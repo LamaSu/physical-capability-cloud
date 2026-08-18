@@ -313,3 +313,81 @@ export interface SerializedClosureInput {
   /** Full closure record bytes, in canonical order, one entry per record. */
   records: Uint8Array[];
 }
+
+// ---------------------------------------------------------------------------
+// compositionRoot v2 — evaluation-semantics + accepted-policy inputs.
+// Spec: ai/research/pcc-inc3a-v2-evalsemantics-leaf-spec.md. Consumed by
+// deriveCompositionV2 (§3/§4/§5/§6). The v1 types above are unchanged.
+// ---------------------------------------------------------------------------
+
+/**
+ * One pinned metric-catalog row (oracle-owned; coord #643). `specificationDigest`
+ * and `parameterSchemaDigest` are the oracle's OPAQUE keccak digests, committed
+ * raw. This row is authoritative — the derivation rejects any producer-supplied
+ * substitute (F8).
+ */
+export interface MetricCatalogRow {
+  metricId: string;
+  specificationDigest: Digest32Input;
+  /** Ascending subset of the §4.3 comparator enum {1..6}. */
+  permittedComparators: number[];
+  /** Ascending §1.4 Value-kind tags admitted for the target (u256 = 0x02). */
+  targetValueKinds: number[];
+  /** Ascending §1.4 Value-kind tags admitted for tolerances. */
+  toleranceValueKinds: number[];
+  /** Hit-target metrics require BOTH lower + upper tolerance present. */
+  requireBothTolerances: boolean;
+  parameterSchemaDigest: Digest32Input;
+}
+
+/**
+ * One pinned evidence-type row: `specificationDigest` is the primitive's contract
+ * projection under `VOCAB_MANIFEST_HASH` (evidence-owned; opaque, committed raw).
+ */
+export interface EvidenceTypeRow {
+  evidenceTypeId: string;
+  specificationDigest: Digest32Input;
+}
+
+/**
+ * The authoritative, pinned evaluation semantics (spec §5/§8). NOT a trusted
+ * producer table: `deriveCompositionV2` resolves the EXACT plan-referenced subset
+ * and rejects extras/missing or any non-authoritative row (F8).
+ */
+export interface ResolvedEvaluationSemantics {
+  /** 32-byte manifest hash pinning every primitive's per-tier authorityPolicy (evidence-owned; opaque). */
+  vocabManifestHash: Digest32Input;
+  /** 32-byte authorityPolicy-projection digest (evidence #982, Model A) — the (evidenceType,tier)→{roles,propositionKind}
+   * table composition + oracle both read; pinned + committed here, folds into vocabManifestHash once evidence confirms. */
+  projectionDigest: Digest32Input;
+  evidenceTypes: EvidenceTypeRow[];
+  metrics: MetricCatalogRow[];
+}
+
+/**
+ * One per-requirement subject binding (spec §6), sourced from evidence's
+ * `CanonicalAcceptedJobPolicyV1` — NOT from `EvidenceRequirement` (so `planDigest`
+ * is unchanged). `propositionKind` is composition's STATIC check axis;
+ * `sourceKind` is the oracle's RUNTIME identity check axis (the F3 split).
+ */
+export interface EvidenceSubjectBinding {
+  settlementUnitId: string;
+  requirementId: string;
+  /** SubjectSelector u8 kind {0..16} — WHO generated it (oracle runtime). */
+  sourceKind: number;
+  /** SubjectSelector u8 kind {0..16} — WHAT it is about (composition static). */
+  propositionKind: number;
+  /** Opaque reference resolving to a committed AcceptedJobPolicyV1 field. */
+  valueRef: string;
+}
+
+/**
+ * The committed accepted-policy inputs (spec §4/§6). `acceptedPolicyDigest` is
+ * evidence's OPAQUE keccak digest — committed raw in `policyLeaf` (0x04) and
+ * folded into `evalSemanticsDigest`. `evidenceSubjectBindings` are consumed for
+ * the static check (Model A, pending coord #724) — never hashed into `planDigest`.
+ */
+export interface AcceptedPolicyInput {
+  acceptedPolicyDigest: Digest32Input;
+  evidenceSubjectBindings: EvidenceSubjectBinding[];
+}

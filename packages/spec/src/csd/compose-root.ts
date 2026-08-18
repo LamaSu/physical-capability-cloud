@@ -46,6 +46,11 @@ import type {
   TransferAllocationInput,
   ValueInput,
   ValueMapEntry,
+  // compositionRoot v2 inputs
+  ResolvedEvaluationSemantics,
+  MetricCatalogRow,
+  EvidenceTypeRow,
+  AcceptedPolicyInput,
 } from "./compose-root-types.js";
 
 // ---------------------------------------------------------------------------
@@ -519,6 +524,11 @@ const DOM_CLOSURE_ROOT = domain("PCC-CLOSURE-ROOT-v1");
 const DOM_CLOSURE_LEAF = domain("PCC-CLOSURE-LEAF-v1");
 const DOM_CLOSURE_NODE = domain("PCC-CLOSURE-NODE-v1");
 const DOM_CLOSURE_EMPTY = domain("PCC-CLOSURE-EMPTY-v1");
+// compositionRoot v2 — EVAL domain family for the evalSemanticsLeaf Merkle-list (F6).
+const DOM_EVAL_ROOT = domain("PCC-EVAL-ROOT-v1");
+const DOM_EVAL_LEAF = domain("PCC-EVAL-LEAF-v1");
+const DOM_EVAL_NODE = domain("PCC-EVAL-NODE-v1");
+const DOM_EVAL_EMPTY = domain("PCC-EVAL-EMPTY-v1");
 
 // ---------------------------------------------------------------------------
 // §3 Merkle-list
@@ -1513,4 +1523,159 @@ export function emptyPlanDigest(): Uint8Array {
 export function emptyClosureDigest(): Uint8Array {
   const emptyClosureTree = H(DOM_CLOSURE_EMPTY);
   return H(concat(DOM_CLOSURE_ROOT, u16(1), u32(0), emptyClosureTree));
+}
+
+// ===========================================================================
+// compositionRoot v2 — evalSemanticsLeaf (§3) + policyLeaf (§4) + F8 (§5) +
+// deriveCompositionV2 (§1). Spec: ai/research/pcc-inc3a-v2-evalsemantics-leaf-spec.md.
+// The v1 derivation above is unchanged; v2 reuses it for planDigest/depClosureDigest.
+// ===========================================================================
+
+const COMPARATOR_TAGS = new Set([1, 2, 3, 4, 5, 6]); // §4.3 comparator enum
+const VALUE_KIND_TAGS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]); // §1.4 Value-kind tags
+
+/** Encode a strictly-ascending, tag-validated u8 set: u8(count) || u8(v)*. */
+function u8AscSet(values: number[], allowed: Set<number>, ctx: string): Uint8Array {
+  if (!Array.isArray(values)) reject("U8SET_TYPE", `${ctx}: expected array`);
+  if (values.length > 0xff) reject("U8SET_COUNT", `${ctx}: too many entries (${values.length})`);
+  const parts: Uint8Array[] = [u8(values.length)];
+  let prev = -1;
+  for (const v of values) {
+    if (!Number.isInteger(v) || v < 0 || v > 0xff) reject("U8SET_RANGE", `${ctx}: value ${v} is not a u8`);
+    if (v <= prev) reject("U8SET_ORDER", `${ctx}: values must be strictly ascending (got ${v} after ${prev})`);
+    if (!allowed.has(v)) reject("U8SET_TAG", `${ctx}: value ${v} is not an allowed tag`);
+    prev = v;
+    parts.push(u8(v));
+  }
+  return concat(...parts);
+}
+
+/** evidence-type entry (§3): 0x01 || Id(evidenceTypeId) || specificationDigest32 (opaque). */
+function encodeEvTypeEntry(row: EvidenceTypeRow, ctx: string): Uint8Array {
+  assertObject(row, ctx);
+  assertExactKeys(row, ["evidenceTypeId", "specificationDigest"], ctx);
+  return concat(u8(0x01), encodeId(row.evidenceTypeId, `${ctx}.evidenceTypeId`), toDigest32(row.specificationDigest, `${ctx}.specificationDigest`));
+}
+
+/** metric entry (§3): 0x02 || Id || specDigest32 || comparators || targetKinds || tolKinds || requireBoth || paramSchemaDigest32. */
+function encodeMetricEntry(row: MetricCatalogRow, ctx: string): Uint8Array {
+  assertObject(row, ctx);
+  assertExactKeys(
+    row,
+    ["metricId", "specificationDigest", "permittedComparators", "targetValueKinds", "toleranceValueKinds", "requireBothTolerances", "parameterSchemaDigest"],
+    ctx,
+  );
+  if (typeof row.requireBothTolerances !== "boolean") reject("METRIC_REQBOTH_TYPE", `${ctx}: requireBothTolerances must be boolean`);
+  return concat(
+    u8(0x02),
+    encodeId(row.metricId, `${ctx}.metricId`),
+    toDigest32(row.specificationDigest, `${ctx}.specificationDigest`),
+    u8AscSet(row.permittedComparators, COMPARATOR_TAGS, `${ctx}.permittedComparators`),
+    u8AscSet(row.targetValueKinds, VALUE_KIND_TAGS, `${ctx}.targetValueKinds`),
+    u8AscSet(row.toleranceValueKinds, VALUE_KIND_TAGS, `${ctx}.toleranceValueKinds`),
+    u8(row.requireBothTolerances ? 1 : 0),
+    toDigest32(row.parameterSchemaDigest, `${ctx}.parameterSchemaDigest`),
+  );
+}
+
+/**
+ * F8 (§5): resolve the pinned rows to the EXACT set of ids the plan references —
+ * reject on any extra or missing row (no producer-injected semantics) or a
+ * duplicate; return them sorted by id (ascending ASCII bytes).
+ */
+function resolveExactRows<T>(rows: T[], idOf: (r: T) => string, referenced: Set<string>, ctx: string): T[] {
+  if (!Array.isArray(rows)) reject("EVAL_ROWS_TYPE", `${ctx}: expected array`);
+  const byId = new Map<string, T>();
+  rows.forEach((r, i) => {
+    assertObject(r, `${ctx}[${i}]`);
+    const id = idOf(r);
+    if (typeof id !== "string") reject("EVAL_ROW_ID_TYPE", `${ctx}[${i}]: id must be a string`);
+    if (byId.has(id)) reject("EVAL_ROW_DUP", `${ctx}: duplicate row id ${id}`);
+    byId.set(id, r);
+  });
+  referenced.forEach((id) => {
+    if (!byId.has(id)) reject("EVAL_ID_SET_MISMATCH", `${ctx}: plan references '${id}' but there is no pinned row`);
+  });
+  byId.forEach((_v, id) => {
+    if (!referenced.has(id)) reject("EVAL_ID_SET_MISMATCH", `${ctx}: pinned row '${id}' is not referenced by the plan (no extras)`);
+  });
+  return [...byId.keys()].sort((a, b) => compareBytes(asciiBytes(a, ctx), asciiBytes(b, ctx))).map((id) => byId.get(id)!);
+}
+
+/** Raw 32-byte digests produced by the v2 derivation (composition schema version 2). */
+export interface CompositionV2Result {
+  planDigest: Uint8Array;
+  depClosureDigest: Uint8Array;
+  evalSemanticsDigest: Uint8Array;
+  compositionRoot: Uint8Array;
+}
+
+/**
+ * Derive the v2 (schema version 2) `compositionRoot` — a four-leaf tree
+ * (closure / plan / evalSemantics / policy). Reuses the v1 derivation for full
+ * plan + closure validation and its digests, then commits the pinned evaluation
+ * semantics (F8 authoritative rows), the authorityPolicy projection, and the
+ * accepted-policy digest. Pure + offline + deterministic; rejects rather than
+ * hashing on any violation. (The evidenceSubjectBindings static check is
+ * increment 3, pending the Model-A projection rows.)
+ */
+export function deriveCompositionV2(
+  plan: PlanV1,
+  m1: M1ResolvedDependencyGraph,
+  evalSemantics: ResolvedEvaluationSemantics,
+  policy: AcceptedPolicyInput,
+  options: DeriveOptions = {},
+): CompositionV2Result {
+  // Reuse v1: validates the whole plan + closure and yields planDigest/depClosureDigest.
+  const v1 = deriveComposition(plan, m1, options);
+
+  assertObject(evalSemantics, "evalSemantics");
+  assertExactKeys(evalSemantics, ["vocabManifestHash", "projectionDigest", "evidenceTypes", "metrics"], "evalSemantics");
+  assertObject(policy, "policy");
+  assertExactKeys(policy, ["acceptedPolicyDigest", "evidenceSubjectBindings"], "policy");
+
+  const vocabManifestHash = toDigest32(evalSemantics.vocabManifestHash, "evalSemantics.vocabManifestHash");
+  const projectionDigest = toDigest32(evalSemantics.projectionDigest, "evalSemantics.projectionDigest");
+  const acceptedPolicyDigest = toDigest32(policy.acceptedPolicyDigest, "policy.acceptedPolicyDigest");
+
+  // Collect the EXACT evidence-type + metric ids the plan references (§5 / F8).
+  const refEvTypes = new Set<string>();
+  const refMetrics = new Set<string>();
+  plan.settlementUnits.forEach((u) => {
+    u.acceptancePolicy.evidenceRequirements.forEach((r) => refEvTypes.add(r.evidenceTypeId));
+    u.acceptancePolicy.criteria.forEach((c) => refMetrics.add(c.metricId));
+  });
+
+  const evRows = resolveExactRows(evalSemantics.evidenceTypes, (r) => r.evidenceTypeId, refEvTypes, "evalSemantics.evidenceTypes");
+  const metricRows = resolveExactRows(evalSemantics.metrics, (r) => r.metricId, refMetrics, "evalSemantics.metrics");
+
+  const evEntries = evRows.map((r, i) => encodeEvTypeEntry(r, `evalSemantics.evidenceTypes[${i}]`));
+  const metricEntries = metricRows.map((r, i) => encodeMetricEntry(r, `evalSemantics.metrics[${i}]`));
+
+  // evalSemanticsDigest (§3): EVAL Merkle-list over evidence-type ++ metric entries.
+  const evalTree = merkleListRoot([...evEntries, ...metricEntries], DOM_EVAL_LEAF, DOM_EVAL_NODE, DOM_EVAL_EMPTY);
+  const evalSemanticsDigest = H(
+    concat(
+      DOM_EVAL_ROOT,
+      u16(1), // eval-semantics sub-schema version
+      vocabManifestHash,
+      projectionDigest, // evidence #982 Model A input; collapses into vocabManifestHash post-fold
+      acceptedPolicyDigest, // self-containment fold (oracle #710)
+      u32(evRows.length),
+      u32(metricRows.length),
+      evalTree,
+    ),
+  );
+
+  // compositionRoot v2 (§1): four typed leaves, explicit balanced tree (F5).
+  const closureLeaf = H(concat(DOM_COMP_LEAF, u8(0x01), u32(0), v1.depClosureDigest));
+  const planLeaf = H(concat(DOM_COMP_LEAF, u8(0x02), u32(1), v1.planDigest));
+  const evalSemanticsLeaf = H(concat(DOM_COMP_LEAF, u8(0x03), u32(2), evalSemanticsDigest));
+  const policyLeaf = H(concat(DOM_COMP_LEAF, u8(0x04), u32(3), acceptedPolicyDigest));
+  const p0 = H(concat(DOM_COMP_NODE, closureLeaf, planLeaf));
+  const p1 = H(concat(DOM_COMP_NODE, evalSemanticsLeaf, policyLeaf));
+  const merkleRoot = H(concat(DOM_COMP_NODE, p0, p1));
+  const compositionRoot = H(concat(DOM_COMP_ROOT, u16(2), merkleRoot));
+
+  return { planDigest: v1.planDigest, depClosureDigest: v1.depClosureDigest, evalSemanticsDigest, compositionRoot };
 }

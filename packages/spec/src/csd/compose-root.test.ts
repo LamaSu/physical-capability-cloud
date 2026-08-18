@@ -3,6 +3,7 @@ import {
   deriveComposition,
   deriveCompositionRoot,
   deriveCompositionRootHex,
+  deriveCompositionV2,
   digestToHex,
   emptyPlanDigest,
   emptyClosureDigest,
@@ -29,6 +30,8 @@ import type {
   PlanV1,
   PrincipalInput,
   RationalInput,
+  ResolvedEvaluationSemantics,
+  AcceptedPolicyInput,
   ValueInput,
 } from "./compose-root-types.js";
 
@@ -575,5 +578,83 @@ describe("inc-3a re-audit F1: missing required Option field rejects (not coerced
     expect(digestToHex(deriveCompositionRoot(plan, m1))).toBe(
       "3292178be141f918a5f78db7fee784c120d9a992e29070ed1b931fd23dfadb5e",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compositionRoot v2 — four-leaf (evalSemanticsLeaf 0x03 + policyLeaf 0x04),
+// schema u16(2). deriveCompositionV2 + F8 authoritative-row resolution.
+// ---------------------------------------------------------------------------
+
+function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantics: ResolvedEvaluationSemantics; policy: AcceptedPolicyInput } {
+  const { plan, m1 } = fixtureA(); // fixtureA references evidenceTypeId "evtype.a" + metricId "metric.a"
+  const evalSemantics: ResolvedEvaluationSemantics = {
+    vocabManifestHash: dig(0x51),
+    projectionDigest: dig(0x52),
+    evidenceTypes: [{ evidenceTypeId: "evtype.a", specificationDigest: dig(0x53) }],
+    metrics: [
+      { metricId: "metric.a", specificationDigest: dig(0x54), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x55) },
+    ],
+  };
+  const policy: AcceptedPolicyInput = { acceptedPolicyDigest: dig(0xf6), evidenceSubjectBindings: [] };
+  return { plan, m1, evalSemantics, policy };
+}
+
+describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLeaf)", () => {
+  it("32-byte digests + independent 4-leaf recompute matches (F5 explicit tree, u16(2))", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const r = deriveCompositionV2(plan, m1, evalSemantics, policy);
+    expect(r.compositionRoot).toHaveLength(32);
+    expect(r.evalSemanticsDigest).toHaveLength(32);
+    const closureLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x01), _u32(0), r.depClosureDigest));
+    const planLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x02), _u32(1), r.planDigest));
+    const evalLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x03), _u32(2), r.evalSemanticsDigest));
+    const policyLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x04), _u32(3), dig(0xf6)));
+    const p0 = _hash(_concat(_DOM_COMP_NODE, closureLeaf, planLeaf));
+    const p1 = _hash(_concat(_DOM_COMP_NODE, evalLeaf, policyLeaf));
+    const merkleRoot = _hash(_concat(_DOM_COMP_NODE, p0, p1));
+    const expected = _hash(_concat(_DOM_COMP_ROOT, _u16(2), merkleRoot));
+    expect(Array.from(r.compositionRoot)).toEqual(Array.from(expected));
+    // eslint-disable-next-line no-console
+    console.log(`V2_GOLDEN fixtureA compositionRoot=${digestToHex(r.compositionRoot)} evalSemanticsDigest=${digestToHex(r.evalSemanticsDigest)}`);
+  });
+
+  it("v2 root differs from the v1 root for the same plan (new committed leaf set)", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const v2 = deriveCompositionV2(plan, m1, evalSemantics, policy).compositionRoot;
+    const v1 = deriveCompositionRoot(plan, m1);
+    expect(Array.from(v2)).not.toEqual(Array.from(v1));
+  });
+
+  it("determinism: identical inputs -> identical v2 root", () => {
+    const a = v2Inputs();
+    const b = v2Inputs();
+    expect(Array.from(deriveCompositionV2(a.plan, a.m1, a.evalSemantics, a.policy).compositionRoot)).toEqual(
+      Array.from(deriveCompositionV2(b.plan, b.m1, b.evalSemantics, b.policy).compositionRoot),
+    );
+  });
+
+  it("F8: a pinned metric row NOT referenced by the plan -> EVAL_ID_SET_MISMATCH (no extras)", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    evalSemantics.metrics.push({ metricId: "metric.extra", specificationDigest: dig(0x60), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x61) });
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "EVAL_ID_SET_MISMATCH");
+  });
+
+  it("F8: a plan-referenced metric MISSING from the pinned rows -> EVAL_ID_SET_MISMATCH", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    evalSemantics.metrics = [];
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "EVAL_ID_SET_MISMATCH");
+  });
+
+  it("metric row: a non-{1..6} comparator -> U8SET_TAG", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    evalSemantics.metrics[0].permittedComparators = [7];
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "U8SET_TAG");
+  });
+
+  it("metric row: a non-ascending comparator set -> U8SET_ORDER", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    evalSemantics.metrics[0].permittedComparators = [5, 3];
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "U8SET_ORDER");
   });
 });
