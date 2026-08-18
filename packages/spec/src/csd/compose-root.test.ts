@@ -658,3 +658,27 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
     expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "U8SET_ORDER");
   });
 });
+
+// ---------------------------------------------------------------------------
+// sol B1: SPARSE arrays (holes) must reject, not silently emit a count that
+// overstates the elements forEach/map actually serialize. Dense arrays only.
+// ---------------------------------------------------------------------------
+describe("sol B1 — sparse-array rejection (dense-array requirement)", () => {
+  it("a hole in evidenceRequirements rejects SPARSE_ARRAY (not a malformed count-prefix)", () => {
+    const { plan, m1 } = fixtureA();
+    const ap = plan.settlementUnits[0].acceptancePolicy;
+    const sparse = [...ap.evidenceRequirements];
+    sparse.length = sparse.length + 1; // append a trailing hole
+    (ap as { evidenceRequirements: typeof sparse }).evidenceRequirements = sparse;
+    expectReject(() => deriveComposition(plan, m1), "SPARSE_ARRAY");
+  });
+
+  it("a hole in memberNodeIds rejects SPARSE_ARRAY", () => {
+    const { plan, m1 } = fixtureA();
+    const u = plan.settlementUnits[0];
+    const sparse = [...u.memberNodeIds];
+    sparse.length = sparse.length + 1;
+    (u as { memberNodeIds: typeof sparse }).memberNodeIds = sparse;
+    expectReject(() => deriveComposition(plan, m1), "SPARSE_ARRAY");
+  });
+});

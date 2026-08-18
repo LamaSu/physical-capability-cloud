@@ -171,6 +171,19 @@ function assertObject(v: unknown, ctx: string): void {
   if (v === null || typeof v !== "object" || Array.isArray(v)) reject("NOT_OBJECT", `${ctx}: expected object`);
 }
 
+// Runtime-only guard (sol B1): reject SPARSE arrays (holes). Encoders serialize
+// `.length` as a count but iterate with forEach/map, which SKIP holes — so a sparse
+// array (`new Array(3)`, `[1,,3]`) yields a count that overstates the elements actually
+// emitted, malformed count-prefixed bytes a dense mirror (JSON/Solidity) cannot
+// reproduce, and a large hole-count is a cheap count-bomb. Every array whose `.length`
+// is serialized as a count MUST be dense with own-indexed elements. Call after the
+// `Array.isArray` gate, before reading `.length`.
+function assertDense(v: readonly unknown[], ctx: string): void {
+  for (let i = 0; i < v.length; i++) {
+    if (!(i in v)) reject("SPARSE_ARRAY", `${ctx}: array has a hole at index ${i} (dense arrays required)`);
+  }
+}
+
 function assertExactKeys(v: object, allowed: readonly string[], ctx: string): void {
   for (const k of Object.keys(v)) {
     if (!allowed.includes(k)) reject("UNKNOWN_FIELD", `${ctx}: unknown field '${k}'`);
@@ -217,6 +230,7 @@ function encodeId(s: string, ctx: string): Uint8Array {
 
 function encodePath(segments: string[], ctx: string): Uint8Array {
   if (!Array.isArray(segments)) reject("PATH_TYPE", `${ctx}: path must be an array`);
+  assertDense(segments, ctx);
   const parts: Uint8Array[] = [u16(segments.length)];
   segments.forEach((seg, i) => parts.push(encodeId(seg, `${ctx}.seg[${i}]`)));
   return concat(...parts);
@@ -336,6 +350,7 @@ function encodeValue(v: ValueInput, ctx: string, depth = 1): Uint8Array {
       assertExactKeys(v, ["kind", "value"], ctx);
       const items = (v as { value: unknown }).value;
       if (!Array.isArray(items)) reject("VALUE_LIST", `${ctx}: list value must be an array`);
+      assertDense(items as unknown[], ctx);
       const parts: Uint8Array[] = [u32(items.length)];
       (items as ValueInput[]).forEach((it, i) => parts.push(lp32(encodeValue(it, `${ctx}[${i}]`, depth + 1))));
       return concat(u8(0x08), concat(...parts));
@@ -344,6 +359,7 @@ function encodeValue(v: ValueInput, ctx: string, depth = 1): Uint8Array {
       assertExactKeys(v, ["kind", "value"], ctx);
       const entries = (v as { value: unknown }).value;
       if (!Array.isArray(entries)) reject("VALUE_MAP", `${ctx}: map value must be an array`);
+      assertDense(entries as unknown[], ctx);
       const parts: Uint8Array[] = [u32(entries.length)];
       let prevKey: Uint8Array | null = null;
       (entries as ValueMapEntry[]).forEach((e, i) => {
@@ -672,6 +688,7 @@ function encodeNodeRecord(n: NodeInput, ctx: string): Uint8Array {
   ];
   const params = n.executionParameters;
   if (!Array.isArray(params)) reject("NODE_PARAMS", `${ctx}: executionParameters must be an array`);
+  assertDense(params, `${ctx}.executionParameters`);
   parts.push(u32(params.length));
   let prevName: Uint8Array | null = null;
   params.forEach((p, i) => {
@@ -688,6 +705,7 @@ function encodeNodeRecord(n: NodeInput, ctx: string): Uint8Array {
   });
   const tols = n.tolerances;
   if (!Array.isArray(tols)) reject("NODE_TOLERANCES", `${ctx}: tolerances must be an array`);
+  assertDense(tols, `${ctx}.tolerances`);
   parts.push(u16(tols.length));
   const seenPaths = new Set<string>();
   tols.forEach((t, i) => {
@@ -864,6 +882,7 @@ function encodeOutcome(o: OutcomeInput, ctx: string, fundedAmount: bigint, feeMa
   if (!OUTCOME_CLASSES.has(o.outcomeClass)) reject("OUTCOME_CLASS_TAG", `${ctx}: unknown outcome class ${o.outcomeClass}`);
   const allocs = o.allocations;
   if (!Array.isArray(allocs)) reject("OUTCOME_ALLOCS", `${ctx}: allocations must be an array`);
+  assertDense(allocs, `${ctx}.allocations`);
   const seen = new Set<string>();
   let sum = 0n;
   const parts: Uint8Array[] = [encodeId(o.outcomeId, `${ctx}.outcomeId`), u8(o.outcomeClass), u32(allocs.length)];
@@ -894,6 +913,7 @@ function encodeAuthoritySelection(a: AuthoritySelectionInput, ctx: string, allow
     const modeByte = mode === "all" ? 0x01 : mode === "mOfN" ? 0x02 : 0x03;
     const principals = (a as { principals: unknown }).principals;
     if (!Array.isArray(principals) || principals.length < 1) reject("AUTHORITY_PRINCIPALS", `${ctx}: principals must be a nonempty array`);
+    assertDense(principals as unknown[], `${ctx}.principals`);
     if ((principals as PrincipalInput[]).length > U16_MAX) reject("AUTHORITY_PRINCIPAL_COUNT", `${ctx}: too many principals`);
     const encoded = (principals as PrincipalInput[]).map((p, i) => encodePrincipal(p, `${ctx}.principal[${i}]`));
     if (mode === "all" || mode === "mOfN") {
@@ -976,6 +996,7 @@ function encodeAcceptanceCriterion(c: AcceptanceCriterionInput, ctx: string): Ui
   );
   const refs = c.requirementReferences;
   if (!Array.isArray(refs) || refs.length < 1) reject("CRITERION_REFS", `${ctx}: requirementReferences must be nonempty`);
+  assertDense(refs, `${ctx}.requirementReferences`);
   if (refs.length > U16_MAX) reject("CRITERION_REFS_COUNT", `${ctx}: too many requirement references`);
   const seen = new Set<string>();
   const refParts: Uint8Array[] = [];
@@ -1023,8 +1044,11 @@ function encodeAcceptancePolicy(ap: AcceptancePolicyInput, ctx: string, outcomeC
   const crits = ap.criteria;
   const bands = ap.decisionBands;
   if (!Array.isArray(reqs) || reqs.length < 1) reject("POLICY_REQS", `${ctx}: at least one evidence requirement`);
+  assertDense(reqs, `${ctx}.evidenceRequirements`);
   if (!Array.isArray(crits) || crits.length < 1) reject("POLICY_CRITERIA", `${ctx}: at least one criterion`);
+  assertDense(crits, `${ctx}.criteria`);
   if (!Array.isArray(bands) || bands.length < 1) reject("POLICY_BANDS", `${ctx}: at least one decision band`);
+  assertDense(bands, `${ctx}.decisionBands`);
   const reqIds = new Set<string>();
   reqs.forEach((r) => {
     if (reqIds.has(r.requirementId)) reject("POLICY_REQ_DUP", `${ctx}: duplicate requirement id ${r.requirementId}`);
@@ -1084,6 +1108,7 @@ function encodeSettlementUnitRecord(
   if (u.settlementOrdinal !== expectedOrdinal) reject("UNIT_ORDINAL", `${ctx}: settlementOrdinal ${u.settlementOrdinal} != expected ${expectedOrdinal}`);
   const members = u.memberNodeIds;
   if (!Array.isArray(members) || members.length < 1) reject("UNIT_MEMBERS", `${ctx}: memberCount >= 1`);
+  assertDense(members, `${ctx}.memberNodeIds`);
   const localSeen = new Set<string>();
   let prevIdx = -1;
   members.forEach((mid) => {
@@ -1100,6 +1125,7 @@ function encodeSettlementUnitRecord(
   if (u.fundedAmount > U256_MAX) reject("UNIT_FUNDED_RANGE", `${ctx}: fundedAmount must fit u256`);
   const fees = u.feeRules;
   if (!Array.isArray(fees)) reject("UNIT_FEES", `${ctx}: feeRules must be an array`);
+  assertDense(fees, `${ctx}.feeRules`);
   const feeMap = new Map<string, FeeInfo>();
   const feeBytes: Uint8Array[] = [];
   fees.forEach((f, i) => {
@@ -1111,6 +1137,7 @@ function encodeSettlementUnitRecord(
   });
   const outcomes = u.outcomes;
   if (!Array.isArray(outcomes)) reject("UNIT_OUTCOMES", `${ctx}: outcomes must be an array`);
+  assertDense(outcomes, `${ctx}.outcomes`);
   const outcomeIds = new Set<string>();
   const outcomeClassById = new Map<string, number>();
   const classCounts = new Map<number, number>();
@@ -1205,6 +1232,7 @@ function buildClosureRecords(
 
   const processParent = (parentKind: number, parentId: string, uses: M1DependencyUse[]): void => {
     if (!Array.isArray(uses)) reject("CLOSURE_USES", `${ctx}: dependencyUses must be an array for ${parentId}`);
+    assertDense(uses, `${ctx}.dependencyUses(${parentId})`);
     const ordinals = new Set<number>();
     uses.forEach((use) => {
       assertObject(use, `${ctx}.use(${parentId})`);
@@ -1364,7 +1392,12 @@ export function deriveComposition(plan: PlanV1, m1: M1ResolvedDependencyGraph, o
   const edges = plan.edges;
   const units = plan.settlementUnits;
   if (!Array.isArray(nodes) || !Array.isArray(edges) || !Array.isArray(units)) reject("PLAN_ARRAYS", `plan nodes/edges/settlementUnits must be arrays`);
+  assertDense(nodes, "plan.nodes");
+  assertDense(edges, "plan.edges");
+  assertDense(units, "plan.settlementUnits");
   if (!Array.isArray(m1.nodes) || !Array.isArray(m1.dependencies)) reject("M1_ARRAYS", `m1 nodes/dependencies must be arrays`);
+  assertDense(m1.nodes, "m1.nodes");
+  assertDense(m1.dependencies, "m1.dependencies");
 
   const N = nodes.length;
   const E = edges.length;
