@@ -1579,9 +1579,11 @@ function encodeMetricEntry(row: MetricCatalogRow, ctx: string): Uint8Array {
 }
 
 /**
- * F8 (§5): resolve the pinned rows to the EXACT set of ids the plan references —
- * reject on any extra or missing row (no producer-injected semantics) or a
- * duplicate; return them sorted by id (ascending ASCII bytes).
+ * F8 (§5) — id-SET resolution ONLY (increment 2): reject any extra/missing/duplicate
+ * id vs the plan-referenced set; return sorted by id (ascending ASCII bytes). This does
+ * NOT yet enforce row-CONTENT authority (a supplied row == the pinned authoritative row)
+ * — a producer can still inject permissive contents until the cross-lane fix at bulletin
+ * #772 lands. See spec §5 IMPLEMENTATION STATUS.
  */
 function resolveExactRows<T>(rows: T[], idOf: (r: T) => string, referenced: Set<string>, ctx: string): T[] {
   if (!Array.isArray(rows)) reject("EVAL_ROWS_TYPE", `${ctx}: expected array`);
@@ -1613,11 +1615,11 @@ export interface CompositionV2Result {
 /**
  * Derive the v2 (schema version 2) `compositionRoot` — a four-leaf tree
  * (closure / plan / evalSemantics / policy). Reuses the v1 derivation for full
- * plan + closure validation and its digests, then commits the pinned evaluation
- * semantics (F8 authoritative rows), the authorityPolicy projection, and the
- * accepted-policy digest. Pure + offline + deterministic; rejects rather than
- * hashing on any violation. (The evidenceSubjectBindings static check is
- * increment 3, pending the Model-A projection rows.)
+ * plan + closure validation and its digests, then commits the evaluation
+ * semantics (id-set resolved; row-CONTENT authority NOT yet enforced — sol #772,
+ * spec §5 status), the authorityPolicy projection, and the accepted-policy digest.
+ * Pure + offline + deterministic; rejects rather than hashing on any violation.
+ * (The evidenceSubjectBindings static check is increment 3, pending #1007.)
  */
 export function deriveCompositionV2(
   plan: PlanV1,
