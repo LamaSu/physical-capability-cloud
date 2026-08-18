@@ -412,6 +412,7 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
             id,
             O5_ADJ_ROLE_APPEAL,
             address(e),
+            uint64(e.challengedAtOf(id)), // ATT-01: the real appeal window, so the slot is the live one
             O5AdjudicationRecord({
                 adjudicationId: keccak256("adj-other"),
                 reviewedAssertionId: keccak256("some-other-assertion"),
@@ -438,6 +439,7 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
             id,
             O5_ADJ_ROLE_APPEAL,
             address(e),
+            uint64(e.challengedAtOf(id)), // ATT-01: right slot, wrong bound escrow -- the point of the test
             O5AdjudicationRecord({
                 adjudicationId: keccak256("adj-elsewhere"),
                 reviewedAssertionId: accepted,
@@ -547,6 +549,7 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
             id,
             role,
             address(e),
+            uint64(role == O5_ADJ_ROLE_APPEAL ? e.challengedAtOf(id) : e.emergencyAnchorOf(id)), // ATT-01
             O5AdjudicationRecord({
                 adjudicationId: keccak256(abi.encode("adj-at", id, role, outcome, decidedAt)),
                 reviewedAssertionId: accepted,
@@ -707,8 +710,19 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         assertLt(preDeclaration, disabledAt, "the record really does predate the declaration");
 
         // It is inert: it answers a review that did not exist when it was decided.
-        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        // ATT-01 makes that inertness STRUCTURAL rather than time-checked, so the error moved from
+        // `WindowStillOpen` to `AttestationNotFound`. When this record was written no emergency existed,
+        // so `emergencyAnchorOf` returned 0 (the four §8.3 C-5 exclusions decide that, not the attester)
+        // and it was filed under anchor 0. The escrow looks up the real `disabledAt` anchor and finds
+        // nothing. A pre-signed veto can no longer sit in the slot waiting for a window to open.
+        vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
         e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+
+        assertEq(
+            escalation.adjudicationOf(id, O5_ADJ_ROLE_EMERGENCY, address(e), uint64(disabledAt)).adjudicationId,
+            bytes32(0),
+            "the pre-declaration record never entered the live emergency window's slot"
+        );
 
         // [FAILS PRE-FIX] and it does not BRICK the unit either. Pre-fix, `finalize`'s one-sided
         // `_decidedInTime` also saw this stale record as "decided in time" and reverted forever, so the
@@ -737,8 +751,23 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         uint256 challengedAt = block.timestamp;
         assertLt(preChallenge, challengedAt, "the record really does predate the challenge");
 
-        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        // ATT-01 STRENGTHENED THIS, and the error changed because the defense moved EARLIER.
+        // Before: the escrow FOUND the pre-challenge record and rejected it on a time comparison
+        //   (`WindowStillOpen`) -- correct, but it depended on the escrow reasoning about `decidedAt`.
+        // Now: the slot key includes the window anchor. When this record was written the unit was not yet
+        //   CHALLENGED, so `challengedAtOf` returned 0 and the record was filed under anchor 0. The escrow
+        //   looks up the anchor it derives -- the real `challengedAt` -- and the record is simply NOT
+        //   THERE. A verdict for a window that never opened can no longer occupy the live window's slot.
+        // The assertion is therefore STRICTER, not looser: structural absence rather than a rejected find.
+        vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        // Prove the structural property directly, not just via the revert: the live window's slot is EMPTY.
+        assertEq(
+            escalation.adjudicationOf(id, O5_ADJ_ROLE_APPEAL, address(e), uint64(challengedAt)).adjudicationId,
+            bytes32(0),
+            "the pre-challenge record never entered the live appeal window's slot"
+        );
 
         // And the unit is not bricked: appeal silence resolves to the RELEASE default, as §8.3 C-1 says.
         vm.warp(challengedAt + VNextSettlementLib.APPEAL_WINDOW);

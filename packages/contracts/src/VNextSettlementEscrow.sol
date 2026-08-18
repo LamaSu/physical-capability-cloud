@@ -181,6 +181,11 @@ contract VNextSettlementEscrow {
     ///      terms, bound into the CREATE2 salt. `fund()` re-derives it from the supplied configs, so the
     ///      escrow's own ADDRESS proves which terms it may be funded with, before any signature is read.
     bytes32 internal _prePolicyRoot;
+    /// @dev BATCH-1 item 3 — the bilaterally-committed `AcceptedJobPolicyV1` digest. OPAQUE TO THIS
+    ///      CONTRACT: stored, republished via `policy()`, and passed back to the factory for the acceptance
+    ///      digest. There is deliberately NO code path in this escrow that decodes or interprets it, which
+    ///      is what lets composition/evidence/oracle change its CONTENTS with zero escrow change.
+    bytes32 internal _acceptedPolicyDigest;
     /// @dev The EIP-712 struct hash of the policy both parties authenticated, written at funding. Zero
     ///      until funded; it is the on-chain record that bilateral acceptance actually happened and the
     ///      anchor the post-verdict state machine will reference.
@@ -395,8 +400,29 @@ contract VNextSettlementEscrow {
     event Challenged(bytes32 indexed unitId, address indexed challenger, uint256 bond, uint64 challengedAt);
     event BackupInvoked(bytes32 indexed unitId, uint64 at);
     event EscalationResolved(bytes32 indexed unitId, bytes32 indexed adjudicationId, uint8 role, bool upheld);
-    /// @param reason 0 = uncontested challenge window closed, 1 = appeal silence, 2 = backup timeout,
-    ///               3 = emergency-review silence (§8.3 C-5 Model B).
+    // ── {Finalized} outcome-cause codes ───────────────────────────────────────────────────────────────
+    // NAMED as of BATCH-1 item 2. These were bare literals at their emit sites, which made the read
+    // surface's `refundReason` mapping a comment-archaeology exercise. `internal constant` is inlined at
+    // compile time, so naming them costs ZERO runtime bytecode on a contract at the EIP-170 ceiling.
+    //
+    // CAUTION FOR INDEXERS — {Finalized} FIRES AT *ALLOCATION*, NOT AT SETTLEMENT. It marks the transition
+    // INTO `RELEASE_ALLOCATED`/`REFUND_ALLOCATED` (states 6/7), where money may still be owed. The real
+    // 6->8 / 7->9 flip happens in `dischargeClaim` and emits NO event of its own, so a `finalizedBlock`
+    // derived from THIS event is wrong for any unit with an outstanding claim. Derive it from the block of
+    // the `ClaimDischarged` that zeroed `remainingClaimCount`.
+    uint8 internal constant FINALIZED_REASON_UNCONTESTED_RELEASE = 0;
+    uint8 internal constant FINALIZED_REASON_APPEAL_SILENCE_RELEASE = 1;
+    // Backup lane produced no accepted release by its deadline. The escrow CANNOT distinguish a backup
+    // "reject" from a backup "timeout" — both leave via the same `BACKUP_PENDING` branch — so this is
+    // deliberately ONE honest cause rather than two the contract cannot witness.
+    uint8 internal constant FINALIZED_REASON_BACKUP_NO_RELEASE = 2;
+    uint8 internal constant FINALIZED_REASON_EMERGENCY_SILENCE_REFUND = 3;
+    // BATCH-1 item 2: deadline reclaim is now WITNESSED rather than inferred by elimination.
+    uint8 internal constant FINALIZED_REASON_DEADLINE_RECLAIM = 4;
+
+    /// @param reason one of the `FINALIZED_REASON_*` codes above: 0 = uncontested challenge window closed,
+    ///               1 = appeal silence, 2 = backup produced no release by its deadline, 3 = emergency-review
+    ///               silence (§8.3 C-5 Model B), 4 = deadline reclaim.
     event Finalized(bytes32 indexed unitId, bool released, uint8 reason);
     /// @dev The full disposition of a challenge bond, in one line: `delayCompensation + remainder == bond`
     ///      always, and `burned` says where the remainder went (sink if true, back to the challenger if
@@ -649,6 +675,10 @@ contract VNextSettlementEscrow {
         termsHash = p.termsHash;
         _policyNonce = p.policyNonce;
         _prePolicyRoot = p.prePolicyRoot;
+        // BATCH-1 item 3. Deliberately UNVALIDATED: zero is a legitimate value meaning "no accepted-policy
+        // commitment for this job". The escrow asserts only that whatever digest is here was signed by both
+        // parties and is bound into this clone's address; what it MEANS is composition/oracle's to define.
+        _acceptedPolicyDigest = p.acceptedPolicyDigest;
         emit Initialized(p.payer, p.operator, p.jobIdHash);
     }
 
@@ -850,7 +880,8 @@ contract VNextSettlementEscrow {
                 jobIdHash: jobIdHash,
                 termsHash: termsHash,
                 policyNonce: _policyNonce,
-                prePolicyRoot: _prePolicyRoot
+                prePolicyRoot: _prePolicyRoot,
+                acceptedPolicyDigest: _acceptedPolicyDigest
             }),
             root,
             msg.sender, // the payer leg is implicit ONLY for a direct payer-sent tx (see `OnlyPayer` above)
@@ -867,6 +898,8 @@ contract VNextSettlementEscrow {
     ///         frozen size-reclamation order prefers collapsing read surfaces over four separate dispatch
     ///         entries, and reading the policy atomically is also the correct shape for a verifier.
     ///         `jobPolicyHash_` is zero until the escrow is funded — i.e. until acceptance actually happened.
+    ///         BATCH-1 item 3 appends `acceptedPolicyDigest_` as the FINAL return value, so existing tuple
+    ///         indices 0-3 are unchanged and any caller destructuring by position keeps working.
     function policy()
         external
         view
@@ -874,10 +907,11 @@ contract VNextSettlementEscrow {
             address operator_,
             uint256 policyNonce_,
             bytes32 prePolicyRoot_,
-            bytes32 jobPolicyHash_
+            bytes32 jobPolicyHash_,
+            bytes32 acceptedPolicyDigest_
         )
     {
-        return (operator, _policyNonce, _prePolicyRoot, _jobPolicyHash);
+        return (operator, _policyNonce, _prePolicyRoot, _jobPolicyHash, _acceptedPolicyDigest);
     }
 
     /// @dev The rolling commitment over every settlementUnitId this escrow froze, in funding order:
@@ -1133,6 +1167,48 @@ contract VNextSettlementEscrow {
     ///         pre-check so an adjudication naming the wrong assertion can never burn the unit's slot.
     function acceptedAssertionIdOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
         return _units[unitId].acceptedAssertionId;
+    }
+
+    // ── ATT-01: the escalation WINDOW ANCHORS, published for the attester ─────────────────────────────
+    //
+    // WHY THESE EXIST AND WHY THEY LIVE HERE. `O5AttesterBase.adjudicate()` consumed its one-shot
+    // (unitId, role, escrow) slot after checking WHICH assertion was under review but never WHETHER the
+    // role's window had OPENED. An appeal record written before its window therefore burned the slot
+    // permanently, and the legitimate later appeal could not be recorded — an anti-brick gap.
+    //
+    // The fix binds the window ANCHOR into the adjudication's slot key and signed payload. The anchor
+    // cannot be self-declared by the attester or its caller, so it has to be READ FROM THE AUTHORITY on
+    // which window applies — and for BOTH roles that authority is this contract, not the attester:
+    //   * the APPEAL anchor is `challengedAt`, which only this contract writes;
+    //   * the EMERGENCY anchor is the PRIMARY cohort's `disabledAt` — NOT the escalation attester's own —
+    //     and, more importantly, whether an emergency window exists AT ALL is decided by the four §8.3 C-5
+    //     exclusions that only `_emergencyDeadline` implements. An attester reading a raw `disabledAt`
+    //     would gate on a window this escrow does not agree exists.
+    //
+    // Both are ONE-WORD by contract: the attester STATICCALLs them through a helper that rejects any
+    // return that is not exactly 32 bytes. Do not reshape them into multi-return getters.
+
+    /// @notice The APPEAL window's anchor, or 0 if no appeal window is open for this unit.
+    /// @dev    Gated on `CHALLENGED` deliberately: outside that state there is no appeal to adjudicate, so
+    ///         a zero here is the attester's "this role's window has not opened" signal rather than an
+    ///         ambiguous timestamp. The window itself is `challengedAt + APPEAL_WINDOW` — arithmetic the
+    ///         caller does for free from a compile-time constant (see the note above `settlement`).
+    function challengedAtOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
+        Unit storage u = _units[unitId];
+        return u.state == UnitState.CHALLENGED ? uint256(u.challengedAt) : 0;
+    }
+
+    /// @notice The EMERGENCY review window's anchor, or 0 if no emergency window exists for this unit.
+    /// @dev    DERIVED FROM `_emergencyDeadline` RATHER THAN FROM `disabledAt` DIRECTLY, on purpose. That
+    ///         function is the sole implementation of the four exclusions (backup lane, already-due
+    ///         release, Tier-0, never outliving `reclaimAt`); re-deriving the anchor here would duplicate
+    ///         them, and a duplicate is a divergence waiting to happen on the money path. Subtracting the
+    ///         window back off the deadline is exact — `_emergencyDeadline` returns either 0 or
+    ///         `disabledAt + EMERGENCY_REVIEW_WINDOW` and nothing else — and it cannot underflow, because
+    ///         the non-zero branch is only reached after `d != 0` was established.
+    function emergencyAnchorOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
+        uint256 e = _emergencyDeadline(_units[unitId]);
+        return e == 0 ? 0 : e - VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
     }
 
     /// @notice WAVE 4c — the unit's three LIVE counters in ONE read.
@@ -1672,7 +1748,7 @@ contract VNextSettlementEscrow {
             // is not the challenger's doing either way.
             _disposeBond(unitId, u, BondDisposition.RETURN_ALL);
             _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
-            emit Finalized(unitId, false, 3);
+            emit Finalized(unitId, false, FINALIZED_REASON_EMERGENCY_SILENCE_REFUND);
             return;
         }
 
@@ -1697,7 +1773,7 @@ contract VNextSettlementEscrow {
                 revert WindowStillOpen();
             }
             _allocateRelease(unitId, _assertionAuthKey(unitId, u));
-            emit Finalized(unitId, true, 0);
+            emit Finalized(unitId, true, FINALIZED_REASON_UNCONTESTED_RELEASE);
             emit EvidenceReleased(unitId, u.acceptedAssertionId);
         } else if (s == UnitState.CHALLENGED) {
             // The appeal window (and the H-01 "was it already decided?" guard) were both applied above.
@@ -1723,13 +1799,13 @@ contract VNextSettlementEscrow {
             // delay cost. What it no longer pays is a penalty for someone else's failure to rule.
             _disposeBond(unitId, u, BondDisposition.COMP_RETURN);
             _allocateRelease(unitId, _assertionAuthKey(unitId, u));
-            emit Finalized(unitId, true, 1);
+            emit Finalized(unitId, true, FINALIZED_REASON_APPEAL_SILENCE_RELEASE);
             emit EvidenceReleased(unitId, u.acceptedAssertionId);
         } else if (s == UnitState.BACKUP_PENDING) {
             // §8.1: backup REJECT / timeout ⇒ refund. The backup verdict deadline IS the assertion cutoff.
             if (block.timestamp < _assertionCutoff(u)) revert WindowStillOpen();
             _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
-            emit Finalized(unitId, false, 2);
+            emit Finalized(unitId, false, FINALIZED_REASON_BACKUP_NO_RELEASE);
         } else {
             revert NotActive(); // FUNDED_ACTIVE with no emergency: `reclaimAfterDeadline` is the exit
         }
@@ -1788,7 +1864,11 @@ contract VNextSettlementEscrow {
         }
 
         O5AdjudicationRecord memory r =
-            IOracleAttester(escalationAttester).adjudicationOf(unitId, role, address(this));
+        // ATT-01: `decisionFrom` IS this role's window anchor -- `challengedAt` for APPEAL (see
+        // `_appealWindow`), `disabledAt` for EMERGENCY (line above) -- so the escrow looks the record up
+        // under the window it itself derived. A record filed against any other window is NOT FOUND, which
+        // is the correct fail-closed answer. The cast is safe: both branches derive from uint64 storage.
+            IOracleAttester(escalationAttester).adjudicationOf(unitId, role, address(this), uint64(decisionFrom));
         if (r.adjudicationId == bytes32(0)) revert AttestationNotFound();
         if (r.escrow != address(this)) revert WrongRecipient();
         // Assertion-specific by construction: a verdict signed over one assertion cannot be applied to
@@ -1902,7 +1982,11 @@ contract VNextSettlementEscrow {
         returns (bool)
     {
         uint256 d = uint256(
-            IOracleAttester(escalationAttester).adjudicationDecidedAt(unitId, role, address(this), acceptedId)
+            // ATT-01: `from` IS the window anchor for both roles, so the lookup is scoped to exactly the
+            // window being asked about. A verdict recorded against a different window is not found here.
+            IOracleAttester(escalationAttester).adjudicationDecidedAt(
+                unitId, role, address(this), acceptedId, uint64(from)
+            )
         );
         return d >= from && d < due;
     }
@@ -2025,6 +2109,14 @@ contract VNextSettlementEscrow {
         if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
         if (block.timestamp < u.reclaimAt) revert TooEarlyToReclaim();
         _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
+        // BATCH-1 item 2 (gen-UI's ask). WITHOUT this emit, a deadline reclaim produced a BARE
+        // `RefundAllocated` with no companion event, so the read surface could only identify the cause BY
+        // ELIMINATION — "a RefundAllocated with no `Finalized` and no `EscalationResolved` in the same tx".
+        // That derivation is silently broken by any future path that emits a bare `RefundAllocated`, which
+        // makes a MONEY-CAUSE label depend on an invariant nothing enforces. Now the cause is WITNESSED.
+        // Reason 4 joins the codes emitted by `finalize`: 0 uncontested release, 1 appeal-silence release,
+        // 2 backup-no-release refund, 3 emergency-silence refund.
+        emit Finalized(unitId, false, FINALIZED_REASON_DEADLINE_RECLAIM);
     }
 
     /// @dev §2 authorization-key envelope (L-01): binds type + issuer domain + issuer + raw id + chain + escrow + unit.

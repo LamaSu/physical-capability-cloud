@@ -313,7 +313,17 @@ contract VNextSettlementEscrowFactory {
                     p.payer,
                     p.operator
                 ),
-                abi.encode(p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot, unitsRoot, expiry)
+                // BATCH-1 item 3: `acceptedPolicyDigest` is the FINAL encoded word, matching its position as
+                // the final field of `JOB_POLICY_TYPEHASH`. Both parties therefore sign it.
+                abi.encode(
+                    p.jobIdHash,
+                    p.termsHash,
+                    p.policyNonce,
+                    p.prePolicyRoot,
+                    unitsRoot,
+                    expiry,
+                    p.acceptedPolicyDigest
+                )
             )
         );
     }
@@ -383,7 +393,7 @@ contract VNextSettlementEscrowFactory {
 
     function _salt(PolicyIdentity calldata p) private pure returns (bytes32) {
         return VNextSettlementLib.computePolicySalt(
-            p.payer, p.operator, p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot
+            p.payer, p.operator, p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot, p.acceptedPolicyDigest
         );
     }
 }

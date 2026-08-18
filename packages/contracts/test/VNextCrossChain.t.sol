@@ -87,20 +87,22 @@ contract MockOracleAttester is IOracleAttester {
         disabledAt = t == 0 ? 1 : t;
     }
 
-    function adjudicationOf(bytes32 unitId, uint8 role, address escrow)
+    function adjudicationOf(bytes32 unitId, uint8 role, address escrow, uint64 windowAnchor)
         external
         view
         returns (O5AdjudicationRecord memory)
     {
-        return _adj[keccak256(abi.encode(unitId, role, escrow))];
+        return _adj[keccak256(abi.encode(unitId, role, escrow, windowAnchor))];
     }
 
-    function adjudicationDecidedAt(bytes32 unitId, uint8 role, address escrow, bytes32 reviewedAssertionId)
-        external
-        view
-        returns (uint64)
-    {
-        O5AdjudicationRecord storage r = _adj[keccak256(abi.encode(unitId, role, escrow))];
+    function adjudicationDecidedAt(
+        bytes32 unitId,
+        uint8 role,
+        address escrow,
+        bytes32 reviewedAssertionId,
+        uint64 windowAnchor
+    ) external view returns (uint64) {
+        O5AdjudicationRecord storage r = _adj[keccak256(abi.encode(unitId, role, escrow, windowAnchor))];
         if (
             r.adjudicationId == bytes32(0) || r.escrow != escrow
                 || r.reviewedAssertionId != reviewedAssertionId
@@ -271,7 +273,8 @@ contract VNextCrossChainTest is Test {
             jobIdHash: job,
             termsHash: TERMS,
             policyNonce: nonce,
-            prePolicyRoot: keccak256(abi.encode(cfgs))
+            prePolicyRoot: keccak256(abi.encode(cfgs)),
+            acceptedPolicyDigest: bytes32(0)
         });
     }
 
@@ -339,7 +342,7 @@ contract VNextCrossChainTest is Test {
                     payer,
                     operator
                 ),
-                abi.encode(job, TERMS, nonce, preRoot, uRoot, POLICY_EXPIRY)
+                abi.encode(job, TERMS, nonce, preRoot, uRoot, POLICY_EXPIRY, bytes32(0)) // BATCH-1 item 3
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), structHash));
@@ -353,7 +356,7 @@ contract VNextCrossChainTest is Test {
         view
         returns (VNextSettlementEscrow.PolicyAcceptance memory acc)
     {
-        (, uint256 nonce, bytes32 preRoot,) = e.policy();
+        (, uint256 nonce, bytes32 preRoot,,) = e.policy();
         bytes32 digest = _jobPolicyDigest(e, cfgs, nonce, preRoot);
         acc = VNextSettlementEscrow.PolicyAcceptance({
             expiry: POLICY_EXPIRY,

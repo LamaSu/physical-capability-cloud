@@ -108,6 +108,17 @@ contract MockEscrowBinding {
     function setAcceptedAssertionId(bytes32 unitId, bytes32 a) external {
         acceptedAssertionIdOf[unitId] = a;
     }
+
+    /// @dev ATT-01 window anchors. The real escrow returns 0 when the role's window is not open; these
+    ///      default to 0 for exactly that reason, so a test that forgets to open a window gets the
+    ///      fail-closed `WindowNotOpen` rather than an accidental pass.
+    mapping(bytes32 => uint256) public challengedAtOf;
+    mapping(bytes32 => uint256) public emergencyAnchorOf;
+
+    function setWindowAnchors(bytes32 unitId, uint256 appealAnchor, uint256 emergencyAnchor) external {
+        challengedAtOf[unitId] = appealAnchor;
+        emergencyAnchorOf[unitId] = emergencyAnchor;
+    }
 }
 
 /// @dev An escrow whose getter returns a NON-32-byte payload — the fail-closed length guard's target.
@@ -940,6 +951,10 @@ contract Fixed2of3O5AttesterTest is Test {
 
     bytes32 constant ACCEPTED = keccak256("the-accepted-assertion");
 
+    /// @dev ATT-01 — the window anchor every adjudication fixture is bound to. Non-zero on purpose: zero
+    ///      is the escrow's "this role's window is not open" signal and must stay a distinct failure.
+    uint64 constant TEST_ANCHOR = 1_000_000;
+
     function _adj(uint8 role, uint8 outcome) internal view returns (O5Adjudication memory a) {
         a = O5Adjudication({
             settlementUnitId: _suid(),
@@ -947,7 +962,8 @@ contract Fixed2of3O5AttesterTest is Test {
             reviewedAssertionId: ACCEPTED,
             role: role,
             outcome: outcome,
-            oracleAuthEpoch: COHORT
+            oracleAuthEpoch: COHORT,
+            windowAnchor: TEST_ANCHOR // ATT-01
         });
     }
 
@@ -957,6 +973,8 @@ contract Fixed2of3O5AttesterTest is Test {
 
     function _armAccepted() internal {
         escrowBinding.setAcceptedAssertionId(_suid(), ACCEPTED);
+        // ATT-01: an accepted assertion is no longer sufficient — the role's WINDOW must also be open.
+        escrowBinding.setWindowAnchors(_suid(), TEST_ANCHOR, TEST_ANCHOR);
     }
 
     /// @dev The happy path: a 2-of-3 quorum writes an immutable, escrow-bound, assertion-specific UPHOLD.
@@ -967,7 +985,7 @@ contract Fixed2of3O5AttesterTest is Test {
         bytes32 got = attester.adjudicate(a, _adjSigs(a));
         assertEq(got, expected, "the adjudication id IS the EIP-712 digest over the full signed struct");
 
-        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR);
         assertEq(r.adjudicationId, expected);
         assertEq(r.reviewedAssertionId, ACCEPTED);
         assertEq(r.escrow, ESCROW);
@@ -996,9 +1014,9 @@ contract Fixed2of3O5AttesterTest is Test {
         O5Adjudication memory em = _adj(O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN);
         attester.adjudicate(em, _adjSigs(em));
         assertEq(
-            uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_EMERGENCY, ESCROW).outcome), uint256(O5_ADJ_OVERTURN)
+            uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_EMERGENCY, ESCROW, TEST_ANCHOR).outcome), uint256(O5_ADJ_OVERTURN)
         );
-        assertEq(uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW).outcome), uint256(O5_ADJ_UPHOLD));
+        assertEq(uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR).outcome), uint256(O5_ADJ_UPHOLD));
     }
 
     /// @dev A signature over an APPEAL cannot be replayed as an EMERGENCY (and vice versa): `role` is
@@ -1032,6 +1050,7 @@ contract Fixed2of3O5AttesterTest is Test {
         attester.adjudicate(a, sigs_a_2); // nothing accepted yet -> zero -> mismatch
 
         escrowBinding.setAcceptedAssertionId(_suid(), keccak256("a-different-assertion"));
+        escrowBinding.setWindowAnchors(_suid(), TEST_ANCHOR, TEST_ANCHOR);
         bytes[] memory sigs_a_3 = _adjSigs(a);
         vm.expectRevert(O5AttesterBase.ReviewedAssertionMismatch.selector);
         attester.adjudicate(a, sigs_a_3);
@@ -1039,7 +1058,7 @@ contract Fixed2of3O5AttesterTest is Test {
         // Nothing was burned: once the escrow's accepted assertion matches, the SAME verdict writes.
         _armAccepted();
         attester.adjudicate(a, _adjSigs(a));
-        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW).reviewedAssertionId, ACCEPTED);
+        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR).reviewedAssertionId, ACCEPTED);
     }
 
     function test_Adjudicate_RejectsBadRoleOutcomeCohortAndZeroFields() public {
@@ -1136,7 +1155,7 @@ contract Fixed2of3O5AttesterTest is Test {
         _armAccepted();
         O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
         attester.adjudicate(a, _adjSigs(a));
-        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR);
         // abi.encode of the whole record is exactly 6 words: id, reviewed, escrow, decidedAt, role, outcome.
         assertEq(abi.encode(r).length, 6 * 32, "no amount and no recipient field exists to abuse");
     }
@@ -1160,6 +1179,7 @@ contract Fixed2of3O5AttesterTest is Test {
         // A different escrow that happens to answer with the REAL unit's accepted assertion.
         MockEscrowBinding fake = new MockEscrowBinding();
         fake.setAcceptedAssertionId(_suid(), ACCEPTED);
+        fake.setWindowAnchors(_suid(), TEST_ANCHOR, TEST_ANCHOR);
 
         O5Adjudication memory bad = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
         bad.escrow = address(fake); // same unit id, same reviewed assertion, WRONG escrow
@@ -1167,19 +1187,19 @@ contract Fixed2of3O5AttesterTest is Test {
 
         // The real escrow's slot is untouched...
         assertEq(
-            attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW).adjudicationId,
+            attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR).adjudicationId,
             bytes32(0),
             "the real unit's slot was NOT consumed by a foreign-escrow record"
         );
         // ...and the corrected record still writes, which is the whole anti-brick property.
         O5Adjudication memory good = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
         bytes32 id = attester.adjudicate(good, _adjSigs(good));
-        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR);
         assertEq(r.adjudicationId, id);
         assertEq(r.escrow, ESCROW);
         assertEq(uint256(r.outcome), uint256(O5_ADJ_UPHOLD), "the real escrow reads its own verdict");
         // The foreign record still exists in its own slot — it was never destroyed, just scoped.
-        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, address(fake)).escrow, address(fake));
+        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, address(fake), TEST_ANCHOR).escrow, address(fake));
     }
 
     /// @dev H-01 — the one-word read the escrow's deadline defaults consult. It answers `max` ("never")
@@ -1190,7 +1210,7 @@ contract Fixed2of3O5AttesterTest is Test {
         _armAccepted();
         uint64 never = type(uint64).max;
         assertEq(
-            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, ACCEPTED), never, "no record yet"
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, ACCEPTED, TEST_ANCHOR), never, "no record yet"
         );
 
         vm.warp(1_700_000_000);
@@ -1198,22 +1218,22 @@ contract Fixed2of3O5AttesterTest is Test {
         attester.adjudicate(a, _adjSigs(a));
 
         assertEq(
-            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, ACCEPTED),
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, ACCEPTED, TEST_ANCHOR),
             uint64(block.timestamp),
             "the RECORDED decision time"
         );
         assertEq(
-            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, keccak256("other-assertion")),
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, keccak256("other-assertion"), TEST_ANCHOR),
             never,
             "a different reviewed assertion is not this unit's verdict"
         );
         assertEq(
-            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, address(0xE5C0F), ACCEPTED),
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, address(0xE5C0F), ACCEPTED, TEST_ANCHOR),
             never,
             "a different escrow's slot is not this escrow's verdict"
         );
         assertEq(
-            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_EMERGENCY, ESCROW, ACCEPTED),
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_EMERGENCY, ESCROW, ACCEPTED, TEST_ANCHOR),
             never,
             "the roles are independent slots"
         );

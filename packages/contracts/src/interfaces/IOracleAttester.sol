@@ -89,7 +89,10 @@ interface IOracleAttester {
     ///         recipient by design — it selects a path, never a distribution.
     /// @dev    M-05: `escrow` is part of the slot key, so a record naming a different escrow cannot
     ///         consume this one's slot. The escrow passes `address(this)`.
-    function adjudicationOf(bytes32 settlementUnitId, uint8 role, address escrow)
+    /// @dev ATT-01 — `windowAnchor` joined the slot key, so the reader must name the window it wants.
+    ///      The escrow passes the anchor IT derives (`decisionFrom`), so a record filed against a different
+    ///      window is simply NOT FOUND rather than silently applied to this one.
+    function adjudicationOf(bytes32 settlementUnitId, uint8 role, address escrow, uint64 windowAnchor)
         external
         view
         returns (O5AdjudicationRecord memory);
@@ -106,11 +109,14 @@ interface IOracleAttester {
     ///         is never inside any window. `max` makes the absent case FAIL TOWARD the ordinary deadline
     ///         default with no second comparison to get wrong; 0 would have answered "decided at the dawn
     ///         of time", i.e. inside every window, and stalled units instead.
+    /// @dev ATT-01 — takes the caller's `windowAnchor` (the `from` bound of the window it is asking
+    ///      about), because that is now part of the slot key. A record for another window answers `max`.
     function adjudicationDecidedAt(
         bytes32 settlementUnitId,
         uint8 role,
         address escrow,
-        bytes32 reviewedAssertionId
+        bytes32 reviewedAssertionId,
+        uint64 windowAnchor
     ) external view returns (uint64 decidedAtOrNever);
 
     /// @notice Write the typed UPHOLD/OVERTURN from a valid escalation-cohort quorum over `a`.

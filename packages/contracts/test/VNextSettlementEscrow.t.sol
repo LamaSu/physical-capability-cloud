@@ -200,28 +200,39 @@ contract MockOracleAttester is IOracleAttester {
     ///      EXPLICIT argument rather than `r.escrow` on purpose — that is what lets a test place a
     ///      NON-CONFORMING record (right slot, wrong bound escrow) in this escrow's own slot and prove the
     ///      escrow's `WrongRecipient` defense still stands on its own.
-    function setAdjudication(bytes32 unitId, uint8 role, address slotEscrow, O5AdjudicationRecord memory r)
-        external
-    {
-        _adj[keccak256(abi.encode(unitId, role, slotEscrow))] = r;
+    /// @dev ATT-01 adds `anchor` — the window this record belongs to — because the slot key now includes
+    ///      it. Passing the WRONG anchor is itself a useful fixture: it places the record in a slot the
+    ///      escrow will never look in, which is exactly the premature-filing case the fix defends against.
+    function setAdjudication(
+        bytes32 unitId,
+        uint8 role,
+        address slotEscrow,
+        uint64 anchor,
+        O5AdjudicationRecord memory r
+    ) external {
+        // ATT-01: the slot key gained `windowAnchor`. The mock keys on the record's OWN anchor so a
+        // fixture writes into exactly the slot the escrow will look up for that window.
+        _adj[keccak256(abi.encode(unitId, role, slotEscrow, anchor))] = r;
     }
 
-    function adjudicationOf(bytes32 unitId, uint8 role, address escrow)
+    function adjudicationOf(bytes32 unitId, uint8 role, address escrow, uint64 windowAnchor)
         external
         view
         returns (O5AdjudicationRecord memory)
     {
-        return _adj[keccak256(abi.encode(unitId, role, escrow))];
+        return _adj[keccak256(abi.encode(unitId, role, escrow, windowAnchor))];
     }
 
     /// @dev H-01: mirrors {O5AttesterBase.adjudicationDecidedAt} — the one-word "already decided, and this
     ///      escrow would apply it" read the escrow's deadline defaults consult.
-    function adjudicationDecidedAt(bytes32 unitId, uint8 role, address escrow, bytes32 reviewedAssertionId)
-        external
-        view
-        returns (uint64)
-    {
-        O5AdjudicationRecord storage r = _adj[keccak256(abi.encode(unitId, role, escrow))];
+    function adjudicationDecidedAt(
+        bytes32 unitId,
+        uint8 role,
+        address escrow,
+        bytes32 reviewedAssertionId,
+        uint64 windowAnchor
+    ) external view returns (uint64) {
+        O5AdjudicationRecord storage r = _adj[keccak256(abi.encode(unitId, role, escrow, windowAnchor))];
         if (
             r.adjudicationId == bytes32(0) || r.escrow != escrow
                 || r.reviewedAssertionId != reviewedAssertionId
@@ -337,7 +348,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      Written out in full here — NOT read from the library — so a drift in the contract's type string
     ///      fails these tests instead of silently agreeing with itself.
     bytes32 constant JOB_POLICY_TYPEHASH_T = keccak256(
-        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry)"
+        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry,bytes32 acceptedPolicyDigest)"
     );
     uint256 constant POLICY_EXPIRY = 1e12; // far future for the happy paths; overridden where it matters
 
@@ -357,7 +368,10 @@ contract VNextSettlementEscrowTest is Test {
             jobIdHash: job,
             termsHash: TERMS,
             policyNonce: nonce,
-            prePolicyRoot: _preRoot(cfgs)
+            prePolicyRoot: _preRoot(cfgs),
+            // BATCH-1 item 3. The default fixture commits ZERO -- a legitimate value meaning "no
+            // accepted-policy commitment". A dedicated test covers the non-zero binding.
+            acceptedPolicyDigest: bytes32(0)
         });
     }
 
@@ -400,7 +414,9 @@ contract VNextSettlementEscrowTest is Test {
                     payer,
                     operator
                 ),
-                abi.encode(a.job, TERMS, a.nonce, a.preRoot, a.unitsRoot, a.expiry)
+                // BATCH-1 item 3: `acceptedPolicyDigest` is the FINAL signed word. The fixture commits
+                // zero, matching `_policyIdentity`; a dedicated test exercises the non-zero binding.
+                abi.encode(a.job, TERMS, a.nonce, a.preRoot, a.unitsRoot, a.expiry, bytes32(0))
             )
         );
     }
@@ -421,7 +437,7 @@ contract VNextSettlementEscrowTest is Test {
         view
         returns (bytes32)
     {
-        (, uint256 nonce, bytes32 preRoot,) = e.policy();
+        (, uint256 nonce, bytes32 preRoot,,) = e.policy();
         bytes32 job = e.jobIdHash();
         address f = e.factory();
         return _policyDigest(
@@ -838,6 +854,8 @@ contract VNextSettlementEscrowTest is Test {
             id,
             role,
             address(e),
+            // ATT-01: place the record in the slot the ESCROW will look up for this role's window.
+            uint64(role == O5_ADJ_ROLE_APPEAL ? e.challengedAtOf(id) : e.emergencyAnchorOf(id)),
             O5AdjudicationRecord({
                 adjudicationId: keccak256(abi.encode("adj", id, role, outcome)),
                 reviewedAssertionId: accepted,
@@ -1618,10 +1636,17 @@ contract VNextSettlementEscrowTest is Test {
         c2[0].payouts[1].amount -= 1;
         assertTrue(factory.predictEscrow(_identity(job, 1, c2)) != base, "altered TERMS move the address");
 
-        // WAVE 4b — the six substitutions above are EXHAUSTIVE. Re-derive the salt from the frozen v2
-        // preimage independently of the contract: if a seventh field ever re-enters `computePolicySalt`
-        // (an arbiter creeping back, say), this equality breaks and the missing coverage is loud rather
-        // than silent. It also pins the DOMAIN BUMP: keccak("PCC:vnext:policy-salt:v2"), not v1.
+        // The substitutions above are EXHAUSTIVE for the fields they cover. Re-derive the salt from the
+        // frozen preimage independently of the contract: if an EIGHTH field ever re-enters
+        // `computePolicySalt` (an arbiter creeping back, say), this equality breaks and the missing
+        // coverage is loud rather than silent. It also pins the DOMAIN: keccak("PCC:vnext:policy-salt:v2").
+        //
+        // BATCH-1 item 3 added `acceptedPolicyDigest` as the SEVENTH field. It is in the salt on purpose:
+        // composition requires "different accepted policy => different clone => cannot co-fund", and only
+        // the salt gives that. Binding it in the typehash alone would make a differing policy a SIGNATURE
+        // failure at the SAME address; in the salt it is a DIFFERENT ADDRESS, so two policies can never
+        // contend for one escrow. This test caught the change exactly as designed — that is why the
+        // independent re-derivation is worth keeping.
         PolicyIdentity memory idB = _identity(job, 1, c);
         assertEq(
             factory.saltOf(idB),
@@ -1633,10 +1658,11 @@ contract VNextSettlementEscrowTest is Test {
                     idB.jobIdHash,
                     idB.termsHash,
                     idB.policyNonce,
-                    idB.prePolicyRoot
+                    idB.prePolicyRoot,
+                    idB.acceptedPolicyDigest
                 )
             ),
-            "salt preimage is exactly the v2 six-field tuple"
+            "salt preimage is exactly the v2 seven-field tuple"
         );
         assertTrue(
             factory.saltOf(idB)
@@ -1661,19 +1687,20 @@ contract VNextSettlementEscrowTest is Test {
     ///      library) so a partial re-introduction — a ghost slot, a reserved word, a "zeroed" arbiter —
     ///      fails here instead of passing quietly.
     function test_WAVE4B_ArbiterSemanticIsGone() public view {
-        // 1. The EIP-712 type string carries 13 fields, and neither removed field is among them.
+        // 1. The EIP-712 type string carries 14 fields (13 + BATCH-1 `acceptedPolicyDigest`), and
+        //    neither WAVE-4b-removed field is among them.
         assertEq(
             VNextSettlementLib.JOB_POLICY_TYPEHASH,
             keccak256(
-                "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry)"
+                "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry,bytes32 acceptedPolicyDigest)"
             ),
-            "JOB_POLICY_TYPEHASH re-pin (WAVE 4b)"
+            "JOB_POLICY_TYPEHASH re-pin (WAVE 4b + BATCH-1 acceptedPolicyDigest)"
         );
         // 2. It is NOT the v1 hash — i.e. every signature over the old shape is now invalid, by design.
         assertEq(
             VNextSettlementLib.JOB_POLICY_TYPEHASH,
-            bytes32(0xb60365989ceff69362e0386c0825b30fc6e385a6b16870d3879edf1d66a8c6ab),
-            "the published NEW JobPolicy typehash"
+            bytes32(0xda434b1043344df560573b6643eb6441876460071a7660bbe9f73214d62db142),
+            "the published NEW JobPolicy typehash (BATCH-1)"
         );
         assertTrue(
             VNextSettlementLib.JOB_POLICY_TYPEHASH
@@ -1911,7 +1938,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev Split out of the sequence test to keep its stack shallow.
     function _assertAcceptedPolicy(VNextSettlementEscrow e, bytes32 job, bytes32 expectedPreRoot) internal view {
-        (address operator_, uint256 nonce_, bytes32 preRoot_, bytes32 policyHash_) = e.policy();
+        (address operator_, uint256 nonce_, bytes32 preRoot_, bytes32 policyHash_,) = e.policy();
         assertEq(nonce_, 1);
         assertEq(operator_, operator, "the collapsed getter still reports the accepted operator identity");
         assertEq(preRoot_, expectedPreRoot);

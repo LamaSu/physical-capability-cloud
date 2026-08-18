@@ -34,6 +34,12 @@ interface IEscrowSettlementBinding {
     ///      this unit (zero while nothing is accepted). Same discipline as the M-01 pre-checks — an
     ///      adjudication the escrow would reject must never burn the unit's one adjudication slot.
     function acceptedAssertionIdOf(bytes32 unitId) external view returns (bytes32);
+    /// @dev ATT-01 window anchors. `acceptedAssertionIdOf` answers WHICH assertion is under review; these
+    ///      answer WHETHER this role may review it yet. Both return 0 when the role's window is not open,
+    ///      and the escrow — not the attester — is the authority on that, because it owns `challengedAt`
+    ///      and the four §8.3 C-5 exclusions that decide whether an emergency window exists at all.
+    function challengedAtOf(bytes32 unitId) external view returns (uint256);
+    function emergencyAnchorOf(bytes32 unitId) external view returns (uint256);
     /// @dev P0-6 mirror only (NOT a money-path read): the escrow's authoritative settlement state for the
     ///      unit, emitted as the "settlement receipt" leg of the `O5Mirrored` link. The real escrow returns
     ///      the `UnitState` enum; declared `uint8` here because a selector depends only on name + inputs,
@@ -135,8 +141,13 @@ abstract contract O5AttesterBase is IOracleAttester {
     /// @dev H-01 §2.5 — the escalation adjudication type. A SEPARATE typehash from `O5_TYPEHASH` under the
     ///      SAME domain, so an O5 SETTLE signature can never be replayed as an UPHOLD (and vice versa), and
     ///      `role` inside the struct separates APPEAL from EMERGENCY for the same reason.
+    /// @dev ATT-01 — `windowAnchor` is APPENDED as the final field. THIS MOVES THE ESCALATION ADJUDICATION
+    ///      DIGEST, which is the intended and announced blast radius: a quorum can no longer produce a
+    ///      signature that is valid for "this unit, this role" irrespective of when the window opened. It
+    ///      does NOT touch the O5Verdict-448 layout, `termsHash`, or any evidence/oracle golden bound to
+    ///      those. Cleared by gen-UI and oracle, both of which verified they do not mirror this digest.
     bytes32 private constant O5_ADJUDICATION_TYPEHASH = keccak256(
-        "O5Adjudication(bytes32 settlementUnitId,address escrow,bytes32 reviewedAssertionId,uint8 role,uint8 outcome,uint64 oracleAuthEpoch)"
+        "O5Adjudication(bytes32 settlementUnitId,address escrow,bytes32 reviewedAssertionId,uint8 role,uint8 outcome,uint64 oracleAuthEpoch,uint64 windowAnchor)"
     );
     /// @dev secp256k1 n/2 — reject high-s (malleable) signatures (EIP-2 canonical form).
     uint256 private constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
@@ -215,6 +226,12 @@ abstract contract O5AttesterBase is IOracleAttester {
     error UnitAlreadyAdjudicated();
     error ZeroReviewedAssertion();
     error ReviewedAssertionMismatch();
+    /// @dev ATT-01 — the escrow reports NO open window for this role on this unit (a zero anchor). Distinct
+    ///      from `WindowAnchorMismatch` on purpose: this one says "there is nothing to adjudicate yet",
+    ///      which is the premature-filing case the slot burn came from.
+    error WindowNotOpen();
+    /// @dev ATT-01 — a window IS open, but not the one this quorum signed over.
+    error WindowAnchorMismatch();
 
     constructor(address eas_, bytes32 o5SchemaUid_, uint64 cohortId_, address revoker_) {
         if (eas_ == address(0) || revoker_ == address(0)) revert ZeroAddress();
@@ -390,18 +407,31 @@ abstract contract O5AttesterBase is IOracleAttester {
 
     // ── H-01 Wave 3: the typed escalation adjudication (appeal + Model-B emergency) ─────────────────
 
-    /// @notice The consume-once storage key for one (unit, role, escrow) adjudication slot.
-    function adjudicationKey(bytes32 settlementUnitId, uint8 role, address escrow) public pure returns (bytes32) {
-        return keccak256(abi.encode(settlementUnitId, role, escrow));
+    /// @notice The consume-once storage key for one (unit, role, escrow, windowAnchor) adjudication slot.
+    /// @dev    ATT-01 — `windowAnchor` IS PART OF THE KEY. Without it the slot was keyed on
+    ///         (unit, role, escrow) alone, so a record written before the role's window opened consumed the
+    ///         ONLY slot that window would ever have, and the legitimate verdict could never be recorded.
+    ///         Including the anchor means a premature record can at worst occupy a slot belonging to a
+    ///         window that does not exist — and `adjudicate` rejects it before that, since the escrow
+    ///         reports a zero anchor for a window that is not open.
+    ///
+    ///         This is the same shape as the M-05 fix that put `escrow` in the key: the slot must be keyed
+    ///         on everything that identifies WHICH decision it is, or an unrelated record can squat it.
+    function adjudicationKey(bytes32 settlementUnitId, uint8 role, address escrow, uint64 windowAnchor)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(settlementUnitId, role, escrow, windowAnchor));
     }
 
     /// @inheritdoc IOracleAttester
-    function adjudicationOf(bytes32 settlementUnitId, uint8 role, address escrow)
+    function adjudicationOf(bytes32 settlementUnitId, uint8 role, address escrow, uint64 windowAnchor)
         external
         view
         returns (O5AdjudicationRecord memory)
     {
-        return _adjudications[adjudicationKey(settlementUnitId, role, escrow)];
+        return _adjudications[adjudicationKey(settlementUnitId, role, escrow, windowAnchor)];
     }
 
     /// @inheritdoc IOracleAttester
@@ -411,12 +441,15 @@ abstract contract O5AttesterBase is IOracleAttester {
     ///      and the caller only has to compare the timestamp against its own window. Anything unbound
     ///      answers `max` ("never"), i.e. fails toward the ordinary deadline default — never inside a
     ///      window, so an absent record can never stall a unit.
-    function adjudicationDecidedAt(bytes32 settlementUnitId, uint8 role, address escrow, bytes32 reviewedAssertionId)
-        external
-        view
-        returns (uint64)
-    {
-        O5AdjudicationRecord storage r = _adjudications[adjudicationKey(settlementUnitId, role, escrow)];
+    function adjudicationDecidedAt(
+        bytes32 settlementUnitId,
+        uint8 role,
+        address escrow,
+        bytes32 reviewedAssertionId,
+        uint64 windowAnchor
+    ) external view returns (uint64) {
+        O5AdjudicationRecord storage r =
+            _adjudications[adjudicationKey(settlementUnitId, role, escrow, windowAnchor)];
         if (
             r.adjudicationId == bytes32(0) || r.escrow != escrow
                 || r.reviewedAssertionId != reviewedAssertionId
@@ -469,7 +502,31 @@ abstract contract O5AttesterBase is IOracleAttester {
                 != a.reviewedAssertionId
         ) revert ReviewedAssertionMismatch();
 
-        bytes32 k = adjudicationKey(a.settlementUnitId, a.role, a.escrow);
+        // ATT-01 — bind to the WINDOW the escrow says is open, before consuming the slot.
+        //
+        // The check above answers "is this the right assertion?"; this one answers "may this role review it
+        // YET?". Both must pass BEFORE the one-shot slot is touched, and for the same reason: an
+        // adjudication the escrow would reject must never burn a slot the escrow would later honour.
+        //
+        // The anchor is read from the ESCROW rather than trusted from `a`, so the signer cannot name its
+        // own window. A ZERO from either getter means that role's window is not open — `challengedAtOf`
+        // returns 0 outside `CHALLENGED`, and `emergencyAnchorOf` returns 0 whenever any of the four §8.3
+        // C-5 exclusions applies — so a zero is rejected as `WindowNotOpen` rather than matched against a
+        // zero in the payload. Note the signature was ALREADY verified over `a.windowAnchor`, so a quorum
+        // that signs the wrong window fails here without having consumed anything.
+        uint256 anchor = uint256(
+            _escrowBindingWord(
+                a.escrow,
+                a.role == O5_ADJ_ROLE_APPEAL
+                    ? IEscrowSettlementBinding.challengedAtOf.selector
+                    : IEscrowSettlementBinding.emergencyAnchorOf.selector,
+                a.settlementUnitId
+            )
+        );
+        if (anchor == 0) revert WindowNotOpen();
+        if (anchor != uint256(a.windowAnchor)) revert WindowAnchorMismatch();
+
+        bytes32 k = adjudicationKey(a.settlementUnitId, a.role, a.escrow, a.windowAnchor);
         if (_adjudications[k].adjudicationId != bytes32(0)) revert UnitAlreadyAdjudicated();
         // H-01: `decidedAt` is the AUTHORITATIVE decision time — the escrow's windows are measured against
         // it, not against the block that happens to relay the record. Clamped non-zero for the same reason
@@ -500,7 +557,8 @@ abstract contract O5AttesterBase is IOracleAttester {
                         a.reviewedAssertionId,
                         a.role,
                         a.outcome,
-                        a.oracleAuthEpoch
+                        a.oracleAuthEpoch,
+                        a.windowAnchor // ATT-01
                     )
                 )
             )

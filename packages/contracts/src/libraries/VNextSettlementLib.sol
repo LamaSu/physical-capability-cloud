@@ -120,6 +120,24 @@ struct PolicyIdentity {
     bytes32 termsHash;
     uint256 policyNonce;
     bytes32 prePolicyRoot;
+    /// @dev BATCH-1 item 3 — the bilaterally-committed digest of `AcceptedJobPolicyV1` (producer identity,
+    ///      the authorized (operator,kernel,device) tuples, subject constraints). APPENDED AT INDEX 6 on
+    ///      purpose: indices 0-5 keep their positions, so every off-chain tuple (notably the oracle's
+    ///      `predictEscrow` call) GROWS rather than SHIFTS and its existing index extraction stays valid.
+    ///
+    ///      THE ESCROW NEVER DECODES THIS. It is store / compare / pass-through, exactly like `termsHash`
+    ///      and `prePolicyRoot`. That opacity is the whole design: composition, evidence and oracle settle
+    ///      the CONTENTS of `AcceptedJobPolicyV1` on their own timeline with ZERO further escrow change,
+    ///      because there is no escrow code path that reads inside it. The escrow's only claim is that the
+    ///      digest was committed by BOTH parties before funding.
+    ///
+    ///      WHY IT LANDED IN THIS BATCH RATHER THAN "the next policy-shape change" (the timing call, and
+    ///      the reason it is not deferred): a policy-shape change IS an address re-pin and a strictly
+    ///      BIGGER one — it moves `JOB_POLICY_TYPEHASH`, which invalidates every acceptance signature, on
+    ///      top of the runtime move. Pre-deploy that is free; post-deploy it is a migration of live money
+    ///      contracts. A committed zero we never use costs 32 bytes; a slot we failed to add costs the
+    ///      migration. Cleared by evidence, gen-UI, oracle, composition and VCR; operator-approved.
+    bytes32 acceptedPolicyDigest;
 }
 
 /// @notice Raised by the explicit checked downcasts (H-2). A value that does not fit its packed width
@@ -184,8 +202,13 @@ library VNextSettlementLib {
     ///      signature over the old shape stops validating rather than quietly meaning the new shape.
     ///      OLD: 0x8f215705a8b214f653cf376e5ae9b8d10ac7f7d9b64ec835e344bb829c4e56b6
     ///      NEW: 0xb60365989ceff69362e0386c0825b30fc6e385a6b16870d3879edf1d66a8c6ab
+    /// @dev BATCH-1 item 3 — `acceptedPolicyDigest` is APPENDED as the final field (14 fields, was 13).
+    ///      This MOVES THE TYPEHASH and therefore invalidates every acceptance signature produced against
+    ///      the 13-field form. That is authorised and intended: nothing is deployed, funded or signed yet,
+    ///      so the cost is a re-derivation rather than a migration. Appending (not inserting) keeps every
+    ///      off-chain field index stable.
     bytes32 internal constant JOB_POLICY_TYPEHASH = keccak256(
-        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry)"
+        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry,bytes32 acceptedPolicyDigest)"
     );
     bytes4 internal constant ERC1271_MAGIC = 0x1626ba7e;
     /// @dev secp256k1 n/2 — the ECDSA malleability bound (a signature with `s` above it is the mirror of a
@@ -356,16 +379,35 @@ library VNextSettlementLib {
     ///         reads adds no security — it only adds a way to land at the wrong address.
     ///         EVERY PREDICTED ADDRESS CHANGES. That is authorised and expected (nothing is deployed,
     ///         funded, pre-funded or signed against the v1 salt); off-chain builders re-derive.
+    /// @dev BATCH-1 item 3 — `acceptedPolicyDigest` IS IN THE SALT PREIMAGE, deliberately. Composition
+    ///      (#681) asked for the property "different accepted policy => different clone => cannot co-fund",
+    ///      and only the salt delivers that. Binding it in the typehash alone would make a differing policy
+    ///      a SIGNATURE failure at the SAME address; binding it in the salt makes it a DIFFERENT ADDRESS,
+    ///      so the two policies can never contend for one escrow at all. That is the stronger property and
+    ///      the one the composition/oracle authority check relies on.
+    ///
+    ///      This does not contradict the rule stated above ("bind only what the code reads"): the escrow
+    ///      does read this field — it stores it and republishes it — it simply never decodes its CONTENTS.
     function computePolicySalt(
         address payer,
         address operator,
         bytes32 jobIdHash,
         bytes32 termsHash,
         uint256 policyNonce,
-        bytes32 prePolicyRoot
+        bytes32 prePolicyRoot,
+        bytes32 acceptedPolicyDigest
     ) internal pure returns (bytes32) {
         return keccak256(
-            abi.encode(POLICY_SALT_DOMAIN, payer, operator, jobIdHash, termsHash, policyNonce, prePolicyRoot)
+            abi.encode(
+                POLICY_SALT_DOMAIN,
+                payer,
+                operator,
+                jobIdHash,
+                termsHash,
+                policyNonce,
+                prePolicyRoot,
+                acceptedPolicyDigest
+            )
         );
     }
 

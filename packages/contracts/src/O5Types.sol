@@ -101,6 +101,17 @@ uint8 constant O5_ADJ_OVERTURN = 2; // the reviewed SETTLE falls -> REFUND
 ///         assertion can never be applied to a different one, and the escrow re-checks it against its own
 ///         `acceptedAssertionId`. There is no amount, no recipient and no fee field anywhere in this
 ///         struct — that absence IS the "no distribution authority" property, enforced by the type.
+/// @dev    ATT-01 — `windowAnchor` is what makes this WINDOW-SPECIFIC, and it is the companion to
+///         `reviewedAssertionId`: that field pins WHICH assertion is under review, this one pins WHEN the
+///         review was authorised to happen. Before it existed, `adjudicate` checked the former and not the
+///         latter, so a record written BEFORE its role's window opened still consumed the one-shot
+///         (unitId, role, escrow) slot and permanently blocked the legitimate later verdict.
+///
+///         The anchor is READ FROM THE ESCROW at write time, never taken on the signer's word — the escrow
+///         is the authority on `challengedAt` and on whether an emergency window exists at all. Because it
+///         is in BOTH the signed payload and the slot key, a premature record is not merely rejected: it
+///         is UNSIGNABLE for a window that has not opened, and a record for a different window occupies a
+///         DIFFERENT slot, so it cannot squat the real one.
 struct O5Adjudication {
     bytes32 settlementUnitId;
     address escrow;
@@ -108,6 +119,10 @@ struct O5Adjudication {
     uint8 role; // O5_ADJ_ROLE_*
     uint8 outcome; // O5_ADJ_UPHOLD | O5_ADJ_OVERTURN
     uint64 oracleAuthEpoch; // the escalation cohort's own id
+    /// @dev The role's window anchor as the ESCROW reports it: `challengedAtOf` for APPEAL,
+    ///      `emergencyAnchorOf` for EMERGENCY. Zero is never valid — a zero from either getter means that
+    ///      role's window is not open, and `adjudicate` rejects before consuming the slot.
+    uint64 windowAnchor;
 }
 
 /// @notice The immutable record written by the escalation cohort's quorum, read by the escrow.
