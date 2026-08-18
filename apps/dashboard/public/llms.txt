@@ -91,7 +91,7 @@ listing below should point back to this file, and this file names the
 listing once it exists. Entries without a live listing yet are left as a
 marked placeholder rather than a guessed URL.
 
-- Anthropic MCP Registry (registry.modelcontextprotocol.io): <!-- add the registry.modelcontextprotocol.io/v0/servers/... URL after submission -->
+- Anthropic MCP Registry (registry.modelcontextprotocol.io): **LIVE** — PCC is published as `network.capability/physical-capability-cloud` (v2.19.0, status active). Listing: https://registry.modelcontextprotocol.io/v0/servers?search=network.capability/physical-capability-cloud
 - Smithery (smithery.ai): <!-- add Smithery URL after submission -->
 - Glama (glama.ai/mcp/servers): <!-- add Glama URL after submission -->
 - mcp.so: <!-- add mcp.so URL after submission -->
