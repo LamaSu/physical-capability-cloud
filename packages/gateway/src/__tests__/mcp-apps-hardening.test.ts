@@ -78,6 +78,7 @@ interface KitFns {
 const kit: KitFns = (() => {
   const bundle = [
     `var API_DEFAULT = ${JSON.stringify(PCC_ORIGIN)};`,
+    `var API_ORIGIN = new URL(API_DEFAULT).origin;`,
     extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
     extractFn(PCC_UI_SRC, "safeApiPath"),
     extractFn(PCC_UI_SRC, "resolveApiBase"),
@@ -96,7 +97,11 @@ describe("directive 10 — MCP-App/host mode FORCES the PCC origin", () => {
   it("ignores manifest.api_base in host mode and uses the fixed PCC origin", () => {
     expect(kit.resolveApiBase({ api_base: "https://evil.example" }, true)).toBe(PCC_ORIGIN);
     expect(kit.resolveApiBase({ api_base: "https://evil.example/api" }, true)).toBe(PCC_ORIGIN);
-    // Non-host: a manifest api_base is still honored (kept for the standalone shell).
+    // sol#1 cross-family review: a manifest api_base is IGNORED in standalone too — a shared manifest
+    // can never select the fetch origin for a Bearer-authenticated request. resolveApiBase pins to the
+    // API origin unless the document is itself served from it (the test render origin is not
+    // capability.network, so a forged evil api_base does NOT redirect it — it pins to the PCC origin).
+    expect(kit.resolveApiBase({ api_base: "https://evil.example" }, false)).toBe(PCC_ORIGIN);
     expect(kit.resolveApiBase({ api_base: "https://capability.network" }, false)).toBe(PCC_ORIGIN);
   });
 });
