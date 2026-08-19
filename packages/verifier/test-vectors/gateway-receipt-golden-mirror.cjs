@@ -15,6 +15,7 @@
  * Run: NODE_PATH=/c/Users/globa/pcc-oracle/node_modules node gateway-receipt-golden-mirror.cjs
  */
 const E = require('ethers');
+const crypto = require('crypto');
 const keccak256 = E.keccak256 || E.utils.keccak256;
 const toUtf8Bytes = E.toUtf8Bytes || E.utils.toUtf8Bytes;
 const coder = E.AbiCoder ? E.AbiCoder.defaultAbiCoder() : E.utils.defaultAbiCoder;
@@ -62,5 +63,20 @@ chk(otherTs.toLowerCase() !== receiptDigest.toLowerCase(), 'binds: receivedAt ch
 chk(packageDigest.toLowerCase() === '0xe1e5c30d2ed795e28ccb035edc53daacf13c5a077686dc4141c49ed9768a3fb5',
     'tie-in: the receipt binds evidence FinalMilestonePackageV2 packageDigest 0xe1e5c30d..3fb5');
 
-console.log(`\n${ok ? 'gateway-receipt mirror: BYTE-EXACT vs oracle #703 (domain + receiptDigest) — effectiveEvidenceTime T_hi confirmed over evidence V2 packageDigest.' : 'DIVERGENCE -- blocker'}`);
+// (6) REAL SIGNATURE (oracle #800 KAT): the receipt is ed25519-signed by the PINNED authorized gateway key.
+// Evidence verifies oracle's real signed vector independently — closes sol "no real signing vectors" for the receipt.
+const ORACLE_PUB = '8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c';   // pinned authorized receipt-signer pubkey (raw ed25519 32B)
+const ORACLE_SIG = '52be6edad949088f9e92e054a6fc68f0cf85ce17d3e7f2bd182057bbcc14299c4aa981b58b58b822dbc07680afff3e1a44f565127871ab966b4fd3f570f80501'; // ed25519 over the 32-byte receiptDigest
+const ed25519verify = (pubHex, msgHex, sigHex) => {
+  const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(pubHex, 'hex')]); // wrap raw ed25519 pubkey as SPKI DER
+  const key = crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+  return crypto.verify(null, Buffer.from(msgHex, 'hex'), key, Buffer.from(sigHex, 'hex'));
+};
+const sigOk = ed25519verify(ORACLE_PUB, receiptDigest.slice(2), ORACLE_SIG);
+chk(sigOk, 'REAL ed25519: oracle #800 signed vector VERIFIES over receiptDigest 0xe805d617 (a real signature crosses the boundary)');
+chk(!ed25519verify(ORACLE_PUB, K('tampered').slice(2), ORACLE_SIG), 'REAL ed25519 negative: tampered receiptDigest -> reject (fail-closed)');
+const wrongPub = 'ff' + ORACLE_PUB.slice(2);
+chk(!ed25519verify(wrongPub, receiptDigest.slice(2), ORACLE_SIG), 'REAL ed25519 negative: wrong pubkey -> reject (signing != authorization, sol #3 — pin the authorized key)');
+
+console.log(`\n${ok ? 'gateway-receipt mirror: BYTE-EXACT vs oracle #703 (domain + receiptDigest) + REAL ed25519 sig VERIFIED (oracle #800 KAT) — effectiveEvidenceTime T_hi, real signature confirmed over evidence V2 packageDigest.' : 'DIVERGENCE -- blocker'}`);
 process.exit(ok ? 0 : 1);
