@@ -590,7 +590,6 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
   const { plan, m1 } = fixtureA(); // fixtureA references evidenceTypeId "evtype.a" + metricId "metric.a"
   const evalSemantics: ResolvedEvaluationSemantics = {
     vocabManifestHash: dig(0x51),
-    projectionDigest: dig(0x52),
     evidenceTypes: [{ evidenceTypeId: "evtype.a", specificationDigest: dig(0x53) }],
     metrics: [
       { metricId: "metric.a", specificationDigest: dig(0x54), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x55) },

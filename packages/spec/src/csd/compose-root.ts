@@ -52,6 +52,14 @@ import type {
   EvidenceTypeRow,
   AcceptedPolicyInput,
 } from "./compose-root-types.js";
+// compositionRoot v2 — policy + projection AUTHENTICATION (sol comprehensive-review f1/f2).
+// keccak + minimal-ABI recompute, proven byte-exact vs evidence's mirrors in policy-authenticate.test.ts.
+import {
+  buildProjectionRows,
+  computeProjectionDigest,
+  computeAcceptedPolicyDigest,
+  bytesToHex as pacBytesToHex,
+} from "./policy-authenticate.js";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -1566,6 +1574,9 @@ export function emptyClosureDigest(): Uint8Array {
 
 const COMPARATOR_TAGS = new Set([1, 2, 3, 4, 5, 6]); // §4.3 comparator enum
 const VALUE_KIND_TAGS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]); // §1.4 Value-kind tags
+// sol f2: the pinned authoritative authorityPolicy-projection digest (evidence golden, cross-confirmed by
+// composition #1032/#1036 + oracle #820). deriveCompositionV2 embeds the 51 rows, recomputes, and asserts this.
+const PINNED_PROJECTION_DIGEST = "0xb044b20b6ea2470f0d80e2fc73651c77a9dfc406707df1dfec460335f5a83900";
 
 /** Encode a strictly-ascending, tag-validated u8 set: u8(count) || u8(v)*. */
 function u8AscSet(values: number[], allowed: Set<number>, ctx: string): Uint8Array {
@@ -1665,12 +1676,18 @@ export function deriveCompositionV2(
   const v1 = deriveComposition(plan, m1, options);
 
   assertObject(evalSemantics, "evalSemantics");
-  assertExactKeys(evalSemantics, ["vocabManifestHash", "projectionDigest", "evidenceTypes", "metrics"], "evalSemantics");
+  assertExactKeys(evalSemantics, ["vocabManifestHash", "evidenceTypes", "metrics"], "evalSemantics");
   assertObject(policy, "policy");
   assertExactKeys(policy, ["acceptedPolicyDigest", "evidenceSubjectBindings"], "policy");
 
   const vocabManifestHash = toDigest32(evalSemantics.vocabManifestHash, "evalSemantics.vocabManifestHash");
-  const projectionDigest = toDigest32(evalSemantics.projectionDigest, "evalSemantics.projectionDigest");
+  // sol f2: EMBED the authoritative 51-row authorityPolicy projection and RECOMPUTE projectionDigest here
+  // (evidence #1014: it is a fixed-global table composition can recompute) — assert it equals the pinned
+  // authoritative value rather than trusting a caller-supplied digest. There is no caller projectionDigest input.
+  const projectionDigest = computeProjectionDigest(buildProjectionRows());
+  if (pacBytesToHex(projectionDigest) !== PINNED_PROJECTION_DIGEST) {
+    reject("PROJECTION_DIGEST_MISMATCH", `embedded projectionDigest ${pacBytesToHex(projectionDigest)} != pinned ${PINNED_PROJECTION_DIGEST}`);
+  }
   const acceptedPolicyDigest = toDigest32(policy.acceptedPolicyDigest, "policy.acceptedPolicyDigest");
 
   // Collect the EXACT evidence-type + metric ids the plan references (§5 / F8).

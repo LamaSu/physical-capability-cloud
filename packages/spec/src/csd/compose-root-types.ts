@@ -357,12 +357,12 @@ export interface EvidenceTypeRow {
 export interface ResolvedEvaluationSemantics {
   /** 32-byte manifest hash pinning every primitive's per-tier authorityPolicy (evidence-owned; opaque). */
   vocabManifestHash: Digest32Input;
-  /** 32-byte authorityPolicy-projection digest (evidence #982, Model A) — the (evidenceType,tier)→{roles,propositionKind}
-   * table composition + oracle both read; pinned + committed here, folds into vocabManifestHash once evidence confirms. */
-  projectionDigest: Digest32Input;
   evidenceTypes: EvidenceTypeRow[];
   metrics: MetricCatalogRow[];
 }
+// NOTE (sol f2): projectionDigest is NO LONGER a caller input. deriveCompositionV2 EMBEDS the authoritative
+// 51-row authorityPolicy projection (buildProjectionRows, policy-authenticate.ts) and RECOMPUTES the digest,
+// asserting it equals the pinned value — a caller-supplied opaque digest could not be authenticated (evidence #1014).
 
 /**
  * One per-requirement subject binding (spec §6), sourced from evidence's
