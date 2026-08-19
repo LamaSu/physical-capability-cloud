@@ -46,6 +46,10 @@
   window.__PCC_UI_BOOTED__ = true;
 
   var API_DEFAULT = 'https://capability.network';
+  // sol#1 cross-family security review (2026-08-19): the fixed PCC API origin. EVERY
+  // Bearer-authenticated request pins to this origin; untrusted manifest / query / localStorage
+  // may never select it. Parsed origin (protocol+host+port), never a string/suffix compare.
+  var API_ORIGIN = (function () { try { return new URL(API_DEFAULT).origin; } catch (e) { return API_DEFAULT; } })();
   var POLL_DEFAULT_MS = 30000; // the system_prompt's own recommended cadence
   var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve)(?:[\/_.-]|$)/i;
 
@@ -173,19 +177,23 @@
   // ═══════════════════════════════════════════════════════════════════════
 
   function resolveApiBase(manifest, isHost) {
-    // MCP-App/host embedding: the manifest is UNTRUSTED (a hostile parent could
-    // forge api_base to redirect writes/reads). FORCE the configured PCC origin —
-    // ignore manifest.api_base, ?api=, and any stored override (directive 10).
-    if (isHost) return API_DEFAULT;
-    try {
-      var q = new URLSearchParams(location.search).get('api');
-      if (q) { try { localStorage.setItem('pcc.apiBase', q); } catch (e) {} return q.replace(/\/+$/, ''); }
-      var ls = localStorage.getItem('pcc.apiBase');
-      if (ls) return ls.replace(/\/+$/, '');
-    } catch (e) {}
-    if (manifest && manifest.api_base) return String(manifest.api_base).replace(/\/+$/, '');
-    if (location.protocol === 'http:' || location.protocol === 'https:') return ''; // same-origin
-    return API_DEFAULT; // file:// / offline: the shared target, NOT localhost
+    // sol#1 cross-family security review (2026-08-19): a shared manifest is UNTRUSTED content, and
+    // ?api= / localStorage['pcc.apiBase'] are attacker-supplyable ambient input (a malicious shared
+    // link can carry ?api=; a hostile render-origin script can seed localStorage). NONE of them may
+    // select the origin for a Bearer-authenticated request — otherwise a shared dashboard redirects
+    // the viewer's key to an attacker (credential-transport / confused-deputy). So manifest.api_base,
+    // ?api= and localStorage are ALL ignored as transport destinations.
+    //   - Host/MCP-App mode: pinned (already was).
+    //   - Standalone: use relative (same-origin) URLs ONLY when THIS document is itself served from
+    //     the API origin; every other render origin (a Claude artifact, file://, opaque/sandbox,
+    //     localhost, a *.capability.network subdomain) pins to the fixed API origin.
+    // Compare PARSED origins, never strings or hostname suffixes. Other deployments/dev select the
+    // backend via a build-time API_DEFAULT, never a runtime override. (manifest.api_base stays in the
+    // schema as ADVISORY metadata but is never a transport destination — ui-artifact.ts.)
+    if (isHost) return API_ORIGIN;
+    var renderOrigin;
+    try { renderOrigin = location.origin; } catch (e) { return API_ORIGIN; }
+    return renderOrigin === API_ORIGIN ? '' : API_ORIGIN;
   }
 
   // Whether apiBase points at the page's own origin (empty, or literal match).
@@ -335,6 +343,18 @@
     if (k) h['Authorization'] = 'Bearer ' + k;
     return h;
   };
+  // sol#1 defense-in-depth: resolve the final request URL and PIN it to the API origin BEFORE any
+  // Bearer is attached, so a future resolveApiBase regression can't leak the viewer's key. Returns
+  // the absolute URL string, or null if it resolves outside the fixed PCC API origin (or carries
+  // embedded credentials). Parsed-origin compare subsumes the https pin (the shipped API_DEFAULT is
+  // https, so only https://capability.network satisfies equality). Callers reject on null.
+  Transport.prototype._pin = function (safe, query) {
+    var base = this.base || location.origin;
+    var u;
+    try { u = new URL(safe + this.qs(query), base); } catch (e) { return null; }
+    if (u.origin !== API_ORIGIN || u.username || u.password) return null;
+    return u.toString();
+  };
   Transport.prototype._trace = function (res) {
     try { var t = res.headers.get('x-pcc-trace-id'); if (t) this.lastTrace = t; } catch (e) {}
   };
@@ -353,7 +373,9 @@
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.reject(new Error('refused unsafe request path: ' + path));
-    return fetch(this.base + safe + this.qs(query), { headers: this._headers({ Accept: 'application/json' }) })
+    var url = this._pin(safe, query);
+    if (url === null) return Promise.reject(new Error('refused: request resolves outside the PCC API origin'));
+    return fetch(url, { headers: this._headers({ Accept: 'application/json' }), redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' })
       .then(function (r) {
         self._trace(r);
         if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + safe);
@@ -364,10 +386,13 @@
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
-    return fetch(this.base + safe, {
+    var url = this._pin(safe);
+    if (url === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: request resolves outside the PCC API origin.' } });
+    return fetch(url, {
       method: method,
       headers: this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' }),
-      body: body != null ? JSON.stringify(body) : undefined
+      body: body != null ? JSON.stringify(body) : undefined,
+      redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'
     }).then(function (r) {
       self._trace(r);
       return r.json().catch(function () { return {}; }).then(function (j) {
@@ -382,9 +407,11 @@
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.reject(new Error('refused unsafe sse path: ' + path));
-    var init = { headers: this._headers({ Accept: 'text/event-stream' }) };
+    var url = this._pin(safe);
+    if (url === null) return Promise.reject(new Error('refused: sse resolves outside the PCC API origin'));
+    var init = { headers: this._headers({ Accept: 'text/event-stream' }), redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' };
     if (opts.signal) init.signal = opts.signal;
-    return fetch(this.base + safe, init).then(function (res) {
+    return fetch(url, init).then(function (res) {
       self._trace(res);
       if (!res.ok || !res.body) throw new Error('sse dispatch failed (HTTP ' + res.status + ')');
       var reader = res.body.getReader();
