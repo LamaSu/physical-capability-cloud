@@ -139,3 +139,48 @@ describe("signing", () => {
     );
   });
 });
+
+describe("ORACLE cross-family signed vector (#800) — the loop, proven both directions", () => {
+  /**
+   * Oracle published a DETERMINISTIC signed vector so each side could verify the
+   * other's crypto rather than only its own half. This pins it permanently: if
+   * either side's signing preimage ever drifts, THIS fails here instead of a
+   * settlement failing in production with an unverifiable signature.
+   *
+   * Vector (coord #800, oracle commit 2041818): ed25519 seed 0x01..01 signing the
+   * 32 RAW BYTES of the #703 golden receiptDigest — no extra hashing.
+   */
+  const SEED = "01".repeat(32);
+  const ORACLE_PUBKEY =
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
+  const ORACLE_SIG =
+    "52be6edad949088f9e92e054a6fc68f0cf85ce17d3e7f2bd182057bbcc14299c" +
+    "4aa981b58b58b822dbc07680afff3e1a44f565127871ab966b4fd3f570f80501";
+
+  const digestBytes = () => Buffer.from(toBytes(computeGatewayReceiptDigest(GOLDEN)));
+
+  it("the gateway VERIFIES the oracle's signature (their sig -> our verify)", () => {
+    expect(verifyEd25519Signature(ORACLE_PUBKEY, digestBytes(), ORACLE_SIG)).toBe(true);
+  });
+
+  it("the gateway PRODUCES a byte-identical signature (our sig -> their verify)", () => {
+    // Byte-identity is a stronger claim than mutual verification: it proves both
+    // sides sign exactly the same preimage, so there is no ambiguity about
+    // whether the digest is hashed again, hex-encoded, or domain-wrapped first.
+    const signed = signGatewayReceipt(GOLDEN, devSignerFromPrivateKeyHex(SEED), ORACLE_PUBKEY);
+    expect(signed.signature.toLowerCase()).toBe(ORACLE_SIG);
+  });
+
+  it("REJECTS a valid signature presented under a different pubkey", () => {
+    // signing != authorization: a well-formed signature from an unauthorized key
+    // must not pass. The oracle pins ONE authorized gateway receipt-signer pubkey.
+    const other = generateEd25519Keypair();
+    expect(verifyEd25519Signature(other.publicKeyHex, digestBytes(), ORACLE_SIG)).toBe(false);
+  });
+
+  it("REJECTS a tampered receiptDigest", () => {
+    const tampered = digestBytes();
+    tampered[0] ^= 0xff;
+    expect(verifyEd25519Signature(ORACLE_PUBKEY, tampered, ORACLE_SIG)).toBe(false);
+  });
+});
