@@ -1,38 +1,42 @@
 /**
  * Settlement READ routes (#573) — the three routes gen-UI's Surface A renders.
  *
- *   GET /api/settlement/units/:unitId/receipt      -> Result<SettlementReceiptDTO>
- *   GET /api/settlement/units/:unitId/lifecycle    -> Result<LifecycleDTO>
- *   GET /api/settlement/units/:unitId/provenance   -> Result<ProvenanceDTO>
+ *   GET /api/settlement/units/:unitId/receipt      -> SettlementReceiptDTO
+ *   GET /api/settlement/units/:unitId/lifecycle    -> LifecycleDTO
+ *   GET /api/settlement/units/:unitId/provenance   -> ProvenanceDTO
  *
- * Built to gen-UI read-surface contract v1.4 (coord #666) with escrow's DTO
- * mapping (coord #667). Ownership per operator ruling #657/#661: GATEWAY builds
- * the routes, escrow owns money-semantics, composition owns provenance, gen-UI
- * owns the contract + Surface A + review.
+ * Built to gen-UI read-surface contract **v1.5** (coord #666 -> #712 -> #733)
+ * with escrow's DTO mapping (#667). Ownership per operator ruling #657/#661.
  *
  * ── WHY THERE IS A PORT AND NOT A CHAIN CALL ─────────────────────────
- * The V-next escrow is NOT DEPLOYED. Escrow's M-2 has not produced (D) the
- * deployed address, and VCR (#623/#690) is blocked on that same single artifact.
- * So a concrete staticcall reader cannot exist yet and anything claiming to be
- * one would be fiction. Instead the routes bind to `SettlementUnitReader`, a
- * port with exactly the reads escrow enumerated. Until an implementation is
- * registered the routes answer INDEX_NOT_READY (503 + Retry-After) — an honest
- * "ask again later", never an empty or fabricated DTO.
+ * The V-next escrow is NOT DEPLOYED — escrow's M-2 has not produced artifact
+ * (D), the deployed address, and VCR (#623/#690) is blocked on the same one. So
+ * a concrete staticcall reader cannot exist yet and anything claiming to be one
+ * would be fiction. The routes bind to `SettlementUnitReader`; until an
+ * implementation is registered they answer INDEX_NOT_READY (503 + Retry-After)
+ * — an honest "ask again later", never an empty or fabricated DTO.
  *
- * ── THE RULES THAT ARE MONEY-CRITICAL, NOT COSMETIC ──────────────────
- *  rule 2   Asserts NOTHING sound. No `verified`/`paid`/`settled:boolean`, no
- *           inline signature. Returns the record + material to verify it.
- *  rule 11  `network` is chainId-derived; `assetReality` is REGISTRY-derived,
- *           NEVER chainId. Deriving it from chainId renders a test-USDC
- *           settlement as a REAL payment.
- *  rule 12  `finalState` keys off the terminal set {8,9}, NEVER off receipt
- *           presence. Enforced in the mapper, not here.
- *  rule 14  Economics come from the RELEASE-VERIFIED record, never the raw
- *           attestation/O5 field.
- *  rule 21  Hybrid provenance: staticcall-authoritative vs LOG-derived, marked
- *           per field so a reorg-exposed value never renders like a confirmed one.
- *  #567     Pull-based ONLY. Never make settlement depend on a synchronous
- *           registry write; a withheld write renders WITHHELD, never blocks.
+ * ── MONEY-CRITICAL RULES (not cosmetic) ──────────────────────────────
+ *  rule 2   Asserts NOTHING sound. No verified/paid/settled boolean.
+ *  rule 11  `network` is chainId-derived; `assetReality` is REGISTRY-derived.
+ *  rule 12  `finalState` keys off the terminal set {8,9}, NEVER receipt presence.
+ *  rule 14  Economics come from the RELEASE-VERIFIED record.
+ *  rule 16  ONE pinned block per response — no torn reads.
+ *  rule 21  Hybrid: staticcall-authoritative vs LOG-derived, marked per field.
+ *  rule 22  Pin to the FINALIZED head, BY HASH. Base has unsafe/safe/finalized
+ *           L2 heads; a money display must read `finalized`, and a non-finalized
+ *           read is marked non-final or refused — never rendered as confirmed.
+ *  rule 23  ABSENCE IS NOT EVIDENCE. A log-derived field is trustworthy only if
+ *           the indexer is complete through the pinned block. Lagging indexer =>
+ *           UNKNOWN, never an absence-based inference.
+ *  rule 24  CROSS-ROUTE SNAPSHOT. Per-route pinning is NOT enough: Surface A
+ *           stitches all three, and three independently-`latest` responses
+ *           combine three blocks into a view that never existed. Routes accept
+ *           `?asOf=<finalizedBlockHash>` and every DTO echoes {asOfBlock,
+ *           asOfBlockHash}; a mismatch is 409, never a silent stitch.
+ *  rule 25  Off-chain registries pin SEPARATELY; source envelope is enriched.
+ *  rule 26  assetReality attests IDENTITY, not LIVENESS.
+ *  #567     Pull-based only; WITHHELD renders, never blocks.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -47,16 +51,40 @@ import {
   type WindowConstants,
   type RefundWitness,
   type LifecycleView,
+  type Finality,
+  type Completeness,
 } from "../settlement/unit-state-mapper.js";
 
 // ── The port ──────────────────────────────────────────────────────────
 
-/** Thrown by a reader when the unit does not exist (contract REVERTS UnitNotFound). */
 export class UnitNotFoundError extends Error {
   constructor(unitId: string) {
     super(`settlement unit ${unitId} not found`);
     this.name = "UnitNotFoundError";
   }
+}
+
+/** Raised when a caller-supplied `?asOf` cannot be honoured (rule 24). */
+export class SnapshotMismatchError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "SnapshotMismatchError";
+  }
+}
+
+/**
+ * One pinned view of the chain. EVERY read in a single response must come from
+ * this snapshot — that is the whole torn-read guarantee (rule 16). Without it a
+ * RELEASE_ALLOCATED state could be joined to a `remainingClaimCount == 0` that
+ * never coexisted at any block.
+ */
+export interface ChainSnapshot {
+  asOfBlock: bigint;
+  asOfBlockHash: string;
+  /** rule 22 — money display requires "finalized". */
+  finality: Finality;
+  /** rule 23 — is the log index complete through this block, same canonical chain? */
+  logCompleteness: Completeness;
 }
 
 export interface UnitBinding {
@@ -65,7 +93,6 @@ export interface UnitBinding {
 }
 
 export interface EconomicsRecord {
-  /** Base units (token decimals), decimal string. From the RELEASE-VERIFIED record (rule 14). */
   amount: string;
   feeAmount: string;
   recipient: string;
@@ -83,49 +110,57 @@ export interface ProvenanceLeaf {
 export interface ProvenancePage {
   availability: ProvenanceAvailability;
   compositionRoot?: string;
+  /** rule 25 — the provenance registry revises independently of the chain block. */
   revision?: number;
-  asOfBlock?: bigint;
   leaves?: ProvenanceLeaf[];
   nextCursor?: string | null;
 }
 
 /**
- * Everything the three routes need. Deliberately narrow: each method maps to a
- * read escrow already enumerated (#606/#667), so an implementation is a thin
- * binding rather than a design exercise.
+ * Everything the three routes need. Every read takes the SNAPSHOT so all values
+ * in one response come from one pinned block (rule 16/24).
  */
 export interface SettlementUnitReader {
   binding(): UnitBinding;
   windows(): WindowConstants;
-  /** `settlement(bytes32)` + `unitCounters`. MUST throw UnitNotFoundError on revert. */
-  readAnchors(unitId: string): Promise<SettlementAnchors>;
-  /** Log-derived refund witnesses (rule 21). */
-  readRefundWitness(unitId: string): Promise<RefundWitness>;
-  /** Block of the dischargeClaim that zeroed remainingClaimCount, if any. */
-  readZeroingDischargeBlock(unitId: string): Promise<bigint | undefined>;
-  /** Release-verified economics (rule 14). Undefined until an outcome is allocated. */
-  readEconomics(unitId: string): Promise<EconomicsRecord | undefined>;
-  /** REGISTRY-derived (rule 11) — never inferred from chainId. */
-  readAssetReality(token: string): Promise<"REAL" | "TEST" | "UNKNOWN">;
+  /**
+   * Pin the snapshot for this response.
+   * - No `asOf` -> pin the current FINALIZED head (rule 22).
+   * - With `asOf` (a finalized block HASH) -> pin exactly that, or throw
+   *   SnapshotMismatchError if it is unknown/reorged-out (rule 24).
+   */
+  pinSnapshot(asOf?: string): Promise<ChainSnapshot>;
+  readAnchors(unitId: string, snap: ChainSnapshot): Promise<SettlementAnchors>;
+  readRefundWitness(unitId: string, snap: ChainSnapshot): Promise<RefundWitness>;
+  readZeroingDischargeBlock(unitId: string, snap: ChainSnapshot): Promise<bigint | undefined>;
+  readEconomics(unitId: string, snap: ChainSnapshot): Promise<EconomicsRecord | undefined>;
+  /**
+   * rule 11 + 25 + 26 — REGISTRY-derived, pinned separately from the chain block,
+   * and it attests IDENTITY ("this IS canonical USDC at an approved deployment"),
+   * NOT liveness. Circle USDC is upgradeable/pausable/blacklistable, so a
+   * correctly-pinned "real" asset may still be unable to move.
+   */
+  readAssetIdentity(
+    token: string,
+  ): Promise<{ assetReality: "real" | "test" | "unknown"; registryId: string; revision?: number }>;
   readProvenance(
     unitId: string,
+    snap: ChainSnapshot,
     opts: { depth?: number; limit?: number; cursor?: string },
   ): Promise<ProvenancePage>;
-  /** Tenant that owns this unit, for scoping. */
   readOwnerTenant(unitId: string): Promise<string | null>;
 }
 
 let reader: SettlementUnitReader | null = null;
-/** Register the concrete reader once escrow publishes (D) the deployed address. */
 export function setSettlementUnitReader(r: SettlementUnitReader | null): void {
   reader = r;
 }
 
-// ── Error union (contract v1.4) ───────────────────────────────────────
+// ── Error union (contract v1.5) ───────────────────────────────────────
 
 const ERRORS = {
   UNKNOWN_UNIT: { status: 404, code: "UNKNOWN_UNIT" },
-  TENANT_FORBIDDEN: { status: 404, code: "UNKNOWN_UNIT" }, // see note below
+  TENANT_FORBIDDEN: { status: 404, code: "UNKNOWN_UNIT" },
   INVALID_CURSOR: { status: 409, code: "INVALID_CURSOR" },
   EXPIRED_CURSOR: { status: 409, code: "EXPIRED_CURSOR" },
   REVISION_MISMATCH: { status: 409, code: "REVISION_MISMATCH" },
@@ -133,20 +168,24 @@ const ERRORS = {
 } as const;
 
 /**
- * TENANT_FORBIDDEN is answered as an INDISTINGUISHABLE 404 (contract v1.4 rule 7).
- * A distinct 403 would confirm the unit EXISTS to a caller not entitled to know
- * that — an existence oracle across tenants. The status and body are byte-identical
- * to UNKNOWN_UNIT on purpose; do not "improve" this into a helpful 403.
+ * TENANT_FORBIDDEN is answered as an INDISTINGUISHABLE 404 (rule 7). A distinct
+ * 403 would confirm the unit EXISTS to a caller not entitled to know that — an
+ * existence oracle across tenants. Do not "improve" this into a helpful 403.
  */
-function fail(reply: FastifyReply, kind: keyof typeof ERRORS, message: string, extra?: Record<string, unknown>) {
+function fail(
+  reply: FastifyReply,
+  kind: keyof typeof ERRORS,
+  message: string,
+  extra?: Record<string, unknown>,
+) {
   const e = ERRORS[kind];
   if (kind === "INDEX_NOT_READY") reply.header("Retry-After", "5");
   return reply.status(e.status).send({ error: e.code, message, ...extra });
 }
 
 const UNIT_ID_RE = /^0x[0-9a-fA-F]{64}$/;
+const BLOCK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 
-/** Resolve the reader or answer 503. Never fabricates a DTO. */
 function requireReader(reply: FastifyReply): SettlementUnitReader | null {
   if (reader) return reader;
   fail(
@@ -158,46 +197,83 @@ function requireReader(reply: FastifyReply): SettlementUnitReader | null {
   return null;
 }
 
-/**
- * Tenant scope. Returns true when the caller may see this unit.
- * Unowned units (null tenant) are visible to any authenticated caller —
- * they carry no tenant to leak.
- */
 async function tenantPermits(req: FastifyRequest, r: SettlementUnitReader, unitId: string) {
   const owner = await r.readOwnerTenant(unitId);
   if (owner === null) return true;
   return owner === (req as FastifyRequest & { tenantId?: string | null }).tenantId;
 }
 
-function serialiseWindow(v: bigint | null): string | null {
-  return v === null ? null : v.toString();
+const str = (v: bigint | null | undefined): string | null =>
+  v === null || v === undefined ? null : v.toString();
+
+function serialiseSourced<T>(s: Sourced<T> | null): Record<string, unknown> | null {
+  if (s === null) return null;
+  return {
+    ...s,
+    value: typeof s.value === "bigint" ? s.value.toString() : s.value,
+    blockNumber: str(s.blockNumber),
+  };
 }
 
-function serialiseSourced<T>(s: Sourced<T> | null): { value: unknown; source: string } | null {
-  return s === null ? null : { value: typeof s.value === "bigint" ? s.value.toString() : s.value, source: s.source };
+/** rule 24 — the snapshot echo every DTO carries so Surface A can assert equality. */
+function snapshotEcho(snap: ChainSnapshot) {
+  return {
+    asOfBlock: snap.asOfBlock.toString(),
+    asOfBlockHash: snap.asOfBlockHash,
+    finality: snap.finality,
+    logCompleteness: snap.logCompleteness,
+  };
 }
 
 // ── Routes ────────────────────────────────────────────────────────────
 
 export async function settlementReadRoutes(app: FastifyInstance) {
-  /**
-   * Shared prelude: validate the id, resolve the reader, scope the tenant, and
-   * read anchors. Returns null when it has already answered.
-   */
-  async function prelude(req: FastifyRequest, reply: FastifyReply, unitId: string) {
+  async function prelude(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    unitId: string,
+    asOf?: string,
+  ) {
     if (!UNIT_ID_RE.test(unitId)) {
       fail(reply, "UNKNOWN_UNIT", "unitId must be a 0x-prefixed 32-byte hex string");
+      return null;
+    }
+    if (asOf !== undefined && !BLOCK_HASH_RE.test(asOf)) {
+      // rule 24: asOf is a finalized block HASH, not a number. Accepting a bare
+      // number would let two routes pin different blocks with the same label.
+      fail(reply, "REVISION_MISMATCH", "asOf must be a 0x-prefixed 32-byte finalized block hash");
       return null;
     }
     const r = requireReader(reply);
     if (!r) return null;
 
+    let snap: ChainSnapshot;
+    try {
+      snap = await r.pinSnapshot(asOf);
+    } catch (e) {
+      if (e instanceof SnapshotMismatchError) {
+        fail(reply, "REVISION_MISMATCH", e.message);
+        return null;
+      }
+      throw e;
+    }
+
+    // rule 22 — a non-finalized read must never render as confirmed. Refusing is
+    // the honest answer for a money display; the caller can retry.
+    if (snap.finality !== "finalized") {
+      fail(
+        reply,
+        "INDEX_NOT_READY",
+        `Read plane is pinned to a ${snap.finality} head; a money-display read requires a finalized head.`,
+        snapshotEcho(snap),
+      );
+      return null;
+    }
+
     let anchors: SettlementAnchors;
     try {
-      anchors = await r.readAnchors(unitId);
+      anchors = await r.readAnchors(unitId, snap);
     } catch (e) {
-      // The contract REVERTS UnitNotFound for a non-existent unit (F-5). That
-      // revert is the real signal — it is NOT a state-0 "awaiting funding".
       if (e instanceof UnitNotFoundError) {
         fail(reply, "UNKNOWN_UNIT", "No such settlement unit");
         return null;
@@ -206,7 +282,6 @@ export async function settlementReadRoutes(app: FastifyInstance) {
     }
 
     if (!(await tenantPermits(req, r, unitId))) {
-      // Deliberately identical to UNKNOWN_UNIT — see fail() note.
       fail(reply, "TENANT_FORBIDDEN", "No such settlement unit");
       return null;
     }
@@ -216,76 +291,112 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       lifecycle = toLifecycleView(anchors, r.windows());
     } catch (e) {
       if (e instanceof UnreachableUnitStateError) {
-        // Fail closed and loudly: an unreachable state means the READ is wrong,
-        // not that the unit is awaiting funding.
         req.log?.error({ err: e, unitId }, "unreachable unit state from settlement read");
         fail(reply, "INDEX_NOT_READY", "Settlement state could not be interpreted; read may be stale or misbound");
         return null;
       }
       throw e;
     }
-    return { r, anchors, lifecycle };
+    return { r, anchors, lifecycle, snap };
   }
 
   // ── GET /lifecycle ──────────────────────────────────────────────────
-  app.get<{ Params: { unitId: string } }>(
+  app.get<{ Params: { unitId: string }; Querystring: { asOf?: string } }>(
     "/api/settlement/units/:unitId/lifecycle",
     async (req, reply) => {
-      const ctx = await prelude(req, reply, req.params.unitId);
+      const ctx = await prelude(req, reply, req.params.unitId, req.query.asOf);
       if (!ctx) return;
-      const { r, lifecycle } = ctx;
+      const { r, lifecycle, snap } = ctx;
       const { chainId, escrow } = r.binding();
 
       return reply.send({
         chainId,
         escrow,
         unitId: req.params.unitId,
+        ...snapshotEcho(snap),
         unitState: lifecycle.unitState,
         phase: lifecycle.phase,
-        // rule 12 — terminal set only.
         finalState: lifecycle.finalState,
         isTerminal: lifecycle.isTerminal,
         isAllocated: lifecycle.isAllocated,
-        windowEndsAt: serialiseWindow(lifecycle.windowEndsAt),
+        windowEndsAt: str(lifecycle.windowEndsAt),
       });
     },
   );
 
   // ── GET /receipt ────────────────────────────────────────────────────
-  app.get<{ Params: { unitId: string } }>(
+  app.get<{ Params: { unitId: string }; Querystring: { asOf?: string } }>(
     "/api/settlement/units/:unitId/receipt",
     async (req, reply) => {
-      const ctx = await prelude(req, reply, req.params.unitId);
+      const ctx = await prelude(req, reply, req.params.unitId, req.query.asOf);
       if (!ctx) return;
-      const { r, lifecycle } = ctx;
+      const { r, lifecycle, snap } = ctx;
       const unitId = req.params.unitId;
       const { chainId, escrow } = r.binding();
+      const chainCtx = {
+        chain: `eip155:${chainId}`,
+        contractOrRegistryId: escrow,
+        blockNumber: snap.asOfBlock,
+        blockHash: snap.asOfBlockHash,
+        finality: snap.finality,
+      };
 
-      // rule 21 — both of these are LOG-derived and reorg-exposed.
+      // rule 23 — ABSENCE IS NOT EVIDENCE. If the log index is not complete
+      // through the pinned block, a missing witness means UNKNOWN, not "no
+      // refund cause therefore released" and not DEADLINE_RECLAIM by elimination.
+      const indexComplete = snap.logCompleteness === "complete";
+      const isRefundPath =
+        lifecycle.finalState === "SETTLED_REFUNDED" || lifecycle.unitState === 7;
+
       let refundReason: Sourced<RefundReason> | null = null;
-      if (lifecycle.finalState === "SETTLED_REFUNDED" || lifecycle.unitState === 7) {
-        refundReason = deriveRefundReason(await r.readRefundWitness(unitId));
+      let refundReasonUnknown = false;
+      if (isRefundPath) {
+        const witness = await r.readRefundWitness(unitId, snap);
+        const derived = deriveRefundReason(witness);
+        if (derived) {
+          refundReason = { ...derived, ...chainCtx, completeness: snap.logCompleteness };
+        } else if (!indexComplete) {
+          refundReasonUnknown = true;
+        }
       }
-      const finalizedBlock = deriveFinalizedBlock(await r.readZeroingDischargeBlock(unitId));
 
-      // rule 14 — economics from the release-verified record only.
-      const economics = await r.readEconomics(unitId);
-      // rule 11 — assetReality is REGISTRY-derived, never chainId.
-      const assetReality = economics ? await r.readAssetReality(economics.token) : "UNKNOWN";
+      const zeroing = await r.readZeroingDischargeBlock(unitId, snap);
+      const fb = deriveFinalizedBlock(zeroing);
+      const finalizedBlock = fb ? { ...fb, ...chainCtx, completeness: snap.logCompleteness } : null;
+      // Same rule-23 logic: terminal but no discharge block found while the index
+      // is behind is UNKNOWN, not "no discharge happened".
+      const finalizedBlockUnknown = lifecycle.isTerminal && !fb && !indexComplete;
+
+      const economics = await r.readEconomics(unitId, snap);
+
+      // rule 25/26 — registry pins SEPARATELY from the chain block, and attests
+      // identity only.
+      let assetIdentity: Record<string, unknown> | null = null;
+      if (economics) {
+        const a = await r.readAssetIdentity(economics.token);
+        assetIdentity = {
+          value: a.assetReality,
+          source: "registry",
+          contractOrRegistryId: a.registryId,
+          revision: a.revision,
+          attests: "identity-not-liveness",
+        };
+      }
 
       return reply.send({
         chainId,
         escrow,
         unitId,
-        // No `settled: boolean` and no `verified` — rule 2. Callers key off finalState.
+        ...snapshotEcho(snap),
+        // rule 2 — no settled/verified/paid boolean. Callers key off finalState.
         finalState: lifecycle.finalState,
         phase: lifecycle.phase,
         isAllocated: lifecycle.isAllocated,
-        network: { chainId }, // rule 11: chainId-derived
-        assetReality, // rule 11: REGISTRY-derived
+        network: { chainId },
+        assetReality: assetIdentity,
         economics: economics ?? null,
-        refundReason: serialiseSourced(refundReason),
-        finalizedBlock: serialiseSourced(finalizedBlock),
+        refundReason: refundReasonUnknown ? "UNKNOWN" : serialiseSourced(refundReason),
+        finalizedBlock: finalizedBlockUnknown ? "UNKNOWN" : serialiseSourced(finalizedBlock),
       });
     },
   );
@@ -293,11 +404,11 @@ export async function settlementReadRoutes(app: FastifyInstance) {
   // ── GET /provenance ─────────────────────────────────────────────────
   app.get<{
     Params: { unitId: string };
-    Querystring: { depth?: string; limit?: string; cursor?: string };
+    Querystring: { depth?: string; limit?: string; cursor?: string; asOf?: string };
   }>("/api/settlement/units/:unitId/provenance", async (req, reply) => {
-    const ctx = await prelude(req, reply, req.params.unitId);
+    const ctx = await prelude(req, reply, req.params.unitId, req.query.asOf);
     if (!ctx) return;
-    const { r } = ctx;
+    const { r, snap } = ctx;
     const unitId = req.params.unitId;
     const { chainId, escrow } = r.binding();
 
@@ -312,8 +423,11 @@ export async function settlementReadRoutes(app: FastifyInstance) {
 
     let page: ProvenancePage;
     try {
-      page = await r.readProvenance(unitId, { depth, limit, cursor: req.query.cursor });
+      page = await r.readProvenance(unitId, snap, { depth, limit, cursor: req.query.cursor });
     } catch (e) {
+      if (e instanceof SnapshotMismatchError) {
+        return fail(reply, "REVISION_MISMATCH", e.message);
+      }
       const msg = e instanceof Error ? e.message : String(e);
       if (/expired cursor/i.test(msg)) return fail(reply, "EXPIRED_CURSOR", "Cursor has expired; restart pagination");
       if (/invalid cursor/i.test(msg)) return fail(reply, "INVALID_CURSOR", "Cursor is not valid for this unit");
@@ -321,15 +435,14 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       throw e;
     }
 
-    // DA_UNAVAILABLE is NOT an error: it is a 200 carrying WITHHELD. A withheld
-    // or failed registry write must render as unavailable, never block (#567).
-    // The union is real — do NOT fabricate empty roots/proofs for WITHHELD or
-    // UNANCHORED, because an empty root is indistinguishable from a real one.
+    // DA_UNAVAILABLE is NOT an error: 200 carrying WITHHELD. Do NOT fabricate
+    // roots/proofs — an empty root is indistinguishable from a real one (#567).
     if (page.availability !== "AVAILABLE") {
       return reply.send({
         chainId,
         escrow,
         unitId,
+        ...snapshotEcho(snap),
         provenanceAvailability: page.availability,
       });
     }
@@ -338,13 +451,14 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       chainId,
       escrow,
       unitId,
+      ...snapshotEcho(snap),
       provenanceAvailability: "AVAILABLE",
       compositionRoot: page.compositionRoot,
       revision: page.revision,
-      asOfBlock: page.asOfBlock?.toString(),
       leaves: page.leaves ?? [],
-      // Opaque cursor bound to {compositionRoot, revision, asOfBlock}; `depth`
-      // is a graph-walk bound, NOT a page-size bound.
+      // rule 25 — the cursor binds the COMPLETE snapshot (chain block + every
+      // off-chain revision), not asOfBlock alone. `depth` is a graph-walk bound,
+      // NOT a page-size bound.
       nextCursor: page.nextCursor ?? null,
     });
   });

@@ -89,21 +89,71 @@ export type RefundReason =
   | "BACKUP_NO_RELEASE"
   | "DEADLINE_RECLAIM";
 
-// ── rule 21: per-field provenance marker ──────────────────────────────
+// ── rules 21 + 25: per-field provenance envelope ──────────────────
 
-export type FieldSource = "staticcall" | "log";
+export type FieldSource = "staticcall" | "log" | "registry";
+
+/** Head a read may be pinned to. rule 22: money display reads `finalized`. */
+export type Finality = "finalized" | "safe" | "unsafe";
 
 /**
- * A value plus how it was obtained. `source: "log"` means reorg-exposed —
- * consumers must not render it identically to a staticcall-confirmed value.
+ * Whether the indexer backing a LOG-derived field is complete through the
+ * pinned block, on the matching canonical chain.
+ *
+ * rule 23 — ABSENCE IS NOT EVIDENCE. A log-derived field is trustworthy only if
+ * the indexer is COMPLETE THROUGH the pinned block with a matching canonical
+ * hash. If it is lagging, "no log found" must render UNKNOWN, never an
+ * absence-based inference. The sharpest instances are `refundReason` by
+ * elimination (DEADLINE_RECLAIM) and "no refund cause therefore released" —
+ * both become UNKNOWN when the indexer is behind.
+ */
+export type Completeness = "complete" | "incomplete" | "unknown";
+
+/**
+ * rule 25 — the enriched source envelope. A bare {value, source} could not say
+ * WHICH chain/registry, at WHICH block, at WHAT finality, or whether the backing
+ * index was complete. A chain block cannot snapshot an off-chain registry, so
+ * registry-derived fields pin separately and say so here.
  */
 export interface Sourced<T> {
   value: T;
   source: FieldSource;
+  /** CAIP-2-ish chain id for on-chain sources; omitted for pure registry reads. */
+  chain?: string;
+  /** Contract address or registry identifier the value came from. */
+  contractOrRegistryId?: string;
+  blockNumber?: bigint;
+  blockHash?: string;
+  finality?: Finality;
+  /** Only meaningful for `source: "log"`. */
+  completeness?: Completeness;
 }
 
-export const staticcall = <T>(value: T): Sourced<T> => ({ value, source: "staticcall" });
-export const fromLog = <T>(value: T): Sourced<T> => ({ value, source: "log" });
+export interface SourceContext {
+  chain?: string;
+  contractOrRegistryId?: string;
+  blockNumber?: bigint;
+  blockHash?: string;
+  finality?: Finality;
+}
+
+export const staticcall = <T>(value: T, ctx: SourceContext = {}): Sourced<T> => ({
+  value,
+  source: "staticcall",
+  ...ctx,
+});
+
+export const fromLog = <T>(
+  value: T,
+  ctx: SourceContext = {},
+  completeness: Completeness = "unknown",
+): Sourced<T> => ({ value, source: "log", ...ctx, completeness });
+
+export const fromRegistry = <T>(value: T, ctx: SourceContext = {}): Sourced<T> => ({
+  value,
+  source: "registry",
+  ...ctx,
+});
 
 // ── Inputs ────────────────────────────────────────────────────────────
 
