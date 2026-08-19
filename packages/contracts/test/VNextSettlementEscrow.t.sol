@@ -1630,6 +1630,25 @@ contract VNextSettlementEscrowTest is Test {
         // jobIdHash substituted
         assertTrue(factory.predictEscrow(_identity(keccak256("other-job"), 1, c)) != base, "job moves it");
 
+        // acceptedPolicyDigest substituted (BATCH-1 item 3).
+        // ADDED AFTER A CROSS-FAMILY REVIEW found the field was NEVER EXERCISED WITH A NONZERO VALUE --
+        // both identity fixtures hard-code bytes32(0), so the salt binding was committed but untested.
+        // This is the property COMPOSITION depends on and asked for by name in #681: a different accepted
+        // policy must yield a DIFFERENT CLONE, so two policies can never contend for one escrow. Binding it
+        // in the typehash alone would only make a mismatch a SIGNATURE failure at the SAME address.
+        alt = _identity(job, 1, c);
+        alt.acceptedPolicyDigest = keccak256("accepted-policy-v1");
+        address withDigest = factory.predictEscrow(alt);
+        assertTrue(withDigest != base, "a different ACCEPTED POLICY DIGEST must move the address");
+
+        // ...and it is the DIGEST that moved it, not merely "nonzero vs zero": two DIFFERENT nonzero
+        // digests must also land on different clones.
+        alt.acceptedPolicyDigest = keccak256("accepted-policy-v2");
+        assertTrue(
+            factory.predictEscrow(alt) != withDigest,
+            "two different nonzero accepted policies must not share a clone"
+        );
+
         // ANY funded term substituted (the pre-policy root) — here a single payout amount.
         VNextSettlementEscrow.UnitConfig[] memory c2 = _oneUnitConfig(1000e6, 0, 0, 1);
         c2[0].payouts[0].amount += 1;

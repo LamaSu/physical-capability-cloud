@@ -977,6 +977,88 @@ contract Fixed2of3O5AttesterTest is Test {
         escrowBinding.setWindowAnchors(_suid(), TEST_ANCHOR, TEST_ANCHOR);
     }
 
+    // ── ATT-01: the two PRODUCTION window gates ───────────────────────────────────────────────────
+    //
+    // ADDED AFTER A CROSS-FAMILY REVIEW (sol/GPT-5.6) FOUND THEM ASSERTED BY NO TEST AT ALL. The ATT-01
+    // change added `WindowNotOpen` and `WindowAnchorMismatch` to `adjudicate()` and the suite stayed green
+    // without ever executing either — the escrow-side tests exercised a MOCK attester that writes records
+    // directly, so they never reached the real gate. Green was not coverage.
+    //
+    // Both tests assert the anti-brick property, not just the revert: THE SLOT MUST SURVIVE. A rejected
+    // adjudication that consumed the one-shot slot would be the exact bug ATT-01 exists to remove.
+
+    /// @dev A role whose window is NOT OPEN (the escrow reports a zero anchor) is refused, and the slot is
+    ///      left MINTABLE. This is the premature-filing case: before ATT-01 such a record consumed the
+    ///      unit's only slot for that role and permanently blocked the legitimate later verdict.
+    function test_ATT01_WindowNotOpen_IsRefused_AndLeavesTheSlotMintable() public {
+        // Accepted assertion present, but NO window opened — anchors default to zero.
+        escrowBinding.setAcceptedAssertionId(_suid(), ACCEPTED);
+
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        bytes[] memory sigs = _adjSigs(a);
+        vm.expectRevert(O5AttesterBase.WindowNotOpen.selector);
+        attester.adjudicate(a, sigs);
+
+        // NOTHING WAS CONSUMED: once the window genuinely opens, the same quorum still mints.
+        escrowBinding.setWindowAnchors(_suid(), TEST_ANCHOR, TEST_ANCHOR);
+        bytes32 got = attester.adjudicate(a, _adjSigs(a));
+        assertEq(got, attester.adjudicationDigestOf(a), "the slot survived the premature attempt");
+        assertEq(
+            attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, TEST_ANCHOR).adjudicationId,
+            got,
+            "the legitimate verdict lands in the live window's slot"
+        );
+    }
+
+    /// @dev A window IS open, but the quorum signed over a DIFFERENT one. Refused, slot untouched.
+    ///      Distinct from `WindowNotOpen` on purpose: "there is nothing to adjudicate yet" and "you
+    ///      adjudicated the wrong window" are different operator-facing failures.
+    function test_ATT01_WindowAnchorMismatch_IsRefused_AndLeavesTheSlotMintable() public {
+        escrowBinding.setAcceptedAssertionId(_suid(), ACCEPTED);
+        // The escrow's live appeal window is a DIFFERENT anchor than the fixture signs over.
+        uint64 liveAnchor = TEST_ANCHOR + 1;
+        escrowBinding.setWindowAnchors(_suid(), liveAnchor, liveAnchor);
+
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN); // signs windowAnchor = TEST_ANCHOR
+        bytes[] memory sigs = _adjSigs(a);
+        vm.expectRevert(O5AttesterBase.WindowAnchorMismatch.selector);
+        attester.adjudicate(a, sigs);
+
+        // The LIVE window's slot is still empty, so the correctly-anchored verdict can still be written.
+        assertEq(
+            attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, liveAnchor).adjudicationId,
+            bytes32(0),
+            "a mismatched record must not occupy the live window's slot"
+        );
+    }
+
+    /// @dev The EMERGENCY role reads a DIFFERENT escrow getter than APPEAL (`emergencyAnchorOf`, which
+    ///      applies the four exclusions). Proves the role->getter routing, not just the appeal path.
+    function test_ATT01_EmergencyRole_ReadsItsOwnAnchor() public {
+        escrowBinding.setAcceptedAssertionId(_suid(), ACCEPTED);
+        // Appeal window OPEN, emergency window CLOSED: the emergency role must still be refused.
+        escrowBinding.setWindowAnchors(_suid(), TEST_ANCHOR, 0);
+
+        O5Adjudication memory e = _adj(O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN);
+        bytes[] memory sigs = _adjSigs(e);
+        vm.expectRevert(O5AttesterBase.WindowNotOpen.selector);
+        attester.adjudicate(e, sigs);
+
+        // And the reverse: emergency open, appeal closed — the appeal role is the one refused.
+        escrowBinding.setWindowAnchors(_suid(), 0, TEST_ANCHOR);
+        O5Adjudication memory ap = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        bytes[] memory sigs2 = _adjSigs(ap);
+        vm.expectRevert(O5AttesterBase.WindowNotOpen.selector);
+        attester.adjudicate(ap, sigs2);
+
+        // Emergency is genuinely mintable in that state — the refusals above are role-specific, not a brick.
+        assertEq(
+            attester.adjudicate(e, _adjSigs(e)),
+            attester.adjudicationDigestOf(e),
+            "the open role still mints while the closed one is refused"
+        );
+    }
+
     /// @dev The happy path: a 2-of-3 quorum writes an immutable, escrow-bound, assertion-specific UPHOLD.
     function test_Adjudicate_QuorumWritesAnImmutableRecord() public {
         _armAccepted();

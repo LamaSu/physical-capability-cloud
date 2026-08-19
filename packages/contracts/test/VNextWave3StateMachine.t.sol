@@ -740,6 +740,66 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
     ///      the challenge it purports to answer was ever filed. Pre-fix only `decidedAt < challengedAt +
     ///      APPEAL_WINDOW` was checked, so such a verdict decided the challenge in advance: the appeal
     ///      quorum ruling on a dispute that did not exist.
+    /// @dev [RESTORED COVERAGE] The escrow's LOWER-BOUND time check, exercised with the record in the
+    ///      CORRECT LIVE SLOT so the lookup actually FINDS it and the comparison at
+    ///      `VNextSettlementEscrow.sol:1889` runs.
+    ///
+    ///      WHY THIS EXISTS. ATT-01 changed the two tests below from `WindowStillOpen` to
+    ///      `AttestationNotFound`, because a record written before its window is now filed under anchor 0
+    ///      and is structurally unfindable. That is a genuine strengthening of the IMPLEMENTATION -- but a
+    ///      cross-family review (sol/GPT-5.6) pointed out those were the ONLY tests reaching the escrow's
+    ///      `decidedAt < decisionFrom` branch, so the change silently REMOVED that coverage while the
+    ///      suite stayed green. The author had claimed the change was "strictly stronger"; it was stronger
+    ///      in the contract and weaker in the tests. This restores the missing half.
+    ///
+    ///      Here the appeal record carries the RIGHT anchor (so it is found) but a `decidedAt` that
+    ///      PREDATES `challengedAt` -- a verdict decided before the challenge it purports to answer.
+    ///      The escrow must reject it on TIME, not on absence.
+    function test_WAVE4B_LowerBound_RecordInTheLiveSlotButDecidedTooEarly_IsRejectedOnTime() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 beforeChallenge = block.timestamp;
+
+        vm.warp(beforeChallenge + 1 days);
+        _challenge(e, id);
+        uint256 challengedAt = block.timestamp;
+        assertLt(beforeChallenge, challengedAt, "the decision really does predate the challenge");
+
+        // The LIVE anchor -- so the escrow's lookup FINDS this record -- but decided BEFORE the window.
+        (,, bytes32 accepted,,,,) = e.settlement(id);
+        escalation.setAdjudication(
+            id,
+            O5_ADJ_ROLE_APPEAL,
+            address(e),
+            uint64(e.challengedAtOf(id)), // the CORRECT live slot
+            O5AdjudicationRecord({
+                adjudicationId: keccak256("decided-too-early"),
+                reviewedAssertionId: accepted,
+                escrow: address(e),
+                decidedAt: uint64(beforeChallenge), // < decisionFrom
+                role: O5_ADJ_ROLE_APPEAL,
+                outcome: O5_ADJ_OVERTURN
+            })
+        );
+
+        // Proves the record IS findable -- otherwise this test would be re-testing AttestationNotFound.
+        assertEq(
+            escalation.adjudicationOf(id, O5_ADJ_ROLE_APPEAL, address(e), uint64(challengedAt)).adjudicationId,
+            keccak256("decided-too-early"),
+            "precondition: the record occupies the LIVE window's slot"
+        );
+
+        // Found, then rejected on the LOWER TIME BOUND -- the branch ATT-01's key check would have hidden.
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        // Not bricked: appeal silence still resolves to the RELEASE default.
+        vm.warp(challengedAt + VNextSettlementLib.APPEAL_WINDOW);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the silence default fires");
+        _assertBucketsCovered(e);
+    }
+
     function test_WAVE4B_AppealDecidedBeforeTheChallenge_IsRejected() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
