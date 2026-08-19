@@ -34,6 +34,13 @@ import type {
   AcceptedPolicyInput,
   ValueInput,
 } from "./compose-root-types.js";
+import {
+  computeAcceptedPolicyDigest,
+  keccakUtf8,
+  hexToBytes,
+  bytesToHex,
+  type CanonicalAcceptedJobPolicyV1,
+} from "./policy-authenticate.js";
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -595,7 +602,35 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
       { metricId: "metric.a", specificationDigest: dig(0x54), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x55) },
     ],
   };
-  const policy: AcceptedPolicyInput = { acceptedPolicyDigest: dig(0xf6), evidenceSubjectBindings: [] };
+  // sol f1: the policy is authenticated by recompute — build a minimal valid preimage and derive its
+  // committed digest, so deriveCompositionV2's recompute == committed assertion passes by construction.
+  const pk = (s: string) => keccakUtf8(s);
+  const paddr = (n: number) => hexToBytes("0x" + n.toString(16).padStart(40, "0"));
+  const preimage: CanonicalAcceptedJobPolicyV1 = {
+    token: paddr(1),
+    assuranceTier: 2n,
+    milestones: [{ milestoneIndex: 0n, stepId: pk("s0"), amount: 100n, deadline: 1000n }],
+    payer: pk("payer"),
+    operatorPrincipal: pk("op"),
+    operatorSettlementAddress: paddr(2),
+    authorizedTuples: [],
+    approvedExpertSet: [],
+    approvedThirdPartyExecutorSet: [],
+    expectedRecipient: pk("rec"),
+    targetSystemIdentity: pk("tgt"),
+    committedProgramHash: pk("prog"),
+    recipeRef: pk("recipe"),
+    sampleManifestRef: pk("sample"),
+    children: [],
+    operatingEnvelope: [],
+    expectedRouteArea: pk("route"),
+    expectedLocation: { lat: 0n, lng: 0n, radius: 0n, time: 0n },
+    captureNonceAnchor: pk("nonce"),
+    challengeAnchor: pk("challenge"),
+    integrityGrade: 1n,
+    evidenceSubjectBindings: [],
+  };
+  const policy: AcceptedPolicyInput = { committedAcceptedPolicyDigest: bytesToHex(computeAcceptedPolicyDigest(preimage)).slice(2), preimage };
   return { plan, m1, evalSemantics, policy };
 }
 
@@ -608,7 +643,7 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
     const closureLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x01), _u32(0), r.depClosureDigest));
     const planLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x02), _u32(1), r.planDigest));
     const evalLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x03), _u32(2), r.evalSemanticsDigest));
-    const policyLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x04), _u32(3), dig(0xf6)));
+    const policyLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x04), _u32(3), computeAcceptedPolicyDigest(policy.preimage)));
     const p0 = _hash(_concat(_DOM_COMP_NODE, closureLeaf, planLeaf));
     const p1 = _hash(_concat(_DOM_COMP_NODE, evalLeaf, policyLeaf));
     const merkleRoot = _hash(_concat(_DOM_COMP_NODE, p0, p1));
@@ -631,6 +666,12 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
     expect(Array.from(deriveCompositionV2(a.plan, a.m1, a.evalSemantics, a.policy).compositionRoot)).toEqual(
       Array.from(deriveCompositionV2(b.plan, b.m1, b.evalSemantics, b.policy).compositionRoot),
     );
+  });
+
+  it("sol f1: a committed digest that does NOT match the recomputed preimage -> POLICY_DIGEST_MISMATCH", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const tampered: AcceptedPolicyInput = { committedAcceptedPolicyDigest: dig(0x99), preimage: policy.preimage };
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, tampered), "POLICY_DIGEST_MISMATCH");
   });
 
   it("F8: a pinned metric row NOT referenced by the plan -> EVAL_ID_SET_MISMATCH (no extras)", () => {

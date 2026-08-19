@@ -319,6 +319,7 @@ export interface SerializedClosureInput {
 // Spec: ai/research/pcc-inc3a-v2-evalsemantics-leaf-spec.md. Consumed by
 // deriveCompositionV2 (§3/§4/§5/§6). The v1 types above are unchanged.
 // ---------------------------------------------------------------------------
+import type { CanonicalAcceptedJobPolicyV1 } from "./policy-authenticate.js";
 
 /**
  * One pinned metric-catalog row (oracle-owned; coord #643). `specificationDigest`
@@ -388,6 +389,12 @@ export interface EvidenceSubjectBinding {
  * the static check (Model A, pending coord #724) — never hashed into `planDigest`.
  */
 export interface AcceptedPolicyInput {
-  acceptedPolicyDigest: Digest32Input;
-  evidenceSubjectBindings: EvidenceSubjectBinding[];
+  /** The acceptedPolicyDigest committed at funding (escrow PolicyIdentity idx6, opaque).
+   * deriveCompositionV2 recomputes it from `preimage` and asserts equality — AUTHENTICATING that the
+   * bindings + tier it reads are the ones inside the committed digest (sol comprehensive-review f1). */
+  committedAcceptedPolicyDigest: Digest32Input;
+  /** The full canonical policy preimage. Composition recomputes acceptedPolicyDigest from it (byte-exact,
+   * proven vs evidence's mirror in policy-authenticate.test.ts). Its `assuranceTier` is the authenticated
+   * requirement tier; its `evidenceSubjectBindings` are the authenticated bindings (increment-3). */
+  preimage: CanonicalAcceptedJobPolicyV1;
 }

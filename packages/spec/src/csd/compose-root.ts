@@ -1678,7 +1678,7 @@ export function deriveCompositionV2(
   assertObject(evalSemantics, "evalSemantics");
   assertExactKeys(evalSemantics, ["vocabManifestHash", "evidenceTypes", "metrics"], "evalSemantics");
   assertObject(policy, "policy");
-  assertExactKeys(policy, ["acceptedPolicyDigest", "evidenceSubjectBindings"], "policy");
+  assertExactKeys(policy, ["committedAcceptedPolicyDigest", "preimage"], "policy");
 
   const vocabManifestHash = toDigest32(evalSemantics.vocabManifestHash, "evalSemantics.vocabManifestHash");
   // sol f2: EMBED the authoritative 51-row authorityPolicy projection and RECOMPUTE projectionDigest here
@@ -1688,7 +1688,14 @@ export function deriveCompositionV2(
   if (pacBytesToHex(projectionDigest) !== PINNED_PROJECTION_DIGEST) {
     reject("PROJECTION_DIGEST_MISMATCH", `embedded projectionDigest ${pacBytesToHex(projectionDigest)} != pinned ${PINNED_PROJECTION_DIGEST}`);
   }
-  const acceptedPolicyDigest = toDigest32(policy.acceptedPolicyDigest, "policy.acceptedPolicyDigest");
+  // sol f1: AUTHENTICATE the policy — recompute acceptedPolicyDigest from the preimage and assert it equals
+  // the committed digest. This proves the evidenceSubjectBindings + assuranceTier read from the preimage are
+  // exactly the ones inside the committed digest; no caller-supplied sidecar is trusted.
+  const committedAcceptedPolicyDigest = toDigest32(policy.committedAcceptedPolicyDigest, "policy.committedAcceptedPolicyDigest");
+  const acceptedPolicyDigest = computeAcceptedPolicyDigest(policy.preimage);
+  if (compareBytes(acceptedPolicyDigest, committedAcceptedPolicyDigest) !== 0) {
+    reject("POLICY_DIGEST_MISMATCH", `recomputed acceptedPolicyDigest ${pacBytesToHex(acceptedPolicyDigest)} != committed ${pacBytesToHex(committedAcceptedPolicyDigest)}`);
+  }
 
   // Collect the EXACT evidence-type + metric ids the plan references (§5 / F8).
   const refEvTypes = new Set<string>();
