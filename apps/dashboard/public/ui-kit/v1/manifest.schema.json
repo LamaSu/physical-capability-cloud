@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://capability.network/ui-kit/v1/manifest.schema.json",
   "title": "PCC Dashboard Manifest",
-  "description": "JSON-Schema mirror of @pcc/spec DashboardManifestSchema (packages/spec/src/types/ui-artifact.ts). The small declarative dashboard a person's LLM emits; the pcc-ui kit renders it. Windows are a closed set rendered textContent-only. Actions never carry confirm:\"none\" (a human click is the confirm step). A manifest must NOT contain an API key (pcc_live_/pcc_test_) anywhere — a shared artifact travels with its contents.",
+  "description": "JSON-Schema mirror of @pcc/spec DashboardManifestSchema (packages/spec/src/types/ui-artifact.ts). The small declarative dashboard a person's LLM emits; the pcc-ui kit renders it. Windows are a closed set rendered textContent-only. Actions never carry confirm:\"none\" (a human click is the confirm step). A manifest must NOT contain an API key (pcc_live_/pcc_test_) anywhere — a shared artifact travels with its contents. This mirror now carries the Zod RESOURCE CAPS (sections/windows/actions maxItems 24, list.limit max 200, meta maxItems 12, pollMs minimum 2000) so a generator validating only against this schema does not emit manifests the gateway then rejects. TWO Zod guards are not expressible as JSON-Schema validation and are enforced only by the gateway's Zod (the authoritative gate): the 256KB byte cap (MAX_MANIFEST_BYTES) and the recursive no-credential refine (containsApiKey — rejects a baked pcc key / Bearer / JWT, raw, percent-encoded, or base64). Validate against the Zod DashboardManifestSchema for the full gate.",
   "type": "object",
   "required": ["csd", "title", "sections"],
   "additionalProperties": false,
@@ -20,6 +20,7 @@
     "theme": { "enum": ["auto", "dark", "light"] },
     "sections": {
       "type": "array",
+      "maxItems": 24,
       "items": { "$ref": "#/definitions/Section" }
     }
   },
@@ -32,7 +33,7 @@
       "properties": {
         "path": { "type": "string", "minLength": 1, "description": "'/api/…' route the window reads." },
         "query": { "type": "object", "description": "Query params merged onto the request." },
-        "pollMs": { "type": "integer", "exclusiveMinimum": 0, "description": "Poll cadence in ms (default ~30000)." },
+        "pollMs": { "type": "integer", "minimum": 2000, "description": "Poll cadence in ms (default ~30000; Zod floors at MIN_POLL_MS=2000 so a shared dashboard can't fast-poll authenticated endpoints)." },
         "sse": { "type": "string", "minLength": 1, "description": "SSE stream '/sse/stream/…' (fetch-SSE with Bearer)." },
         "select": { "type": "string", "description": "Dot-path into the response (e.g. 'data.jobs.0.status'). NOT JSONPath." }
       }
@@ -62,7 +63,7 @@
       "additionalProperties": false,
       "properties": {
         "title": { "type": "string", "minLength": 1, "description": "Dot-path field for each row's title." },
-        "meta": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Dot-path fields for the row's meta line." },
+        "meta": { "type": "array", "maxItems": 12, "items": { "type": "string" }, "default": [], "description": "Dot-path fields for the row's meta line (capped at 12 — meta selectors loop per rendered row)." },
         "statusFrom": { "type": "string", "description": "Dot-path field for the row's status pill." }
       }
     },
@@ -106,7 +107,7 @@
       "additionalProperties": false,
       "properties": {
         "heading": { "type": "string" },
-        "windows": { "type": "array", "items": { "$ref": "#/definitions/Window" } }
+        "windows": { "type": "array", "maxItems": 24, "items": { "$ref": "#/definitions/Window" } }
       }
     },
     "Window": {
@@ -135,7 +136,7 @@
             "kind": { "const": "list" },
             "binding": { "$ref": "#/definitions/Binding" },
             "item": { "$ref": "#/definitions/ListItem" },
-            "limit": { "type": "integer", "exclusiveMinimum": 0 }
+            "limit": { "type": "integer", "exclusiveMinimum": 0, "maximum": 200 }
           }
         },
         {
@@ -180,7 +181,7 @@
           "type": "object", "required": ["kind", "actions"], "additionalProperties": false,
           "properties": {
             "kind": { "const": "actions" },
-            "actions": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/Action" } }
+            "actions": { "type": "array", "minItems": 1, "maxItems": 24, "items": { "$ref": "#/definitions/Action" } }
           }
         }
       ]
