@@ -43,8 +43,13 @@ const EVIDENCE_BLOCK_VERSION = 2n;
 // ═══ #4 unitContextDigest — canonical unit + challenge context (the oracle reconstructs this independently) ═══
 const UNITCTX_DOMAIN = K('PCC:vnext:unit-context:v1');
 const chainId = 8453n, escrow = addr(0xe5c0fn);
-const settlementUnitId = '0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1';
-const jobIdHash = K('golden-job'), milestoneIndex = 0n, stepId = K('golden-step-0'), challengeNonce = K('golden-gateway-nonce');
+const jobIdHash = K('golden-job'), milestoneIndex = 3n, stepId = K('golden-step'), challengeNonce = K('golden-gateway-nonce');
+// settlementUnitId is DERIVED from the same {chainId,escrow,jobIdHash,milestoneIndex,stepId} so the unit is SELF-CONSISTENT:
+// the context milestoneIndex/stepId are NOT free — they must reproduce settlementUnitId. That is the anti-swap invariant the
+// oracle enforces (derive settlementUnitId from the context fields, require equality). A test vector must be a VALID unit.
+const SUD = K('PCC:vnext:settlement-unit:v1');
+const settlementUnitId = keccak256(enc(['bytes32', 'uint256', 'address', 'bytes32', 'uint256', 'bytes32'],
+  [SUD, chainId, escrow, jobIdHash, milestoneIndex, stepId]));  // == the gate-1 golden 0x4453a3d2..
 const unitContext = (cid, esc, unit, job, mi, step, nonce) =>
   keccak256(enc(['bytes32', 'uint256', 'address', 'bytes32', 'bytes32', 'uint256', 'bytes32', 'bytes32'],
     [UNITCTX_DOMAIN, cid, esc, unit, job, mi, step, nonce]));
@@ -121,6 +126,12 @@ const unitB = unitContext(chainId, escrow, K('other-unit'), jobIdHash, 1n, K('go
 chk(unitB.toLowerCase() !== unitContextDigest.toLowerCase(), '#4 cross-unit: reconstructed unit-B context != block.unitContextDigest -> oracle rejects the replay (evidence replay closed, not just package replay)');
 const staleChallenge = unitContext(chainId, escrow, settlementUnitId, jobIdHash, milestoneIndex, stepId, K('other-nonce'));
 chk(staleChallenge.toLowerCase() !== unitContextDigest.toLowerCase(), '#4 challenge: a different challengeNonce -> different unitContextDigest (freshness bound)');
+// #4 anti-swap INVARIANT: the context milestoneIndex/stepId are NOT free — they must reproduce settlementUnitId. A valid unit
+// satisfies settlementUnitId == keccak(SUD, chainId, escrow, jobIdHash, milestoneIndex, stepId); the oracle derives + checks it.
+chk(settlementUnitId.toLowerCase() === keccak256(enc(['bytes32','uint256','address','bytes32','uint256','bytes32'],[SUD,chainId,escrow,jobIdHash,milestoneIndex,stepId])).toLowerCase(),
+    '#4 invariant: settlementUnitId DERIVES from the context {chainId,escrow,jobIdHash,milestoneIndex,stepId} -> this is a VALID unit (gate-1 golden 0x4453a3d2)');
+chk(keccak256(enc(['bytes32','uint256','address','bytes32','uint256','bytes32'],[SUD,chainId,escrow,jobIdHash,2n,stepId])).toLowerCase() !== settlementUnitId.toLowerCase(),
+    '#4 invariant negative: a DIFFERENT milestoneIndex in the context does NOT derive settlementUnitId -> oracle rejects an incoherent unit (mi/step bound, not free)');
 
 // (4) #3 ROLE-RELABEL: move an attestation to a different roleId -> attestationSetRoot changes (roles bound, not flat hashes)
 const relabeled = [{ ...roles[0], roleId: 'buyer' }];
@@ -141,7 +152,7 @@ chk(bundleHashOf(events.map(e => ({ ...e, source: { ...e.source, simulated: true
 // (7) PINNED GOLDEN
 const EXPECT = {
   EVIDENCE_BLOCK_DOMAIN_V2: '0xf15817db95786e8bbc3156b3e66c9fa7776b2d1233841e8718b9c91fa1c751a0',
-  evidenceBlockHash:        '0x9b90c9efd713a17d95f6b992a497aa9755aabaa47b4f689edf13dd055862d071',
+  evidenceBlockHash:        '0x4605a6e9affa66fd2acd44f5b88d0468f293056573f04e884048f58ba8803a40',
 };
 chk(EVIDENCE_BLOCK_DOMAIN_V2.toLowerCase() === EXPECT.EVIDENCE_BLOCK_DOMAIN_V2, `pinned golden: EVIDENCE_BLOCK_DOMAIN_V2 == ${EXPECT.EVIDENCE_BLOCK_DOMAIN_V2}`);
 chk(evidenceBlockHash.toLowerCase() === EXPECT.evidenceBlockHash, `pinned golden: evidenceBlockHash == ${EXPECT.evidenceBlockHash}`);
