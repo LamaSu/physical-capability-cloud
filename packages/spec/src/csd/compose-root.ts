@@ -58,7 +58,11 @@ import {
   buildProjectionRows,
   computeProjectionDigest,
   computeAcceptedPolicyDigest,
+  keccakUtf8 as pacKeccakUtf8,
+  lookupProjection,
   bytesToHex as pacBytesToHex,
+  type ProjectionRow,
+  type CanonicalAcceptedJobPolicyV1,
 } from "./policy-authenticate.js";
 
 // ---------------------------------------------------------------------------
@@ -1648,6 +1652,60 @@ function resolveExactRows<T>(rows: T[], idOf: (r: T) => string, referenced: Set<
   return [...byId.keys()].sort((a, b) => compareBytes(asciiBytes(a, ctx), asciiBytes(b, ctx))).map((id) => byId.get(id)!);
 }
 
+/**
+ * increment-3 (sol comprehensive-review f1; evidence #853 answer A): the STATIC evidenceSubjectBindings
+ * check, run over the AUTHENTICATED policy preimage. requirementId is globally unique across a plan, so
+ * composition matches each plan EvidenceRequirement to its binding by requirementIdHash = keccak(requirementId)
+ * ALONE; the chain-bound settlementUnitId is carried opaquely and re-bound by the ORACLE at settlement (the F3
+ * split — composition cannot form the chain-bound id pre-funding). Per requirement: exactly-one binding;
+ * propositionKind in {0..16}; propositionKind == the authoritative projection's propositionSubjectConstraint for
+ * (evidenceType, tier); authority.role in allowedSourceRoles. tier = the authenticated policy assuranceTier
+ * (job-global, evidence #1027). Rejects rather than derives on any violation; does NOT touch planDigest.
+ * NOTE: the A-vs-C layering (evidence A here vs escrow's predict-the-address C) is under cross-family review;
+ * A is chosen because C is circular against the committed binding struct (settlementUnitId -> acceptedPolicyDigest
+ * -> predicted address -> settlementUnitId). Shadow-only until that review confirms.
+ */
+function checkEvidenceSubjectBindings(
+  plan: PlanV1,
+  preimage: CanonicalAcceptedJobPolicyV1,
+  projectionRows: ProjectionRow[],
+): void {
+  const tier = Number(preimage.assuranceTier);
+  // index bindings by requirementIdHash; reject a duplicate (globally-unique requirementId — evidence #853).
+  const bindingByReq = new Map<string, number>(); // requirementIdHash hex -> propositionKind
+  preimage.evidenceSubjectBindings.forEach((b, i) => {
+    if (!Number.isInteger(b.propositionKind) || b.propositionKind < 0 || b.propositionKind > 16) {
+      reject("SUBJECT_BINDING_KIND", `evidenceSubjectBindings[${i}]: propositionKind ${b.propositionKind} not in {0..16}`);
+    }
+    const key = pacBytesToHex(b.requirementIdHash);
+    if (bindingByReq.has(key)) reject("SUBJECT_BINDING_DUPLICATE", `two bindings share requirementIdHash ${key}`);
+    bindingByReq.set(key, b.propositionKind);
+  });
+  const matched = new Set<string>();
+  plan.settlementUnits.forEach((u) => {
+    u.acceptancePolicy.evidenceRequirements.forEach((r) => {
+      const reqKey = pacBytesToHex(pacKeccakUtf8(r.requirementId));
+      if (!bindingByReq.has(reqKey)) reject("SUBJECT_BINDING_MISSING", `no evidenceSubjectBinding for requirement '${r.requirementId}'`);
+      matched.add(reqKey);
+      const propositionKind = bindingByReq.get(reqKey)!;
+      const proj = lookupProjection(projectionRows, pacKeccakUtf8(r.evidenceTypeId), tier);
+      if (proj === null) reject("SUBJECT_BINDING_MISMATCH", `no authority projection row for (${r.evidenceTypeId}, tier ${tier})`);
+      if (propositionKind !== proj!.propositionSubjectConstraint) {
+        reject("SUBJECT_BINDING_MISMATCH", `requirement '${r.requirementId}' propositionKind ${propositionKind} != authoritative ${proj!.propositionSubjectConstraint}`);
+      }
+      const role = r.authority.role;
+      if (!Number.isInteger(role) || role < 1 || role > 3) reject("SUBJECT_BINDING_ROLE", `requirement '${r.requirementId}': authority.role ${role} not in {1,2,3}`);
+      const roleBit = 1 << (role - 1); // 1 emitter->0b001, 2 evaluator->0b010, 3 oracle->0b100
+      if ((roleBit & proj!.allowedSourceRoles) === 0) {
+        reject("SUBJECT_BINDING_ROLE", `requirement '${r.requirementId}' role ${role} not in allowedSourceRoles ${proj!.allowedSourceRoles}`);
+      }
+    });
+  });
+  bindingByReq.forEach((_v, key) => {
+    if (!matched.has(key)) reject("SUBJECT_BINDING_ORPHAN", `evidenceSubjectBinding requirementIdHash ${key} matches no plan requirement`);
+  });
+}
+
 /** Raw 32-byte digests produced by the v2 derivation (composition schema version 2). */
 export interface CompositionV2Result {
   planDigest: Uint8Array;
@@ -1684,7 +1742,8 @@ export function deriveCompositionV2(
   // sol f2: EMBED the authoritative 51-row authorityPolicy projection and RECOMPUTE projectionDigest here
   // (evidence #1014: it is a fixed-global table composition can recompute) — assert it equals the pinned
   // authoritative value rather than trusting a caller-supplied digest. There is no caller projectionDigest input.
-  const projectionDigest = computeProjectionDigest(buildProjectionRows());
+  const projectionRows = buildProjectionRows();
+  const projectionDigest = computeProjectionDigest(projectionRows);
   if (pacBytesToHex(projectionDigest) !== PINNED_PROJECTION_DIGEST) {
     reject("PROJECTION_DIGEST_MISMATCH", `embedded projectionDigest ${pacBytesToHex(projectionDigest)} != pinned ${PINNED_PROJECTION_DIGEST}`);
   }
@@ -1696,6 +1755,10 @@ export function deriveCompositionV2(
   if (compareBytes(acceptedPolicyDigest, committedAcceptedPolicyDigest) !== 0) {
     reject("POLICY_DIGEST_MISMATCH", `recomputed acceptedPolicyDigest ${pacBytesToHex(acceptedPolicyDigest)} != committed ${pacBytesToHex(committedAcceptedPolicyDigest)}`);
   }
+
+  // increment-3 (evidence #853 = A): the authenticated evidenceSubjectBindings static check — the bindings +
+  // tier are now proven committed (recompute above), so checking them against the embedded projection is sound.
+  checkEvidenceSubjectBindings(plan, policy.preimage, projectionRows);
 
   // Collect the EXACT evidence-type + metric ids the plan references (§5 / F8).
   const refEvTypes = new Set<string>();

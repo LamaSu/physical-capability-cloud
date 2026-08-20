@@ -594,10 +594,13 @@ describe("inc-3a re-audit F1: missing required Option field rejects (not coerced
 // ---------------------------------------------------------------------------
 
 function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantics: ResolvedEvaluationSemantics; policy: AcceptedPolicyInput } {
-  const { plan, m1 } = fixtureA(); // fixtureA references evidenceTypeId "evtype.a" + metricId "metric.a"
+  const { plan, m1 } = fixtureA(); // references requirementId "req.a" (evtype.a) + metricId "metric.a"
+  // increment-3 needs a REAL authorityPolicy-projection primitive + a matching binding. approval.payer @ tier 2
+  // has allowedSourceRoles={evaluator} (matches fixtureA's role-2 authority) + propositionSubjectConstraint=NONE(0).
+  (plan.settlementUnits[0].acceptancePolicy.evidenceRequirements[0] as { evidenceTypeId: string }).evidenceTypeId = "approval.payer";
   const evalSemantics: ResolvedEvaluationSemantics = {
     vocabManifestHash: dig(0x51),
-    evidenceTypes: [{ evidenceTypeId: "evtype.a", specificationDigest: dig(0x53) }],
+    evidenceTypes: [{ evidenceTypeId: "approval.payer", specificationDigest: dig(0x53) }],
     metrics: [
       { metricId: "metric.a", specificationDigest: dig(0x54), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x55) },
     ],
@@ -628,7 +631,10 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
     captureNonceAnchor: pk("nonce"),
     challengeAnchor: pk("challenge"),
     integrityGrade: 1n,
-    evidenceSubjectBindings: [],
+    // increment-3: one binding for requirement "req.a" (approval.payer@t2 -> propositionKind NONE(0)).
+    evidenceSubjectBindings: [
+      { settlementUnitId: pk("unit-a"), requirementIdHash: pk("req.a"), sourceKind: 7, propositionKind: 0, valueRef: pk("vr") },
+    ],
   };
   const policy: AcceptedPolicyInput = { committedAcceptedPolicyDigest: bytesToHex(computeAcceptedPolicyDigest(preimage)).slice(2), preimage };
   return { plan, m1, evalSemantics, policy };
@@ -672,6 +678,55 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
     const { plan, m1, evalSemantics, policy } = v2Inputs();
     const tampered: AcceptedPolicyInput = { committedAcceptedPolicyDigest: dig(0x99), preimage: policy.preimage };
     expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, tampered), "POLICY_DIGEST_MISMATCH");
+  });
+
+  // increment-3 (evidence #853 = A): the authenticated evidenceSubjectBindings static check. Mutating the
+  // preimage requires re-deriving committedAcceptedPolicyDigest so the sol-f1 auth passes and the binding
+  // check (not POLICY_DIGEST_MISMATCH) is the thing that rejects.
+  const reauth = (policy: AcceptedPolicyInput) => {
+    policy.committedAcceptedPolicyDigest = bytesToHex(computeAcceptedPolicyDigest(policy.preimage)).slice(2);
+  };
+
+  it("increment-3: no binding for a plan requirement -> SUBJECT_BINDING_MISSING", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    policy.preimage.evidenceSubjectBindings = [];
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_MISSING");
+  });
+
+  it("increment-3: propositionKind != the authoritative projection -> SUBJECT_BINDING_MISMATCH", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    policy.preimage.evidenceSubjectBindings[0].propositionKind = 5; // approval.payer@t2 authoritative is NONE(0)
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_MISMATCH");
+  });
+
+  it("increment-3: propositionKind out of {0..16} -> SUBJECT_BINDING_KIND", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    policy.preimage.evidenceSubjectBindings[0].propositionKind = 17;
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_KIND");
+  });
+
+  it("increment-3: requirement role not in allowedSourceRoles -> SUBJECT_BINDING_ROLE", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    // role 1 (emitter); approval.payer@t2 allows evaluator(2) only. Mutates the PLAN, not the preimage.
+    (plan.settlementUnits[0].acceptancePolicy.evidenceRequirements[0].authority as { role: number }).role = 1;
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_ROLE");
+  });
+
+  it("increment-3: a binding matching no plan requirement -> SUBJECT_BINDING_ORPHAN", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    policy.preimage.evidenceSubjectBindings.push({ settlementUnitId: keccakUtf8("u2"), requirementIdHash: keccakUtf8("no-such-req"), sourceKind: 0, propositionKind: 0, valueRef: keccakUtf8("vr2") });
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_ORPHAN");
+  });
+
+  it("increment-3: two bindings share a requirementIdHash -> SUBJECT_BINDING_DUPLICATE", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    policy.preimage.evidenceSubjectBindings.push({ settlementUnitId: keccakUtf8("u2"), requirementIdHash: keccakUtf8("req.a"), sourceKind: 0, propositionKind: 0, valueRef: keccakUtf8("vr2") });
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_DUPLICATE");
   });
 
   it("F8: a pinned metric row NOT referenced by the plan -> EVAL_ID_SET_MISMATCH (no extras)", () => {
