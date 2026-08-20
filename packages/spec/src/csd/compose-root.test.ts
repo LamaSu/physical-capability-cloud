@@ -32,10 +32,12 @@ import type {
   RationalInput,
   ResolvedEvaluationSemantics,
   AcceptedPolicyInput,
+  UnitConfigRef,
   ValueInput,
 } from "./compose-root-types.js";
 import {
   computeAcceptedPolicyDigest,
+  computePlanUnitKey,
   keccakUtf8,
   hexToBytes,
   bytesToHex,
@@ -593,7 +595,7 @@ describe("inc-3a re-audit F1: missing required Option field rejects (not coerced
 // schema u16(2). deriveCompositionV2 + F8 authoritative-row resolution.
 // ---------------------------------------------------------------------------
 
-function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantics: ResolvedEvaluationSemantics; policy: AcceptedPolicyInput } {
+function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantics: ResolvedEvaluationSemantics; policy: AcceptedPolicyInput; unitConfigs: readonly UnitConfigRef[] } {
   const { plan, m1 } = fixtureA(); // references requirementId "req.a" (evtype.a) + metricId "metric.a"
   // increment-3 needs a REAL authorityPolicy-projection primitive + a matching binding. approval.payer @ tier 2
   // has allowedSourceRoles={evaluator} (matches fixtureA's role-2 authority) + propositionSubjectConstraint=NONE(0).
@@ -609,6 +611,11 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
   // committed digest, so deriveCompositionV2's recompute == committed assertion passes by construction.
   const pk = (s: string) => keccakUtf8(s);
   const paddr = (n: number) => hexToBytes("0x" + n.toString(16).padStart(40, "0"));
+  // increment-3 (escrow #893): fixtureA is single-unit at ordinal 0. Its authoritative UnitConfig projects to
+  // {milestoneIndex, stepId}; the binding's planUnitKey MUST equal the reconstruction of those, else the anti-swap
+  // check rejects. Pick config {0, keccak("s0")} (mirrors the milestone) and derive the matching planUnitKey.
+  const unitConfigs: readonly UnitConfigRef[] = [{ milestoneIndex: 0n, stepId: pk("s0") }];
+  const unitAPlanUnitKey = computePlanUnitKey(0n, 0n, pk("s0"));
   const preimage: CanonicalAcceptedJobPolicyV1 = {
     token: paddr(1),
     assuranceTier: 2n,
@@ -631,19 +638,20 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
     captureNonceAnchor: pk("nonce"),
     challengeAnchor: pk("challenge"),
     integrityGrade: 1n,
-    // increment-3: one binding for requirement "req.a" (approval.payer@t2 -> propositionKind NONE(0)).
+    // increment-3: one binding for requirement "req.a" (approval.payer@t2 -> propositionKind NONE(0)); its
+    // planUnitKey is the reconstruction from unitConfigs[0] so the anti-swap check passes (escrow #893).
     evidenceSubjectBindings: [
-      { planUnitKey: pk("unit-a"), requirementIdHash: pk("req.a"), sourceKind: 7, propositionKind: 0, valueRef: pk("vr") },
+      { planUnitKey: unitAPlanUnitKey, requirementIdHash: pk("req.a"), sourceKind: 7, propositionKind: 0, valueRef: pk("vr") },
     ],
   };
   const policy: AcceptedPolicyInput = { committedAcceptedPolicyDigest: bytesToHex(computeAcceptedPolicyDigest(preimage)).slice(2), preimage };
-  return { plan, m1, evalSemantics, policy };
+  return { plan, m1, evalSemantics, policy, unitConfigs };
 }
 
 describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLeaf)", () => {
   it("32-byte digests + independent 4-leaf recompute matches (F5 explicit tree, u16(2))", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
-    const r = deriveCompositionV2(plan, m1, evalSemantics, policy);
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
+    const r = deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs);
     expect(r.compositionRoot).toHaveLength(32);
     expect(r.evalSemanticsDigest).toHaveLength(32);
     const closureLeaf = _hash(_concat(_DOM_COMP_LEAF, _u8(0x01), _u32(0), r.depClosureDigest));
@@ -660,8 +668,8 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
   });
 
   it("v2 root differs from the v1 root for the same plan (new committed leaf set)", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
-    const v2 = deriveCompositionV2(plan, m1, evalSemantics, policy).compositionRoot;
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
+    const v2 = deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs).compositionRoot;
     const v1 = deriveCompositionRoot(plan, m1);
     expect(Array.from(v2)).not.toEqual(Array.from(v1));
   });
@@ -669,15 +677,15 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
   it("determinism: identical inputs -> identical v2 root", () => {
     const a = v2Inputs();
     const b = v2Inputs();
-    expect(Array.from(deriveCompositionV2(a.plan, a.m1, a.evalSemantics, a.policy).compositionRoot)).toEqual(
-      Array.from(deriveCompositionV2(b.plan, b.m1, b.evalSemantics, b.policy).compositionRoot),
+    expect(Array.from(deriveCompositionV2(a.plan, a.m1, a.evalSemantics, a.policy, a.unitConfigs).compositionRoot)).toEqual(
+      Array.from(deriveCompositionV2(b.plan, b.m1, b.evalSemantics, b.policy, b.unitConfigs).compositionRoot),
     );
   });
 
   it("sol f1: a committed digest that does NOT match the recomputed preimage -> POLICY_DIGEST_MISMATCH", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     const tampered: AcceptedPolicyInput = { committedAcceptedPolicyDigest: dig(0x99), preimage: policy.preimage };
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, tampered), "POLICY_DIGEST_MISMATCH");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, tampered, unitConfigs), "POLICY_DIGEST_MISMATCH");
   });
 
   // increment-3 (evidence #853 = A): the authenticated evidenceSubjectBindings static check. Mutating the
@@ -688,38 +696,57 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
   };
 
   it("increment-3: no binding for a plan requirement -> SUBJECT_BINDING_MISSING", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     policy.preimage.evidenceSubjectBindings = [];
     reauth(policy);
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_MISSING");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_MISSING");
   });
 
   it("increment-3: propositionKind != the authoritative projection -> SUBJECT_BINDING_MISMATCH", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     policy.preimage.evidenceSubjectBindings[0].propositionKind = 5; // approval.payer@t2 authoritative is NONE(0)
     reauth(policy);
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_MISMATCH");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_MISMATCH");
   });
 
   it("increment-3: propositionKind out of {0..16} -> SUBJECT_BINDING_KIND", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     policy.preimage.evidenceSubjectBindings[0].propositionKind = 17;
     reauth(policy);
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_KIND");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_KIND");
   });
 
   it("increment-3: requirement role not in allowedSourceRoles -> SUBJECT_BINDING_ROLE", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     // role 1 (emitter); approval.payer@t2 allows evaluator(2) only. Mutates the PLAN, not the preimage.
     (plan.settlementUnits[0].acceptancePolicy.evidenceRequirements[0].authority as { role: number }).role = 1;
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_ROLE");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_ROLE");
   });
 
   it("increment-3: a binding matching no plan requirement -> SUBJECT_BINDING_ORPHAN", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     policy.preimage.evidenceSubjectBindings.push({ planUnitKey: keccakUtf8("u2"), requirementIdHash: keccakUtf8("no-such-req"), sourceKind: 0, propositionKind: 0, valueRef: keccakUtf8("vr2") });
     reauth(policy);
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_ORPHAN");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_ORPHAN");
+  });
+
+  it("increment-3 anti-swap: a binding planUnitKey != the unit's reconstruction -> SUBJECT_BINDING_UNIT_MISMATCH", () => {
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
+    // The withdrawn answer A trusted the binding's own unit label. Composition now reconstructs unit 0's
+    // planUnitKey from the authoritative unitConfigs[0] and REQUIRES the binding to carry it; a binding holding
+    // ANY other key — the exact shape of a cross-unit swap (rA bound under unit B's key) — must reject here,
+    // not be authenticated against itself downstream. Re-point the single binding's planUnitKey to a foreign
+    // value and re-authenticate so the binding check (not sol-f1 POLICY_DIGEST_MISMATCH) is what fires.
+    policy.preimage.evidenceSubjectBindings[0].planUnitKey = keccakUtf8("some-other-unit-key");
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_UNIT_MISMATCH");
+  });
+
+  it("increment-3: unitConfigs length != settlementUnits -> SUBJECT_BINDING_UNITCONFIG_COUNT", () => {
+    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    // A missing/extra per-unit config breaks the unit-side bijection before any binding is examined.
+    const shortConfigs: readonly UnitConfigRef[] = [];
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, shortConfigs), "SUBJECT_BINDING_UNITCONFIG_COUNT");
   });
 
   it("increment-3: a duplicate requirementId is rejected at the policy layer (globally-unique, #876)", () => {
@@ -730,27 +757,27 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
   });
 
   it("F8: a pinned metric row NOT referenced by the plan -> EVAL_ID_SET_MISMATCH (no extras)", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     evalSemantics.metrics.push({ metricId: "metric.extra", specificationDigest: dig(0x60), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x61) });
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "EVAL_ID_SET_MISMATCH");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "EVAL_ID_SET_MISMATCH");
   });
 
   it("F8: a plan-referenced metric MISSING from the pinned rows -> EVAL_ID_SET_MISMATCH", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     evalSemantics.metrics = [];
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "EVAL_ID_SET_MISMATCH");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "EVAL_ID_SET_MISMATCH");
   });
 
   it("metric row: a non-{1..6} comparator -> U8SET_TAG", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     evalSemantics.metrics[0].permittedComparators = [7];
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "U8SET_TAG");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "U8SET_TAG");
   });
 
   it("metric row: a non-ascending comparator set -> U8SET_ORDER", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
     evalSemantics.metrics[0].permittedComparators = [5, 3];
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "U8SET_ORDER");
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "U8SET_ORDER");
   });
 });
 

@@ -51,6 +51,7 @@ import type {
   MetricCatalogRow,
   EvidenceTypeRow,
   AcceptedPolicyInput,
+  UnitConfigRef,
 } from "./compose-root-types.js";
 // compositionRoot v2 — policy + projection AUTHENTICATION (sol comprehensive-review f1/f2).
 // keccak + minimal-ABI recompute, proven byte-exact vs evidence's mirrors in policy-authenticate.test.ts.
@@ -60,6 +61,7 @@ import {
   computeAcceptedPolicyDigest,
   keccakUtf8 as pacKeccakUtf8,
   lookupProjection,
+  computePlanUnitKey,
   bytesToHex as pacBytesToHex,
   type ProjectionRow,
   type CanonicalAcceptedJobPolicyV1,
@@ -1653,49 +1655,76 @@ function resolveExactRows<T>(rows: T[], idOf: (r: T) => string, referenced: Set<
 }
 
 /**
- * increment-3 (sol comprehensive-review f1; evidence #853 answer A): the STATIC evidenceSubjectBindings
- * check, run over the AUTHENTICATED policy preimage. requirementId is globally unique across a plan, so
- * composition matches each plan EvidenceRequirement to its binding by requirementIdHash = keccak(requirementId)
- * ALONE; the chain-bound settlementUnitId is carried opaquely and re-bound by the ORACLE at settlement (the F3
- * split — composition cannot form the chain-bound id pre-funding). Per requirement: exactly-one binding;
- * propositionKind in {0..16}; propositionKind == the authoritative projection's propositionSubjectConstraint for
- * (evidenceType, tier); authority.role in allowedSourceRoles. tier = the authenticated policy assuranceTier
- * (job-global, evidence #1027). Rejects rather than derives on any violation; does NOT touch planDigest.
- * WARNING — INTERIM / SUPERSEDED: this requirementIdHash-only match is the WITHDRAWN answer A. A sol swap
- * attack broke it (bind rA->unitB, rB->unitA; the unit label is ignored so it passes, then the oracle
- * authenticates the malicious mapping against itself). The reconciled design (evidence #876, planUnitKey)
- * requires composition to RECONSTRUCT each binding's planUnitKey from the AUTHENTICATED PLAN by ordinal and
- * enforce the per-unit BIJECTION — never the binding self-label. That rebuild is PENDING the exact
- * plan-unit -> {unitOrdinal, milestoneIndex, stepId} mapping (SettlementUnitInput carries no milestone fields;
- * asked evidence). Until it lands, this check is sound ONLY for single-unit plans. Shadow-only throughout.
+ * increment-3 (sol comprehensive-review f1; reconciled design evidence #876 + escrow #893): the STATIC
+ * evidenceSubjectBindings check, run over the AUTHENTICATED policy preimage (acceptedPolicyDigest is recomputed
+ * and asserted upstream, so the bindings + tier read here are proven committed). requirementId is globally
+ * unique across a plan, so each plan EvidenceRequirement matches its binding by requirementIdHash =
+ * keccak(requirementId).
+ *
+ * ANTI-SWAP — the property that broke the withdrawn answer A. Composition does NOT trust the binding's own unit
+ * label. For each plan settlement unit of ordinal N it RECONSTRUCTS the authoritative planUnitKey from the
+ * per-unit UnitConfig[N] — planUnitKey = keccak(PLANUNIT_DOMAIN, uint32 N, uint256 milestoneIndex, bytes32
+ * stepId), N indexing the funding-ordered UnitConfig[] (escrow #893: unit ordinal N IS UnitConfig[N]) — and
+ * REQUIRES every binding on that unit to carry that exact planUnitKey. A cross-unit swap (binding rA under unit
+ * B's key) therefore fails HERE, rather than being authenticated against itself downstream. {milestoneIndex,
+ * stepId} are NEVER taken from the plan SettlementUnitInput (it carries none) nor from the binding self-label —
+ * only from unitConfigs. milestoneIndex stays uint256 (no truncation — a narrowed value could alias two units).
+ *
+ * unitConfigs carries only {milestoneIndex, stepId} per ordinal — NOT UnitConfig[N].compositionRoot (that is
+ * this function's transitive output; including it would be circular). unitConfigs authenticity (that it equals
+ * escrow's committed UnitConfig[]) is the funding/settlement boundary's job: escrow commits prePolicyRoot =
+ * keccak(abi.encode(UnitConfig[])) into the signed JOB_POLICY_TYPEHASH, and the oracle re-derives this
+ * compositionRoot over the authenticated UnitConfig[] at settlement — a mismatched unitConfigs cannot settle.
+ *
+ * Per requirement: exactly-one binding (SUBJECT_BINDING_MISSING); binding.planUnitKey == reconstructed
+ * (SUBJECT_BINDING_UNIT_MISMATCH); propositionKind in {0..16} (SUBJECT_BINDING_KIND); propositionKind == the
+ * authoritative projection's propositionSubjectConstraint for (evidenceType, tier) (SUBJECT_BINDING_MISMATCH);
+ * authority.role in allowedSourceRoles (SUBJECT_BINDING_ROLE). tier = the authenticated policy assuranceTier
+ * (job-global, evidence #1027). Bijection both ways: |unitConfigs| == |settlementUnits|
+ * (SUBJECT_BINDING_UNITCONFIG_COUNT), every unit has a config (SUBJECT_BINDING_UNITCONFIG_MISSING), no orphan
+ * binding (SUBJECT_BINDING_ORPHAN); a duplicate requirementId is rejected upstream at computeBindingsRoot and
+ * defensively here (SUBJECT_BINDING_DUPLICATE). Rejects rather than derives; does NOT touch planDigest.
  */
 function checkEvidenceSubjectBindings(
   plan: PlanV1,
   preimage: CanonicalAcceptedJobPolicyV1,
+  unitConfigs: readonly UnitConfigRef[],
   projectionRows: ProjectionRow[],
 ): void {
   const tier = Number(preimage.assuranceTier);
-  // index bindings by requirementIdHash; reject a duplicate (globally-unique requirementId — evidence #853).
-  const bindingByReq = new Map<string, number>(); // requirementIdHash hex -> propositionKind
+  if (unitConfigs.length !== plan.settlementUnits.length) {
+    reject("SUBJECT_BINDING_UNITCONFIG_COUNT", `unitConfigs length ${unitConfigs.length} != settlementUnits length ${plan.settlementUnits.length}`);
+  }
+  // index bindings by requirementIdHash; validate propositionKind range; reject a duplicate (globally-unique
+  // requirementId — also enforced upstream at computeBindingsRoot).
+  const bindingByReq = new Map<string, { planUnitKey: Uint8Array; propositionKind: number }>();
   preimage.evidenceSubjectBindings.forEach((b, i) => {
     if (!Number.isInteger(b.propositionKind) || b.propositionKind < 0 || b.propositionKind > 16) {
       reject("SUBJECT_BINDING_KIND", `evidenceSubjectBindings[${i}]: propositionKind ${b.propositionKind} not in {0..16}`);
     }
     const key = pacBytesToHex(b.requirementIdHash);
     if (bindingByReq.has(key)) reject("SUBJECT_BINDING_DUPLICATE", `two bindings share requirementIdHash ${key}`);
-    bindingByReq.set(key, b.propositionKind);
+    bindingByReq.set(key, { planUnitKey: b.planUnitKey, propositionKind: b.propositionKind });
   });
   const matched = new Set<string>();
   plan.settlementUnits.forEach((u) => {
+    const n = u.settlementOrdinal;
+    const cfg = unitConfigs[n];
+    if (cfg === undefined) reject("SUBJECT_BINDING_UNITCONFIG_MISSING", `no UnitConfig for settlement unit ordinal ${n}`);
+    // RECONSTRUCT the authoritative planUnitKey for this unit ordinal — never the binding self-label (anti-swap).
+    const expectedPlanUnitKey = computePlanUnitKey(BigInt(n), cfg!.milestoneIndex, toDigest32(cfg!.stepId, `unitConfigs[${n}].stepId`));
     u.acceptancePolicy.evidenceRequirements.forEach((r) => {
       const reqKey = pacBytesToHex(pacKeccakUtf8(r.requirementId));
       if (!bindingByReq.has(reqKey)) reject("SUBJECT_BINDING_MISSING", `no evidenceSubjectBinding for requirement '${r.requirementId}'`);
       matched.add(reqKey);
-      const propositionKind = bindingByReq.get(reqKey)!;
+      const bnd = bindingByReq.get(reqKey)!;
+      if (compareBytes(bnd.planUnitKey, expectedPlanUnitKey) !== 0) {
+        reject("SUBJECT_BINDING_UNIT_MISMATCH", `requirement '${r.requirementId}': binding planUnitKey ${pacBytesToHex(bnd.planUnitKey)} != reconstructed ${pacBytesToHex(expectedPlanUnitKey)} for unit ordinal ${n} (swap guard)`);
+      }
       const proj = lookupProjection(projectionRows, pacKeccakUtf8(r.evidenceTypeId), tier);
       if (proj === null) reject("SUBJECT_BINDING_MISMATCH", `no authority projection row for (${r.evidenceTypeId}, tier ${tier})`);
-      if (propositionKind !== proj!.propositionSubjectConstraint) {
-        reject("SUBJECT_BINDING_MISMATCH", `requirement '${r.requirementId}' propositionKind ${propositionKind} != authoritative ${proj!.propositionSubjectConstraint}`);
+      if (bnd.propositionKind !== proj!.propositionSubjectConstraint) {
+        reject("SUBJECT_BINDING_MISMATCH", `requirement '${r.requirementId}' propositionKind ${bnd.propositionKind} != authoritative ${proj!.propositionSubjectConstraint}`);
       }
       const role = r.authority.role;
       if (!Number.isInteger(role) || role < 1 || role > 3) reject("SUBJECT_BINDING_ROLE", `requirement '${r.requirementId}': authority.role ${role} not in {1,2,3}`);
@@ -1725,13 +1754,16 @@ export interface CompositionV2Result {
  * semantics (id-set resolved; row-CONTENT authority NOT yet enforced — sol #772,
  * spec §5 status), the authorityPolicy projection, and the accepted-policy digest.
  * Pure + offline + deterministic; rejects rather than hashing on any violation.
- * (The evidenceSubjectBindings static check is increment 3, pending #1007.)
+ * increment-3 (evidence #876 + escrow #893): the evidenceSubjectBindings static check runs the per-unit
+ * planUnitKey bijection over `unitConfigs` (the {milestoneIndex, stepId} of each settlement-unit ordinal) —
+ * see checkEvidenceSubjectBindings for the anti-swap property and the authenticity boundary.
  */
 export function deriveCompositionV2(
   plan: PlanV1,
   m1: M1ResolvedDependencyGraph,
   evalSemantics: ResolvedEvaluationSemantics,
   policy: AcceptedPolicyInput,
+  unitConfigs: readonly UnitConfigRef[],
   options: DeriveOptions = {},
 ): CompositionV2Result {
   // Reuse v1: validates the whole plan + closure and yields planDigest/depClosureDigest.
@@ -1760,9 +1792,10 @@ export function deriveCompositionV2(
     reject("POLICY_DIGEST_MISMATCH", `recomputed acceptedPolicyDigest ${pacBytesToHex(acceptedPolicyDigest)} != committed ${pacBytesToHex(committedAcceptedPolicyDigest)}`);
   }
 
-  // increment-3 (evidence #853 = A): the authenticated evidenceSubjectBindings static check — the bindings +
-  // tier are now proven committed (recompute above), so checking them against the embedded projection is sound.
-  checkEvidenceSubjectBindings(plan, policy.preimage, projectionRows);
+  // increment-3 (evidence #876 + escrow #893): the authenticated evidenceSubjectBindings static check — the
+  // bindings + tier are proven committed (recompute above), and the per-unit planUnitKey is reconstructed from
+  // unitConfigs so a cross-unit swap is rejected here (see checkEvidenceSubjectBindings).
+  checkEvidenceSubjectBindings(plan, policy.preimage, unitConfigs, projectionRows);
 
   // Collect the EXACT evidence-type + metric ids the plan references (§5 / F8).
   const refEvTypes = new Set<string>();

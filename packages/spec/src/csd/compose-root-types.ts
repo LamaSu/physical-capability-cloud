@@ -366,23 +366,6 @@ export interface ResolvedEvaluationSemantics {
 // asserting it equals the pinned value — a caller-supplied opaque digest could not be authenticated (evidence #1014).
 
 /**
- * One per-requirement subject binding (spec §6), sourced from evidence's
- * `CanonicalAcceptedJobPolicyV1` — NOT from `EvidenceRequirement` (so `planDigest`
- * is unchanged). `propositionKind` is composition's STATIC check axis;
- * `sourceKind` is the oracle's RUNTIME identity check axis (the F3 split).
- */
-export interface EvidenceSubjectBinding {
-  settlementUnitId: string;
-  requirementId: string;
-  /** SubjectSelector u8 kind {0..16} — WHO generated it (oracle runtime). */
-  sourceKind: number;
-  /** SubjectSelector u8 kind {0..16} — WHAT it is about (composition static). */
-  propositionKind: number;
-  /** Opaque reference resolving to a committed AcceptedJobPolicyV1 field. */
-  valueRef: string;
-}
-
-/**
  * The committed accepted-policy inputs (spec §4/§6). `acceptedPolicyDigest` is
  * evidence's OPAQUE keccak digest — committed raw in `policyLeaf` (0x04) and
  * folded into `evalSemanticsDigest`. `evidenceSubjectBindings` are consumed for
@@ -397,4 +380,19 @@ export interface AcceptedPolicyInput {
    * proven vs evidence's mirror in policy-authenticate.test.ts). Its `assuranceTier` is the authenticated
    * requirement tier; its `evidenceSubjectBindings` are the authenticated bindings (increment-3). */
   preimage: CanonicalAcceptedJobPolicyV1;
+}
+
+/**
+ * One authoritative per-unit config entry (escrow #893) — the ONLY fields composition needs to RECONSTRUCT a
+ * unit's planUnitKey. `unitConfigs[N]` is the config of settlement-unit ordinal N (funding order): escrow's
+ * `UnitConfig[]`, projected onto `{milestoneIndex, stepId}`. It deliberately EXCLUDES `UnitConfig[N].compositionRoot`
+ * (that is deriveCompositionV2's transitive output — including it would be circular). `milestoneIndex` stays a
+ * `bigint` (uint256): never truncate — a narrowed value could alias two distinct units. Its authenticity (that it
+ * equals escrow's committed `UnitConfig[]`) is the funding/settlement boundary's job — escrow commits
+ * `prePolicyRoot = keccak(abi.encode(UnitConfig[]))` into the signed `JOB_POLICY_TYPEHASH`, and the oracle
+ * re-derives this compositionRoot over the authenticated `UnitConfig[]` at settlement.
+ */
+export interface UnitConfigRef {
+  milestoneIndex: bigint;
+  stepId: Digest32Input;
 }
