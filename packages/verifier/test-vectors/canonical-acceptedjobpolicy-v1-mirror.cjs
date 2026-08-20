@@ -98,7 +98,11 @@ const subjectBlockHash = keccak256(enc(
 const PLANUNIT_DOMAIN = K('PCC:vnext:plan-unit-key:v1');
 const planUnitKey = (unitOrdinal, milestoneIndex, stepId) =>
   keccak256(enc(['bytes32', 'uint32', 'uint256', 'bytes32'], [PLANUNIT_DOMAIN, BigInt(unitOrdinal), BigInt(milestoneIndex), stepId]));
-// golden binding unit: unitOrdinal 0, milestoneIndex 0, stepId == the termsHash milestone-0 stepId (K('golden-step-0'))
+// SOURCE of the fields (composition #892 -> escrow #893 (b), from source): unitOrdinal = position in the committed
+// UnitConfig[]; milestoneIndex + stepId = the EXPLICIT per-unit fields UnitConfig[unitOrdinal].{field0,field1}
+// (VNextSettlementEscrow.sol:313-330), committed in prePolicyRoot=keccak(abi.encode(UnitConfig[])). NOT SettlementUnitInput,
+// NOT ordinal==milestoneIndex (that (a) re-opens the swap). The bijection reconstructs each key from the authenticated UnitConfig[].
+// golden binding unit is single-unit (ordinal 0, milestoneIndex 0, stepId K('golden-step-0')) — pins the HASH STRUCTURE, not the mapping.
 const puk0 = planUnitKey(0, 0, K('golden-step-0'));
 const B = (reqId, src, prop, valueRef) => [puk0, K(reqId), BigInt(src), BigInt(prop), valueRef];
 const bindingsUnsorted = [
