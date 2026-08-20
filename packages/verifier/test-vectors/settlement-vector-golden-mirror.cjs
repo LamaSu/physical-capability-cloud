@@ -9,8 +9,9 @@
  * Positive chain (all over ONE unit):
  *   settlementUnitId <- {chainId, escrow, jobIdHash, milestoneIndex, stepId}
  *   termsHash        <- CanonicalJobTermsV1 v2.1                         (== published 0x2cb7a79e..)
- *   acceptedPolicyDigest <- CanonicalAcceptedJobPolicyV1 (sorted)        (== published 0xe616864b..)
- *   V2 package: unitBinding NAMES the unit + acceptedEnvelopeHash == acceptedPolicyDigest (COHERENT)
+ *   acceptedPolicyDigest <- CanonicalAcceptedJobPolicyV1 (planUnitKey bindings)  (== published 0xa821492a.. — NO-GO #6 re-golden)
+ *   V2 package: unitBinding NAMES the unit + acceptedEnvelopeHash == acceptedPolicyDigest (COHERENT);
+ *     evidence field carries EvidenceBlockV1 v2 evidenceBlockHash (claimsAsserted out, unitContextDigest in) — NOT {events,payloadRoot}
  *   packageDigest    <- SHA-256(JCS({body, canonicalSigs}))
  *   evidenceCommitment <- binds packageDigest to the unit
  *   gatewayReceipt   <- binds packageDigest + receivedAt (effectiveEvidenceTime T_hi)
@@ -65,7 +66,10 @@ const subjectBlockHash=keccak256(enc(
    K('golden-recipient'),K('golden-target-system'),K('golden-program'),K('golden-recipe'),K('golden-sample-manifest'),
    keccak256(enc(['tuple(bytes32,address)[]'],[children])),opEnvHash,K('golden-route-area'),expLocHash,K('golden-capture-nonce'),K('golden-challenge-anchor'),2n]));
 const SEL={NONE:0,POLICY_PAYER:1,TARGET_SYSTEM:5,AUTHORIZED_TUPLE:6,ORACLE_SELF:7,CHILD_UNIT:8,OPERATING_ENVELOPE:13,CONTENT_ADDR:16};
-const B=(reqId,src,prop,vr)=>[settlementUnitId,K(reqId),BigInt(src),BigInt(prop),vr];
+// planUnitKey (sol NO-GO #6): chain-independent binding key; settlementUnitId is OUT of acceptedPolicyDigest -> breaks the escrow cycle.
+const PLANUNIT_DOMAIN=K('PCC:vnext:plan-unit-key:v1');
+const puk0=keccak256(enc(['bytes32','uint32','uint256','bytes32'],[PLANUNIT_DOMAIN,0n,0n,K('golden-step-0')]));
+const B=(reqId,src,prop,vr)=>[puk0,K(reqId),BigInt(src),BigInt(prop),vr];
 const bindings=[
   B('req-approval-payer',SEL.POLICY_PAYER,SEL.NONE,payer),
   B('req-target-confirm',SEL.ORACLE_SELF,SEL.TARGET_SYSTEM,K('golden-target-system')),
@@ -77,8 +81,18 @@ const bindingsRoot=keccak256(enc(['tuple(bytes32,bytes32,uint8,uint8,bytes32)[]'
 const acceptedPolicyDigest=keccak256(enc(['bytes32','uint16','bytes32','bytes32','bytes32'],
   [K('PCC:vnext:accepted-job-policy:v1'),1n,termsHash,subjectBlockHash,bindingsRoot]));
 
-// ── V2 package: COHERENT — acceptedEnvelopeHash == the REAL acceptedPolicyDigest (sol coherence fix) ──
+// ── V2 package: COHERENT — acceptedEnvelopeHash == the REAL acceptedPolicyDigest; evidence field carries EvidenceBlockV1 v2 ──
 const challengeNonce = K('golden-gateway-nonce');
+// EvidenceBlockV1 v2 (sol NO-GO fold): claimsAsserted OUT, unitContextDigest IN, role-bound attestations, programHash pinned.
+const UNITCTX_DOMAIN=K('PCC:vnext:unit-context:v1');
+const unitContextDigest=keccak256(enc(['bytes32','uint256','address','bytes32','bytes32','uint256','bytes32','bytes32'],
+  [UNITCTX_DOMAIN,chainId,escrow,settlementUnitId,jobIdHash,milestoneIndex,stepId,challengeNonce]));
+const kernelSignedEventsRoot=K('golden-bundle-hash'), sessionKeyAuthDigest=K('golden-sessionkey-auth');
+const attestationSetRoot=K('golden-attestation-set'), workProductRoot=K('golden-work-product');
+const programHash=K('golden-program');   // COHERENT: == subjectBlock committedProgramHash (oracle pins block.programHash to it, NO-GO #3)
+const EVIDENCE_BLOCK_DOMAIN_V2=K('PCC:vnext:evidence-block:v2');
+const evidenceBlockHash=keccak256(enc(['bytes32','uint16','bytes32','bytes32','bytes32','bytes32','bytes32','bytes32'],
+  [EVIDENCE_BLOCK_DOMAIN_V2,2n,unitContextDigest,kernelSignedEventsRoot,sessionKeyAuthDigest,attestationSetRoot,workProductRoot,programHash]));
 const body = {
   packageSchemaVersion:'FinalMilestonePackageV2', packageFormat:'2',            // sol: DISTINCT V2 format (was '1')
   compositionSchemaVersion:'1',
@@ -86,8 +100,7 @@ const body = {
     compositionRoot:Z32, acceptedEnvelopeHash: acceptedPolicyDigest },          // COHERENT: == acceptedPolicyDigest
   producer:{ operatorPrincipalId:'op-golden', kernelId:'kernel-golden-01', devicePrincipalId:'dev-golden' },
   challengeBinding:{ nonce:challengeNonce, tChallengeRef:'1699999000' },
-  evidence:{ events:[{type:'execution_completed',at:'1700000000'}],
-    payloadRoot: keccak256(enc(['bytes32','bytes32'],[K('golden-payload'),challengeNonce])) },
+  evidence:{ evidenceBlockHash },                                              // v2: ONE commitment to the 6 evaluator inputs (was {events,payloadRoot})
   evidenceTimeBounds:{ start:'1699999500', end:'1700000000' },
 };
 const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v2');                     // sol: DISTINCT V2 signing domain (not v1)
@@ -113,9 +126,10 @@ let ok=true; const chk=(c,l)=>{ok=ok&&c;console.log(`${c?'PASS':'FAIL'}  ${l}`);
 
 // COHERENCE — the whole point sol demanded: one unit, everything ties.
 chk(termsHash.toLowerCase()==='0x2cb7a79e45cbb5b78b61dbbcc182b2f27ac7991b055a66ef58457459dc2f4fe6','coherent: termsHash == published v2.1 golden');
-chk(acceptedPolicyDigest.toLowerCase()==='0xe616864b43af297effb3215ee6ed89bb3d0b19db20226a472a5b6ef216b2a3ee','coherent: acceptedPolicyDigest == published (sorted) golden 0xe616864b');
+chk(acceptedPolicyDigest.toLowerCase()==='0xa821492ad1c9d685fc794c21485480f01169c2d690d73c86a354143f3f496a41','coherent: acceptedPolicyDigest == published planUnitKey golden 0xa821492a (NO-GO #6 re-golden; matches the standalone mirror byte-for-byte)');
 chk(body.unitBinding.acceptedEnvelopeHash.toLowerCase()===acceptedPolicyDigest.toLowerCase(),'coherent: V2 package acceptedEnvelopeHash == the REAL acceptedPolicyDigest (NOT a placeholder) — closes the sol coherence gap');
 chk(body.unitBinding.settlementUnitId===settlementUnitId,'coherent: V2 package names THIS settlementUnitId');
+chk(body.evidence.evidenceBlockHash===evidenceBlockHash && programHash===K('golden-program'),'coherent: evidence field carries EvidenceBlockV1 v2 evidenceBlockHash; block programHash == subjectBlock committedProgramHash (NO-GO #3 pin) — no {events,payloadRoot}');
 chk(evidenceCommitment!==Z32 && gatewayReceipt!==Z32,'coherent: evidenceCommitment + gatewayReceipt both derived over THIS packageDigest');
 chk(SIG_DOMAIN_V2.toLowerCase()!==K('PCC:vnext:evidence-package-sig:v1').toLowerCase() && body.packageFormat==='2','sol: V2 uses a DISTINCT signing domain + packageFormat (parser never selected from the untrusted body)');
 chk(signatures.length===2 && sha256b(Buffer.from(jcs({body,signatures:canonicalSigs([rawSigs[1],rawSigs[0],rawSigs[1]])}),'utf8'))===packageDigest,'sol: canonical signature envelope — reorder+dup -> identical packageDigest');
@@ -130,9 +144,9 @@ chk(sha256b(Buffer.from(jcs({body:bodyDiv,signatures}),'utf8'))!==packageDigest,
 chk(packageBodyHash!==packageDigest,'sol: packageBodyHash (physical-statement identity, replay key) is distinct from packageDigest (signed envelope)');
 
 // pinned golden for the coherent chain (the NEW values that bind the real policy)
-const EXPECT={ packageDigest:'0xae70053ec3672db9de0c3a7e204935662e7b14a62145c001f0d59b6c1c67ce25',
-  evidenceCommitment:'0x3fa2046a2d4bc940c4d25125806d87bd6e9b991733eaea6cc68fe55909145cda',
-  gatewayReceipt:'0xa7764aa9ec513e5a4b624d05225fd145491f09fc059c506f1a99500bd41896b8' };
+const EXPECT={ packageDigest:'0xf78103a17702d1fe490a36dd3a02320ba334d52fa966e730c1876501d928dea2',
+  evidenceCommitment:'0xb1391d217932aba1e2c50a3cd4b08ecc3156507ef5e3dbe679bf626b9d23ab9b',
+  gatewayReceipt:'0xca508df81e7e84060306ae6925ae82baeda835af8c7b326177143d680eea9bac' };
 for (const [k,v] of [['packageDigest',packageDigest],['evidenceCommitment',evidenceCommitment],['gatewayReceipt',gatewayReceipt]])
   chk(v.toLowerCase()===EXPECT[k].toLowerCase(),`pinned coherent-chain golden ${k} == ${EXPECT[k]}`);
 
