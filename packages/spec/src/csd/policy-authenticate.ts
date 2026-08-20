@@ -117,7 +117,16 @@ function abiSingleArray(elements: Uint8Array[][]): Uint8Array {
 const TERMS_DOMAIN = keccakUtf8("PCC:vnext:job-terms:v1");
 const SUBJECT_DOMAIN = keccakUtf8("PCC:vnext:accepted-policy-subjects:v1");
 const POLICY_DOMAIN = keccakUtf8("PCC:vnext:accepted-job-policy:v1");
+const PLANUNIT_DOMAIN = keccakUtf8("PCC:vnext:plan-unit-key:v1");
 const PROJECTION_DOMAIN = keccakUtf8("PCC:vnext:authoritypolicy-projection:v1");
+
+/** planUnitKey = keccak256(abi.encode(PLANUNIT_DOMAIN, uint32 unitOrdinal, uint256 milestoneIndex, bytes32 stepId)).
+ * CHAIN-INDEPENDENT (evidence #876) — replaces the chain-bound settlementUnitId that created the fixed-point
+ * cycle. Composition recomputes this from the AUTHENTICATED PLAN (by ordinal) to enforce the per-unit bijection
+ * and kill sol's swap attack — never trusting the binding's self-label. */
+export function computePlanUnitKey(unitOrdinal: bigint, milestoneIndex: bigint, stepId: Bytes32): Bytes32 {
+  return keccak256(abiStatic([wordBytes32(PLANUNIT_DOMAIN), wordUint(unitOrdinal), wordUint(milestoneIndex), wordBytes32(stepId)]));
+}
 
 // ---------------------------------------------------------------------------
 // CanonicalAcceptedJobPolicyV1 -> acceptedPolicyDigest (port of the mirror)
@@ -151,7 +160,10 @@ export interface ExpectedLocation {
   time: bigint;
 }
 export interface SubjectBinding {
-  settlementUnitId: Bytes32;
+  /** CHAIN-INDEPENDENT planUnitKey (evidence #876) = computePlanUnitKey(unitOrdinal, milestoneIndex, stepId).
+   * Composition RECOMPUTES this from the authenticated plan by ordinal and requires it match — never trusts
+   * this self-label (that is what kills the swap attack). Replaces the chain-bound settlementUnitId. */
+  planUnitKey: Bytes32;
   requirementIdHash: Bytes32; // keccak256(utf8(requirementId))
   sourceKind: number; // SubjectSelector u8
   propositionKind: number; // SubjectSelector u8
@@ -267,16 +279,16 @@ export function computeBindingsRoot(bs: SubjectBinding[]): Bytes32 {
   // (unit,requirement) — deterministic recompute, no caller order-freedom. tuple(bytes32,bytes32,uint8,uint8,bytes32)[]
   const seen = new Set<string>();
   for (const b of bs) {
-    const k = bytesToHex(b.settlementUnitId) + bytesToHex(b.requirementIdHash).slice(2);
-    if (seen.has(k)) throw new Error("policy-authenticate: duplicate (settlementUnitId,requirementId) binding");
-    seen.add(k);
+    const rid = bytesToHex(b.requirementIdHash);
+    if (seen.has(rid)) throw new Error("policy-authenticate: duplicate requirementId (must be globally unique)");
+    seen.add(rid);
   }
   const sorted = [...bs].sort((a, b) => {
-    const c = compareBytes32(a.settlementUnitId, b.settlementUnitId);
+    const c = compareBytes32(a.planUnitKey, b.planUnitKey);
     return c !== 0 ? c : compareBytes32(a.requirementIdHash, b.requirementIdHash);
   });
   const elements = sorted.map((b) => [
-    wordBytes32(b.settlementUnitId),
+    wordBytes32(b.planUnitKey),
     wordBytes32(b.requirementIdHash),
     wordUint(BigInt(b.sourceKind)),
     wordUint(BigInt(b.propositionKind)),

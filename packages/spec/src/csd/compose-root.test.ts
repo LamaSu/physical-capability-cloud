@@ -633,7 +633,7 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
     integrityGrade: 1n,
     // increment-3: one binding for requirement "req.a" (approval.payer@t2 -> propositionKind NONE(0)).
     evidenceSubjectBindings: [
-      { settlementUnitId: pk("unit-a"), requirementIdHash: pk("req.a"), sourceKind: 7, propositionKind: 0, valueRef: pk("vr") },
+      { planUnitKey: pk("unit-a"), requirementIdHash: pk("req.a"), sourceKind: 7, propositionKind: 0, valueRef: pk("vr") },
     ],
   };
   const policy: AcceptedPolicyInput = { committedAcceptedPolicyDigest: bytesToHex(computeAcceptedPolicyDigest(preimage)).slice(2), preimage };
@@ -717,16 +717,16 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
 
   it("increment-3: a binding matching no plan requirement -> SUBJECT_BINDING_ORPHAN", () => {
     const { plan, m1, evalSemantics, policy } = v2Inputs();
-    policy.preimage.evidenceSubjectBindings.push({ settlementUnitId: keccakUtf8("u2"), requirementIdHash: keccakUtf8("no-such-req"), sourceKind: 0, propositionKind: 0, valueRef: keccakUtf8("vr2") });
+    policy.preimage.evidenceSubjectBindings.push({ planUnitKey: keccakUtf8("u2"), requirementIdHash: keccakUtf8("no-such-req"), sourceKind: 0, propositionKind: 0, valueRef: keccakUtf8("vr2") });
     reauth(policy);
     expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_ORPHAN");
   });
 
-  it("increment-3: two bindings share a requirementIdHash -> SUBJECT_BINDING_DUPLICATE", () => {
-    const { plan, m1, evalSemantics, policy } = v2Inputs();
-    policy.preimage.evidenceSubjectBindings.push({ settlementUnitId: keccakUtf8("u2"), requirementIdHash: keccakUtf8("req.a"), sourceKind: 0, propositionKind: 0, valueRef: keccakUtf8("vr2") });
-    reauth(policy);
-    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy), "SUBJECT_BINDING_DUPLICATE");
+  it("increment-3: a duplicate requirementId is rejected at the policy layer (globally-unique, #876)", () => {
+    const { policy } = v2Inputs();
+    const b = policy.preimage.evidenceSubjectBindings[0];
+    const tampered = { ...policy.preimage, evidenceSubjectBindings: [b, { ...b, planUnitKey: keccakUtf8("u2"), valueRef: keccakUtf8("vr2") }] };
+    expect(() => computeAcceptedPolicyDigest(tampered)).toThrow(/duplicate requirementId/);
   });
 
   it("F8: a pinned metric row NOT referenced by the plan -> EVAL_ID_SET_MISMATCH (no extras)", () => {

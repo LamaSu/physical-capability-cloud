@@ -8,6 +8,7 @@ import {
   computeBindingsRoot,
   computeAcceptedPolicyDigest,
   computeOperatingEnvelopeHash,
+  computePlanUnitKey,
   buildProjectionRows,
   computeRowsRoot,
   computeProjectionDigest,
@@ -40,11 +41,12 @@ function goldenPolicy(): CanonicalAcceptedJobPolicyV1 {
     { metric: K("power"), min: 0n, max: 1000n },
     { metric: K("temp"), min: 0n, max: 250n },
   ];
-  const settlementUnitId = hexToBytes("0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1");
+  // planUnitKey (evidence #876): golden binding unit = unitOrdinal 0, milestoneIndex 0, stepId K("golden-step-0").
+  const puk0 = computePlanUnitKey(0n, 0n, K("golden-step-0"));
   // operatingEnvelopeHash doubles as the req-envelope binding valueRef (mirror B('req-envelope', .., operatingEnvelopeHash)):
   const operatingEnvelopeHash = computeOperatingEnvelopeHash(operatingEnvelope);
   const B = (reqId: string, src: number, prop: number, valueRef: Uint8Array) => ({
-    settlementUnitId,
+    planUnitKey: puk0,
     requirementIdHash: K(reqId),
     sourceKind: src,
     propositionKind: prop,
@@ -96,12 +98,12 @@ describe("policy-authenticate — byte-exactness vs evidence's published goldens
     expect(bytesToHex(computeSubjectBlockHash(p))).toBe("0x05fb7b45f6079ca2c82f6b3676e8af2cf98f3322bdc1e64acf0afc2aef2c46c7");
   });
 
-  it("bindingsRoot == evidence golden 0xb0fac971.. (canonical binding-sort, 999e6bdb)", () => {
-    expect(bytesToHex(computeBindingsRoot(p.evidenceSubjectBindings))).toBe("0xb0fac97112a3e02d1c80e1017d033fa8d224b4ccf64de25ea5eaa0820ab6a340");
+  it("bindingsRoot == evidence golden 0x05ce18c9.. (planUnitKey binding, #876)", () => {
+    expect(bytesToHex(computeBindingsRoot(p.evidenceSubjectBindings))).toBe("0x05ce18c90db024fbc9958dcc9939c9d42ce4ba2e60485b3038424007098ec20f");
   });
 
-  it("acceptedPolicyDigest == evidence golden 0xe616864b.. (canonical binding-sort, 999e6bdb)", () => {
-    expect(bytesToHex(computeAcceptedPolicyDigest(p))).toBe("0xe616864b43af297effb3215ee6ed89bb3d0b19db20226a472a5b6ef216b2a3ee");
+  it("acceptedPolicyDigest == evidence golden 0xa821492a.. (planUnitKey, #876 — cycle broken)", () => {
+    expect(bytesToHex(computeAcceptedPolicyDigest(p))).toBe("0xa821492ad1c9d685fc794c21485480f01169c2d690d73c86a354143f3f496a41");
   });
 
   it("projection: 51 rows, rowsRoot + projectionDigest == evidence goldens", () => {

@@ -1661,9 +1661,13 @@ function resolveExactRows<T>(rows: T[], idOf: (r: T) => string, referenced: Set<
  * propositionKind in {0..16}; propositionKind == the authoritative projection's propositionSubjectConstraint for
  * (evidenceType, tier); authority.role in allowedSourceRoles. tier = the authenticated policy assuranceTier
  * (job-global, evidence #1027). Rejects rather than derives on any violation; does NOT touch planDigest.
- * NOTE: the A-vs-C layering (evidence A here vs escrow's predict-the-address C) is under cross-family review;
- * A is chosen because C is circular against the committed binding struct (settlementUnitId -> acceptedPolicyDigest
- * -> predicted address -> settlementUnitId). Shadow-only until that review confirms.
+ * WARNING — INTERIM / SUPERSEDED: this requirementIdHash-only match is the WITHDRAWN answer A. A sol swap
+ * attack broke it (bind rA->unitB, rB->unitA; the unit label is ignored so it passes, then the oracle
+ * authenticates the malicious mapping against itself). The reconciled design (evidence #876, planUnitKey)
+ * requires composition to RECONSTRUCT each binding's planUnitKey from the AUTHENTICATED PLAN by ordinal and
+ * enforce the per-unit BIJECTION — never the binding self-label. That rebuild is PENDING the exact
+ * plan-unit -> {unitOrdinal, milestoneIndex, stepId} mapping (SettlementUnitInput carries no milestone fields;
+ * asked evidence). Until it lands, this check is sound ONLY for single-unit plans. Shadow-only throughout.
  */
 function checkEvidenceSubjectBindings(
   plan: PlanV1,
