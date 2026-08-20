@@ -648,6 +648,81 @@ function v2Inputs(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantic
   return { plan, m1, evalSemantics, policy, unitConfigs };
 }
 
+// increment-3 anti-swap, MULTI-UNIT (2 units): lets the CROSS-UNIT swap be exercised end-to-end — bind unit A's
+// requirement under unit B's reconstructed planUnitKey and vice-versa. That is the exact attack that broke the
+// withdrawn answer A. Two units at ordinals 0/1, each owning a distinct node + a distinct requirementId; both use
+// approval.payer@t2 (a real projection row) + metric.a. unitConfigs carry DISTINCT {milestoneIndex, stepId} per
+// ordinal, and each binding carries its own unit's reconstructed planUnitKey (so the honest fixture derives clean).
+function v2Inputs2Unit(): { plan: PlanV1; m1: M1ResolvedDependencyGraph; evalSemantics: ResolvedEvaluationSemantics; policy: AcceptedPolicyInput; unitConfigs: readonly UnitConfigRef[] } {
+  const pk = (s: string) => keccakUtf8(s);
+  const paddr = (n: number) => hexToBytes("0x" + n.toString(16).padStart(40, "0"));
+  const unitPolicy = (reqId: string, nodeId: string): AcceptancePolicyInput => ({
+    evidenceRequirements: [
+      { requirementId: reqId, nodeInstanceId: nodeId, evidenceTypeId: "approval.payer", evidenceSchemaDigest: dig(0x11), minCount: 1, maxCount: 1, authority: authAll(2, 0x21) },
+    ],
+    criteria: [
+      { criterionId: `crit.${reqId}`, requirementReferences: [reqId], metricId: "metric.a", metricParameters: emptyMap, comparator: 1, target: uVal(0n), lowerTolerance: null, upperTolerance: null, minPassingEvidence: 1, authority: authAll(2, 0x22) },
+    ],
+    decisionBands: [
+      { minPassingCriteria: 0, maxPassingCriteria: 0, outcomeId: "out.fail" },
+      { minPassingCriteria: 1, maxPassingCriteria: 1, outcomeId: "out.success" },
+    ],
+    finalEvaluatorSelection: authAll(2, 0x23),
+  });
+  const plan: PlanV1 = {
+    schemaVersion: 1,
+    nodes: [
+      { nodeInstanceId: "node.a", capabilityContractDigest: dig(0x01), quantity: { magnitude: rat(1n, 1n), unitId: "unit.each" }, executionParameters: [], tolerances: [] },
+      { nodeInstanceId: "node.b", capabilityContractDigest: dig(0x02), quantity: { magnitude: rat(1n, 1n), unitId: "unit.each" }, executionParameters: [], tolerances: [] },
+    ],
+    edges: [],
+    settlementUnits: [
+      { settlementUnitId: "unit.a", settlementOrdinal: 0, memberNodeIds: ["node.a"], asset: { kind: "evmErc20", chainId: 84532n, contractAddress: new Uint8Array(20).fill(0xcc), decimals: 6 }, fundedAmount: 1000n, feeRules: [], outcomes: simpleOutcomes(1000n), acceptancePolicy: unitPolicy("req.a", "node.a") },
+      { settlementUnitId: "unit.b", settlementOrdinal: 1, memberNodeIds: ["node.b"], asset: { kind: "evmErc20", chainId: 84532n, contractAddress: new Uint8Array(20).fill(0xcc), decimals: 6 }, fundedAmount: 1000n, feeRules: [], outcomes: simpleOutcomes(1000n), acceptancePolicy: unitPolicy("req.b", "node.b") },
+    ],
+  };
+  const m1node = (id: string, dg: number) => ({ nodeInstanceId: id, capabilityContractDigest: dig(dg), outputPorts: [], inputPorts: [], configurableParameters: [], fixedParameters: [], forbiddenParameters: [], fixedTolerancePaths: [] as string[][], dependencyUses: [] });
+  const m1: M1ResolvedDependencyGraph = { nodes: [m1node("node.a", 0x01), m1node("node.b", 0x02)], dependencies: [] };
+  const evalSemantics: ResolvedEvaluationSemantics = {
+    vocabManifestHash: dig(0x51),
+    evidenceTypes: [{ evidenceTypeId: "approval.payer", specificationDigest: dig(0x53) }],
+    metrics: [{ metricId: "metric.a", specificationDigest: dig(0x54), permittedComparators: [1], targetValueKinds: [2], toleranceValueKinds: [], requireBothTolerances: false, parameterSchemaDigest: dig(0x55) }],
+  };
+  const unitConfigs: readonly UnitConfigRef[] = [
+    { milestoneIndex: 0n, stepId: pk("s0") },
+    { milestoneIndex: 1n, stepId: pk("s1") },
+  ];
+  const preimage: CanonicalAcceptedJobPolicyV1 = {
+    token: paddr(1),
+    assuranceTier: 2n,
+    milestones: [{ milestoneIndex: 0n, stepId: pk("s0"), amount: 100n, deadline: 1000n }],
+    payer: pk("payer"),
+    operatorPrincipal: pk("op"),
+    operatorSettlementAddress: paddr(2),
+    authorizedTuples: [],
+    approvedExpertSet: [],
+    approvedThirdPartyExecutorSet: [],
+    expectedRecipient: pk("rec"),
+    targetSystemIdentity: pk("tgt"),
+    committedProgramHash: pk("prog"),
+    recipeRef: pk("recipe"),
+    sampleManifestRef: pk("sample"),
+    children: [],
+    operatingEnvelope: [],
+    expectedRouteArea: pk("route"),
+    expectedLocation: { lat: 0n, lng: 0n, radius: 0n, time: 0n },
+    captureNonceAnchor: pk("nonce"),
+    challengeAnchor: pk("challenge"),
+    integrityGrade: 1n,
+    evidenceSubjectBindings: [
+      { planUnitKey: computePlanUnitKey(0n, 0n, pk("s0")), requirementIdHash: pk("req.a"), sourceKind: 7, propositionKind: 0, valueRef: pk("vrA") },
+      { planUnitKey: computePlanUnitKey(1n, 1n, pk("s1")), requirementIdHash: pk("req.b"), sourceKind: 7, propositionKind: 0, valueRef: pk("vrB") },
+    ],
+  };
+  const policy: AcceptedPolicyInput = { committedAcceptedPolicyDigest: bytesToHex(computeAcceptedPolicyDigest(preimage)).slice(2), preimage };
+  return { plan, m1, evalSemantics, policy, unitConfigs };
+}
+
 describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLeaf)", () => {
   it("32-byte digests + independent 4-leaf recompute matches (F5 explicit tree, u16(2))", () => {
     const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs();
@@ -747,6 +822,26 @@ describe("inc-3a v2 — four-leaf compositionRoot (evalSemanticsLeaf + policyLea
     // A missing/extra per-unit config breaks the unit-side bijection before any binding is examined.
     const shortConfigs: readonly UnitConfigRef[] = [];
     expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, shortConfigs), "SUBJECT_BINDING_UNITCONFIG_COUNT");
+  });
+
+  it("increment-3 (MULTI-UNIT): correct per-unit planUnitKeys derive cleanly (2-unit bijection holds)", () => {
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs2Unit();
+    const r = deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs);
+    expect(r.compositionRoot).toHaveLength(32);
+    expect(r.evalSemanticsDigest).toHaveLength(32);
+  });
+
+  it("increment-3 anti-swap (MULTI-UNIT): a genuine cross-unit binding swap -> SUBJECT_BINDING_UNIT_MISMATCH", () => {
+    const { plan, m1, evalSemantics, policy, unitConfigs } = v2Inputs2Unit();
+    // The withdrawn answer A's EXACT break, now on a real 2-unit plan: bind unit A's requirement under unit B's
+    // planUnitKey and unit B's under unit A's. Each requirementIdHash still matches its requirement, but the
+    // per-unit RECONSTRUCTED key (from unitConfigs[ordinal]) does NOT -> reject at the first unit processed.
+    const b = policy.preimage.evidenceSubjectBindings;
+    const tmp = b[0].planUnitKey;
+    b[0].planUnitKey = b[1].planUnitKey;
+    b[1].planUnitKey = tmp;
+    reauth(policy);
+    expectReject(() => deriveCompositionV2(plan, m1, evalSemantics, policy, unitConfigs), "SUBJECT_BINDING_UNIT_MISMATCH");
   });
 
   it("increment-3: a duplicate requirementId is rejected at the policy layer (globally-unique, #876)", () => {
