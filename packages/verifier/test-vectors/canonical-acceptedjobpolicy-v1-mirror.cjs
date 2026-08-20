@@ -85,10 +85,22 @@ const subjectBlockHash = keccak256(enc(
    recipeRef, sampleManifestRef, childrenRoot, operatingEnvelopeHash, expectedRouteArea,
    expectedLocationHash, captureNonceAnchor, challengeAnchor, integrityGrade]));
 
-// ── evidenceSubjectBindings (R3/R4#2): one per requirement; {settlementUnitId, requirementId, srcKind, propKind, valueRef} ──
+// ── evidenceSubjectBindings: one per requirement; {planUnitKey, requirementId, srcKind, propKind, valueRef} ──
 // srcKind = sourceIdentityConstraint (who generated), propKind = propositionSubjectConstraint (what it is about) — the F3 SPLIT.
-const settlementUnitId = '0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1'; // gate-1 golden unit
-const B = (reqId, src, prop, valueRef) => [settlementUnitId, K(reqId), BigInt(src), BigInt(prop), valueRef];
+// planUnitKey (sol NO-GO #6 + escrow #854 + reconciliation #1105): a CHAIN-INDEPENDENT key
+//   planUnitKey = keccak256(abi.encode(PLANUNIT_DOMAIN, uint32 unitOrdinal, uint256 milestoneIndex, bytes32 stepId))
+// REPLACES the chain-bound settlementUnitId, which created the fixed-point cycle that BOTH sol and escrow found:
+//   acceptedPolicyDigest -> bindingsRoot -> settlementUnitId -> escrow(CREATE2 salt over acceptedPolicyDigest) -> acceptedPolicyDigest.
+// planUnitKey has NO chainId/escrow/address -> acceptedPolicyDigest is address-INDEPENDENT -> predictEscrow precondition holds.
+// The chain-bound settlementUnitId now lives OUTSIDE acceptedPolicyDigest: the oracle derives it post-prediction at settlement
+// (or a separate post-prediction bilateral root), and re-binds each requirement to its plan unit BY ORDINAL from the AUTHENTICATED
+// PLAN — never from the binding self-label — which is what kills sol's swap attack (rA->unitB, rB->unitA).
+const PLANUNIT_DOMAIN = K('PCC:vnext:plan-unit-key:v1');
+const planUnitKey = (unitOrdinal, milestoneIndex, stepId) =>
+  keccak256(enc(['bytes32', 'uint32', 'uint256', 'bytes32'], [PLANUNIT_DOMAIN, BigInt(unitOrdinal), BigInt(milestoneIndex), stepId]));
+// golden binding unit: unitOrdinal 0, milestoneIndex 0, stepId == the termsHash milestone-0 stepId (K('golden-step-0'))
+const puk0 = planUnitKey(0, 0, K('golden-step-0'));
+const B = (reqId, src, prop, valueRef) => [puk0, K(reqId), BigInt(src), BigInt(prop), valueRef];
 const bindingsUnsorted = [
   B('req-approval-payer',     SEL.POLICY_PAYER,       SEL.NONE,             payer),                 // payer approves; source=payer, no distinct proposition
   B('req-target-confirm',     SEL.ORACLE_SELF,        SEL.TARGET_SYSTEM,    targetSystemIdentity),  // F3: source=oracle-fetch, proposition=target system
@@ -96,12 +108,13 @@ const bindingsUnsorted = [
   B('req-envelope',           SEL.AUTHORIZED_TUPLE,   SEL.OPERATING_ENVELOPE, operatingEnvelopeHash), // source=emitter, proposition=envelope
   B('req-artifact-hash',      SEL.AUTHORIZED_TUPLE,   SEL.CONTENT_ADDR,     Z32),                   // source=emitter, proposition=content (NONE-value)
 ];
-// sol #786 f1 + "sets need sort/dedup": PIN the binding ORDER canonically by (settlementUnitId, requirementId)
-// so composition RECOMPUTES bindingsRoot -> acceptedPolicyDigest deterministically (authenticates the bindings,
-// no caller order-freedom). Exactly-one binding per (settlementUnitId, requirementId) — reject a duplicate.
-const bkey = (r) => r[0].toLowerCase() + r[1].toLowerCase().slice(2);
-const seenB = new Set();
-for (const r of bindingsUnsorted) { if (seenB.has(bkey(r))) throw new Error('duplicate (settlementUnitId,requirementId) binding'); seenB.add(bkey(r)); }
+// sol #786 f1 + planUnitKey (NO-GO #6): PIN the binding ORDER canonically by (planUnitKey, requirementId) so composition
+// RECOMPUTES bindingsRoot -> acceptedPolicyDigest deterministically (no caller order-freedom). requirementId is GLOBALLY
+// UNIQUE across the plan -> reject a duplicate requirementId; composition additionally enforces the EXACT per-unit BIJECTION
+// (each planUnitKey's requirement set == the authenticated plan unit's requirements, by ordinal) at derivation — never trusts
+// the binding self-label, which is what defeats the swap (rA->unitB, rB->unitA).
+const seenReq = new Set();
+for (const r of bindingsUnsorted) { const rid = r[1].toLowerCase(); if (seenReq.has(rid)) throw new Error('duplicate requirementId (must be globally unique)'); seenReq.add(rid); }
 const bindings = [...bindingsUnsorted].sort((a, b) =>
   a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
 const bindingsRoot = keccak256(enc(
@@ -140,11 +153,19 @@ chk(keccak256(enc(['tuple(bytes32,bytes32,uint8,uint8,bytes32)[]'], [swapped])).
 const disjoint = !approvedExpertSet.concat(approvedThirdPartyExecutorSet).map(x=>x.toLowerCase()).includes(operatorPrincipal.toLowerCase());
 chk(disjoint, 'R4: operatorPrincipal (bytes32) is byte-disjoint from expert+executor sets');
 
+// planUnitKey CHAIN-INDEPENDENCE (NO-GO #6 / escrow #854 / reconciliation #1105): no chainId/escrow/address input, so
+// acceptedPolicyDigest is address-independent -> BREAKS the fixed-point cycle both sol and escrow found
+// (acceptedPolicyDigest -> bindingsRoot -> settlementUnitId -> escrow CREATE2 salt -> acceptedPolicyDigest).
+chk(planUnitKey(0, 0, K('golden-step-0')).toLowerCase() === puk0.toLowerCase(),
+    'planUnitKey: deterministic + chain-independent (recompute needs only {unitOrdinal,milestoneIndex,stepId}, no address -> no cycle)');
+chk(planUnitKey(1, 0, K('golden-step-0')).toLowerCase() !== puk0.toLowerCase(),
+    'planUnitKey: unitOrdinal binds (ordinal 0 != ordinal 1) -> per-unit bijection is keyable; settlementUnitId is OUT of the digest');
+
 // ── pinned PROPOSED golden (oracle cross-confirms, like termsHash/V2); re-pins if sub-type encodings change ──
 const EXPECT = {
   subjectBlockHash:     '0x05fb7b45f6079ca2c82f6b3676e8af2cf98f3322bdc1e64acf0afc2aef2c46c7',
-  bindingsRoot:         '0xb0fac97112a3e02d1c80e1017d033fa8d224b4ccf64de25ea5eaa0820ab6a340', // re-golden: bindings canonically sorted (sol #786 f1)
-  acceptedPolicyDigest: '0xe616864b43af297effb3215ee6ed89bb3d0b19db20226a472a5b6ef216b2a3ee', // was 0xf6af20eb (unsorted); sorted-bindings is the authoritative form
+  bindingsRoot:         '0x05ce18c90db024fbc9958dcc9939c9d42ce4ba2e60485b3038424007098ec20f', // re-golden: planUnitKey replaces settlementUnitId (NO-GO #6)
+  acceptedPolicyDigest: '0xa821492ad1c9d685fc794c21485480f01169c2d690d73c86a354143f3f496a41', // was 0xe616864b (settlementUnitId-in-bindings -> cycle); planUnitKey is the authoritative address-independent form
 };
 console.log('');
 for (const [k, v] of [['subjectBlockHash', subjectBlockHash], ['bindingsRoot', bindingsRoot], ['acceptedPolicyDigest', acceptedPolicyDigest]])
