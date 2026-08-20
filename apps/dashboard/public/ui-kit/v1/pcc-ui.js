@@ -347,11 +347,14 @@
   // Bearer is attached, so a future resolveApiBase regression can't leak the viewer's key. Returns
   // the absolute URL string, or null if it resolves outside the fixed PCC API origin (or carries
   // embedded credentials). Parsed-origin compare subsumes the https pin (the shipped API_DEFAULT is
-  // https, so only https://capability.network satisfies equality). Callers reject on null.
+  // https, so only https://capability.network satisfies equality). Callers REFUSE on null (getJSON /
+  // streamSSE reject; send returns a structured {ok:false} refusal).
   Transport.prototype._pin = function (safe, query) {
-    var base = this.base || location.origin;
     var u;
-    try { u = new URL(safe + this.qs(query), base); } catch (e) { return null; }
+    try {
+      var base = this.base || location.origin;
+      u = new URL(safe + this.qs(query), base);
+    } catch (e) { return null; }
     if (u.origin !== API_ORIGIN || u.username || u.password) return null;
     return u.toString();
   };
@@ -375,7 +378,7 @@
     if (safe === null) return Promise.reject(new Error('refused unsafe request path: ' + path));
     var url = this._pin(safe, query);
     if (url === null) return Promise.reject(new Error('refused: request resolves outside the PCC API origin'));
-    return fetch(url, { headers: this._headers({ Accept: 'application/json' }), redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' })
+    return fetch(url, { headers: this._headers({ Accept: 'application/json' }), credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' })
       .then(function (r) {
         self._trace(r);
         if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + safe);
@@ -392,7 +395,7 @@
       method: method,
       headers: this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' }),
       body: body != null ? JSON.stringify(body) : undefined,
-      redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'
+      credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'
     }).then(function (r) {
       self._trace(r);
       return r.json().catch(function () { return {}; }).then(function (j) {
@@ -409,7 +412,7 @@
     if (safe === null) return Promise.reject(new Error('refused unsafe sse path: ' + path));
     var url = this._pin(safe);
     if (url === null) return Promise.reject(new Error('refused: sse resolves outside the PCC API origin'));
-    var init = { headers: this._headers({ Accept: 'text/event-stream' }), redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' };
+    var init = { headers: this._headers({ Accept: 'text/event-stream' }), credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' };
     if (opts.signal) init.signal = opts.signal;
     return fetch(url, init).then(function (res) {
       self._trace(res);
