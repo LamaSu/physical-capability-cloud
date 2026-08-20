@@ -1195,7 +1195,30 @@ contract VNextSettlementEscrow {
     ///         caller does for free from a compile-time constant (see the note above `settlement`).
     function challengedAtOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
         Unit storage u = _units[unitId];
-        return u.state == UnitState.CHALLENGED ? uint256(u.challengedAt) : 0;
+        // D-1/D-2 (sol cross-family review): "state == CHALLENGED" was NOT the same claim as "an appeal
+        // window is OPEN", and the gap was exploitable as a slot burn. Two cases it let through:
+        //   D-1 EMPTY WINDOW. `_appealWindow` CAPS `due` at the emergency declaration instant, so a disable
+        //      at or before `challengedAt` yields `due <= from` -- no appeal can EVER qualify. `adjudicate`
+        //      still accepted a quorum record and CONSUMED the one-shot slot, which `resolveEscalation`
+        //      then rejected as `EmergencyPaused`. ATT-01 narrowed the burn window; it did not close it.
+        //   D-2 LATE. The anchor stayed non-zero past `due`, so a verdict decided after the window could
+        //      still burn the slot before the escrow rejected it on time.
+        // Reusing `_appealWindow` is deliberate: it already owns the state guard AND the emergency cap, so
+        // this getter cannot drift from the predicate `finalize`/`resolveEscalation` actually apply.
+        // COST: this getter now STATICCALLs the primary attester (via `_emergencyDeadline`) and can revert
+        // if that attester is unreadable. Accepted — an unreadable primary already fails `finalize` and
+        // `resolveEscalation`, so a getter that fails with them is consistent rather than newly fragile.
+        // D-2 IS DELIBERATELY *NOT* FIXED HERE, and that is a finding in its own right. Gating this on
+        // `block.timestamp < due` — the obvious reading of sol's D-2 — RE-INTRODUCES RELAY-TIME EXPIRY,
+        // which is precisely the H-01 bug this contract exists to have deleted: a verdict DECIDED inside
+        // its window must stay resolvable FOREVER, because `decidedAt` owns the window and no relayer's
+        // inactivity may change the financial outcome. Proven by test, not by argument:
+        // `test_WAVE4B_TimelyAppealRecordedBeforeDisable_IsHonoured` fails with that gate in place.
+        // The late-record slot burn D-2 describes is therefore ACCEPTED as the cheaper of two evils —
+        // a burnable slot on a record the escrow will reject anyway, versus a timely verdict made
+        // unrecordable by relay latency.
+        (uint256 from, uint256 due) = _appealWindow(u, _emergencyDeadline(u));
+        return due > from ? from : 0;
     }
 
     /// @notice The EMERGENCY review window's anchor, or 0 if no emergency window exists for this unit.
@@ -1207,8 +1230,19 @@ contract VNextSettlementEscrow {
     ///         `disabledAt + EMERGENCY_REVIEW_WINDOW` and nothing else — and it cannot underflow, because
     ///         the non-zero branch is only reached after `d != 0` was established.
     function emergencyAnchorOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        uint256 e = _emergencyDeadline(_units[unitId]);
-        return e == 0 ? 0 : e - VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+        Unit storage u = _units[unitId];
+        // D-3 (sol): `_emergencyDeadline` has no current-time or terminal-state gate, so this reported a
+        // live-looking anchor AFTER the review window closed and even after the unit settled — letting a
+        // record that the escrow can never apply consume the one-shot emergency slot. Gate both here: the
+        // deadline must still be in the future, and the unit must still be in a state an emergency can
+        // decide (anything past BACKUP_ASSERTED already has an outcome allocated).
+        if (u.state > UnitState.BACKUP_ASSERTED) return 0;
+        // Terminal-state gate KEPT (D-3). Time gate DROPPED for the same H-01 reason as the appeal
+        // anchor above: an emergency verdict decided inside its review window must remain recordable
+        // and resolvable after the window closes.
+        uint256 e = _emergencyDeadline(u);
+        if (e == 0) return 0;
+        return e - VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
     }
 
     /// @notice WAVE 4c — the unit's three LIVE counters in ONE read.
@@ -1642,7 +1676,14 @@ contract VNextSettlementEscrow {
         // Effects before the token pull (nonReentrant-guarded).
         u.state = UnitState.CHALLENGED;
         u.challenger = msg.sender;
-        u.challengedAt = uint64(block.timestamp);
+        // D-4 (sol): CLAMPED NON-ZERO, matching the discipline already applied to `disabledAt` and
+        // `decidedAt`. Zero is this system's "no such window" sentinel — `challengedAtOf` returns 0 to mean
+        // "no appeal window is open" — so an unclamped genesis timestamp would make a GENUINE challenge
+        // indistinguishable from an absent one and permanently unadjudicable. Irrelevant on a live chain;
+        // included because the same reasoning was already accepted twice elsewhere and a lone exception is
+        // how a sentinel invariant rots.
+        uint64 ct = uint64(block.timestamp);
+        u.challengedAt = ct == 0 ? 1 : ct;
         u.bond = bond;
         bondLiability += bond;
 
