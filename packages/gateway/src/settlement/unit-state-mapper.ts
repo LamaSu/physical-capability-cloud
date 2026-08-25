@@ -55,21 +55,33 @@ export enum UnitState {
   SETTLED_REFUNDED = 9,
 }
 
-/** Terminal set. rule 12 keys `finalState` off EXACTLY this. */
-export const TERMINAL_STATES: ReadonlySet<UnitState> = new Set([
-  UnitState.SETTLED_RELEASED,
-  UnitState.SETTLED_REFUNDED,
-]);
+/**
+ * Terminal / allocated state membership.
+ *
+ * DELIBERATELY NOT EXPORTED AS SETS. `ReadonlySet` is a compile-time fiction —
+ * it is erased at runtime, so any code sharing the process (a test helper, a
+ * polyfill, a transitive dep) could `.add()` a non-terminal state and turn
+ * "has this money moved?" into a lie with every test still green. Found by
+ * sol's cross-family review; escrow #1246 pushed to make the fix structural
+ * rather than a typing tweak. `Object.freeze` does not protect a Set, so the
+ * sets are module-local and reachable only through the predicates below.
+ */
+const TERMINAL = new Set<number>([8, 9]);
+const ALLOCATED = new Set<number>([6, 7]);
+
+/** rule 12 keys `finalState` off EXACTLY this predicate. */
+export function isTerminalState(state: UnitState): boolean {
+  return TERMINAL.has(state);
+}
 
 /**
- * Outcome decided but money not fully moved. NOT terminal, NOT payable-complete.
- * escrow #620: APPLIED (what an executor treats as success) is 6/7, but for the
- * READ surface these must render "incomplete" — a claim can still be outstanding.
+ * Outcome decided but money NOT fully moved. NOT terminal.
+ * escrow #620: an executor treats 6/7 as APPLIED, but the READ surface must
+ * render them "incomplete" — a claim can still be outstanding.
  */
-export const ALLOCATED_STATES: ReadonlySet<UnitState> = new Set([
-  UnitState.RELEASE_ALLOCATED,
-  UnitState.REFUND_ALLOCATED,
-]);
+export function isAllocatedState(state: UnitState): boolean {
+  return ALLOCATED.has(state);
+}
 
 export type Phase = "active" | "contest" | "escalation" | "allocated" | "settled";
 
@@ -155,6 +167,69 @@ export const fromRegistry = <T>(value: T, ctx: SourceContext = {}): Sourced<T> =
   ...ctx,
 });
 
+/**
+ * Raised when a decoded unit state is not a usable enum member.
+ *
+ * WHY THIS EXISTS (sol cross-family review, reproduced): the previous code did
+ * `state in PHASE_BY_STATE`, and object keys are STRINGS — so a decoder handing
+ * back `"8"` passed the membership test and got `phase: "settled"`, while
+ * `TERMINAL.has("8")` failed strict identity and produced `finalState: null`.
+ * ONE response claiming settled in one field and not-terminal in another, from
+ * an ordinary JSON-RPC/ABI representation difference. Every rule-12 test still
+ * passed because they only ever fed clean numeric enums.
+ */
+export class InvalidUnitStateError extends Error {
+  constructor(raw: unknown) {
+    super(
+      `unit state ${typeof raw === "string" ? JSON.stringify(raw) : String(raw)} ` +
+        `(${typeof raw}) is not a valid UnitState. Refusing to interpret a money ` +
+        `state from an unrecognised representation.`,
+    );
+    this.name = "InvalidUnitStateError";
+  }
+}
+
+/**
+ * Raised when two reads that must describe ONE block contradict each other.
+ * Fail closed: a contradictory snapshot means the READ is wrong, and a money
+ * answer derived from it would be a guess wearing a number.
+ */
+export class InconsistentAnchorsError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "InconsistentAnchorsError";
+  }
+}
+
+/**
+ * Normalise a decoded state to a real enum member, or throw.
+ *
+ * Accepts `number` and `bigint` (both are legitimate ABI decodings of a uint8)
+ * and a purely-numeric `string`. Rejects everything else — notably prototype
+ * keys like "toString", which previously slipped through `in` and yielded a
+ * DTO with no `phase` at all.
+ */
+export function normalizeUnitState(raw: unknown): UnitState {
+  let n: number;
+  if (typeof raw === "number") {
+    if (!Number.isInteger(raw)) throw new InvalidUnitStateError(raw);
+    n = raw;
+  } else if (typeof raw === "bigint") {
+    if (raw < 0n || raw > 9n) throw new InvalidUnitStateError(raw);
+    n = Number(raw);
+  } else if (typeof raw === "string" && /^[0-9]+$/.test(raw)) {
+    n = Number(raw);
+  } else {
+    throw new InvalidUnitStateError(raw);
+  }
+  if (n < 1 || n > 9) {
+    // 0 is UNREACHABLE (F-5) and anything outside 1..9 is not a state at all.
+    if (n === 0) throw new UnreachableUnitStateError(0);
+    throw new InvalidUnitStateError(raw);
+  }
+  return n as UnitState;
+}
+
 // ── Inputs ────────────────────────────────────────────────────────────
 
 /** Anchors from `settlement(bytes32)` (:1103-1119) + `unitCounters` (:1148-1155). */
@@ -191,6 +266,12 @@ export interface LifecycleView {
   isTerminal: boolean;
   /** 6/7 — outcome decided, money not fully moved. Renders "incomplete". */
   isAllocated: boolean;
+  /**
+   * Which lane produced the accepted assertion. THE discriminator between
+   * states 2 and 5 (escrow #667) — they share one window rule, so this is the
+   * only thing that tells them apart. `null` when the reader did not supply it.
+   */
+  backupLane: boolean | null;
   /** Unix seconds the current window closes, when the state has one. */
   windowEndsAt: bigint | null;
 }
@@ -256,17 +337,50 @@ export function windowEndsAt(
   }
 }
 
-/** Map on-chain anchors to the lifecycle view. Total over reachable states. */
+/**
+ * Map on-chain anchors to the lifecycle view.
+ *
+ * ── THE CROSS-CHECK, AND WHY IT IS ONLY SAFE FROM ONE PINNED BLOCK ───
+ * `state` comes from `settlement(unitId)` and `remainingClaimCount` from
+ * `unitCounters(unitId)` — TWO SEPARATE CALLS. escrow #1246 caught that a naive
+ * cross-check MANUFACTURES the very contradiction it is meant to detect: a
+ * discharge landing between the two calls yields the OLD state with the NEW
+ * count (or the reverse), so a HEALTHY unit fails closed — and the opposite
+ * ordering lets a genuinely-incomplete unit read clean. That is the same torn
+ * view `unitCounters` was collapsed to fix, per its own docstring; collapsing
+ * closed it WITHIN that getter, not ACROSS the two.
+ *
+ * So this cross-check is only sound when BOTH reads come from the SAME pinned
+ * block. The reader port enforces that (every read takes the snapshot); this
+ * function therefore treats a contradiction as a REAL chain/read fault and
+ * fails closed rather than guessing which half is stale.
+ */
 export function toLifecycleView(
   anchors: SettlementAnchors,
   windows: WindowConstants,
 ): LifecycleView {
-  const state = anchors.state;
+  // Normalise at the boundary — never trust the decoded representation.
+  const state = normalizeUnitState(anchors.state as unknown);
 
-  if (state === UnitState.AWAITING_FUNDING) throw new UnreachableUnitStateError(state);
-  if (!(state in PHASE_BY_STATE)) throw new UnreachableUnitStateError(state);
+  const isTerminal = isTerminalState(state);
+  const isAllocated = isAllocatedState(state);
 
-  const isTerminal = TERMINAL_STATES.has(state);
+  // Counter/state consistency (only meaningful because both are same-block).
+  const remaining = anchors.remainingClaimCount;
+  if (remaining !== undefined) {
+    if (isTerminal && remaining > 0n) {
+      throw new InconsistentAnchorsError(
+        `unitState ${state} is terminal but remainingClaimCount=${remaining} — ` +
+          `money cannot be fully moved with claims outstanding. Refusing to render settled.`,
+      );
+    }
+    if (isAllocated && remaining === 0n) {
+      throw new InconsistentAnchorsError(
+        `unitState ${state} is ALLOCATED but remainingClaimCount=0 — the zeroing ` +
+          `discharge must have advanced it to 8/9. Read is stale or torn.`,
+      );
+    }
+  }
 
   return {
     unitState: state,
@@ -278,8 +392,13 @@ export function toLifecycleView(
         : "SETTLED_REFUNDED"
       : null,
     isTerminal,
-    isAllocated: ALLOCATED_STATES.has(state),
-    windowEndsAt: windowEndsAt(anchors, windows),
+    isAllocated,
+    // escrow #667 requires 2-vs-5 be discriminated by backupLane, NEVER by window
+    // arithmetic. Previously this field was accepted and DROPPED — the code
+    // implemented the prohibition and not the requirement, while a comment
+    // claimed the discriminator "lives in the lifecycle view". It now does.
+    backupLane: anchors.backupLane ?? null,
+    windowEndsAt: windowEndsAt({ ...anchors, state }, windows),
   };
 }
 
@@ -310,9 +429,14 @@ export interface RefundWitness {
  */
 export function deriveRefundReason(w: RefundWitness): Sourced<RefundReason> | null {
   if (w.escalationResolved && w.escalationResolved.upheld === false) {
-    return fromLog(
-      w.escalationResolved.role === "APPEAL" ? "APPEAL_OVERTURN" : "EMERGENCY_OVERTURN",
-    );
+    const role = w.escalationResolved.role;
+    // Previously ANY role that was not exactly "APPEAL" fell through to
+    // EMERGENCY_OVERTURN — so a corrupt or unrecognised role was reported as a
+    // DEFINITE, SPECIFIC refund cause. An unknown role is unwitnessed, and
+    // unwitnessed means null (the caller renders UNKNOWN), never a guess.
+    if (role === "APPEAL") return fromLog("APPEAL_OVERTURN");
+    if (role === "EMERGENCY") return fromLog("EMERGENCY_OVERTURN");
+    return null;
   }
   if (w.finalized && w.finalized.released === false) {
     if (w.finalized.code === 3) return fromLog("EMERGENCY_SILENCE");
