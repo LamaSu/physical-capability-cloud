@@ -100,6 +100,7 @@ type FetchMock = (url: string, init?: Record<string, unknown>) => Promise<unknow
 function buildHostTransport(fetchMock: FetchMock, key: string | null): HostTx {
   const bundle = [
     `var API_DEFAULT = ${JSON.stringify(PCC_ORIGIN)};`,
+    `var API_ORIGIN = new URL(API_DEFAULT).origin;`,
     `var __KEY__ = ${JSON.stringify(key)};`,
     `function getKey(){ return __KEY__; }`,
     extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
