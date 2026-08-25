@@ -1437,6 +1437,45 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         assertEq(uint256(assertedAt_), 1, "clamped to 1, exactly as disabledAt and challengedAt are");
     }
 
+    // ══ O25 — rawChallengedAtOf, the TIMELESS anchor for the attester's storage gate ═══════════════
+
+    /// @dev The property oracle's O25 predicate depends on, and it is a NEGATIVE one: this getter must
+    ///      NOT revert when the PRIMARY attester is unreadable. `challengedAtOf` routes through
+    ///      `_appealWindow` -> `_emergencyDeadline` -> a STATICCALL to the primary; this one is a plain
+    ///      storage read and must be immune to that entirely.
+    ///
+    ///      Why a storage gate must never depend on a foreign call (the D-1 lesson as an API contract):
+    ///      if `adjudicate()` refuses to STORE a record because some other contract is momentarily
+    ///      unreadable, an attacker holds that contract unreadable across the window and a VALID OVERTURN
+    ///      becomes permanently unrecordable — release where a refund was owed.
+    function test_O25_RawChallengedAtOf_IsTimeless_AndSurvivesAnUnreadablePrimary() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+
+        // No challenge yet: an unambiguous zero. `challengedAt` is clamped non-zero on write, so 0 can
+        // only ever mean "no challenge", never a genesis timestamp.
+        assertEq(e.rawChallengedAtOf(id), 0, "no challenge => 0, unambiguously");
+
+        _acceptNow(e, id);
+        _challenge(e, id);
+        uint256 challengedAt = block.timestamp;
+        assertEq(e.rawChallengedAtOf(id), challengedAt, "returns the raw stored anchor");
+
+        // THE LOAD-BEARING CASE. Make the primary attester unreadable and confirm this getter is
+        // UNAFFECTED — no revert, same value. A storage gate built on it therefore cannot be starved.
+        vm.mockCallRevert(address(attester), abi.encodeWithSignature("disabledAt()"), bytes(""));
+        assertEq(
+            e.rawChallengedAtOf(id),
+            challengedAt,
+            "an unreadable primary must not affect a plain storage read"
+        );
+        vm.clearMockedCalls();
+
+        // And it is genuinely TIMELESS: warping far past the appeal window does not change it. The
+        // window is the CALLER's arithmetic (anchor + APPEAL_WINDOW), never baked into the anchor.
+        vm.warp(challengedAt + VNextSettlementLib.APPEAL_WINDOW * 10);
+        assertEq(e.rawChallengedAtOf(id), challengedAt, "timeless: the anchor does not decay");
+    }
+
     // ══ D-1 FAIL-OPEN — sol re-review of 94ee6d5b ═══════════════════════════════════════════════════
 
     /// @dev [FAILS PRE-FIX] THE TEST FOR A BUG I INTRODUCED MYSELF. The first cut of D-1 had

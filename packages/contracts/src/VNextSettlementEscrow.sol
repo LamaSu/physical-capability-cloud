@@ -1193,6 +1193,31 @@ contract VNextSettlementEscrow {
     ///         a zero here is the attester's "this role's window has not opened" signal rather than an
     ///         ambiguous timestamp. The window itself is `challengedAt + APPEAL_WINDOW` — arithmetic the
     ///         caller does for free from a compile-time constant (see the note above `settlement`).
+    /// @notice The RAW appeal anchor: `challengedAt` as stored, with NO window logic applied.
+    /// @dev    O25 (oracle #1350) — the attester's `adjudicate()` needs a TIMELESS lower bound to gate a
+    ///         record BEFORE it consumes the one-shot slot. `challengedAtOf` cannot serve that: it routes
+    ///         through `_appealWindow`, which applies the §8.3 C-5 EMERGENCY CAP and therefore reads the
+    ///         PRIMARY attester. This one is a plain storage read and CANNOT FAIL.
+    ///
+    ///         THAT INABILITY TO FAIL IS THE ENTIRE POINT, and it is the D-1 lesson stated as an API. If a
+    ///         STORAGE gate can revert because some other contract is unreadable, an attacker makes that
+    ///         contract transiently unreadable across the window and a VALID OVERTURN becomes permanently
+    ///         unrecordable — release where a refund was owed. A gate that decides whether a record may be
+    ///         WRITTEN must never depend on a foreign call.
+    ///
+    ///         The asymmetry that makes this safe: the storage gate is deliberately LOOSE (uncapped, so it
+    ///         admits a record the emergency cap might later exclude), and the escrow's own `_decidedIn`
+    ///         check at RESOLUTION is AUTHORITATIVE and capped. A record admitted here is still rejected on
+    ///         time there. Worst residual is the D-2 slot burn, which is financially inert.
+    ///
+    ///         Returns 0 when no challenge was ever filed — `challengedAt` is clamped non-zero on write
+    ///         (`challenge`, :1713), so 0 is an unambiguous "no challenge", never a genesis timestamp.
+    ///         Pair with `VNextSettlementLib.APPEAL_WINDOW` (an `internal constant`, so an on-chain caller
+    ///         gets it by import — no getter, no staticcall) to form the timeless `[from, from + APPEAL_WINDOW)`.
+    function rawChallengedAtOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
+        return uint256(_units[unitId].challengedAt);
+    }
+
     function challengedAtOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
         Unit storage u = _units[unitId];
         // D-1/D-2 (sol cross-family review): "state == CHALLENGED" was NOT the same claim as "an appeal
