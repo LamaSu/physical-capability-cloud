@@ -1217,7 +1217,28 @@ contract VNextSettlementEscrow {
         // The late-record slot burn D-2 describes is therefore ACCEPTED as the cheaper of two evils —
         // a burnable slot on a record the escrow will reject anyway, versus a timely verdict made
         // unrecordable by relay latency.
-        (uint256 from, uint256 due) = _appealWindow(u, _emergencyDeadline(u));
+        // FAIL OPEN ON AN UNREADABLE PRIMARY (sol re-review of 94ee6d5b). The first cut of D-1 called
+        // `_emergencyDeadline` directly, which STATICCALLs the primary attester -- and I wrongly accepted
+        // that as harmless because "finalize and resolveEscalation revert too". THAT REASONING MISSED THE
+        // IRREVERSIBLE PART. Those reverting is TEMPORARY; a missed appeal window is PERMANENT. The attack
+        // it opened: quorum submits a valid OVERTURN in-window -> primary is made transiently unreadable
+        // -> this getter reverts -> the attester reports EscrowBindingUnreadable and STORES NOTHING -> hold
+        // it unreadable past `due`, restore it with disabledAt == 0 -> every later adjudication is stamped
+        // LATE and rejected -> `finalize` sees silence and RELEASES, when a timely OVERTURN should have
+        // REFUNDED. That is money to the wrong party, introduced by my own fix.
+        //
+        // So: try the primary, and on ANY failure fall back to the LOCAL `challengedAt`. Failing open is
+        // safe HERE and only here, because this getter merely decides whether a record may be WRITTEN --
+        // the escrow still applies its own authoritative `[from, due)` check at resolution
+        // (`_decidedIn`), so a record admitted under a stale-open window is still rejected on time. The
+        // worst residual is the D-2 slot burn, which is financially inert.
+        uint256 emergencyDue;
+        try IOracleAttester(authorizedOracle).disabledAt() returns (uint64) {
+            emergencyDue = _emergencyDeadline(u);
+        } catch {
+            emergencyDue = 0; // unreadable primary => assume no emergency cap => widest legitimate window
+        }
+        (uint256 from, uint256 due) = _appealWindow(u, emergencyDue);
         return due > from ? from : 0;
     }
 
