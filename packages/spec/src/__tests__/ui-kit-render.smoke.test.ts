@@ -186,3 +186,139 @@ describe("pcc-ui kit renders an actions manifest and gates money verbs", () => {
     expect(document.querySelector(".pcc-chip")!.textContent).toContain("fund");
   });
 });
+
+// ── Live-mode harness: a recording fetch mock (jsdom ships no fetch). Each C-03
+// hardening item is asserted through the REAL kit render/dispatch path. ────────
+type FetchCall = { url: string; method: string; headers: Record<string, string>; body: unknown };
+function installFetch(
+  responder: (call: FetchCall) => { status: number; body?: unknown; trace?: string },
+): FetchCall[] {
+  const calls: FetchCall[] = [];
+  (window as unknown as { fetch: unknown }).fetch = (
+    url: unknown,
+    init?: { method?: string; headers?: Record<string, string>; body?: unknown },
+  ) => {
+    const call: FetchCall = {
+      url: String(url),
+      method: (init && init.method) || "GET",
+      headers: (init && (init.headers as Record<string, string>)) || {},
+      body: init && init.body,
+    };
+    calls.push(call);
+    const r = responder(call);
+    return Promise.resolve({
+      ok: r.status >= 200 && r.status < 300,
+      status: r.status,
+      headers: { get: (h: string) => (h === "x-pcc-trace-id" ? (r.trace ?? null) : null) },
+      json: () => Promise.resolve(r.body ?? {}),
+    });
+  };
+  return calls;
+}
+
+const approveButtons = () =>
+  Array.from(document.querySelectorAll(".pcc-actionbar .pcc-btn")) as HTMLButtonElement[];
+
+describe("pcc-ui kit — C-03 money-action hardening (live mode)", () => {
+  beforeEach(() => {
+    try { window.sessionStorage.clear(); } catch { /* jsdom always has it */ }
+    try { window.localStorage.clear(); } catch { /* jsdom always has it */ }
+    delete (window as unknown as { fetch?: unknown }).fetch;
+  });
+
+  // approval window; deny is deliberately wired to a MONEY POST — the attack the
+  // "Deny is UI-only" rule defends against.
+  const approvalManifest = JSON.stringify({
+    csd: "pcc://artifacts/dashboard/v1",
+    title: "Approve",
+    sections: [{ windows: [{
+      kind: "approval",
+      binding: { path: "/api/escrow/esc-1" },
+      approve: { id: "fund", label: "Approve fund", kind: "post", path: "/api/escrow/fund", body: { escrowId: "esc-1", amount: 21.99 } },
+      deny: { id: "deny", label: "Deny", kind: "post", path: "/api/escrow/fund", body: { escrowId: "attacker", amount: 999 } },
+    }] }],
+  });
+
+  it("Deny is UI-only — it NEVER dispatches the manifest's deny action (even a money one)", async () => {
+    const calls = installFetch(() => ({ status: 200, body: { summary: "Pizza", amount: 21.99, currency: "USDC" } }));
+    boot(approvalManifest); // live (same-origin), no snapshot
+    await flush();
+    const deny = approveButtons().find((b) => b.textContent === "Deny")!;
+    expect(deny).toBeTruthy();
+    const before = calls.length; // the binding GET has already happened
+    deny.click();
+    expect(calls.length).toBe(before); // no network call of ANY kind
+    expect(document.body.textContent).toContain("Denied");
+    expect(deny.disabled).toBe(true);
+  });
+
+  it("a money NAMESPACE action (/api/compose, no money verb) still routes through the approval gate", () => {
+    const calls = installFetch(() => ({ status: 200, body: {} }));
+    boot(JSON.stringify({
+      csd: "pcc://artifacts/dashboard/v1", title: "Compose",
+      sections: [{ windows: [{ kind: "actions", actions: [
+        { id: "compose", label: "Compose plan", kind: "post", path: "/api/compose/plan" },
+      ] }] }],
+    }));
+    const btn = document.querySelector(".pcc-actionbar .pcc-btn") as HTMLButtonElement;
+    btn.click();
+    expect(document.querySelector(".pcc-overlay")).not.toBeNull(); // gate modal, not a direct POST
+    expect(calls.filter((c) => c.method === "POST").length).toBe(0);
+  });
+
+  it("Approve sends a real Idempotency-Key HEADER on the POST", async () => {
+    const calls = installFetch((c) => (c.method === "POST" ? { status: 200, body: { ok: true }, trace: "t-1" } : { status: 200, body: { amount: 21.99 } }));
+    boot(approvalManifest);
+    await flush();
+    approveButtons().find((b) => b.textContent!.indexOf("Approve") === 0)!.click();
+    await flush();
+    const post = calls.find((c) => c.method === "POST" && c.url.indexOf("/api/escrow/fund") !== -1)!;
+    expect(post).toBeTruthy();
+    expect(post.headers["Idempotency-Key"]).toBeTruthy();
+  });
+
+  it("double-click Approve fires exactly ONE POST (coalesced)", async () => {
+    const calls = installFetch((c) => (c.method === "POST" ? { status: 200, body: {} } : { status: 200, body: { amount: 1 } }));
+    boot(approvalManifest);
+    await flush();
+    const approve = approveButtons().find((b) => b.textContent!.indexOf("Approve") === 0)!;
+    approve.click(); approve.click(); approve.click();
+    await flush();
+    expect(calls.filter((c) => c.method === "POST" && c.url.indexOf("/api/escrow/fund") !== -1).length).toBe(1);
+  });
+
+  it("origin hard-bind: the viewer key is WITHHELD from a manifest-chosen off-origin api_base", async () => {
+    window.sessionStorage.setItem("pcc.key", "pcc_live_secret");
+    const calls = installFetch(() => ({ status: 200, body: { v: 1 } }));
+    boot(JSON.stringify({
+      csd: "pcc://artifacts/dashboard/v1", title: "M", api_base: "https://evil.example",
+      sections: [{ windows: [{ kind: "metric", label: "M", binding: { path: "/api/x" }, format: "int" }] }],
+    }));
+    await flush();
+    const get = calls.find((c) => c.url.indexOf("https://evil.example") === 0)!;
+    expect(get).toBeTruthy();
+    expect(get.headers["Authorization"]).toBeUndefined();
+  });
+
+  it("origin hard-bind: the viewer key IS sent to the canonical PCC origin", async () => {
+    window.sessionStorage.setItem("pcc.key", "pcc_live_secret");
+    const calls = installFetch(() => ({ status: 200, body: { v: 1 } }));
+    boot(JSON.stringify({
+      csd: "pcc://artifacts/dashboard/v1", title: "M", api_base: "https://capability.network",
+      sections: [{ windows: [{ kind: "metric", label: "M", binding: { path: "/api/x" }, format: "int" }] }],
+    }));
+    await flush();
+    const get = calls.find((c) => c.url.indexOf("https://capability.network") === 0)!;
+    expect(get).toBeTruthy();
+    expect(get.headers["Authorization"]).toBe("Bearer pcc_live_secret");
+  });
+
+  it("a removed endpoint (HTTP 410) yields a clear 'no longer available' message", async () => {
+    installFetch((c) => (c.method === "POST" ? { status: 410, body: {} } : { status: 200, body: { amount: 1 } }));
+    boot(approvalManifest);
+    await flush();
+    approveButtons().find((b) => b.textContent!.indexOf("Approve") === 0)!.click();
+    await flush();
+    expect(document.body.textContent!.toLowerCase()).toContain("no longer available");
+  });
+});
