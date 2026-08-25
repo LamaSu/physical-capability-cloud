@@ -1411,6 +1411,32 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         escalation.setAssertion(id, a);
     }
 
+    // ══ D-4 SIBLING — the last unclamped sentinel (sol re-review of 94ee6d5b) ══════════════════════
+
+    /// @dev [FAILS PRE-FIX] `_emergencyDeadline` reads `assertedAt` as a SENTINEL (`if (a != 0)`) meaning
+    ///      "an assertion has been accepted", and only on that branch applies §8.3 C-5 exclusion (2): no
+    ///      emergency may open on a unit whose release was ALREADY DUE. A raw `assertedAt = 0` overloads
+    ///      that sentinel -- at genesis "accepted at t=0" is indistinguishable from "nothing accepted" --
+    ///      so the exclusion is SILENTLY SKIPPED.
+    ///
+    ///      Not introduced by ATT-01; a pre-existing sibling of the `disabledAt` and `challengedAt` clamps,
+    ///      and the lone exception the `challengedAt` clamp comment warns about. Fixed while the
+    ///      implementation address is ALREADY MOVING for this batch, because after first deploy the same
+    ///      one-line change costs a migration.
+    function test_D4Sibling_AssertedAtIsClampedNonZeroAtGenesis() public {
+        vm.warp(0);
+        assertEq(block.timestamp, 0, "we really are at genesis");
+
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+
+        (, uint64 assertedAt_,,,,,) = e.settlement(id);
+
+        // THE SENTINEL PROPERTY: an accepted assertion must never read as "nothing accepted".
+        assertTrue(assertedAt_ != 0, "assertedAt must never be the zero sentinel once an assertion exists");
+        assertEq(uint256(assertedAt_), 1, "clamped to 1, exactly as disabledAt and challengedAt are");
+    }
+
     // ══ D-1 FAIL-OPEN — sol re-review of 94ee6d5b ═══════════════════════════════════════════════════
 
     /// @dev [FAILS PRE-FIX] THE TEST FOR A BUG I INTRODUCED MYSELF. The first cut of D-1 had

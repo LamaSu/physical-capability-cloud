@@ -1677,7 +1677,19 @@ contract VNextSettlementEscrow {
 
         // §8.2 C-3: the escrow's OWN clock, never `a.assertedAt`. A verdict minted weeks ago and submitted
         // one hour before the cutoff still gets a full, fresh challenge window.
+        // D-4 SIBLING (sol re-review of 94ee6d5b) — CLAMPED NON-ZERO, closing the last unclamped sentinel.
+        // `_emergencyDeadline` reads `assertedAt` as a SENTINEL (`if (a != 0)`, :1608) to mean "an assertion
+        // has been accepted", and on that branch applies §8.3 C-5 exclusion (2): no emergency may open on a
+        // unit whose release was ALREADY DUE. Storing a raw 0 overloads that sentinel — at genesis "accepted
+        // at t=0" is indistinguishable from "nothing accepted", so the exclusion is SILENTLY SKIPPED and an
+        // emergency can open on an already-due release. That is the same sentinel-overload class already
+        // fixed twice, for `disabledAt` and for `challengedAt` (:1713) — and this was the lone exception the
+        // clamp comment there warns about ("a lone exception is how a sentinel invariant rots").
+        // The only cost is that the two ARITHMETIC readers (`challenge` :1698, `finalize` :1840) measure
+        // their window from 1 instead of 0 at genesis — one second, on a chain whose timestamp is never 0,
+        // and exactly the imprecision already accepted for `challengedAt`.
         uint64 nowTs = uint64(block.timestamp);
+        if (nowTs == 0) nowTs = 1;
         u.assertedAt = nowTs;
         u.acceptedAssertionId = a.assertionId;
         u.state = backup ? UnitState.BACKUP_ASSERTED : UnitState.PRIMARY_ASSERTED;
