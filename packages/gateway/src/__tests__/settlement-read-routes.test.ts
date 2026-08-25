@@ -18,9 +18,13 @@ import {
   settlementReadRoutes,
   setSettlementUnitReader,
   UnitNotFoundError,
+  SnapshotMismatchError,
   type SettlementUnitReader,
 } from "../routes/settlement-read.js";
 import { UnitState } from "../settlement/unit-state-mapper.js";
+
+/** The one finalized block every read in a response is pinned to (rule 22/24). */
+const SNAP_HASH = "0x" + "cd".repeat(32);
 
 const UNIT = "0x" + "ab".repeat(32);
 const OTHER_TENANT = "tenant-b";
@@ -29,7 +33,15 @@ function makeReader(over: Partial<SettlementUnitReader> = {}): SettlementUnitRea
   return {
     binding: () => ({ chainId: 84532, escrow: "0xEsCrOw" }),
     windows: () => ({ challengeWindow: 3600n, appealWindow: 7200n }),
-    readAnchors: async () => ({ state: UnitState.SETTLED_RELEASED }),
+    // v1.5 rule 22/24: ONE pinned FINALIZED snapshot per response, echoed on
+    // every DTO so Surface A can assert all three routes agree.
+    pinSnapshot: async (asOf?: string) => {
+      if (asOf && asOf !== SNAP_HASH) {
+        throw new SnapshotMismatchError(`unknown or reorged-out block ${asOf}`);
+      }
+      return { asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized" as const, logCompleteness: "complete" as const };
+    },
+    readAnchors: async () => ({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 0n }),
     readRefundWitness: async () => ({}),
     readZeroingDischargeBlock: async () => 999n,
     readEconomics: async () => ({
@@ -39,8 +51,9 @@ function makeReader(over: Partial<SettlementUnitReader> = {}): SettlementUnitRea
       token: "0xUSDC",
       assuranceTier: 1,
     }),
-    readAssetReality: async () => "TEST",
-    readProvenance: async () => ({ availability: "AVAILABLE", compositionRoot: "0xroot", revision: 1, asOfBlock: 5n, leaves: [], nextCursor: null }),
+    // rule 25/26: registry-derived, pinned separately, attests IDENTITY not liveness.
+    readAssetIdentity: async () => ({ assetReality: "test" as const, registryId: "reg-1", revision: 3 }),
+    readProvenance: async () => ({ availability: "AVAILABLE" as const, compositionRoot: "0xroot", revision: 1, leaves: [], nextCursor: null }),
     readOwnerTenant: async () => null,
     ...over,
   };
@@ -279,6 +292,107 @@ describe("provenance — real discriminated union, no fabricated roots (#567)", 
     const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/provenance?cursor=x` });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("EXPIRED_CURSOR");
+    await app.close();
+  });
+});
+
+describe("v1.5 rule 22/24 — pinned finalized snapshot, echoed and cross-route checkable", () => {
+  it("every DTO echoes {asOfBlock, asOfBlockHash} so Surface A can assert agreement", async () => {
+    setSettlementUnitReader(makeReader());
+    const app = await buildApp();
+    for (const leaf of ["receipt", "lifecycle", "provenance"]) {
+      const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/${leaf}` })).json();
+      expect(b.asOfBlock).toBe("100");
+      expect(b.asOfBlockHash).toBe(SNAP_HASH);
+      expect(b.finality).toBe("finalized");
+    }
+    await app.close();
+  });
+
+  it("REFUSES to serve a non-finalized head rather than rendering it as confirmed", async () => {
+    // rule 22: Base has unsafe/safe/finalized L2 heads. A money display read at
+    // a non-finalized head must be refused or marked — never rendered as though
+    // it were confirmed.
+    setSettlementUnitReader(
+      makeReader({
+        pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "unsafe", logCompleteness: "complete" }),
+      }),
+    );
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/lifecycle` });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().finalState).toBeUndefined();
+    await app.close();
+  });
+
+  it("honours a caller-supplied ?asOf and 409s a snapshot it cannot serve", async () => {
+    setSettlementUnitReader(makeReader());
+    const app = await buildApp();
+    const ok = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/lifecycle?asOf=${SNAP_HASH}` });
+    expect(ok.statusCode).toBe(200);
+
+    const other = "0x" + "ef".repeat(32);
+    const bad = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/lifecycle?asOf=${other}` });
+    expect(bad.statusCode).toBe(409);
+    expect(bad.json().error).toBe("REVISION_MISMATCH");
+    await app.close();
+  });
+
+  it("rejects a bare block NUMBER as ?asOf — the token must be a hash", async () => {
+    // A number is not a snapshot identity: two routes could pin different
+    // blocks under the same label after a reorg.
+    setSettlementUnitReader(makeReader());
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/lifecycle?asOf=100` });
+    expect(res.statusCode).toBe(409);
+    await app.close();
+  });
+});
+
+describe("v1.5 rule 23 — ABSENCE IS NOT EVIDENCE", () => {
+  it("renders UNKNOWN (not a cause) when the log index is incomplete", async () => {
+    setSettlementUnitReader(
+      makeReader({
+        pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized", logCompleteness: "incomplete" }),
+        readAnchors: async () => ({ state: UnitState.SETTLED_REFUNDED, remainingClaimCount: 0n }),
+        readRefundWitness: async () => ({}), // nothing found — but the index is BEHIND
+      }),
+    );
+    const app = await buildApp();
+    const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
+    // Must NOT be null-meaning-none, and must NOT be an eliminated guess.
+    expect(b.refundReason).toBe("UNKNOWN");
+    await app.close();
+  });
+
+  it("still reports a real cause when the index IS complete", async () => {
+    setSettlementUnitReader(
+      makeReader({
+        readAnchors: async () => ({ state: UnitState.SETTLED_REFUNDED, remainingClaimCount: 0n }),
+        readRefundWitness: async () => ({ finalized: { released: false, code: 2 } }),
+      }),
+    );
+    const app = await buildApp();
+    const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
+    expect(b.refundReason.value).toBe("BACKUP_NO_RELEASE");
+    expect(b.refundReason.completeness).toBe("complete");
+    await app.close();
+  });
+});
+
+describe("v1.5 rule 26 — assetReality attests IDENTITY, not liveness", () => {
+  it("carries an explicit attests marker so 'real' cannot imply 'settlement possible'", async () => {
+    setSettlementUnitReader(
+      makeReader({ readAssetIdentity: async () => ({ assetReality: "real", registryId: "circle-usdc", revision: 7 }) }),
+    );
+    const app = await buildApp();
+    const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
+    expect(b.assetReality.value).toBe("real");
+    expect(b.assetReality.source).toBe("registry");
+    // USDC is upgradeable/pausable/blacklistable — a correctly-pinned "real"
+    // asset may still be unable to move. The DTO must never let the renderer
+    // read identity as liveness.
+    expect(b.assetReality.attests).toBe("identity-not-liveness");
     await app.close();
   });
 });
