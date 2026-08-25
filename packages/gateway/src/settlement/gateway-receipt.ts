@@ -47,7 +47,7 @@
  * knowing decision as signing-gate owner (#703), stated in the verdict semantics.
  */
 
-import { keccak256, encodeAbiParameters, toBytes, type Hex } from "viem";
+import { keccak256, encodeAbiParameters, toBytes, getAddress, type Hex } from "viem";
 import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 
 /** keccak256("PCC:vnext:gateway-receipt:v1") — oracle-owned, cross-confirmed. */
@@ -100,7 +100,17 @@ export function computeGatewayReceiptDigest(r: GatewayReceipt): Hex {
         GATEWAY_RECEIPT_DOMAIN,
         GATEWAY_RECEIPT_VERSION,
         BigInt(r.chainId),
-        r.escrow,
+        // NORMALISE ADDRESS CASE BEFORE ENCODING.
+        // viem's `address` encoder enforces EIP-55 checksum and REJECTS a
+        // mixed-case address that is not correctly checksummed; oracle's
+        // ethers-based reference module does not. The published golden escrow
+        // is written 0x...0E5C0F, which is NOT its EIP-55 form, so viem threw
+        // InvalidAddressError in CI while my ethers-based cross-confirm script
+        // accepted it — I verified the algorithm in one library and shipped it
+        // in another. The encoded bytes are identical either way (an address is
+        // 20 bytes; case is only a checksum representation), so normalising
+        // keeps the digest byte-equal to oracle's while accepting any case.
+        getAddress(r.escrow.toLowerCase() as Hex),
         r.settlementUnitId,
         r.packageDigest,
         BigInt(r.receivedAt),
