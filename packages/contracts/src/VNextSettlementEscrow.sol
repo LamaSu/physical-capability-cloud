@@ -1205,18 +1205,24 @@ contract VNextSettlementEscrow {
         //      still burn the slot before the escrow rejected it on time.
         // Reusing `_appealWindow` is deliberate: it already owns the state guard AND the emergency cap, so
         // this getter cannot drift from the predicate `finalize`/`resolveEscalation` actually apply.
-        // COST: this getter now STATICCALLs the primary attester (via `_emergencyDeadline`) and can revert
-        // if that attester is unreadable. Accepted — an unreadable primary already fails `finalize` and
-        // `resolveEscalation`, so a getter that fails with them is consistent rather than newly fragile.
-        // D-2 IS DELIBERATELY *NOT* FIXED HERE, and that is a finding in its own right. Gating this on
-        // `block.timestamp < due` — the obvious reading of sol's D-2 — RE-INTRODUCES RELAY-TIME EXPIRY,
-        // which is precisely the H-01 bug this contract exists to have deleted: a verdict DECIDED inside
-        // its window must stay resolvable FOREVER, because `decidedAt` owns the window and no relayer's
-        // inactivity may change the financial outcome. Proven by test, not by argument:
-        // `test_WAVE4B_TimelyAppealRecordedBeforeDisable_IsHonoured` fails with that gate in place.
-        // The late-record slot burn D-2 describes is therefore ACCEPTED as the cheaper of two evils —
-        // a burnable slot on a record the escrow will reject anyway, versus a timely verdict made
-        // unrecordable by relay latency.
+        // COST: this getter reads the primary attester (via `_emergencyDeadline`), so it can fail where a
+        // plain storage read could not. My first justification for accepting that — "an unreadable primary
+        // already fails `finalize` and `resolveEscalation`, so a getter that fails with them is consistent"
+        // — WAS WRONG, and it is corrected by the FAIL-OPEN paragraph below. Read that before this.
+        // D-2 IS NOT FIXED HERE, but NOT for the reason first recorded. The original claim was that gating
+        // on `block.timestamp < due` re-introduces relay-time expiry, "proven by test" via
+        // `test_WAVE4B_TimelyAppealRecordedBeforeDisable_IsHonoured`. THAT PROOF DOES NOT HOLD (sol
+        // re-review of 94ee6d5b): the test backdates `decidedAt` THROUGH A MOCK, and production
+        // `O5AttesterBase.adjudicate` CANNOT — it stamps `decidedAt = block.timestamp` at write time, so a
+        // real post-window call loses the tie by construction. The anchor getters are also read ONLY while
+        // CREATING a record (`O5AttesterBase`:517); resolution never calls them, so the H-01 property the
+        // original argument invoked was never at risk from this gate.
+        // The honest status: D-2 is a REAL OPEN ITEM, deliberately left to the ATTESTER side, where the
+        // deadline can be enforced pre-storage against timeless bounds. It is LOW priority because its only
+        // consequence is a burned one-shot slot on a record the escrow rejects anyway — it cannot
+        // misallocate or lock funds. It must NOT be "fixed" by adding a signer-supplied timestamp to
+        // `O5Adjudication`: a signature does not prove signing time, so that would let a quorum BACKDATE a
+        // post-disable appeal into the earlier window and defeat the anti-capture rule outright.
         // FAIL OPEN ON AN UNREADABLE PRIMARY (sol re-review of 94ee6d5b). The first cut of D-1 called
         // `_emergencyDeadline` directly, which STATICCALLs the primary attester -- and I wrongly accepted
         // that as harmless because "finalize and resolveEscalation revert too". THAT REASONING MISSED THE

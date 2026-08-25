@@ -1410,4 +1410,59 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         a.oracleAuthEpoch = ESC_COHORT;
         escalation.setAssertion(id, a);
     }
+
+    // ══ D-1 FAIL-OPEN — sol re-review of 94ee6d5b ═══════════════════════════════════════════════════
+
+    /// @dev [FAILS PRE-FIX] THE TEST FOR A BUG I INTRODUCED MYSELF. The first cut of D-1 had
+    ///      `challengedAtOf` call `_emergencyDeadline`, which STATICCALLs the PRIMARY attester. I noticed
+    ///      the getter could now revert and ACCEPTED it, reasoning that "an unreadable primary already
+    ///      fails `finalize` and `resolveEscalation`, so a getter that fails with them is consistent".
+    ///      THAT MISSED THE ASYMMETRY: those reverts are TEMPORARY; A MISSED APPEAL WINDOW IS PERMANENT.
+    ///
+    ///      The attack it opened: a quorum submits a VALID in-window OVERTURN; the primary is made
+    ///      transiently unreadable (proxy swap, revert, malformed return); `O5AttesterBase.adjudicate`
+    ///      reads this getter (:517), gets a revert, reports `EscrowBindingUnreadable` and STORES
+    ///      NOTHING; the outage is held past `due` and the primary restored reading `disabledAt == 0`;
+    ///      every later adjudication is stamped LATE and rejected, so `finalize` sees silence and
+    ///      RELEASES — where a timely OVERTURN should have REFUNDED. Money to the wrong party.
+    ///
+    ///      Failing OPEN is correct HERE AND ONLY HERE: this getter decides only whether a record may be
+    ///      WRITTEN, and the escrow still applies its own authoritative `[from, due)` check at
+    ///      resolution via `_decidedIn` — so a record admitted under a stale-open window is still
+    ///      rejected on time. The worst residual is the D-2 slot burn, which is financially inert.
+    function test_D1_UnreadablePrimary_MustNotMakeATimelyAppealUnrecordable() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        _challenge(e, id);
+        uint256 challengedAt = block.timestamp;
+
+        // Baseline: with the primary readable, the getter reports the live appeal anchor.
+        assertEq(e.challengedAtOf(id), challengedAt, "readable primary reports the live appeal anchor");
+
+        // The primary becomes unreadable MID-WINDOW.
+        vm.mockCallRevert(address(attester), abi.encodeWithSignature("disabledAt()"), bytes(""));
+
+        // PRE-FIX THIS LINE REVERTS. The appeal window is a fact about THIS escrow's own storage; it
+        // does not depend on the primary being readable, and must not become unreadable with it.
+        assertEq(
+            e.challengedAtOf(id), challengedAt, "an unreadable primary must not brick the appeal anchor"
+        );
+
+        // The consequence that actually matters: the verdict stays RECORDABLE during the outage.
+        // `_adjudicateAt` reads the anchor at exactly the point production's `adjudicate` reads it.
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN, block.timestamp);
+
+        // The attacker's second step: restore the primary, now reading as never-disabled.
+        vm.clearMockedCalls();
+
+        // The OVERTURN the quorum actually reached is honoured — the PAYER is refunded. Pre-fix the
+        // record never existed, `finalize` would have seen silence, and the operator would have been paid.
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(
+            uint256(e.unitState(id)),
+            uint256(UnitState.SETTLED_REFUNDED),
+            "the timely OVERTURN decides, and it refunds"
+        );
+        _assertBucketsCovered(e);
+    }
 }
