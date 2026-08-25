@@ -111,7 +111,11 @@ describe("F-5 — state 0 is UNREACHABLE and must fail closed, not render", () =
   });
 
   it("THROWS on an out-of-range state rather than guessing", () => {
-    expect(() => view({ state: 42 as UnitState })).toThrow(UnreachableUnitStateError);
+    // 0 is UNREACHABLE (a distinct, meaningful condition); anything else outside
+    // 1..9 is not a state at all, so it raises InvalidUnitStateError. Both fail
+    // closed — the distinction is which diagnosis the operator gets.
+    expect(() => view({ state: 42 as UnitState })).toThrow(InvalidUnitStateError);
+    expect(() => view({ state: UnitState.AWAITING_FUNDING })).toThrow(UnreachableUnitStateError);
   });
 });
 
@@ -174,12 +178,14 @@ describe("windows — #667 trap: 2 and 5 share ONE rule, backupLane discriminate
 describe("refundReason — five witnessed causes, all LOG-derived (rule 21)", () => {
   it("APPEAL_OVERTURN from EscalationResolved(role=APPEAL, upheld=false)", () => {
     const r = deriveRefundReason({ escalationResolved: { role: "APPEAL", upheld: false } });
-    expect(r).toEqual({ value: "APPEAL_OVERTURN", source: "log" });
+    // `fromLog` stamps completeness — a log-derived value must always carry it
+    // (rule 23), so the full envelope is the assertion, not a 2-key subset.
+    expect(r).toEqual({ value: "APPEAL_OVERTURN", source: "log", completeness: "unknown" });
   });
 
   it("EMERGENCY_OVERTURN from EscalationResolved(role=EMERGENCY, upheld=false)", () => {
     const r = deriveRefundReason({ escalationResolved: { role: "EMERGENCY", upheld: false } });
-    expect(r).toEqual({ value: "EMERGENCY_OVERTURN", source: "log" });
+    expect(r).toEqual({ value: "EMERGENCY_OVERTURN", source: "log", completeness: "unknown" });
   });
 
   it("EMERGENCY_SILENCE from Finalized(false, 3)", () => {
@@ -240,7 +246,11 @@ describe("refundReason — five witnessed causes, all LOG-derived (rule 21)", ()
 
 describe("finalizedBlock — from the zeroing dischargeClaim, NEVER from Finalized (#666 F-2)", () => {
   it("uses the block of the discharge that zeroed remainingClaimCount", () => {
-    expect(deriveFinalizedBlock(12345n)).toEqual({ value: 12345n, source: "log" });
+    expect(deriveFinalizedBlock(12345n)).toEqual({
+      value: 12345n,
+      source: "log",
+      completeness: "unknown",
+    });
   });
 
   it("is NULL while allocated (6/7) — no discharge has zeroed the count yet", () => {

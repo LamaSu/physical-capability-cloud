@@ -210,7 +210,12 @@ describe("receipt DTO — rule 2 (asserts nothing sound) and rule 21 (marked sou
     setSettlementUnitReader(makeReader());
     const app = await buildApp();
     const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
-    expect(b.finalizedBlock).toEqual({ value: "999", source: "log" });
+    // rule 25: the envelope is enriched (chain, contract, block, finality,
+    // completeness) — assert the load-bearing fields rather than an exact shape
+    // that breaks every time the envelope legitimately grows.
+    expect(b.finalizedBlock.value).toBe("999");
+    expect(b.finalizedBlock.source).toBe("log");
+    expect(b.finalizedBlock.blockHash).toBe(SNAP_HASH);
     await app.close();
   });
 
@@ -223,7 +228,9 @@ describe("receipt DTO — rule 2 (asserts nothing sound) and rule 21 (marked sou
     );
     const app = await buildApp();
     const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
-    expect(b.refundReason).toEqual({ value: "BACKUP_NO_RELEASE", source: "log" });
+    expect(b.refundReason.value).toBe("BACKUP_NO_RELEASE");
+    expect(b.refundReason.source).toBe("log");
+    expect(b.refundReason.completeness).toBe("complete");
     await app.close();
   });
 
@@ -238,10 +245,15 @@ describe("receipt DTO — rule 2 (asserts nothing sound) and rule 21 (marked sou
   it("takes assetReality from the REGISTRY, not from chainId — rule 11", async () => {
     // chainId 84532 is a testnet, but assetReality must come from the registry
     // read, so a REAL asset on a testnet is still reported REAL (and vice versa).
-    setSettlementUnitReader(makeReader({ readAssetReality: async () => "REAL" }));
+    setSettlementUnitReader(
+      makeReader({ readAssetIdentity: async () => ({ assetReality: "real", registryId: "circle-usdc" }) }),
+    );
     const app = await buildApp();
     const b = (await app.inject({ method: "GET", url: `/api/settlement/units/${UNIT}/receipt` })).json();
-    expect(b.assetReality).toBe("REAL");
+    // rule 25/26: assetReality is now a registry-pinned envelope, not a bare
+    // string, and carries the identity-not-liveness marker.
+    expect(b.assetReality.value).toBe("real");
+    expect(b.assetReality.source).toBe("registry");
     expect(b.network.chainId).toBe(84532);
     await app.close();
   });
