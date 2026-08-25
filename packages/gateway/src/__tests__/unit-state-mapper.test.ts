@@ -17,8 +17,11 @@
 import { describe, it, expect } from "vitest";
 import {
   UnitState,
-  TERMINAL_STATES,
-  ALLOCATED_STATES,
+  isTerminalState,
+  isAllocatedState,
+  normalizeUnitState,
+  InvalidUnitStateError,
+  InconsistentAnchorsError,
   toLifecycleView,
   windowEndsAt,
   deriveRefundReason,
@@ -85,9 +88,17 @@ describe("rule 12 — finalState keys off the TERMINAL SET, never receipt-presen
   });
 
   it("terminal set is exactly {8,9} — allocated states are NOT in it", () => {
-    expect([...TERMINAL_STATES].sort()).toEqual([8, 9]);
-    expect([...ALLOCATED_STATES].sort()).toEqual([6, 7]);
-    for (const s of ALLOCATED_STATES) expect(TERMINAL_STATES.has(s)).toBe(false);
+    // The sets are no longer EXPORTED — a ReadonlySet is erased at runtime, so
+    // exporting it let any in-process code .add() a non-terminal state and turn
+    // "has the money moved?" into a lie with tests still green (sol finding 7;
+    // escrow #1246 pushed for non-exposure over a typing tweak). Membership is
+    // now reachable only through predicates, which is what we assert.
+    for (const st of [8, 9] as UnitState[]) expect(isTerminalState(st)).toBe(true);
+    for (const st of [1, 2, 3, 4, 5, 6, 7] as UnitState[]) expect(isTerminalState(st)).toBe(false);
+    for (const st of [6, 7] as UnitState[]) expect(isAllocatedState(st)).toBe(true);
+    for (const st of [1, 2, 3, 4, 5, 8, 9] as UnitState[]) expect(isAllocatedState(st)).toBe(false);
+    // Terminal and allocated are DISJOINT — 6/7 must never be both.
+    for (const st of [6, 7] as UnitState[]) expect(isTerminalState(st)).toBe(false);
   });
 });
 
@@ -111,18 +122,26 @@ describe("windows — #667 trap: 2 and 5 share ONE rule, backupLane discriminate
     );
   });
 
-  it("BACKUP_ASSERTED uses the SAME rule — identical inputs give identical windows", () => {
-    const primary = windowEndsAt(
-      { state: UnitState.PRIMARY_ASSERTED, assertedAt: 1000n },
-      WINDOWS,
-    );
-    const backup = windowEndsAt(
-      { state: UnitState.BACKUP_ASSERTED, assertedAt: 1000n, backupLane: true },
-      WINDOWS,
-    );
-    // If these ever diverge, someone has tried to discriminate the lanes by
-    // window arithmetic — which #667 states explicitly is wrong.
-    expect(backup).toBe(primary);
+  it("BACKUP_ASSERTED uses the SAME rule — asserted against a LITERAL, not against primary", () => {
+    // THEATRE FIX (sol finding 6): this previously compared the two outputs TO
+    // EACH OTHER, so it passed if BOTH branches were deleted and returned null.
+    // Comparing to a computed literal means deleting either branch fails.
+    expect(
+      windowEndsAt({ state: UnitState.BACKUP_ASSERTED, assertedAt: 1000n, backupLane: true }, WINDOWS),
+    ).toBe(4600n); // 1000 + 3600, computed by hand, not by the code under test
+
+    // AND the equality with primary still holds — but now both sides are pinned
+    // to the same literal, so the equality cannot be satisfied by mutual absence.
+    expect(windowEndsAt({ state: UnitState.PRIMARY_ASSERTED, assertedAt: 1000n }, WINDOWS)).toBe(4600n);
+  });
+
+  it("backupLane is the 2-vs-5 discriminator and REACHES the view (escrow #667)", () => {
+    // The prohibition (no window arithmetic) was implemented; the requirement
+    // (use backupLane) was not — the field was accepted and DROPPED while a
+    // comment claimed it "lives in the lifecycle view". Now it does, and this
+    // fails if it is dropped again.
+    expect(view({ state: UnitState.BACKUP_ASSERTED, backupLane: true }).backupLane).toBe(true);
+    expect(view({ state: UnitState.PRIMARY_ASSERTED, backupLane: false }).backupLane).toBe(false);
   });
 
   it("CHALLENGED uses challengedAt + APPEAL_WINDOW (a different anchor AND window)", () => {
@@ -175,13 +194,27 @@ describe("refundReason — five witnessed causes, all LOG-derived (rule 21)", ()
     );
   });
 
-  it("DEADLINE_RECLAIM from a bare RefundAllocated (by elimination only)", () => {
-    expect(deriveRefundReason({ bareRefundAllocated: true })?.value).toBe("DEADLINE_RECLAIM");
+  it("DEADLINE_RECLAIM is the ONLY cause a bare RefundAllocated may yield", () => {
+    // THEATRE NOTE (sol finding 6): this input is the RESULT of elimination
+    // supplied as a boolean, so it cannot prove the upstream scan ran. What it
+    // CAN pin is that the branch maps to exactly this cause and nothing else —
+    // so a future edit that widens it to another cause fails here.
+    expect(deriveRefundReason({ bareRefundAllocated: true })).toEqual({
+      value: "DEADLINE_RECLAIM",
+      source: "log",
+      completeness: "unknown",
+    });
+    // The caller (route) is what turns absence into UNKNOWN when the index is
+    // incomplete; that behaviour is asserted in settlement-read-routes.test.ts,
+    // NOT here, because this function cannot see index completeness.
   });
 
-  it("returns NULL when nothing witnesses a cause — never a default", () => {
-    // An unwitnessed cause rendered as a specific one is a money-display lie.
-    expect(deriveRefundReason({})).toBeNull();
+  it("returns NULL when nothing witnesses a cause — and null is NOT a cause", () => {
+    const r = deriveRefundReason({});
+    expect(r).toBeNull();
+    // Pin that null is distinguishable from every real cause, so a future
+    // "default to something sensible" edit cannot pass this.
+    expect(r).not.toEqual(expect.objectContaining({ value: expect.anything() }));
   });
 
   it("does NOT fire on an UPHELD escalation (upheld=true is not an overturn)", () => {
@@ -214,10 +247,107 @@ describe("finalizedBlock — from the zeroing dischargeClaim, NEVER from Finaliz
     expect(deriveFinalizedBlock(undefined)).toBeNull();
   });
 
-  it("is marked source:'log' — it is reorg-exposed, unlike finalState", () => {
-    // rule 21: finalState is staticcall-authoritative; finalizedBlock is not.
-    // They must never be rendered with equal confidence.
-    expect(deriveFinalizedBlock(1n)?.source).toBe("log");
+  it("finalizedBlock and finalState carry DIFFERENT confidence (rule 21)", () => {
+    // THEATRE FIX (sol finding 6): asserting only source==="log" would still
+    // pass if the value came from the FORBIDDEN `Finalized` event — that is a
+    // log too. What this pins instead is the ASYMMETRY the rule exists for:
+    // finalState is staticcall-authoritative and carries NO source envelope,
+    // while finalizedBlock is reorg-exposed and MUST carry one. If either side
+    // drifts toward the other's confidence level, this fails.
+    const fb = deriveFinalizedBlock(1n);
+    expect(fb).toEqual({ value: 1n, source: "log", completeness: "unknown" });
+
+    const settled = view({ state: UnitState.SETTLED_RELEASED });
+    expect(settled.finalState).toBe("SETTLED_RELEASED");
+    // finalState is a bare value, NOT a Sourced<T> — it is authoritative.
+    expect(typeof settled.finalState).toBe("string");
+    expect(settled.finalState).not.toHaveProperty("source");
+  });
+
+  it("CANNOT be satisfied by a Finalized-event block — the provenance is the caller's contract", () => {
+    // HONEST LIMIT, stated rather than papered over: deriveFinalizedBlock takes
+    // a bare block number and has NO way to verify the caller passed the block
+    // of the ZEROING dischargeClaim rather than an allocation-time `Finalized`
+    // block (sol finding 4). This test documents that the guarantee lives in
+    // the reader port, not here — so nobody reads the suite as proving it.
+    const allocationTimeBlock = 999n; // pretend this came from `Finalized`
+    const r = deriveFinalizedBlock(allocationTimeBlock);
+    expect(r?.value).toBe(999n); // it is accepted — that is the gap
+    expect(r?.source).toBe("log"); // and correctly marked reorg-exposed
+    // The port is what must only ever pass a zeroing-discharge block.
+  });
+});
+
+describe("boundary normalisation — the defect sol found, and its fix", () => {
+  it("a STRING state no longer yields settled-AND-not-terminal", () => {
+    // THE BUG: `state in PHASE_BY_STATE` accepted "8" (object keys are strings)
+    // giving phase:"settled", while TERMINAL.has("8") failed strict identity
+    // giving finalState:null — ONE response asserting both, from an ordinary
+    // JSON-RPC representation. Every rule-12 test passed because they only ever
+    // fed clean numeric enums.
+    const v = view({ state: "8" as unknown as UnitState });
+    expect(v.phase).toBe("settled");
+    expect(v.finalState).toBe("SETTLED_RELEASED"); // <- was null
+    expect(v.isTerminal).toBe(true); // <- was false
+  });
+
+  it("bigint and number decodings agree", () => {
+    expect(view({ state: 8n as unknown as UnitState }).finalState).toBe("SETTLED_RELEASED");
+    expect(view({ state: 8 as UnitState }).finalState).toBe("SETTLED_RELEASED");
+  });
+
+  it("REJECTS a prototype key rather than producing a DTO with no phase", () => {
+    // "toString" previously passed `in` via the prototype chain and yielded a
+    // view whose `phase` was undefined.
+    expect(() => normalizeUnitState("toString")).toThrow(InvalidUnitStateError);
+  });
+
+  it("REJECTS non-integer, out-of-range and non-numeric input", () => {
+    for (const bad of [1.5, -1, 10, 99, "", "8x", null, undefined, {}, []]) {
+      expect(() => normalizeUnitState(bad)).toThrow();
+    }
+  });
+});
+
+describe("counter/state consistency — fails CLOSED both directions", () => {
+  it("REFUSES to render settled while claims are outstanding", () => {
+    // Money cannot be fully moved with a claim outstanding. Rendering settled
+    // here would be a money lie, so it throws rather than guessing.
+    expect(() => view({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 1n }))
+      .toThrow(InconsistentAnchorsError);
+  });
+
+  it("REFUSES to render allocated when the count already reached zero", () => {
+    // The zeroing discharge must have advanced it to 8/9; seeing 6 with zero
+    // claims means the read is stale or torn.
+    expect(() => view({ state: UnitState.RELEASE_ALLOCATED, remainingClaimCount: 0n }))
+      .toThrow(InconsistentAnchorsError);
+  });
+
+  it("ACCEPTS the two consistent combinations", () => {
+    expect(view({ state: UnitState.SETTLED_RELEASED, remainingClaimCount: 0n }).finalState)
+      .toBe("SETTLED_RELEASED");
+    expect(view({ state: UnitState.RELEASE_ALLOCATED, remainingClaimCount: 2n }).isAllocated)
+      .toBe(true);
+  });
+
+  it("is a no-op when the counter was not supplied (cross-check is opt-in)", () => {
     expect(view({ state: UnitState.SETTLED_RELEASED }).finalState).toBe("SETTLED_RELEASED");
+  });
+});
+
+describe("unknown escalation roles are UNWITNESSED, not EMERGENCY", () => {
+  it("returns null for a role that is neither APPEAL nor EMERGENCY", () => {
+    // Previously ANY non-"APPEAL" role fell through to EMERGENCY_OVERTURN, so a
+    // corrupt role was reported as a definite, specific refund cause.
+    expect(deriveRefundReason({ escalationResolved: { role: "CORRUPT" as never, upheld: false } }))
+      .toBeNull();
+  });
+
+  it("still resolves both KNOWN roles", () => {
+    expect(deriveRefundReason({ escalationResolved: { role: "APPEAL", upheld: false } })?.value)
+      .toBe("APPEAL_OVERTURN");
+    expect(deriveRefundReason({ escalationResolved: { role: "EMERGENCY", upheld: false } })?.value)
+      .toBe("EMERGENCY_OVERTURN");
   });
 });
