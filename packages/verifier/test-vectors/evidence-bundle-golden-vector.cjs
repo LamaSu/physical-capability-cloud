@@ -17,7 +17,9 @@
  *   programHash = "0x" + hex( SHA-256(canonicalize({version,schemaHash,stages})) )  <-- 0x PREFIX (verification-program.ts)
  * EvidenceBlock bytes32 roots strip the prefix: kernelSignedEventsRoot = "0x"+bundleHash.slice(7);
  *   sessionKeyAuthDigest = "0x"+sha256(canonicalize(sessionKeyAuthorization)).slice(7). kernelSignature is
- *   Ed25519 over the RAW 32-byte bundle digest (= raw32(kernelSignedEventsRoot)).
+ *   Ed25519 over the UTF-8 BYTES of the full "sha256:"-prefixed bundleHash STRING — matches the REAL producer
+ *   (kernel-sdk job-handler.ts:352-353 `TextEncoder().encode(bundleHash)` + verifyBundleSignature:394), NOT the raw
+ *   32-byte digest. (sol cross-family review fix #1, coord #1240: the raw-digest form was producer-incompatible.)
  *
  * Run: NODE_PATH=/c/Users/globa/pcc-oracle/node_modules node evidence-bundle-golden-vector.cjs
  */
@@ -92,14 +94,14 @@ const rawEvents = [
 const events = rawEvents.map((e) => ({ ...e, hash: sha256pfx(canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload })) }));
 const bundleHash = sha256pfx(canonicalize(events.map((e) => e.hash).sort()));                 // spec hashBundle
 const kernelSignedEventsRoot = '0x' + bundleHash.slice(7);                                     // block bytes32 = strip "sha256:"
-const bundleDigestRaw = Buffer.from(bundleHash.slice(7), 'hex');                               // the raw 32-byte digest the kernel signs
+const bundleHashMsg = Buffer.from(bundleHash, 'utf8');                                         // PRODUCER signs the UTF-8 bytes of the FULL "sha256:"+hex STRING (job-handler.ts:352)
 
-// real Ed25519 kernel key (deterministic seed) + sign the raw bundle digest
+// real Ed25519 kernel key (deterministic seed) + sign the UTF-8 bundleHash STRING (matches the real producer, NOT the raw digest)
 const kSeed = Buffer.from('33'.repeat(32), 'hex');
 const kernelPriv = crypto.createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), kSeed]), format: 'der', type: 'pkcs8' });
 const kernelPub = crypto.createPublicKey(kernelPriv);
 const kernelPubRaw = kernelPub.export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex');
-const kernelSignature = '0x' + crypto.sign(null, bundleDigestRaw, kernelPriv).toString('hex');
+const kernelSignature = '0x' + crypto.sign(null, bundleHashMsg, kernelPriv).toString('hex');
 
 // sessionKeyAuthorization: the principal (parent) signs the canonical SessionKey body authorizing the ephemeral publicKey
 const pSeed = Buffer.from('44'.repeat(32), 'hex');
@@ -123,17 +125,17 @@ console.log(`  event[1].hash            ${events[1].hash}`);
 console.log(`  bundleHash               ${bundleHash}`);
 console.log(`  kernelSignedEventsRoot   ${kernelSignedEventsRoot}   (block bytes32 = strip "sha256:")`);
 console.log(`  kernel pubkey (raw32)    0x${kernelPubRaw}`);
-console.log(`  kernelSignature (ed25519 over raw bundle digest)  ${kernelSignature}`);
+console.log(`  kernelSignature (ed25519 over UTF-8 of the "sha256:" bundleHash string)  ${kernelSignature}`);
 console.log(`  parent pubkey (raw32)    0x${parentPubRaw}`);
 console.log(`  parentSignature          ${sessionKeyAuthorization.parentSignature}`);
 console.log(`  sessionKeyAuthDigest     ${sessionKeyAuthDigest}   (block bytes32)`);
 
 chk(events.every((e) => e.hash === sha256pfx(canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload }))), 'SEAM 2: per-event hash = sha256(canonicalize({type,timestamp,source,payload})) recomputes (verifyEventHash)');
 chk(bundleHash === sha256pfx(canonicalize(events.map((e) => e.hash).sort())), 'SEAM 2: bundleHash = sha256(canonicalize(sorted event hashes)) recomputes (verifyBundleHash)');
-chk(ed25519verify(bundleDigestRaw, kernelPubRaw, kernelSignature), 'SEAM 2: kernelSignature (ed25519) verifies over the raw 32-byte bundle digest');
+chk(ed25519verify(bundleHashMsg, kernelPubRaw, kernelSignature), 'SEAM 2: kernelSignature verifies over the UTF-8 bytes of the "sha256:" bundleHash string (== kernel-sdk verifyBundleSignature:394 — PRODUCER-COMPATIBLE)');
 chk(ed25519verify(Buffer.from(sessionKeyBody, 'utf8'), parentPubRaw, sessionKeyAuthorization.parentSignature), 'SEAM 2: parentSignature verifies the delegation (principal authorized the ephemeral publicKey)');
 chk(sessionKeyAuthorization.publicKey === kernelPubRaw, 'SEAM 2: the delegated publicKey IS the kernel signer (ties sessionKeyAuth -> kernelSignature)');
-chk(!ed25519verify(Buffer.from(K('tampered').slice(2), 'hex'), kernelPubRaw, kernelSignature), 'SEAM 2 negative: kernelSignature over a DIFFERENT digest rejects (fail-closed)');
+chk(!ed25519verify(Buffer.from('sha256:' + K('tampered').slice(2), 'utf8'), kernelPubRaw, kernelSignature), 'SEAM 2 negative: kernelSignature over a DIFFERENT bundleHash string rejects (fail-closed)');
 
 console.log(`\n${ok ? 'sol #1 CLOSE golden vectors VERIFIED. SEAM 1: subjectBlockHash 0x05fb7b45 + programHash. SEAM 2: EvidenceBundle with REAL Ed25519 kernel + delegation. Canonicalization is util/canonical.ts (sorted-keys/String-numbers/sha256: prefix), NOT RFC-8785. Oracle reproduces both -> flips sol #2 gate label->derived.' : 'DIVERGENCE -- blocker'}`);
 process.exit(ok ? 0 : 1);
