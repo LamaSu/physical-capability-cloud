@@ -1,0 +1,15 @@
+{
+  "name": "Physical Capability Cloud",
+  "description": "Open infrastructure for agents to discover, hire, and verify real-world physical capability (3D printing, CNC, lab work, drone surveys, couriers, and more).",
+  "url": "https://capability.network",
+  "agentCard": "https://capability.network/.well-known/agent-card.json",
+  "mcp": "https://capability.network/.well-known/mcp",
+  "openapi": "https://capability.network/openapi.json",
+  "agentPackage": "https://capability.network/agent-package.json",
+  "aiCatalog": "https://capability.network/.well-known/ai-catalog.json",
+  "skill": "https://capability.network/skills/pcc.md",
+  "auth": {
+    "provision": "https://capability.network/api/auth/provision",
+    "scheme": "bearer"
+  }
+}
