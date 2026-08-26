@@ -41,15 +41,21 @@ export type Hex = `0x${string}`;
 /**
  * One signature over a FinalMilestonePackage body.
  *
- * `signerId` is the dedup key and the sort key. It is compared
- * CASE-INSENSITIVELY (lowercased) because signer ids in this system are
- * EIP-55-checksummed addresses in some paths and lowercase in others — the same
- * address in two spellings is ONE signer, and treating it as two would reopen
- * the malleability hole the dedup exists to close.
+ * Shape is the ORACLE's (#1395, they own ingestion): `{signer, scheme, sig}`.
+ * The signer SET is {operator, kernel} per evidence's frozen profile —
+ * D1 = operator secp256k1-EIP712, D2 = kernel ed25519-raw32.
+ *
+ * `signer` is the dedup key AND the sort key AND is LOWERCASED in the canonical
+ * form. Oracle #1395, verbatim: "Do NOT depend on case; changing a signer id's
+ * case MUST be a no-op." Signer ids are EIP-55-checksummed addresses in some
+ * paths and lowercase in others, so the same address in two spellings is ONE
+ * signer; binding the spelling would make identical evidence produce two package
+ * identities and fail the packageHash bind at first mint.
  */
 export interface PackageSignature {
-  signerId: string;
-  signature: string;
+  signer: string;
+  scheme: string;
+  sig: string;
   [k: string]: unknown;
 }
 
@@ -127,22 +133,24 @@ export function canonicalSignatures(
     if (s === null || typeof s !== "object") {
       throw new InvalidSignatureEntryError("entry is not an object");
     }
-    if (typeof s.signerId !== "string" || s.signerId.length === 0) {
-      throw new InvalidSignatureEntryError("signerId must be a non-empty string");
+    if (typeof s.signer !== "string" || s.signer.length === 0) {
+      throw new InvalidSignatureEntryError("signer must be a non-empty string");
     }
-    const key = s.signerId.toLowerCase();
+    const key = s.signer.toLowerCase();
     if (seen.has(key)) continue; // FIRST wins — later duplicates are dropped
     seen.add(key);
-    kept.push(s);
+    // NORMALIZE the emitted signer to the same lowercased form used for dedup
+    // and sorting. Without this the digest would depend on the SPELLING of an
+    // address, so the identical package assembled by two services could hash
+    // differently — the case-insensitivity the oracle requires (#1395).
+    kept.push({ ...s, signer: key });
   }
 
-  // Sort by the SAME lowercased key used for dedup, so the two operations
-  // cannot disagree about signer identity.
-  return kept.sort((a, b) => {
-    const ka = a.signerId.toLowerCase();
-    const kb = b.signerId.toLowerCase();
-    return ka < kb ? -1 : ka > kb ? 1 : 0;
-  });
+  // Sort by the SAME lowercased key used for dedup and emission, so no two of
+  // the three operations can disagree about signer identity.
+  return kept.sort((a, b) =>
+    a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0,
+  );
 }
 
 /**
