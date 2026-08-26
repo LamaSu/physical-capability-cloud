@@ -66,7 +66,7 @@ import { agentChatRoutes } from "./routes/agent-chat.js";
 import { settlementRoutes } from "./routes/settlement.js";
 import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
-import { wellKnownRoutes } from "./routes/well-known.js";
+import { wellKnownRoutes, unimplementedWellKnownBody } from "./routes/well-known.js";
 import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
 import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
@@ -943,6 +943,25 @@ export async function createGateway(port = 3200) {
       const indexPath = resolvePath(join(dashboardPath, cleanPath, "index.html"));
       if (indexPath.startsWith(resolvedDashboardRoot) && existsSync(indexPath)) {
         return reply.type("text/html").send(readFileSync(indexPath, "utf-8"));
+      }
+      // Unimplemented /.well-known/* must 404, NOT fall through to the SPA.
+      //
+      // A 200 carrying HTML is WORSE than a 404 here: a 404 says "not
+      // implemented", while a 200 tells a discovery client the document EXISTS
+      // and then hands it markup. Conformance checkers score the 200 as present.
+      // Measured on prod 2026-08-26: /.well-known/ai-agent.json and
+      // /.well-known/mcp.json both returned 200 text/html from this line.
+      //
+      // This is the SAME failure mode already carved out for bare /health above
+      // (see the SPA-fallback note earlier in this file) — it was simply never
+      // extended to /.well-known. Placed AFTER the static-file and directory-
+      // index checks on purpose, so every path that genuinely resolves today
+      // (/.well-known/agent-card.json, /.well-known/mcp/server-card.json,
+      // /.well-known/agent-skills/index.json) returns before reaching here, as
+      // do all registered routes, which never hit setNotFoundHandler at all.
+      const wellKnown404 = unimplementedWellKnownBody(cleanPath);
+      if (wellKnown404) {
+        return reply.status(404).type("application/json").send(wellKnown404);
       }
       return reply.type("text/html").send(indexHtml);
     });
