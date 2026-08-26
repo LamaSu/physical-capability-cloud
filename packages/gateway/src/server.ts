@@ -944,6 +944,34 @@ export async function createGateway(port = 3200) {
       if (indexPath.startsWith(resolvedDashboardRoot) && existsSync(indexPath)) {
         return reply.type("text/html").send(readFileSync(indexPath, "utf-8"));
       }
+      // Unimplemented /.well-known/* must 404, NOT fall through to the SPA.
+      //
+      // A 200 carrying HTML is WORSE than a 404 here: a 404 says "not
+      // implemented", while a 200 tells a discovery client the document EXISTS
+      // and then hands it markup. Conformance checkers score the 200 as present.
+      // Measured on prod 2026-08-26: /.well-known/ai-agent.json and
+      // /.well-known/mcp.json both returned 200 text/html from this line.
+      //
+      // This is the SAME failure mode already carved out for bare /health above
+      // (see the SPA-fallback note earlier in this file) — it was simply never
+      // extended to /.well-known. Placed AFTER the static-file and directory-
+      // index checks on purpose, so every path that genuinely resolves today
+      // (/.well-known/agent-card.json, /.well-known/mcp/server-card.json,
+      // /.well-known/agent-skills/index.json) returns before reaching here, as
+      // do all registered routes, which never hit setNotFoundHandler at all.
+      if (cleanPath.startsWith("/.well-known/")) {
+        return reply.status(404).type("application/json").send({
+          error: "not_found",
+          message: `No document is published at ${cleanPath}.`,
+          available: [
+            "/.well-known/agent-card.json",
+            "/.well-known/agent-registration.json",
+            "/.well-known/agent-descriptions",
+            "/.well-known/mcp/server-card.json",
+            "/.well-known/agent-skills/index.json",
+          ],
+        });
+      }
       return reply.type("text/html").send(indexHtml);
     });
 
