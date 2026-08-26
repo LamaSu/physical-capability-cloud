@@ -30,7 +30,7 @@ function jcs(o) {
 }
 
 // ── FROZEN V2 packageBodyHash framing (same as the integrated vector) ──
-const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v2');
+const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v1');   // AUTHORITATIVE :v1 (oracle #1414 — V2 = raw32 framing, not suffix)
 function packageBodyHash(body) {
   const jcsBytes = Buffer.from(jcs(body), 'utf8');
   return sha256b(Buffer.concat([raw32(SIG_DOMAIN_V2), u64be(jcsBytes.length), jcsBytes]));
@@ -109,7 +109,7 @@ chk(recW.toLowerCase() !== opWallet.address.toLowerCase(), 'WRONG-SIGNER: a diff
 
 // (6) pinned KAT golden (deterministic keys -> stable)
 const EXPECT = {
-  packageBodyHash: '0xc0289a2f5be58ea3d42f242eec733272c13c6108e10f18df9c2171d3072bb7ec',
+  packageBodyHash: '0x653fb2e5226092d579def9ae67ed996f64bdd6265113250a55bd1755cb7fe952',
   operator: '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A',
   kernel: '0x6544b5fc0eca6431c8133c58c5e8112f530ed520',
 };

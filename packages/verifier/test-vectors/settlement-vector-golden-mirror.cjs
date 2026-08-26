@@ -103,7 +103,7 @@ const body = {
   evidence:{ evidenceBlockHash },                                              // v2: ONE commitment to the 6 evaluator inputs (was {events,payloadRoot})
   evidenceTimeBounds:{ start:'1699999500', end:'1700000000' },
 };
-const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v2');                     // sol: DISTINCT V2 signing domain (not v1)
+const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v1');                     // AUTHORITATIVE :v1 — matches oracle production (package-hash-v2.ts) + cross-confirmed golden 0x21cdcf90. The V2 distinction is the raw32 FRAMING + packageFormat, NOT the domain suffix (oracle #1414; my earlier :v2 was drift).
 const packageBodyHash = sha256b(Buffer.concat([raw32(SIG_DOMAIN_V2), u64be(Buffer.byteLength(jcs(body))), Buffer.from(jcs(body),'utf8')]));
 // canonical signature envelope: dedup-by-signer + sort-by-signer (low-s/scheme-namespace enforced in prod; sample here)
 const rawSigs=[{signer:'0x'+'bb'.repeat(20),scheme:'secp256k1',sig:'0x'+'22'.repeat(65)},{signer:'0x'+'aa'.repeat(20),scheme:'ed25519',sig:'0x'+'11'.repeat(64)}];
@@ -123,7 +123,7 @@ for (const [k,v] of [['settlementUnitId',settlementUnitId],['termsHash',termsHas
   ['packageDigest',packageDigest],['evidenceCommitment',evidenceCommitment],['gatewayReceipt',gatewayReceipt]]) console.log(`  ${k.padEnd(20)} ${v}`);
 console.log(`  ${'packageBodyHash'.padEnd(20)} ${packageBodyHash}`);
 // ── complete producer golden vector: reproduce JCS via @pcc/spec canonicalize (NOT a re-impl — that is the #286 trap). ──
-//   packageBodyHash = SHA256( raw32(keccak256("PCC:vnext:evidence-package-sig:v2")) || u64be(byteLen(JCS(body))) || JCS(body) )
+//   packageBodyHash = SHA256( raw32(keccak256("PCC:vnext:evidence-package-sig:v1")) || u64be(byteLen(JCS(body))) || JCS(body) )   [u64be is UTF-8 BYTE length]
 //   packageDigest   = SHA256( JCS({ body, canonicalSignatures(sigs) }) )   [canonicalSignatures = dedup-by-signer(first) + sort-by-lowercased-signer]
 console.log(`  JCS(body)=${jcs(body)}`);
 console.log(`  JCS(bodyAndSignatures)=${jcs({body,signatures})}`);
@@ -137,7 +137,7 @@ chk(body.unitBinding.acceptedEnvelopeHash.toLowerCase()===acceptedPolicyDigest.t
 chk(body.unitBinding.settlementUnitId===settlementUnitId,'coherent: V2 package names THIS settlementUnitId');
 chk(body.evidence.evidenceBlockHash===evidenceBlockHash && programHash===K('golden-program'),'coherent: evidence field carries EvidenceBlockV1 v2 evidenceBlockHash; block programHash == subjectBlock committedProgramHash (NO-GO #3 pin) — no {events,payloadRoot}');
 chk(evidenceCommitment!==Z32 && gatewayReceipt!==Z32,'coherent: evidenceCommitment + gatewayReceipt both derived over THIS packageDigest');
-chk(SIG_DOMAIN_V2.toLowerCase()!==K('PCC:vnext:evidence-package-sig:v1').toLowerCase() && body.packageFormat==='2','sol: V2 uses a DISTINCT signing domain + packageFormat (parser never selected from the untrusted body)');
+chk(SIG_DOMAIN_V2.toLowerCase()===K('PCC:vnext:evidence-package-sig:v1').toLowerCase() && body.packageFormat==='2','domain :v1 == oracle production (0x21cdcf90) + the raw32 FRAMING (not the suffix) + packageFormat is the V2 marker; the framing/domain are FIXED constants, never selected from the untrusted body');
 chk(signatures.length===2 && sha256b(Buffer.from(jcs({body,signatures:canonicalSigs([rawSigs[1],rawSigs[0],rawSigs[1]])}),'utf8'))===packageDigest,'sol: canonical signature envelope — reorder+dup -> identical packageDigest');
 
 // ADVERSARIAL — cross-unit replay + policy-divergence FAIL (money-path).

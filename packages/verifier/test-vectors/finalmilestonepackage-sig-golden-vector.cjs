@@ -34,7 +34,7 @@ function canonicalize(v) {
   return String(v);
 }
 
-const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v2');   // raw32 domain, frozen V2 framing (#664)
+const SIG_DOMAIN_V2 = K('PCC:vnext:evidence-package-sig:v1');   // AUTHORITATIVE :v1 (oracle #1414: matches production + cross-confirmed 0x21cdcf90; V2 = the raw32 FRAMING, not the suffix)
 
 // ── coherent unit binding: reuse the integrated settlement-vector values (settlementUnitId 0x4453a3d2,
 //    acceptedEnvelopeHash == the REAL acceptedPolicyDigest 0xa821492a). Sample escrow addr 0xE5C0... (address-parametric). ──
