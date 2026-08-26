@@ -110,6 +110,7 @@ import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
 import { provisionRoutes } from "./routes/provision.js";
+import { agentIntrospectionRoutes } from "./routes/agent-introspection.js";
 import { auditRoutes } from "./routes/audit.js";
 import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
@@ -457,6 +458,14 @@ export async function createGateway(port = 3200) {
   // Agent friction reports — observability piece 3 (public, before auth)
   await app.register(agentFeedbackRoutes);
   await app.register(identifyDeviceRoutes);
+
+  // Agent introspection — what can THIS key reach, and where does this operator
+  // stand. Read-only, no settlement path. Registered here (after the public
+  // feedback routes, before the auth-gated block) because both endpoints do
+  // their own resolveApiKey and return a named 401 rather than relying on a
+  // global auth hook: an agent that cannot read the refusal cannot recover
+  // from it.
+  await app.register(agentIntrospectionRoutes);
 
   // Health check
   app.get("/api/health", async () => ({
