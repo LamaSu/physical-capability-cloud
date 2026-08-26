@@ -55,6 +55,10 @@ const chainId = '8453';
 const escrow = '0x00000000000000000000000000000000000e5c0f';
 const settlementUnitId = '0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1';
 
+// SUPERSEDED BODY SHAPE: packageFormat '1' + evidence:{events} predate the EvidenceBlockV2 fold (sol NO-GO #4).
+// The CURRENT canonical body is packageFormat '2' + evidence:{evidenceBlockHash} — see
+// ~/.claude/shared/vnext-finalmilestonepackage-v2-body-schema.md + settlement-vector-golden-mirror.cjs.
+// This mirror is retained for its signature-envelope/framing history; do NOT read this body as the schema.
 const body = {
   packageSchemaVersion: 'FinalMilestonePackageV2',
   packageFormat: '1',

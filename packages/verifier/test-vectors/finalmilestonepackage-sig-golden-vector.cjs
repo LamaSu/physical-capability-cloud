@@ -50,7 +50,10 @@ const unitBinding = {
   acceptedEnvelopeHash: '0xa821492ad1c9d685fc794c21485480f01169c2d690d73c86a354143f3f496a41', // == acceptedPolicyDigest (authoritative)
 };
 
-// ── unsigned V2 body (representative; the framing is what this golden pins, not the aggregate packageDigest) ──
+// ── unsigned V2 body: REPRESENTATIVE for the D1/D2 signature-framing proof (body-independent — operator/kernel
+//    sign packageBodyHash regardless of body shape). The CANONICAL FinalMilestonePackageV2 body (exact fields+types)
+//    is ~/.claude/shared/vnext-finalmilestonepackage-v2-body-schema.md; the canonical integrated golden (correct body
+//    + downstream packageDigest 0xf78103a1) is settlement-vector-golden-mirror.cjs. Do NOT read THIS body as the schema. ──
 const unsignedBody = {
   version: 2,
   unitBinding,
