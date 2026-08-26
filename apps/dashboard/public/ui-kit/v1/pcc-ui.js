@@ -296,6 +296,10 @@
   // Status → semantic pill class (hue = meaning only).
   function statusClass(s) {
     var t = String(s == null ? '' : s).toLowerCase();
+    // A refund means the payer was made whole and the operator was NOT paid — it must NEVER
+    // render as settled/green. "funded" matches inside "refunded", so this MUST precede the
+    // settled check (money-display honesty; read-route contract rule 1).
+    if (/refund/.test(t)) return 'st-failed';
     if (/(settl|releas|complet|done|paid|funded|success|approved|active)/.test(t)) return 'st-settled';
     if (/(fail|error|denied|dispute|cancel|reject)/.test(t)) return 'st-failed';
     if (/(wait|pending|queued|paused|review|created|needs)/.test(t)) return 'st-waiting';
