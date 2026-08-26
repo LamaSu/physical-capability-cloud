@@ -121,6 +121,12 @@ const gatewayReceipt=keccak256(enc(['bytes32','uint16','uint256','address','byte
 console.log(`ethers=${E.version||'v6'}  == INTEGRATED settlement vector (ONE unit, coherent; sol gate 6) ==`);
 for (const [k,v] of [['settlementUnitId',settlementUnitId],['termsHash',termsHash],['acceptedPolicyDigest',acceptedPolicyDigest],
   ['packageDigest',packageDigest],['evidenceCommitment',evidenceCommitment],['gatewayReceipt',gatewayReceipt]]) console.log(`  ${k.padEnd(20)} ${v}`);
+console.log(`  ${'packageBodyHash'.padEnd(20)} ${packageBodyHash}`);
+// ── complete producer golden vector: reproduce JCS via @pcc/spec canonicalize (NOT a re-impl — that is the #286 trap). ──
+//   packageBodyHash = SHA256( raw32(keccak256("PCC:vnext:evidence-package-sig:v2")) || u64be(byteLen(JCS(body))) || JCS(body) )
+//   packageDigest   = SHA256( JCS({ body, canonicalSignatures(sigs) }) )   [canonicalSignatures = dedup-by-signer(first) + sort-by-lowercased-signer]
+console.log(`  JCS(body)=${jcs(body)}`);
+console.log(`  JCS(bodyAndSignatures)=${jcs({body,signatures})}`);
 console.log('');
 let ok=true; const chk=(c,l)=>{ok=ok&&c;console.log(`${c?'PASS':'FAIL'}  ${l}`);};
 
