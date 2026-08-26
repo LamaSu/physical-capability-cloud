@@ -66,7 +66,7 @@ import { agentChatRoutes } from "./routes/agent-chat.js";
 import { settlementRoutes } from "./routes/settlement.js";
 import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
-import { wellKnownRoutes } from "./routes/well-known.js";
+import { wellKnownRoutes, unimplementedWellKnownBody } from "./routes/well-known.js";
 import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
 import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
@@ -959,18 +959,9 @@ export async function createGateway(port = 3200) {
       // (/.well-known/agent-card.json, /.well-known/mcp/server-card.json,
       // /.well-known/agent-skills/index.json) returns before reaching here, as
       // do all registered routes, which never hit setNotFoundHandler at all.
-      if (cleanPath.startsWith("/.well-known/")) {
-        return reply.status(404).type("application/json").send({
-          error: "not_found",
-          message: `No document is published at ${cleanPath}.`,
-          available: [
-            "/.well-known/agent-card.json",
-            "/.well-known/agent-registration.json",
-            "/.well-known/agent-descriptions",
-            "/.well-known/mcp/server-card.json",
-            "/.well-known/agent-skills/index.json",
-          ],
-        });
+      const wellKnown404 = unimplementedWellKnownBody(cleanPath);
+      if (wellKnown404) {
+        return reply.status(404).type("application/json").send(wellKnown404);
       }
       return reply.type("text/html").send(indexHtml);
     });

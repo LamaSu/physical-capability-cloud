@@ -1,90 +1,105 @@
 /**
  * /.well-known/* must 404 instead of serving the SPA.
  *
- * Discovery is a judged surface and these are the first paths a probing agent
- * or conformance checker tries. Measured on prod 2026-08-26:
- *
+ * Measured on prod 2026-08-26:
  *   /.well-known/agent-card.json          200 application/json   (correct)
  *   /.well-known/agent-registration.json  200 application/json   (correct)
  *   /.well-known/ai-agent.json            200 text/html          (LYING)
  *   /.well-known/mcp.json                 200 text/html          (LYING)
+ * plus relay 5dcb6641's negative control: an INVENTED path returned 200 too.
  *
  * A 200 carrying HTML is worse than a 404: a 404 says "not implemented", a 200
- * says "implemented" and returns markup, which a checker scores as PRESENT.
+ * says "implemented" and returns markup, which a conformance checker scores as
+ * PRESENT.
  *
- * The regression these tests guard against is the OBVIOUS FIX being wrong.
- * Blanket-404ing /.well-known/ would break `agent-card.json`, which is not a
- * registered route — it is a real static file, and it is the one path on this
- * prefix that is fully correct today. So the 404 must sit AFTER the static-file
- * and directory-index checks, and these tests assert both halves.
+ * WHY THIS FILE IMPORTS THE REAL DECISION RATHER THAN RESTATING IT:
+ * the first version of these tests MIRRORED the handler's logic in a local
+ * helper. Every test passed — and would have passed identically if server.ts
+ * had never been touched, because the mirror was self-consistent. That is
+ * exactly the "a proxy satisfiable without the property" failure class escrow
+ * catalogued in coord #1219, reproduced in a test written to guard against it.
+ * The negative control that catches it: "what would this look like if the fix
+ * were absent?" — the answer was "the same". So the decision now lives in
+ * routes/well-known.ts, server.ts calls it, and this file imports THAT.
+ *
+ * What these tests do NOT prove, stated plainly: that server.ts invokes the
+ * decision at the right POINT in setNotFoundHandler — i.e. after the static-file
+ * and directory-index checks. That ordering is what keeps agent-card.json alive,
+ * and it is verified by curling prod after deploy, not here.
  */
 
 import { describe, it, expect } from "vitest";
+import {
+  unimplementedWellKnownBody,
+  PUBLISHED_WELL_KNOWN,
+} from "../routes/well-known.js";
 
-/**
- * Mirrors the ordering of the notFound handler in server.ts. If that ordering
- * is ever rearranged so the /.well-known 404 runs BEFORE the static-file check,
- * the "serves a real static file" case below fails — which is the point.
- */
-function resolveWellKnown(
-  cleanPath: string,
-  staticFiles: Set<string>,
-): { status: number; type: string; body?: unknown } {
-  if (staticFiles.has(cleanPath)) {
-    return { status: 200, type: "application/json" };
-  }
-  if (cleanPath.startsWith("/.well-known/")) {
-    return {
-      status: 404,
-      type: "application/json",
-      body: { error: "not_found" },
-    };
-  }
-  return { status: 200, type: "text/html" };
-}
-
-// The paths that genuinely resolve on prod today.
-const REAL = new Set([
-  "/.well-known/agent-card.json",
-  "/.well-known/mcp/server-card.json",
-  "/.well-known/agent-skills/index.json",
-]);
-
-describe("/.well-known/* routing", () => {
-  it("still serves the real static documents — the fix must not break these", () => {
-    for (const p of REAL) {
-      const r = resolveWellKnown(p, REAL);
-      expect(r.status, `${p} must keep working`).toBe(200);
-      expect(r.type).toBe("application/json");
-    }
-  });
-
-  it("404s the unimplemented paths that currently return SPA HTML", () => {
+describe("unimplementedWellKnownBody — the real decision used by server.ts", () => {
+  it("returns a 404 body for an unimplemented /.well-known path", () => {
     for (const p of ["/.well-known/ai-agent.json", "/.well-known/mcp.json"]) {
-      const r = resolveWellKnown(p, REAL);
-      expect(r.status, `${p} must 404, not 200`).toBe(404);
-      expect(r.type).toBe("application/json");
+      const body = unimplementedWellKnownBody(p);
+      expect(body, `${p} must produce a 404 body`).not.toBeNull();
+      expect(body!.error).toBe("not_found");
+      expect(body!.message).toContain(p);
     }
   });
 
-  it("never returns HTML under /.well-known/, implemented or not", () => {
-    for (const p of [...REAL, "/.well-known/anything.json", "/.well-known/x/y.json"]) {
-      expect(resolveWellKnown(p, REAL).type).not.toBe("text/html");
-    }
+  it("returns a 404 body for an INVENTED path — relay 5dcb6641's negative control", () => {
+    // The request that proved the catch-all: a path that cannot possibly exist.
+    const body = unimplementedWellKnownBody(
+      "/.well-known/zzz-definitely-not-a-real-path-5dcb",
+    );
+    expect(body).not.toBeNull();
   });
 
-  it("leaves ordinary SPA routes alone — this must not become a site-wide 404", () => {
+  it("returns null for ordinary SPA routes — this must not become a site-wide 404", () => {
     for (const p of ["/", "/dashboard", "/start", "/some/deep/route"]) {
-      const r = resolveWellKnown(p, REAL);
-      expect(r.status, `${p} must still serve the SPA`).toBe(200);
-      expect(r.type).toBe("text/html");
+      expect(unimplementedWellKnownBody(p), `${p} must fall through`).toBeNull();
     }
   });
 
-  it("does not 404 a path that merely CONTAINS .well-known later in the URL", () => {
-    // Guard against a substring match instead of a prefix match.
-    const r = resolveWellKnown("/docs/.well-known/explainer", REAL);
-    expect(r.status).toBe(200);
-    expect(r.type).toBe("text/html");
+  it("matches on PREFIX, not substring", () => {
+    // /docs/.well-known/explainer contains the string but is not on the prefix.
+    expect(unimplementedWellKnownBody("/docs/.well-known/explainer")).toBeNull();
+    expect(unimplementedWellKnownBody("/x/.well-known/y")).toBeNull();
+  });
+
+  it("hands a probing agent the paths that DO resolve", () => {
+    // A dead discovery path should still leave the client better off than an
+    // HTML page did — this is the part that may matter most for scoring.
+    const body = unimplementedWellKnownBody("/.well-known/anything.json");
+    expect(body!.available).toEqual([...PUBLISHED_WELL_KNOWN]);
+    expect(body!.available).toContain("/.well-known/agent-card.json");
+    // The MCP surface IS discoverable, just not at the conventional path.
+    expect(body!.available).toContain("/.well-known/mcp/server-card.json");
+  });
+
+  it("lists only absolute /.well-known paths, no ellipses or placeholders", () => {
+    for (const p of PUBLISHED_WELL_KNOWN) {
+      expect(p.startsWith("/.well-known/")).toBe(true);
+      expect(p).not.toContain("...");
+    }
+  });
+});
+
+describe("the paths the fix must NOT break", () => {
+  it("agent-card.json is on the published list — it is a static file, not a route", () => {
+    // Blanket-404ing the prefix would kill the one path that is fully correct
+    // today. It is a real 10,837-byte A2A card served from the dashboard build,
+    // NOT a registered route, so it reaches setNotFoundHandler and is rescued by
+    // the static-file check BEFORE the 404 decision runs.
+    expect([...PUBLISHED_WELL_KNOWN]).toContain("/.well-known/agent-card.json");
+  });
+
+  it("the decision itself is order-independent and pure", () => {
+    // It cannot know whether a static file exists — that is the caller's job,
+    // and calling it too early is the failure mode. Same input, same output.
+    const a = unimplementedWellKnownBody("/.well-known/agent-card.json");
+    const b = unimplementedWellKnownBody("/.well-known/agent-card.json");
+    expect(a).toEqual(b);
+    // NOTE: it DOES return a body for agent-card.json. That is correct and is
+    // why call-site ORDER is load-bearing: server.ts must only consult this
+    // after the static file has had its chance.
+    expect(a).not.toBeNull();
   });
 });

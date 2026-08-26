@@ -573,3 +573,44 @@ export async function wellKnownRoutes(app: FastifyInstance) {
     },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Unimplemented /.well-known/* — shared decision, used by server.ts's
+// setNotFoundHandler AND by its tests.
+//
+// This lives here rather than inline in server.ts for a specific reason: the
+// first version of this test MIRRORED the handler's logic instead of calling
+// it, so the suite passed identically whether or not the handler existed —
+// exactly the "proxy satisfiable without the property" failure class escrow
+// documented in coord #1219. A mirror proves the mirror works. Exporting the
+// real decision and importing it into the test removes the mirror.
+// ---------------------------------------------------------------------------
+
+/** Paths under /.well-known/ that genuinely resolve today (routes + static). */
+export const PUBLISHED_WELL_KNOWN = [
+  "/.well-known/agent-card.json",
+  "/.well-known/agent-registration.json",
+  "/.well-known/agent-descriptions",
+  "/.well-known/mcp/server-card.json",
+  "/.well-known/agent-skills/index.json",
+] as const;
+
+/**
+ * The 404 body for an unimplemented /.well-known path, or null when the path is
+ * not on that prefix (caller then falls through to its normal handling).
+ *
+ * Call this ONLY after real-file and directory-index checks have already had
+ * their chance: /.well-known/agent-card.json is a static file, not a registered
+ * route, and blanket-404ing the prefix would break the one path on it that is
+ * fully correct today.
+ */
+export function unimplementedWellKnownBody(
+  cleanPath: string,
+): { error: string; message: string; available: string[] } | null {
+  if (!cleanPath.startsWith("/.well-known/")) return null;
+  return {
+    error: "not_found",
+    message: `No document is published at ${cleanPath}.`,
+    available: [...PUBLISHED_WELL_KNOWN],
+  };
+}
