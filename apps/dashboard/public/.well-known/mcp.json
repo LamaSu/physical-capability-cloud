@@ -1,0 +1,9 @@
+{
+  "name": "Physical Capability Cloud MCP Server",
+  "description": "MCP tools for discovering, negotiating, and orchestrating real-world physical capabilities through PCC.",
+  "transport": "streamable-http",
+  "url": "https://capability.network/mcp",
+  "serverCard": "https://capability.network/.well-known/mcp/server-card.json",
+  "canonical": "https://capability.network/.well-known/mcp",
+  "note": "Conventional-path mirror. The authoritative, live MCP discovery document is served at /.well-known/mcp (no .json)."
+}
