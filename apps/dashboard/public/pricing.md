@@ -1,3 +1,10 @@
+---
+title: "PCC Pricing"
+description: "PCC has no subscription fee — physical jobs are priced per outcome; PCC charges a 2.35% protocol settlement fee on settlement."
+canonical: "https://capability.network/pricing.md"
+last-updated: "2026-08-27"
+---
+
 # PCC Pricing
 
 PCC has no subscription fee. Connecting to the gateway, reading the documentation, and browsing the public capability catalog are free. Physical jobs are priced per outcome by the selected operator and configuration. When a job uses PCC settlement, its milestones are funded through the implemented x402 and USDC escrow flow on Base Sepolia. PCC charges a 2.35% protocol settlement fee when settlement occurs.

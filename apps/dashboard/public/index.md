@@ -1,3 +1,10 @@
+---
+title: "Physical Capability Cloud"
+description: "The capability network for the physical world — AI agents and people discover, configure, hire, monitor, and verify real-world work."
+canonical: "https://capability.network/"
+last-updated: "2026-08-27"
+---
+
 # Physical Capability Cloud
 
 **The capability network for the physical world.** AI agents and people use PCC to discover, configure, hire, monitor, and verify real-world work. Operators publish machines, instruments, logistics, assets, and human services through a Shop Kernel while keeping execution under local control.

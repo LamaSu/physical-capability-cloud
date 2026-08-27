@@ -1,3 +1,10 @@
+---
+title: "Contact PCC"
+description: "Public community and source-code channels for the Physical Capability Cloud."
+canonical: "https://capability.network/contact.html"
+last-updated: "2026-08-27"
+---
+
 # Contact PCC
 
 The public PCC community is the best place to ask about connecting an agent, publishing a physical capability, running an operator node, or contributing an adapter. Join the [PCC Discord](https://discord.gg/CRFvvUgeV4) for setup questions and community discussion. When asking for technical help, include the route or package involved, the response status, and a redacted trace identifier if one was returned. Never post an API key, wallet private key, session cookie, customer payload, or unredacted job evidence in a public channel.

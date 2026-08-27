@@ -1,3 +1,10 @@
+---
+title: "About the Physical Capability Cloud"
+description: "How PCC connects agents with real machines, operators, evidence, and milestone settlement."
+canonical: "https://capability.network/about.html"
+last-updated: "2026-08-27"
+---
+
 # About the Physical Capability Cloud
 
 Physical Capability Cloud (PCC) is a decentralized control plane for real-world work. It gives software agents and people one API for discovering, configuring, hiring, and monitoring capabilities such as 3D printers, CNC routers, laser cutters, laboratory instruments, couriers, and human services. Operators keep their equipment behind a local Shop Kernel, publish what it can do, and decide which jobs to accept. The gateway coordinates discovery and workflow state without pretending that every machine is the same.

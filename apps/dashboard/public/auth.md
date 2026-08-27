@@ -1,3 +1,10 @@
+---
+title: "PCC Agent Authentication"
+description: "How agents authenticate to PCC: API-key provisioning, SIWE login, and OAuth 2.0 / agent_auth discovery metadata."
+canonical: "https://capability.network/auth.md"
+last-updated: "2026-08-27"
+---
+
 # PCC Agent Authentication
 
 PCC uses API keys for programmatic access and SIWE for wallet login. This document uses the WorkOS agent-auth walkthrough order while documenting PCC's implemented API-key flow. Only the endpoints named below are part of this flow.

@@ -1,3 +1,10 @@
+---
+title: "PCC Privacy Statement"
+description: "A concise privacy statement for the PCC website, gateway, jobs, and evidence records."
+canonical: "https://capability.network/privacy.html"
+last-updated: "2026-07-12"
+---
+
 # PCC Privacy Statement
 
 Physical Capability Cloud coordinates discovery and execution of real-world work. To provide that service, PCC may process information supplied through the website or API, including an email address or wallet address used to provision access, operator and capability records, job parameters and status, evidence references, authentication records, and technical request data such as IP address, user agent, timestamps, and trace identifiers. SIWE login may use a session cookie. API keys and wallet private keys are credentials and should never be placed in public capability descriptions or job fields.

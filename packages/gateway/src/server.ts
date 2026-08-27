@@ -8,6 +8,7 @@ initPostHog();
 import { randomBytes } from "node:crypto";
 
 import Fastify from "fastify";
+import type { FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
@@ -930,6 +931,84 @@ export async function createGateway(port = 3200) {
 
     const { resolve: resolvePath } = await import("node:path");
     const resolvedDashboardRoot = resolvePath(dashboardPath);
+
+    // ── Markdown content negotiation (acceptmarkdown.com convention) ────────
+    // An agent that sends `Accept: text/markdown`, or a known AI answer-engine
+    // crawler, receives the markdown twin of a doc/HTML page instead of HTML.
+    // HTML resources advertise the twin via a `Link: <...>; rel="alternate";
+    // type="text/markdown"` header (mirrored by an in-page <link rel="alternate">)
+    // and `Vary: Accept` so shared caches stay correct.
+    const AI_ANSWER_ENGINE_UA =
+      /GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|cohere-ai|Applebot|Amazonbot|YouBot|DuckAssistBot|Bingbot|meta-externalagent/i;
+
+    const wantsMarkdown = (req: FastifyRequest): boolean => {
+      const accept = String(req.headers["accept"] ?? "");
+      if (/text\/markdown/i.test(accept)) return true;
+      return AI_ANSWER_ENGINE_UA.test(String(req.headers["user-agent"] ?? ""));
+    };
+
+    // Resolve an HTML / clean path to its markdown twin: the served-URL path
+    // and the on-disk file, when a real twin exists under the dashboard root.
+    const markdownTwin = (
+      cleanPath: string,
+    ): { rel: string; file: string } | null => {
+      let rel: string | null = null;
+      if (cleanPath === "/" || cleanPath === "/index.html") rel = "/index.md";
+      else if (cleanPath.endsWith(".html")) rel = `${cleanPath.slice(0, -5)}.md`;
+      else if (/^\/[a-z0-9][a-z0-9\-/]*$/i.test(cleanPath)) rel = `${cleanPath}.md`;
+      if (!rel) return null;
+      const file = resolvePath(join(dashboardPath, rel.slice(1)));
+      if (!file.startsWith(resolvedDashboardRoot)) return null;
+      if (!existsSync(file) || !statSync(file).isFile()) return null;
+      return { rel, file };
+    };
+
+    // Serve the markdown twin when the caller prefers markdown. Runs before the
+    // "/" route, the static plugin, and the SPA fallback, but only ever acts on
+    // a GET/HEAD whose clean path has a real .md twin — every other request
+    // (API, MCP, assets, HTML with no twin) passes straight through untouched.
+    app.addHook("onRequest", async (req, reply) => {
+      if (req.method !== "GET" && req.method !== "HEAD") return;
+      const cleanPath = req.url.split("?")[0];
+      if (
+        cleanPath.startsWith("/api/") ||
+        cleanPath.startsWith("/sse") ||
+        cleanPath.startsWith("/mcp") ||
+        cleanPath.startsWith("/.well-known/")
+      ) {
+        return;
+      }
+      if (!wantsMarkdown(req)) return;
+      const twin = markdownTwin(cleanPath);
+      if (!twin) return;
+      reply
+        .header("Content-Type", "text/markdown; charset=utf-8")
+        .header("Vary", "Accept")
+        .header("Link", `<${twin.rel}>; rel="alternate"; type="text/markdown"`)
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "public, max-age=300");
+      return reply.send(readFileSync(twin.file, "utf-8"));
+    });
+
+    // Advertise the markdown twin (Link + Vary) on every HTML response, so an
+    // agent that got HTML learns where the markdown lives without a probe.
+    app.addHook("onSend", async (req, reply, payload) => {
+      const ct = String(reply.getHeader("content-type") ?? "");
+      if (!ct.includes("text/html")) return payload;
+      const cleanPath = req.url.split("?")[0];
+      const existingVary = String(reply.getHeader("vary") ?? "");
+      if (!/\baccept\b/i.test(existingVary)) {
+        reply.header("Vary", existingVary ? `${existingVary}, Accept` : "Accept");
+      }
+      const twin = markdownTwin(cleanPath);
+      if (twin && !reply.getHeader("link")) {
+        reply.header(
+          "Link",
+          `<${twin.rel}>; rel="alternate"; type="text/markdown"`,
+        );
+      }
+      return payload;
+    });
 
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
