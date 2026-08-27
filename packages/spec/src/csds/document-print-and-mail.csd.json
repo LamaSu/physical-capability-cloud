@@ -1,0 +1,188 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/document-print-and-mail/v1",
+  "version": "1.0.0",
+  "status": "draft",
+  "name": "Document Print-and-Mail",
+  "description": "Composite capability: print a document, fold and stuff it with a carrier label issued UPSTREAM (postage bought before any human touches the envelope), drop it into the mail stream, and prove it. The mail leg closes ONLY on the carrier's own acceptance-scan event for the upstream-issued tracking number — third-party attested, never a photograph. Fulfillable identically by an API operator (e.g. Lob) or a human with a printer and a car: same contract, same evidence requirements, same escrow, same verdict. Legs: print -> handoff -> mail -> proof (plan template: packages/spec/src/csd/document-print-and-mail.plan.ts).",
+  "kind": "workflow",
+  "baseDefinition": null,
+  "discovery": {
+    "protocols": ["api", "manual"],
+    "detect": {
+      "api": { "attributes": ["carrierAccount", "labelApi", "webhookEndpoint"] },
+      "manual": { "attributes": ["printerModel", "serviceRadiusKm", "carrierDropoffAccess"] }
+    }
+  },
+  "parameters": [
+    {
+      "type": "string",
+      "key": "documentCid",
+      "label": "Document",
+      "description": "Content address (CID) of the PDF to print and mail",
+      "required": true,
+      "order": 1,
+      "group": "Document",
+      "maxLength": 128,
+      "placeholder": "bafybeigdyrzt..."
+    },
+    {
+      "type": "number",
+      "key": "pageCount",
+      "label": "Pages",
+      "description": "Number of printed pages (drives the per-page print charge)",
+      "required": true,
+      "order": 2,
+      "group": "Document",
+      "min": 1,
+      "max": 500,
+      "step": 1,
+      "unit": "pages",
+      "defaultValue": 1,
+      "pricingImpact": { "mode": "per_unit", "value": "0.10", "label": "+$0.10 per page" }
+    },
+    {
+      "type": "enum",
+      "key": "colorMode",
+      "label": "Color Mode",
+      "required": true,
+      "order": 3,
+      "group": "Document",
+      "defaultValue": "monochrome",
+      "options": [
+        { "value": "monochrome", "label": "Black & White" },
+        { "value": "color", "label": "Color", "pricingImpact": { "mode": "multiplier", "value": "2.0", "label": "2x for color" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "mailClass",
+      "label": "Mail Class",
+      "description": "Carrier service. Certified classes close the proof leg on the carrier's delivery scan plus the recipient's signature.",
+      "required": true,
+      "order": 4,
+      "group": "Mailing",
+      "defaultValue": "first-class",
+      "options": [
+        { "value": "first-class", "label": "First-Class Mail" },
+        { "value": "priority", "label": "Priority Mail", "pricingImpact": { "mode": "flat", "value": "9.00", "label": "+$9.00 priority" } },
+        { "value": "certified", "label": "Certified Mail", "pricingImpact": { "mode": "flat", "value": "4.85", "label": "+$4.85 certified" } },
+        { "value": "certified-return-receipt", "label": "Certified Mail + Return Receipt", "pricingImpact": { "mode": "flat", "value": "8.50", "label": "+$8.50 certified + return receipt" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "envelope",
+      "label": "Envelope",
+      "required": false,
+      "order": 5,
+      "group": "Mailing",
+      "defaultValue": "number-10",
+      "options": [
+        { "value": "number-10", "label": "#10 envelope (up to 6 pages)" },
+        { "value": "flat-9x12", "label": "9x12 flat (up to 60 pages)", "pricingImpact": { "mode": "flat", "value": "0.50", "label": "+$0.50 flat envelope" } }
+      ]
+    },
+    {
+      "type": "string",
+      "key": "recipientAddress",
+      "label": "Recipient Address",
+      "description": "Full postal address of the recipient (verified by the carrier before postage is bought)",
+      "required": true,
+      "order": 6,
+      "group": "Mailing",
+      "maxLength": 256,
+      "placeholder": "Clerk of the Court, 400 McAllister St, San Francisco CA 94102"
+    },
+    {
+      "type": "string",
+      "key": "returnAddress",
+      "label": "Return Address",
+      "required": false,
+      "order": 7,
+      "group": "Mailing",
+      "maxLength": 256
+    }
+  ],
+  "constraints": [
+    {
+      "key": "print-and-mail-1",
+      "human": "More than 6 pages will not fit a #10 envelope",
+      "severity": "warning",
+      "when": [
+        { "param": "pageCount", "operator": "gt", "value": 6 },
+        { "param": "envelope", "operator": "equals", "value": "number-10" }
+      ],
+      "then": [{ "action": "restrictTo", "param": "envelope", "values": ["flat-9x12"], "message": "Use the 9x12 flat envelope for more than 6 pages" }]
+    },
+    {
+      "key": "print-and-mail-2",
+      "human": "Certified mail closes the proof leg on the carrier's delivery scan plus recipient signature (tier 3)",
+      "severity": "warning",
+      "when": [
+        { "param": "mailClass", "operator": "in", "value": ["certified", "certified-return-receipt"] }
+      ],
+      "then": [{ "action": "warn", "message": "Certified classes require tier-3 proof: carrier delivery scan + recipient signature" }]
+    }
+  ],
+  "invariants": [
+    {
+      "key": "print-and-mail-inv-1",
+      "human": "The mail leg closes only on the carrier's own acceptance scan for a tracking number issued upstream; a photograph never substitutes",
+      "severity": "error",
+      "expression": "evidence.tier2.primitives.some(p => p.id == 'confirm.target_system' && p.params.channel == 'webhook' && p.params.matcher == 'carrier.acceptance_scan')"
+    },
+    {
+      "key": "print-and-mail-inv-2",
+      "human": "Postage is bought and the label generated BEFORE the handoff leg begins — the tracking number exists upstream of any human",
+      "severity": "error",
+      "expression": "legs.handoff.startsAfter('label.issued')"
+    }
+  ],
+  "evidence": {
+    "tier0": {
+      "description": "Self-attested: the operator declares the document was printed and mailed. Not purchasable by a stranger.",
+      "required": ["jobId", "timestamp", "pageCount"],
+      "primitives": [{ "id": "decl.self_attested" }]
+    },
+    "tier1": {
+      "description": "Print leg proven by the kernel (machine job log + kernel-signed receipt); the upstream-issued label/tracking number hashed into the bundle; mailing still self-declared.",
+      "required": ["jobId", "timestamp", "pageCount", "printJobLogCid", "labelCid", "trackingNumber"],
+      "primitives": [
+        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printJobLogCid" },
+        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
+        { "id": "artifact.hash", "bind": "labelCid" }
+      ]
+    },
+    "tier2": {
+      "description": "Print + handoff + MAIL: a nonce-bound photo of the printed document with its pre-printed label at handoff, then the CARRIER's authenticated acceptance-scan webhook for the upstream-issued tracking number. The worker cannot author the proof. No scan, no release.",
+      "required": ["jobId", "timestamp", "pageCount", "printJobLogCid", "labelCid", "trackingNumber", "handoffPhotoCid", "carrierAcceptanceScan"],
+      "primitives": [
+        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printJobLogCid" },
+        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
+        { "id": "artifact.hash", "bind": "labelCid" },
+        { "id": "capture.photo_nonced", "bind": "handoffPhotoCid" },
+        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "carrierAcceptanceScan" }
+      ]
+    },
+    "tier3": {
+      "description": "Tier 2 + the carrier's delivery scan + the recipient's signature (certified classes). NOTE: a dedicated signed-channel primitive for carrier scans (channel.carrier_scan) is not yet in evidence-vocabulary v1 and is proposed to the evidence lane; until it lands, tier 3 rides confirm.target_system over the authenticated webhook plus the recipient signature.",
+      "required": ["jobId", "timestamp", "pageCount", "printJobLogCid", "labelCid", "trackingNumber", "handoffPhotoCid", "carrierAcceptanceScan", "carrierDeliveryScan", "recipientSignatureCid"],
+      "primitives": [
+        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printJobLogCid" },
+        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
+        { "id": "artifact.hash", "bind": "labelCid" },
+        { "id": "capture.photo_nonced", "bind": "handoffPhotoCid" },
+        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "carrierAcceptanceScan" },
+        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.delivery_scan" }, "bind": "carrierDeliveryScan" },
+        { "id": "confirm.recipient_signature", "bind": "recipientSignatureCid" }
+      ]
+    }
+  },
+  "pricing": {
+    "basePrice": "2.50",
+    "currency": "USDC",
+    "unit": "per letter",
+    "minimumCharge": "2.50"
+  }
+}
