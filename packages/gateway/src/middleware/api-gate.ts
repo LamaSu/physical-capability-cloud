@@ -96,10 +96,20 @@ const PUBLIC_ARTIFACTS_READ_RE = /^\/api\/artifacts(?:\/[^/]+)?$/;
 // second segment is never the literal "registry-snapshot").
 const PUBLIC_REGISTRY_SNAPSHOT_RE = /^\/api\/compose\/registry-snapshot(?:\/[^/]+)?$/;
 
+// Carrier tracking webhook (EasyPost -> PCC). EasyPost cannot present a PCC
+// API key, so gating this path on one would 401 every genuine delivery before
+// the route's HMAC check ever ran — the exact defect that got the unsigned
+// Stripe/Yellowcard webhooks retired ("being behind an API key is NOT provider
+// authentication"). This path's authentication IS the verified X-Hmac-Signature
+// in routes/carrier.ts (fails closed 503 with no secret, 401 on mismatch).
+// POST only; nothing else under /api/carrier/ is public. sol #297 finding 15.
+const PUBLIC_CARRIER_WEBHOOK_PATH = "/api/carrier/webhook/easypost";
+
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
+  if (method === "POST" && path === PUBLIC_CARRIER_WEBHOOK_PATH) return true;
   // Kernel discovery is public; identity-bearing creation/upsert is not.
   if (method === "GET" && path === "/api/kernels") return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;

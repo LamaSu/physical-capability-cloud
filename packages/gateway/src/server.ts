@@ -93,6 +93,9 @@ import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { carrierRoutes } from "./routes/carrier.js";
+import { initCarrierShipmentStore } from "./services/carrier-shipment-store.js";
+import { setDefaultCommitmentSigner } from "./services/easypost-client.js";
+import { gatewayCommitmentSigner } from "./services/commitment-signer.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
@@ -434,6 +437,9 @@ export async function createGateway(port = 3200) {
   // A2A v1.0 §8.4 — load the agent-card signing key at boot. No-op if
   // PCC_AGENT_CARD_SIGNING_KEY is unset (gateway falls back to unsigned).
   await initSigningKey();
+  // Carrier ShipmentCommitments are attested with the same key (null-safe:
+  // unsigned, visibly, when PCC_AGENT_CARD_SIGNING_KEY is unset).
+  setDefaultCommitmentSigner(gatewayCommitmentSigner);
 
   // ERC-8004 domain verification + A2A agent card (public, before auth)
   await app.register(wellKnownRoutes);
@@ -575,6 +581,24 @@ export async function createGateway(port = 3200) {
       info: (msg) => app.log.info(msg),
       warn: (msg) => app.log.warn(msg),
     });
+  }
+
+  // Carrier shipments (print-and-mail physical-provenance oracle input) —
+  // same write-through SQLite handle as job-offers; tables created by
+  // db/src/migrate.ts (carrier_shipments, carrier_webhook_events). A pre-
+  // execution commitment must survive a restart or the carrier's genuine
+  // scan webhook has nothing to match against (sol #297 finding 8).
+  try {
+    const rawSqlite = (getStore().db as unknown as {
+      $client?: import("./services/carrier-shipment-store.js").SqliteDatabaseLike;
+    }).$client;
+    initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite } : {});
+    if (!rawSqlite) app.log.warn("[carrier] no SQLite handle; shipment commitments are in-memory only");
+  } catch (err) {
+    app.log.warn(
+      `[carrier] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
+    );
+    initCarrierShipmentStore({});
   }
 
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so

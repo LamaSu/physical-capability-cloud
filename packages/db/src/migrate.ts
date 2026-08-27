@@ -1941,6 +1941,37 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS job_offer_events_offer_idx ON job_offer_events(offer_id);
   `);
 
+  // ══════════════════════════════════════════════════════════════════
+  // Carrier shipments (print-and-mail physical-provenance oracle input).
+  // ADDITIVE, new tables only. Written by gateway/services/carrier-shipment-
+  // store.ts with the same write-through pattern as job_offers above. A
+  // pre-execution ShipmentCommitment that only lived in memory would vanish
+  // on restart and make the carrier's genuine scan webhook unmatched (and
+  // allow a second charged label for the same job) — sol #297 finding 8.
+  // tracking_code is UNIQUE so a duplicate/empty code can never be indexed
+  // to two jobs (finding 6/13); webhook event ids are the replay ledger.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS carrier_shipments (
+      job_id         TEXT PRIMARY KEY,
+      tracking_code  TEXT NOT NULL UNIQUE,
+      carrier        TEXT NOT NULL,
+      status         TEXT NOT NULL,
+      data           TEXT NOT NULL,                -- JSON CarrierShipmentRecord (full object)
+      created_at     TEXT NOT NULL,
+      updated_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS carrier_shipments_status_idx ON carrier_shipments(status);
+
+    CREATE TABLE IF NOT EXISTS carrier_webhook_events (
+      event_id   TEXT PRIMARY KEY,                 -- provider (EasyPost) event id: the replay/dedupe key
+      job_id     TEXT NOT NULL,
+      at         TEXT NOT NULL,
+      data       TEXT NOT NULL                     -- JSON: raw signed webhook body + signature header + parsed status
+    );
+    CREATE INDEX IF NOT EXISTS carrier_webhook_events_job_idx ON carrier_webhook_events(job_id);
+  `);
+
   // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────
   // Use the in-scope 3-arg safeAddColumn (closure captures sqlite).
   // SQLite has no ALTER COLUMN; new columns are appended idempotently.
