@@ -69,6 +69,17 @@ export interface CapabilityNode {
   matchStatus?: "matched" | "none";
   /** ID of the registered capability instance this node was matched to. */
   matchedCapabilityId?: string;
+  /**
+   * 0x + 64 hex. SHA-256 over the DEAL SNAPSHOT the match was made against —
+   * {capabilityId, capabilityType, kernelId, price, currency, assuranceTiers}.
+   * `matchedCapabilityId` is mutable (a capability row can be edited
+   * underneath a plan); this is what a commitment binds to instead. It
+   * answers "did the thing I matched change underneath me". It is NOT
+   * `capabilityContractDigest` (the resolved-CSD identity) — capability rows
+   * carry no CSD reference today, so that join does not exist. Consumers:
+   * composition's compositionRoot guard, bridge's job-offer producer.
+   */
+  matchedCapabilityDigest?: string;
   /** Display name of the matched capability (e.g. "Marios Pizzeria"). */
   matchedCapabilityName?: string;
   /** Kernel that offers the matched capability. */
