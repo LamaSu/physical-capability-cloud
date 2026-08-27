@@ -8,10 +8,25 @@
   "kind": "workflow",
   "baseDefinition": null,
   "discovery": {
-    "protocols": ["api", "manual"],
+    "protocols": [
+      "api",
+      "manual"
+    ],
     "detect": {
-      "api": { "attributes": ["carrierAccount", "labelApi", "webhookEndpoint"] },
-      "manual": { "attributes": ["printerModel", "serviceRadiusKm", "carrierDropoffAccess"] }
+      "api": {
+        "attributes": [
+          "carrierAccount",
+          "labelApi",
+          "webhookEndpoint"
+        ]
+      },
+      "manual": {
+        "attributes": [
+          "printerModel",
+          "serviceRadiusKm",
+          "carrierDropoffAccess"
+        ]
+      }
     }
   },
   "parameters": [
@@ -39,7 +54,11 @@
       "step": 1,
       "unit": "pages",
       "defaultValue": 1,
-      "pricingImpact": { "mode": "per_unit", "value": "0.10", "label": "+$0.10 per page" }
+      "pricingImpact": {
+        "mode": "per_unit",
+        "value": "0.10",
+        "label": "+$0.10 per page"
+      }
     },
     {
       "type": "enum",
@@ -50,8 +69,19 @@
       "group": "Document",
       "defaultValue": "monochrome",
       "options": [
-        { "value": "monochrome", "label": "Black & White" },
-        { "value": "color", "label": "Color", "pricingImpact": { "mode": "multiplier", "value": "2.0", "label": "2x for color" } }
+        {
+          "value": "monochrome",
+          "label": "Black & White"
+        },
+        {
+          "value": "color",
+          "label": "Color",
+          "pricingImpact": {
+            "mode": "multiplier",
+            "value": "2.0",
+            "label": "2x for color"
+          }
+        }
       ]
     },
     {
@@ -64,10 +94,37 @@
       "group": "Mailing",
       "defaultValue": "first-class",
       "options": [
-        { "value": "first-class", "label": "First-Class Mail" },
-        { "value": "priority", "label": "Priority Mail", "pricingImpact": { "mode": "flat", "value": "9.00", "label": "+$9.00 priority" } },
-        { "value": "certified", "label": "Certified Mail", "pricingImpact": { "mode": "flat", "value": "4.85", "label": "+$4.85 certified" } },
-        { "value": "certified-return-receipt", "label": "Certified Mail + Return Receipt", "pricingImpact": { "mode": "flat", "value": "8.50", "label": "+$8.50 certified + return receipt" } }
+        {
+          "value": "first-class",
+          "label": "First-Class Mail"
+        },
+        {
+          "value": "priority",
+          "label": "Priority Mail",
+          "pricingImpact": {
+            "mode": "flat",
+            "value": "9.00",
+            "label": "+$9.00 priority"
+          }
+        },
+        {
+          "value": "certified",
+          "label": "Certified Mail",
+          "pricingImpact": {
+            "mode": "flat",
+            "value": "4.85",
+            "label": "+$4.85 certified"
+          }
+        },
+        {
+          "value": "certified-return-receipt",
+          "label": "Certified Mail + Return Receipt",
+          "pricingImpact": {
+            "mode": "flat",
+            "value": "8.50",
+            "label": "+$8.50 certified + return receipt"
+          }
+        }
       ]
     },
     {
@@ -79,8 +136,19 @@
       "group": "Mailing",
       "defaultValue": "number-10",
       "options": [
-        { "value": "number-10", "label": "#10 envelope (up to 6 pages)" },
-        { "value": "flat-9x12", "label": "9x12 flat (up to 60 pages)", "pricingImpact": { "mode": "flat", "value": "0.50", "label": "+$0.50 flat envelope" } }
+        {
+          "value": "number-10",
+          "label": "#10 envelope (up to 6 pages)"
+        },
+        {
+          "value": "flat-9x12",
+          "label": "9x12 flat (up to 60 pages)",
+          "pricingImpact": {
+            "mode": "flat",
+            "value": "0.50",
+            "label": "+$0.50 flat envelope"
+          }
+        }
       ]
     },
     {
@@ -110,19 +178,48 @@
       "human": "More than 6 pages will not fit a #10 envelope",
       "severity": "warning",
       "when": [
-        { "param": "pageCount", "operator": "gt", "value": 6 },
-        { "param": "envelope", "operator": "equals", "value": "number-10" }
+        {
+          "param": "pageCount",
+          "operator": "gt",
+          "value": 6
+        },
+        {
+          "param": "envelope",
+          "operator": "equals",
+          "value": "number-10"
+        }
       ],
-      "then": [{ "action": "restrictTo", "param": "envelope", "values": ["flat-9x12"], "message": "Use the 9x12 flat envelope for more than 6 pages" }]
+      "then": [
+        {
+          "action": "restrictTo",
+          "param": "envelope",
+          "values": [
+            "flat-9x12"
+          ],
+          "message": "Use the 9x12 flat envelope for more than 6 pages"
+        }
+      ]
     },
     {
       "key": "print-and-mail-2",
       "human": "Certified mail closes the proof leg on the carrier's delivery scan plus recipient signature (tier 3)",
       "severity": "warning",
       "when": [
-        { "param": "mailClass", "operator": "in", "value": ["certified", "certified-return-receipt"] }
+        {
+          "param": "mailClass",
+          "operator": "in",
+          "value": [
+            "certified",
+            "certified-return-receipt"
+          ]
+        }
       ],
-      "then": [{ "action": "warn", "message": "Certified classes require tier-3 proof: carrier delivery scan + recipient signature" }]
+      "then": [
+        {
+          "action": "warn",
+          "message": "Certified classes require tier-3 proof: carrier delivery scan + recipient signature"
+        }
+      ]
     }
   ],
   "invariants": [
@@ -142,47 +239,170 @@
   "evidence": {
     "tier0": {
       "description": "Self-attested: the operator declares the document was printed and mailed. Not purchasable by a stranger.",
-      "required": ["jobId", "timestamp", "pageCount"],
-      "primitives": [{ "id": "decl.self_attested" }]
+      "required": [
+        "jobId",
+        "timestamp",
+        "pageCount"
+      ],
+      "primitives": [
+        {
+          "id": "decl.self_attested"
+        }
+      ]
     },
     "tier1": {
       "description": "Print leg proven by the kernel (printer_job_verified machine-log event + kernel-signed receipt); the upstream-issued label hash (commitment.labelHash, sha256 of the label bytes) and trackingCode in the bundle; mailing still self-declared.",
-      "required": ["jobId", "timestamp", "pageCount", "printer_job_verified", "trackingCode", "commitment.labelHash"],
+      "required": [
+        "jobId",
+        "timestamp",
+        "pageCount",
+        "printer_job_verified",
+        "printer_log_captured",
+        "trackingCode",
+        "commitment.labelHash"
+      ],
       "primitives": [
-        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printer_job_verified" },
-        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
-        { "id": "artifact.hash", "bind": "commitment.labelHash" }
+        {
+          "id": "machine.execution_log",
+          "params": {
+            "logKind": "job_log"
+          },
+          "bind": "printer_log_captured"
+        },
+        {
+          "id": "receipt.kernel_signed",
+          "params": {
+            "capability": "document-printing"
+          },
+          "bind": "printer_job_verified"
+        },
+        {
+          "id": "artifact.hash",
+          "bind": "commitment.labelHash"
+        }
       ]
     },
     "tier2": {
       "description": "Print + handoff + MAIL: a nonce-bound pre-seal photo of the printed document with its pre-printed label (photo_captured), then the CARRIER's authenticated acceptance-scan webhook (courier_pickup_confirmed: trackerStatus in_transit, HMAC-verified, commitmentVerified) for the upstream-issued trackingCode. The worker cannot author the proof. No scan, no release.",
-      "required": ["jobId", "timestamp", "pageCount", "printer_job_verified", "trackingCode", "commitment.labelHash", "photo_captured", "courier_pickup_confirmed"],
+      "required": [
+        "jobId",
+        "timestamp",
+        "pageCount",
+        "printer_job_verified",
+        "printer_log_captured",
+        "trackingCode",
+        "commitment.labelHash",
+        "photo_captured",
+        "photo_anti_spoof_check",
+        "courier_pickup_confirmed"
+      ],
       "primitives": [
-        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printer_job_verified" },
-        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
-        { "id": "artifact.hash", "bind": "commitment.labelHash" },
-        { "id": "capture.photo_nonced", "bind": "photo_captured" },
-        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "courier_pickup_confirmed" }
+        {
+          "id": "machine.execution_log",
+          "params": {
+            "logKind": "job_log"
+          },
+          "bind": "printer_log_captured"
+        },
+        {
+          "id": "receipt.kernel_signed",
+          "params": {
+            "capability": "document-printing"
+          },
+          "bind": "printer_job_verified"
+        },
+        {
+          "id": "artifact.hash",
+          "bind": "commitment.labelHash"
+        },
+        {
+          "id": "capture.photo_nonced",
+          "bind": "photo_captured"
+        },
+        {
+          "id": "fresh.challenge_bound",
+          "bind": "photo_anti_spoof_check"
+        },
+        {
+          "id": "confirm.target_system",
+          "params": {
+            "channel": "webhook",
+            "matcher": "carrier.acceptance_scan"
+          },
+          "bind": "courier_pickup_confirmed"
+        }
       ]
     },
     "tier3": {
       "description": "Tier 2 + the carrier's delivery scan (courier_delivery_confirmed) + the recipient's signature (certified classes). NOTE: a dedicated signed-channel primitive for carrier scans (channel.carrier_scan) is not yet in evidence-vocabulary v1 and is proposed to the evidence lane; until it lands, tier 3 rides confirm.target_system over the authenticated webhook plus the recipient signature.",
-      "required": ["jobId", "timestamp", "pageCount", "printer_job_verified", "trackingCode", "commitment.labelHash", "photo_captured", "courier_pickup_confirmed", "courier_delivery_confirmed", "recipientSignatureCid"],
+      "required": [
+        "jobId",
+        "timestamp",
+        "pageCount",
+        "printer_job_verified",
+        "printer_log_captured",
+        "trackingCode",
+        "commitment.labelHash",
+        "photo_captured",
+        "photo_anti_spoof_check",
+        "courier_pickup_confirmed",
+        "courier_delivery_confirmed",
+        "recipientSignatureCid"
+      ],
       "primitives": [
-        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printer_job_verified" },
-        { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
-        { "id": "artifact.hash", "bind": "commitment.labelHash" },
-        { "id": "capture.photo_nonced", "bind": "photo_captured" },
-        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "courier_pickup_confirmed" },
-        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.delivery_scan" }, "bind": "courier_delivery_confirmed" },
-        { "id": "confirm.recipient_signature", "bind": "recipientSignatureCid" }
+        {
+          "id": "machine.execution_log",
+          "params": {
+            "logKind": "job_log"
+          },
+          "bind": "printer_log_captured"
+        },
+        {
+          "id": "receipt.kernel_signed",
+          "params": {
+            "capability": "document-printing"
+          },
+          "bind": "printer_job_verified"
+        },
+        {
+          "id": "artifact.hash",
+          "bind": "commitment.labelHash"
+        },
+        {
+          "id": "capture.photo_nonced",
+          "bind": "photo_captured"
+        },
+        {
+          "id": "fresh.challenge_bound",
+          "bind": "photo_anti_spoof_check"
+        },
+        {
+          "id": "confirm.target_system",
+          "params": {
+            "channel": "webhook",
+            "matcher": "carrier.acceptance_scan"
+          },
+          "bind": "courier_pickup_confirmed"
+        },
+        {
+          "id": "confirm.target_system",
+          "params": {
+            "channel": "webhook",
+            "matcher": "carrier.delivery_scan"
+          },
+          "bind": "courier_delivery_confirmed"
+        },
+        {
+          "id": "confirm.recipient_signature",
+          "bind": "recipientSignatureCid"
+        }
       ]
     }
   },
   "pricing": {
-    "basePrice": "2.50",
+    "basePrice": "6.50",
     "currency": "USDC",
     "unit": "per letter",
-    "minimumCharge": "2.50"
+    "minimumCharge": "6.50"
   }
 }
