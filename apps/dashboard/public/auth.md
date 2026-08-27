@@ -6,6 +6,15 @@ PCC uses API keys for programmatic access and SIWE for wallet login. This docume
 
 The API description is available at `GET https://capability.network/openapi.json`. The tool catalog is available at `GET https://capability.network/agent-package.json`. Protected REST calls use the gateway base URL `https://capability.network` and an HTTP Bearer credential.
 
+## Discovery metadata (OAuth 2.0 / agent_auth)
+
+PCC's authentication is self-describing for an agent that speaks the standard OAuth 2.0 / WorkOS `agent_auth` discovery dance. A protected route replies to an unauthenticated request with `401` and a `WWW-Authenticate: Bearer resource_metadata="https://capability.network/.well-known/oauth-protected-resource"` header (RFC 9728). Resolve that pointer to learn PCC's authorization server and scopes, then resolve the authorization server's own metadata.
+
+- `GET https://capability.network/.well-known/oauth-protected-resource` — RFC 9728 Protected Resource Metadata. Declares `resource` (`https://capability.network`), `authorization_servers`, `bearer_methods_supported` (`header`), and `scopes_supported`.
+- `GET https://capability.network/.well-known/oauth-authorization-server` — RFC 8414 Authorization Server Metadata. Maps PCC's real endpoints to OAuth discovery fields: `registration_endpoint` is key provisioning (`/api/auth/provision`); `authorization_endpoint`/`token_endpoint` are the SIWE nonce/verify pair; `jwks_uri` is `/.well-known/jwks.json`.
+
+Named scopes describe PCC's access tiers: `capabilities:read` (public discovery), `jobs:read`, `jobs:write`, `operator`, and `admin`. The concrete credential is still an API key or a SIWE session as described below — the discovery documents let an `agent_auth`-aware client find the provisioning endpoint without guessing.
+
 ## Pick a method
 
 For an autonomous HTTP client, pick a PCC API key. Provisioning accepts one operator identifier: either an `email` string or an EVM `walletAddress` string. The optional `name` and `capability` fields add operator context. A separate SIWE flow exists at `GET /api/auth/nonce` and `POST /api/auth/verify`, but it is not required for API-key clients.
