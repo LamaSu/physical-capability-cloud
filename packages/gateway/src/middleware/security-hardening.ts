@@ -115,6 +115,37 @@ export function canSiweVerify(ip: string): boolean {
   return true;
 }
 
+// ── Anonymous A2A discovery limiter ──────────────────────────────────────────
+// POST /a2a/tasks/send lets UNAUTHENTICATED callers run the discovery skill
+// (pcc-discover / discover_capability) so a third-party host can find PCC
+// capabilities with no PCC credential on it at all (coord #1667). The reads are
+// the same ones behind the already-public GET /api/capabilities*, so the data
+// exposure is nil — but every tasks/send stores a task in the gateway's
+// in-memory a2aTasks map until TTL prune. Public must not mean unbounded, or
+// anonymous discovery becomes a way to fill gateway memory. 60/min/IP is far
+// more than a polling agent needs and far less than a memory-fill needs.
+
+const anonA2aDiscoverAttempts = new Map<string, { count: number; windowStart: number }>();
+const ANON_A2A_DISCOVER_LIMIT = 60;
+const ANON_A2A_DISCOVER_WINDOW_MS = 60_000; // 1 minute
+
+export function canAnonA2aDiscover(ip: string): boolean {
+  const now = Date.now();
+  const entry = anonA2aDiscoverAttempts.get(ip);
+  if (!entry || now - entry.windowStart > ANON_A2A_DISCOVER_WINDOW_MS) {
+    anonA2aDiscoverAttempts.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= ANON_A2A_DISCOVER_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+/** Test hook — clears the anonymous-discovery window so suites don't bleed into each other. */
+export function __resetAnonA2aDiscoverForTest(): void {
+  anonA2aDiscoverAttempts.clear();
+}
+
 // Cleanup stale SIWE entries periodically
 setInterval(() => {
   const now = Date.now();
