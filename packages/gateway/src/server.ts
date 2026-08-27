@@ -999,8 +999,13 @@ export async function createGateway(port = 3200) {
     // HTML resources advertise the twin via a `Link: <...>; rel="alternate";
     // type="text/markdown"` header (mirrored by an in-page <link rel="alternate">)
     // and `Vary: Accept` so shared caches stay correct.
+    // AI answer-engine crawlers ONLY. Deliberately excludes traditional search
+    // crawlers (Googlebot, Bingbot, Applebot) — they index the HTML (with its
+    // JSON-LD) and only learn about the markdown twin via the Link header, so
+    // classic SEO is untouched. Applebot-Extended / Google-Extended (the AI
+    // arms) are included; their bare search counterparts are not.
     const AI_ANSWER_ENGINE_UA =
-      /GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|Googlebot|cohere-ai|Applebot|Amazonbot|YouBot|DuckAssistBot|Bingbot|meta-externalagent/i;
+      /GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|anthropic-ai|PerplexityBot|Perplexity-User|Google-Extended|cohere-ai|Applebot-Extended|Amazonbot|YouBot|DuckAssistBot|meta-externalagent/i;
 
     const wantsMarkdown = (req: FastifyRequest): boolean => {
       const accept = String(req.headers["accept"] ?? "");
