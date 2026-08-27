@@ -92,6 +92,7 @@ import { subnetRoutes } from "./routes/subnet.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
+import { carrierRoutes } from "./routes/carrier.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
@@ -682,6 +683,7 @@ export async function createGateway(port = 3200) {
   await app.register(agentChatRoutes);
   await app.register(settlementRoutes);
   await app.register(fiatRampRoutes);
+  await app.register(carrierRoutes);
   await app.register(bountyRoutes);
   await app.register(poolRoutes);
   await app.register(telemetryRoutes);
