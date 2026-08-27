@@ -1,10 +1,18 @@
+# PCC robots.txt — AEO posture: allow the AI answer engines that drive referral
+# traffic, point crawlers at PCC's structured discovery feeds, and turn away
+# training-only scrapers that return no answer-engine value.
+
 User-agent: *
 Allow: /
 
+# ── AI answer engines — explicitly allowed ─────────────────────────────────
 User-agent: ChatGPT-User
 Allow: /
 
 User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
 Allow: /
 
 User-agent: ClaudeBot
@@ -16,5 +24,16 @@ Allow: /
 User-agent: Google-Extended
 Allow: /
 
+# ── Training-only crawlers — disallowed (no answer-engine referral value) ───
+User-agent: CCBot
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
 Content-Signal: search=yes, ai-train=yes, ai-input=yes
 Sitemap: https://capability.network/sitemap.xml
+# ARD v0.91 entry source (Agentic Resource Discovery)
+Agentmap: https://capability.network/.well-known/ard.json
+# NLWeb Schema Feeds — Schema.org-bearing pages are enumerated in the sitemap
+Schemamap: https://capability.network/sitemap.xml
