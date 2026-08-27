@@ -40,6 +40,7 @@ import type {
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
 import { matchListings } from "../services/request-matcher.js";
+import { produceJobOffersForRequest } from "../services/job-offer-producer.js";
 import {
   decomposeAgentic,
   createMatcher,
@@ -453,7 +454,16 @@ export async function requestRoutes(app: FastifyInstance) {
     const actor = request.requesterEmail ?? request.requesterWallet ?? "anonymous";
     emitIntent(envelope, actor, "requestor");
 
-    return reply.status(201).send({ request, decomposition: result });
+    // ── Bridge (coord #1276) ────────────────────────────────────────
+    // Direct-match requests publish immediately: the buyer already named an
+    // exact capabilityType/listing, so there is no separate review step and
+    // the node is matched by construction. Composite (NL) requests stay
+    // status="decomposed" and only produce job-offers at explicit /publish
+    // (composition 8a0f4de0's #1289 mapping — buyer consents before offers
+    // go live).
+    const jobOffers = publishNow ? await produceJobOffersForRequest(request) : undefined;
+
+    return reply.status(201).send({ request, decomposition: result, jobOffers });
   });
 
   // ── POST /api/requests/match ──────────────────────────────────────
@@ -604,7 +614,19 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     });
 
-    return { request, publishedBounties, publishedCount: publishedBounties.length };
+    // ── Bridge (coord #1276) ────────────────────────────────────────
+    // Matched nodes become claimable job-offers here — this IS the
+    // buyer-consent step composition 8a0f4de0's #1289 mapping asked for.
+    // Unmatched nodes are untouched (fail-closed, per #1289) — they already
+    // got a bounty above via the existing, unchanged loop.
+    const jobOffers = await produceJobOffersForRequest(request);
+
+    return {
+      request,
+      publishedBounties,
+      publishedCount: publishedBounties.length,
+      jobOffers,
+    };
   });
 
   // ── PUT /api/requests/:id ─────────────────────────────────────────
