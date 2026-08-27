@@ -1,0 +1,83 @@
+{
+  "signedBundle": {
+    "id": "bundle-pm-0001",
+    "jobId": "job-pm-0001",
+    "stepId": "step-mail-0001",
+    "kernelId": "kernel-pm-0001",
+    "assuranceTier": 0,
+    "events": [
+      {
+        "id": "evt-print-0001",
+        "type": "printer_job_verified",
+        "timestamp": "2026-08-27T12:00:00.000Z",
+        "source": {
+          "deviceId": "printer:hp-0001",
+          "deviceType": "printer_log",
+          "kernelId": "kernel-pm-0001",
+          "simulated": false
+        },
+        "payload": {
+          "jobId": "job-pm-0001",
+          "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
+          "labelHash": "d4299f318e413ebed9ce8a30d306bd3d768c9208b708cc1af570030ada8165f9",
+          "pages": 2,
+          "printerId": "hp-0001"
+        },
+        "hash": "sha256:1bb59fc879672fb7bc9947238efcfde393f2eb96a92093bbb5b673dac41ab898"
+      },
+      {
+        "id": "evt-mail-0001",
+        "type": "courier_pickup_confirmed",
+        "timestamp": "2026-08-27T13:30:00.000Z",
+        "source": {
+          "deviceId": "easypost:9400111899223817200001",
+          "deviceType": "courier_api",
+          "kernelId": "kernel-pm-0001",
+          "simulated": false
+        },
+        "payload": {
+          "jobId": "job-pm-0001",
+          "trackingCode": "9400111899223817200001",
+          "trackerId": "trk_pm0001",
+          "carrier": "USPS",
+          "commitment": {
+            "v": 1,
+            "jobId": "job-pm-0001",
+            "kernelId": "kernel-pm-0001",
+            "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
+            "destinationHash": "82edd8c919828e694d5e665798a918fc96e4e255ffe69c702e9e2e91f708fca9",
+            "trackingCode": "9400111899223817200001",
+            "shipmentId": "shp_pm0001",
+            "trackerId": "trk_pm0001",
+            "carrier": "USPS",
+            "service": "First",
+            "labelHash": "d4299f318e413ebed9ce8a30d306bd3d768c9208b708cc1af570030ada8165f9",
+            "labelCid": "bafkreibd4299f318e413ebed9ce8a30d306bd3d768c9208b708cc1af570",
+            "mock": false,
+            "committedAt": "2026-08-27T11:00:00.000Z",
+            "hash": "d2527b925c36afc5f2b254973f358c2648208067a32469d21e5c09086b5ca113",
+            "signature": null
+          },
+          "commitmentVerified": true,
+          "statusDetail": "accepted",
+          "carrierMessage": "Accepted at USPS Origin Facility",
+          "trackingLocation": {
+            "city": "San Francisco",
+            "state": "CA",
+            "country": "US",
+            "zip": "94103"
+          },
+          "providerEventId": "evt_ezp_pm0001",
+          "occurredAt": "2026-08-27T13:30:00.000Z",
+          "providerRawBody": "{\"result\":{\"tracking_code\":\"9400111899223817200001\",\"status\":\"in_transit\"}}"
+        },
+        "hash": "sha256:30a34184a44a52a5053b113934dfbd7710101d4bc2d5dce09cc6297411ae0b5e"
+      }
+    ],
+    "bundleHash": "sha256:6af759298d2cc719bbc0ed5df7fbe1c270e975b06797c4e8aa66d6a3e6e0d230",
+    "kernelSignature": "ed25519:fca1e8f400de4642fc6710e5bc330064a029b8df4b2fa9992e7532b3d7c53198a2352906528f9821e8bfa83cf4f8fa82526f73072886937587747a0151b88700",
+    "createdAt": "2026-08-27T13:31:00.000Z"
+  },
+  "kernelPubkeyRawHex": "3ccd241cffc9b3618044b97d036d8614593d8b017c340f1dee8773385517654b",
+  "preimage": "RAW32(bundleHash)"
+}
