@@ -1,26 +1,30 @@
 #!/usr/bin/env node
 /**
  * composite-bundle-signed-kat.cjs
- * Evidence lane c25c8f97 — a REAL signed EvidenceBundle KAT for the print-and-mail composite.
+ * Evidence lane c25c8f97 — a signed EvidenceBundle KAT (conformance fixture) for the print-and-mail composite.
  *
- * Purpose (oracle #1727: "runnable the moment a real signed bundle exists"): hand oracle a concrete
- * EvidenceBundle carrying both legs, signed by a real (fixed, deterministic) Ed25519 kernel key, so its
- * end-to-end verifyEvidenceBundle -> event-present -> release runs against a REAL kernel signature, not
- * just presence. Reuses the exact fixture + roots from composite-print-mail-bundle-golden-mirror.cjs.
+ * HONEST SCOPE (do not overstate — this is a FIXTURE, not evidence):
+ *   - The events are hand-authored with invented data; the carrier scan is a synthetic providerRawBody.
+ *   - The kernel key is a FIXED TEST seed chosen here — the architecture requires a real DEVICE to sign;
+ *     no real kernel signer exists yet (kernel/src/evidence-emitter.ts:53-62 is a TEST placeholder that
+ *     returns a fake string `test_sig_<...>`, never a real Ed25519 sig; kernel-hp-printer is unbuilt).
+ *   So this proves the bundle hash + signature MECHANICS and gives oracle a concrete artifact to run its
+ *   verifyEvidenceBundle against. It is NOT evidence that any print/mail job happened.
  *
- * SIGNING PREIMAGE — PRODUCTION, grounded in source (NOT the raw32 I first guessed; oracle #1523 caught it):
- *   kernelSignature = Ed25519_sign(kernelSeed, utf8(bundleHash))   where bundleHash = "sha256:"+hex
- * The real kernel emitter signs the STRING: evidence-emitter.ts:132-135 does `bundleHashValue = hashBundle(events)`
- * (a "sha256:hex" string) then `signFn(bundleHashValue)`; oracle's verifyEvidenceBundle (bundle-auth.ts:122) checks
- * utf8(sha256:+hex). Emitter and verifier MUST agree, and they agree at the utf8-string form — this is oracle's #1240
- * production convention. (raw32(bundleHash) was the MIRROR artifact, per #1240 — my v1 KAT wrongly used it.)
+ * SIGNING PREIMAGE — a PINNED CONVENTION, not a discovered production fact (there is no real signFn to
+ * discover). The emitter's signFn is pluggable ((data:string)=>Signature, evidence-emitter.ts:135 passes
+ * the "sha256:hex" string), so the emitter does NOT fix the byte preimage — the SIGNER does, and it is
+ * unbuilt. So evidence + oracle PIN it deliberately:
+ *   kernelSignature = Ed25519_sign(kernelSeed, RAW32(bundleHash))   where RAW32 = the 32 bytes of the digest.
+ * raw32 = sign the digest BYTES (the cryptographic standard), matches oracle's verifyEvidenceBundle after
+ * its #1766 flip. (#1240's "utf8-string=production" was a placeholder awaiting a real vector — there is none.)
+ * When a real kernel signer is built it MUST sign RAW32(bundleHash) to honour this pin.
  *
- * Deterministic: fixed 32-byte kernel seed, fixed fixture. node:crypto only.
+ * Deterministic: fixed test seed + fixed fixture. node:crypto only.
  */
 "use strict";
 const { createHash, createPrivateKey, createPublicKey, sign, verify } = require("node:crypto");
 
-// ---- @pcc/spec canonical.ts (verbatim, same as the golden mirror) --------------------------------
 function canonicalize(value) {
   if (value === null || value === undefined) return "null";
   if (typeof value === "string") return JSON.stringify(value);
@@ -37,7 +41,6 @@ const sha256Hex = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 const hashEvent = (e) => sha256Prefixed(canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload }));
 const hashBundle = (events) => sha256Prefixed(canonicalize(events.map((e) => e.hash).sort()));
 
-// ---- fixed fixture (identical to the golden mirror) ----------------------------------------------
 const JOB = "job-pm-0001", KERNEL = "kernel-pm-0001";
 const documentHash = sha256Hex("the-letter-body::Dear resident, ...::v1");
 const labelHash = sha256Hex("EASYPOST-LABEL-PNG-BYTES::v1");
@@ -50,56 +53,48 @@ const printEvent = { id: "evt-print-0001", type: "printer_job_verified", timesta
 const mailEvent = { id: "evt-mail-0001", type: "courier_pickup_confirmed", timestamp: "2026-08-27T13:30:00.000Z", source: { deviceId: "easypost:" + trackingCode, deviceType: "courier_api", kernelId: KERNEL, simulated: false }, payload: { jobId: JOB, trackingCode, trackerId: "trk_pm0001", carrier: "USPS", commitment, commitmentVerified: true, statusDetail: "accepted", carrierMessage: "Accepted at USPS Origin Facility", trackingLocation: { city: "San Francisco", state: "CA", country: "US", zip: "94103" }, providerEventId: "evt_ezp_pm0001", occurredAt: "2026-08-27T13:30:00.000Z", providerRawBody: '{"result":{"tracking_code":"' + trackingCode + '","status":"in_transit"}}' } };
 printEvent.hash = hashEvent(printEvent);
 mailEvent.hash = hashEvent(mailEvent);
-const bundleHash = hashBundle([printEvent, mailEvent]); // = kernelSignedEventsRoot, "sha256:HEX"
+const bundleHash = hashBundle([printEvent, mailEvent]);
 
-// ---- deterministic Ed25519 kernel key from a fixed 32-byte seed (node:crypto, PKCS8/SPKI DER wrap) -
-const KERNEL_SEED = Buffer.from("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "hex"); // FIXED test seed — NOT a real key
+// deterministic Ed25519 TEST key from a fixed seed (NOT a real device key)
+const KERNEL_SEED = Buffer.from("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "hex");
 const pkcs8 = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), KERNEL_SEED]);
 const kernelPriv = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
 const kernelPub = createPublicKey(kernelPriv);
-const kernelPubRaw = kernelPub.export({ format: "der", type: "spki" }).subarray(-32); // last 32 bytes = raw ed25519 pubkey
+const kernelPubRaw = kernelPub.export({ format: "der", type: "spki" }).subarray(-32);
 
-// preimage = utf8(bundleHash) — the "sha256:"+hex STRING, what the real emitter signFn signs (evidence-emitter.ts:135)
-const preimage = Buffer.from(bundleHash, "utf8");
-const kernelSignature = sign(null, preimage, kernelPriv); // Ed25519 (algorithm implied by the key)
+// PINNED preimage = RAW32(bundleHash)
+const preimage = Buffer.from(bundleHash.slice("sha256:".length), "hex");
+const kernelSignature = sign(null, preimage, kernelPriv);
 
-// ---- the signed EvidenceBundle (master EvidenceBundle shape) --------------------------------------
 const signedBundle = {
-  id: "bundle-pm-0001",
-  jobId: JOB,
-  stepId: "step-mail-0001",
-  kernelId: KERNEL,
-  assuranceTier: 0,
-  events: [printEvent, mailEvent],
-  bundleHash,
+  id: "bundle-pm-0001", jobId: JOB, stepId: "step-mail-0001", kernelId: KERNEL, assuranceTier: 0,
+  events: [printEvent, mailEvent], bundleHash,
   kernelSignature: "ed25519:" + kernelSignature.toString("hex"),
   createdAt: "2026-08-27T13:31:00.000Z",
 };
 
-// ---- verify (watched-it-work) --------------------------------------------------------------------
 let fail = 0;
 const check = (n, ok) => { if (!ok) fail++; console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}`); };
 const good = verify(null, preimage, kernelPub, kernelSignature);
-const tamperedMsg = Buffer.from("sha256:" + sha256Hex("different-bundle").slice(7), "utf8");
-const badMsg = verify(null, tamperedMsg, kernelPub, kernelSignature);
+const tamperedRoot = Buffer.from(sha256Hex("different-bundle"), "hex");
+const badMsg = verify(null, tamperedRoot, kernelPub, kernelSignature);
 const flip = Buffer.from(kernelSignature); flip[10] ^= 0x01;
 const badSig = verify(null, preimage, kernelPub, flip);
-// cross-check: the raw32 form (the #1240 MIRROR artifact) must NOT verify against this production sig
-const raw32 = Buffer.from(bundleHash.slice("sha256:".length), "hex");
-const raw32Verifies = verify(null, raw32, kernelPub, kernelSignature);
+// cross-check: the utf8("sha256:"+hex) STRING form must NOT verify against this raw32-pinned sig
+const utf8Form = Buffer.from(bundleHash, "utf8");
+const utf8Verifies = verify(null, utf8Form, kernelPub, kernelSignature);
 
-console.log("== composite print-and-mail SIGNED bundle KAT (evidence c25c8f97) ==");
+console.log("== composite print-and-mail SIGNED bundle KAT (fixture, evidence c25c8f97) ==");
 console.log("  bundleHash / kernelSignedEventsRoot =", bundleHash);
-console.log("  kernelPubkey (raw ed25519, hex)     =", kernelPubRaw.toString("hex"));
+console.log("  kernelPubkey (raw ed25519, hex)     =", kernelPubRaw.toString("hex"), "(TEST key)");
 console.log("  kernelSignature (ed25519, hex)      =", kernelSignature.toString("hex"));
-console.log("  preimage                            = utf8(bundleHash) =", JSON.stringify(bundleHash));
+console.log("  preimage                            = RAW32(bundleHash) =", preimage.toString("hex"), "(PINNED convention)");
 console.log("VERIFY:");
-check("valid signature verifies TRUE (utf8-string preimage = production)", good === true);
+check("valid signature verifies TRUE (raw32 preimage = pinned)", good === true);
 check("wrong message verifies FALSE", badMsg === false);
 check("tampered signature verifies FALSE", badSig === false);
-check("raw32 (the #1240 mirror form) does NOT verify vs this production sig", raw32Verifies === false);
-console.log(fail === 0 ? "\nALL GREEN (4/4) - sig over utf8(bundleHash) matches oracle verifyEvidenceBundle bundle-auth.ts:122 (production form)" : `\n${fail} FAILURE(S)`);
-// emit the signed bundle so oracle can run its end-to-end against it
-require("node:fs").writeFileSync(__dirname + "/composite-bundle-signed-kat.json", JSON.stringify({ signedBundle, kernelPubkeyRawHex: kernelPubRaw.toString("hex"), preimage: "utf8(bundleHash) = utf8(sha256:+hex)" }, null, 2));
+check("utf8(sha256:+hex) string form does NOT verify vs this raw32-pinned sig", utf8Verifies === false);
+console.log(fail === 0 ? "\nALL GREEN (4/4) - sig over RAW32(bundleHash), matches oracle verifyEvidenceBundle after #1766. FIXTURE, not real evidence." : `\n${fail} FAILURE(S)`);
+require("node:fs").writeFileSync(__dirname + "/composite-bundle-signed-kat.json", JSON.stringify({ signedBundle, kernelPubkeyRawHex: kernelPubRaw.toString("hex"), preimage: "RAW32(bundleHash) [PINNED]", note: "FIXTURE: test key + fabricated events; not evidence" }, null, 2));
 console.log("wrote composite-bundle-signed-kat.json");
 process.exit(fail === 0 ? 0 : 1);
