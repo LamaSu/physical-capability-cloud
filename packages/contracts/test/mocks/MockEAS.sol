@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IEAS, EASAttestation} from "../../src/interfaces/IEAS.sol";
+import {IEAS, EASAttestation, AttestationRequest} from "../../src/interfaces/IEAS.sol";
 
 /**
  * @title MockEAS
@@ -66,6 +66,25 @@ contract MockEAS is IEAS {
      */
     function getAttestation(bytes32 uid) external view override returns (EASAttestation memory) {
         return _attestations[uid];
+    }
+
+    /**
+     * @notice Record a new attestation (the EAS write surface). `msg.sender` becomes the `attester`.
+     *         Returns a deterministic uid and stores the full struct so a later getAttestation resolves it.
+     */
+    function attest(AttestationRequest calldata request) external payable override returns (bytes32 uid) {
+        uid = keccak256(abi.encode(request.schema, request.data.recipient, request.data.data, msg.sender, block.number));
+        EASAttestation storage a = _attestations[uid];
+        a.uid = uid;
+        a.schema = request.schema;
+        a.time = uint64(block.timestamp);
+        a.expirationTime = request.data.expirationTime;
+        a.revocationTime = 0;
+        a.refUID = request.data.refUID;
+        a.recipient = request.data.recipient;
+        a.attester = msg.sender;
+        a.revocable = request.data.revocable;
+        a.data = request.data.data;
     }
 
     // ── Schema-payload helper ────────────────────────────────────────────────
