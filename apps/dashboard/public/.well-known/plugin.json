@@ -1,0 +1,29 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Physical Capability Cloud",
+  "name_for_model": "pcc",
+  "description_for_human": "Discover, price, hire, and verify real-world physical capability — 3D printing, CNC, lab, couriers — via agents.",
+  "description_for_model": "PCC (Physical Capability Cloud) exposes real-world physical capabilities as agent-callable operations: discover capability types, get build options and prices, build contracts, submit and track jobs, and inspect on-chain-anchored evidence. Use the OpenAPI document for the operationId-named REST surface, the MCP server for a tool transport, and the A2A agent card for agent-to-agent tasks.",
+  "auth": {
+    "type": "oauth",
+    "authorization_type": "bearer",
+    "protected_resource_metadata": "https://capability.network/.well-known/oauth-protected-resource",
+    "authorization_server_metadata": "https://capability.network/.well-known/oauth-authorization-server",
+    "provision": "https://capability.network/api/auth/provision",
+    "documentation": "https://capability.network/auth.md"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://capability.network/openapi.json"
+  },
+  "interfaces": {
+    "openapi": "https://capability.network/openapi.json",
+    "mcp": "https://capability.network/.well-known/mcp",
+    "a2a_agent_card": "https://capability.network/.well-known/agent-card.json",
+    "agent_package": "https://capability.network/agent-package.json",
+    "ard_catalog": "https://capability.network/.well-known/ard.json"
+  },
+  "logo_url": "https://capability.network/pcc-icon.svg",
+  "contact_email": "globalmysterysnailrevolution@gmail.com",
+  "legal_info_url": "https://capability.network/privacy.html"
+}

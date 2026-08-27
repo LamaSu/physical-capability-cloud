@@ -372,6 +372,31 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
           linkset: [
             {
               anchor: PUBLIC_BASE_URL,
+              // RFC 9727 §2 — one `item` link per API PCC publishes, so a
+              // catalog consumer can enumerate the individual APIs rather than
+              // only the base service-desc/service-doc.
+              item: [
+                {
+                  href: `${PUBLIC_BASE_URL}/openapi.json`,
+                  type: "application/openapi+json",
+                  title: "PCC REST API (OpenAPI)",
+                },
+                {
+                  href: `${PUBLIC_BASE_URL}/.well-known/mcp`,
+                  type: "application/json",
+                  title: "PCC MCP server",
+                },
+                {
+                  href: `${PUBLIC_BASE_URL}/.well-known/agent-card.json`,
+                  type: "application/json",
+                  title: "PCC A2A agent card",
+                },
+                {
+                  href: `${PUBLIC_BASE_URL}/.well-known/ard.json`,
+                  type: "application/json",
+                  title: "PCC ARD capability catalog",
+                },
+              ],
               "service-desc": [
                 {
                   href: `${PUBLIC_BASE_URL}/openapi.json`,
