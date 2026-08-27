@@ -133,12 +133,23 @@ function sortedNodes(nodes: MatchedNode[]): MatchedNode[] {
 }
 function sortedEdges(edges: MatchedEdge[]): MatchedEdge[] { return [...edges].sort(cmpEdge); }
 
+export interface ValidateOptions {
+  /**
+   * Also check the provider BINDINGS (digest / price / currency) on matched nodes. Required for a
+   * compositionRoot; irrelevant to — and deliberately skipped for — the provider-agnostic
+   * capabilityContractRoot, which must be computable for a matched-but-not-yet-digested plan
+   * (master today) exactly as for an unmatched one. Default: true.
+   */
+  bindings?: boolean;
+}
+
 /**
  * Validate a plan's structure and field grammars. Returns the list of violations (empty = valid).
- * Matching-dependent fields (digest, price, currency) are checked only on matched nodes, so a
- * not-yet-matched plan can still have a valid, computable capabilityContractRoot.
+ * Structure (ids, types, evidence, edges, acyclicity) is always checked; provider bindings only when
+ * `opts.bindings !== false`.
  */
-export function validatePlan(dag: MatchedDAG): string[] {
+export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): string[] {
+  const checkBindings = opts.bindings !== false;
   const v: string[] = [];
   if (!ID_PATTERN.test(dag?.requestId ?? "")) v.push("requestId: must be 1-128 printable ASCII characters");
   if (!Array.isArray(dag?.nodes) || dag.nodes.length === 0) { v.push("nodes: empty plan"); return v; }
@@ -150,7 +161,7 @@ export function validatePlan(dag: MatchedDAG): string[] {
     ids.add(n.nodeId);
     if (!ID_PATTERN.test(n?.capabilityType ?? "")) v.push(`${tag}: capabilityType is required (1-128 printable ASCII characters)`);
     if (n.matchStatus !== "matched" && n.matchStatus !== "none") v.push(`${tag}: matchStatus must be 'matched' or 'none'`);
-    if (n.matchStatus === "matched") {
+    if (checkBindings && n.matchStatus === "matched") {
       if (!DIGEST_PATTERN.test(n.matchedCapabilityDigest ?? "")) v.push(`${tag}: matched node missing/invalid matchedCapabilityDigest (0x + 64 hex)`);
       if (!COST_PATTERN.test(n.estimatedCost ?? "")) v.push(`${tag}: matched node missing/invalid estimatedCost (canonical decimal string)`);
       if (!CURRENCY_PATTERN.test(n.currency ?? "")) v.push(`${tag}: matched node missing/invalid currency (e.g. USDC)`);
@@ -215,7 +226,8 @@ function contractRootUnchecked(dag: MatchedDAG): string {
  * over a malformed plan is meaningless, and callers must not be able to mistake one for a root.
  */
 export function deriveCapabilityContractRoot(dag: MatchedDAG): string {
-  const violations = validatePlan(dag);
+  // Structure only — provider bindings are not part of the contract (see ValidateOptions.bindings).
+  const violations = validatePlan(dag, { bindings: false });
   if (violations.length > 0) throw new Error(`INVALID_PLAN: ${violations.join("; ")}`);
   return contractRootUnchecked(dag);
 }
