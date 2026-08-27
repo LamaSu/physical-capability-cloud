@@ -57,6 +57,15 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # PINNED. Unpinned, this action installs the current nightly on every
+          # run, so a Foundry release can turn master red with zero repo changes.
+          # That happened 2026-08-27: the last green run (33019332582) installed
+          # forge 1.7.1; the first red run (33097376122) got 1.8.0, whose
+          # tightened vm.prank ("cannot overwrite a prank until it is applied at
+          # least once") failed the suite. 1.7.1 is the version this exact suite
+          # is KNOWN to pass on. Bump deliberately, with the tests, not by drift.
+          version: v1.7.1
 
       - name: Install forge-std
         working-directory: packages/contracts
