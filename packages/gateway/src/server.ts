@@ -153,6 +153,7 @@ import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
+import { adminKeyAuditRoutes } from "./routes/admin-key-audit.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -701,6 +702,8 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  // Retire-the-wildcard #1099 piece 4 — read-only audit of keys still on "*".
+  await app.register(adminKeyAuditRoutes);
   // Generic /api/job-offers/* surface — every PCC adapter shares this.
   await app.register(jobOffersRoutes);
   // Legacy /api/courier-jobs/* shim — kept for backward compat through the
