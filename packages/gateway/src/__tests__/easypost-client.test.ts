@@ -18,6 +18,31 @@ import {
   type ShipmentCommitmentBody,
 } from "../services/easypost-client.js";
 import { createCommitmentSigner, COMMITMENT_JWS_TYP } from "../services/commitment-signer.js";
+import { computeCid, isValidCid, type ICidBlobStorage } from "../services/cid-blob-storage.js";
+
+/** Hermetic content-addressed store: no disk, same CID math as the gateway's. */
+function memBlobStore(): ICidBlobStorage & { blobs: Map<string, Uint8Array> } {
+  const blobs = new Map<string, Uint8Array>();
+  return {
+    blobs,
+    async put(bytes, opts) {
+      const cid = computeCid(bytes);
+      blobs.set(cid, bytes);
+      return { cid, sizeBytes: bytes.length, mediaType: opts?.mediaType ?? "application/octet-stream", backend: "local", storedAt: new Date().toISOString() };
+    },
+    async get(cid) {
+      const b = blobs.get(cid);
+      if (!b) throw new Error("not found");
+      return b;
+    },
+    async getRange(cid, start, end) {
+      return (await this.get(cid)).slice(start, end);
+    },
+    async exists(cid) {
+      return blobs.has(cid);
+    },
+  };
+}
 
 const toAddress = { name: "Recipient Name", street1: "100 Court St", city: "Brooklyn", state: "NY", zip: "11201" };
 const fromAddress = { name: "PCC Operator", street1: "1 Shop Way", city: "San Francisco", state: "CA", zip: "94103" };
@@ -66,7 +91,8 @@ function happyFetch(calls: { url: string; init?: RequestInit }[] = []) {
 
 describe("EasyPostClient — mock mode", () => {
   it("fabricates a label with no network calls, marked mock, with a self-consistent commitment", async () => {
-    const client = new EasyPostClient({});
+    const blobs = memBlobStore();
+    const client = new EasyPostClient({ blobStore: blobs });
     expect(client.isMock).toBe(true);
 
     const result = await client.buyCheapestLabel(base);
@@ -74,36 +100,40 @@ describe("EasyPostClient — mock mode", () => {
     expect(result.mock).toBe(true);
     expect(result.trackingCode).toMatch(/^EZMOCK\d{10}$/);
     expect(result.labelHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(isValidCid(result.labelCid)).toBe(true);
+    expect(blobs.blobs.has(result.labelCid)).toBe(true); // mock label bytes are stored too, so the print leg can fetch them
     expect(result.commitment.mock).toBe(true);
     expect(result.commitment.documentHash).toBe(documentHash);
     expect(result.commitment.kernelId).toBe("kernel-1");
     expect(result.commitment.labelHash).toBe(result.labelHash);
+    expect(result.commitment.labelCid).toBe(result.labelCid);
     expect(result.commitment.signature).toBeNull(); // no signer configured -> visibly unsigned
     expect(verifyCommitmentHash(result.commitment)).toBe(true);
   });
 
   it("produces distinct tracking codes per shipment", async () => {
-    const client = new EasyPostClient({});
+    const client = new EasyPostClient({ blobStore: memBlobStore() });
     const a = await client.buyCheapestLabel({ ...base, jobId: "job-a" });
     const b = await client.buyCheapestLabel({ ...base, jobId: "job-b" });
     expect(a.trackingCode).not.toBe(b.trackingCode);
   });
 
   it("rejects a malformed documentHash before doing anything", async () => {
-    const client = new EasyPostClient({});
+    const client = new EasyPostClient({ blobStore: memBlobStore() });
     await expect(client.buyCheapestLabel({ ...base, documentHash: "nope" })).rejects.toMatchObject({ code: "invalid_document_hash" });
   });
 
   it("enforces the weight ceiling before purchase", async () => {
-    const client = new EasyPostClient({ maxWeightOz: 10 });
+    const client = new EasyPostClient({ maxWeightOz: 10, blobStore: memBlobStore() });
     await expect(client.buyCheapestLabel({ ...base, parcel: { weightOz: 11 } })).rejects.toMatchObject({ code: "weight_exceeds_ceiling" });
   });
 });
 
 describe("EasyPostClient — real mode (injected fetchImpl, no network)", () => {
-  it("creates, buys the cheapest USD rate, downloads and hashes the label BYTES", async () => {
+  it("creates, buys the cheapest USD rate, downloads the label BYTES, hashes AND content-addresses them", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
-    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch(calls) });
+    const blobs = memBlobStore();
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch(calls), blobStore: blobs });
     expect(client.isMock).toBe(false);
 
     const result = await client.buyCheapestLabel(base);
@@ -115,7 +145,10 @@ describe("EasyPostClient — real mode (injected fetchImpl, no network)", () => 
     expect(result.carrier).toBe("USPS"); // cheapest USD — not the UPS listed first, not the EUR rate
     expect(result.rate).toBe("4.13");
     expect(result.labelHash).toBe(createHash("sha256").update(LABEL_BYTES).digest("hex"));
+    expect(result.labelCid).toBe(computeCid(new Uint8Array(LABEL_BYTES)));
+    expect(Buffer.from(await blobs.get(result.labelCid))).toEqual(LABEL_BYTES); // the print leg gets the EXACT bytes back
     expect(result.commitment.labelHash).toBe(result.labelHash);
+    expect(result.commitment.labelCid).toBe(result.labelCid);
     expect(result.commitment.trackerId).toBe("trk_real_456");
     expect(verifyCommitmentHash(result.commitment)).toBe(true);
 
@@ -133,7 +166,7 @@ describe("EasyPostClient — real mode (injected fetchImpl, no network)", () => 
 
   it("refuses to buy when the cheapest rate exceeds the USD ceiling (no /buy call made)", async () => {
     const calls: { url: string }[] = [];
-    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch(calls), maxRateUsd: 4.0 });
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch(calls), maxRateUsd: 4.0, blobStore: memBlobStore() });
     await expect(client.buyCheapestLabel(base)).rejects.toMatchObject({ code: "rate_exceeds_ceiling" });
     expect(calls.some((c) => c.url.endsWith("/buy"))).toBe(false);
   });
@@ -164,7 +197,7 @@ describe("EasyPostClient — real mode (injected fetchImpl, no network)", () => 
 
 describe("ShipmentCommitment — hash + gateway signature", () => {
   it("hash is sha256 over canonical JSON of the body and detects tampering", async () => {
-    const client = new EasyPostClient({});
+    const client = new EasyPostClient({ blobStore: memBlobStore() });
     const { commitment } = await client.buyCheapestLabel(base);
     const { hash, signature: _s, ...body } = commitment;
     expect(hash).toBe(createHash("sha256").update(canonicalize(body)).digest("hex"));
@@ -175,7 +208,7 @@ describe("ShipmentCommitment — hash + gateway signature", () => {
   it("signs the commitment with an ES256 key and the signature verifies against the public key", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256");
     const signer = createCommitmentSigner({ privateKey, kid: "test-kid", alg: "ES256" });
-    const client = new EasyPostClient({ signer });
+    const client = new EasyPostClient({ signer, blobStore: memBlobStore() });
     const { commitment } = await client.buyCheapestLabel(base);
 
     expect(commitment.signature).not.toBeNull();
@@ -190,7 +223,7 @@ describe("ShipmentCommitment — hash + gateway signature", () => {
   it("a signature over one commitment does not verify for a different body", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256");
     const signer = createCommitmentSigner({ privateKey, kid: "k", alg: "ES256" });
-    const client = new EasyPostClient({ signer });
+    const client = new EasyPostClient({ signer, blobStore: memBlobStore() });
     const { commitment } = await client.buyCheapestLabel(base);
     const { payload } = await compactVerify(commitment.signature!.jws, publicKey);
     const tampered = { ...commitment, jobId: "job-other" };
@@ -253,7 +286,27 @@ describe("EasyPostClient — parseTrackerEvent", () => {
       carrier: "USPS",
       statusDetail: "arrived_at_destination_facility",
       occurredAt: "2026-08-27T12:00:00.000Z",
+      carrierMessage: null,
+      trackingLocation: null,
     });
+  });
+
+  it("surfaces the LATEST scan's location + message from tracking_details (by carrier datetime, not array order)", () => {
+    const parsed = client.parseTrackerEvent({
+      id: "evt_loc",
+      description: "tracker.updated",
+      result: {
+        tracking_code: "X",
+        status: "in_transit",
+        updated_at: "2026-08-27T14:22:00Z",
+        tracking_details: [
+          { message: "Arrived at USPS Facility", status: "in_transit", datetime: "2026-08-27T14:22:00Z", tracking_location: { city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" } },
+          { message: "Pre-Shipment Info Sent to USPS", status: "pre_transit", datetime: "2026-08-27T09:00:00Z", tracking_location: { city: null, state: null, zip: null, country: null } },
+        ],
+      },
+    });
+    expect(parsed?.carrierMessage).toBe("Arrived at USPS Facility");
+    expect(parsed?.trackingLocation).toEqual({ city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" });
   });
 
   it("returns null without an event id (no replay key), a carrier timestamp, a tracking code, or for non-tracker events", () => {

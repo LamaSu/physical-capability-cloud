@@ -22,6 +22,30 @@ import {
 } from "../services/carrier-shipment-store.js";
 import { initStore, closeStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import { computeCid, type ICidBlobStorage } from "../services/cid-blob-storage.js";
+
+/** Hermetic content-addressed store for label bytes (no disk). */
+function memBlobStore(): ICidBlobStorage {
+  const blobs = new Map<string, Uint8Array>();
+  return {
+    async put(bytes, opts) {
+      const cid = computeCid(bytes);
+      blobs.set(cid, bytes);
+      return { cid, sizeBytes: bytes.length, mediaType: opts?.mediaType ?? "application/octet-stream", backend: "local", storedAt: new Date().toISOString() };
+    },
+    async get(cid) {
+      const b = blobs.get(cid);
+      if (!b) throw new Error("not found");
+      return b;
+    },
+    async getRange(cid, start, end) {
+      return (await this.get(cid)).slice(start, end);
+    },
+    async exists(cid) {
+      return blobs.has(cid);
+    },
+  };
+}
 
 const WEBHOOK_SECRET = "whsec_test_carrier_suite";
 const OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -90,7 +114,7 @@ afterAll(() => closeStore());
 beforeEach(() => {
   _resetCarrierShipmentStoreForTests();
   initCarrierShipmentStore({});
-  _setEasyPostClientForTests(new EasyPostClient({ webhookSecret: WEBHOOK_SECRET }));
+  _setEasyPostClientForTests(new EasyPostClient({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
 });
 
 afterEach(() => {
@@ -219,7 +243,7 @@ describe("POST /api/carrier/shipments — purchase + idempotency", () => {
         return super.buyCheapestLabel(p);
       }
     }
-    _setEasyPostClientForTests(new SlowMock({ webhookSecret: WEBHOOK_SECRET }));
+    _setEasyPostClientForTests(new SlowMock({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
     const app = await buildApp();
     try {
       const [a, b] = await Promise.all([
@@ -280,7 +304,7 @@ describe("status lattice (finding 7)", () => {
 
 describe("POST /api/carrier/webhook/easypost", () => {
   it("503s when no webhook secret is configured", async () => {
-    _setEasyPostClientForTests(new EasyPostClient({}));
+    _setEasyPostClientForTests(new EasyPostClient({ blobStore: memBlobStore() }));
     const app = await buildApp();
     try {
       const res = await app.inject({ method: "POST", url: "/api/carrier/webhook/easypost", payload: "{}", headers: { "content-type": "application/json", "x-hmac-signature": "x" } });
@@ -305,7 +329,14 @@ describe("POST /api/carrier/webhook/easypost", () => {
     const app = await buildApp();
     try {
       const bought = (await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner })).json();
-      const body = trackerEvent(bought.trackingCode, "in_transit", "evt_pickup_1", "2026-08-27T14:22:00Z", { id: bought.trackerId, shipment_id: bought.shipmentId, status_detail: "arrived_at_destination_facility" });
+      expect(bought.labelCid).toBeTruthy();
+      expect(bought.labelFetch).toBe(`/api/storage/${bought.labelCid}`);
+      const body = trackerEvent(bought.trackingCode, "in_transit", "evt_pickup_1", "2026-08-27T14:22:00Z", {
+        id: bought.trackerId,
+        shipment_id: bought.shipmentId,
+        status_detail: "arrived_at_destination_facility",
+        tracking_details: [{ message: "Accepted at USPS Origin Facility", status: "in_transit", datetime: "2026-08-27T14:22:00Z", tracking_location: { city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" } }],
+      });
       const res = await postWebhook(app, body);
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ matched: true, status: "in_transit", outcome: "applied" });
@@ -317,6 +348,10 @@ describe("POST /api/carrier/webhook/easypost", () => {
       expect(event.type).toBe("courier_pickup_confirmed");
       expect(event.source).toMatchObject({ deviceType: "courier_api", kernelId: KERNEL, simulated: true });
       expect(event.timestamp).toBe("2026-08-27T14:22:00.000Z");
+      // "accepted into the mail stream, ZIP 94103, 14:22" lives in the authenticated payload, not only in the raw bytes
+      expect(event.payload.trackingLocation).toEqual({ city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" });
+      expect(event.payload.carrierMessage).toBe("Accepted at USPS Origin Facility");
+      expect((event.payload.commitment as { labelCid: string }).labelCid).toBe(bought.labelCid);
       // The payload lets a verifier RECOMPUTE, not just trust:
       expect(event.payload.providerRawBody).toBe(body);
       expect(event.payload.providerSignatureHeader).toBe(sign(body));

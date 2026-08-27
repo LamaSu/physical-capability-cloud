@@ -26,6 +26,7 @@
 
 import { randomUUID, createHmac, timingSafeEqual, createHash } from "node:crypto";
 import { canonicalize } from "@pcc/spec";
+import { getCidBlobStorage, type ICidBlobStorage } from "./cid-blob-storage.js";
 
 export interface EasyPostAddress {
   name: string;
@@ -83,6 +84,14 @@ export interface ShipmentCommitmentBody {
   service: string;
   /** sha256 hex of the label BYTES as downloaded from EasyPost (mock: of a deterministic mock label). */
   labelHash: string;
+  /**
+   * CIDv1 (raw, sha-256) of the same label bytes, stored in the gateway's
+   * content-addressed blob store at purchase time. This is how the PRINT leg
+   * fetches the EXACT bytes the commitment binds — so "hash of what the
+   * printer printed" can equal labelHash — instead of re-downloading from a
+   * provider URL that may serve different bytes later.
+   */
+  labelCid: string;
   mock: boolean;
   committedAt: string;
 }
@@ -112,12 +121,20 @@ export interface CreateLabelResult {
   trackingCode: string;
   labelUrl: string;
   labelHash: string;
+  labelCid: string;
   carrier: string;
   service: string;
   rate: string;
   currency: string;
   commitment: ShipmentCommitment;
   mock: boolean;
+}
+
+export interface TrackingLocation {
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  zip: string | null;
 }
 
 export interface TrackerWebhookEvent {
@@ -132,6 +149,10 @@ export interface TrackerWebhookEvent {
   carrier: string | null;
   statusDetail: string | null;
   occurredAt: string;
+  /** The carrier's own words for the latest scan (tracking_details[].message), when present. */
+  carrierMessage: string | null;
+  /** Where the latest scan happened (tracking_details[].tracking_location), when present — "accepted, ZIP 94103". */
+  trackingLocation: TrackingLocation | null;
 }
 
 export class EasyPostError extends Error {
@@ -158,6 +179,8 @@ export interface EasyPostClientConfig {
   /** Refuse any parcel heavier than this (oz). Default 70 (USPS First-Class Package ceiling is ~15.99 oz; leave headroom for Priority). */
   maxWeightOz?: number;
   signer?: CommitmentSigner;
+  /** Content-addressed store for label bytes; defaults to the gateway's shared CID blob store. Tests inject an in-memory one. */
+  blobStore?: ICidBlobStorage;
   now?: () => Date;
 }
 
@@ -261,6 +284,7 @@ export class EasyPostClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly signer: CommitmentSigner | undefined;
+  private readonly blobStore: ICidBlobStorage | undefined;
   private readonly now: () => Date;
 
   constructor(config: EasyPostClientConfig = {}) {
@@ -272,7 +296,15 @@ export class EasyPostClient {
     this.maxRateUsd = config.maxRateUsd ?? DEFAULT_MAX_RATE_USD;
     this.maxWeightOz = config.maxWeightOz ?? DEFAULT_MAX_WEIGHT_OZ;
     this.signer = config.signer;
+    this.blobStore = config.blobStore;
     this.now = config.now ?? (() => new Date());
+  }
+
+  /** Store label bytes content-addressed; returns the CID the print leg fetches by. */
+  private async storeLabel(bytes: Buffer, mediaType: string): Promise<string> {
+    const store = this.blobStore ?? (await getCidBlobStorage());
+    const meta = await store.put(new Uint8Array(bytes), { mediaType });
+    return meta.cid;
   }
 
   get hasWebhookSecret(): boolean {
@@ -293,6 +325,7 @@ export class EasyPostClient {
       carrier: string;
       service: string;
       labelHash: string;
+      labelCid: string;
       mock: boolean;
     },
   ): Promise<ShipmentCommitment> {
@@ -308,6 +341,7 @@ export class EasyPostClient {
       carrier: fields.carrier,
       service: fields.service,
       labelHash: fields.labelHash,
+      labelCid: fields.labelCid,
       mock: fields.mock,
       committedAt: this.now().toISOString(),
     };
@@ -409,6 +443,7 @@ export class EasyPostClient {
       throw new EasyPostError("easypost_invalid_response", null, "label download was empty");
     }
     const labelHash = sha256Hex(labelBytes);
+    const labelCid = await this.storeLabel(labelBytes, labelRes.headers.get("content-type") ?? "image/png");
 
     const carrier = bought.selected_rate?.carrier ?? cheapest.r.carrier ?? "unknown";
     const service = bought.selected_rate?.service ?? cheapest.r.service ?? "unknown";
@@ -420,6 +455,7 @@ export class EasyPostClient {
       trackingCode,
       labelUrl,
       labelHash,
+      labelCid,
       carrier,
       service,
       rate: bought.selected_rate?.rate ?? cheapest.r.rate ?? String(cheapest.usd),
@@ -431,6 +467,7 @@ export class EasyPostClient {
         carrier,
         service,
         labelHash,
+        labelCid,
         mock: false,
       }),
       mock: false,
@@ -442,7 +479,9 @@ export class EasyPostClient {
     const trackerId = `trk_mock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
     const trackingCode = `EZMOCK${hashToPositiveInt(shipmentId).toString().padStart(10, "0").slice(0, 10)}`;
     const labelUrl = `https://easypost-mock.invalid/labels/${shipmentId}.png`;
-    const labelHash = sha256Hex(Buffer.from(`MOCK-LABEL:${shipmentId}:${trackingCode}`));
+    const mockLabelBytes = Buffer.from(`MOCK-LABEL:${shipmentId}:${trackingCode}`);
+    const labelHash = sha256Hex(mockLabelBytes);
+    const labelCid = await this.storeLabel(mockLabelBytes, "text/plain");
 
     return {
       shipmentId,
@@ -450,6 +489,7 @@ export class EasyPostClient {
       trackingCode,
       labelUrl,
       labelHash,
+      labelCid,
       carrier: "USPS",
       service: "First",
       rate: "4.50",
@@ -461,6 +501,7 @@ export class EasyPostClient {
         carrier: "USPS",
         service: "First",
         labelHash,
+        labelCid,
         mock: true,
       }),
       mock: true,
@@ -520,6 +561,7 @@ export class EasyPostClient {
         status_detail?: unknown;
         carrier?: unknown;
         updated_at?: unknown;
+        tracking_details?: unknown;
       };
     };
     if (!evt || typeof evt !== "object") return null;
@@ -533,6 +575,7 @@ export class EasyPostClient {
       ? new Date(Date.parse(r.updated_at)).toISOString()
       : null;
     if (!occurredAt) return null; // carrier timestamp is what orders events; refuse without it
+    const latest = latestTrackingDetail(r.tracking_details);
     return {
       easypostEventId: evt.id,
       trackerId: nonEmptyString(r.id) ? r.id : null,
@@ -542,8 +585,43 @@ export class EasyPostClient {
       carrier: nonEmptyString(r.carrier) ? r.carrier : null,
       statusDetail: nonEmptyString(r.status_detail) ? r.status_detail : null,
       occurredAt,
+      carrierMessage: latest && nonEmptyString(latest.message) ? latest.message : null,
+      trackingLocation: latest?.tracking_location ? toTrackingLocation(latest.tracking_location) : null,
     };
   }
+}
+
+interface RawTrackingDetail {
+  message?: unknown;
+  status?: unknown;
+  datetime?: unknown;
+  tracking_location?: unknown;
+}
+
+/** The most recent scan by the carrier's own datetime (falls back to array order when datetimes are missing). */
+function latestTrackingDetail(details: unknown): RawTrackingDetail | null {
+  if (!Array.isArray(details) || details.length === 0) return null;
+  let best: RawTrackingDetail | null = null;
+  let bestT = -Infinity;
+  for (let i = 0; i < details.length; i++) {
+    const d = details[i] as RawTrackingDetail;
+    if (!d || typeof d !== "object") continue;
+    const t = nonEmptyString(d.datetime) ? Date.parse(d.datetime) : NaN;
+    const score = Number.isNaN(t) ? i : t;
+    if (score >= bestT) {
+      bestT = score;
+      best = d;
+    }
+  }
+  return best;
+}
+
+function toTrackingLocation(loc: unknown): TrackingLocation | null {
+  if (!loc || typeof loc !== "object") return null;
+  const l = loc as Record<string, unknown>;
+  const pick = (k: string) => (nonEmptyString(l[k]) ? (l[k] as string) : null);
+  const out = { city: pick("city"), state: pick("state"), country: pick("country"), zip: pick("zip") };
+  return out.city || out.state || out.country || out.zip ? out : null;
 }
 
 let singleton: EasyPostClient | undefined;

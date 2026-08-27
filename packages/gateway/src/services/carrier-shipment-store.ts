@@ -49,6 +49,8 @@ export interface CarrierShipmentRecord {
   trackingCode: string;
   labelUrl: string;
   labelHash: string;
+  /** CIDv1 of the label bytes in the gateway blob store — fetch via GET /api/storage/:cid (owner/offer-linked). */
+  labelCid: string;
   carrier: string;
   service: string;
   commitment: ShipmentCommitment;
