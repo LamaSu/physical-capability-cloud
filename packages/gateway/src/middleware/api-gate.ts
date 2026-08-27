@@ -9,6 +9,12 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
+// PCC's public gateway base — the resource identifier for RFC 9728 discovery.
+const PUBLIC_BASE_URL = "https://capability.network";
+// RFC 9728 §5.1 — points an unauthenticated agent at the Protected Resource
+// Metadata document so it can discover PCC's authorization server and scopes.
+const RESOURCE_METADATA_CHALLENGE = `Bearer realm="capability.network", resource_metadata="${PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`;
+
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
   "/api/health",
@@ -139,7 +145,10 @@ async function apiGateImpl(app: FastifyInstance) {
       return;
     }
 
-    // No auth — reject
+    // No auth — reject. Emit RFC 9728 WWW-Authenticate so an OAuth/MCP-aware
+    // agent can discover PCC's protected-resource metadata and self-serve a
+    // credential instead of guessing.
+    reply.header("WWW-Authenticate", RESOURCE_METADATA_CHALLENGE);
     return reply.status(401).send({
       error: "api_key_required",
       message: "This endpoint requires authentication. Provide an API key via Authorization: Bearer pcc_live_... header, or sign in with your wallet.",
