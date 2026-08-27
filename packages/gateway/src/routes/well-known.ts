@@ -593,6 +593,10 @@ export const PUBLISHED_WELL_KNOWN = [
   "/.well-known/agent-descriptions",
   "/.well-known/mcp/server-card.json",
   "/.well-known/agent-skills/index.json",
+  "/.well-known/ard.json",
+  "/.well-known/ai-catalog.json",
+  "/.well-known/oauth-protected-resource",
+  "/.well-known/oauth-authorization-server",
 ] as const;
 
 /**
