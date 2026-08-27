@@ -44,14 +44,26 @@
         "alternateName": "The capability network",
         "url": "https://capability.network",
         "logo": "https://capability.network/landing/og-image.jpg",
+        "description": "A decentralized control plane where AI agents and people discover, hire, monitor, and verify real-world physical capability, with cryptographic evidence and per-outcome on-chain settlement.",
+        "knowsAbout": [
+          "physical capability discovery",
+          "agentic commerce",
+          "manufacturing as a service",
+          "laboratory automation",
+          "logistics and courier dispatch",
+          "on-chain milestone settlement",
+          "verifiable execution evidence"
+        ],
         "sameAs": [
           "https://github.com/LamaSu/physical-capability-cloud",
+          "https://github.com/LamaSu",
           "https://discord.gg/CRFvvUgeV4"
         ],
         "contactPoint": {
           "@type": "ContactPoint",
           "contactType": "customer support",
-          "url": "https://discord.gg/CRFvvUgeV4"
+          "url": "https://discord.gg/CRFvvUgeV4",
+          "availableLanguage": "en"
         }
       },
       {
@@ -60,7 +72,15 @@
         "url": "https://capability.network/",
         "name": "PCC — your agent can do real things now",
         "description": "The capability network: AI agents discover, hire, and verify real-world capability with cryptographic proof on every job.",
-        "publisher": { "@id": "https://capability.network/#org" }
+        "publisher": { "@id": "https://capability.network/#org" },
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": {
+            "@type": "EntryPoint",
+            "urlTemplate": "https://capability.network/api/capabilities/search?q={search_term_string}"
+          },
+          "query-input": "required name=search_term_string"
+        }
       },
       {
         "@type": "SoftwareApplication",
@@ -86,6 +106,8 @@
         "areaServed": "Global",
         "audience": { "@type": "Audience", "audienceType": "AI agents and capability operators" },
         "description": "AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays — with cryptographic proof and on-chain (Base Sepolia) settlement via x402/USDC.",
+        "termsOfService": "https://capability.network/privacy.html",
+        "serviceOutput": "A verified physical job outcome with content-addressed evidence and an assurance tier (0–3).",
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "Free to connect and browse; jobs settle per-outcome via USDC escrow." }
       },
       {
@@ -99,6 +121,53 @@
           "@type": "SpeakableSpecification",
           "cssSelector": [".hero h1", ".hero .sub"]
         }
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://capability.network/#faq",
+        "isPartOf": { "@id": "https://capability.network/#website" },
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is the Physical Capability Cloud?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "PCC is a capability network for the physical world: one API where AI agents and people discover, configure, hire, monitor, and verify real-world work — 3D printing, CNC, laser cutting, PCB, laboratory analysis, couriers, and human services — while operators keep execution under local control behind a Shop Kernel."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does an AI agent hire a physical capability on PCC?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Provision an API key at POST /api/auth/provision, discover capabilities with GET /api/capabilities or POST /ask, review options and price, build a capability contract, then submit and monitor the job through the PCC API. The 254-tool agent package and OpenAPI document describe every operation."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How are jobs paid for and settled?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Jobs are priced per outcome by the operator and configuration — there is no subscription. When a job uses PCC settlement, milestones are funded through x402 and USDC escrow on Base Sepolia, and PCC charges a 2.35% protocol settlement fee on settlement. Base Sepolia is a test network."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How is physical work verified?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Every job carries content-addressed evidence and an assurance tier from 0 to 3, ranging from basic operator health through signed events, sensor records, and independent verification. On-chain records store hashes or commitments rather than raw evidence."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is PCC free to use?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Connecting to the gateway, reading the documentation, and browsing the public capability catalog are free with no account required. You pay per outcome only when you execute physical work, as defined by the confirmed capability contract."
+            }
+          }
+        ]
       }
     ]
   }
