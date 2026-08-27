@@ -34,6 +34,7 @@ import type {
   CapabilityNode,
   DecompositionResult,
 } from "@pcc/spec";
+import { matchedCapabilityDigest } from "./matched-capability-digest.js";
 
 // ---------------------------------------------------------------------------
 // Public contracts (dependency-injected — see decomposeAgentic)
@@ -82,6 +83,14 @@ export interface MatchedCapability {
   materials: string[];
   /** Match confidence in [0,1]. */
   score: number;
+  /**
+   * 0x + 64 hex. Digest of the DEAL SNAPSHOT this match was made against
+   * (id, type, kernel, price, currency, tiers) — see matched-capability-digest.ts.
+   * What a commitment binds to instead of the mutable capabilityId.
+   * Deliberately EXCLUDES `score` (matcher confidence, unstable run to run)
+   * and `name` (a rename is not a change in what was bought).
+   */
+  matchedCapabilityDigest: string;
 }
 
 export interface CapabilityMatcher {
@@ -224,17 +233,30 @@ export function createMatcher(
 }
 
 function toMatched(cap: CapabilityLite, score: number): MatchedCapability {
+  const price = capPrice(cap);
+  const currency = cap.pricing?.currency ?? "USDC";
+  const assuranceTiers = cap.assuranceTiers ?? [0, 1];
   return {
     capabilityId: cap.id,
     capabilityType: cap.type,
     name: cap.name,
     kernelId: cap.kernelId,
-    price: capPrice(cap),
-    currency: cap.pricing?.currency ?? "USDC",
-    assuranceTiers: cap.assuranceTiers ?? [0, 1],
+    price,
+    currency,
+    assuranceTiers,
     tags: cap.tags ?? [],
     materials: cap.materials ?? [],
     score: Math.round(score * 100) / 100,
+    // Computed from the SAME resolved values the node is priced with, so the
+    // digest and the price a buyer sees can never disagree about the deal.
+    matchedCapabilityDigest: matchedCapabilityDigest({
+      capabilityId: cap.id,
+      capabilityType: cap.type,
+      kernelId: cap.kernelId,
+      price,
+      currency,
+      assuranceTiers,
+    }),
   };
 }
 
@@ -504,6 +526,11 @@ export async function decomposeAgentic(
       evidenceRequirements: deriveEvidence(m, kind),
       matchStatus: m ? "matched" : "none",
       matchedCapabilityId: m?.capabilityId,
+      // Present iff matched. Downstream fail-closed guards (composition's
+      // compositionRoot, bridge's job-offer producer) treat a matched node
+      // WITHOUT this as uncommittable — so an unmatched node must not carry
+      // a digest that looks like a match.
+      matchedCapabilityDigest: m?.matchedCapabilityDigest,
       matchedCapabilityName: m?.name,
       matchedKernelId: m?.kernelId,
       matchScore: m?.score,
