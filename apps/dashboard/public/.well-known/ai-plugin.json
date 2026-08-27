@@ -2,7 +2,7 @@
   "schema_version": "v1",
   "name_for_human": "Physical Capability Cloud",
   "name_for_model": "pcc",
-  "description_for_human": "Discover, price, hire, and verify real-world physical capabilities — 3D printing, CNC, lab work, drone surveys, couriers — through agents.",
+  "description_for_human": "Discover, price, hire, and verify real-world physical capability — 3D printing, CNC, lab, couriers — via agents.",
   "description_for_model": "PCC (Physical Capability Cloud) exposes real-world physical capabilities as agent-callable API operations: discover capability types, get build options and prices, build contracts, submit and track jobs, and inspect on-chain-anchored evidence. The full, operationId-named operation set is in the OpenAPI document.",
   "auth": {
     "type": "user_http",

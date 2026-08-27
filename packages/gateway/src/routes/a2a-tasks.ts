@@ -56,6 +56,7 @@ import { createJobFromSession } from "./paid-job-flow.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { canAnonA2aDiscover } from "../middleware/security-hardening.js";
 import {
   attachChannel,
   getChannelsByOperator,
@@ -1166,6 +1167,30 @@ function emitAtomicSessionIntent(
 
 // ── Plugin entry point ───────────────────────────────────────────────────────
 
+// ── Public discovery ─────────────────────────────────────────────────────────
+// The ONE thing an unauthenticated caller may do on this endpoint. Kept as an
+// explicit allowlist of skill names — not "anything read-only" — because the
+// same handler dispatches pcc-submit, which reaches commitPccSession and mints
+// escrow. Route-wide public would reopen that side-door (A-1). Per-skill or
+// nothing.
+//
+// Both spellings are listed because dispatchTasksSend accepts the A2A card's
+// alias (`discover_capability`) as well as the canonical `pcc-discover`; the
+// allowlist must match what the dispatcher will actually run, not a
+// normalised form that is computed later.
+const PUBLIC_DISCOVER_SKILLS = new Set(["pcc-discover", "discover_capability"]);
+
+/**
+ * True iff this JSON-RPC call is a `tasks/send` for the discovery skill — the
+ * only call permitted without a bearer. `tasks/get` and `tasks/cancel` are NOT
+ * public even though get is a read: a task is private to whoever created it.
+ */
+function isPublicDiscoverCall(method: unknown, params: Record<string, unknown>): boolean {
+  if (method !== "tasks/send") return false;
+  const requested = params.skill ?? params.skillId;
+  return typeof requested === "string" && PUBLIC_DISCOVER_SKILLS.has(requested);
+}
+
 export async function a2aTasksRoutes(app: FastifyInstance) {
   app.post("/a2a/tasks/send", async (req, reply: FastifyReply) => {
     const body = req.body as unknown;
@@ -1178,25 +1203,52 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
 
     const rpcId = body.id ?? null;
 
+    const method = body.method;
+    const params = (body.params ?? {}) as Record<string, unknown>;
+
     // /a2a/* is NOT under /api/, so apiGate didn't run. Resolve auth here
     // using the same primitives. Tests can opt out by setting
     // PCC_A2A_AUTH_DISABLED=true.
+    //
+    // One exception: the DISCOVERY skill is public. `pcc-discover` (card
+    // alias `discover_capability`) runs the same CapabilityFacade reads that
+    // back the already-public GET /api/capabilities* endpoints, so an
+    // anonymous caller learns nothing a plain curl could not. What it buys is
+    // that a third-party host — a Runtype-hosted agent, another team's agent
+    // reading our card — can discover PCC capabilities with NO PCC credential
+    // existing on that host: a credential-free replica yields nothing if the
+    // host is compromised (coord #1667, sol's verdict on #1659).
+    //
+    // Everything else stays bearer-gated exactly as before: pcc-quote,
+    // pcc-submit (→ commitPccSession, which mints escrow), pcc-verify,
+    // pcc-settle, tasks/get, tasks/cancel.
+    //
+    // Every tasks/send stores a task in the in-memory a2aTasks map, so the
+    // anonymous path is per-IP rate-limited. Public is not unbounded.
     if (process.env.PCC_A2A_AUTH_DISABLED !== "true") {
       const apiKey = resolveApiKey(req);
       const session = !apiKey ? resolveSession(req) : null;
       if (!apiKey && !session) {
-        return reply.status(200).send(
-          rpcError(
-            rpcId,
-            -32600,
-            "Invalid Request: authentication required (Authorization: Bearer pcc_live_...)",
-          ),
-        );
+        if (!isPublicDiscoverCall(method, params)) {
+          return reply.status(200).send(
+            rpcError(
+              rpcId,
+              -32600,
+              "Invalid Request: authentication required (Authorization: Bearer pcc_live_...)",
+            ),
+          );
+        }
+        if (!canAnonA2aDiscover(req.ip)) {
+          return reply.status(200).send(
+            rpcError(
+              rpcId,
+              -32000,
+              "Rate limited: anonymous discovery is capped per IP. Authenticate (Authorization: Bearer pcc_live_...) for higher limits.",
+            ),
+          );
+        }
       }
     }
-
-    const method = body.method;
-    const params = (body.params ?? {}) as Record<string, unknown>;
 
     let result: JsonRpcSuccess | JsonRpcError;
     switch (method) {

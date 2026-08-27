@@ -37,9 +37,10 @@ import type {
   IntentSource,
   DecompositionResult,
 } from "@pcc/spec";
-import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
+import { computeCompositionSignature, budgetToBand, commitmentReportForRequest } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
 import { matchListings } from "../services/request-matcher.js";
+import { produceJobOffersForRequest } from "../services/job-offer-producer.js";
 import {
   decomposeAgentic,
   createMatcher,
@@ -453,7 +454,16 @@ export async function requestRoutes(app: FastifyInstance) {
     const actor = request.requesterEmail ?? request.requesterWallet ?? "anonymous";
     emitIntent(envelope, actor, "requestor");
 
-    return reply.status(201).send({ request, decomposition: result });
+    // ── Bridge (coord #1276) ────────────────────────────────────────
+    // Direct-match requests publish immediately: the buyer already named an
+    // exact capabilityType/listing, so there is no separate review step and
+    // the node is matched by construction. Composite (NL) requests stay
+    // status="decomposed" and only produce job-offers at explicit /publish
+    // (composition 8a0f4de0's #1289 mapping — buyer consents before offers
+    // go live).
+    const jobOffers = publishNow ? await produceJobOffersForRequest(request) : undefined;
+
+    return reply.status(201).send({ request, decomposition: result, jobOffers });
   });
 
   // ── POST /api/requests/match ──────────────────────────────────────
@@ -604,7 +614,19 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     });
 
-    return { request, publishedBounties, publishedCount: publishedBounties.length };
+    // ── Bridge (coord #1276) ────────────────────────────────────────
+    // Matched nodes become claimable job-offers here — this IS the
+    // buyer-consent step composition 8a0f4de0's #1289 mapping asked for.
+    // Unmatched nodes are untouched (fail-closed, per #1289) — they already
+    // got a bounty above via the existing, unchanged loop.
+    const jobOffers = await produceJobOffersForRequest(request);
+
+    return {
+      request,
+      publishedBounties,
+      publishedCount: publishedBounties.length,
+      jobOffers,
+    };
   });
 
   // ── PUT /api/requests/:id ─────────────────────────────────────────
@@ -669,6 +691,47 @@ export async function requestRoutes(app: FastifyInstance) {
       nodeCount: nodes.length,
       edgeCount: edges.length,
     };
+  });
+
+  // ── GET /api/requests/:id/commitment ─────────────────────────────
+  // Composition's trust surface (lane 8a0f4de0): what the buyer AGREED (capabilityContractRoot,
+  // provider-agnostic) and what the fleet AGREED for this run (compositionRoot, provider-bound),
+  // recomputed from the STORED DAG — never from client input. Fail-closed: a partially matched plan
+  // reports its unmatched nodes, and a fully matched plan whose nodes carry no matchedCapabilityDigest
+  // reports `blockedOn` — a root is never fabricated. `legacyCompositionSignature` is the pre-existing
+  // shape key (types + edges, sha256) returned alongside for comparison; the contract root supersets it.
+  // Anyone can recompute: GET /api/requests/:id/dag -> matchedDagFromCapabilityNodes ->
+  // deriveCompositionCommitment (@pcc/spec), and check the conformance corpus in
+  // packages/spec/src/csd/composition-commitment.vectors.json.
+  app.get<{ Params: { id: string } }>("/api/requests/:id/commitment", async (req, reply) => {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
+      return reply.status(404).send({ error: "request_not_found" });
+    }
+    const request = rowToRequest(row);
+    const report = commitmentReportForRequest(request.id, request.capabilityDag, {
+      currency: request.currency,
+      goal: request.title,
+    });
+    const body = {
+      ...report,
+      // Provenance (gateway #1472 condition 2): this is a LIVE recompute from the stored request row,
+      // not a cached claim. `as_of` is the recompute time; `source` names what was recomputed from.
+      as_of: new Date().toISOString(),
+      source: { kind: "stored-request-dag", requestId: request.id, requestUpdatedAt: request.updatedAt, requestStatus: request.status },
+      legacyCompositionSignature: signatureFromDag(request.capabilityDag),
+      verify: {
+        recompute: "GET /api/requests/:id/dag -> matchedDagFromCapabilityNodes -> deriveCompositionCommitment (@pcc/spec)",
+        corpus: "packages/spec/src/csd/composition-commitment.vectors.json",
+      },
+    };
+    // Fail CLOSED at the HTTP layer too (gateway #1472 condition 1): an uncommittable plan is 422 with the
+    // reason and the node ids — never a 200 carrying a null or placeholder root.
+    if (!report.commitment.committable) {
+      return reply.status(422).send({ error: "uncommittable", ...body });
+    }
+    return body;
   });
 
   // ── GET /api/requests/:id/critical-path ──────────────────────────

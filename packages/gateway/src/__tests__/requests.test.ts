@@ -22,16 +22,24 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { requestRoutes, resetRequestsStore } from "../routes/requests.js";
 import { detectTemplateName } from "../services/request-decomposer.js";
 import { initStore, closeStore } from "../db.js";
+import { initJobOffersStore, _resetJobOffersStoreForTests } from "../services/job-offers-store.js";
 
 // Wave 5 — requests now live in SQLite. Boot an in-memory store once for
 // the whole test file; resetRequestsStore() truncates + re-seeds per test.
+//
+// Bridge (coord #1276): POST /api/requests (direct-match) and POST
+// /api/requests/:id/publish now call produceJobOffersForRequest(), which
+// calls getJobOffersStore() — that throws if uninitialised, so this file's
+// routes need the same boot dependency the real server wires at startup.
 beforeAll(() => {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
+  initJobOffersStore({});
 });
 
 afterAll(() => {
   closeStore();
+  _resetJobOffersStoreForTests();
 });
 
 // ---------------------------------------------------------------------------

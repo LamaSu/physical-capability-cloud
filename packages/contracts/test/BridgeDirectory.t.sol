@@ -21,7 +21,10 @@ abstract contract BridgeDirectoryBase is Test {
     bytes32 internal nsC = keccak256(bytes("solana-jupiter"));
 
     function setUp() public virtual {
-        vm.prank(owner);
+        // No prank: the constructor takes `initialOwner` explicitly and never reads
+        // msg.sender. Under foundry >= 1.8.0 (isolate-by-default) a prank before
+        // `new` is left unconsumed and poisons the first real prank in every test
+        // ("vm.prank: cannot overwrite a prank until it is applied at least once").
         directory = new BridgeDirectory(owner);
     }
 

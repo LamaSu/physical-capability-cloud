@@ -1,0 +1,51 @@
+{
+  "$comment": "Cross-implementation conformance corpus for composition-commitment v2 (sol cross-family review Q4, 2026-08-27). EVERY implementation of deriveCompositionCommitment (canonical: pcc-inc3a/packages/spec/src/csd; gateway: packages/gateway/src/services) MUST reproduce these roots byte-exact from these inputs. A differing root means two algorithms exist — fix the implementation, never the vector. Changing a vector is a deliberate domain bump (v3), announced on the bus. Hash: keccak-256 (NOT SHA3-256). Ids: printable ASCII; ordering: nodes by nodeId, edges by (from,to) tuple, evidence by (evidenceTypeId,tier) tuple. Computed 2026-08-27 11:21 PDT.",
+  "domains": { "composition": "PCC:composition-commitment:v2", "contract": "PCC:capability-contract:v2" },
+  "vectors": [
+    {
+      "name": "pizza — two physical legs, fully matched",
+      "dag": {
+        "requestId": "req.pizza.1",
+        "goal": "a 12-inch margherita pizza made and delivered to me in Manhattan",
+        "nodes": [
+          { "nodeId": "n0.make", "capabilityType": "pizza.make", "matchStatus": "matched", "matchedCapabilityDigest": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "matchedCapabilityId": "cap.marios.woodfired", "estimatedCost": "12", "currency": "USDC" },
+          { "nodeId": "n1.deliver", "capabilityType": "courier.dispatch", "matchStatus": "matched", "matchedCapabilityDigest": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "matchedCapabilityId": "cap.daves.courier", "estimatedCost": "6", "currency": "USDC" }
+        ],
+        "edges": [{ "from": "n0.make", "to": "n1.deliver" }]
+      },
+      "compositionRoot": "0xb928f11291ba9e7533ee8dfb33046862788007541beb172273c2933735ce8def",
+      "capabilityContractRoot": "0x5c00800e481a8c0ecb9f320467de5d1fc76dbdf8def27ae746dd54cef5027b78"
+    },
+    {
+      "name": "mixed — digital leg + human-with-phone leg + courier leg (#1299 reframe)",
+      "dag": {
+        "requestId": "req.storefront-audit.1",
+        "goal": "research the brand (digital), photograph its flagship storefront (human w/ phone), courier a sample to the lab",
+        "nodes": [
+          { "nodeId": "n0.research", "capabilityType": "research.brief", "matchStatus": "matched", "matchedCapabilityDigest": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "matchedCapabilityId": "cap.aisa.deepseek", "estimatedCost": "2", "currency": "USDC" },
+          { "nodeId": "n1.photograph", "capabilityType": "field.photo", "matchStatus": "matched", "matchedCapabilityDigest": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "matchedCapabilityId": "cap.human.field-agent", "estimatedCost": "15", "currency": "USDC", "evidenceRequirements": [{ "requirementId": "r.photo", "evidenceTypeId": "capture.photo_nonced", "tier": 2 }] },
+          { "nodeId": "n2.courier", "capabilityType": "courier.dispatch", "matchStatus": "matched", "matchedCapabilityDigest": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "matchedCapabilityId": "cap.daves.courier", "estimatedCost": "9", "currency": "USDC" }
+        ],
+        "edges": [{ "from": "n0.research", "to": "n1.photograph" }, { "from": "n1.photograph", "to": "n2.courier" }]
+      },
+      "compositionRoot": "0xa0e1e0cbdd2502f21a98125d945b465ab99f54b49477bb982ef470467cdc41db",
+      "capabilityContractRoot": "0x70d918eb39f28fc4cd267b43cde45a19537027823b099998fa303e0d40257ed0"
+    },
+    {
+      "name": "document.print-and-mail — Lob fulfils all four legs (#1344 two-operator proof, operator A)",
+      "dag": {
+        "requestId": "req.mail.court-filing-001",
+        "goal": "g",
+        "nodes": [
+          { "nodeId": "print", "capabilityType": "document-printing", "matchStatus": "matched", "matchedCapabilityDigest": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "matchedCapabilityId": "cap.lob.print", "estimatedCost": "0.60", "currency": "USDC", "evidenceRequirements": [{ "requirementId": "print.job-log", "evidenceTypeId": "machine.execution_log", "tier": 1 }, { "requirementId": "print.receipt", "evidenceTypeId": "receipt.kernel_signed", "tier": 1 }] },
+          { "nodeId": "handoff", "capabilityType": "courier.confirm", "matchStatus": "matched", "matchedCapabilityDigest": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2", "matchedCapabilityId": "cap.lob.insert", "estimatedCost": "0.40", "currency": "USDC", "evidenceRequirements": [{ "requirementId": "handoff.photo", "evidenceTypeId": "capture.photo_nonced", "tier": 2 }, { "requirementId": "handoff.label", "evidenceTypeId": "artifact.hash", "tier": 1 }] },
+          { "nodeId": "mail", "capabilityType": "mail.drop", "matchStatus": "matched", "matchedCapabilityDigest": "0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3", "matchedCapabilityId": "cap.lob.mail", "estimatedCost": "1.20", "currency": "USDC", "evidenceRequirements": [{ "requirementId": "mail.acceptance-scan", "evidenceTypeId": "confirm.target_system", "tier": 2 }] },
+          { "nodeId": "proof", "capabilityType": "mail.track", "matchStatus": "matched", "matchedCapabilityDigest": "0xa4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4", "matchedCapabilityId": "cap.lob.track", "estimatedCost": "0.30", "currency": "USDC", "evidenceRequirements": [{ "requirementId": "proof.delivery-scan", "evidenceTypeId": "confirm.target_system", "tier": 2 }, { "requirementId": "proof.signature", "evidenceTypeId": "confirm.recipient_signature", "tier": 2 }] }
+        ],
+        "edges": [{ "from": "print", "to": "handoff" }, { "from": "handoff", "to": "mail" }, { "from": "mail", "to": "proof" }]
+      },
+      "compositionRoot": "0x873069a90d6c046ddf942cfba67de1ea3785aa0aa4fefe84888fa5f22bcb2317",
+      "capabilityContractRoot": "0x22758b967845f388db141a41a756b19287ebf10f366ffc55a8ddcbef37b94d02"
+    }
+  ]
+}
