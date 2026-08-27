@@ -622,19 +622,35 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
 
   // ── Auth (re-enable) ───────────────────────────────────────────────────
 
-  it("with auth enabled, missing Authorization header returns -32600", async () => {
+  it("with auth enabled, missing Authorization header returns -32600 for a gated skill", async () => {
+    // This test used to send `pcc-discover` as its representative skill.
+    // Discovery is PUBLIC as of coord #1667 (see a2a-public-discover.test.ts,
+    // which pins both the public and the gated sides), so the representative
+    // here is now pcc-submit — the escrow-minting path, the one that must
+    // never be reachable without a bearer. The invariant under test is
+    // unchanged: no bearer → -32600 for anything that is not discovery.
     delete process.env.PCC_A2A_AUTH_DISABLED;
     try {
       const res = await app.inject({
         method: "POST",
         url: "/a2a/tasks/send",
-        payload: rpcRequest("rpc-10", "tasks/send", { skill: "pcc-discover", params: {} }),
+        payload: rpcRequest("rpc-10", "tasks/send", { skill: "pcc-submit", params: {} }),
         headers: { "content-type": "application/json" },
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.error.code).toBe(-32600);
       expect(body.error.message).toMatch(/authentication required/i);
+
+      // And the flip side, in the same file so the change is visible here too:
+      // discovery no longer needs a bearer.
+      const pub = await app.inject({
+        method: "POST",
+        url: "/a2a/tasks/send",
+        payload: rpcRequest("rpc-11", "tasks/send", { skill: "pcc-discover", params: {} }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(pub.json().error).toBeUndefined();
     } finally {
       process.env.PCC_A2A_AUTH_DISABLED = "true";
     }
