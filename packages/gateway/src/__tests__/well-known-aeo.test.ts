@@ -249,6 +249,18 @@ describe("public AEO discovery routes", () => {
     );
   });
 
+  it("mirrors the MCP discovery doc at the conventional /.well-known/mcp.json path", async () => {
+    const [canonical, mirror] = await Promise.all([
+      app.inject({ method: "GET", url: "/.well-known/mcp" }),
+      app.inject({ method: "GET", url: "/.well-known/mcp.json" }),
+    ]);
+    expect(mirror.statusCode).toBe(200);
+    // Conventional .json path must resolve to real JSON (not the SPA HTML
+    // catch-all), byte-identical to the canonical /.well-known/mcp document.
+    expect(mirror.headers["content-type"]).toBe("application/json");
+    expect(mirror.json()).toEqual(canonical.json());
+  });
+
   it("generates the MCP server card from the live agent package", async () => {
     const response = await app.inject({
       method: "GET",

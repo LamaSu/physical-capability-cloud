@@ -587,7 +587,7 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         specVersion: "1.0",
         agents: [
           {
-            identifier: "urn:ai:capability.network:a2a",
+            identifier: "urn:air:capability.network:agent:a2a",
             displayName: "Physical Capability Cloud",
             description:
               "Physical-capability discovery agent backed by PCC's live capability registry.",
@@ -618,6 +618,68 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
     },
   );
 
+  // Shared MCP discovery document, served at BOTH /.well-known/mcp (PCC's
+  // existing path) AND the conventional /.well-known/mcp.json. The conventional
+  // .json path is what most discovery checkers probe first; before this it fell
+  // through to the SPA 200-HTML catch-all (a "lying" 200 — worse than a 404).
+  // Mirroring the real document there makes the conventional path resolve to
+  // real JSON. (Addresses a701bcac #1428 / the AEO route-author's mcp.json
+  // backlog: "mcp.json should mirror /.well-known/mcp".)
+  const serveMcpDiscovery = async (
+    _request: FastifyRequest,
+    reply: FastifyReply,
+  ) => {
+    const configuration = {
+      command: "node",
+      args: ["packages/mcp-server/dist/index.js"],
+      env: { PCC_URL: PUBLIC_BASE_URL },
+    };
+
+    return sendPublicJson(reply, {
+      name: "Physical Capability Cloud MCP Server",
+      description:
+        "MCP tools for discovering, negotiating, and orchestrating real-world physical capabilities through PCC.",
+      transport: "streamable-http",
+      url: `${PUBLIC_BASE_URL}/mcp`,
+      serverCard: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
+      serverCardUrl: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
+      // Two real MCP surfaces: the product server (does things) and the
+      // read-only docs server (learn things) — see docs-mcp-server.ts.
+      servers: [
+        {
+          name: "product",
+          description:
+            "Discover, negotiate, and settle real-world physical capability through PCC's tool catalog.",
+          url: `${PUBLIC_BASE_URL}/mcp`,
+        },
+        {
+          name: "docs",
+          description:
+            "Read-only PCC documentation as MCP resources (agent guide, API reference, quickstarts) plus a search_docs tool.",
+          url: MCP_DOCS_URL,
+        },
+      ],
+      configuration: {
+        mcpServers: {
+          pcc: configuration,
+        },
+      },
+      transports: [
+        {
+          type: "streamable-http",
+          url: `${PUBLIC_BASE_URL}/mcp`,
+        },
+        {
+          type: "stdio",
+          description:
+            "Run from a cloned and built physical-capability-cloud repository.",
+          configuration,
+        },
+      ],
+      documentation: `${PUBLIC_BASE_URL}/docs`,
+    });
+  };
+
   app.get(
     "/.well-known/mcp",
     {
@@ -628,57 +690,22 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
           "Describes PCC's public Streamable HTTP MCP server and repository-hosted stdio transport.",
       },
     },
-    async (_request, reply) => {
-      const configuration = {
-        command: "node",
-        args: ["packages/mcp-server/dist/index.js"],
-        env: { PCC_URL: PUBLIC_BASE_URL },
-      };
+    serveMcpDiscovery,
+  );
 
-      return sendPublicJson(reply, {
-        name: "Physical Capability Cloud MCP Server",
+  // Conventional-path mirror (bare application/json for charset-strict scanners).
+  app.get(
+    "/.well-known/mcp.json",
+    {
+      onSend: forceBareJsonContentType,
+      schema: {
+        tags: ["well-known", "discovery"],
+        summary: "MCP server discovery (conventional .json path)",
         description:
-          "MCP tools for discovering, negotiating, and orchestrating real-world physical capabilities through PCC.",
-        transport: "streamable-http",
-        url: `${PUBLIC_BASE_URL}/mcp`,
-        serverCard: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
-        serverCardUrl: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
-        // Two real MCP surfaces: the product server (does things) and the
-        // read-only docs server (learn things) — see docs-mcp-server.ts.
-        servers: [
-          {
-            name: "product",
-            description:
-              "Discover, negotiate, and settle real-world physical capability through PCC's tool catalog.",
-            url: `${PUBLIC_BASE_URL}/mcp`,
-          },
-          {
-            name: "docs",
-            description:
-              "Read-only PCC documentation as MCP resources (agent guide, API reference, quickstarts) plus a search_docs tool.",
-            url: MCP_DOCS_URL,
-          },
-        ],
-        configuration: {
-          mcpServers: {
-            pcc: configuration,
-          },
-        },
-        transports: [
-          {
-            type: "streamable-http",
-            url: `${PUBLIC_BASE_URL}/mcp`,
-          },
-          {
-            type: "stdio",
-            description:
-              "Run from a cloned and built physical-capability-cloud repository.",
-            configuration,
-          },
-        ],
-        documentation: `${PUBLIC_BASE_URL}/docs`,
-      });
+          "Identical to /.well-known/mcp, served at the conventional /.well-known/mcp.json path that discovery checkers probe first.",
+      },
     },
+    serveMcpDiscovery,
   );
 
   // Ed25519 public-key proof for HTTP domain authentication to the official
