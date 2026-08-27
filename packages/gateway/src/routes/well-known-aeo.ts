@@ -323,6 +323,30 @@ function toNlwebResult(capability: CapabilityDTO) {
 }
 
 /**
+ * Coerce a raw tool name (e.g. "provision_api_key") into a valid Agent Skills
+ * skill `name` per the agentskills.io spec: 1–64 chars, unicode lowercase
+ * alphanumeric + hyphens only, no leading/trailing/consecutive hyphens. The
+ * previous index emitted raw underscore_case tool names verbatim, which the
+ * Agent-Skills conformance (v0.2.0) check rejected as invalid entries.
+ */
+function toAgentSkillName(rawName: string): string {
+  const slug = rawName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-") // underscores, spaces, dots → hyphen
+    .replace(/-+/g, "-") // collapse consecutive hyphens
+    .replace(/^-+|-+$/g, "") // trim leading/trailing hyphens
+    .slice(0, 64)
+    .replace(/-+$/g, ""); // re-trim if the 64-char cut left a trailing hyphen
+  return slug || "skill";
+}
+
+/** Non-empty description, clamped to the spec's 1024-char ceiling. */
+function clampSkillDescription(description: string | undefined, name: string): string {
+  const text = (description ?? "").trim() || `PCC ${name} skill.`;
+  return text.length > 1024 ? `${text.slice(0, 1021)}...` : text;
+}
+
+/**
  * Public agent-discovery surfaces that require explicit content types or
  * dynamic data. Register this plugin before the API authentication gate.
  */
@@ -729,12 +753,27 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
     async (_request, reply) => {
       const agentPackage = await loadAgentPackage();
 
+      // Normalize each tool into a spec-valid Agent Skills entry. Raw tool
+      // names are underscore_case (e.g. "provision_api_key") which the v0.2.0
+      // naming rule forbids; map them to hyphen-case skill names and keep the
+      // first valid entry when the coercion collides. `skills` keeps a stable,
+      // deduplicated order.
+      const seen = new Set<string>();
+      const skills: Array<{ name: string; description: string }> = [];
+      for (const tool of agentPackage.tools) {
+        const name = toAgentSkillName(tool.name);
+        if (seen.has(name)) continue;
+        seen.add(name);
+        skills.push({
+          name,
+          description: clampSkillDescription(tool.description, name),
+        });
+      }
+
       return sendPublicJson(reply, {
         $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
-        skills: agentPackage.tools.map(({ name, description }) => ({
-          name,
-          description,
-        })),
+        version: "0.2.0",
+        skills,
       });
     },
   );

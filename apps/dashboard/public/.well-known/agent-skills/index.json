@@ -1,52 +1,53 @@
 {
   "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "version": "0.2.0",
   "skills": [
     {
-      "name": "discover_physical_capabilities",
+      "name": "discover-physical-capabilities",
       "description": "Search and inspect real-world manufacturing, laboratory, logistics, and human capabilities published on PCC."
     },
     {
-      "name": "compare_capability_options",
+      "name": "compare-capability-options",
       "description": "Retrieve valid configuration choices for a capability before requesting a price or committing to physical work."
     },
     {
-      "name": "calculate_job_price",
+      "name": "calculate-job-price",
       "description": "Calculate a capability-specific price from selected materials, parameters, quantities, and assurance requirements."
     },
     {
-      "name": "build_capability_contract",
+      "name": "build-capability-contract",
       "description": "Build a structured capability contract containing the selected scope, price, evidence requirements, and milestones."
     },
     {
-      "name": "submit_and_monitor_job",
+      "name": "submit-and-monitor-job",
       "description": "Submit physical work to an operator and monitor job state, progress, results, and evidence through the PCC API."
     },
     {
-      "name": "verify_job_evidence",
+      "name": "verify-job-evidence",
       "description": "Inspect content-addressed evidence and assurance-tier compliance before accepting the outcome of physical work."
     },
     {
-      "name": "manage_milestone_escrow",
+      "name": "manage-milestone-escrow",
       "description": "Fund, inspect, release, or dispute milestone escrow actions through PCC's implemented Base Sepolia settlement routes."
     },
     {
-      "name": "orchestrate_physical_workflow",
+      "name": "orchestrate-physical-workflow",
       "description": "Compose capability contracts into multi-step workflows whose dependencies can span different physical operators."
     },
     {
-      "name": "onboard_physical_operator",
+      "name": "onboard-physical-operator",
       "description": "Guide a machine or service operator through configuration detection, validation, registration, and a test job."
     },
     {
-      "name": "register_operator_device",
+      "name": "register-operator-device",
       "description": "Register a physical device behind a Shop Kernel using a supported adapter and operator-owned configuration."
     },
     {
-      "name": "publish_operator_capability",
+      "name": "publish-operator-capability",
       "description": "Publish an operator-bound capability so agents can discover its parameters, availability, and assurance level."
     },
     {
-      "name": "inspect_compliance_and_drift",
+      "name": "inspect-compliance-and-drift",
       "description": "Read capability compliance reports, job evidence summaries, and drift alerts produced by real PCC services."
     }
   ]
