@@ -75,9 +75,9 @@
       }
     ],
     "bundleHash": "sha256:6af759298d2cc719bbc0ed5df7fbe1c270e975b06797c4e8aa66d6a3e6e0d230",
-    "kernelSignature": "ed25519:fca1e8f400de4642fc6710e5bc330064a029b8df4b2fa9992e7532b3d7c53198a2352906528f9821e8bfa83cf4f8fa82526f73072886937587747a0151b88700",
+    "kernelSignature": "ed25519:34cb55cd91279b183d8a59179888910bce52fb8a05c21f174c03c40a82a3ce07dcfa8d41f637b65d9dba6b2b546f5e36132c552c3e75563676bc7f643bf2a808",
     "createdAt": "2026-08-27T13:31:00.000Z"
   },
   "kernelPubkeyRawHex": "3ccd241cffc9b3618044b97d036d8614593d8b017c340f1dee8773385517654b",
-  "preimage": "RAW32(bundleHash)"
+  "preimage": "utf8(bundleHash) = utf8(sha256:+hex)"
 }
