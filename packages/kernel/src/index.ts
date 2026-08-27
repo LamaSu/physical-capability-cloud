@@ -76,6 +76,19 @@ export type {
 } from "./adapter-factory.js";
 export { JobRunner } from "./job-runner.js";
 export type { JobConfig, JobResult } from "./job-runner.js";
+export {
+  runPrintJob,
+  makeKernelEd25519Signer,
+  createIppPrintKernel,
+} from "./printer-job.js";
+export type {
+  PrintJobOptions,
+  PrintJobResult,
+  PrintCompletion,
+  KernelEd25519Signer,
+  IppPrintKernelOptions,
+  IppPrintKernel,
+} from "./printer-job.js";
 export { buildServer } from "./server.js";
 export { SensorPipeline, RingBuffer, lttbDownsample } from "./sensor-pipeline.js";
 export type { PipelineConfig } from "./sensor-pipeline.js";
