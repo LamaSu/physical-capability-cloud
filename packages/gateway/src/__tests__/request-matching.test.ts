@@ -26,6 +26,7 @@ import { requestRoutes } from "../routes/requests.js";
 import { matchListings } from "../services/request-matcher.js";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema } from "@pcc/store";
+import { initJobOffersStore, _resetJobOffersStoreForTests, getJobOffersStore } from "../services/job-offers-store.js";
 
 const { shopKernels, capabilities } = schema;
 
@@ -125,6 +126,11 @@ async function buildApp(): Promise<FastifyInstance> {
     } as any,
   ]).run();
 
+  // Bridge (coord #1276): direct-match POSTs now call
+  // produceJobOffersForRequest() -> getJobOffersStore(), which throws if
+  // uninitialised — same boot dependency the real server wires at startup.
+  initJobOffersStore({});
+
   const app = Fastify({ logger: false });
   await app.register(requestRoutes);
   await app.ready();
@@ -141,6 +147,7 @@ describe("Buyer-request → ad-hoc listing matching", () => {
   afterEach(async () => {
     if (app) await app.close();
     closeStore();
+    _resetJobOffersStoreForTests();
   });
 
   // ════════════════════════════════════════════════════════════════════
@@ -247,6 +254,23 @@ describe("Buyer-request → ad-hoc listing matching", () => {
       expect(node.capabilityId).toBe(RIDESHARE_CAP);
       expect(node.estimatedCost).toBe(18);
       expect(request.totalEstimatedCost).toBe(18);
+
+      // Bridge (coord #1276): the matched node is now a claimable job-offer,
+      // not just a matched-and-stopped decomposition.
+      const { jobOffers } = res.json();
+      expect(jobOffers.created).toHaveLength(1);
+      expect(jobOffers.skippedUnmatched).toHaveLength(0);
+      const open = getJobOffersStore().listOpen({ capabilityType: "rideshare-driver" });
+      expect(open).toHaveLength(1);
+      expect(open[0]!.pricing).toEqual({ amount: 18, currency: "USDC", model: "fixed" });
+      expect(open[0]!.requirements.matchedKernelId).toBe(RIDESHARE_KERNEL);
+      expect(open[0]!.requirements.matchedCapabilityId).toBe(RIDESHARE_CAP);
+      expect(open[0]!.requirements.requestId).toBe(request.id);
+
+      // Negative control (gateway's own #1468 gotcha): an unrelated
+      // capabilityType must stay empty, so an empty list here isn't
+      // mistaken for "the feed is broken" rather than "nothing of this type".
+      expect(getJobOffersStore().listOpen({ capabilityType: "fdm" })).toHaveLength(0);
     });
 
     it("honors quantity for direct-match pricing (3 pizzas = 3 * 12)", async () => {
