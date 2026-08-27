@@ -48,7 +48,7 @@ describe("public AEO discovery routes", () => {
     expect(before.json().entries).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          identifier: `urn:ai:capability.network:capability:${capabilityType}`,
+          identifier: `urn:air:capability.network:capability:${capabilityType}`,
         }),
       ]),
     );
@@ -76,17 +76,17 @@ describe("public AEO discovery routes", () => {
     expect(body.specVersion).toBe("1.0");
     expect(body.host).toEqual({
       displayName: "Physical Capability Cloud",
-      identifier: "urn:ai:capability.network",
+      identifier: "urn:air:capability.network:host:pcc",
     });
     expect(body.entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          identifier: "urn:ai:capability.network:mcp",
-          type: "application/mcp-server+json",
-          url: "https://capability.network/mcp",
+          identifier: "urn:air:capability.network:server:mcp",
+          type: "application/mcp-server-card+json",
+          url: "https://capability.network/.well-known/mcp/server-card.json",
         }),
         expect.objectContaining({
-          identifier: `urn:ai:capability.network:capability:${capabilityType}`,
+          identifier: `urn:air:capability.network:capability:${capabilityType}`,
           type: "application/pcc-capability+json",
           url: `https://capability.network/api/capabilities/by-type/${capabilityType}`,
         }),
@@ -101,11 +101,92 @@ describe("public AEO discovery routes", () => {
     expect(body.collections).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          identifier: "urn:ai:capability.network:catalog",
+          identifier: "urn:air:capability.network:collection:catalog",
           url: "https://capability.network/api/capabilities",
         }),
       ]),
     );
+  });
+
+  it("serves the canonical ARD v0.91 manifest with domain-anchored urn:air entries", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/ard.json",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    // Bare application/json — the ARD validator is charset-strict.
+    expect(response.headers["content-type"]).toBe("application/json");
+    expect(body.specVersion).toBe("0.91");
+    expect(body["@context"]).toBe(
+      "https://agenticresourcediscovery.org/context/v1",
+    );
+    expect(Array.isArray(body.entries)).toBe(true);
+    expect(body.entries.length).toBeGreaterThan(0);
+
+    // Every identifier is a domain-anchored urn:air URN (ARD Appendix C):
+    // urn:air:<fqdn-publisher>:<namespace>:<agent-name>.
+    for (const entry of body.entries) {
+      expect(entry.identifier).toMatch(
+        /^urn:air:capability\.network:[a-z0-9-]+:.+/,
+      );
+      // Publisher-authority binding (ARD §4.5.1): trustManifest.identity domain
+      // MUST align with the <publisher> in the URN.
+      expect(entry.trustManifest?.identity?.domain).toBe("capability.network");
+      // representativeQueries present (ARD §4.2 / D.2).
+      expect(Array.isArray(entry.representativeQueries)).toBe(true);
+      expect(entry.representativeQueries.length).toBeGreaterThanOrEqual(2);
+    }
+
+    const mcp = body.entries.find(
+      (e: { identifier: string }) =>
+        e.identifier === "urn:air:capability.network:server:mcp",
+    );
+    expect(mcp?.type).toBe("application/mcp-server-card+json");
+  });
+
+  it("serves RFC 9728 protected-resource metadata whose resource is the gateway base", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/oauth-protected-resource",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/json");
+    // resource MUST equal the resource identifier (RFC 9728 §3.3).
+    expect(body.resource).toBe("https://capability.network");
+    expect(body.authorization_servers).toContain("https://capability.network");
+    expect(body.bearer_methods_supported).toContain("header");
+    expect(body.scopes_supported).toEqual(
+      expect.arrayContaining(["capabilities:read", "jobs:write"]),
+    );
+    expect(body.resource_documentation).toBe(
+      "https://capability.network/auth.md",
+    );
+  });
+
+  it("serves RFC 8414 authorization-server metadata whose issuer is the gateway base", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/oauth-authorization-server",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    // issuer MUST equal the base the well-known suffix was inserted into
+    // (RFC 8414 §3.3).
+    expect(body.issuer).toBe("https://capability.network");
+    expect(body.authorization_endpoint).toBe(
+      "https://capability.network/api/auth/nonce",
+    );
+    expect(body.token_endpoint).toBe(
+      "https://capability.network/api/auth/verify",
+    );
+    // response_types_supported is REQUIRED by RFC 8414.
+    expect(Array.isArray(body.response_types_supported)).toBe(true);
+    expect(body.response_types_supported.length).toBeGreaterThan(0);
   });
 
   it("lists PCC's physical-capability discovery agent with real endpoints", async () => {
