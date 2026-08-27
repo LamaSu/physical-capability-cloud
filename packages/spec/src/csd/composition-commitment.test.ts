@@ -145,4 +145,28 @@ describe("composition-commitment", () => {
     };
     expect(deriveCapabilityContractRoot(weakened)).not.toBe(deriveCapabilityContractRoot(base));
   });
+
+  // === Canonical-order hazard (found 2026-08-27: the gateway copy diverged from canonical by ONE separator
+  // byte in the edge comparator). Edge order must not depend on a separator, or two honest implementations
+  // can commit different roots for the same plan. Ids with spaces in prefix relation are the probe.
+  it("edge order is separator-free: ids with spaces/prefix relations sort identically under any reordering", () => {
+    const mk = (id: string) => ({ nodeId: id, matchStatus: "matched" as const, matchedCapabilityDigest: DIG_A, estimatedCost: "1", currency: "USDC" });
+    const dag: MatchedDAG = { requestId: "req.hazard", nodes: [mk("a"), mk("a b"), mk("y"), mk("z")], edges: [{ from: "a", to: "z" }, { from: "a b", to: "y" }] };
+    const rev: MatchedDAG = { ...dag, nodes: [...dag.nodes].reverse(), edges: [...dag.edges].reverse() };
+    const r1 = deriveCompositionCommitment(dag);
+    const r2 = deriveCompositionCommitment(rev);
+    expect(r1.committable && r2.committable).toBe(true);
+    if (r1.committable && r2.committable) expect(r2.compositionRoot).toBe(r1.compositionRoot);
+    expect(deriveCapabilityContractRoot(rev)).toBe(deriveCapabilityContractRoot(dag));
+  });
+
+  it("GOLDEN vectors — any change to ordering/preimage MUST be a deliberate domain bump, not drift", () => {
+    const p = deriveCompositionCommitment(pizza);
+    const m = deriveCompositionCommitment(mixed);
+    // Computed 2026-08-27 10:40 PDT from the canonical (separator-free) ordering, DOMAIN v1.
+    expect(p.committable && m.committable).toBe(true);
+    if (p.committable) expect(p.compositionRoot).toBe("0x94c7d8c0978335edc84f82798efd2d035beb86ff3cc8a588888fd63c6af097df");
+    if (m.committable) expect(m.compositionRoot).toBe("0x1df3e12a6cb3c599e64967045bd4ffa0d964fe1393103654c2828bfc58fe5747");
+    expect(deriveCapabilityContractRoot(mixed)).toBe("0x4e464681ccda143d3db0b00beb0a9d211d535cf83dc2012a45929b7b00f87ce5");
+  });
 });
