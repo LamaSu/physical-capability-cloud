@@ -332,9 +332,70 @@ export async function createGateway(port = 3200) {
             description:
               "PCC API key (pcc_live_...). Provision at POST /api/auth/provision.",
           },
+          // Named OAuth 2.0 scopes describing PCC's access tiers. Discovery-only
+          // (enforcement is the apiGate + role checks); mirrors the scopes in
+          // /.well-known/oauth-authorization-server and the A2A agent card so an
+          // agent can name the access it needs.
+          oauth2: {
+            type: "oauth2",
+            description:
+              "Sign-In with Ethereum (SIWE / EIP-4361). Authorize at /api/auth/nonce, exchange at /api/auth/verify. Scopes name PCC's access tiers.",
+            flows: {
+              authorizationCode: {
+                authorizationUrl: `${gatewayUrlForOpenApi}/api/auth/nonce`,
+                tokenUrl: `${gatewayUrlForOpenApi}/api/auth/verify`,
+                scopes: {
+                  "capabilities:read":
+                    "Discover and read public capability listings.",
+                  "jobs:read": "Read job state, progress, and evidence.",
+                  "jobs:write": "Submit and manage physical jobs.",
+                  operator:
+                    "Operator-level access: manage kernels and accept work.",
+                  admin:
+                    "Admin-level access: reward epochs and bond slashing.",
+                },
+              },
+            },
+          },
+        },
+        // Typed error model — a single consistent shape for error responses.
+        // Defined here so operations can $ref it (components/schemas/Error);
+        // wiring it onto all operations is the separate response-schema pass.
+        schemas: {
+          Error: {
+            type: "object",
+            description:
+              "PCC's consistent error envelope. `error` is a stable machine code; `message` is human-readable.",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "string",
+                description: "Stable machine-readable error code.",
+                example: "api_key_required",
+              },
+              message: {
+                type: "string",
+                description: "Human-readable explanation.",
+              },
+              docs: {
+                type: "string",
+                format: "uri",
+                description: "Link to relevant documentation.",
+              },
+            },
+          },
         },
       },
       ...({
+        // Deprecation policy — PCC signals a route's retirement ahead of
+        // removal with RFC 8594 `Deprecation` and `Sunset` response headers and
+        // a superseded-by pointer, and keeps a deprecated route serving through
+        // the announced Sunset date. Applied per-route as routes are retired.
+        "x-deprecation-policy": {
+          headers: ["Deprecation", "Sunset", 'Link; rel="successor-version"'],
+          minNoticeDays: 90,
+          reference: "https://www.rfc-editor.org/rfc/rfc8594",
+        },
         "x-payment-info": {
           description:
             "Machine-payment metadata for deployment-configured paid routes. MPP is the current default; x402 v2 remains a real legacy opt-in transport.",
