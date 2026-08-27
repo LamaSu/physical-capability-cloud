@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "status": "draft",
   "name": "Document Print-and-Mail",
-  "description": "Composite capability: print a document, fold and stuff it with a carrier label issued UPSTREAM (postage bought before any human touches the envelope), drop it into the mail stream, and prove it. The mail leg closes ONLY on the carrier's own acceptance-scan event for the upstream-issued tracking number — third-party attested, never a photograph. Fulfillable identically by an API operator (e.g. Lob) or a human with a printer and a car: same contract, same evidence requirements, same escrow, same verdict. Legs: print -> handoff -> mail -> proof (plan template: packages/spec/src/csd/document-print-and-mail.plan.ts).",
+  "description": "Composite capability: print a document, fold and stuff it with a carrier label issued UPSTREAM (postage bought before any human touches the envelope), drop it into the mail stream, and prove it. The mail leg closes ONLY on the carrier's own acceptance-scan event (EvidenceEvent type courier_pickup_confirmed, payload pre-bound to jobId + trackingCode + labelHash — anti-swap: payload.jobId == fundedJobId and payload.commitment.trackingCode == payload.trackingCode) for the upstream-issued tracking number — third-party attested, never a photograph. HONEST LIMIT: the scan + commitment prove THIS labelled envelope entered the mail stream; they do NOT prove the envelope contained the document — that binding is the print leg (printer_job_verified) plus the pre-seal handoff photo (photo_captured). Fulfillable identically by an API operator (e.g. Lob) or a human with a printer and a car: same contract, same evidence requirements, same escrow, same verdict. Legs: print -> handoff -> mail -> proof (plan template: packages/spec/src/csd/document-print-and-mail.plan.ts). Event vocabulary per @pcc/spec EVIDENCE_EVENT_TYPES and the carrier leg (feat/carrier-integration, PR #297).",
   "kind": "workflow",
   "baseDefinition": null,
   "discovery": {
@@ -130,7 +130,7 @@
       "key": "print-and-mail-inv-1",
       "human": "The mail leg closes only on the carrier's own acceptance scan for a tracking number issued upstream; a photograph never substitutes",
       "severity": "error",
-      "expression": "evidence.tier2.primitives.some(p => p.id == 'confirm.target_system' && p.params.channel == 'webhook' && p.params.matcher == 'carrier.acceptance_scan')"
+      "expression": "evidence.tier2.primitives.some(p => p.id == 'confirm.target_system' && p.params.channel == 'webhook' && p.params.matcher == 'carrier.acceptance_scan' && p.bind == 'courier_pickup_confirmed')"
     },
     {
       "key": "print-and-mail-inv-2",
@@ -146,35 +146,35 @@
       "primitives": [{ "id": "decl.self_attested" }]
     },
     "tier1": {
-      "description": "Print leg proven by the kernel (machine job log + kernel-signed receipt); the upstream-issued label/tracking number hashed into the bundle; mailing still self-declared.",
-      "required": ["jobId", "timestamp", "pageCount", "printJobLogCid", "labelCid", "trackingNumber"],
+      "description": "Print leg proven by the kernel (printer_job_verified machine-log event + kernel-signed receipt); the upstream-issued label hash (commitment.labelHash, sha256 of the label bytes) and trackingCode in the bundle; mailing still self-declared.",
+      "required": ["jobId", "timestamp", "pageCount", "printer_job_verified", "trackingCode", "commitment.labelHash"],
       "primitives": [
-        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printJobLogCid" },
+        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printer_job_verified" },
         { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
-        { "id": "artifact.hash", "bind": "labelCid" }
+        { "id": "artifact.hash", "bind": "commitment.labelHash" }
       ]
     },
     "tier2": {
-      "description": "Print + handoff + MAIL: a nonce-bound photo of the printed document with its pre-printed label at handoff, then the CARRIER's authenticated acceptance-scan webhook for the upstream-issued tracking number. The worker cannot author the proof. No scan, no release.",
-      "required": ["jobId", "timestamp", "pageCount", "printJobLogCid", "labelCid", "trackingNumber", "handoffPhotoCid", "carrierAcceptanceScan"],
+      "description": "Print + handoff + MAIL: a nonce-bound pre-seal photo of the printed document with its pre-printed label (photo_captured), then the CARRIER's authenticated acceptance-scan webhook (courier_pickup_confirmed: trackerStatus in_transit, HMAC-verified, commitmentVerified) for the upstream-issued trackingCode. The worker cannot author the proof. No scan, no release.",
+      "required": ["jobId", "timestamp", "pageCount", "printer_job_verified", "trackingCode", "commitment.labelHash", "photo_captured", "courier_pickup_confirmed"],
       "primitives": [
-        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printJobLogCid" },
+        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printer_job_verified" },
         { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
-        { "id": "artifact.hash", "bind": "labelCid" },
-        { "id": "capture.photo_nonced", "bind": "handoffPhotoCid" },
-        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "carrierAcceptanceScan" }
+        { "id": "artifact.hash", "bind": "commitment.labelHash" },
+        { "id": "capture.photo_nonced", "bind": "photo_captured" },
+        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "courier_pickup_confirmed" }
       ]
     },
     "tier3": {
-      "description": "Tier 2 + the carrier's delivery scan + the recipient's signature (certified classes). NOTE: a dedicated signed-channel primitive for carrier scans (channel.carrier_scan) is not yet in evidence-vocabulary v1 and is proposed to the evidence lane; until it lands, tier 3 rides confirm.target_system over the authenticated webhook plus the recipient signature.",
-      "required": ["jobId", "timestamp", "pageCount", "printJobLogCid", "labelCid", "trackingNumber", "handoffPhotoCid", "carrierAcceptanceScan", "carrierDeliveryScan", "recipientSignatureCid"],
+      "description": "Tier 2 + the carrier's delivery scan (courier_delivery_confirmed) + the recipient's signature (certified classes). NOTE: a dedicated signed-channel primitive for carrier scans (channel.carrier_scan) is not yet in evidence-vocabulary v1 and is proposed to the evidence lane; until it lands, tier 3 rides confirm.target_system over the authenticated webhook plus the recipient signature.",
+      "required": ["jobId", "timestamp", "pageCount", "printer_job_verified", "trackingCode", "commitment.labelHash", "photo_captured", "courier_pickup_confirmed", "courier_delivery_confirmed", "recipientSignatureCid"],
       "primitives": [
-        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printJobLogCid" },
+        { "id": "machine.execution_log", "params": { "logKind": "job_log" }, "bind": "printer_job_verified" },
         { "id": "receipt.kernel_signed", "params": { "capability": "document-printing" } },
-        { "id": "artifact.hash", "bind": "labelCid" },
-        { "id": "capture.photo_nonced", "bind": "handoffPhotoCid" },
-        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "carrierAcceptanceScan" },
-        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.delivery_scan" }, "bind": "carrierDeliveryScan" },
+        { "id": "artifact.hash", "bind": "commitment.labelHash" },
+        { "id": "capture.photo_nonced", "bind": "photo_captured" },
+        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.acceptance_scan" }, "bind": "courier_pickup_confirmed" },
+        { "id": "confirm.target_system", "params": { "channel": "webhook", "matcher": "carrier.delivery_scan" }, "bind": "courier_delivery_confirmed" },
         { "id": "confirm.recipient_signature", "bind": "recipientSignatureCid" }
       ]
     }
