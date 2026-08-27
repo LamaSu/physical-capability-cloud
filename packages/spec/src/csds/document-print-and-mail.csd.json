@@ -180,9 +180,9 @@
     }
   },
   "pricing": {
-    "basePrice": "2.50",
+    "basePrice": "6.50",
     "currency": "USDC",
     "unit": "per letter",
-    "minimumCharge": "2.50"
+    "minimumCharge": "6.50"
   }
 }
