@@ -20,6 +20,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import cookie from "@fastify/cookie";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+import { siweAuthPlugin } from "../auth/siwe-auth.js";
 
 // All external services mocked at the module level.
 vi.mock("../services/posthog-service.js", () => ({
@@ -65,9 +68,77 @@ async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
   const app = Fastify({ logger: false });
+  // retire-the-wildcard #1099: the wallet path now requires a SIWE-verified
+  // session (see routes/provision.ts + provision-wallet-siwe.test.ts). These
+  // plugins are harmless to the email-path / sweeper tests below, which never
+  // touch them.
+  await app.register(cookie, { secret: "test-only-cookie-secret-do-not-use-in-prod" });
+  await app.register(siweAuthPlugin);
   await app.register(provisionRoutes);
   await app.ready();
   return app;
+}
+
+/** Mirrors apps/dashboard/src/hooks/use-auth.ts buildSiweMessage exactly (see provision-wallet-siwe.test.ts). */
+function buildSiweMessage(params: {
+  domain: string;
+  address: string;
+  statement: string;
+  uri: string;
+  version: string;
+  chainId: number;
+  nonce: string;
+  issuedAt: string;
+}): string {
+  return [
+    `${params.domain} wants you to sign in with your Ethereum account:`,
+    params.address,
+    "",
+    params.statement,
+    "",
+    `URI: ${params.uri}`,
+    `Version: ${params.version}`,
+    `Chain ID: ${params.chainId}`,
+    `Nonce: ${params.nonce}`,
+    `Issued At: ${params.issuedAt}`,
+  ].join("\n");
+}
+
+/** Drive the real nonce -> sign -> verify flow for a fresh throwaway account. */
+async function signIn(
+  app: FastifyInstance,
+  account: ReturnType<typeof privateKeyToAccount>,
+): Promise<{ token: string }> {
+  const nonceRes = await app.inject({
+    method: "GET",
+    url: "/api/auth/nonce",
+    headers: { host: "pcc.test" },
+  });
+  const { nonce } = JSON.parse(nonceRes.body) as { nonce: string };
+
+  const message = buildSiweMessage({
+    domain: "pcc.test",
+    address: account.address,
+    statement: "Sign in to Physical Capability Cloud",
+    uri: "http://pcc.test",
+    version: "1",
+    chainId: 1,
+    nonce,
+    issuedAt: new Date().toISOString(),
+  });
+  const signature = await account.signMessage({ message });
+
+  const verifyRes = await app.inject({
+    method: "POST",
+    url: "/api/auth/verify",
+    headers: { host: "pcc.test" },
+    payload: { message, signature },
+  });
+  if (verifyRes.statusCode !== 200) {
+    throw new Error(`SIWE verify failed in test helper: ${verifyRes.statusCode} ${verifyRes.body}`);
+  }
+  const { token } = JSON.parse(verifyRes.body) as { token: string };
+  return { token };
 }
 
 // ---------------------------------------------------------------------------
@@ -112,11 +183,19 @@ describe("POST /api/auth/provision — ERC-8004 wire-up", () => {
       chainId: 84532,
     });
 
+    // retire-the-wildcard #1099: the wallet path requires a SIWE-verified
+    // session — a bare walletAddress claim is no longer trusted (see
+    // provision-wallet-siwe.test.ts). Prove ownership of a fresh throwaway
+    // account instead of asserting an unprovable hardcoded address.
+    const account = privateKeyToAccount(generatePrivateKey());
+    const { token } = await signIn(app, account);
+
     const res = await app.inject({
       method: "POST",
       url: "/api/auth/provision",
+      headers: { authorization: `Bearer ${token}` },
       payload: {
-        walletAddress: "0x61B4e2a7347a529b8B19A2a3444Bd3500E693890",
+        walletAddress: account.address,
         name: "Test Wallet Op",
       },
     });
@@ -140,7 +219,7 @@ describe("POST /api/auth/provision — ERC-8004 wire-up", () => {
 
     // The helper should have been called with a did:pcc:<wallet> DID
     const call = mockRegisterAgentOnChain.mock.calls[0][0];
-    expect(call.agentDid).toMatch(/^did:pcc:0x61b4e2/);
+    expect(call.agentDid).toBe(`did:pcc:${account.address.toLowerCase()}`);
   });
 
   it("returns 201 with onchain='pending' when chain write throws", async () => {
