@@ -28,11 +28,26 @@
  * (funds movement) with no breakage, and leaves the global flip as a follow-up
  * that needs a per-route requirement sweep first.
  *
- * ── This is only HALF the fix (see coord #615) ────────────────────
- * `routes/provision.ts` mints every self-service key with scopes:["*"], and the
- * wildcard short-circuit below grants those keys everything regardless of the
- * rules here. This file and the provisioning policy must BOTH change for the
- * money path to actually be gated; neither alone is sufficient.
+ * ── Why `settlement` is its OWN scope, separate from `operator` ───
+ * `operator` is the scope every self-service key gets, because it is what the
+ * documented onboarding flow needs (register a kernel, submit evidence,
+ * negotiate/build). Moving funds is a categorically different authority, so it
+ * is a categorically different scope: an `operator` key can run a shop, and
+ * CANNOT fund/release/dispute an escrow or trigger a fiat withdrawal.
+ *
+ * Consequence, stated plainly because it is a BREAKING change: a key holding
+ * only `operator` now gets 403 on the money path where it previously
+ * succeeded. `settlement` is granted by manual approval, never by merely
+ * completing self-service signup — see PCC_SETTLEMENT_OPERATORS in
+ * routes/provision.ts.
+ *
+ * ── The remaining gap (coord #615), deliberately still open ───────
+ * Keys minted BEFORE self-service provisioning was narrowed still hold
+ * scopes:["*"], and the wildcard short-circuit below still grants those keys
+ * everything regardless of the rules here. That migration is a separate,
+ * operator-owned decision (some wildcard keys back live integrations); this
+ * file does not force it. GET /api/admin/keys/wildcard-audit reports which keys
+ * are still affected. New keys are no longer minted with "*".
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -63,19 +78,28 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
   { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin"] },
-  // ── Money path — WRITES move funds. Previously had NO requirement at all,
-  // so any authenticated key could fund/release/dispute an escrow or trigger a
-  // fiat withdrawal/payout. Reads are deliberately left ungated here to avoid
-  // breaking the dashboard; the exposure being closed is funds MOVEMENT.
-  { method: "POST",   pattern: "/api/escrow/**",                    scopes: ["operator", "admin"] },
-  { method: "PUT",    pattern: "/api/escrow/**",                    scopes: ["operator", "admin"] },
-  { method: "PATCH",  pattern: "/api/escrow/**",                    scopes: ["operator", "admin"] },
+  // ── Money path — WRITES move funds, and require the DEDICATED `settlement`
+  // scope, NOT `operator`. See the "why settlement is its own scope" note in
+  // the file header. Reads are deliberately left ungated here to avoid breaking
+  // the dashboard; the exposure being closed is funds MOVEMENT.
+  { method: "POST",   pattern: "/api/escrow/**",                    scopes: ["settlement", "admin"] },
+  { method: "PUT",    pattern: "/api/escrow/**",                    scopes: ["settlement", "admin"] },
+  { method: "PATCH",  pattern: "/api/escrow/**",                    scopes: ["settlement", "admin"] },
   { method: "DELETE", pattern: "/api/escrow/**",                    scopes: ["admin"] },
-  { method: "POST",   pattern: "/api/fiat-ramp/**",                 scopes: ["operator", "admin"] },
-  { method: "PUT",    pattern: "/api/fiat-ramp/**",                 scopes: ["operator", "admin"] },
-  { method: "PATCH",  pattern: "/api/fiat-ramp/**",                 scopes: ["operator", "admin"] },
+  { method: "POST",   pattern: "/api/fiat-ramp/**",                 scopes: ["settlement", "admin"] },
+  { method: "PUT",    pattern: "/api/fiat-ramp/**",                 scopes: ["settlement", "admin"] },
+  { method: "PATCH",  pattern: "/api/fiat-ramp/**",                 scopes: ["settlement", "admin"] },
   { method: "DELETE", pattern: "/api/fiat-ramp/**",                 scopes: ["admin"] },
 ];
+
+/**
+ * The scopes that authorise funds MOVEMENT. Kept as one named constant so the
+ * default-deny branch below reports the same answer the rules above enforce —
+ * they drifted apart once already (the deny message advertised
+ * ["operator","admin"] while the rules had been changed), and a wrong hint on a
+ * money route sends an integrator to ask for exactly the wrong grant.
+ */
+const MONEY_SCOPES = ["settlement", "admin"];
 
 /**
  * Route prefixes where a MISSING requirement means DENY rather than allow.
@@ -269,7 +293,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
           "This money-path endpoint has no scope requirement configured and is " +
           "therefore denied by default. If this route is legitimate, add an " +
           "explicit requirement for it.",
-        required_scopes: ["operator", "admin"],
+        required_scopes: MONEY_SCOPES,
         caller_scopes: callerScopes,
         docs: "https://capability.network/whitepaper.md",
       });
