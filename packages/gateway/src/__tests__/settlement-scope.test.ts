@@ -90,6 +90,46 @@ describe("settlement scope — money authority is separate from operator", () =>
   beforeEach(() => { delete process.env.PCC_SETTLEMENT_OPERATORS; });
   afterEach(() => { delete process.env.PCC_SETTLEMENT_OPERATORS; });
 
+  // ── The SIWE bootstrap must stay reachable ────────────────────────
+  //
+  // Found by this very file: with the real apiGate mounted, every SIWE test
+  // here failed at `POST /api/auth/verify` -> 401, because neither bootstrap
+  // endpoint was on apiGate's public allowlist. Verified against PRODUCTION
+  // the same day (capability.network returned 401 api_key_required for both),
+  // so it was a live defect, not a test-harness artifact: SIWE login was
+  // unreachable, and with it every wallet-identity flow -- including the
+  // SIWE-gated provisioning that the `settlement` grant below depends on.
+  //
+  // These two assertions are the regression guard. If either starts 401ing,
+  // the deadlock is back and the settlement path is unreachable again.
+  describe("SIWE login bootstrap is publicly reachable (regression guard)", () => {
+    it("GET /api/auth/nonce does not require auth", async () => {
+      const res = await app.inject({
+        method: "GET", url: "/api/auth/nonce", headers: { host: "pcc.test" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).nonce).toMatch(/^[0-9a-f]{32}$/);
+    });
+
+    it("POST /api/auth/verify does not require auth (it IS the login endpoint)", async () => {
+      const res = await app.inject({
+        method: "POST", url: "/api/auth/verify",
+        headers: { host: "pcc.test" }, payload: {},
+      });
+      // 400 = reached the handler and was rejected on its merits (missing
+      // message/signature). Anything 401 means the gate ate it first.
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).not.toBe("api_key_required");
+    });
+
+    it("session-bearing auth routes stay GATED", async () => {
+      // /me and /logout operate on an existing session, so they are not part of
+      // the bootstrap and must not have been opened up alongside it.
+      const me = await app.inject({ method: "GET", url: "/api/auth/me" });
+      expect(me.statusCode).toBe(401);
+    });
+  });
+
   /** Drive the real nonce -> sign -> verify flow for a throwaway account. */
   async function siweSignIn(account: ReturnType<typeof privateKeyToAccount>) {
     const nonceRes = await app.inject({
