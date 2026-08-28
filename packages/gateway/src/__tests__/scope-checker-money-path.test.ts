@@ -20,6 +20,15 @@
  *
  * The load-bearing assertions are the negative ones: a caller without the
  * required scope must never reach the route handler.
+ *
+ * ── UPDATED: money routes now require `settlement`, not `operator` ─
+ * This file previously asserted "ALLOWS escrow funding to an operator-scoped
+ * key", which was correct for the rules as they then stood. The rules have
+ * DELIBERATELY changed: `operator` (what every self-service signup receives) no
+ * longer satisfies a money route; funds movement requires the separately-granted
+ * `settlement` scope. The old assertion is therefore inverted below into an
+ * explicit DENY case rather than deleted — the previously-passing behaviour is
+ * exactly the exposure being closed, so it is worth pinning in its new form.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -55,6 +64,9 @@ async function buildApp(): Promise<FastifyInstance> {
   app.get("/api/escrow", ok);
   app.get("/api/capabilities/types", ok);
   app.post("/api/contributors/schedule", ok);
+  // Registered so the "settlement does not satisfy an operator route" negative
+  // control proves a 403 FROM THE SCOPE CHECK, not an incidental 404.
+  app.post("/api/kernels/register", ok);
   await app.ready();
   return app;
 }
@@ -93,8 +105,34 @@ describe("scope-checker — money-path authorization", () => {
       await app.close();
     });
 
-    it("ALLOWS escrow funding to an operator-scoped key", async () => {
+    // INVERTED, deliberately (was: "ALLOWS escrow funding to an operator-scoped
+    // key"). `operator` is what every self-service signup receives, so letting
+    // it move funds meant completing a signup form bought funds-movement
+    // authority. Now it does not.
+    it("DENIES escrow funding to an operator-scoped key — operator is NOT money authority", async () => {
       keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      expect(res.json().required_scopes).toContain("settlement");
+      await app.close();
+    });
+
+    it("DENIES fiat payout to an operator-scoped key", async () => {
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("ALLOWS escrow funding to a settlement-scoped key", async () => {
+      keyScopes = JSON.stringify(["operator", "settlement"]);
       const app = await buildApp();
       const res = await app.inject({
         method: "POST",
@@ -102,6 +140,38 @@ describe("scope-checker — money-path authorization", () => {
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+
+    it("ALLOWS fiat payout to a settlement-scoped key", async () => {
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+
+    it("still ALLOWS admin at the money path (settlement is not the only key)", async () => {
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    // NEGATIVE CONTROL on the grant itself: `settlement` must buy the money
+    // path and NOTHING more. If it ever starts satisfying an operator-only
+    // route, the split has collapsed back into a second superuser scope.
+    it("settlement alone does NOT satisfy an operator-only route", async () => {
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/kernels/register" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
       await app.close();
     });
   });

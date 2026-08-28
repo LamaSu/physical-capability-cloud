@@ -21,6 +21,32 @@ import {
   setAgentWalletOnChain,
 } from "../services/erc8004-identity-write.js";
 
+/**
+ * Operators manually approved to receive the money-moving `settlement` scope
+ * through self-service provisioning. Comma-separated EVM addresses, matched
+ * case-insensitively (a SIWE session address is checksummed; an env var is
+ * typed by a human — neither casing should decide who can move funds).
+ *
+ * FAILS CLOSED. Empty or unset means NOBODY receives `settlement` via
+ * self-service; an admin can still grant it out-of-band. That default is
+ * deliberate: an unconfigured deploy must not hand out funds-movement
+ * authority, and this list is the manual-approval step that
+ * `settlement`-vs-`operator` exists to require.
+ *
+ * Re-read on every call (no import-time freeze) so a deploy can change the
+ * allowlist without a rebuild, mirroring isBrokerOperator/isDemandAdmin.
+ */
+function isSettlementApproved(operatorId: string): boolean {
+  const raw = process.env.PCC_SETTLEMENT_OPERATORS ?? "";
+  const approved = new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return approved.has(operatorId.toLowerCase());
+}
+
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
   // Public endpoint — this is how new operators get their API key.
@@ -49,6 +75,13 @@ export async function provisionRoutes(app: FastifyInstance) {
     };
 
     let operatorId: string;
+    /**
+     * True only when this identity was proven by an EIP-4361 signature, never
+     * when it was merely asserted (an email is a claim, not a proof). Gates the
+     * `settlement` grant below: an unproven identity can never move funds, no
+     * matter what the allowlist says.
+     */
+    let siweVerified = false;
 
     // Type guards — prevent object/array/number injection (red team #14, #15)
     if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
@@ -96,10 +129,12 @@ export async function provisionRoutes(app: FastifyInstance) {
         });
       }
       operatorId = session.address;
+      siweVerified = true;
     } else if (session) {
       // A verified SIWE session exists and walletAddress wasn't repeated in
       // the body — use the cryptographically-proven address directly.
       operatorId = session.address;
+      siweVerified = true;
     } else if (body.email) {
       // Email path — RFC 5321 max total length is 254
       if (body.email.length > 254) {
@@ -124,6 +159,30 @@ export async function provisionRoutes(app: FastifyInstance) {
       });
     }
 
+    // ── What this key is allowed to do ────────────────────────────
+    //
+    // Retire-the-wildcard #1099 (coord #615 follow-up): self-service keys no
+    // longer mint scopes:["*"]. "operator" covers the documented quick-start
+    // flow (register a kernel, submit evidence, build/negotiate a contract —
+    // see DEFAULT_SCOPE_REQUIREMENTS in middleware/scope-checker.ts) without
+    // handing out admin access.
+    //
+    // "settlement" — the scope that actually moves funds — is granted ONLY
+    // when BOTH hold:
+    //   1. the identity was PROVEN by SIWE, not merely asserted; and
+    //   2. that proven address is on the PCC_SETTLEMENT_OPERATORS allowlist,
+    //      i.e. a human approved it out-of-band.
+    // Signing up can therefore never, by itself, buy the ability to move
+    // money. An email caller gets ["operator"] and is refused at the money
+    // path; a SIWE caller who is not on the allowlist gets exactly the same.
+    //
+    // Pre-existing wildcard keys are untouched by this change and still
+    // bypass all of it — see routes/admin-key-audit.ts.
+    const scopes =
+      siweVerified && isSettlementApproved(operatorId)
+        ? ["operator", "settlement"]
+        : ["operator"];
+
     try {
       const { rawKey, record, ed25519 } = provisionApiKey({
         operatorId,
@@ -131,14 +190,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         description: body.capability
           ? `Operator capability: ${body.capability}`
           : undefined,
-        // Retire-the-wildcard #1099 (coord #615 follow-up): self-service keys
-        // no longer mint scopes:["*"]. "operator" covers the documented
-        // quick-start flow (register a kernel, submit evidence, build/
-        // negotiate a contract — see DEFAULT_SCOPE_REQUIREMENTS in
-        // middleware/scope-checker.ts) without handing out admin access or
-        // bypassing the money-path scope gate. Pre-existing wildcard keys are
-        // untouched by this change — see routes/admin-key-audit.ts.
-        scopes: ["operator"],
+        scopes,
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),
