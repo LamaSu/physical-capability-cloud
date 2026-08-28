@@ -52,6 +52,15 @@ const PUBLIC_EXACT = [
   "/api/courier-jobs/healthz",    // Courier-jobs liveness — public for monitoring (legacy shim)
   "/api/job-offers/open",         // Generic open-offers feed — operator agents poll without API key (PRIMARY)
   "/api/job-offers/healthz",      // Job-offers liveness — public for monitoring (PRIMARY)
+  // ── SIWE login bootstrap ────────────────────────────────────────────────
+  // These MUST be public: SIWE login is how you get a key, so requiring a key
+  // to reach them is a bootstrap deadlock. Verified 401 on production
+  // 2026-08-27 — SIWE login (and the SIWE-gated provisioning built on it) was
+  // dead on arrival because neither was allowlisted. Listed EXACT, not as a
+  // prefix: verify carries its own per-IP rate limit (canSiweVerify, 30/min),
+  // and an exact entry can't let a "/api/auth/verify-*" sibling leak public.
+  "/api/auth/nonce",              // SIWE challenge — public by design (a nonce is a public challenge)
+  "/api/auth/verify",             // SIWE signature verify → session; the login endpoint, must be reachable without a key
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
