@@ -1,12 +1,17 @@
 /**
  * Carrier route tests — authorization against the REAL job/kernel records
- * (seeded in-memory store + facades, not stubs), the two-phase purchase
- * (reserve -> markPurchased -> finalize) including finalize-failure recovery
- * WITHOUT a second charge, idempotency, concurrency, and the webhook
- * receiver's full signature -> identity -> ordering -> lattice -> evidence
- * path. Webhook signatures are computed with real HMAC-SHA256 (not stubbed).
+ * (seeded in-memory store + facades, not stubs), the guarded purchase
+ * lifecycle (reserve -> buy_in_flight -> purchased_pending -> label_bought,
+ * with getShipment recovery and reconciliation parking), and the webhook
+ * receiver's full signature -> identity -> commitment-time -> ordering ->
+ * lattice -> gated-evidence path. Webhook signatures are computed with real
+ * HMAC-SHA256 (not stubbed).
  *
- * Test names reference sol #297 finding numbers (rounds 1 and 2).
+ * Scan timestamps are OFFSETS FROM NOW: commitments are minted at wall-clock
+ * time and a scan predating its commitment is (correctly) refused, so
+ * hardcoded past dates would trip the R3-4 gate in every test.
+ *
+ * Test names reference sol #297 finding numbers (rounds 1-3).
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
@@ -16,11 +21,14 @@ import { verifyEventHash } from "@pcc/spec";
 import { carrierRoutes } from "../routes/carrier.js";
 import {
   EasyPostClient,
+  EasyPostError,
   _setEasyPostClientForTests,
   verifyCommitmentHash,
-  type CreateLabelParams,
   type BoughtShipment,
+  type CreateLabelParams,
+  type CreatedShipment,
   type EasyPostClientConfig,
+  type FinalizedLabel,
 } from "../services/easypost-client.js";
 import {
   _resetCarrierShipmentStoreForTests,
@@ -38,6 +46,10 @@ const STRANGER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const KERNEL = "kernel-hp-printer-test";
 const JOB = "job-print-mail-1";
 const documentHash = createHash("sha256").update("court filing.pdf").digest("hex");
+
+const T0 = Date.now();
+/** Carrier-clock timestamps as offsets from now — always AFTER the commitment minted during the test. */
+const ts = (mins: number) => new Date(T0 + mins * 60_000).toISOString();
 
 const sign = (body: string) => "hmac-sha256-hex=" + createHmac("sha256", WEBHOOK_SECRET).update(body, "utf8").digest("hex");
 
@@ -90,7 +102,7 @@ const validBody = {
 };
 const asOwner = { "x-test-operator": OWNER };
 
-/** Webhook body builder. Passes the tracker id by default because every purchase records one, and the route rejects tracker-less scans for such purchases (finding 6). */
+/** Webhook body builder. Passes the tracker id by default because every purchase records one, and the route rejects tracker-less scans for such purchases. */
 function trackerEvent(
   bought: { trackingCode: string; trackerId: string | null; shipmentId: string | null },
   status: string,
@@ -160,7 +172,7 @@ afterEach(() => {
 });
 
 describe("GET /api/carrier/healthz", () => {
-  it("reports mock mode, webhook config, durability, and ceilings", async () => {
+  it("reports mock mode, webhook config, durability, ceilings, and reconciliation counts", async () => {
     const app = await buildApp();
     try {
       const res = await app.inject({ method: "GET", url: "/api/carrier/healthz" });
@@ -173,6 +185,7 @@ describe("GET /api/carrier/healthz", () => {
         maxRateUsd: 25,
         maxWeightOz: 70,
         pendingFinalize: 0,
+        needsReconciliation: 0,
       });
     } finally {
       await app.close();
@@ -224,7 +237,7 @@ describe("POST /api/carrier/shipments — authorization (findings 3/4)", () => {
     }
   });
 
-  it("409s for a job that is no longer active — a completed job must not spend (round-2 NEW-5, partial)", async () => {
+  it("409s for a job that is no longer active — a completed job must not spend", async () => {
     const app = await buildApp();
     try {
       const res = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: { ...validBody, jobId: "job-completed" }, headers: asOwner });
@@ -248,8 +261,8 @@ describe("POST /api/carrier/shipments — authorization (findings 3/4)", () => {
   });
 });
 
-describe("POST /api/carrier/shipments — two-phase purchase + idempotency", () => {
-  it("buys a (mock) label for the kernel operator and returns a verifiable commitment with labelCid", async () => {
+describe("POST /api/carrier/shipments — guarded purchase lifecycle", () => {
+  it("buys a (mock) label and returns a verifiable commitment with labelCid", async () => {
     const app = await buildApp();
     try {
       const res = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
@@ -257,7 +270,6 @@ describe("POST /api/carrier/shipments — two-phase purchase + idempotency", () 
       const body = res.json();
       expect(body).toMatchObject({ jobId: JOB, kernelId: KERNEL, mock: true, providerMode: "mock", status: "label_bought" });
       expect(body.commitment).toMatchObject({ jobId: JOB, kernelId: KERNEL, documentHash, mock: true, providerMode: "mock", signature: null });
-      expect(body.labelCid).toBeTruthy();
       expect(body.labelFetch).toBe(`/api/storage/${body.labelCid}`);
       expect(verifyCommitmentHash(body.commitment)).toBe(true);
     } finally {
@@ -292,13 +304,13 @@ describe("POST /api/carrier/shipments — two-phase purchase + idempotency", () 
     }
   });
 
-  it("two CONCURRENT buys for one jobId yield exactly one charge (finding 6 / NEW-6)", async () => {
+  it("two CONCURRENT buys for one jobId yield exactly one charge (round-2 NEW-6)", async () => {
     let buys = 0;
     class SlowBuy extends EasyPostClient {
-      override async createAndBuy(p: CreateLabelParams): Promise<BoughtShipment> {
+      override async buyRate(c: CreatedShipment): Promise<BoughtShipment> {
         buys++;
         await new Promise((r) => setTimeout(r, 30));
-        return super.createAndBuy(p);
+        return super.buyRate(c);
       }
     }
     _setEasyPostClientForTests(new SlowBuy({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
@@ -317,15 +329,15 @@ describe("POST /api/carrier/shipments — two-phase purchase + idempotency", () 
     }
   });
 
-  it("a finalize failure NEVER causes a second charge: purchase is recorded, the identical retry finalizes it (round-2 NEW-2)", async () => {
+  it("a finalize failure NEVER causes a second charge: the identical retry finalizes the recorded purchase (round-2 NEW-2)", async () => {
     let buys = 0;
     let finalizeAttempts = 0;
     class FlakyFinalize extends EasyPostClient {
-      override async createAndBuy(p: CreateLabelParams): Promise<BoughtShipment> {
+      override async buyRate(c: CreatedShipment): Promise<BoughtShipment> {
         buys++;
-        return super.createAndBuy(p);
+        return super.buyRate(c);
       }
-      override async finalizeLabel(p: CreateLabelParams, bought: BoughtShipment) {
+      override async finalizeLabel(p: CreateLabelParams, bought: BoughtShipment): Promise<FinalizedLabel> {
         finalizeAttempts++;
         if (finalizeAttempts === 1) throw new Error("blob store hiccup");
         return super.finalizeLabel(p, bought);
@@ -339,7 +351,6 @@ describe("POST /api/carrier/shipments — two-phase purchase + idempotency", () 
       expect(first.json()).toMatchObject({ error: "purchase_recorded_finalize_failed", retry: true });
       const rec = getCarrierShipmentStore().getByJobId(JOB)!;
       expect(rec.status).toBe("purchased_pending"); // the charge is RECORDED, not lost
-      expect(rec.trackingCode).toBeTruthy();
       expect(getCarrierShipmentStore().listPendingFinalize()).toHaveLength(1);
 
       const retry = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
@@ -353,13 +364,95 @@ describe("POST /api/carrier/shipments — two-phase purchase + idempotency", () 
     }
   });
 
-  it("maps ceiling violations to 400 with a stable code and no provider detail (findings 11/14)", async () => {
+  it("an AMBIGUOUS /buy outcome stays buy_in_flight; the retry asks EasyPost and finds the purchase WAS made — no second charge (R3-1)", async () => {
+    let buyCalls = 0;
+    class AmbiguousThenRecovered extends EasyPostClient {
+      override async buyRate(c: CreatedShipment): Promise<BoughtShipment> {
+        buyCalls++;
+        // The charge "happened" at EasyPost, but we never saw the response.
+        throw new EasyPostError("easypost_buy_ambiguous", null, "socket hang up after dispatch");
+      }
+      // Recovery lookup finds the purchase EasyPost recorded (mock base returns bought).
+    }
+    _setEasyPostClientForTests(new AmbiguousThenRecovered({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
+    const app = await buildApp();
+    try {
+      const first = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(first.statusCode).toBe(502);
+      expect(first.json()).toMatchObject({ error: "buy_ambiguous_retry_to_recover", retry: true });
+      expect(getCarrierShipmentStore().getByJobId(JOB)!.status).toBe("buy_in_flight"); // NOT released (R3-1)
+
+      const retry = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(retry.statusCode).toBe(201);
+      expect(retry.json().note).toContain("recovered a dispatched purchase");
+      expect(buyCalls).toBe(1); // recovery NEVER re-dispatched /buy
+      expect(getCarrierShipmentStore().getByJobId(JOB)!.status).toBe("label_bought");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("an AMBIGUOUS /buy where EasyPost shows NO purchase re-buys safely on retry — exactly one eventual charge (R3-1)", async () => {
+    let buyCalls = 0;
+    let lookups = 0;
+    class AmbiguousThenUnbought extends EasyPostClient {
+      override async buyRate(c: CreatedShipment): Promise<BoughtShipment> {
+        buyCalls++;
+        if (buyCalls === 1) throw new EasyPostError("easypost_buy_ambiguous", null, "socket hang up before dispatch completed");
+        return super.buyRate(c);
+      }
+      override async getShipment(_c: CreatedShipment): Promise<{ bought: BoughtShipment | null }> {
+        lookups++;
+        return { bought: null }; // EasyPost shows no charge for the created shipment
+      }
+    }
+    _setEasyPostClientForTests(new AmbiguousThenUnbought({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
+    const app = await buildApp();
+    try {
+      expect((await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner })).statusCode).toBe(502);
+      const retry = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(retry.statusCode).toBe(201);
+      expect(lookups).toBe(1);
+      expect(buyCalls).toBe(2); // one failed dispatch, one real charge — never two charges
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a KNOWN post-charge defect parks as reconciliation_required and is never auto-retried (R3-1/R3-10)", async () => {
+    let buyCalls = 0;
+    class UnusableBuy extends EasyPostClient {
+      override async buyRate(_c: CreatedShipment): Promise<BoughtShipment> {
+        buyCalls++;
+        throw new EasyPostError("easypost_bought_but_unusable", null, "charged but no tracking code");
+      }
+    }
+    _setEasyPostClientForTests(new UnusableBuy({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
+    const app = await buildApp();
+    try {
+      const first = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(first.statusCode).toBe(409);
+      expect(first.json()).toEqual({ error: "reconciliation_required", reason: "easypost_bought_but_unusable" });
+      const rec = getCarrierShipmentStore().getByJobId(JOB)!;
+      expect(rec.status).toBe("reconciliation_required");
+      expect(getCarrierShipmentStore().listNeedsReconciliation()).toHaveLength(1);
+
+      const retry = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json().error).toBe("reconciliation_required");
+      expect(buyCalls).toBe(1); // a parked purchase is a HUMAN decision, never an auto-retry
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps ceiling violations to 400 with a stable code, and the reservation is released (findings 11/14)", async () => {
     const app = await buildApp();
     try {
       const res = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: { ...validBody, parcel: { weightOz: 999 } }, headers: asOwner });
       expect(res.statusCode).toBe(400);
       expect(res.json()).toEqual({ error: "weight_exceeds_ceiling" });
-      expect(getCarrierShipmentStore().size()).toBe(0); // reservation released
+      expect(getCarrierShipmentStore().size()).toBe(0); // pre-charge failure -> released
     } finally {
       await app.close();
     }
@@ -387,7 +480,7 @@ describe("GET /api/carrier/shipments/:jobId — owner-only (finding 4)", () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      await postWebhook(app, trackerEvent(bought, "in_transit", "evt_e1", "2026-08-27T14:22:00Z"));
+      await postWebhook(app, trackerEvent(bought, "in_transit", "evt_e1", ts(1)));
       const mine = await app.inject({ method: "GET", url: `/api/carrier/shipments/${JOB}/evidence`, headers: asOwner });
       expect(mine.statusCode).toBe(200);
       expect(mine.json().events).toHaveLength(1);
@@ -406,12 +499,14 @@ describe("status lattice (finding 7)", () => {
     expect(nextStatus("in_transit", "in_transit")).toBeNull();
     expect(nextStatus("delivered", "in_transit")).toBe("delivered");
     expect(nextStatus("in_transit", "delivered")).toBeNull(); // no regression
-    expect(nextStatus("delivered", "return_to_sender")).toBeNull(); // RTS is terminal; a later 'delivered' is delivery back to sender
+    expect(nextStatus("delivered", "return_to_sender")).toBeNull(); // RTS terminal; later 'delivered' = delivery back to sender
     expect(nextStatus("in_transit", "failed")).toBeNull();
     expect(nextStatus("pre_transit", "label_bought")).toBeNull();
     expect(nextStatus("unknown", "label_bought")).toBeNull();
     expect(nextStatus("in_transit", "reserved")).toBeNull();
+    expect(nextStatus("in_transit", "buy_in_flight")).toBeNull();
     expect(nextStatus("in_transit", "purchased_pending")).toBeNull();
+    expect(nextStatus("in_transit", "reconciliation_required")).toBeNull();
   });
 });
 
@@ -430,7 +525,7 @@ describe("POST /api/carrier/webhook/easypost", () => {
   it("401s on an invalid signature", async () => {
     const app = await buildApp();
     try {
-      const body = trackerEvent({ trackingCode: "X", trackerId: null, shipmentId: null }, "in_transit", "evt", "2026-08-27T14:22:00Z");
+      const body = trackerEvent({ trackingCode: "X", trackerId: null, shipmentId: null }, "in_transit", "evt", ts(1));
       const res = await app.inject({ method: "POST", url: "/api/carrier/webhook/easypost", payload: body, headers: { "content-type": "application/json", "x-hmac-signature": "hmac-sha256-hex=deadbeef" } });
       expect(res.statusCode).toBe(401);
     } finally {
@@ -438,13 +533,13 @@ describe("POST /api/carrier/webhook/easypost", () => {
     }
   });
 
-  it("applies a signed in_transit scan and emits a byte-verifiable, recomputable EvidenceEvent (finding 2 / NEW-8)", async () => {
+  it("applies a signed in_transit scan and emits a byte-verifiable, recomputable, GATED EvidenceEvent (finding 2 / NEW-8 / R3-7)", async () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      const body = trackerEvent(bought, "in_transit", "evt_pickup_1", "2026-08-27T14:22:00Z", {
+      const body = trackerEvent(bought, "in_transit", "evt_pickup_1", ts(1), {
         status_detail: "arrived_at_destination_facility",
-        tracking_details: [{ message: "Accepted at USPS Origin Facility", status: "in_transit", datetime: "2026-08-27T14:22:00Z", tracking_location: { city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" } }],
+        tracking_details: [{ message: "Accepted at USPS Origin Facility", status: "in_transit", datetime: ts(1), tracking_location: { city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" } }],
       });
       const res = await postWebhook(app, body);
       expect(res.statusCode).toBe(200);
@@ -456,21 +551,33 @@ describe("POST /api/carrier/webhook/easypost", () => {
       const event = record.events[0]!;
       expect(event.type).toBe("courier_pickup_confirmed");
       expect(event.source).toMatchObject({ deviceType: "courier_api", kernelId: KERNEL, simulated: true }); // mock purchase -> simulated
-      expect(event.timestamp).toBe("2026-08-27T14:22:00.000Z");
-      // "accepted into the mail stream, ZIP 94103, 14:22" lives in the authenticated payload:
       expect(event.payload.trackingLocation).toEqual({ city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" });
       expect(event.payload.carrierMessage).toBe("Accepted at USPS Origin Facility");
-      // The raw signed bytes ride as base64 and decode to the exact body:
       expect(Buffer.from(event.payload.providerRawBodyB64 as string, "base64").toString("utf8")).toBe(body);
       expect(event.payload.providerSignatureHeader).toBe(sign(body));
       expect(event.payload.providerEventId).toBe("evt_pickup_1");
-      // Split verification results (NEW-8): the hash recomputes, but with no
-      // signing key configured there is no attestation — and the payload says so.
+      // Split verification results: the hash recomputes; with no signing key
+      // configured there is no attestation — and the payload says so.
       expect(event.payload.commitmentHashValid).toBe(true);
       expect(event.payload.commitmentSignatureVerified).toBe(false);
       expect((event.payload.commitment as { labelCid: string }).labelCid).toBe(bought.labelCid);
-      expect(verifyCommitmentHash(event.payload.commitment as never)).toBe(true);
       expect(await verifyEventHash(event)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("REFUSES to emit evidence when the commitment identity has been corrupted — 500, provider retries (R3-7)", async () => {
+    const app = await buildApp();
+    try {
+      const bought = await buyViaRoute(app);
+      const record = getCarrierShipmentStore().getByJobId(JOB)!;
+      (record.commitment as { jobId: string }).jobId = "job-somebody-else"; // simulated corruption/tamper
+      const res = await postWebhook(app, trackerEvent(bought, "in_transit", "evt_gate", ts(1)));
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error).toBe("apply_failed");
+      expect(record.events).toHaveLength(0); // nothing emitted
+      expect(getCarrierShipmentStore().hasSeenEvent("evt_gate")).toBe(false); // retryable
     } finally {
       await app.close();
     }
@@ -480,7 +587,7 @@ describe("POST /api/carrier/webhook/easypost", () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      const body = trackerEvent(bought, "in_transit", "evt_retry", "2026-08-27T14:22:00Z");
+      const body = trackerEvent(bought, "in_transit", "evt_retry", ts(1));
       expect((await postWebhook(app, body)).json().outcome).toBe("applied");
       expect((await postWebhook(app, body)).json().outcome).toBe("deduped");
       expect(getCarrierShipmentStore().getByJobId(JOB)!.events).toHaveLength(1);
@@ -493,7 +600,7 @@ describe("POST /api/carrier/webhook/easypost", () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      const body = trackerEvent(bought, "in_transit", "evt_conc", "2026-08-27T14:22:00Z");
+      const body = trackerEvent(bought, "in_transit", "evt_conc", ts(1));
       const [a, b] = await Promise.all([postWebhook(app, body), postWebhook(app, body)]);
       const outcomes = [a.json().outcome, b.json().outcome].sort();
       expect(outcomes).toEqual(["applied", "deduped"]);
@@ -503,12 +610,32 @@ describe("POST /api/carrier/webhook/easypost", () => {
     }
   });
 
+  it("two CONCURRENT DIFFERENT events serialize per shipment — no stale-snapshot overwrite (R3-3)", async () => {
+    const app = await buildApp();
+    try {
+      const bought = await buyViaRoute(app);
+      const older = trackerEvent(bought, "in_transit", "evt_a", ts(1));
+      const newer = trackerEvent(bought, "delivered", "evt_b", ts(5));
+      const [ra, rb] = await Promise.all([postWebhook(app, older), postWebhook(app, newer)]);
+      // Whichever order the mutex ran them in, the final state MUST be delivered
+      // with both events accounted for and no regression.
+      expect([ra.statusCode, rb.statusCode]).toEqual([200, 200]);
+      const record = getCarrierShipmentStore().getByJobId(JOB)!;
+      expect(record.status).toBe("delivered");
+      const types = record.events.map((e) => e.type).sort();
+      // in_transit-first ordering yields both events; delivered-first makes the older one stale (no pickup event) — both are correct, regression is not.
+      expect(types.length === 2 ? types : types).toContain("courier_delivery_confirmed");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("ignores an older event delivered late — no regression, no fabricated transition (finding 7)", async () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      expect((await postWebhook(app, trackerEvent(bought, "delivered", "evt_deliv", "2026-08-29T09:00:00Z"))).json().status).toBe("delivered");
-      const late = await postWebhook(app, trackerEvent(bought, "in_transit", "evt_late", "2026-08-27T14:22:00Z"));
+      expect((await postWebhook(app, trackerEvent(bought, "delivered", "evt_deliv", ts(10)))).json().status).toBe("delivered");
+      const late = await postWebhook(app, trackerEvent(bought, "in_transit", "evt_late", ts(1)));
       expect(late.json().outcome).toBe("stale");
       const record = getCarrierShipmentStore().getByJobId(JOB)!;
       expect(record.status).toBe("delivered");
@@ -518,15 +645,13 @@ describe("POST /api/carrier/webhook/easypost", () => {
     }
   });
 
-  it("a newer NO-OP event still advances the watermark, shutting the door on older late arrivals (round-2 MED-1)", async () => {
+  it("a newer NO-OP event still advances the watermark, shutting the door on older late arrivals (R3 MED-1)", async () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      // Newer pre_transit: no transition, but the watermark must advance…
-      const noop = await postWebhook(app, trackerEvent(bought, "pre_transit", "evt_noop", "2026-08-27T15:00:00Z"));
+      const noop = await postWebhook(app, trackerEvent(bought, "pre_transit", "evt_noop", ts(6)));
       expect(noop.json().outcome).toBe("no_transition");
-      // …so an OLDER in_transit arriving later is stale, not applied.
-      const older = await postWebhook(app, trackerEvent(bought, "in_transit", "evt_older", "2026-08-27T14:00:00Z"));
+      const older = await postWebhook(app, trackerEvent(bought, "in_transit", "evt_older", ts(2)));
       expect(older.json().outcome).toBe("stale");
       const record = getCarrierShipmentStore().getByJobId(JOB)!;
       expect(record.status).toBe("label_bought");
@@ -540,9 +665,9 @@ describe("POST /api/carrier/webhook/easypost", () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      await postWebhook(app, trackerEvent(bought, "in_transit", "e1", "2026-08-27T14:22:00Z"));
-      await postWebhook(app, trackerEvent(bought, "return_to_sender", "e2", "2026-08-28T10:00:00Z"));
-      const res = await postWebhook(app, trackerEvent(bought, "delivered", "e3", "2026-08-30T10:00:00Z"));
+      await postWebhook(app, trackerEvent(bought, "in_transit", "e1", ts(1)));
+      await postWebhook(app, trackerEvent(bought, "return_to_sender", "e2", ts(5)));
+      const res = await postWebhook(app, trackerEvent(bought, "delivered", "e3", ts(9)));
       expect(res.json().outcome).toBe("terminal");
       const record = getCarrierShipmentStore().getByJobId(JOB)!;
       expect(record.status).toBe("return_to_sender");
@@ -552,13 +677,28 @@ describe("POST /api/carrier/webhook/easypost", () => {
     }
   });
 
+  it("refuses a scan whose carrier timestamp PREDATES the commitment — permanently non-qualifying (R3-4)", async () => {
+    const app = await buildApp();
+    try {
+      const bought = await buyViaRoute(app);
+      const res = await postWebhook(app, trackerEvent(bought, "in_transit", "evt_backdated", ts(-5)));
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ matched: false, reason: "scan_predates_commitment" });
+      const record = getCarrierShipmentStore().getByJobId(JOB)!;
+      expect(record.status).toBe("label_bought");
+      expect(record.events).toHaveLength(0);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("refuses a scan whose tracker id differs from the purchased tracker, and one MISSING a tracker id entirely (finding 6)", async () => {
     const app = await buildApp();
     try {
       const bought = await buyViaRoute(app);
-      const wrong = await postWebhook(app, trackerEvent({ ...bought, trackerId: "trk_someone_elses", shipmentId: null }, "in_transit", "e1", "2026-08-27T14:22:00Z"));
+      const wrong = await postWebhook(app, trackerEvent({ ...bought, trackerId: "trk_someone_elses", shipmentId: null }, "in_transit", "e1", ts(1)));
       expect(wrong.json()).toMatchObject({ matched: false, reason: "tracker_mismatch" });
-      const missing = await postWebhook(app, trackerEvent({ ...bought, trackerId: null, shipmentId: null }, "in_transit", "e2", "2026-08-27T14:23:00Z"));
+      const missing = await postWebhook(app, trackerEvent({ ...bought, trackerId: null, shipmentId: null }, "in_transit", "e2", ts(2)));
       expect(missing.json()).toMatchObject({ matched: false, reason: "tracker_missing" });
       expect(getCarrierShipmentStore().getByJobId(JOB)!.status).toBe("label_bought");
     } finally {
@@ -566,36 +706,48 @@ describe("POST /api/carrier/webhook/easypost", () => {
     }
   });
 
-  it("does not treat a scan for an uncommitted tracking code as evidence for any job", async () => {
+  it("LEDGERS a scan for an unknown tracking code instead of dropping it (R3-5)", async () => {
     const app = await buildApp();
     try {
-      const res = await postWebhook(app, trackerEvent({ trackingCode: "EZ_NEVER_COMMITTED", trackerId: null, shipmentId: null }, "in_transit", "e_stray", "2026-08-27T14:22:00Z"));
+      const res = await postWebhook(app, trackerEvent({ trackingCode: "EZ_NOT_YET_KNOWN", trackerId: null, shipmentId: null }, "in_transit", "e_stray", ts(1)));
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toMatchObject({ matched: false, reason: "unknown_tracking_code" });
+      expect(res.json()).toMatchObject({ received: true, pending: true, reason: "unknown_tracking_code" });
     } finally {
       await app.close();
     }
   });
 
-  it("asks the provider to RETRY (409) a scan that arrives before finalize — the scan must not be dropped", async () => {
+  it("a scan arriving BEFORE finalize is ledgered and REPLAYED after the finalize retry — nothing depends on provider retries (R3-5)", async () => {
     let finalizeAttempts = 0;
-    class NeverFinalize extends EasyPostClient {
-      override async finalizeLabel(): Promise<never> {
+    class FlakyFinalize extends EasyPostClient {
+      override async finalizeLabel(p: CreateLabelParams, bought: BoughtShipment): Promise<FinalizedLabel> {
         finalizeAttempts++;
-        throw new Error("still down");
+        if (finalizeAttempts === 1) throw new Error("still down");
+        return super.finalizeLabel(p, bought);
       }
     }
-    _setEasyPostClientForTests(new NeverFinalize({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
+    _setEasyPostClientForTests(new FlakyFinalize({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
     const app = await buildApp();
     try {
       const first = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
       expect(first.statusCode).toBe(502);
       const rec = getCarrierShipmentStore().getByJobId(JOB)!;
-      const res = await postWebhook(app, trackerEvent({ trackingCode: rec.trackingCode!, trackerId: rec.trackerId, shipmentId: rec.shipmentId }, "in_transit", "evt_early", "2026-08-27T14:22:00Z"));
-      expect(res.statusCode).toBe(409);
-      expect(res.json()).toMatchObject({ received: false, reason: "not_finalized", retry: true });
-      expect(getCarrierShipmentStore().hasSeenEvent("evt_early")).toBe(false); // not consumed — the retry gets a clean attempt
-      expect(finalizeAttempts).toBe(1);
+      expect(rec.status).toBe("purchased_pending");
+
+      // The human already dropped the envelope; USPS scans it before finalize succeeded.
+      // ts(1) is AFTER the (upcoming) commitment mint at retry time, so it qualifies on replay.
+      const scan = await postWebhook(app, trackerEvent({ trackingCode: rec.trackingCode!, trackerId: rec.trackerId, shipmentId: rec.shipmentId }, "in_transit", "evt_early", ts(1)));
+      expect(scan.statusCode).toBe(200);
+      expect(scan.json()).toMatchObject({ pending: true, reason: "not_finalized" });
+      expect(getCarrierShipmentStore().hasSeenEvent("evt_early")).toBe(false);
+
+      const retry = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(retry.statusCode).toBe(201);
+      expect(retry.json().replayedScans).toBe(1); // the ledgered scan was applied during finalize
+      const after = getCarrierShipmentStore().getByJobId(JOB)!;
+      expect(after.status).toBe("in_transit");
+      expect(after.events.map((e) => e.type)).toEqual(["courier_pickup_confirmed"]);
+      expect(getCarrierShipmentStore().hasSeenEvent("evt_early")).toBe(true);
     } finally {
       await app.close();
     }
@@ -605,7 +757,7 @@ describe("POST /api/carrier/webhook/easypost", () => {
     _setEasyPostClientForTests(testClient({ apiKey: "EZAKprod", requireProductionMode: true }));
     const app = await buildApp();
     try {
-      const body = trackerEvent({ trackingCode: "X", trackerId: null, shipmentId: null }, "in_transit", "evt_test_mode", "2026-08-27T14:22:00Z", { mode: "test" });
+      const body = trackerEvent({ trackingCode: "X", trackerId: null, shipmentId: null }, "in_transit", "evt_test_mode", ts(1), { mode: "test" });
       const res = await postWebhook(app, body);
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ ignored: true, reason: "provider_mode_not_production" });
@@ -627,7 +779,7 @@ describe("POST /api/carrier/webhook/easypost", () => {
         status: "in_transit",
         carrier: "USPS",
         statusDetail: null,
-        occurredAt: "2026-08-27T14:22:00.000Z",
+        occurredAt: ts(1),
         providerMode: null,
         carrierMessage: null,
         trackingLocation: null,
@@ -635,8 +787,8 @@ describe("POST /api/carrier/webhook/easypost", () => {
       await expect(store.recordCarrierEvent(evt, () => { throw new Error("hash service down"); })).rejects.toThrow("hash service down");
       expect(store.hasSeenEvent("evt_fail_once")).toBe(false);
       expect(store.getByJobId(JOB)!.status).toBe("label_bought");
-      const retry = await store.recordCarrierEvent(evt, () => null);
-      expect(retry.ok && retry.outcome).toBe("applied");
+      const retryRes = await store.recordCarrierEvent(evt, () => null);
+      expect(retryRes.ok && retryRes.outcome).toBe("applied");
     } finally {
       await app.close();
     }

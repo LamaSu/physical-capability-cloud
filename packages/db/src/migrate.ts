@@ -1954,9 +1954,10 @@ export function migrateDatabase(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS carrier_shipments (
       job_id         TEXT PRIMARY KEY,             -- the cross-process spending lock: reserved BEFORE /buy
-      tracking_code  TEXT UNIQUE,                  -- NULL while reserved; set (immutably) once EasyPost has charged
+      tracking_code  TEXT UNIQUE,                  -- NULL until EasyPost has charged; then immutable
       carrier        TEXT,
-      status         TEXT NOT NULL,                -- reserved | purchased_pending | label_bought | in_transit | delivered | return_to_sender | failed
+      status         TEXT NOT NULL,                -- reserved | buy_in_flight | purchased_pending | reconciliation_required | label_bought | in_transit | delivered | return_to_sender | failed
+      version        INTEGER NOT NULL DEFAULT 0,   -- CAS token: every UPDATE asserts + bumps it (sol #297 R3-2)
       data           TEXT NOT NULL,                -- JSON CarrierShipmentRecord (full object)
       created_at     TEXT NOT NULL,
       updated_at     TEXT NOT NULL
@@ -1967,9 +1968,22 @@ export function migrateDatabase(sqlite: Database.Database): void {
       event_id   TEXT PRIMARY KEY,                 -- provider (EasyPost) event id: the replay/dedupe key
       job_id     TEXT NOT NULL,
       at         TEXT NOT NULL,
-      data       TEXT NOT NULL                     -- JSON: raw signed webhook body + signature header + parsed status
+      data       TEXT NOT NULL                     -- JSON: raw signed webhook body (b64) + signature header + parsed status
     );
     CREATE INDEX IF NOT EXISTS carrier_webhook_events_job_idx ON carrier_webhook_events(job_id);
+
+    -- Signature-valid tracker events that could not be matched/applied when
+    -- they arrived (scan before purchase recorded / before finalize, or a
+    -- stale process). Ledgered durably so correctness never depends on the
+    -- provider retrying long enough (sol #297 R3-5); replayed after
+    -- markPurchased/finalize against the same dedupe key as applied events.
+    CREATE TABLE IF NOT EXISTS carrier_unmatched_events (
+      event_id      TEXT PRIMARY KEY,              -- provider event id (same id-space as carrier_webhook_events)
+      tracking_code TEXT NOT NULL,
+      at            TEXT NOT NULL,
+      data          TEXT NOT NULL                  -- JSON: raw signed webhook body (b64) + signature header + parsed event
+    );
+    CREATE INDEX IF NOT EXISTS carrier_unmatched_events_code_idx ON carrier_unmatched_events(tracking_code);
   `);
 
   // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────

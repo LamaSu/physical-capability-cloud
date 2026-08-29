@@ -1,43 +1,61 @@
 /**
  * Carrier shipment store — the durable record of "we reserved this job,
- * EasyPost charged us for a label, we bound the commitment, and we are
- * watching for the carrier's own scan." One record per print-and-mail job.
+ * dispatched a charge to EasyPost, recorded its outcome, bound the
+ * commitment, and are watching for the carrier's own scan." One record per
+ * print-and-mail job.
  *
- * STATE MACHINE (each edge is a sol #297 finding):
+ * STATE MACHINE (each edge is a sol #297 finding, rounds 1-3):
  *
- *   reserve()          INSERT row, status=reserved           (finding 6 / NEW-6:
- *                      PK on job_id is the cross-process spending lock)
- *   markPurchased()    reserved -> purchased_pending          (NEW-2: recorded the
- *                      instant EasyPost has charged; BEFORE label download)
- *   finalize()         purchased_pending -> label_bought      (commitment built)
- *   release()          deletes ONLY a `reserved` row          (never a purchase)
- *   recordCarrierEvent label_bought -> in_transit -> delivered | return_to_sender | failed
- *                      (finding 7: explicit lattice, terminal states terminal,
- *                      ordered by the CARRIER's clock, watermark advances on
- *                      every matched event)
+ *   reserve()            INSERT row, status=reserved            (PK on job_id
+ *                        is the cross-process spending lock; an EXPIRED
+ *                        reserved row is reclaimed transactionally HERE, not
+ *                        only at boot — R3-9)
+ *   markBuyInFlight()    reserved -> buy_in_flight              (durable,
+ *                        BEFORE /buy is dispatched, carrying the created
+ *                        shipment id + rate so recovery can ask EasyPost
+ *                        what actually happened — R3-1)
+ *   markPurchased()      buy_in_flight -> purchased_pending      (the charge
+ *                        is recorded the moment it is known)
+ *   markReconciliation() buy_in_flight|purchased_pending ->
+ *                        reconciliation_required                 (ambiguous or
+ *                        defective post-charge outcomes PARK for a human;
+ *                        never released, never expired, never auto-retried)
+ *   finalize()           purchased_pending -> label_bought       (commitment)
+ *   release()            deletes ONLY a `reserved` row           (after /buy
+ *                        MAY have been dispatched, release is forbidden)
+ *   recordCarrierEvent() label_bought -> in_transit -> delivered |
+ *                        return_to_sender | failed               (explicit
+ *                        lattice; terminal states terminal; ordered by the
+ *                        CARRIER's clock; watermark advances on every matched
+ *                        event; a scan predating commitment.committedAt is
+ *                        refused — R3-4)
  *
- * A failure after /buy leaves `purchased_pending`; a retried request with the
- * same fingerprint finalizes that purchase instead of buying again. Stale
- * `reserved` rows (a crash between reserve and /buy) expire on hydrate.
+ * CONCURRENCY: a per-job async mutex serializes every mutation in-process
+ * (different webhook event ids can no longer interleave across the
+ * evidence-build await — R3-3), and every SQL UPDATE is a version-CAS
+ * (`WHERE job_id=? AND version=?`, bumping version) so a stale writer loses
+ * loudly instead of overwriting newer state (R3-2). Creation is INSERT-only.
+ * Webhook application claims the provider event id INSIDE the same
+ * transaction as the state change (round-2 NEW-4).
+ *
+ * UNMATCHED SCANS: any signature-valid tracker event that cannot currently
+ * be matched/applied (scan before purchase recorded, scan before finalize)
+ * is durably LEDGERED in carrier_unmatched_events and replayed after
+ * markPurchased/finalize — correctness never depends on the provider
+ * retrying long enough (R3-5).
  *
  * Persistence: write-through SQLite via the same raw better-sqlite3 handle
- * job-offers-store.ts uses (tables carrier_shipments + carrier_webhook_events,
- * created by db/src/migrate.ts). Creation is INSERT-only (never UPSERT — a
- * purchase's identity is immutable, NEW-3); status changes are UPDATEs that
- * verify the row's tracking identity. Webhook application claims the
- * provider event id INSIDE the same transaction as the state change (NEW-4 /
- * finding 5): a unique-conflict means "already applied" and nothing mutates.
- * In-memory mode (tests) mirrors the same ordering with a synchronous claim
- * set so the await on evidence construction cannot admit a duplicate.
- *
- * `strictHydration` (production): missing tables or corrupt rows throw at
- * boot instead of silently degrading to memory (NEW-7 / finding 8).
+ * job-offers-store.ts uses; tables created by db/src/migrate.ts. In-memory
+ * mode (tests) mirrors the same ordering. `strictHydration` (production)
+ * validates the full record schema and throws on disagreement between the
+ * SQL columns and the serialized record (R3-8).
  */
 
 import type { EvidenceEvent } from "@pcc/spec";
 import type { SqliteDatabaseLike } from "./job-offers-store.js";
 import type {
   BoughtShipment,
+  CreatedShipment,
   FinalizedLabel,
   ProviderMode,
   ShipmentCommitment,
@@ -48,13 +66,26 @@ export type { SqliteDatabaseLike };
 
 export type CarrierShipmentStatus =
   | "reserved"
+  | "buy_in_flight"
   | "purchased_pending"
+  | "reconciliation_required"
   | "label_bought"
   | "in_transit"
   | "delivered"
   | "return_to_sender"
   | "failed";
 
+const ALL_STATUSES: ReadonlySet<string> = new Set([
+  "reserved",
+  "buy_in_flight",
+  "purchased_pending",
+  "reconciliation_required",
+  "label_bought",
+  "in_transit",
+  "delivered",
+  "return_to_sender",
+  "failed",
+]);
 const TERMINAL: ReadonlySet<CarrierShipmentStatus> = new Set(["delivered", "return_to_sender", "failed"]);
 const TRACKABLE: ReadonlySet<CarrierShipmentStatus> = new Set([
   "label_bought",
@@ -63,16 +94,26 @@ const TRACKABLE: ReadonlySet<CarrierShipmentStatus> = new Set([
   "return_to_sender",
   "failed",
 ]);
+/** Statuses in which a tracking code exists (a purchase happened). */
+const PURCHASED: ReadonlySet<CarrierShipmentStatus> = new Set([
+  "purchased_pending",
+  "reconciliation_required",
+  ...TRACKABLE,
+]);
 
 export interface CarrierShipmentRecord {
   jobId: string;
   kernelId: string;
   /** operatorId/userId of the caller who reserved/bought — the only principal allowed to read it back. */
   ownerId: string;
-  /** sha256 of canonical(request params) — a re-request with the same jobId but different params is a 409, not a silent reuse (finding 12). */
+  /** sha256 of canonical(request params) — a re-request with the same jobId but different params is a 409 (round-1 finding 12). */
   requestFingerprint: string;
   status: CarrierShipmentStatus;
+  /** CAS token mirrored in the SQL column; bumped on every UPDATE. */
+  version: number;
   reservedAt: string;
+  // ── set by markBuyInFlight (the created-but-unbought shipment; recovery key) ──
+  createdShipment: CreatedShipment | null;
   // ── set by markPurchased (immutable afterwards) ──
   shipmentId: string | null;
   trackerId: string | null;
@@ -83,15 +124,15 @@ export interface CarrierShipmentRecord {
   rate: string | null;
   currency: string | null;
   providerMode: ProviderMode | null;
-  /** True when the label was fabricated by mock mode (no EASYPOST_API_KEY). */
   mock: boolean;
+  // ── set by markReconciliationRequired ──
+  reconciliationReason: string | null;
   // ── set by finalize ──
   labelHash: string | null;
-  /** CIDv1 of the label bytes in the gateway blob store — fetch via GET /api/storage/:cid. */
   labelCid: string | null;
   commitment: ShipmentCommitment | null;
   // ── carrier tracking ──
-  /** Carrier timestamp of the latest MATCHED event (applied or not); older events are ignored. */
+  /** Carrier timestamp of the latest MATCHED event (applied or not); strictly older events are stale. */
   lastCarrierEventAt: string | null;
   events: EvidenceEvent[];
   createdAt: string;
@@ -101,9 +142,9 @@ export interface CarrierShipmentRecord {
 export interface CarrierShipmentStoreOptions {
   sqlite?: SqliteDatabaseLike;
   now?: () => Date;
-  /** Throw on missing tables / corrupt rows instead of degrading (production). */
+  /** Throw on missing tables / invalid rows instead of degrading (production). */
   strictHydration?: boolean;
-  /** `reserved` rows older than this are dropped on hydrate (crash between reserve and /buy). Default 10 min. */
+  /** `reserved` rows older than this are reclaimable (crash between reserve and buy dispatch). Default 10 min. */
   reservationTtlMs?: number;
 }
 
@@ -113,8 +154,21 @@ export type RecordCarrierEventResult =
   | { ok: true; record: CarrierShipmentRecord; outcome: RecordCarrierEventOutcome; newStatus: CarrierShipmentStatus }
   | {
       ok: false;
-      reason: "unknown_tracking_code" | "not_finalized" | "tracker_missing" | "tracker_mismatch" | "shipment_mismatch";
+      reason:
+        | "unknown_tracking_code"
+        | "not_finalized"
+        | "tracker_missing"
+        | "tracker_mismatch"
+        | "shipment_mismatch"
+        | "scan_predates_commitment";
     };
+
+export interface UnmatchedLedgerEntry {
+  eventId: string;
+  trackingCode: string;
+  at: string;
+  data: unknown;
+}
 
 export class CarrierStoreError extends Error {
   constructor(
@@ -124,6 +178,7 @@ export class CarrierStoreError extends Error {
       | "duplicate_tracking_code"
       | "empty_tracking_code"
       | "invalid_transition"
+      | "cas_conflict"
       | "not_found",
   ) {
     super(code);
@@ -133,8 +188,7 @@ export class CarrierStoreError extends Error {
 
 /**
  * The transition lattice. Returns the next status for a carrier tracker
- * status, or null when no transition applies (no-op statuses like
- * pre_transit/unknown, or a transition the lattice forbids).
+ * status, or null when no transition applies.
  */
 export function nextStatus(trackerStatus: string, current: CarrierShipmentStatus): CarrierShipmentStatus | null {
   if (!TRACKABLE.has(current) || TERMINAL.has(current)) return null;
@@ -167,12 +221,17 @@ function isUniqueViolation(err: unknown): boolean {
   return /UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(msg);
 }
 
+function parseableIso(s: unknown): s is string {
+  return typeof s === "string" && !Number.isNaN(Date.parse(s));
+}
+
 export class CarrierShipmentStore {
   private byJobId = new Map<string, CarrierShipmentRecord>();
   private byTrackingCode = new Map<string, string>(); // trackingCode -> jobId
   private seenEventIds = new Set<string>();
-  /** Event ids currently being applied (between the synchronous check and the commit). */
-  private claimingEventIds = new Set<string>();
+  private unmatchedByCode = new Map<string, UnmatchedLedgerEntry[]>();
+  private unmatchedIds = new Set<string>();
+  private locks = new Map<string, Promise<unknown>>();
   private readonly sqlite: SqliteDatabaseLike | undefined;
   private readonly now: () => Date;
   private readonly strict: boolean;
@@ -191,15 +250,56 @@ export class CarrierShipmentStore {
     return !!this.sqlite;
   }
 
-  // ── persistence ──────────────────────────────────────────────────────────
+  // ── per-job mutex (R3-3) ─────────────────────────────────────────────────
+
+  private withLock<T>(jobKey: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(jobKey) ?? Promise.resolve();
+    const run = prev.then(fn, fn); // run regardless of the previous holder's outcome
+    // Park the chain tail; swallow rejections on the CHAIN only (the caller
+    // still receives them from `run`).
+    this.locks.set(jobKey, run.catch(() => {}));
+    return run;
+  }
+
+  // ── hydration (R3-8) ─────────────────────────────────────────────────────
+
+  private validateRecord(rec: unknown, row: { job_id: string; tracking_code: string | null; status: string; version: number }): CarrierShipmentRecord {
+    const r = rec as CarrierShipmentRecord;
+    const fail = (why: string): never => {
+      throw new Error(`carrier store: invalid row for job ${row.job_id}: ${why}`);
+    };
+    if (!r || typeof r !== "object") fail("not an object");
+    if (r.jobId !== row.job_id) fail("jobId disagrees with SQL column");
+    if (!ALL_STATUSES.has(r.status)) fail(`unknown status ${String(r.status)}`);
+    if (r.status !== row.status) fail("status disagrees with SQL column");
+    if (typeof r.version !== "number" || r.version !== row.version) fail("version disagrees with SQL column");
+    if ((r.trackingCode ?? null) !== (row.tracking_code ?? null)) fail("tracking_code disagrees with SQL column");
+    if (!parseableIso(r.createdAt) || !parseableIso(r.updatedAt)) fail("unparseable timestamps");
+    if (PURCHASED.has(r.status)) {
+      if (!r.trackingCode || !r.shipmentId) fail("purchased status without tracking identity");
+    }
+    if (TRACKABLE.has(r.status)) {
+      if (!r.commitment || typeof r.commitment.hash !== "string") fail("trackable status without a commitment");
+      if (!parseableIso(r.commitment.committedAt)) fail("commitment.committedAt unparseable");
+    }
+    if (r.lastCarrierEventAt != null && !parseableIso(r.lastCarrierEventAt)) fail("lastCarrierEventAt unparseable");
+    if (!Array.isArray(r.events)) fail("events not an array");
+    return r;
+  }
 
   private hydrate(): void {
     if (!this.sqlite) return;
-    let rows: Array<{ job_id: string; data: string }>;
+    let rows: Array<{ job_id: string; tracking_code: string | null; status: string; version: number; data: string }>;
     let evts: Array<{ event_id: string }>;
+    let unmatched: Array<{ event_id: string; tracking_code: string; at: string; data: string }>;
     try {
-      rows = this.sqlite.prepare("SELECT job_id, data FROM carrier_shipments").all() as typeof rows;
+      rows = this.sqlite
+        .prepare("SELECT job_id, tracking_code, status, version, data FROM carrier_shipments")
+        .all() as typeof rows;
       evts = this.sqlite.prepare("SELECT event_id FROM carrier_webhook_events").all() as typeof evts;
+      unmatched = this.sqlite
+        .prepare("SELECT event_id, tracking_code, at, data FROM carrier_unmatched_events")
+        .all() as typeof unmatched;
     } catch (err) {
       if (this.strict) {
         throw new Error(
@@ -208,51 +308,72 @@ export class CarrierShipmentStore {
       }
       return; // dev/test without migrate: in-memory behaviour
     }
-    const cutoff = this.now().getTime() - this.reservationTtlMs;
-    for (const r of rows) {
+    for (const row of rows) {
       let rec: CarrierShipmentRecord;
       try {
-        rec = JSON.parse(r.data) as CarrierShipmentRecord;
-        if (!rec || rec.jobId !== r.job_id || typeof rec.status !== "string") throw new Error("shape mismatch");
+        rec = this.validateRecord(JSON.parse(row.data), row);
       } catch (err) {
-        if (this.strict) throw new Error(`carrier store: corrupt row for job ${r.job_id}: ${err instanceof Error ? err.message : String(err)}`);
+        if (this.strict) throw err;
         continue;
       }
-      if (rec.status === "reserved" && Date.parse(rec.reservedAt) < cutoff) {
-        // Crash between reserve and /buy: nothing was bought; free the job.
-        this.sqlite.prepare("DELETE FROM carrier_shipments WHERE job_id = ? AND status = 'reserved'").run(rec.jobId);
+      if (rec.status === "reserved") {
+        // A reservation is pre-dispatch by definition; a crash left it behind.
+        // NaN/old reservedAt both count as expired (R3-8: NaN must not
+        // create an immortal lock). Reclaim happens in reserve() too (R3-9).
+        const t = Date.parse(rec.reservedAt);
+        if (Number.isNaN(t) || t < this.now().getTime() - this.reservationTtlMs) {
+          this.sqlite.prepare("DELETE FROM carrier_shipments WHERE job_id = ? AND status = 'reserved'").run(rec.jobId);
+          continue;
+        }
+      }
+      if (rec.trackingCode && this.byTrackingCode.has(rec.trackingCode)) {
+        const why = `duplicate tracking code ${rec.trackingCode} across jobs`;
+        if (this.strict) throw new Error(`carrier store: ${why}`);
         continue;
       }
       this.byJobId.set(rec.jobId, rec);
       if (rec.trackingCode) this.byTrackingCode.set(rec.trackingCode, rec.jobId);
     }
     for (const e of evts) this.seenEventIds.add(e.event_id);
+    for (const u of unmatched) {
+      try {
+        const entry: UnmatchedLedgerEntry = { eventId: u.event_id, trackingCode: u.tracking_code, at: u.at, data: JSON.parse(u.data) };
+        this.unmatchedIds.add(entry.eventId);
+        const list = this.unmatchedByCode.get(entry.trackingCode) ?? [];
+        list.push(entry);
+        this.unmatchedByCode.set(entry.trackingCode, list);
+      } catch (err) {
+        if (this.strict) throw new Error(`carrier store: corrupt unmatched event ${u.event_id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
+
+  // ── SQL helpers ──────────────────────────────────────────────────────────
 
   private sqlInsert(rec: CarrierShipmentRecord): void {
     if (!this.sqlite) return;
     this.sqlite
       .prepare(
-        `INSERT INTO carrier_shipments (job_id, tracking_code, carrier, status, data, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO carrier_shipments (job_id, tracking_code, carrier, status, version, data, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(rec.jobId, rec.trackingCode, rec.carrier, rec.status, JSON.stringify(rec), rec.createdAt, rec.updatedAt);
+      .run(rec.jobId, rec.trackingCode, rec.carrier, rec.status, rec.version, JSON.stringify(rec), rec.createdAt, rec.updatedAt);
   }
 
-  /** UPDATE that also asserts the row's tracking identity has not been swapped underneath us. */
-  private sqlUpdate(rec: CarrierShipmentRecord, expectTrackingCode: string | null): void {
+  /** Version-CAS UPDATE (R3-2): asserts the previous version, bumps it. Zero changes = a stale writer — loud, never silent. */
+  private sqlUpdateCas(rec: CarrierShipmentRecord, expectedVersion: number): void {
     if (!this.sqlite) return;
     const res = this.sqlite
       .prepare(
         `UPDATE carrier_shipments
-            SET tracking_code = ?, carrier = ?, status = ?, data = ?, updated_at = ?
-          WHERE job_id = ? AND (tracking_code IS ? OR tracking_code = ?)`,
+            SET tracking_code = ?, carrier = ?, status = ?, version = ?, data = ?, updated_at = ?
+          WHERE job_id = ? AND version = ?`,
       )
-      .run(rec.trackingCode, rec.carrier, rec.status, JSON.stringify(rec), rec.updatedAt, rec.jobId, expectTrackingCode, expectTrackingCode) as
+      .run(rec.trackingCode, rec.carrier, rec.status, rec.version, JSON.stringify(rec), rec.updatedAt, rec.jobId, expectedVersion) as
       | { changes?: number }
       | undefined;
     if (res && typeof res.changes === "number" && res.changes === 0) {
-      throw new CarrierStoreError("invalid_transition");
+      throw new CarrierStoreError("cas_conflict");
     }
   }
 
@@ -280,12 +401,38 @@ export class CarrierShipmentStore {
     }
   }
 
-  // ── reservation + purchase (finding 6 / NEW-2 / NEW-6) ──────────────────
+  /** Apply a mutation: bump version, CAS-update SQL, then mirror into memory. */
+  private commitMutation(rec: CarrierShipmentRecord, next: Partial<CarrierShipmentRecord>): CarrierShipmentRecord {
+    const expected = rec.version;
+    const updated: CarrierShipmentRecord = { ...rec, ...next, version: expected + 1, updatedAt: this.now().toISOString() };
+    this.sqlUpdateCas(updated, expected);
+    Object.assign(rec, updated);
+    return rec;
+  }
 
-  /** Reserve a jobId for an in-progress purchase. Durable; the PK is the cross-process lock. */
+  // ── reservation + purchase lifecycle ─────────────────────────────────────
+
+  /**
+   * Reserve a jobId for a purchase attempt. Durable; the PK is the
+   * cross-process lock. An EXPIRED `reserved` row (pre-dispatch crash) is
+   * reclaimed here, transactionally (R3-9). Rows in any post-dispatch state
+   * are never reclaimed.
+   */
   reserve(input: { jobId: string; kernelId: string; ownerId: string; requestFingerprint: string }): CarrierShipmentRecord {
     const existing = this.byJobId.get(input.jobId);
-    if (existing) throw new CarrierStoreError(existing.status === "reserved" ? "job_in_flight" : "job_exists");
+    if (existing) {
+      if (existing.status === "reserved") {
+        const t = Date.parse(existing.reservedAt);
+        const expired = Number.isNaN(t) || t < this.now().getTime() - this.reservationTtlMs;
+        if (!expired) throw new CarrierStoreError("job_in_flight");
+        this.tx(() => {
+          if (this.sqlite) this.sqlite.prepare("DELETE FROM carrier_shipments WHERE job_id = ? AND status = 'reserved'").run(input.jobId);
+        });
+        this.byJobId.delete(input.jobId);
+      } else {
+        throw new CarrierStoreError(existing.status === "buy_in_flight" ? "job_in_flight" : "job_exists");
+      }
+    }
     const ts = this.now().toISOString();
     const rec: CarrierShipmentRecord = {
       jobId: input.jobId,
@@ -293,7 +440,9 @@ export class CarrierShipmentStore {
       ownerId: input.ownerId,
       requestFingerprint: input.requestFingerprint,
       status: "reserved",
+      version: 0,
       reservedAt: ts,
+      createdShipment: null,
       shipmentId: null,
       trackerId: null,
       trackingCode: null,
@@ -304,6 +453,7 @@ export class CarrierShipmentStore {
       currency: null,
       providerMode: null,
       mock: false,
+      reconciliationReason: null,
       labelHash: null,
       labelCid: null,
       commitment: null,
@@ -322,7 +472,7 @@ export class CarrierShipmentStore {
     return rec;
   }
 
-  /** Free a reservation that never became a purchase. A purchased row is never deleted. */
+  /** Free a reservation that never dispatched a charge. Any other state is never deleted. */
   release(jobId: string): void {
     const rec = this.byJobId.get(jobId);
     if (!rec || rec.status !== "reserved") return;
@@ -330,57 +480,74 @@ export class CarrierShipmentStore {
     this.byJobId.delete(jobId);
   }
 
-  /** Record that EasyPost has charged. Called the moment /buy returns, BEFORE the label is downloaded. */
-  markPurchased(jobId: string, bought: BoughtShipment): CarrierShipmentRecord {
-    const rec = this.byJobId.get(jobId);
-    if (!rec) throw new CarrierStoreError("not_found");
-    if (rec.status !== "reserved") throw new CarrierStoreError("invalid_transition");
-    const code = bought.trackingCode?.trim();
-    if (!code) throw new CarrierStoreError("empty_tracking_code");
-    if (this.byTrackingCode.has(code)) throw new CarrierStoreError("duplicate_tracking_code");
-
-    const next: CarrierShipmentRecord = {
-      ...rec,
-      status: "purchased_pending",
-      shipmentId: bought.shipmentId,
-      trackerId: bought.trackerId,
-      trackingCode: code,
-      labelUrl: bought.labelUrl,
-      carrier: bought.carrier,
-      service: bought.service,
-      rate: bought.rate,
-      currency: bought.currency,
-      providerMode: bought.providerMode,
-      mock: bought.mock,
-      updatedAt: this.now().toISOString(),
-    };
-    try {
-      this.sqlUpdate(next, null);
-    } catch (err) {
-      if (isUniqueViolation(err)) throw new CarrierStoreError("duplicate_tracking_code");
-      throw err;
-    }
-    Object.assign(rec, next);
-    this.byTrackingCode.set(code, rec.jobId);
-    return rec;
+  /** Durably record "we are about to dispatch /buy for THIS created shipment" (R3-1). After this, release() is structurally impossible. */
+  async markBuyInFlight(jobId: string, created: CreatedShipment): Promise<CarrierShipmentRecord> {
+    return this.withLock(jobId, async () => {
+      const rec = this.byJobId.get(jobId);
+      if (!rec) throw new CarrierStoreError("not_found");
+      if (rec.status !== "reserved") throw new CarrierStoreError("invalid_transition");
+      return this.commitMutation(rec, { status: "buy_in_flight", createdShipment: created, shipmentId: created.shipmentId, mock: created.mock, providerMode: created.providerMode });
+    });
   }
 
-  /** Attach the label hash/CID + commitment to a recorded purchase. Idempotent target state: label_bought. */
-  finalize(jobId: string, finalized: FinalizedLabel): CarrierShipmentRecord {
-    const rec = this.byJobId.get(jobId);
-    if (!rec) throw new CarrierStoreError("not_found");
-    if (rec.status !== "purchased_pending") throw new CarrierStoreError("invalid_transition");
-    const next: CarrierShipmentRecord = {
-      ...rec,
-      status: "label_bought",
-      labelHash: finalized.labelHash,
-      labelCid: finalized.labelCid,
-      commitment: finalized.commitment,
-      updatedAt: this.now().toISOString(),
-    };
-    this.sqlUpdate(next, rec.trackingCode);
-    Object.assign(rec, next);
-    return rec;
+  /** Record that EasyPost has charged. */
+  async markPurchased(jobId: string, bought: BoughtShipment): Promise<CarrierShipmentRecord> {
+    return this.withLock(jobId, async () => {
+      const rec = this.byJobId.get(jobId);
+      if (!rec) throw new CarrierStoreError("not_found");
+      if (rec.status !== "buy_in_flight") throw new CarrierStoreError("invalid_transition");
+      const code = bought.trackingCode?.trim();
+      if (!code) throw new CarrierStoreError("empty_tracking_code");
+      if (this.byTrackingCode.has(code)) throw new CarrierStoreError("duplicate_tracking_code");
+      try {
+        this.commitMutation(rec, {
+          status: "purchased_pending",
+          shipmentId: bought.shipmentId,
+          trackerId: bought.trackerId,
+          trackingCode: code,
+          labelUrl: bought.labelUrl,
+          carrier: bought.carrier,
+          service: bought.service,
+          rate: bought.rate,
+          currency: bought.currency,
+          providerMode: bought.providerMode,
+          mock: bought.mock,
+        });
+      } catch (err) {
+        if (isUniqueViolation(err)) throw new CarrierStoreError("duplicate_tracking_code");
+        throw err;
+      }
+      this.byTrackingCode.set(code, rec.jobId);
+      return rec;
+    });
+  }
+
+  /** Park a possibly-charged or defective purchase for a human. Never auto-resolved (R3-1/R3-10). */
+  async markReconciliationRequired(jobId: string, reason: string): Promise<CarrierShipmentRecord> {
+    return this.withLock(jobId, async () => {
+      const rec = this.byJobId.get(jobId);
+      if (!rec) throw new CarrierStoreError("not_found");
+      if (rec.status !== "buy_in_flight" && rec.status !== "purchased_pending") {
+        throw new CarrierStoreError("invalid_transition");
+      }
+      return this.commitMutation(rec, { status: "reconciliation_required", reconciliationReason: reason });
+    });
+  }
+
+  /** Attach the label hash/CID + commitment to a recorded purchase. */
+  async finalize(jobId: string, finalized: FinalizedLabel): Promise<CarrierShipmentRecord> {
+    return this.withLock(jobId, async () => {
+      const rec = this.byJobId.get(jobId);
+      if (!rec) throw new CarrierStoreError("not_found");
+      if (rec.status !== "purchased_pending") throw new CarrierStoreError("invalid_transition");
+      if (rec.commitment) throw new CarrierStoreError("invalid_transition"); // a commitment is never replaced (R3-2)
+      return this.commitMutation(rec, {
+        status: "label_bought",
+        labelHash: finalized.labelHash,
+        labelCid: finalized.labelCid,
+        commitment: finalized.commitment,
+      });
+    });
   }
 
   // ── reads ────────────────────────────────────────────────────────────────
@@ -402,24 +569,50 @@ export class CarrierShipmentStore {
     return this.seenEventIds.has(eventId);
   }
 
-  /** Purchases whose finalize step never completed — surfaced so they are reconciled, never re-bought. */
+  /** Purchases whose finalize step never completed — reconciled/finalized, never re-bought. */
   listPendingFinalize(): CarrierShipmentRecord[] {
     return [...this.byJobId.values()].filter((r) => r.status === "purchased_pending");
   }
 
-  // ── webhook application (findings 5, 7, 9; NEW-4) ───────────────────────
+  /** Ambiguous/defective post-charge outcomes awaiting a human decision. */
+  listNeedsReconciliation(): CarrierShipmentRecord[] {
+    return [...this.byJobId.values()].filter((r) => r.status === "reconciliation_required" || r.status === "buy_in_flight");
+  }
+
+  // ── unmatched-scan ledger (R3-5) ─────────────────────────────────────────
+
+  /** Durably ledger a signature-valid tracker event that cannot currently be matched/applied. Idempotent per event id. */
+  ledgeUnmatched(evt: TrackerWebhookEvent, raw: unknown): void {
+    if (this.seenEventIds.has(evt.easypostEventId) || this.unmatchedIds.has(evt.easypostEventId)) return;
+    if (this.sqlite) {
+      this.sqlite
+        .prepare("INSERT OR IGNORE INTO carrier_unmatched_events (event_id, tracking_code, at, data) VALUES (?, ?, ?, ?)")
+        .run(evt.easypostEventId, evt.trackingCode, evt.occurredAt, JSON.stringify(raw));
+    }
+    this.unmatchedIds.add(evt.easypostEventId);
+    const list = this.unmatchedByCode.get(evt.trackingCode) ?? [];
+    list.push({ eventId: evt.easypostEventId, trackingCode: evt.trackingCode, at: evt.occurredAt, data: raw });
+    this.unmatchedByCode.set(evt.trackingCode, list);
+  }
+
+  /** Remove and return the ledgered events for a tracking code (oldest first, by carrier timestamp) for replay. */
+  takeUnmatched(trackingCode: string): UnmatchedLedgerEntry[] {
+    const list = this.unmatchedByCode.get(trackingCode) ?? [];
+    if (list.length === 0) return [];
+    this.unmatchedByCode.delete(trackingCode);
+    for (const e of list) this.unmatchedIds.delete(e.eventId);
+    if (this.sqlite) {
+      this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE tracking_code = ?").run(trackingCode);
+    }
+    return [...list].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  }
+
+  // ── webhook application ──────────────────────────────────────────────────
 
   /**
    * Applies a verified carrier tracking webhook to its pre-committed shipment.
-   *
-   * Order of operations: identity checks -> synchronous claim of the provider
-   * event id (dedupe) -> watermark/lattice decision -> evidence built (awaited,
-   * BEFORE any mutation) -> ONE transaction that inserts the event id and
-   * updates the row -> then memory. If anything throws before commit, the
-   * claim is dropped and nothing is marked seen, so the provider's retry gets
-   * a clean attempt (finding 9). A concurrent duplicate delivery is refused
-   * by the claim set in-process and by the event_id primary key across
-   * processes (NEW-4).
+   * Serialized per job by the store mutex; the provider event id is claimed
+   * inside the same transaction as the state change. See the class comment.
    */
   async recordCarrierEvent(
     webhookEvent: TrackerWebhookEvent,
@@ -429,32 +622,40 @@ export class CarrierShipmentStore {
     ) => Promise<EvidenceEvent | null> | EvidenceEvent | null,
     rawForLedger?: unknown,
   ): Promise<RecordCarrierEventResult> {
-    const record = this.getByTrackingCode(webhookEvent.trackingCode);
-    if (!record) return { ok: false, reason: "unknown_tracking_code" };
-    if (!TRACKABLE.has(record.status)) return { ok: false, reason: "not_finalized" };
+    const pre = this.getByTrackingCode(webhookEvent.trackingCode);
+    if (!pre) return { ok: false, reason: "unknown_tracking_code" };
 
-    // Identity: the webhook must name the tracker we bought when we know it,
-    // and never a different shipment (finding 6).
-    if (record.trackerId && !webhookEvent.trackerId) return { ok: false, reason: "tracker_missing" };
-    if (record.trackerId && webhookEvent.trackerId && webhookEvent.trackerId !== record.trackerId) {
-      return { ok: false, reason: "tracker_mismatch" };
-    }
-    if (webhookEvent.shipmentId && webhookEvent.shipmentId !== record.shipmentId) {
-      return { ok: false, reason: "shipment_mismatch" };
-    }
+    return this.withLock(pre.jobId, async () => {
+      const record = this.getByTrackingCode(webhookEvent.trackingCode);
+      if (!record) return { ok: false, reason: "unknown_tracking_code" };
+      if (!TRACKABLE.has(record.status)) return { ok: false, reason: "not_finalized" };
 
-    const eventId = webhookEvent.easypostEventId;
-    if (this.seenEventIds.has(eventId) || this.claimingEventIds.has(eventId)) {
-      return { ok: true, record, outcome: "deduped", newStatus: record.status };
-    }
-    this.claimingEventIds.add(eventId); // synchronous: closes the check-then-act window across the await below
+      // Identity: the webhook must name the tracker we bought when we know it,
+      // and never a different shipment (round-2 finding 6).
+      if (record.trackerId && !webhookEvent.trackerId) return { ok: false, reason: "tracker_missing" };
+      if (record.trackerId && webhookEvent.trackerId && webhookEvent.trackerId !== record.trackerId) {
+        return { ok: false, reason: "tracker_mismatch" };
+      }
+      if (webhookEvent.shipmentId && webhookEvent.shipmentId !== record.shipmentId) {
+        return { ok: false, reason: "shipment_mismatch" };
+      }
+      // R3-4: a scan that happened BEFORE the commitment existed can never be
+      // qualifying evidence — the claim "the commitment predates execution"
+      // would be false for it. Refused permanently, not retried.
+      if (record.commitment && Date.parse(webhookEvent.occurredAt) < Date.parse(record.commitment.committedAt)) {
+        return { ok: false, reason: "scan_predates_commitment" };
+      }
 
-    try {
+      const eventId = webhookEvent.easypostEventId;
+      if (this.seenEventIds.has(eventId)) {
+        return { ok: true, record, outcome: "deduped", newStatus: record.status };
+      }
+
       const ledgerEntry: StoredWebhookEvent = { eventId, jobId: record.jobId, at: webhookEvent.occurredAt, data: rawForLedger ?? webhookEvent };
       const eventT = Date.parse(webhookEvent.occurredAt);
       const markT = record.lastCarrierEventAt ? Date.parse(record.lastCarrierEventAt) : -Infinity;
       // The watermark advances on EVERY matched event (applied or not), so a
-      // newer no-op scan still shuts the door on older late arrivals (finding 7).
+      // newer no-op scan still shuts the door on older late arrivals.
       const newWatermark = eventT > markT ? webhookEvent.occurredAt : record.lastCarrierEventAt;
 
       let outcome: RecordCarrierEventOutcome;
@@ -468,13 +669,15 @@ export class CarrierShipmentStore {
         outcome = next ? "applied" : "no_transition";
       }
 
-      // Build evidence FIRST (finding 9). Nothing is written if this throws.
+      // Build evidence FIRST (round-2 finding 9). Nothing is written if this throws.
       const evidenceEvent =
         next === "in_transit" || next === "delivered" ? await buildEvidenceEvent(record, next) : null;
 
+      const expected = record.version;
       const updated: CarrierShipmentRecord = {
         ...record,
         status: next ?? record.status,
+        version: expected + 1,
         lastCarrierEventAt: newWatermark,
         events: evidenceEvent ? [...record.events, evidenceEvent] : record.events,
         updatedAt: this.now().toISOString(),
@@ -491,7 +694,7 @@ export class CarrierShipmentStore {
           }
           throw err;
         }
-        this.sqlUpdate(updated, record.trackingCode);
+        this.sqlUpdateCas(updated, expected);
       });
       if (deduped) {
         this.seenEventIds.add(eventId);
@@ -501,9 +704,7 @@ export class CarrierShipmentStore {
       Object.assign(record, updated);
       this.seenEventIds.add(eventId);
       return { ok: true, record, outcome, newStatus: record.status };
-    } finally {
-      this.claimingEventIds.delete(eventId);
-    }
+    });
   }
 }
 

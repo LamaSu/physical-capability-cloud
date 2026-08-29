@@ -49,7 +49,10 @@ describe("carrier routes behind apiGate (finding 15)", () => {
       // No Bearer, no session — only EasyPost's HMAC. Must NOT be the gate's 401.
       const good = await app.inject({ method: "POST", url: "/api/carrier/webhook/easypost", payload: body, headers: { "content-type": "application/json", "x-hmac-signature": sign(body) } });
       expect(good.statusCode).toBe(200);
-      expect(good.json()).toMatchObject({ received: true, matched: false, reason: "unknown_tracking_code" });
+      // Round 4 (sol R3-5): an unknown tracking code is durably LEDGERED for
+      // post-purchase replay, not dropped — the gate-relevant point stands:
+      // the request reached the HMAC check and the handler, unauthenticated.
+      expect(good.json()).toMatchObject({ received: true, pending: true, reason: "unknown_tracking_code" });
 
       // And a bad signature is rejected BY THE ROUTE (its own 401 body), not by the gate.
       const bad = await app.inject({ method: "POST", url: "/api/carrier/webhook/easypost", payload: body, headers: { "content-type": "application/json", "x-hmac-signature": "hmac-sha256-hex=00" } });

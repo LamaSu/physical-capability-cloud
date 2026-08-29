@@ -11,23 +11,26 @@
  * gateway boots and the route contract is testable with zero external calls.
  * This is NOT EasyPost's own "test mode" (a real EasyPost TEST key still hits
  * the real API, in EasyPost's sandbox) — it's this codebase's convention for
- * "no credential configured at all", matching fiat-ramp.ts's
- * StripeOnrampClient / YellowcardClient / WiseClient pattern (mock = !env var).
+ * "no credential configured at all", matching fiat-ramp.ts's client pattern
+ * (mock = !env var). Mock is refused under requireProductionMode.
  *
- * PROVIDER MODE (sol #297 round 2, CRITICAL): EasyPost's docs define no key
- * prefix that distinguishes test from production keys, and third-party pages
- * contradict each other — so this client does NOT sniff key prefixes. Every
- * EasyPost object carries a provider-attested `mode: "test" | "production"`;
- * the client reads it from the created Shipment BEFORE /buy and from every
- * Tracker webhook, binds it into the commitment and the evidence, and — when
- * `requireProductionMode` is set (production boot) — refuses anything that
- * is not "production". Evidence from a test-mode tracker is never authentic.
+ * PROVIDER MODE (sol #297 round 2, NEW-1): EasyPost's docs define no key
+ * prefix that distinguishes test from production keys, so this client does
+ * NOT sniff key prefixes. Every EasyPost object carries a provider-attested
+ * `mode: "test" | "production"`; the client reads it from the created
+ * Shipment BEFORE any charge, re-checks the bought object for EQUALITY
+ * (R3-10 — a disagreement is a post-charge reconciliation case, its own
+ * error code), reads it from every Tracker webhook, binds it into the
+ * commitment and the evidence, and — when `requireProductionMode` is set —
+ * refuses anything that is not "production" before money moves.
  *
- * PURCHASE IS TWO PHASES (sol round 2, NEW-2): `createAndBuy` ends the moment
- * EasyPost has charged; the caller durably records that BEFORE
- * `finalizeLabel` downloads/hashes/content-addresses the label and builds
- * the commitment. A failure after /buy therefore never leads to a second
- * charge on retry — the recorded purchase is finalized instead.
+ * PURCHASE IS THREE STEPS (sol round 3, R3-1): `createShipment` (no charge —
+ * every failure here is safely retryable), then the caller durably records
+ * `buy_in_flight`, then `buyRate` (THE charge). After buyRate has been
+ * dispatched, NO failure path may treat the purchase as not-having-happened:
+ * ambiguous outcomes are recovered via `getShipment` (did EasyPost record a
+ * purchase for the shipment id we created?) or parked for human
+ * reconciliation — never re-bought on a guess.
  */
 
 import { randomUUID, createHmac, timingSafeEqual, createHash } from "node:crypto";
@@ -69,6 +72,9 @@ export type ProviderMode = "production" | "test" | "mock";
  * The pre-execution binding sol's reviews (coord #1382, PR #297) require.
  * Computed BEFORE the label reaches a human, so the later carrier webhook
  * closes a pre-committed claim rather than observing an unrelated scan.
+ * A scan whose carrier timestamp predates `committedAt` is NOT qualifying
+ * evidence (R3-4) — enforced in carrier-shipment-store and to be enforced
+ * independently by the oracle's verdict rule.
  *
  * WHAT IT PROVES: that at `committedAt` the gateway bound THIS job, THIS
  * document hash, THIS destination, THIS carrier-issued tracking code /
@@ -81,7 +87,6 @@ export type ProviderMode = "production" | "test" | "mock";
  * envelope. Document-to-envelope binding needs the print leg (kernel-signed
  * page count + hash of the label it printed, fetched by labelCid) + the
  * pre-seal handoff photo; the scan binds envelope to mail stream only.
- * Stated in the capability definition, never blurred.
  */
 export interface ShipmentCommitmentBody {
   v: 1;
@@ -123,7 +128,19 @@ export type CommitmentSigner = (
   hash: string,
 ) => Promise<CommitmentSignature | null>;
 
-/** Phase 1 result: EasyPost has charged; nothing else has happened yet. Record this durably before phase 2. */
+/** Step 1 result: a priced shipment EXISTS at EasyPost but NOTHING has been charged. Safe to abandon. */
+export interface CreatedShipment {
+  shipmentId: string;
+  providerMode: ProviderMode;
+  rateId: string;
+  carrier: string;
+  service: string;
+  rate: string;
+  currency: string;
+  mock: boolean;
+}
+
+/** Step 2 result: EasyPost has charged. Record durably before anything else. */
 export interface BoughtShipment {
   shipmentId: string;
   trackerId: string | null;
@@ -137,7 +154,7 @@ export interface BoughtShipment {
   mock: boolean;
 }
 
-/** Phase 2 result: label bytes hashed + content-addressed, commitment built (and signed when a signer is configured). */
+/** Step 3 result: label bytes hashed + content-addressed, commitment built (and signed when a signer is configured). */
 export interface FinalizedLabel {
   labelHash: string;
   labelCid: string;
@@ -187,6 +204,14 @@ export class EasyPostError extends Error {
   }
 }
 
+/** Error codes that can only occur AFTER a charge may have happened. The route must park these for reconciliation, never release-and-retry. */
+export const POST_CHARGE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "easypost_buy_failed",
+  "easypost_buy_ambiguous",
+  "easypost_bought_but_unusable",
+  "easypost_bought_mode_mismatch",
+]);
+
 export interface EasyPostClientConfig {
   apiKey?: string;
   webhookSecret?: string;
@@ -200,7 +225,7 @@ export interface EasyPostClientConfig {
   requireProductionMode?: boolean;
   /** Per-request upstream timeout (ms). Default 15000. */
   timeoutMs?: number;
-  /** Maximum label download size (bytes). Default 5 MiB. */
+  /** Maximum label download size (bytes). Default 5 MiB. Enforced INCREMENTALLY while streaming (R3-6). */
   maxLabelBytes?: number;
   signer?: CommitmentSigner;
   /** Content-addressed store for label bytes; defaults to the gateway's shared CID blob store. Tests inject an in-memory one. */
@@ -213,7 +238,8 @@ const DEFAULT_MAX_WEIGHT_OZ = 70;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_LABEL_BYTES = 5 * 1024 * 1024;
 const HEX64 = /^[0-9a-f]{64}$/;
-const ALLOWED_LABEL_TYPES = [/^image\//i, /^application\/pdf/i];
+/** Exact types only (R3-6): image/* would admit active SVG; a prefix match on application/pdf would admit application/pdfx. */
+const ALLOWED_LABEL_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "application/pdf"]);
 
 export function sha256Hex(input: string | Buffer): string {
   return createHash("sha256").update(input).digest("hex");
@@ -307,6 +333,24 @@ function parseRateUsd(r: EasyPostRate): number | null {
   return n;
 }
 
+/** Extract the fields of a bought shipment; null when the object shows no purchase (no tracking code). */
+function boughtFromShipment(s: EasyPostShipment, fallbackMode: ProviderMode): BoughtShipment | null {
+  if (!nonEmptyString(s.id) || !nonEmptyString(s.tracking_code)) return null;
+  const labelUrl = s.postage_label?.label_url;
+  return {
+    shipmentId: s.id,
+    trackerId: nonEmptyString(s.tracker?.id) ? s.tracker!.id! : null,
+    trackingCode: s.tracking_code,
+    labelUrl: nonEmptyString(labelUrl) ? labelUrl : "",
+    carrier: s.selected_rate?.carrier ?? "unknown",
+    service: s.selected_rate?.service ?? "unknown",
+    rate: s.selected_rate?.rate ?? "",
+    currency: s.selected_rate?.currency ?? "USD",
+    providerMode: parseProviderMode(s.mode) ?? fallbackMode,
+    mock: false,
+  };
+}
+
 export class EasyPostClient {
   readonly isMock: boolean;
   readonly maxRateUsd: number;
@@ -379,13 +423,13 @@ export class EasyPostClient {
   }
 
   /**
-   * PHASE 1 — create the shipment, pick the cheapest usable USD rate, enforce
-   * ceilings and provider mode, then /buy. Returns the moment EasyPost has
-   * charged. The caller MUST durably record the result before phase 2.
+   * STEP 1 — create + price the shipment. NO money moves here; every failure
+   * on this path is safely retryable and the caller may release its
+   * reservation. Enforces ceilings and provider mode pre-charge.
    */
-  async createAndBuy(params: CreateLabelParams): Promise<BoughtShipment> {
+  async createShipment(params: CreateLabelParams): Promise<CreatedShipment> {
     this.checkParams(params);
-    if (this.isMock) return this.mockBought();
+    if (this.isMock) return this.mockCreated();
 
     const shipmentRes = await this.upstream(`${this.baseUrl}/shipments`, {
       method: "POST",
@@ -409,7 +453,7 @@ export class EasyPostClient {
     if (!providerMode) {
       throw new EasyPostError("easypost_invalid_response", null, `shipment.mode missing/unknown: ${String(shipment.mode)}`);
     }
-    // Decide BEFORE /buy: a test-mode shipment must never be charged-and-recorded in production.
+    // Decide BEFORE any charge: a test-mode shipment must never be charged in production.
     if (this.requireProductionMode && providerMode !== "production") {
       throw new EasyPostError("provider_mode_not_production", null, `shipment.mode=${providerMode} under requireProductionMode`);
     }
@@ -426,47 +470,94 @@ export class EasyPostClient {
       throw new EasyPostError("rate_exceeds_ceiling", null, `cheapest rate ${cheapest.usd} USD > ceiling ${this.maxRateUsd}`);
     }
 
-    const buyRes = await this.upstream(`${this.baseUrl}/shipments/${shipment.id}/buy`, {
-      method: "POST",
-      headers: { Authorization: this.authHeader(), "Content-Type": "application/json" },
-      body: JSON.stringify({ rate: { id: cheapest.r.id } }),
-    });
-    if (!buyRes.ok) {
-      throw new EasyPostError("easypost_buy_failed", buyRes.status, await safeText(buyRes));
-    }
-    const bought = (await buyRes.json()) as EasyPostShipment;
-    const shipmentId = nonEmptyString(bought.id) ? bought.id : shipment.id;
-    const trackingCode = bought.tracking_code;
-    const labelUrl = bought.postage_label?.label_url;
-    if (!nonEmptyString(trackingCode) || !nonEmptyString(labelUrl)) {
-      // EasyPost has charged but returned an unusable object. Surface it as
-      // its own code so the caller can record a purchase that needs manual
-      // reconciliation rather than silently re-buying.
-      throw new EasyPostError("easypost_bought_but_unusable", null, `bought shipment ${shipmentId} missing tracking_code/label_url`);
-    }
-    if (!/^https:\/\//.test(labelUrl)) {
-      throw new EasyPostError("easypost_bought_but_unusable", null, `label_url is not https (shipment ${shipmentId})`);
-    }
-    const boughtMode = parseProviderMode(bought.mode) ?? providerMode;
-
     return {
-      shipmentId,
-      trackerId: nonEmptyString(bought.tracker?.id) ? bought.tracker!.id! : null,
-      trackingCode,
-      labelUrl,
-      carrier: bought.selected_rate?.carrier ?? cheapest.r.carrier ?? "unknown",
-      service: bought.selected_rate?.service ?? cheapest.r.service ?? "unknown",
-      rate: bought.selected_rate?.rate ?? cheapest.r.rate ?? String(cheapest.usd),
-      currency: bought.selected_rate?.currency ?? cheapest.r.currency ?? "USD",
-      providerMode: boughtMode,
+      shipmentId: shipment.id,
+      providerMode,
+      rateId: cheapest.r.id!,
+      carrier: cheapest.r.carrier ?? "unknown",
+      service: cheapest.r.service ?? "unknown",
+      rate: cheapest.r.rate ?? String(cheapest.usd),
+      currency: cheapest.r.currency ?? "USD",
       mock: false,
     };
   }
 
   /**
-   * PHASE 2 — download the label BYTES (size-capped, type-checked, no
-   * redirects), hash + content-address them, build and sign the commitment.
-   * Idempotent: safe to re-run for an already-recorded purchase.
+   * STEP 2 — THE CHARGE. The caller MUST have durably recorded
+   * `buy_in_flight` (with `created.shipmentId`) before calling. Every error
+   * thrown here is in POST_CHARGE_ERROR_CODES territory: the caller must
+   * treat the purchase as possibly-made and go through `getShipment`
+   * recovery or reconciliation — never release-and-retry (R3-1).
+   */
+  async buyRate(created: CreatedShipment): Promise<BoughtShipment> {
+    if (created.mock) return this.mockBought(created);
+
+    let buyRes: Response;
+    try {
+      buyRes = await this.upstream(`${this.baseUrl}/shipments/${created.shipmentId}/buy`, {
+        method: "POST",
+        headers: { Authorization: this.authHeader(), "Content-Type": "application/json" },
+        body: JSON.stringify({ rate: { id: created.rateId } }),
+      });
+    } catch (err) {
+      // Timeout / network failure AFTER dispatch: EasyPost may have charged.
+      throw new EasyPostError("easypost_buy_ambiguous", null, `no response to /buy: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!buyRes.ok) {
+      // A non-2xx usually means not charged — but 5xx after processing is
+      // possible, so this too is recovered via getShipment, not assumed.
+      throw new EasyPostError("easypost_buy_failed", buyRes.status, await safeText(buyRes));
+    }
+    const bought = (await buyRes.json()) as EasyPostShipment;
+    const parsed = boughtFromShipment(bought, created.providerMode);
+    if (!parsed || !parsed.labelUrl || !/^https:\/\//.test(parsed.labelUrl)) {
+      throw new EasyPostError(
+        "easypost_bought_but_unusable",
+        null,
+        `bought shipment ${created.shipmentId} missing/invalid tracking_code or label_url`,
+      );
+    }
+    // R3-10: the bought object's mode must be PRESENT and EQUAL to the mode
+    // we authorized pre-charge. A disagreement after the charge is a
+    // reconciliation case, never silently recorded under either mode.
+    const boughtMode = parseProviderMode(bought.mode);
+    if (!boughtMode || boughtMode !== created.providerMode) {
+      throw new EasyPostError(
+        "easypost_bought_mode_mismatch",
+        null,
+        `created mode=${created.providerMode}, bought mode=${String(bought.mode)} (shipment ${created.shipmentId})`,
+      );
+    }
+    return { ...parsed, carrier: parsed.carrier === "unknown" ? created.carrier : parsed.carrier, service: parsed.service === "unknown" ? created.service : parsed.service, rate: parsed.rate || created.rate, currency: parsed.currency || created.currency };
+  }
+
+  /**
+   * RECOVERY — did EasyPost record a purchase for this shipment id? Used
+   * when a prior /buy outcome was ambiguous: a shipment WITH a tracking
+   * code was charged (finalize it); one WITHOUT was not (safe to re-buy).
+   */
+  async getShipment(created: CreatedShipment): Promise<{ bought: BoughtShipment | null }> {
+    if (created.mock) return { bought: this.mockBought(created) };
+    const res = await this.upstream(`${this.baseUrl}/shipments/${created.shipmentId}`, {
+      method: "GET",
+      headers: { Authorization: this.authHeader() },
+    });
+    if (!res.ok) {
+      throw new EasyPostError("easypost_get_shipment_failed", res.status, await safeText(res));
+    }
+    const shipment = (await res.json()) as EasyPostShipment;
+    const bought = boughtFromShipment(shipment, created.providerMode);
+    if (bought && (!bought.labelUrl || !/^https:\/\//.test(bought.labelUrl))) {
+      throw new EasyPostError("easypost_bought_but_unusable", null, `recovered shipment ${created.shipmentId} has tracking but no usable label_url`);
+    }
+    return { bought };
+  }
+
+  /**
+   * STEP 3 — download the label BYTES (streamed with an incremental cap,
+   * exact type allowlist, no redirects), hash + content-address them, build
+   * and sign the commitment. Idempotent: safe to re-run for a recorded
+   * purchase.
    */
   async finalizeLabel(params: CreateLabelParams, bought: BoughtShipment): Promise<FinalizedLabel> {
     this.checkParams(params);
@@ -474,26 +565,23 @@ export class EasyPostClient {
     let mediaType: string;
     if (bought.mock) {
       labelBytes = Buffer.from(`MOCK-LABEL:${bought.shipmentId}:${bought.trackingCode}`);
-      mediaType = "text/plain";
+      mediaType = "image/png"; // mock bytes stand in for a label image
     } else {
       const labelRes = await this.upstream(bought.labelUrl, { method: "GET" });
       if (!labelRes.ok) {
         throw new EasyPostError("easypost_label_download_failed", labelRes.status, await safeText(labelRes));
       }
-      mediaType = (labelRes.headers.get("content-type") ?? "").split(";")[0]!.trim();
-      if (!ALLOWED_LABEL_TYPES.some((re) => re.test(mediaType))) {
+      mediaType = (labelRes.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+      if (!ALLOWED_LABEL_TYPES.has(mediaType)) {
         throw new EasyPostError("easypost_label_unexpected_type", null, `label content-type ${mediaType || "<none>"}`);
       }
       const declared = Number(labelRes.headers.get("content-length"));
       if (Number.isFinite(declared) && declared > this.maxLabelBytes) {
         throw new EasyPostError("easypost_label_too_large", null, `declared ${declared} > cap ${this.maxLabelBytes}`);
       }
-      labelBytes = Buffer.from(await labelRes.arrayBuffer());
+      labelBytes = await this.readCapped(labelRes);
       if (labelBytes.length === 0) {
         throw new EasyPostError("easypost_invalid_response", null, "label download was empty");
-      }
-      if (labelBytes.length > this.maxLabelBytes) {
-        throw new EasyPostError("easypost_label_too_large", null, `received ${labelBytes.length} > cap ${this.maxLabelBytes}`);
       }
     }
     const labelHash = sha256Hex(labelBytes);
@@ -521,26 +609,72 @@ export class EasyPostClient {
     return { labelHash, labelCid, commitment: { ...body, hash, signature } };
   }
 
-  /** Convenience: both phases back to back. Route code uses the phases separately so the purchase is recorded between them. */
+  /** Stream the response body, aborting the moment the cap is exceeded (R3-6: the cap must bound ALLOCATION, not just check afterwards). */
+  private async readCapped(res: Response): Promise<Buffer> {
+    const body = res.body as ReadableStream<Uint8Array> | null;
+    if (!body) {
+      // No stream available (some fetch stubs): fall back, still capped post-hoc.
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > this.maxLabelBytes) {
+        throw new EasyPostError("easypost_label_too_large", null, `received ${buf.length} > cap ${this.maxLabelBytes}`);
+      }
+      return buf;
+    }
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > this.maxLabelBytes) {
+            await reader.cancel().catch(() => {});
+            throw new EasyPostError("easypost_label_too_large", null, `streamed ${total} > cap ${this.maxLabelBytes}`);
+          }
+          chunks.push(value);
+        }
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+  }
+
+  /** Convenience for tests: all three steps back to back. Route code uses the steps separately so the charge is recorded between them. */
   async buyCheapestLabel(params: CreateLabelParams): Promise<CreateLabelResult> {
-    const bought = await this.createAndBuy(params);
+    const created = await this.createShipment(params);
+    const bought = await this.buyRate(created);
     const finalized = await this.finalizeLabel(params, bought);
     return { ...bought, ...finalized };
   }
 
-  private mockBought(): BoughtShipment {
+  private mockCreated(): CreatedShipment {
     const shipmentId = `shp_mock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
-    const trackerId = `trk_mock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
-    const trackingCode = `EZMOCK${hashToPositiveInt(shipmentId).toString().padStart(10, "0").slice(0, 10)}`;
     return {
       shipmentId,
-      trackerId,
-      trackingCode,
-      labelUrl: `https://easypost-mock.invalid/labels/${shipmentId}.png`,
+      providerMode: "mock",
+      rateId: "rate_mock",
       carrier: "USPS",
       service: "First",
       rate: "4.50",
       currency: "USD",
+      mock: true,
+    };
+  }
+
+  private mockBought(created: CreatedShipment): BoughtShipment {
+    const trackingCode = `EZMOCK${hashToPositiveInt(created.shipmentId).toString().padStart(10, "0").slice(0, 10)}`;
+    return {
+      shipmentId: created.shipmentId,
+      trackerId: `trk_mock_${hashToPositiveInt(trackingCode).toString(16).padStart(12, "0")}`,
+      trackingCode,
+      labelUrl: `https://easypost-mock.invalid/labels/${created.shipmentId}.png`,
+      carrier: created.carrier,
+      service: created.service,
+      rate: created.rate,
+      currency: created.currency,
       providerMode: "mock",
       mock: true,
     };
