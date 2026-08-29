@@ -10,63 +10,59 @@
  * getJobOffersStore()/store.create() before this file existed — the producer
  * was unbuilt, not merely unwired.
  *
- * Mapping follows composition 8a0f4de0's #1289 spec (matched DAG -> job-offers):
- *   capabilityType, matchedCapabilityId, matchedKernelId, price (estimatedCost
- *   + currency), evidenceRequirements, requestId+nodeId+ordinal.
+ * v2 (coord #1467, superseding this lane's own v1): uses the CANONICAL
+ * composition-commitment module + adapter from @pcc/spec directly —
+ * `commitmentReportForRequest` — rather than a gateway-local copy. That
+ * module now also backs GET /api/requests/:id/commitment (routes/requests.ts),
+ * so an offer's stamped roots and that endpoint's live recompute are
+ * PROVABLY the same algorithm, not two copies that can drift (v1's actual
+ * bug: composition's own canonical had a NUL-byte separator defect that
+ * would have shipped a second, silently-divergent copy here — coord #1423).
  *
- * compositionRoot + mixed-plan semantics (coord #1347, composition's answer to
- * this lane's #1337): build the FULL matched DAG (every node, not just the
- * matched ones) and hand it to deriveCompositionCommitment. When it returns
- * committable:true, every offer in the plan is stamped with that SAME
- * compositionRoot. When it returns committable:false because >=1 node is
- * genuinely unmatched, the WHOLE request is held -- no offers publish for the
- * matched subset either, because "there is no committable root for a
- * partially-matched plan" (composition's words) and publishing before the
- * plan commits would create a half-committed money-path state. The unmatched
- * legs are surfaced back to the caller (`held.unmatchedNodes`) as a demand
- * signal (#1299), not silently dropped.
+ * NORMALIZATION, and why it exists: @pcc/spec's adapter recognizes ONLY the
+ * agentic-decompose convention (matchStatus==='matched'); it does not know
+ * about this codebase's SECOND convention (request-decomposer.ts's
+ * decomposeDirectMatch -> RoutedCapabilityNode: bare capabilityId/kernelId,
+ * no matchStatus at all). Left alone, every direct-match request — the
+ * ORIGINAL #1276 repro (a single-node cnc-3axis request) — would be
+ * reported as "unmatched" by the adapter and held. So this file overlays
+ * matchStatus/matchedCapabilityId/matchedKernelId from `resolveMatch` (this
+ * file's own dual-convention detector) onto a per-call copy of the DAG
+ * BEFORE handing it to the canonical module. The commitment module owns the
+ * crypto and validation; this file owns "which convention marks a node
+ * matched", which is gateway-producer-specific, not composition's concern.
  *
- * KNOWN, FLAGGED GAP (posted to composition 8a0f4de0 + gateway 0600b204 on the
- * #1276 bus thread, 2026-08-27): deriveCompositionCommitment's guard 2 also
- * requires a per-node matchedCapabilityDigest (0x + 64 hex, gateway #1238 /
- * branch feat/matched-capability-digest). That field does not exist ANYWHERE
- * in this codebase yet -- grepped lamasu/master + this worktree, zero hits.
- * Hard-gating publish on committable:true would therefore zero out 100% of
- * job-offer production (every real plan is "matched but digest-less"), which
- * is strictly worse than today's gap and would block coord #1344's demo. So:
- * when every node IS matched (unmatchedNodes is empty) but the commitment
- * still comes back committable:false purely for the missing-digest reason,
- * this producer DEGRADES GRACEFULLY -- it publishes the offers anyway, just
- * without a compositionRoot stamped (same posture as job-offers-store's own
- * `requirementsValidated:false` graceful-degrade for an unregistered schema).
- * The moment feat/matched-capability-digest lands and nodes carry a real
- * digest, this degrade path stops triggering automatically and every offer
- * gets a verifiable compositionRoot for free -- no further changes needed
- * here, since the digest is read defensively (see resolveDigest below)
- * rather than assumed absent.
+ * ROOTS: capabilityContractRoot is provider-agnostic (needs no digest) and
+ * is stamped whenever the plan itself is valid, EVEN while compositionRoot
+ * is degraded (see below) — the buyer's agreement is pinned from the first
+ * matched offer, before any provider is cryptographically bound.
+ * compositionRoot is stamped only when the full commitment succeeds.
  *
- * Two "matched" conventions exist in this codebase and both are handled here:
- *   - agentic/composite decompose (agentic-decomposer.ts): matchStatus +
- *     matchedCapabilityId + matchedKernelId
- *   - direct-match decompose (request-decomposer.ts decomposeDirectMatch):
- *     capabilityId + kernelId (RoutedCapabilityNode)
+ * DEGRADE, still relevant post gateway #1238/PR#300 (matchedCapabilityDigest
+ * now emitted on agentic-matched nodes): direct-match nodes still carry no
+ * digest, and any node matched before PR#300's deploy landed won't either.
+ * When the ONLY problem is the missing digest (report.blockedOn is set —
+ * @pcc/spec's own signal, shared with GET /api/requests/:id/commitment),
+ * this producer degrades gracefully: publish anyway, without a
+ * compositionRoot, rather than hard-refusing every real offer. Any OTHER
+ * commitment failure (genuine unmatched node, or a plan-validation
+ * violation — bad id/currency/decimal grammar, duplicate edges, etc.) HOLDS
+ * the whole request per composition's #1347 answer: no committable root
+ * exists for a partially-matched or invalid plan, and publishing before the
+ * plan commits would create a half-committed money-path state.
  */
 
 import type { CapabilityNode, CapabilityRequest } from "@pcc/spec";
+import { commitmentReportForRequest } from "@pcc/spec";
 import { getJobOffersStore, type CreateJobOfferInput } from "./job-offers-store.js";
 import type { RoutedCapabilityNode } from "./request-decomposer.js";
-import {
-  deriveCompositionCommitment,
-  type MatchedDAG,
-  type MatchedEdge,
-  type MatchedNode as CommitmentNode,
-} from "./composition-commitment.js";
 
 interface ResolvedMatch {
   capabilityId: string;
   kernelId: string;
 }
 
+/** Two "matched" conventions exist in this codebase; this is the one place that reconciles them. */
 function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
   if (node.matchStatus === "matched" && node.matchedCapabilityId && node.matchedKernelId) {
     return { capabilityId: node.matchedCapabilityId, kernelId: node.matchedKernelId };
@@ -79,16 +75,19 @@ function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
 }
 
 /**
- * Defensive read of a not-yet-landed field. feat/matched-capability-digest
- * has not merged (see file header) so CapabilityNode does not declare this
- * property today; reading it via an unknown-shaped cast means the instant
- * that branch lands and starts populating it, this producer picks it up
- * with zero further changes -- it does not need to know the exact final
- * type shape, only the field name gateway #1238 already committed to.
+ * Normalize onto the agentic shape @pcc/spec's adapter understands, so a
+ * direct-match node reads as matched too. Non-matched nodes pass through
+ * unchanged (matchStatus:"none" either explicitly or by absence).
  */
-function resolveDigest(node: CapabilityNode): string | undefined {
-  const digest = (node as { matchedCapabilityDigest?: unknown }).matchedCapabilityDigest;
-  return typeof digest === "string" ? digest : undefined;
+function normalizeForCommitment(node: CapabilityNode): CapabilityNode {
+  const match = resolveMatch(node);
+  if (!match) return node;
+  return {
+    ...node,
+    matchStatus: "matched",
+    matchedCapabilityId: match.capabilityId,
+    matchedKernelId: match.kernelId,
+  };
 }
 
 export interface ProduceJobOffersResult {
@@ -97,14 +96,17 @@ export interface ProduceJobOffersResult {
   skippedUnmatched: string[];
   failed: Array<{ nodeId: string; reason: string }>;
   /**
-   * Set when the WHOLE plan was held back because >=1 node is genuinely
-   * unmatched (composition #1347: no partial publish on a mixed plan). When
-   * set, `created`/`alreadyExisted` are empty and `skippedUnmatched` lists
-   * every unmatched node -- surface these to the buyer as a demand signal.
+   * Set when the WHOLE plan was held back — a genuinely unmatched node, or a
+   * plan-validation violation unrelated to the digest gap (composition #1347:
+   * no partial publish on a mixed or invalid plan). When set, `created`/
+   * `alreadyExisted` are empty; surface `unmatchedNodes` to the buyer as a
+   * demand signal and `violations` for anything else that tripped the guard.
    */
-  held?: { reason: string; unmatchedNodes: string[] };
-  /** The compositionRoot stamped on every created offer, when derivable (see KNOWN GAP above). */
+  held?: { reason: string; unmatchedNodes: string[]; violations: string[] };
+  /** Stamped on every created offer once the full commitment succeeds. */
   compositionRoot?: string;
+  /** Stamped on every created offer whenever the plan is valid — provider-agnostic, needs no digest. */
+  capabilityContractRoot?: string;
 }
 
 /**
@@ -127,49 +129,37 @@ export async function produceJobOffersForRequest(
   const dag = request.capabilityDag ?? [];
   if (dag.length === 0) return result;
 
-  const matchByNodeId = new Map<string, ResolvedMatch>();
-  const commitmentNodes: CommitmentNode[] = dag.map((node) => {
-    const match = resolveMatch(node);
-    if (match) matchByNodeId.set(node.id, match);
-    return {
-      nodeId: node.id,
-      matchStatus: match ? "matched" : "none",
-      matchedCapabilityDigest: resolveDigest(node),
-      matchedCapabilityId: match?.capabilityId,
-      estimatedCost: match ? String(node.estimatedCost) : undefined,
-      currency: match ? request.currency : undefined,
-    };
-  });
-  const edges: MatchedEdge[] = dag.flatMap((node) =>
-    node.dependencies.map((depId) => ({ from: depId, to: node.id })),
+  const report = commitmentReportForRequest(
+    request.id,
+    dag.map(normalizeForCommitment),
+    { currency: request.currency, goal: request.title },
   );
-  const dagForCommitment: MatchedDAG = {
-    requestId: request.id,
-    goal: request.title,
-    nodes: commitmentNodes,
-    edges,
-  };
-  const commitment = deriveCompositionCommitment(dagForCommitment);
 
-  if (!commitment.committable && commitment.unmatchedNodes.length > 0) {
-    // Genuinely mixed plan -- hold the whole request per composition's #1347
-    // answer. Nothing publishes, including the already-matched nodes.
-    result.skippedUnmatched = commitment.unmatchedNodes;
-    result.held = { reason: commitment.reason, unmatchedNodes: commitment.unmatchedNodes };
+  if (!report.commitment.committable && !report.blockedOn) {
+    result.skippedUnmatched = report.commitment.unmatchedNodes;
+    result.held = {
+      reason: report.commitment.reason,
+      unmatchedNodes: report.commitment.unmatchedNodes,
+      violations: report.commitment.violations,
+    };
     return result;
   }
 
-  // Either fully committable, or fully matched but missing the not-yet-landed
-  // digest (DEGRADED_NO_DIGEST -- see file header). Either way every node here
-  // is matched, so publish; stamp compositionRoot only when we actually have one.
-  const compositionRoot = commitment.committable ? commitment.compositionRoot : undefined;
+  const compositionRoot = report.commitment.committable ? report.commitment.compositionRoot : undefined;
+  const capabilityContractRoot = report.capabilityContractRoot ?? undefined;
+
+  const matchByNodeId = new Map<string, ResolvedMatch>();
+  for (const node of dag) {
+    const match = resolveMatch(node);
+    if (match) matchByNodeId.set(node.id, match);
+  }
 
   for (let ordinal = 0; ordinal < dag.length; ordinal++) {
     const node = dag[ordinal]!;
     const match = matchByNodeId.get(node.id);
     if (!match) {
-      // Unreachable given the guard above (would have hit the held branch),
-      // kept as a fail-closed backstop rather than assuming the invariant.
+      // Unreachable given the guard above (a genuinely unmatched node would
+      // have hit the held branch), kept as a fail-closed backstop.
       result.skippedUnmatched.push(node.id);
       continue;
     }
@@ -187,6 +177,7 @@ export async function produceJobOffersForRequest(
         description: node.description,
         materials: node.materials,
         ...(compositionRoot ? { compositionRoot } : {}),
+        ...(capabilityContractRoot ? { capabilityContractRoot } : {}),
       },
       pricing: {
         amount: node.estimatedCost,
@@ -216,5 +207,6 @@ export async function produceJobOffersForRequest(
   }
 
   if (compositionRoot) result.compositionRoot = compositionRoot;
+  if (capabilityContractRoot) result.capabilityContractRoot = capabilityContractRoot;
   return result;
 }

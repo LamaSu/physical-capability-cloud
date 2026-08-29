@@ -3,11 +3,16 @@
  * decomposition/matching and the job-offers marketplace (coord #1276:
  * "a decomposed request never becomes a claimable job offer").
  *
- * Covers both "matched" conventions in this codebase (agentic matchStatus,
- * direct-match capabilityId/kernelId), fail-closed hold of a mixed plan
- * (coord #1347), idempotency, and compositionRoot stamping once
- * matchedCapabilityDigest exists (feat/matched-capability-digest, not yet
- * landed — see job-offer-producer.ts file header).
+ * v2 (coord #1467): produceJobOffersForRequest now calls @pcc/spec's
+ * commitmentReportForRequest directly (the canonical module + adapter that
+ * also backs GET /api/requests/:id/commitment) instead of a gateway-local
+ * copy. Covers both "matched" conventions in this codebase (agentic
+ * matchStatus, direct-match capabilityId/kernelId — the adapter only knows
+ * the former, so the producer normalizes both before calling in), fail-closed
+ * hold of a mixed or structurally-invalid plan (coord #1347), the digest-gap
+ * degrade (compositionRoot omitted, capabilityContractRoot stamped
+ * regardless — it needs no digest), full dual-root stamping once
+ * matchedCapabilityDigest is present (PR #300), and idempotency.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -44,7 +49,10 @@ function baseRequest(
   };
 }
 
-/** Agentic/composite decompose convention — matchStatus + matchedCapabilityId/matchedKernelId. */
+const VALID_DIGEST_A = "0x" + "11".repeat(32);
+const VALID_DIGEST_B = "0x" + "22".repeat(32);
+
+/** Agentic/composite decompose convention — matchStatus + matchedCapabilityId/matchedKernelId, no digest (pre-PR#300 / today's typical case for older matches). */
 const AGENTIC_MATCHED_NODE: CapabilityNode = {
   id: "node-matched",
   requestId: "req-test-1",
@@ -64,7 +72,13 @@ const AGENTIC_MATCHED_NODE: CapabilityNode = {
   matchedKernelId: "kernel_mtaon2df_ry6r",
 };
 
-/** Direct-match decompose convention — RoutedCapabilityNode's capabilityId/kernelId. */
+/** Same convention, now WITH a real matchedCapabilityDigest (PR #300 shape). */
+const AGENTIC_MATCHED_NODE_WITH_DIGEST: CapabilityNode = {
+  ...AGENTIC_MATCHED_NODE,
+  matchedCapabilityDigest: VALID_DIGEST_A,
+};
+
+/** Direct-match decompose convention — RoutedCapabilityNode's capabilityId/kernelId, no matchStatus at all. */
 const DIRECT_MATCH_NODE: RoutedCapabilityNode = {
   id: "node-direct",
   requestId: "req-test-1",
@@ -100,31 +114,6 @@ const UNMATCHED_NODE: CapabilityNode = {
   matchStatus: "none",
 };
 
-/**
- * feat/matched-capability-digest (gateway #1238) has not landed anywhere in
- * this codebase yet — CapabilityNode does not declare this field today. These
- * fixtures simulate what a matched node will look like once it does, to prove
- * the forward-compat wiring (resolveDigest in job-offer-producer.ts) actually
- * stamps a compositionRoot the moment the field shows up, with zero further
- * producer changes needed.
- */
-type NodeWithDigest = CapabilityNode & { matchedCapabilityDigest?: string };
-const VALID_DIGEST_A = "0x" + "11".repeat(32);
-const VALID_DIGEST_B = "0x" + "22".repeat(32);
-const MATCHED_NODE_WITH_DIGEST_A: NodeWithDigest = {
-  ...AGENTIC_MATCHED_NODE,
-  id: "node-a",
-  matchedCapabilityDigest: VALID_DIGEST_A,
-};
-const MATCHED_NODE_WITH_DIGEST_B: NodeWithDigest = {
-  ...AGENTIC_MATCHED_NODE,
-  id: "node-b",
-  capabilityType: "fdm",
-  matchedCapabilityId: "cap-kernel_abc-fdm",
-  matchedKernelId: "kernel_abc",
-  matchedCapabilityDigest: VALID_DIGEST_B,
-};
-
 describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
   beforeEach(() => {
     initJobOffersStore({});
@@ -134,13 +123,14 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     _resetJobOffersStoreForTests();
   });
 
-  it("creates one open job-offer per MATCHED node (agentic matchStatus convention)", async () => {
+  it("creates one open job-offer per MATCHED node (agentic matchStatus convention), degrading gracefully with no digest", async () => {
     const req = baseRequest([AGENTIC_MATCHED_NODE]);
     const result = await produceJobOffersForRequest(req);
 
     expect(result.created).toHaveLength(1);
     expect(result.skippedUnmatched).toHaveLength(0);
     expect(result.failed).toHaveLength(0);
+    expect(result.held).toBeUndefined();
 
     const open = getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" });
     expect(open).toHaveLength(1);
@@ -158,32 +148,60 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     // "the feed is broken" rather than "nothing of this type".
     expect(getJobOffersStore().listOpen({ capabilityType: "fdm" })).toHaveLength(0);
 
-    // DEGRADED_NO_DIGEST (today's reality, see file header): matched but no
-    // matchedCapabilityDigest anywhere yet -> publishes, but no compositionRoot.
+    // DEGRADE (no digest -> no compositionRoot), but the contract root needs
+    // no digest -- it's still stamped, pinning the buyer's agreement early.
     expect(result.compositionRoot).toBeUndefined();
     expect(open[0]!.requirements.compositionRoot).toBeUndefined();
+    expect(result.capabilityContractRoot).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(open[0]!.requirements.capabilityContractRoot).toBe(result.capabilityContractRoot);
   });
 
-  it("creates one open job-offer per MATCHED node (direct-match capabilityId/kernelId convention)", async () => {
+  it("creates one open job-offer per MATCHED node (direct-match capabilityId/kernelId convention, normalized for the adapter)", async () => {
     const req = baseRequest([DIRECT_MATCH_NODE]);
     const result = await produceJobOffersForRequest(req);
 
     expect(result.created).toHaveLength(1);
+    expect(result.held).toBeUndefined();
     const open = getJobOffersStore().listOpen({ capabilityType: "fdm" });
     expect(open).toHaveLength(1);
     expect(open[0]!.requirements.matchedKernelId).toBe("kernel_abc");
     expect(open[0]!.requirements.matchedCapabilityId).toBe("cap-kernel_abc-fdm");
+    // Still degrades (direct-match carries no digest) but the contract root still stamps.
+    expect(result.compositionRoot).toBeUndefined();
+    expect(result.capabilityContractRoot).toMatch(/^0x[0-9a-fA-F]{64}$/);
   });
 
-  it("never publishes an UNMATCHED node — fail-closed", async () => {
+  it("never publishes an UNMATCHED node — holds the whole request, fail-closed", async () => {
     const req = baseRequest([UNMATCHED_NODE]);
     const result = await produceJobOffersForRequest(req);
 
     expect(result.created).toHaveLength(0);
     expect(result.skippedUnmatched).toEqual(["node-unmatched"]);
+    expect(result.held).toBeDefined();
+    expect(result.held!.unmatchedNodes).toEqual(["node-unmatched"]);
     expect(
       getJobOffersStore().listOpen({ capabilityType: "underwater-basket-weaving" }),
     ).toHaveLength(0);
+  });
+
+  it("holds the whole request on a genuine plan violation that is NOT the digest gap (dangling edge reference)", async () => {
+    // A dependency pointing at a node that doesn't exist in the plan -- a
+    // structural violation @pcc/spec's validatePlan catches, unrelated to
+    // matchedCapabilityDigest. Must NOT be mistaken for the safe-to-degrade
+    // digest-only case, even though unmatchedNodes is empty here too.
+    const dangling: CapabilityNode = {
+      ...AGENTIC_MATCHED_NODE_WITH_DIGEST,
+      dependencies: ["node-does-not-exist"],
+    };
+    const req = baseRequest([dangling]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(
+      result.held!.violations.some((v) => v.includes("references a node not in the plan")),
+    ).toBe(true);
+    expect(getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" })).toHaveLength(0);
   });
 
   it("is idempotent — publishing the same request twice does not double-create offers", async () => {
@@ -199,11 +217,6 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
   });
 
   it("mixed DAG: holds the WHOLE request when >=1 node is unmatched (coord #1347 — no partial publish)", async () => {
-    // Supersedes the earlier "publish the matched subset" reading of #1289 —
-    // composition's #1347 answer is explicit: hold everything, because there
-    // is no committable root for a partially-matched plan, and publishing the
-    // matched subset before the plan commits would create a half-committed
-    // money-path state.
     const req = baseRequest([AGENTIC_MATCHED_NODE, UNMATCHED_NODE]);
     const result = await produceJobOffersForRequest(req);
 
@@ -214,13 +227,22 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     expect(getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" })).toHaveLength(0);
   });
 
-  it("stamps the SAME compositionRoot on every offer once matchedCapabilityDigest is present", async () => {
-    const req = baseRequest([MATCHED_NODE_WITH_DIGEST_A, MATCHED_NODE_WITH_DIGEST_B]);
+  it("stamps BOTH roots on every offer once matchedCapabilityDigest is present (PR #300 shape)", async () => {
+    const nodeB: CapabilityNode = {
+      ...AGENTIC_MATCHED_NODE_WITH_DIGEST,
+      id: "node-b",
+      capabilityType: "fdm",
+      matchedCapabilityId: "cap-kernel_abc-fdm",
+      matchedKernelId: "kernel_abc",
+      matchedCapabilityDigest: VALID_DIGEST_B,
+    };
+    const req = baseRequest([AGENTIC_MATCHED_NODE_WITH_DIGEST, nodeB]);
     const result = await produceJobOffersForRequest(req);
 
     expect(result.created).toHaveLength(2);
     expect(result.held).toBeUndefined();
     expect(result.compositionRoot).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(result.capabilityContractRoot).toMatch(/^0x[0-9a-fA-F]{64}$/);
 
     const cnc = getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" });
     const fdm = getJobOffersStore().listOpen({ capabilityType: "fdm" });
@@ -228,5 +250,7 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     expect(fdm).toHaveLength(1);
     expect(cnc[0]!.requirements.compositionRoot).toBe(result.compositionRoot);
     expect(fdm[0]!.requirements.compositionRoot).toBe(result.compositionRoot);
+    expect(cnc[0]!.requirements.capabilityContractRoot).toBe(result.capabilityContractRoot);
+    expect(fdm[0]!.requirements.capabilityContractRoot).toBe(result.capabilityContractRoot);
   });
 });
