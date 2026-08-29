@@ -348,9 +348,21 @@ export class CarrierShipmentStore {
         .prepare("SELECT job_id, tracking_code, status, version, data FROM carrier_shipments")
         .all() as typeof rows;
       evts = this.sqlite.prepare("SELECT event_id FROM carrier_webhook_events").all() as typeof evts;
+      // Bound the ledger IN SQL before materializing anything (sol round-6 on
+      // R4-6): TTL-expired rows are deleted, then everything past the row cap
+      // (oldest first) — so an oversized persisted table cannot consume boot
+      // memory even transiently.
+      const cutoffIso = new Date(this.now().getTime() - this.unmatchedTtlMs).toISOString();
+      this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE at < ?").run(cutoffIso);
+      this.sqlite
+        .prepare(
+          `DELETE FROM carrier_unmatched_events WHERE event_id NOT IN
+             (SELECT event_id FROM carrier_unmatched_events ORDER BY at DESC, event_id DESC LIMIT ?)`,
+        )
+        .run(this.unmatchedMaxRows);
       unmatched = this.sqlite
-        .prepare("SELECT event_id, tracking_code, at, data FROM carrier_unmatched_events")
-        .all() as typeof unmatched;
+        .prepare("SELECT event_id, tracking_code, at, data FROM carrier_unmatched_events ORDER BY at ASC LIMIT ?")
+        .all(this.unmatchedMaxRows) as typeof unmatched;
     } catch (err) {
       if (this.strict) {
         throw new Error(

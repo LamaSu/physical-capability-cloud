@@ -856,6 +856,58 @@ describe("POST /api/carrier/webhook/easypost", () => {
     }
   });
 
+  it("a scan retained by a transient replay failure is drained by the NEXT identical POST — never stranded (R6-1)", async () => {
+    const app = await buildApp();
+    try {
+      const bought = await buyViaRoute(app); // label_bought
+      // Ledger a valid signed scan directly (as if it had been retained by a
+      // transient replay failure after finalize).
+      const body = trackerEvent(bought, "in_transit", "evt_stranded", ts(1));
+      const store = getCarrierShipmentStore();
+      const client = new EasyPostClient({ webhookSecret: WEBHOOK_SECRET });
+      const parsed = client.parseTrackerEvent(JSON.parse(body))!;
+      store.ledgeUnmatched(parsed, { rawBodyB64: Buffer.from(body, "utf8").toString("base64"), signatureHeader: sign(body), parsed });
+      expect(store.peekUnmatched(bought.trackingCode)).toHaveLength(1);
+
+      const again = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(again.statusCode).toBe(200);
+      expect(again.json().replayedScans).toBe(1);
+      const rec = store.getByJobId(JOB)!;
+      expect(rec.status).toBe("in_transit");
+      expect(rec.events.map((e) => e.type)).toEqual(["courier_pickup_confirmed"]);
+      expect(store.peekUnmatched(bought.trackingCode)).toHaveLength(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("replay trusts ONLY the signed bytes: a ledger row whose identity disagrees with its bytes is removed, never evidence (R6-2)", async () => {
+    const app = await buildApp();
+    try {
+      const bought = await buyViaRoute(app);
+      const store = getCarrierShipmentStore();
+      const body = trackerEvent(bought, "in_transit", "evt_real_id", ts(1));
+      const client = new EasyPostClient({ webhookSecret: WEBHOOK_SECRET });
+      const parsed = client.parseTrackerEvent(JSON.parse(body))!;
+      // Tampered ledger row: claims a different event id than the signed bytes carry.
+      store.ledgeUnmatched({ ...parsed, easypostEventId: "evt_TAMPERED" }, { rawBodyB64: Buffer.from(body, "utf8").toString("base64"), signatureHeader: sign(body), parsed: { ...parsed, easypostEventId: "evt_TAMPERED" } });
+      // And one whose signature simply does not verify.
+      const badBody = trackerEvent(bought, "delivered", "evt_badsig", ts(2));
+      const badParsed = client.parseTrackerEvent(JSON.parse(badBody))!;
+      store.ledgeUnmatched(badParsed, { rawBodyB64: Buffer.from(badBody, "utf8").toString("base64"), signatureHeader: "hmac-sha256-hex=deadbeef", parsed: badParsed });
+
+      const again = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(again.statusCode).toBe(200);
+      expect(again.json().replayedScans).toBe(0);
+      const rec = store.getByJobId(JOB)!;
+      expect(rec.status).toBe("label_bought"); // neither row moved state
+      expect(rec.events).toHaveLength(0); // and neither became evidence
+      expect(store.peekUnmatched(bought.trackingCode)).toHaveLength(0); // both removed as non-evidence
+    } finally {
+      await app.close();
+    }
+  });
+
   it("refuses a non-production tracker when the client requires production mode (round-2 NEW-1)", async () => {
     _setEasyPostClientForTests(testClient({ apiKey: "EZAKprod", requireProductionMode: true }));
     const app = await buildApp();

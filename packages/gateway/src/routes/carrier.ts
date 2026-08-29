@@ -291,6 +291,71 @@ export async function carrierRoutes(app: FastifyInstance) {
     return reply.code(409).send({ error: "reconciliation_required", reason });
   }
 
+  /**
+   * Drain the unmatched-scan ledger for a finalized shipment (R3-5, R4-1,
+   * R6-1, R6-2). Callable from finalize AND from the idempotent already-
+   * bought path, so a row retained by a transient replay failure is drained
+   * by the next identical POST rather than stranded forever (R6-1).
+   *
+   * TRUST COMES FROM THE SIGNED BYTES, not the ledgered parsed object
+   * (R6-2): each entry's raw body is HMAC-re-verified, re-parsed, and must
+   * agree with the ledger row's own event id + tracking code; the evidence
+   * is built exclusively from that freshly verified parse. A row whose
+   * signature or identity does not re-verify is corrupt (or the webhook
+   * secret was rotated underneath it): it can never become evidence, so it
+   * is removed with a loud error rather than retried forever.
+   */
+  async function drainUnmatched(req: FastifyRequest, rec: CarrierShipmentRecord): Promise<number> {
+    const store = getCarrierShipmentStore();
+    const client = getEasyPostClient();
+    if (!rec.trackingCode) return 0;
+    let replayed = 0;
+    for (const entry of store.peekUnmatched(rec.trackingCode)) {
+      const scan = entry.data as LedgeredScan;
+      if (typeof scan?.rawBodyB64 !== "string" || typeof scan?.signatureHeader !== "string") {
+        req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan entry malformed — kept for inspection");
+        continue;
+      }
+      const rawBody = Buffer.from(scan.rawBodyB64, "base64");
+      if (!client.verifyWebhookSignature(rawBody, scan.signatureHeader)) {
+        req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan signature does not re-verify (corrupt row or rotated secret) — removed, cannot become evidence");
+        store.deleteUnmatched(entry.eventId);
+        continue;
+      }
+      let verified: TrackerWebhookEvent | null = null;
+      try {
+        verified = client.parseTrackerEvent(JSON.parse(rawBody.toString("utf8")));
+      } catch {
+        verified = null;
+      }
+      if (!verified || verified.easypostEventId !== entry.eventId || verified.trackingCode !== entry.trackingCode) {
+        req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan bytes disagree with ledger identity — removed, cannot become evidence");
+        store.deleteUnmatched(entry.eventId);
+        continue;
+      }
+      try {
+        const res = await store.recordCarrierEvent(
+          verified,
+          (r, newStatus) => buildCarrierEvidenceEvent(r, newStatus, verified!, rawBody, scan.signatureHeader),
+          scan,
+        );
+        if (res.ok) {
+          if (res.outcome === "applied") replayed++;
+          store.deleteUnmatched(entry.eventId);
+        } else if (res.reason === "not_finalized" || res.reason === "unknown_tracking_code") {
+          req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan still unmatchable — kept");
+        } else {
+          // Permanent refusal (predates commitment / identity mismatch): final outcome.
+          req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan permanently non-qualifying");
+          store.deleteUnmatched(entry.eventId);
+        }
+      } catch (err) {
+        req.log.error({ err, eventId: entry.eventId }, "carrier: ledgered scan replay failed — row kept; the next identical POST retries it");
+      }
+    }
+    return replayed;
+  }
+
   /** Finalize a recorded purchase, then replay any ledgered scans for its tracking code. */
   async function finalizeAndRespond(
     req: FastifyRequest,
@@ -316,52 +381,7 @@ export async function carrierRoutes(app: FastifyInstance) {
       });
       const rec = await store.finalize(params.jobId, finalized);
 
-      // R3-5: scans that arrived before the commitment existed were durably
-      // ledgered; replay them now, oldest first. NON-DESTRUCTIVE (R4-1): the
-      // ledger row is the sole durable copy, so it is deleted only after its
-      // replay reaches a FINAL outcome (applied, deduped, or a permanent
-      // refusal like scan_predates_commitment/identity mismatch). A replay
-      // exception or malformed entry KEEPS the row for the next attempt.
-      let replayed = 0;
-      for (const entry of store.peekUnmatched(rec.trackingCode!)) {
-        const scan = entry.data as LedgeredScan;
-        // Structural validation, not just truthiness (sol round-5 on R4-1): a
-        // malformed entry is KEPT for inspection, never processed-and-deleted.
-        const p = scan?.parsed;
-        const wellFormed =
-          p &&
-          typeof p.easypostEventId === "string" &&
-          typeof p.trackingCode === "string" &&
-          typeof p.status === "string" &&
-          typeof scan.rawBodyB64 === "string" &&
-          typeof scan.signatureHeader === "string" &&
-          !Number.isNaN(Date.parse(p.occurredAt));
-        if (!wellFormed) {
-          req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan entry malformed — kept for inspection");
-          continue;
-        }
-        try {
-          const res = await store.recordCarrierEvent(
-            scan.parsed,
-            (r, newStatus) => buildCarrierEvidenceEvent(r, newStatus, scan.parsed, Buffer.from(scan.rawBodyB64, "base64"), scan.signatureHeader),
-            scan,
-          );
-          if (res.ok) {
-            if (res.outcome === "applied") replayed++;
-            store.deleteUnmatched(entry.eventId);
-          } else if (res.reason === "not_finalized" || res.reason === "unknown_tracking_code") {
-            // Still not matchable (should not happen post-finalize) — keep the row.
-            req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan still unmatchable after finalize");
-          } else {
-            // Permanent refusal (predates commitment / identity mismatch): final outcome.
-            req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan permanently non-qualifying");
-            store.deleteUnmatched(entry.eventId);
-          }
-        } catch (err) {
-          req.log.error({ err, eventId: entry.eventId }, "carrier: ledgered scan replay failed — row kept for retry");
-        }
-      }
-
+      const replayed = await drainUnmatched(req, rec);
       return reply.code(201).send({ ...toShipmentDTO(rec), ...(note ? { note } : {}), replayedScans: replayed });
     } catch (err) {
       const code = err instanceof EasyPostError ? err.code : err instanceof CarrierStoreError ? err.code : "finalize_failed";
@@ -511,8 +531,13 @@ export async function carrierRoutes(app: FastifyInstance) {
         }
         case "purchased_pending":
           return finalizeAndRespond(req, reply, params, existing, "finalized a previously recorded purchase");
-        default:
-          return reply.code(200).send({ ...toShipmentDTO(existing), note: "already bought for this jobId" });
+        default: {
+          // Trackable/terminal: drain any retained ledgered scans too (R6-1)
+          // — a transient replay failure after finalize must be retryable by
+          // the next identical POST, never stranded forever.
+          const drained = await drainUnmatched(req, existing);
+          return reply.code(200).send({ ...toShipmentDTO(existing), note: "already bought for this jobId", replayedScans: drained });
+        }
       }
       }
     }
