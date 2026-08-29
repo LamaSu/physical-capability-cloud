@@ -353,13 +353,15 @@ export class CarrierShipmentStore {
       // (oldest first) — so an oversized persisted table cannot consume boot
       // memory even transiently.
       const cutoffIso = new Date(this.now().getTime() - this.unmatchedTtlMs).toISOString();
-      this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE at < ?").run(cutoffIso);
-      this.sqlite
+      const ttlDel = this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE at < ?").run(cutoffIso) as { changes?: number } | undefined;
+      const capDel = this.sqlite
         .prepare(
           `DELETE FROM carrier_unmatched_events WHERE event_id NOT IN
              (SELECT event_id FROM carrier_unmatched_events ORDER BY at DESC, event_id DESC LIMIT ?)`,
         )
-        .run(this.unmatchedMaxRows);
+        .run(this.unmatchedMaxRows) as { changes?: number } | undefined;
+      // R7-1: hydration-time evictions count too, or healthz underreports.
+      this.unmatchedEvictedCount += (ttlDel?.changes ?? 0) + (capDel?.changes ?? 0);
       unmatched = this.sqlite
         .prepare("SELECT event_id, tracking_code, at, data FROM carrier_unmatched_events ORDER BY at ASC LIMIT ?")
         .all(this.unmatchedMaxRows) as typeof unmatched;
