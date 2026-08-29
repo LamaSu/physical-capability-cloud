@@ -266,6 +266,22 @@ describe("EasyPostClient — real mode, three steps (injected fetchImpl, no netw
     expect(after.bought).toMatchObject({ trackingCode: "9400111899223197428490", trackerId: "trk_real_456" });
   });
 
+  it("getShipment recovery REFUSES a response for a different shipment id or a disagreeing mode (R4-4)", async () => {
+    const wrongId = vi.fn(async () =>
+      new Response(JSON.stringify({ id: "shp_SOMEONE_ELSES", mode: "production", tracking_code: "X", postage_label: { label_url: "https://x.example/l.png" } }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const clientA = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: wrongId, blobStore: memBlobStore() });
+    const created = { shipmentId: "shp_real_123", providerMode: "production" as const, rateId: "r", carrier: "USPS", service: "First", rate: "1", currency: "USD", mock: false };
+    await expect(clientA.getShipment(created)).rejects.toMatchObject({ code: "easypost_recovered_shipment_mismatch" });
+
+    const wrongMode = vi.fn(async () =>
+      new Response(JSON.stringify({ id: "shp_real_123", mode: "test", tracking_code: "X", postage_label: { label_url: "https://x.example/l.png" } }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const clientB = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: wrongMode, blobStore: memBlobStore() });
+    await expect(clientB.getShipment(created)).rejects.toMatchObject({ code: "easypost_bought_mode_mismatch" });
+    expect(POST_CHARGE_ERROR_CODES.has("easypost_recovered_shipment_mismatch")).toBe(true);
+  });
+
   it("rejects a shipment with no provider mode (cannot classify the environment)", async () => {
     const fetchImpl = vi.fn(async () =>
       new Response(JSON.stringify({ id: "shp_1", rates: [{ id: "r", carrier: "USPS", service: "First", rate: "1.00", currency: "USD" }] }), { status: 200 }),

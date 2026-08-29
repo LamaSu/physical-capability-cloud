@@ -321,7 +321,12 @@ describe("POST /api/carrier/shipments — guarded purchase lifecycle", () => {
         app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner }),
       ]);
       const codes = [a.statusCode, b.statusCode].sort();
-      expect(codes).toEqual([201, 409]);
+      // The loser either waits on the purchase lock and observes the winner's
+      // completed purchase (200 already-bought) or hits the reservation
+      // window (409 job_in_flight). Either way: EXACTLY one charge.
+      expect(codes[0] === 200 || codes[0] === 201).toBe(true);
+      expect([[200, 201].includes(codes[0]!), [201, 409].includes(codes[1]!)]).toEqual([true, true]);
+      expect(codes).toContain(201);
       expect(buys).toBe(1);
       expect(getCarrierShipmentStore().size()).toBe(1);
     } finally {
@@ -441,6 +446,55 @@ describe("POST /api/carrier/shipments — guarded purchase lifecycle", () => {
       expect(retry.statusCode).toBe(409);
       expect(retry.json().error).toBe("reconciliation_required");
       expect(buyCalls).toBe(1); // a parked purchase is a HUMAN decision, never an auto-retry
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("an EXPIRED runtime reservation is reclaimed by the next request — no restart needed (R3-9)", async () => {
+    _resetCarrierShipmentStoreForTests();
+    initCarrierShipmentStore({ reservationTtlMs: 1 }); // everything expires ~immediately
+    const app = await buildApp();
+    try {
+      // Simulate a crash between reserve and dispatch: a bare reservation left behind.
+      getCarrierShipmentStore().reserve({ jobId: JOB, kernelId: KERNEL, ownerId: OWNER, requestFingerprint: "does-not-matter-it-expired" });
+      await new Promise((r) => setTimeout(r, 10));
+      const res = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(res.statusCode).toBe(201); // reclaimed + purchased, not 409-until-restart
+      expect(getCarrierShipmentStore().getByJobId(JOB)!.status).toBe("label_bought");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a recovery that cannot RECORD the confirmed purchase parks it — never a plain 502 that hides a charge (R3-1 residual)", async () => {
+    let buyCalls = 0;
+    class AmbiguousBuy extends EasyPostClient {
+      override async buyRate(_c: CreatedShipment): Promise<BoughtShipment> {
+        buyCalls++;
+        throw new EasyPostError("easypost_buy_ambiguous", null, "hang up");
+      }
+      override async getShipment(_c: CreatedShipment): Promise<{ bought: BoughtShipment | null }> {
+        // Recovery confirms a purchase whose tracking code is ALREADY TAKEN
+        // by another job -> markPurchased will fail with duplicate_tracking_code.
+        return { bought: { shipmentId: _c.shipmentId, trackerId: "trk_x", trackingCode: "EZTAKEN0001", labelUrl: "https://easypost-mock.invalid/l.png", carrier: "USPS", service: "First", rate: "1.00", currency: "USD", providerMode: "mock", mock: true } };
+      }
+    }
+    _setEasyPostClientForTests(new AmbiguousBuy({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
+    const app = await buildApp();
+    try {
+      // Occupy the tracking code under a different job first.
+      const store = getCarrierShipmentStore();
+      store.reserve({ jobId: "job-occupier", kernelId: KERNEL, ownerId: OWNER, requestFingerprint: "x" });
+      await store.markBuyInFlight("job-occupier", { shipmentId: "shp_occ", providerMode: "mock", rateId: "r", carrier: "USPS", service: "First", rate: "1", currency: "USD", mock: true });
+      await store.markPurchased("job-occupier", { shipmentId: "shp_occ", trackerId: "trk_occ", trackingCode: "EZTAKEN0001", labelUrl: "https://easypost-mock.invalid/o.png", carrier: "USPS", service: "First", rate: "1", currency: "USD", providerMode: "mock", mock: true });
+
+      expect((await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner })).statusCode).toBe(502);
+      const retry = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json()).toMatchObject({ error: "reconciliation_required", reason: "record_failed:duplicate_tracking_code" });
+      expect(getCarrierShipmentStore().getByJobId(JOB)!.status).toBe("reconciliation_required");
+      expect(buyCalls).toBe(1);
     } finally {
       await app.close();
     }

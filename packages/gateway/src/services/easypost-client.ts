@@ -210,6 +210,7 @@ export const POST_CHARGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "easypost_buy_ambiguous",
   "easypost_bought_but_unusable",
   "easypost_bought_mode_mismatch",
+  "easypost_recovered_shipment_mismatch",
 ]);
 
 export interface EasyPostClientConfig {
@@ -546,7 +547,25 @@ export class EasyPostClient {
       throw new EasyPostError("easypost_get_shipment_failed", res.status, await safeText(res));
     }
     const shipment = (await res.json()) as EasyPostShipment;
-    const bought = boughtFromShipment(shipment, created.providerMode);
+    // R4-4: recovery must prove it recovered THE created shipment, under the
+    // SAME provider environment we authorized pre-charge — same rules as the
+    // direct /buy response, not weaker ones.
+    if (!nonEmptyString(shipment.id) || shipment.id !== created.shipmentId) {
+      throw new EasyPostError(
+        "easypost_recovered_shipment_mismatch",
+        null,
+        `asked for ${created.shipmentId}, response is ${String(shipment.id)}`,
+      );
+    }
+    const mode = parseProviderMode(shipment.mode);
+    if (!mode || mode !== created.providerMode) {
+      throw new EasyPostError(
+        "easypost_bought_mode_mismatch",
+        null,
+        `created mode=${created.providerMode}, recovered mode=${String(shipment.mode)} (shipment ${created.shipmentId})`,
+      );
+    }
+    const bought = boughtFromShipment(shipment, mode);
     if (bought && (!bought.labelUrl || !/^https:\/\//.test(bought.labelUrl))) {
       throw new EasyPostError("easypost_bought_but_unusable", null, `recovered shipment ${created.shipmentId} has tracking but no usable label_url`);
     }

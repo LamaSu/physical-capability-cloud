@@ -94,12 +94,14 @@ const TRACKABLE: ReadonlySet<CarrierShipmentStatus> = new Set([
   "return_to_sender",
   "failed",
 ]);
-/** Statuses in which a tracking code exists (a purchase happened). */
-const PURCHASED: ReadonlySet<CarrierShipmentStatus> = new Set([
-  "purchased_pending",
-  "reconciliation_required",
-  ...TRACKABLE,
-]);
+/**
+ * Statuses that REQUIRE tracking identity. reconciliation_required is
+ * deliberately NOT here (sol R4-3): a purchase parked from buy_in_flight —
+ * e.g. bought-but-unusable, where EasyPost returned no tracking code — is a
+ * legitimate reachable state WITHOUT one, and strict hydration must accept
+ * the states the machine can actually produce, not just the happy path.
+ */
+const REQUIRES_TRACKING: ReadonlySet<CarrierShipmentStatus> = new Set(["purchased_pending", ...TRACKABLE]);
 
 export interface CarrierShipmentRecord {
   jobId: string;
@@ -146,6 +148,10 @@ export interface CarrierShipmentStoreOptions {
   strictHydration?: boolean;
   /** `reserved` rows older than this are reclaimable (crash between reserve and buy dispatch). Default 10 min. */
   reservationTtlMs?: number;
+  /** Unmatched-scan ledger entries older than this are pruned. Default 7 days (covers finalize delays generously). */
+  unmatchedTtlMs?: number;
+  /** Row cap on the unmatched-scan ledger; oldest evicted past it. Default 5000. */
+  unmatchedMaxRows?: number;
 }
 
 export type RecordCarrierEventOutcome = "applied" | "deduped" | "stale" | "terminal" | "no_transition";
@@ -161,7 +167,14 @@ export type RecordCarrierEventResult =
         | "tracker_mismatch"
         | "shipment_mismatch"
         | "scan_predates_commitment";
+      /** True when the scan was durably ledgered for post-purchase replay (unknown/not_finalized with ledgering requested). */
+      ledgered?: boolean;
     };
+
+export interface RecordCarrierEventOpts {
+  /** Ledger the scan durably (R3-5) when it is unmatchable — done INSIDE the same lock that finalize/markPurchased take, so a concurrent finalize cannot slip between the decision and the insert (R4-2). */
+  ledgerUnmatched?: boolean;
+}
 
 export interface UnmatchedLedgerEntry {
   eventId: string;
@@ -232,16 +245,21 @@ export class CarrierShipmentStore {
   private unmatchedByCode = new Map<string, UnmatchedLedgerEntry[]>();
   private unmatchedIds = new Set<string>();
   private locks = new Map<string, Promise<unknown>>();
+  private unmatchedEvictedCount = 0;
   private readonly sqlite: SqliteDatabaseLike | undefined;
   private readonly now: () => Date;
   private readonly strict: boolean;
   private readonly reservationTtlMs: number;
+  private readonly unmatchedTtlMs: number;
+  private readonly unmatchedMaxRows: number;
 
   constructor(opts: CarrierShipmentStoreOptions = {}) {
     this.sqlite = opts.sqlite;
     this.now = opts.now ?? (() => new Date());
     this.strict = opts.strictHydration ?? false;
     this.reservationTtlMs = opts.reservationTtlMs ?? 10 * 60_000;
+    this.unmatchedTtlMs = opts.unmatchedTtlMs ?? 7 * 24 * 3600_000;
+    this.unmatchedMaxRows = opts.unmatchedMaxRows ?? 5000;
     this.hydrate();
   }
 
@@ -275,8 +293,14 @@ export class CarrierShipmentStore {
     if (typeof r.version !== "number" || r.version !== row.version) fail("version disagrees with SQL column");
     if ((r.trackingCode ?? null) !== (row.tracking_code ?? null)) fail("tracking_code disagrees with SQL column");
     if (!parseableIso(r.createdAt) || !parseableIso(r.updatedAt)) fail("unparseable timestamps");
-    if (PURCHASED.has(r.status)) {
+    if (REQUIRES_TRACKING.has(r.status)) {
       if (!r.trackingCode || !r.shipmentId) fail("purchased status without tracking identity");
+    }
+    if (r.status === "buy_in_flight" && !r.createdShipment?.shipmentId) {
+      fail("buy_in_flight without a created shipment (recovery would be impossible)");
+    }
+    if (r.status === "purchased_pending" && (!r.labelUrl || !r.providerMode)) {
+      fail("purchased_pending without labelUrl/providerMode (finalize would be impossible)");
     }
     if (TRACKABLE.has(r.status)) {
       if (!r.commitment || typeof r.commitment.hash !== "string") fail("trackable status without a commitment");
@@ -498,27 +522,33 @@ export class CarrierShipmentStore {
       if (rec.status !== "buy_in_flight") throw new CarrierStoreError("invalid_transition");
       const code = bought.trackingCode?.trim();
       if (!code) throw new CarrierStoreError("empty_tracking_code");
-      if (this.byTrackingCode.has(code)) throw new CarrierStoreError("duplicate_tracking_code");
-      try {
-        this.commitMutation(rec, {
-          status: "purchased_pending",
-          shipmentId: bought.shipmentId,
-          trackerId: bought.trackerId,
-          trackingCode: code,
-          labelUrl: bought.labelUrl,
-          carrier: bought.carrier,
-          service: bought.service,
-          rate: bought.rate,
-          currency: bought.currency,
-          providerMode: bought.providerMode,
-          mock: bought.mock,
-        });
-      } catch (err) {
-        if (isUniqueViolation(err)) throw new CarrierStoreError("duplicate_tracking_code");
-        throw err;
-      }
-      this.byTrackingCode.set(code, rec.jobId);
-      return rec;
+      // The tracking-code mapping is registered under the CODE lock too, so
+      // an unknown-code scan being ledgered concurrently either lands before
+      // (found by the post-finalize replay) or after (finds this record) —
+      // never in an unobservable gap (R4-2).
+      return this.withLock(`code:${code}`, async () => {
+        if (this.byTrackingCode.has(code)) throw new CarrierStoreError("duplicate_tracking_code");
+        try {
+          this.commitMutation(rec, {
+            status: "purchased_pending",
+            shipmentId: bought.shipmentId,
+            trackerId: bought.trackerId,
+            trackingCode: code,
+            labelUrl: bought.labelUrl,
+            carrier: bought.carrier,
+            service: bought.service,
+            rate: bought.rate,
+            currency: bought.currency,
+            providerMode: bought.providerMode,
+            mock: bought.mock,
+          });
+        } catch (err) {
+          if (isUniqueViolation(err)) throw new CarrierStoreError("duplicate_tracking_code");
+          throw err;
+        }
+        this.byTrackingCode.set(code, rec.jobId);
+        return rec;
+      });
     });
   }
 
@@ -579,11 +609,18 @@ export class CarrierShipmentStore {
     return [...this.byJobId.values()].filter((r) => r.status === "reconciliation_required" || r.status === "buy_in_flight");
   }
 
-  // ── unmatched-scan ledger (R3-5) ─────────────────────────────────────────
+  // ── unmatched-scan ledger (R3-5; non-destructive per R4-1, bounded per R4-6) ──
 
-  /** Durably ledger a signature-valid tracker event that cannot currently be matched/applied. Idempotent per event id. */
+  /**
+   * Durably ledger a signature-valid tracker event that cannot currently be
+   * matched/applied. Idempotent per event id. Bounded: entries older than the
+   * TTL are pruned and the oldest are evicted past the row cap — a shared
+   * EasyPost account's unrelated tracker traffic must not grow this without
+   * limit (R4-6). Evictions are counted for healthz.
+   */
   ledgeUnmatched(evt: TrackerWebhookEvent, raw: unknown): void {
     if (this.seenEventIds.has(evt.easypostEventId) || this.unmatchedIds.has(evt.easypostEventId)) return;
+    this.pruneUnmatched();
     if (this.sqlite) {
       this.sqlite
         .prepare("INSERT OR IGNORE INTO carrier_unmatched_events (event_id, tracking_code, at, data) VALUES (?, ?, ?, ?)")
@@ -595,16 +632,66 @@ export class CarrierShipmentStore {
     this.unmatchedByCode.set(evt.trackingCode, list);
   }
 
-  /** Remove and return the ledgered events for a tracking code (oldest first, by carrier timestamp) for replay. */
-  takeUnmatched(trackingCode: string): UnmatchedLedgerEntry[] {
-    const list = this.unmatchedByCode.get(trackingCode) ?? [];
-    if (list.length === 0) return [];
-    this.unmatchedByCode.delete(trackingCode);
-    for (const e of list) this.unmatchedIds.delete(e.eventId);
-    if (this.sqlite) {
-      this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE tracking_code = ?").run(trackingCode);
+  private pruneUnmatched(): void {
+    const cutoff = this.now().getTime() - this.unmatchedTtlMs;
+    const all: UnmatchedLedgerEntry[] = [];
+    for (const [code, list] of this.unmatchedByCode) {
+      const kept = list.filter((e) => {
+        const t = Date.parse(e.at);
+        const expired = Number.isNaN(t) || t < cutoff;
+        if (expired) {
+          this.unmatchedIds.delete(e.eventId);
+          this.unmatchedEvictedCount++;
+          if (this.sqlite) this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE event_id = ?").run(e.eventId);
+        }
+        return !expired;
+      });
+      if (kept.length === 0) this.unmatchedByCode.delete(code);
+      else this.unmatchedByCode.set(code, kept);
+      all.push(...kept);
     }
-    return [...list].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    if (all.length >= this.unmatchedMaxRows) {
+      all.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+      const excess = all.length - this.unmatchedMaxRows + 1; // room for the incoming entry
+      for (const e of all.slice(0, excess)) {
+        this.unmatchedIds.delete(e.eventId);
+        this.unmatchedEvictedCount++;
+        const list = (this.unmatchedByCode.get(e.trackingCode) ?? []).filter((x) => x.eventId !== e.eventId);
+        if (list.length === 0) this.unmatchedByCode.delete(e.trackingCode);
+        else this.unmatchedByCode.set(e.trackingCode, list);
+        if (this.sqlite) this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE event_id = ?").run(e.eventId);
+      }
+    }
+  }
+
+  /**
+   * Return (COPIES of) the ledgered events for a tracking code, oldest first,
+   * WITHOUT deleting anything (R4-1: the ledger row is the sole durable copy;
+   * it is removed only per-event via deleteUnmatched after the replay outcome
+   * is known — applied, deduped, or permanently rejected. Exceptions keep it).
+   */
+  peekUnmatched(trackingCode: string): UnmatchedLedgerEntry[] {
+    return [...(this.unmatchedByCode.get(trackingCode) ?? [])].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  }
+
+  /** Remove ONE ledger entry after its replay reached a final outcome. */
+  deleteUnmatched(eventId: string): void {
+    if (!this.unmatchedIds.delete(eventId)) return;
+    for (const [code, list] of this.unmatchedByCode) {
+      const kept = list.filter((e) => e.eventId !== eventId);
+      if (kept.length !== list.length) {
+        if (kept.length === 0) this.unmatchedByCode.delete(code);
+        else this.unmatchedByCode.set(code, kept);
+        break;
+      }
+    }
+    if (this.sqlite) this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE event_id = ?").run(eventId);
+  }
+
+  unmatchedStats(): { count: number; evicted: number } {
+    let count = 0;
+    for (const list of this.unmatchedByCode.values()) count += list.length;
+    return { count, evicted: this.unmatchedEvictedCount };
   }
 
   // ── webhook application ──────────────────────────────────────────────────
@@ -621,14 +708,49 @@ export class CarrierShipmentStore {
       newStatus: CarrierShipmentStatus,
     ) => Promise<EvidenceEvent | null> | EvidenceEvent | null,
     rawForLedger?: unknown,
+    opts?: RecordCarrierEventOpts,
   ): Promise<RecordCarrierEventResult> {
     const pre = this.getByTrackingCode(webhookEvent.trackingCode);
-    if (!pre) return { ok: false, reason: "unknown_tracking_code" };
+    if (!pre) {
+      // Unknown code: decide + (optionally) ledger under the CODE lock, the
+      // same lock markPurchased registers the mapping under (R4-2).
+      return this.withLock(`code:${webhookEvent.trackingCode}`, async () => {
+        const again = this.getByTrackingCode(webhookEvent.trackingCode);
+        if (!again) {
+          if (opts?.ledgerUnmatched) {
+            this.ledgeUnmatched(webhookEvent, rawForLedger ?? webhookEvent);
+            return { ok: false, reason: "unknown_tracking_code", ledgered: true };
+          }
+          return { ok: false, reason: "unknown_tracking_code" };
+        }
+        return this.applyToJob(again.jobId, webhookEvent, buildEvidenceEvent, rawForLedger, opts);
+      });
+    }
+    return this.applyToJob(pre.jobId, webhookEvent, buildEvidenceEvent, rawForLedger, opts);
+  }
 
-    return this.withLock(pre.jobId, async () => {
+  private applyToJob(
+    jobId: string,
+    webhookEvent: TrackerWebhookEvent,
+    buildEvidenceEvent: (
+      record: CarrierShipmentRecord,
+      newStatus: CarrierShipmentStatus,
+    ) => Promise<EvidenceEvent | null> | EvidenceEvent | null,
+    rawForLedger?: unknown,
+    opts?: RecordCarrierEventOpts,
+  ): Promise<RecordCarrierEventResult> {
+    return this.withLock(jobId, async () => {
       const record = this.getByTrackingCode(webhookEvent.trackingCode);
       if (!record) return { ok: false, reason: "unknown_tracking_code" };
-      if (!TRACKABLE.has(record.status)) return { ok: false, reason: "not_finalized" };
+      if (!TRACKABLE.has(record.status)) {
+        // Ours, but no commitment yet — ledger INSIDE this lock so a
+        // concurrent finalize cannot run its replay before our insert (R4-2).
+        if (opts?.ledgerUnmatched) {
+          this.ledgeUnmatched(webhookEvent, rawForLedger ?? webhookEvent);
+          return { ok: false, reason: "not_finalized", ledgered: true };
+        }
+        return { ok: false, reason: "not_finalized" };
+      }
 
       // Identity: the webhook must name the tracker we bought when we know it,
       // and never a different shipment (round-2 finding 6).

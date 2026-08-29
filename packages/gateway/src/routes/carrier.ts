@@ -81,6 +81,26 @@ interface CreateShipmentBody {
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Route-level per-job mutex around the WHOLE purchase/recovery flow. The
+ * store's fine-grained locks protect individual mutations (and webhooks vs
+ * mutations), but the purchase is a multi-step sequence with an external
+ * call in the middle — without this, a second request for the same job could
+ * enter the buy_in_flight RECOVERY branch while the first request's /buy is
+ * still in flight, "recover" the mock/duplicate purchase, and leave the
+ * first request's markPurchased to fail into reconciliation. Serializing at
+ * the route makes the second request simply observe the first's outcome.
+ * (Deliberately separate from the store's locks: store methods each take the
+ * per-job lock themselves, so holding that same lock here would deadlock.)
+ */
+const purchaseLocks = new Map<string, Promise<unknown>>();
+function withPurchaseLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = purchaseLocks.get(jobId) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  purchaseLocks.set(jobId, run.catch(() => {}));
+  return run;
+}
 /** Job states in which buying postage makes sense. Completed/failed/cancelled jobs must not spend. */
 const ACTIVE_JOB_STATUSES = new Set(["pending", "queued", "in_progress", "paused"]);
 
@@ -154,7 +174,12 @@ async function buildCarrierEvidenceEvent(
     c.trackingCode === record.trackingCode &&
     c.shipmentId === record.shipmentId &&
     c.trackerId === record.trackerId &&
-    c.providerMode === record.providerMode;
+    c.providerMode === record.providerMode &&
+    c.carrier === record.carrier &&
+    c.service === record.service &&
+    c.mock === record.mock &&
+    c.labelHash === record.labelHash &&
+    c.labelCid === record.labelCid;
   const commitmentHashValid = verifyCommitmentHash(c);
   const commitmentSignatureVerified = await verifyCommitmentSignature(c, gatewayCommitmentKeyResolver);
   if (!identityOk) throw new Error("evidence_gate: commitment identity does not equal the stored purchase");
@@ -243,9 +268,22 @@ export async function carrierRoutes(app: FastifyInstance) {
       shipments: store.size(),
       pendingFinalize: store.listPendingFinalize().length,
       needsReconciliation: store.listNeedsReconciliation().length,
+      unmatchedLedger: store.unmatchedStats(),
       ts: new Date().toISOString(),
     };
   });
+
+  /** Park a possibly-charged purchase for a human. A parking FAILURE is its own loud error (R4-5) — never a durable-looking 409 over an unparked row. */
+  async function park(req: FastifyRequest, reply: FastifyReply, jobId: string, reason: string) {
+    try {
+      await getCarrierShipmentStore().markReconciliationRequired(jobId, reason);
+    } catch (err) {
+      const code = err instanceof CarrierStoreError ? err.code : "parking_failed";
+      req.log.error({ code, jobId, reason }, "carrier: FAILED TO PARK a post-charge outcome — state may not reflect the response");
+      return reply.code(500).send({ error: "parking_failed", detailCode: code, originalReason: reason });
+    }
+    return reply.code(409).send({ error: "reconciliation_required", reason });
+  }
 
   /** Finalize a recorded purchase, then replay any ledgered scans for its tracking code. */
   async function finalizeAndRespond(
@@ -273,24 +311,37 @@ export async function carrierRoutes(app: FastifyInstance) {
       const rec = await store.finalize(params.jobId, finalized);
 
       // R3-5: scans that arrived before the commitment existed were durably
-      // ledgered; replay them now, oldest first. Pre-commitment scans are
-      // refused by the store (scan_predates_commitment) — correctly: the
-      // commitment did not predate them.
+      // ledgered; replay them now, oldest first. NON-DESTRUCTIVE (R4-1): the
+      // ledger row is the sole durable copy, so it is deleted only after its
+      // replay reaches a FINAL outcome (applied, deduped, or a permanent
+      // refusal like scan_predates_commitment/identity mismatch). A replay
+      // exception or malformed entry KEEPS the row for the next attempt.
       let replayed = 0;
-      const pending = store.takeUnmatched(rec.trackingCode!);
-      for (const entry of pending) {
+      for (const entry of store.peekUnmatched(rec.trackingCode!)) {
         const scan = entry.data as LedgeredScan;
-        if (!scan?.parsed) continue;
+        if (!scan?.parsed) {
+          req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan entry malformed — kept for inspection");
+          continue;
+        }
         try {
           const res = await store.recordCarrierEvent(
             scan.parsed,
             (r, newStatus) => buildCarrierEvidenceEvent(r, newStatus, scan.parsed, Buffer.from(scan.rawBodyB64, "base64"), scan.signatureHeader),
             scan,
           );
-          if (res.ok && res.outcome === "applied") replayed++;
-          if (!res.ok) req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan not applied on replay");
+          if (res.ok) {
+            if (res.outcome === "applied") replayed++;
+            store.deleteUnmatched(entry.eventId);
+          } else if (res.reason === "not_finalized" || res.reason === "unknown_tracking_code") {
+            // Still not matchable (should not happen post-finalize) — keep the row.
+            req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan still unmatchable after finalize");
+          } else {
+            // Permanent refusal (predates commitment / identity mismatch): final outcome.
+            req.log.warn({ eventId: entry.eventId, reason: res.reason }, "carrier: ledgered scan permanently non-qualifying");
+            store.deleteUnmatched(entry.eventId);
+          }
         } catch (err) {
-          req.log.error({ err, eventId: entry.eventId }, "carrier: ledgered scan replay failed");
+          req.log.error({ err, eventId: entry.eventId }, "carrier: ledgered scan replay failed — row kept for retry");
         }
       }
 
@@ -363,16 +414,22 @@ export async function carrierRoutes(app: FastifyInstance) {
     const store = getCarrierShipmentStore();
     const client = getEasyPostClient();
 
+    return withPurchaseLock(jobId, async () => {
     const existing = store.getByJobId(jobId);
     if (existing) {
+      // A `reserved` row is adjudicated by store.reserve() below — BEFORE the
+      // fingerprint check: a reservation is not a purchase, so an EXPIRED one
+      // must be reclaimable even by a request with different parameters
+      // (sol R3-9); a live one answers job_in_flight from reserve(). The
+      // guard is also load-bearing for the switch: without it the default
+      // branch would answer 200 "already bought" over a bare reservation.
+      if (existing.status !== "reserved") {
       if (existing.requestFingerprint !== requestFingerprint) {
         return reply
           .code(409)
           .send({ error: "idempotency_conflict", message: "a purchase already exists for this jobId with different parameters" });
       }
       switch (existing.status) {
-        case "reserved":
-          return reply.code(409).send({ error: "job_in_flight" });
         case "reconciliation_required":
           // Parked for a human. Never auto-resolved (R3-1).
           return reply.code(409).send({ error: "reconciliation_required", reason: existing.reconciliationReason });
@@ -393,11 +450,17 @@ export async function carrierRoutes(app: FastifyInstance) {
           } catch (err) {
             if (err instanceof EasyPostError && POST_CHARGE_ERROR_CODES.has(err.code)) {
               req.log.error({ code: err.code, detail: err.detail, jobId }, "carrier: recovery hit a post-charge defect — parking for reconciliation");
-              await store.markReconciliationRequired(jobId, err.code).catch(() => {});
-              return reply.code(409).send({ error: "reconciliation_required", reason: err.code });
+              return park(req, reply, jobId, err.code);
+            }
+            if (err instanceof CarrierStoreError) {
+              // Recovery CONFIRMED a purchase but recording it failed — that
+              // is a post-charge fact, so it parks; it never stays ambiguous
+              // as a plain 502 (sol R3-1 residual).
+              req.log.error({ code: err.code, jobId }, "carrier: recovered purchase could not be recorded — parking for reconciliation");
+              return park(req, reply, jobId, `record_failed:${err.code}`);
             }
             const code = err instanceof EasyPostError ? err.code : "recovery_failed";
-            req.log.error({ code, jobId }, "carrier: buy_in_flight recovery failed; state unchanged, retry later");
+            req.log.error({ code, jobId }, "carrier: buy_in_flight recovery lookup failed; state unchanged, retry later");
             return reply.code(502).send({ error: "recovery_failed", detailCode: code, retry: true });
           }
         }
@@ -405,6 +468,7 @@ export async function carrierRoutes(app: FastifyInstance) {
           return finalizeAndRespond(req, reply, params, existing, "finalized a previously recorded purchase");
         default:
           return reply.code(200).send({ ...toShipmentDTO(existing), note: "already bought for this jobId" });
+      }
       }
     }
 
@@ -457,8 +521,7 @@ export async function carrierRoutes(app: FastifyInstance) {
         return reply.code(502).send({ error: "buy_ambiguous_retry_to_recover", retry: true });
       }
       // Known post-charge defect (unusable object, mode mismatch, hard buy error): human decides.
-      await store.markReconciliationRequired(jobId, code).catch(() => {});
-      return reply.code(409).send({ error: "reconciliation_required", reason: code });
+      return park(req, reply, jobId, code);
     }
 
     // The charge happened cleanly. Record it, then finalize.
@@ -468,10 +531,10 @@ export async function carrierRoutes(app: FastifyInstance) {
     } catch (err) {
       const code = err instanceof CarrierStoreError ? err.code : "record_purchase_failed";
       req.log.error({ code, jobId, shipmentId: bought.shipmentId, trackingCode: bought.trackingCode }, "carrier: PURCHASE MADE but could not be recorded — parking for reconciliation");
-      await store.markReconciliationRequired(jobId, `record_failed:${code}`).catch(() => {});
-      return reply.code(409).send({ error: "reconciliation_required", reason: `record_failed:${code}` });
+      return park(req, reply, jobId, `record_failed:${code}`);
     }
     return finalizeAndRespond(req, reply, params, record);
+    });
   });
 
   app.get<{ Params: { jobId: string } }>("/api/carrier/shipments/:jobId", async (req, reply) => {
@@ -538,6 +601,9 @@ export async function carrierRoutes(app: FastifyInstance) {
         trackerEvent,
         (record, newStatus) => buildCarrierEvidenceEvent(record, newStatus, trackerEvent, rawBody, signatureHeader),
         ledgered,
+        // Ledgering happens INSIDE the store's per-job/per-code lock (R4-2),
+        // so a concurrent finalize cannot slip between decision and insert.
+        { ledgerUnmatched: true },
       );
     } catch (err) {
       // Evidence gate or persistence failed: NOT marked seen, so the
@@ -550,10 +616,9 @@ export async function carrierRoutes(app: FastifyInstance) {
       switch (result.reason) {
         case "unknown_tracking_code":
         case "not_finalized":
-          // OURS-maybe but not yet matchable: durably ledger it so nothing
-          // depends on the provider retrying long enough (R3-5), then 2xx.
-          getCarrierShipmentStore().ledgeUnmatched(trackerEvent, ledgered);
-          req.log.info({ trackingCode: trackerEvent.trackingCode, reason: result.reason }, "carrier webhook: ledgered for post-finalize replay");
+          // OURS-maybe but not yet matchable: already durably ledgered by the
+          // store (R3-5), under its lock (R4-2). 2xx — we hold it now.
+          req.log.info({ trackingCode: trackerEvent.trackingCode, reason: result.reason, ledgered: result.ledgered === true }, "carrier webhook: ledgered for post-finalize replay");
           return reply.code(200).send({ received: true, pending: true, reason: result.reason });
         case "scan_predates_commitment":
           // Permanently non-qualifying (R3-4): the commitment did not predate
