@@ -1953,10 +1953,10 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // ══════════════════════════════════════════════════════════════════
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS carrier_shipments (
-      job_id         TEXT PRIMARY KEY,
-      tracking_code  TEXT NOT NULL UNIQUE,
-      carrier        TEXT NOT NULL,
-      status         TEXT NOT NULL,
+      job_id         TEXT PRIMARY KEY,             -- the cross-process spending lock: reserved BEFORE /buy
+      tracking_code  TEXT UNIQUE,                  -- NULL while reserved; set (immutably) once EasyPost has charged
+      carrier        TEXT,
+      status         TEXT NOT NULL,                -- reserved | purchased_pending | label_bought | in_transit | delivered | return_to_sender | failed
       data           TEXT NOT NULL,                -- JSON CarrierShipmentRecord (full object)
       created_at     TEXT NOT NULL,
       updated_at     TEXT NOT NULL

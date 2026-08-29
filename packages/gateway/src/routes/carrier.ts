@@ -14,9 +14,22 @@
  *
  * Authorization (sol #297 findings 3/4): the caller must be the operator of
  * the kernel the job is assigned to; jobId and kernelId are resolved against
- * the authoritative job/kernel records, never trusted from the body. Reads
- * are owner-only. The webhook path is the ONE public route here — its
- * authentication is the verified provider HMAC (see middleware/api-gate.ts).
+ * the authoritative job/kernel records, never trusted from the body, and the
+ * job must be in an active state. Reads are owner-only. The webhook path is
+ * the ONE public route here — its authentication is the verified provider
+ * HMAC (see middleware/api-gate.ts).
+ *
+ * PURCHASE IS TWO PHASES (sol round 2, NEW-2/NEW-6): the job is durably
+ * RESERVED before EasyPost is contacted (the row's PK is the cross-process
+ * spending lock), the purchase is durably RECORDED the moment /buy returns,
+ * and only then is the label downloaded/hashed/committed. A failure after
+ * /buy leaves `purchased_pending`; an identical retry FINALIZES that
+ * purchase instead of charging again.
+ *
+ * PRODUCTION BOOT FAILS CLOSED (round 2 findings 1/8/10, NEW-7, MED-3)
+ * without: an EasyPost key, a webhook secret, the gateway signing key, and
+ * durable storage. A carrier route that can spend but not prove — or prove
+ * from memory that vanishes on restart — must not come up in production.
  *
  * Provider: EasyPost. No SDK dependency.
  */
@@ -40,6 +53,8 @@ import {
   type CarrierShipmentRecord,
   type CarrierShipmentStatus,
 } from "../services/carrier-shipment-store.js";
+import { gatewayCommitmentKeyResolver, verifyCommitmentSignature } from "../services/commitment-signer.js";
+import { getActiveSigningKey } from "../signing-key.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 
 declare module "fastify" {
@@ -58,6 +73,8 @@ interface CreateShipmentBody {
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+/** Job states in which buying postage makes sense. Completed/failed/cancelled jobs must not spend. */
+const ACTIVE_JOB_STATUSES = new Set(["pending", "queued", "in_progress", "paused"]);
 
 function missingAddressFields(a: Partial<EasyPostAddress> | undefined): string[] {
   if (!a) return ["name", "street1", "city", "state", "zip"];
@@ -74,16 +91,19 @@ function toShipmentDTO(record: CarrierShipmentRecord) {
   return {
     jobId: record.jobId,
     kernelId: record.kernelId,
+    status: record.status,
     shipmentId: record.shipmentId,
     trackerId: record.trackerId,
     trackingCode: record.trackingCode,
     labelUrl: record.labelUrl,
     labelHash: record.labelHash,
     labelCid: record.labelCid,
-    labelFetch: `/api/storage/${record.labelCid}`,
+    labelFetch: record.labelCid ? `/api/storage/${record.labelCid}` : null,
     carrier: record.carrier,
     service: record.service,
-    status: record.status,
+    rate: record.rate,
+    currency: record.currency,
+    providerMode: record.providerMode,
     mock: record.mock,
     commitment: record.commitment,
     events: record.events,
@@ -95,9 +115,13 @@ function toShipmentDTO(record: CarrierShipmentRecord) {
 /**
  * Builds the EvidenceEvent for a pickup/delivery transition. The payload
  * carries everything a verifier needs to RECOMPUTE the binding (sol #297
- * finding 2): the full commitment (+ gateway signature when present), the
- * provider's raw signed bytes and signature header, its event id, and the
- * tracker status/detail — not just a hash of a hash.
+ * finding 2 / round-2 NEW-8): the full commitment, the provider's raw signed
+ * bytes (base64, exact) and signature header, its event id, tracker
+ * status/detail/location, the provider-attested mode, and the SPLIT
+ * verification results — commitmentHashValid (integrity: the hash
+ * recomputes) and commitmentSignatureVerified (authenticity: the gateway's
+ * ES256 JWS verifies against its JWKS key). Only the latter is an
+ * attestation; a recomputable hash alone is not.
  */
 async function buildCarrierEvidenceEvent(
   record: CarrierShipmentRecord,
@@ -109,12 +133,16 @@ async function buildCarrierEvidenceEvent(
   const type =
     newStatus === "in_transit" ? "courier_pickup_confirmed" : newStatus === "delivered" ? "courier_delivery_confirmed" : null;
   if (!type) return null;
+  if (!record.commitment) return null; // not finalized: no commitment to bind evidence to (store refuses earlier; belt+braces)
 
+  const providerMode = evt.providerMode ?? record.providerMode ?? "mock";
   const source: EvidenceSource = {
     deviceId: `easypost:${record.trackingCode}`,
     deviceType: "courier_api",
     kernelId: record.kernelId,
-    simulated: record.mock,
+    // Authentic evidence comes only from a production-mode purchase AND a
+    // production-mode tracker. Mock or sandbox anything => simulated.
+    simulated: record.mock || providerMode !== "production" || record.providerMode !== "production",
   };
   const payload = {
     jobId: record.jobId,
@@ -129,10 +157,13 @@ async function buildCarrierEvidenceEvent(
     providerEventId: evt.easypostEventId,
     occurredAt: evt.occurredAt,
     provider: "easypost",
+    providerMode,
     providerSignatureHeader: signatureHeader,
-    providerRawBody: rawBody.toString("utf8"),
+    /** Exact signed bytes, base64 — decode and re-run HMAC to re-verify (round-2 finding 2: UTF-8 re-encoding is not byte-exact). */
+    providerRawBodyB64: rawBody.toString("base64"),
     commitment: record.commitment,
-    commitmentVerified: verifyCommitmentHash(record.commitment),
+    commitmentHashValid: verifyCommitmentHash(record.commitment),
+    commitmentSignatureVerified: await verifyCommitmentSignature(record.commitment, gatewayCommitmentKeyResolver),
   };
   const withoutHash = { type, timestamp: evt.occurredAt, source, payload } as const;
   const hash = await hashEvent(withoutHash);
@@ -140,14 +171,15 @@ async function buildCarrierEvidenceEvent(
 }
 
 export async function carrierRoutes(app: FastifyInstance) {
-  // Mock mode fabricates labels and tracking codes. Serving that from a
-  // production gateway would let fabricated "carrier" evidence exist at all;
-  // refuse to boot instead (same pattern as fiat-ramp.ts's legacy-flag guard).
-  if (process.env.NODE_ENV === "production" && !process.env.EASYPOST_API_KEY) {
-    throw new Error(
-      "EASYPOST_API_KEY is required in production: the carrier route must never run in mock mode " +
-        "(mock labels would be indistinguishable from real ones to a downstream verifier that ignores source.simulated).",
-    );
+  if (process.env.NODE_ENV === "production") {
+    const missing: string[] = [];
+    if (!process.env.EASYPOST_API_KEY) missing.push("EASYPOST_API_KEY (mock labels are fabricated evidence)");
+    if (!process.env.EASYPOST_WEBHOOK_SECRET) missing.push("EASYPOST_WEBHOOK_SECRET (spending with no functioning proof webhook)");
+    if (!getActiveSigningKey()) missing.push("PCC_AGENT_CARD_SIGNING_KEY (an unsigned commitment is a hash anyone can recompute, not an attestation)");
+    if (!getCarrierShipmentStore().isDurable) missing.push("durable carrier store (in-memory commitments vanish on restart; re-purchase + unmatched webhooks)");
+    if (missing.length) {
+      throw new Error(`carrier route refuses production boot; missing: ${missing.join("; ")}`);
+    }
   }
 
   // Scoped to this plugin's encapsulation context only (Fastify's default
@@ -175,10 +207,14 @@ export async function carrierRoutes(app: FastifyInstance) {
       ok: true,
       service: "carrier (EasyPost)",
       mock: client.isMock,
+      requireProductionMode: client.requireProductionMode,
       webhookConfigured: client.hasWebhookSecret,
+      commitmentSigningConfigured: !!getActiveSigningKey(),
+      durable: store.isDurable,
       maxRateUsd: client.maxRateUsd,
       maxWeightOz: client.maxWeightOz,
       shipments: store.size(),
+      pendingFinalize: store.listPendingFinalize().length,
       ts: new Date().toISOString(),
     };
   });
@@ -201,18 +237,33 @@ export async function carrierRoutes(app: FastifyInstance) {
 
     const jobId = b.jobId!;
     const kernelId = b.kernelId!;
+    const params = {
+      jobId,
+      kernelId,
+      documentHash: b.documentHash!,
+      toAddress: b.toAddress as EasyPostAddress,
+      fromAddress: b.fromAddress as EasyPostAddress,
+      parcel: b.parcel as EasyPostParcel,
+    };
 
     // Resolve against the AUTHORITATIVE job + kernel; never trust the body's claims.
     const jobRes = await getJobFacade().getById(jobId);
     if (!jobRes.success) {
-      return reply.code(jobRes.error.httpStatus === 404 ? 404 : 502).send({ error: jobRes.error.httpStatus === 404 ? "job_not_found" : "job_lookup_failed" });
+      return reply
+        .code(jobRes.error.httpStatus === 404 ? 404 : 502)
+        .send({ error: jobRes.error.httpStatus === 404 ? "job_not_found" : "job_lookup_failed" });
     }
     if (jobRes.data.kernelId !== kernelId) {
       return reply.code(409).send({ error: "kernel_mismatch", message: "kernelId does not match the job's assigned kernel" });
     }
+    if (!ACTIVE_JOB_STATUSES.has(jobRes.data.status)) {
+      return reply.code(409).send({ error: "job_not_active", status: jobRes.data.status });
+    }
     const kernelRes = await getKernelFacade().getById(kernelId);
     if (!kernelRes.success) {
-      return reply.code(kernelRes.error.httpStatus === 404 ? 404 : 502).send({ error: kernelRes.error.httpStatus === 404 ? "kernel_not_found" : "kernel_lookup_failed" });
+      return reply
+        .code(kernelRes.error.httpStatus === 404 ? 404 : 502)
+        .send({ error: kernelRes.error.httpStatus === 404 ? "kernel_not_found" : "kernel_lookup_failed" });
     }
     const owner = (kernelRes.data as { operatorAddress?: string }).operatorAddress;
     if (!owner || owner === ZERO_ADDRESS) {
@@ -228,63 +279,98 @@ export async function carrierRoutes(app: FastifyInstance) {
     );
 
     const store = getCarrierShipmentStore();
+    const client = getEasyPostClient();
+
     const existing = store.getByJobId(jobId);
     if (existing) {
       if (existing.requestFingerprint !== requestFingerprint) {
-        return reply.code(409).send({ error: "idempotency_conflict", message: "a label was already bought for this jobId with different parameters" });
+        return reply
+          .code(409)
+          .send({ error: "idempotency_conflict", message: "a purchase already exists for this jobId with different parameters" });
+      }
+      if (existing.status === "reserved") {
+        return reply.code(409).send({ error: "job_in_flight" });
+      }
+      if (existing.status === "purchased_pending") {
+        // A prior attempt charged EasyPost and then failed before finalize.
+        // FINALIZE the recorded purchase — never buy again (round-2 NEW-2).
+        try {
+          const finalized = await client.finalizeLabel(params, {
+            shipmentId: existing.shipmentId!,
+            trackerId: existing.trackerId,
+            trackingCode: existing.trackingCode!,
+            labelUrl: existing.labelUrl!,
+            carrier: existing.carrier!,
+            service: existing.service!,
+            rate: existing.rate ?? "0",
+            currency: existing.currency ?? "USD",
+            providerMode: existing.providerMode ?? "mock",
+            mock: existing.mock,
+          });
+          const record = store.finalize(jobId, finalized);
+          return reply.code(201).send({ ...toShipmentDTO(record), note: "finalized a previously recorded purchase" });
+        } catch (err) {
+          const code = err instanceof EasyPostError ? err.code : "finalize_failed";
+          req.log.error({ err, jobId }, "carrier: finalize of recorded purchase failed (purchase remains recorded)");
+          return reply.code(502).send({ error: "purchase_recorded_finalize_failed", detailCode: code, retry: true });
+        }
       }
       return reply.code(200).send({ ...toShipmentDTO(existing), note: "already bought for this jobId" });
     }
 
     try {
-      store.reserve(jobId);
+      store.reserve({ jobId, kernelId, ownerId: caller, requestFingerprint });
     } catch (err) {
       const code = err instanceof CarrierStoreError ? err.code : "reserve_failed";
       return reply.code(409).send({ error: code });
     }
 
+    // Phase 1: create + buy. On ANY failure here nothing was recorded as
+    // purchased — release the reservation so a retry can start clean.
+    let bought;
     try {
-      const client = getEasyPostClient();
-      const result = await client.buyCheapestLabel({
-        jobId,
-        kernelId,
-        documentHash: b.documentHash!,
-        toAddress: b.toAddress as EasyPostAddress,
-        fromAddress: b.fromAddress as EasyPostAddress,
-        parcel: b.parcel as EasyPostParcel,
-      });
-      const record = store.create({
-        jobId,
-        kernelId,
-        ownerId: caller,
-        shipmentId: result.shipmentId,
-        trackerId: result.trackerId,
-        trackingCode: result.trackingCode,
-        labelUrl: result.labelUrl,
-        labelHash: result.labelHash,
-        labelCid: result.labelCid,
-        carrier: result.carrier,
-        service: result.service,
-        commitment: result.commitment,
-        requestFingerprint,
-        mock: result.mock,
-      });
+      bought = await client.createAndBuy(params);
+    } catch (err) {
+      store.release(jobId);
+      if (err instanceof EasyPostError) {
+        req.log.warn({ code: err.code, status: err.status, detail: err.detail, jobId }, "carrier: purchase failed before charge was usable");
+        const clientFault =
+          err.code === "invalid_parcel" ||
+          err.code === "invalid_document_hash" ||
+          err.code === "provider_mode_not_production" ||
+          err.code.endsWith("_ceiling");
+        // easypost_bought_but_unusable: EasyPost DID charge but returned an
+        // unusable object — releasing the reservation is still correct (we
+        // recorded no tracking identity to reconcile against) but it must be
+        // loud, not a silent 502.
+        if (err.code === "easypost_bought_but_unusable") {
+          req.log.error({ detail: err.detail, jobId }, "carrier: EasyPost charged but returned an unusable shipment — manual reconciliation needed");
+        }
+        return reply.code(clientFault ? 400 : 502).send({ error: err.code });
+      }
+      req.log.error({ err, jobId }, "carrier: unexpected failure before purchase was recorded");
+      return reply.code(502).send({ error: "easypost_label_purchase_failed" });
+    }
+
+    // The charge happened. Record it durably BEFORE anything else can fail.
+    try {
+      store.markPurchased(jobId, bought);
+    } catch (err) {
+      const code = err instanceof CarrierStoreError ? err.code : "record_purchase_failed";
+      req.log.error({ code, jobId, shipmentId: bought.shipmentId, trackingCode: bought.trackingCode }, "carrier: PURCHASE MADE but could not be recorded — manual reconciliation needed");
+      return reply.code(500).send({ error: "purchase_made_but_not_recorded", detailCode: code });
+    }
+
+    // Phase 2: label bytes -> hash/CID -> commitment. Failure leaves
+    // purchased_pending; the identical retry above finalizes it.
+    try {
+      const finalized = await client.finalizeLabel(params, bought);
+      const record = store.finalize(jobId, finalized);
       return reply.code(201).send(toShipmentDTO(record));
     } catch (err) {
-      if (err instanceof EasyPostError) {
-        // Provider detail (may echo address data / provider diagnostics) stays server-side.
-        req.log.warn({ code: err.code, status: err.status, detail: err.detail, jobId }, "carrier: label purchase failed");
-        const client = err.code === "invalid_parcel" || err.code === "invalid_document_hash" || err.code.endsWith("_ceiling");
-        return reply.code(client ? 400 : 502).send({ error: err.code });
-      }
-      if (err instanceof CarrierStoreError) {
-        req.log.error({ code: err.code, jobId }, "carrier: label bought but could not be recorded");
-        return reply.code(409).send({ error: err.code });
-      }
-      req.log.error({ err, jobId }, "carrier: unexpected failure");
-      return reply.code(502).send({ error: "easypost_label_purchase_failed" });
-    } finally {
-      store.release(jobId);
+      const code = err instanceof EasyPostError ? err.code : err instanceof CarrierStoreError ? err.code : "finalize_failed";
+      req.log.error({ code, jobId }, "carrier: purchase recorded, finalize failed — retry same request to finalize");
+      return reply.code(502).send({ error: "purchase_recorded_finalize_failed", detailCode: code, retry: true });
     }
   });
 
@@ -297,6 +383,22 @@ export async function carrierRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "not_found" });
     }
     return toShipmentDTO(record);
+  });
+
+  // The seam the kernel uses to fold the mail leg into its signed bundle
+  // (round-2 NEW-9, option (a) per coord: the kernel PULLS these
+  // spec-conformant EvidenceEvents and signs them into the ONE bundle under
+  // its kernelSignedEventsRoot — the gateway never signs on the kernel's
+  // behalf, so "the party being paid does not author the proof" holds: the
+  // kernel signs a bundle CONTAINING a third-party event it could not forge).
+  app.get<{ Params: { jobId: string } }>("/api/carrier/shipments/:jobId/evidence", async (req, reply) => {
+    const caller = callerId(req);
+    if (!caller) return reply.code(401).send({ error: "authentication_required" });
+    const record = getCarrierShipmentStore().getByJobId(req.params.jobId);
+    if (!record || record.ownerId.toLowerCase() !== caller.toLowerCase()) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+    return { jobId: record.jobId, kernelId: record.kernelId, status: record.status, events: record.events };
   });
 
   app.post("/api/carrier/webhook/easypost", async (req, reply) => {
@@ -323,13 +425,19 @@ export async function carrierRoutes(app: FastifyInstance) {
       // fields we key on) — 2xx so EasyPost does not retry it forever.
       return reply.code(200).send({ received: true, ignored: true });
     }
+    if (client.requireProductionMode && trackerEvent.providerMode !== "production") {
+      // A sandbox tracker must never become evidence in production. 2xx (do
+      // not make EasyPost retry what we will never accept), loudly logged.
+      req.log.warn({ trackingCode: trackerEvent.trackingCode, providerMode: trackerEvent.providerMode }, "carrier webhook: non-production tracker refused");
+      return reply.code(200).send({ received: true, ignored: true, reason: "provider_mode_not_production" });
+    }
 
     let result;
     try {
       result = await getCarrierShipmentStore().recordCarrierEvent(
         trackerEvent,
         (record, newStatus) => buildCarrierEvidenceEvent(record, newStatus, trackerEvent, rawBody, signatureHeader),
-        { rawBody: rawBody.toString("utf8"), signatureHeader, parsed: trackerEvent },
+        { rawBodyB64: rawBody.toString("base64"), signatureHeader, parsed: trackerEvent },
       );
     } catch (err) {
       // Evidence build or persistence failed: NOT marked seen, so the
@@ -339,11 +447,16 @@ export async function carrierRoutes(app: FastifyInstance) {
     }
 
     if (!result.ok) {
-      // unknown tracking code: genuinely not ours (another shipment on the
-      // same EasyPost account) -> 2xx, no retry, but logged: an uncommitted
-      // tracking code must never silently become evidence for a PCC job.
-      // tracker/shipment mismatch: same code, different purchase identity ->
-      // refuse; logged at warn because that is not a benign shape.
+      // unknown_tracking_code: genuinely not ours -> 2xx, no retry, logged.
+      // not_finalized: OUR purchase but the commitment is not built yet ->
+      //   non-2xx so EasyPost RETRIES after the finalize retry lands; the
+      //   scan must not be dropped.
+      // tracker_missing/_mismatch/shipment_mismatch: same code, different
+      //   purchase identity -> refuse, warn (not a benign shape).
+      if (result.reason === "not_finalized") {
+        req.log.warn({ trackingCode: trackerEvent.trackingCode }, "carrier webhook: scan arrived before finalize; asking provider to retry");
+        return reply.code(409).send({ received: false, reason: result.reason, retry: true });
+      }
       const level = result.reason === "unknown_tracking_code" ? "info" : "warn";
       req.log[level]({ trackingCode: trackerEvent.trackingCode, reason: result.reason }, "carrier webhook: not applied");
       return reply.code(200).send({ received: true, matched: false, reason: result.reason });

@@ -1,8 +1,9 @@
 /**
- * EasyPost client tests — mock-mode label buy, real-mode buy against an
- * injected fetchImpl (no network) including label-BYTES download + hashing,
- * response validation, spend ceilings, webhook signature verification against
- * a hand-computed HMAC (real algorithm, both directions), commitment
+ * EasyPost client tests — mock-mode label buy, real-mode two-phase buy
+ * against an injected fetchImpl (no network) including label-BYTES download +
+ * hashing + content-addressing, provider-mode enforcement, response
+ * validation, spend ceilings, webhook signature verification against a
+ * hand-computed HMAC (real algorithm, both directions), commitment
  * hash/signature verification, and tracker-event parsing.
  */
 
@@ -17,8 +18,20 @@ import {
   verifyCommitmentHash,
   type ShipmentCommitmentBody,
 } from "../services/easypost-client.js";
-import { createCommitmentSigner, COMMITMENT_JWS_TYP } from "../services/commitment-signer.js";
+import {
+  createCommitmentSigner,
+  verifyCommitmentSignature,
+  COMMITMENT_JWS_TYP,
+} from "../services/commitment-signer.js";
 import { computeCid, isValidCid, type ICidBlobStorage } from "../services/cid-blob-storage.js";
+
+const toAddress = { name: "Recipient Name", street1: "100 Court St", city: "Brooklyn", state: "NY", zip: "11201" };
+const fromAddress = { name: "PCC Operator", street1: "1 Shop Way", city: "San Francisco", state: "CA", zip: "94103" };
+const parcel = { weightOz: 1.5 };
+const documentHash = createHash("sha256").update("the letter").digest("hex");
+const base = { jobId: "job-1", kernelId: "kernel-1", documentHash, toAddress, fromAddress, parcel };
+
+const LABEL_BYTES = Buffer.from("PNG-LABEL-BYTES-0123456789");
 
 /** Hermetic content-addressed store: no disk, same CID math as the gateway's. */
 function memBlobStore(): ICidBlobStorage & { blobs: Map<string, Uint8Array> } {
@@ -44,16 +57,13 @@ function memBlobStore(): ICidBlobStorage & { blobs: Map<string, Uint8Array> } {
   };
 }
 
-const toAddress = { name: "Recipient Name", street1: "100 Court St", city: "Brooklyn", state: "NY", zip: "11201" };
-const fromAddress = { name: "PCC Operator", street1: "1 Shop Way", city: "San Francisco", state: "CA", zip: "94103" };
-const parcel = { weightOz: 1.5 };
-const documentHash = createHash("sha256").update("the letter").digest("hex");
-const base = { jobId: "job-1", kernelId: "kernel-1", documentHash, toAddress, fromAddress, parcel };
-
-const LABEL_BYTES = Buffer.from("PNG-LABEL-BYTES-0123456789");
-
 /** fetch stub that plays a full happy-path EasyPost conversation. */
-function happyFetch(calls: { url: string; init?: RequestInit }[] = []) {
+function happyFetch(
+  calls: { url: string; init?: RequestInit }[] = [],
+  opts: { mode?: string; labelHeaders?: Record<string, string> } = {},
+) {
+  const mode = opts.mode ?? "production";
+  const labelHeaders = opts.labelHeaders ?? { "content-type": "image/png" };
   return vi.fn(async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
     calls.push({ url: u, init });
@@ -61,6 +71,7 @@ function happyFetch(calls: { url: string; init?: RequestInit }[] = []) {
       return new Response(
         JSON.stringify({
           id: "shp_real_123",
+          mode,
           rates: [
             { id: "rate_expensive", carrier: "UPS", service: "Ground", rate: "12.40", currency: "USD" },
             { id: "rate_cheap", carrier: "USPS", service: "First", rate: "4.13", currency: "USD" },
@@ -74,6 +85,7 @@ function happyFetch(calls: { url: string; init?: RequestInit }[] = []) {
       return new Response(
         JSON.stringify({
           id: "shp_real_123",
+          mode,
           tracking_code: "9400111899223197428490",
           postage_label: { label_url: "https://easypost-cdn.example/label.png" },
           tracker: { id: "trk_real_456" },
@@ -83,14 +95,14 @@ function happyFetch(calls: { url: string; init?: RequestInit }[] = []) {
       );
     }
     if (u === "https://easypost-cdn.example/label.png") {
-      return new Response(LABEL_BYTES, { status: 200 });
+      return new Response(LABEL_BYTES, { status: 200, headers: labelHeaders });
     }
     throw new Error(`unexpected fetch: ${u}`);
   }) as unknown as typeof fetch;
 }
 
 describe("EasyPostClient — mock mode", () => {
-  it("fabricates a label with no network calls, marked mock, with a self-consistent commitment", async () => {
+  it("fabricates a label with no network calls, marked mock + providerMode mock, with a self-consistent commitment", async () => {
     const blobs = memBlobStore();
     const client = new EasyPostClient({ blobStore: blobs });
     expect(client.isMock).toBe(true);
@@ -98,11 +110,13 @@ describe("EasyPostClient — mock mode", () => {
     const result = await client.buyCheapestLabel(base);
 
     expect(result.mock).toBe(true);
+    expect(result.providerMode).toBe("mock");
     expect(result.trackingCode).toMatch(/^EZMOCK\d{10}$/);
     expect(result.labelHash).toMatch(/^[0-9a-f]{64}$/);
     expect(isValidCid(result.labelCid)).toBe(true);
     expect(blobs.blobs.has(result.labelCid)).toBe(true); // mock label bytes are stored too, so the print leg can fetch them
     expect(result.commitment.mock).toBe(true);
+    expect(result.commitment.providerMode).toBe("mock");
     expect(result.commitment.documentHash).toBe(documentHash);
     expect(result.commitment.kernelId).toBe("kernel-1");
     expect(result.commitment.labelHash).toBe(result.labelHash);
@@ -127,66 +141,125 @@ describe("EasyPostClient — mock mode", () => {
     const client = new EasyPostClient({ maxWeightOz: 10, blobStore: memBlobStore() });
     await expect(client.buyCheapestLabel({ ...base, parcel: { weightOz: 11 } })).rejects.toMatchObject({ code: "weight_exceeds_ceiling" });
   });
+
+  it("refuses to construct in requireProductionMode with no API key (mock forbidden in production)", () => {
+    expect(() => new EasyPostClient({ requireProductionMode: true })).toThrowError(/mock_forbidden_in_production/);
+  });
 });
 
-describe("EasyPostClient — real mode (injected fetchImpl, no network)", () => {
-  it("creates, buys the cheapest USD rate, downloads the label BYTES, hashes AND content-addresses them", async () => {
+describe("EasyPostClient — real mode, two phases (injected fetchImpl, no network)", () => {
+  it("phase 1 buys the cheapest USD rate; phase 2 downloads, hashes AND content-addresses the label bytes", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     const blobs = memBlobStore();
     const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch(calls), blobStore: blobs });
     expect(client.isMock).toBe(false);
 
-    const result = await client.buyCheapestLabel(base);
+    const bought = await client.createAndBuy(base);
+    expect(bought.mock).toBe(false);
+    expect(bought.providerMode).toBe("production");
+    expect(bought.shipmentId).toBe("shp_real_123");
+    expect(bought.trackerId).toBe("trk_real_456");
+    expect(bought.trackingCode).toBe("9400111899223197428490");
+    expect(bought.carrier).toBe("USPS"); // cheapest USD — not the UPS listed first, not the EUR rate
+    expect(bought.rate).toBe("4.13");
+    // Phase 1 made exactly two calls and did NOT touch the label:
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://api.easypost.com/v2/shipments",
+      "https://api.easypost.com/v2/shipments/shp_real_123/buy",
+    ]);
 
-    expect(result.mock).toBe(false);
-    expect(result.shipmentId).toBe("shp_real_123");
-    expect(result.trackerId).toBe("trk_real_456");
-    expect(result.trackingCode).toBe("9400111899223197428490");
-    expect(result.carrier).toBe("USPS"); // cheapest USD — not the UPS listed first, not the EUR rate
-    expect(result.rate).toBe("4.13");
-    expect(result.labelHash).toBe(createHash("sha256").update(LABEL_BYTES).digest("hex"));
-    expect(result.labelCid).toBe(computeCid(new Uint8Array(LABEL_BYTES)));
-    expect(Buffer.from(await blobs.get(result.labelCid))).toEqual(LABEL_BYTES); // the print leg gets the EXACT bytes back
-    expect(result.commitment.labelHash).toBe(result.labelHash);
-    expect(result.commitment.labelCid).toBe(result.labelCid);
-    expect(result.commitment.trackerId).toBe("trk_real_456");
-    expect(verifyCommitmentHash(result.commitment)).toBe(true);
+    const finalized = await client.finalizeLabel(base, bought);
+    expect(finalized.labelHash).toBe(createHash("sha256").update(LABEL_BYTES).digest("hex"));
+    expect(finalized.labelCid).toBe(computeCid(new Uint8Array(LABEL_BYTES)));
+    expect(Buffer.from(await blobs.get(finalized.labelCid))).toEqual(LABEL_BYTES); // the print leg gets the EXACT bytes back
+    expect(finalized.commitment.labelHash).toBe(finalized.labelHash);
+    expect(finalized.commitment.trackerId).toBe("trk_real_456");
+    expect(finalized.commitment.providerMode).toBe("production");
+    expect(verifyCommitmentHash(finalized.commitment)).toBe(true);
 
     const buyCall = calls.find((c) => c.url.endsWith("/buy"))!;
     expect(JSON.parse(buyCall.init!.body as string).rate.id).toBe("rate_cheap");
     expect((calls[0]!.init!.headers as Record<string, string>).Authorization).toBe(
       `Basic ${Buffer.from("EZAKtest:").toString("base64")}`,
     );
-    expect(calls.map((c) => c.url)).toEqual([
-      "https://api.easypost.com/v2/shipments",
-      "https://api.easypost.com/v2/shipments/shp_real_123/buy",
-      "https://easypost-cdn.example/label.png",
-    ]);
+    // No redirect-following on any upstream call (provider URLs must not bounce us):
+    for (const c of calls) expect((c.init as { redirect?: string }).redirect).toBe("error");
+  });
+
+  it("refuses a non-production shipment under requireProductionMode BEFORE /buy (no charge)", async () => {
+    const calls: { url: string }[] = [];
+    const client = new EasyPostClient({
+      apiKey: "EZAKtest",
+      fetchImpl: happyFetch(calls, { mode: "test" }),
+      requireProductionMode: true,
+      blobStore: memBlobStore(),
+    });
+    await expect(client.createAndBuy(base)).rejects.toMatchObject({ code: "provider_mode_not_production" });
+    expect(calls.some((c) => c.url.endsWith("/buy"))).toBe(false);
+  });
+
+  it("accepts a test-mode shipment when requireProductionMode is off, and binds providerMode 'test'", async () => {
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch([], { mode: "test" }), blobStore: memBlobStore() });
+    const result = await client.buyCheapestLabel(base);
+    expect(result.providerMode).toBe("test");
+    expect(result.commitment.providerMode).toBe("test");
   });
 
   it("refuses to buy when the cheapest rate exceeds the USD ceiling (no /buy call made)", async () => {
     const calls: { url: string }[] = [];
     const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch(calls), maxRateUsd: 4.0, blobStore: memBlobStore() });
-    await expect(client.buyCheapestLabel(base)).rejects.toMatchObject({ code: "rate_exceeds_ceiling" });
+    await expect(client.createAndBuy(base)).rejects.toMatchObject({ code: "rate_exceeds_ceiling" });
     expect(calls.some((c) => c.url.endsWith("/buy"))).toBe(false);
   });
 
-  it("rejects a bought shipment missing tracking_code/label_url instead of indexing an empty code", async () => {
+  it("rejects a bought shipment missing tracking_code/label_url with the LOUD bought-but-unusable code", async () => {
     const fetchImpl = vi.fn(async (url: string | URL) => {
       const u = String(url);
       if (u.endsWith("/shipments")) {
-        return new Response(JSON.stringify({ id: "shp_1", rates: [{ id: "r", carrier: "USPS", service: "First", rate: "1.00", currency: "USD" }] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ id: "shp_1", mode: "production", rates: [{ id: "r", carrier: "USPS", service: "First", rate: "1.00", currency: "USD" }] }),
+          { status: 200 },
+        );
       }
-      return new Response(JSON.stringify({ id: "shp_1", tracking_code: "", postage_label: {} }), { status: 200 });
+      return new Response(JSON.stringify({ id: "shp_1", mode: "production", tracking_code: "", postage_label: {} }), { status: 200 });
     }) as unknown as typeof fetch;
-    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl });
-    await expect(client.buyCheapestLabel(base)).rejects.toMatchObject({ code: "easypost_invalid_response" });
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl, blobStore: memBlobStore() });
+    await expect(client.createAndBuy(base)).rejects.toMatchObject({ code: "easypost_bought_but_unusable" });
+  });
+
+  it("rejects a shipment with no provider mode (cannot classify the environment)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ id: "shp_1", rates: [{ id: "r", carrier: "USPS", service: "First", rate: "1.00", currency: "USD" }] }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl, blobStore: memBlobStore() });
+    await expect(client.createAndBuy(base)).rejects.toMatchObject({ code: "easypost_invalid_response" });
+  });
+
+  it("rejects a label with an unexpected content type", async () => {
+    const client = new EasyPostClient({
+      apiKey: "EZAKtest",
+      fetchImpl: happyFetch([], { labelHeaders: { "content-type": "text/html" } }),
+      blobStore: memBlobStore(),
+    });
+    const bought = await client.createAndBuy(base);
+    await expect(client.finalizeLabel(base, bought)).rejects.toMatchObject({ code: "easypost_label_unexpected_type" });
+  });
+
+  it("rejects a label whose declared size exceeds the cap", async () => {
+    const client = new EasyPostClient({
+      apiKey: "EZAKtest",
+      fetchImpl: happyFetch([], { labelHeaders: { "content-type": "image/png", "content-length": String(50 * 1024 * 1024) } }),
+      maxLabelBytes: 1024 * 1024,
+      blobStore: memBlobStore(),
+    });
+    const bought = await client.createAndBuy(base);
+    await expect(client.finalizeLabel(base, bought)).rejects.toMatchObject({ code: "easypost_label_too_large" });
   });
 
   it("keeps provider error bodies in EasyPostError.detail (server-side), with a stable code", async () => {
     const fetchImpl = vi.fn(async () => new Response("address invalid: 100 Court St", { status: 422 })) as unknown as typeof fetch;
-    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl });
-    const err = await client.buyCheapestLabel(base).catch((e) => e);
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl, blobStore: memBlobStore() });
+    const err = await client.createAndBuy(base).catch((e) => e);
     expect(err).toBeInstanceOf(EasyPostError);
     expect(err.code).toBe("easypost_create_shipment_failed");
     expect(err.status).toBe(422);
@@ -205,8 +278,9 @@ describe("ShipmentCommitment — hash + gateway signature", () => {
     expect(verifyCommitmentHash({ ...commitment, hash: "0".repeat(64) })).toBe(false);
   });
 
-  it("signs the commitment with an ES256 key and the signature verifies against the public key", async () => {
+  it("signs the commitment with ES256; verifyCommitmentSignature accepts it and rejects tampering / wrong keys", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256");
+    const { publicKey: otherPublicKey } = await generateKeyPair("ES256");
     const signer = createCommitmentSigner({ privateKey, kid: "test-kid", alg: "ES256" });
     const client = new EasyPostClient({ signer, blobStore: memBlobStore() });
     const { commitment } = await client.buyCheapestLabel(base);
@@ -218,17 +292,18 @@ describe("ShipmentCommitment — hash + gateway signature", () => {
     const { hash, signature: _s, ...body } = commitment;
     expect(new TextDecoder().decode(payload)).toBe(canonicalize(body));
     expect(computeCommitmentHash(body as ShipmentCommitmentBody)).toBe(hash);
-  });
 
-  it("a signature over one commitment does not verify for a different body", async () => {
-    const { privateKey, publicKey } = await generateKeyPair("ES256");
-    const signer = createCommitmentSigner({ privateKey, kid: "k", alg: "ES256" });
-    const client = new EasyPostClient({ signer, blobStore: memBlobStore() });
-    const { commitment } = await client.buyCheapestLabel(base);
-    const { payload } = await compactVerify(commitment.signature!.jws, publicKey);
-    const tampered = { ...commitment, jobId: "job-other" };
-    const { hash: _h, signature: _s, ...tamperedBody } = tampered;
-    expect(new TextDecoder().decode(payload)).not.toBe(canonicalize(tamperedBody));
+    // The dedicated verifier: true with the right key…
+    await expect(verifyCommitmentSignature(commitment, () => publicKey)).resolves.toBe(true);
+    // …false for a tampered body even though the attacker recomputed the hash…
+    const tamperedBody = { ...body, jobId: "job-attacker" } as ShipmentCommitmentBody;
+    const tampered = { ...tamperedBody, hash: computeCommitmentHash(tamperedBody), signature: commitment.signature };
+    expect(verifyCommitmentHash(tampered)).toBe(true); // hash validity is NOT authenticity…
+    await expect(verifyCommitmentSignature(tampered, () => publicKey)).resolves.toBe(false); // …the signature is
+    // …false under the wrong key, an unknown kid, or no signature at all.
+    await expect(verifyCommitmentSignature(commitment, () => otherPublicKey)).resolves.toBe(false);
+    await expect(verifyCommitmentSignature(commitment, () => null)).resolves.toBe(false);
+    await expect(verifyCommitmentSignature({ ...commitment, signature: null }, () => publicKey)).resolves.toBe(false);
   });
 });
 
@@ -262,13 +337,14 @@ describe("EasyPostClient — webhook signature verification", () => {
 describe("EasyPostClient — parseTrackerEvent", () => {
   const client = new EasyPostClient({});
 
-  it("extracts fields (incl. tracker + shipment identity) from a tracker.updated event", () => {
+  it("extracts fields (incl. tracker + shipment identity + provider mode) from a tracker.updated event", () => {
     expect(
       client.parseTrackerEvent({
         id: "evt_abc",
         description: "tracker.updated",
         result: {
           id: "trk_1",
+          mode: "production",
           shipment_id: "shp_1",
           tracking_code: "9400111899223197428490",
           status: "in_transit",
@@ -286,6 +362,7 @@ describe("EasyPostClient — parseTrackerEvent", () => {
       carrier: "USPS",
       statusDetail: "arrived_at_destination_facility",
       occurredAt: "2026-08-27T12:00:00.000Z",
+      providerMode: "production",
       carrierMessage: null,
       trackingLocation: null,
     });
@@ -298,6 +375,7 @@ describe("EasyPostClient — parseTrackerEvent", () => {
       result: {
         tracking_code: "X",
         status: "in_transit",
+        mode: "test",
         updated_at: "2026-08-27T14:22:00Z",
         tracking_details: [
           { message: "Arrived at USPS Facility", status: "in_transit", datetime: "2026-08-27T14:22:00Z", tracking_location: { city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" } },
@@ -305,6 +383,7 @@ describe("EasyPostClient — parseTrackerEvent", () => {
         ],
       },
     });
+    expect(parsed?.providerMode).toBe("test");
     expect(parsed?.carrierMessage).toBe("Arrived at USPS Facility");
     expect(parsed?.trackingLocation).toEqual({ city: "SAN FRANCISCO", state: "CA", zip: "94103", country: "US" });
   });

@@ -587,18 +587,29 @@ export async function createGateway(port = 3200) {
   // same write-through SQLite handle as job-offers; tables created by
   // db/src/migrate.ts (carrier_shipments, carrier_webhook_events). A pre-
   // execution commitment must survive a restart or the carrier's genuine
-  // scan webhook has nothing to match against (sol #297 finding 8).
-  try {
-    const rawSqlite = (getStore().db as unknown as {
-      $client?: import("./services/carrier-shipment-store.js").SqliteDatabaseLike;
-    }).$client;
-    initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite } : {});
-    if (!rawSqlite) app.log.warn("[carrier] no SQLite handle; shipment commitments are in-memory only");
-  } catch (err) {
-    app.log.warn(
-      `[carrier] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
-    );
-    initCarrierShipmentStore({});
+  // scan webhook has nothing to match against, and a lost reservation
+  // re-charges the operator (sol #297 findings 8, NEW-2/6/7). PRODUCTION
+  // therefore FAILS BOOT on a missing handle or corrupt rows instead of
+  // degrading to memory; dev/test keeps the in-memory fallback.
+  {
+    const isProd = process.env.NODE_ENV === "production";
+    try {
+      const rawSqlite = (getStore().db as unknown as {
+        $client?: import("./services/carrier-shipment-store.js").SqliteDatabaseLike;
+      }).$client;
+      if (!rawSqlite && isProd) {
+        throw new Error("no raw SQLite handle available from the store");
+      }
+      initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: isProd } : {});
+      if (!rawSqlite) app.log.warn("[carrier] no SQLite handle; shipment commitments are in-memory only (dev/test)");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isProd) {
+        throw new Error(`[carrier] durable store required in production: ${msg}`);
+      }
+      app.log.warn(`[carrier] could not attach SQLite (${msg}); falling back to in-memory (dev/test)`);
+      initCarrierShipmentStore({});
+    }
   }
 
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so

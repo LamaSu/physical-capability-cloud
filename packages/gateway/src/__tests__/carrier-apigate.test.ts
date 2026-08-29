@@ -34,7 +34,7 @@ afterAll(() => closeStore());
 beforeEach(() => {
   _resetCarrierShipmentStoreForTests();
   initCarrierShipmentStore({});
-  _setEasyPostClientForTests(new EasyPostClient({ webhookSecret: SECRET }));
+  _setEasyPostClientForTests(new EasyPostClient({ webhookSecret: SECRET })); // webhook-only suite: blob store never touched
 });
 afterEach(() => {
   _resetCarrierShipmentStoreForTests();

@@ -9,19 +9,25 @@
  *
  * Mock mode (no EASYPOST_API_KEY set): synthesizes a shipment locally so the
  * gateway boots and the route contract is testable with zero external calls.
- * This is NOT EasyPost's own "test mode" (a real EZTK... test key still hits
+ * This is NOT EasyPost's own "test mode" (a real EasyPost TEST key still hits
  * the real API, in EasyPost's sandbox) — it's this codebase's convention for
  * "no credential configured at all", matching fiat-ramp.ts's
  * StripeOnrampClient / YellowcardClient / WiseClient pattern (mock = !env var).
- * Mock mode is FORBIDDEN in production — routes/carrier.ts fails boot.
  *
- * Revised after sol's cross-family review of PR #297 (DO-NOT-SHIP, 15
- * findings). Changes: the commitment binds the DOCUMENT hash + kernel +
- * shipment/tracker identity + label BYTES (not the URL string) + mock state,
- * is hashed over canonical JSON, and can be signed by the gateway key; every
- * EasyPost response field we index on is validated non-empty; postage rate
- * and parcel weight are ceiling-checked BEFORE purchase; upstream error
- * bodies stay server-side; HMAC runs over raw BYTES.
+ * PROVIDER MODE (sol #297 round 2, CRITICAL): EasyPost's docs define no key
+ * prefix that distinguishes test from production keys, and third-party pages
+ * contradict each other — so this client does NOT sniff key prefixes. Every
+ * EasyPost object carries a provider-attested `mode: "test" | "production"`;
+ * the client reads it from the created Shipment BEFORE /buy and from every
+ * Tracker webhook, binds it into the commitment and the evidence, and — when
+ * `requireProductionMode` is set (production boot) — refuses anything that
+ * is not "production". Evidence from a test-mode tracker is never authentic.
+ *
+ * PURCHASE IS TWO PHASES (sol round 2, NEW-2): `createAndBuy` ends the moment
+ * EasyPost has charged; the caller durably records that BEFORE
+ * `finalizeLabel` downloads/hashes/content-addresses the label and builds
+ * the commitment. A failure after /buy therefore never leads to a second
+ * charge on retry — the recorded purchase is finalized instead.
  */
 
 import { randomUUID, createHmac, timingSafeEqual, createHash } from "node:crypto";
@@ -56,6 +62,9 @@ export interface CreateLabelParams {
   parcel: EasyPostParcel;
 }
 
+/** "production" = a real EasyPost production account; "test" = EasyPost sandbox; "mock" = no credential at all (this codebase). */
+export type ProviderMode = "production" | "test" | "mock";
+
 /**
  * The pre-execution binding sol's reviews (coord #1382, PR #297) require.
  * Computed BEFORE the label reaches a human, so the later carrier webhook
@@ -64,12 +73,15 @@ export interface CreateLabelParams {
  * WHAT IT PROVES: that at `committedAt` the gateway bound THIS job, THIS
  * document hash, THIS destination, THIS carrier-issued tracking code /
  * shipment / tracker, and THESE exact label bytes together — and, when
- * `signature` is present, that the gateway's key attested to that binding.
+ * `signature` is present and verifies (commitment-signer.ts), that the
+ * gateway's key attested to that binding. A bare `hash` that recomputes is
+ * NOT an attestation; only the signature is.
  * WHAT IT DOES NOT PROVE: that the envelope the carrier scans contains the
  * document, is non-empty, or that the label was not moved to another
  * envelope. Document-to-envelope binding needs the print leg (kernel-signed
- * page count) + the pre-seal handoff photo; the scan binds envelope to mail
- * stream only. Stated in the capability definition, never blurred.
+ * page count + hash of the label it printed, fetched by labelCid) + the
+ * pre-seal handoff photo; the scan binds envelope to mail stream only.
+ * Stated in the capability definition, never blurred.
  */
 export interface ShipmentCommitmentBody {
   v: 1;
@@ -84,14 +96,10 @@ export interface ShipmentCommitmentBody {
   service: string;
   /** sha256 hex of the label BYTES as downloaded from EasyPost (mock: of a deterministic mock label). */
   labelHash: string;
-  /**
-   * CIDv1 (raw, sha-256) of the same label bytes, stored in the gateway's
-   * content-addressed blob store at purchase time. This is how the PRINT leg
-   * fetches the EXACT bytes the commitment binds — so "hash of what the
-   * printer printed" can equal labelHash — instead of re-downloading from a
-   * provider URL that may serve different bytes later.
-   */
+  /** CIDv1 of the same bytes in the gateway blob store — how the print leg fetches the EXACT bytes. */
   labelCid: string;
+  /** Provider-attested environment the purchase was made in. Only "production" is authentic. */
+  providerMode: ProviderMode;
   mock: boolean;
   committedAt: string;
 }
@@ -104,9 +112,9 @@ export interface CommitmentSignature {
 }
 
 export interface ShipmentCommitment extends ShipmentCommitmentBody {
-  /** sha256 hex of canonicalize(body). */
+  /** sha256 hex of canonicalize(body). Integrity only — see signature for authenticity. */
   hash: string;
-  /** null when no gateway signing key is configured (PCC_AGENT_CARD_SIGNING_KEY). */
+  /** null when no gateway signing key is configured (dev/test only; production boot requires one). */
   signature: CommitmentSignature | null;
 }
 
@@ -115,20 +123,28 @@ export type CommitmentSigner = (
   hash: string,
 ) => Promise<CommitmentSignature | null>;
 
-export interface CreateLabelResult {
+/** Phase 1 result: EasyPost has charged; nothing else has happened yet. Record this durably before phase 2. */
+export interface BoughtShipment {
   shipmentId: string;
   trackerId: string | null;
   trackingCode: string;
   labelUrl: string;
-  labelHash: string;
-  labelCid: string;
   carrier: string;
   service: string;
   rate: string;
   currency: string;
-  commitment: ShipmentCommitment;
+  providerMode: ProviderMode;
   mock: boolean;
 }
+
+/** Phase 2 result: label bytes hashed + content-addressed, commitment built (and signed when a signer is configured). */
+export interface FinalizedLabel {
+  labelHash: string;
+  labelCid: string;
+  commitment: ShipmentCommitment;
+}
+
+export type CreateLabelResult = BoughtShipment & FinalizedLabel;
 
 export interface TrackingLocation {
   city: string | null;
@@ -149,6 +165,8 @@ export interface TrackerWebhookEvent {
   carrier: string | null;
   statusDetail: string | null;
   occurredAt: string;
+  /** Provider-attested environment of the tracker ("test" | "production"); null when absent from the payload. */
+  providerMode: "test" | "production" | null;
   /** The carrier's own words for the latest scan (tracking_details[].message), when present. */
   carrierMessage: string | null;
   /** Where the latest scan happened (tracking_details[].tracking_location), when present — "accepted, ZIP 94103". */
@@ -176,8 +194,14 @@ export interface EasyPostClientConfig {
   fetchImpl?: typeof fetch;
   /** Refuse any rate above this (USD). Default 25. */
   maxRateUsd?: number;
-  /** Refuse any parcel heavier than this (oz). Default 70 (USPS First-Class Package ceiling is ~15.99 oz; leave headroom for Priority). */
+  /** Refuse any parcel heavier than this (oz). Default 70. */
   maxWeightOz?: number;
+  /** Refuse to buy from, or accept tracker webhooks for, anything whose provider-attested mode is not "production". Set in production boot. */
+  requireProductionMode?: boolean;
+  /** Per-request upstream timeout (ms). Default 15000. */
+  timeoutMs?: number;
+  /** Maximum label download size (bytes). Default 5 MiB. */
+  maxLabelBytes?: number;
   signer?: CommitmentSigner;
   /** Content-addressed store for label bytes; defaults to the gateway's shared CID blob store. Tests inject an in-memory one. */
   blobStore?: ICidBlobStorage;
@@ -186,7 +210,10 @@ export interface EasyPostClientConfig {
 
 const DEFAULT_MAX_RATE_USD = 25;
 const DEFAULT_MAX_WEIGHT_OZ = 70;
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_LABEL_BYTES = 5 * 1024 * 1024;
 const HEX64 = /^[0-9a-f]{64}$/;
+const ALLOWED_LABEL_TYPES = [/^image\//i, /^application\/pdf/i];
 
 export function sha256Hex(input: string | Buffer): string {
   return createHash("sha256").update(input).digest("hex");
@@ -203,7 +230,7 @@ export function computeCommitmentHash(body: ShipmentCommitmentBody): string {
   return sha256Hex(canonicalize(body));
 }
 
-/** Recomputes the hash from the commitment's own fields. False = tampered or malformed. */
+/** Recomputes the hash from the commitment's own fields. False = tampered or malformed. INTEGRITY ONLY — not an attestation. */
 export function verifyCommitmentHash(c: ShipmentCommitment): boolean {
   const { hash, signature: _sig, ...body } = c;
   if (!HEX64.test(hash)) return false;
@@ -255,6 +282,7 @@ interface EasyPostRate {
 
 interface EasyPostShipment {
   id?: string;
+  mode?: string;
   tracking_code?: string;
   rates?: EasyPostRate[];
   selected_rate?: EasyPostRate;
@@ -264,6 +292,10 @@ interface EasyPostShipment {
 
 function nonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
+}
+
+function parseProviderMode(v: unknown): "test" | "production" | null {
+  return v === "test" || v === "production" ? v : null;
 }
 
 function parseRateUsd(r: EasyPostRate): number | null {
@@ -279,10 +311,13 @@ export class EasyPostClient {
   readonly isMock: boolean;
   readonly maxRateUsd: number;
   readonly maxWeightOz: number;
+  readonly requireProductionMode: boolean;
   private readonly apiKey: string;
   private readonly webhookSecret: string | undefined;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly maxLabelBytes: number;
   private readonly signer: CommitmentSigner | undefined;
   private readonly blobStore: ICidBlobStorage | undefined;
   private readonly now: () => Date;
@@ -295,16 +330,15 @@ export class EasyPostClient {
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.maxRateUsd = config.maxRateUsd ?? DEFAULT_MAX_RATE_USD;
     this.maxWeightOz = config.maxWeightOz ?? DEFAULT_MAX_WEIGHT_OZ;
+    this.requireProductionMode = config.requireProductionMode ?? false;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxLabelBytes = config.maxLabelBytes ?? DEFAULT_MAX_LABEL_BYTES;
     this.signer = config.signer;
     this.blobStore = config.blobStore;
     this.now = config.now ?? (() => new Date());
-  }
-
-  /** Store label bytes content-addressed; returns the CID the print leg fetches by. */
-  private async storeLabel(bytes: Buffer, mediaType: string): Promise<string> {
-    const store = this.blobStore ?? (await getCidBlobStorage());
-    const meta = await store.put(new Uint8Array(bytes), { mediaType });
-    return meta.cid;
+    if (this.requireProductionMode && this.isMock) {
+      throw new EasyPostError("mock_forbidden_in_production", null, "requireProductionMode set without an API key");
+    }
   }
 
   get hasWebhookSecret(): boolean {
@@ -316,38 +350,16 @@ export class EasyPostClient {
     return "Basic " + Buffer.from(`${this.apiKey}:`).toString("base64");
   }
 
-  private async buildCommitment(
-    params: CreateLabelParams,
-    fields: {
-      trackingCode: string;
-      shipmentId: string;
-      trackerId: string | null;
-      carrier: string;
-      service: string;
-      labelHash: string;
-      labelCid: string;
-      mock: boolean;
-    },
-  ): Promise<ShipmentCommitment> {
-    const body: ShipmentCommitmentBody = {
-      v: 1,
-      jobId: params.jobId,
-      kernelId: params.kernelId,
-      documentHash: params.documentHash,
-      destinationHash: sha256Hex(canonicalAddressForHash(params.toAddress)),
-      trackingCode: fields.trackingCode,
-      shipmentId: fields.shipmentId,
-      trackerId: fields.trackerId,
-      carrier: fields.carrier,
-      service: fields.service,
-      labelHash: fields.labelHash,
-      labelCid: fields.labelCid,
-      mock: fields.mock,
-      committedAt: this.now().toISOString(),
-    };
-    const hash = computeCommitmentHash(body);
-    const signature = this.signer ? await this.signer(body, hash) : null;
-    return { ...body, hash, signature };
+  /** Upstream call with a timeout and no redirect-following (a provider URL must not bounce us anywhere). */
+  private upstream(url: string, init: RequestInit): Promise<Response> {
+    return this.fetchImpl(url, { ...init, redirect: "error", signal: AbortSignal.timeout(this.timeoutMs) });
+  }
+
+  /** Store label bytes content-addressed; returns the CID the print leg fetches by. */
+  private async storeLabel(bytes: Buffer, mediaType: string): Promise<string> {
+    const store = this.blobStore ?? (await getCidBlobStorage());
+    const meta = await store.put(new Uint8Array(bytes), { mediaType });
+    return meta.cid;
   }
 
   private checkParcel(p: EasyPostParcel): void {
@@ -355,28 +367,27 @@ export class EasyPostClient {
       throw new EasyPostError("invalid_parcel", null, "weightOz must be > 0");
     }
     if (p.weightOz > this.maxWeightOz) {
-      throw new EasyPostError(
-        "weight_exceeds_ceiling",
-        null,
-        `weightOz ${p.weightOz} > ceiling ${this.maxWeightOz}`,
-      );
+      throw new EasyPostError("weight_exceeds_ceiling", null, `weightOz ${p.weightOz} > ceiling ${this.maxWeightOz}`);
     }
   }
 
-  /**
-   * Buys the cheapest available USD rate for a shipment. Real mode makes
-   * three EasyPost calls (create shipment -> buy -> download label bytes);
-   * mock mode fabricates an equivalent, clearly-marked-mock result with zero
-   * network calls. Ceilings are enforced BEFORE money moves.
-   */
-  async buyCheapestLabel(params: CreateLabelParams): Promise<CreateLabelResult> {
+  private checkParams(params: CreateLabelParams): void {
     if (!isValidDocumentHash(params.documentHash)) {
       throw new EasyPostError("invalid_document_hash", null, "documentHash must be 64 lowercase hex");
     }
     this.checkParcel(params.parcel);
-    if (this.isMock) return this.buyMockLabel(params);
+  }
 
-    const shipmentRes = await this.fetchImpl(`${this.baseUrl}/shipments`, {
+  /**
+   * PHASE 1 — create the shipment, pick the cheapest usable USD rate, enforce
+   * ceilings and provider mode, then /buy. Returns the moment EasyPost has
+   * charged. The caller MUST durably record the result before phase 2.
+   */
+  async createAndBuy(params: CreateLabelParams): Promise<BoughtShipment> {
+    this.checkParams(params);
+    if (this.isMock) return this.mockBought();
+
+    const shipmentRes = await this.upstream(`${this.baseUrl}/shipments`, {
       method: "POST",
       headers: { Authorization: this.authHeader(), "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -394,6 +405,15 @@ export class EasyPostClient {
     if (!nonEmptyString(shipment.id)) {
       throw new EasyPostError("easypost_invalid_response", null, "shipment.id missing");
     }
+    const providerMode = parseProviderMode(shipment.mode);
+    if (!providerMode) {
+      throw new EasyPostError("easypost_invalid_response", null, `shipment.mode missing/unknown: ${String(shipment.mode)}`);
+    }
+    // Decide BEFORE /buy: a test-mode shipment must never be charged-and-recorded in production.
+    if (this.requireProductionMode && providerMode !== "production") {
+      throw new EasyPostError("provider_mode_not_production", null, `shipment.mode=${providerMode} under requireProductionMode`);
+    }
+
     const priced = (shipment.rates ?? [])
       .map((r) => ({ r, usd: parseRateUsd(r) }))
       .filter((x): x is { r: EasyPostRate; usd: number } => x.usd != null && nonEmptyString(x.r.id));
@@ -403,14 +423,10 @@ export class EasyPostClient {
     priced.sort((a, b) => a.usd - b.usd);
     const cheapest = priced[0]!;
     if (cheapest.usd > this.maxRateUsd) {
-      throw new EasyPostError(
-        "rate_exceeds_ceiling",
-        null,
-        `cheapest rate ${cheapest.usd} USD > ceiling ${this.maxRateUsd}`,
-      );
+      throw new EasyPostError("rate_exceeds_ceiling", null, `cheapest rate ${cheapest.usd} USD > ceiling ${this.maxRateUsd}`);
     }
 
-    const buyRes = await this.fetchImpl(`${this.baseUrl}/shipments/${shipment.id}/buy`, {
+    const buyRes = await this.upstream(`${this.baseUrl}/shipments/${shipment.id}/buy`, {
       method: "POST",
       headers: { Authorization: this.authHeader(), "Content-Type": "application/json" },
       body: JSON.stringify({ rate: { id: cheapest.r.id } }),
@@ -423,87 +439,109 @@ export class EasyPostClient {
     const trackingCode = bought.tracking_code;
     const labelUrl = bought.postage_label?.label_url;
     if (!nonEmptyString(trackingCode) || !nonEmptyString(labelUrl)) {
-      throw new EasyPostError(
-        "easypost_invalid_response",
-        null,
-        `bought shipment missing tracking_code/label_url (id=${shipmentId})`,
-      );
+      // EasyPost has charged but returned an unusable object. Surface it as
+      // its own code so the caller can record a purchase that needs manual
+      // reconciliation rather than silently re-buying.
+      throw new EasyPostError("easypost_bought_but_unusable", null, `bought shipment ${shipmentId} missing tracking_code/label_url`);
     }
     if (!/^https:\/\//.test(labelUrl)) {
-      throw new EasyPostError("easypost_invalid_response", null, "label_url is not https");
+      throw new EasyPostError("easypost_bought_but_unusable", null, `label_url is not https (shipment ${shipmentId})`);
     }
-
-    // Hash the label BYTES, not the URL string — the URL is a mutable pointer.
-    const labelRes = await this.fetchImpl(labelUrl, { method: "GET" });
-    if (!labelRes.ok) {
-      throw new EasyPostError("easypost_label_download_failed", labelRes.status, await safeText(labelRes));
-    }
-    const labelBytes = Buffer.from(await labelRes.arrayBuffer());
-    if (labelBytes.length === 0) {
-      throw new EasyPostError("easypost_invalid_response", null, "label download was empty");
-    }
-    const labelHash = sha256Hex(labelBytes);
-    const labelCid = await this.storeLabel(labelBytes, labelRes.headers.get("content-type") ?? "image/png");
-
-    const carrier = bought.selected_rate?.carrier ?? cheapest.r.carrier ?? "unknown";
-    const service = bought.selected_rate?.service ?? cheapest.r.service ?? "unknown";
-    const trackerId = nonEmptyString(bought.tracker?.id) ? bought.tracker!.id! : null;
+    const boughtMode = parseProviderMode(bought.mode) ?? providerMode;
 
     return {
       shipmentId,
-      trackerId,
+      trackerId: nonEmptyString(bought.tracker?.id) ? bought.tracker!.id! : null,
       trackingCode,
       labelUrl,
-      labelHash,
-      labelCid,
-      carrier,
-      service,
+      carrier: bought.selected_rate?.carrier ?? cheapest.r.carrier ?? "unknown",
+      service: bought.selected_rate?.service ?? cheapest.r.service ?? "unknown",
       rate: bought.selected_rate?.rate ?? cheapest.r.rate ?? String(cheapest.usd),
       currency: bought.selected_rate?.currency ?? cheapest.r.currency ?? "USD",
-      commitment: await this.buildCommitment(params, {
-        trackingCode,
-        shipmentId,
-        trackerId,
-        carrier,
-        service,
-        labelHash,
-        labelCid,
-        mock: false,
-      }),
+      providerMode: boughtMode,
       mock: false,
     };
   }
 
-  private async buyMockLabel(params: CreateLabelParams): Promise<CreateLabelResult> {
+  /**
+   * PHASE 2 — download the label BYTES (size-capped, type-checked, no
+   * redirects), hash + content-address them, build and sign the commitment.
+   * Idempotent: safe to re-run for an already-recorded purchase.
+   */
+  async finalizeLabel(params: CreateLabelParams, bought: BoughtShipment): Promise<FinalizedLabel> {
+    this.checkParams(params);
+    let labelBytes: Buffer;
+    let mediaType: string;
+    if (bought.mock) {
+      labelBytes = Buffer.from(`MOCK-LABEL:${bought.shipmentId}:${bought.trackingCode}`);
+      mediaType = "text/plain";
+    } else {
+      const labelRes = await this.upstream(bought.labelUrl, { method: "GET" });
+      if (!labelRes.ok) {
+        throw new EasyPostError("easypost_label_download_failed", labelRes.status, await safeText(labelRes));
+      }
+      mediaType = (labelRes.headers.get("content-type") ?? "").split(";")[0]!.trim();
+      if (!ALLOWED_LABEL_TYPES.some((re) => re.test(mediaType))) {
+        throw new EasyPostError("easypost_label_unexpected_type", null, `label content-type ${mediaType || "<none>"}`);
+      }
+      const declared = Number(labelRes.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > this.maxLabelBytes) {
+        throw new EasyPostError("easypost_label_too_large", null, `declared ${declared} > cap ${this.maxLabelBytes}`);
+      }
+      labelBytes = Buffer.from(await labelRes.arrayBuffer());
+      if (labelBytes.length === 0) {
+        throw new EasyPostError("easypost_invalid_response", null, "label download was empty");
+      }
+      if (labelBytes.length > this.maxLabelBytes) {
+        throw new EasyPostError("easypost_label_too_large", null, `received ${labelBytes.length} > cap ${this.maxLabelBytes}`);
+      }
+    }
+    const labelHash = sha256Hex(labelBytes);
+    const labelCid = await this.storeLabel(labelBytes, mediaType);
+
+    const body: ShipmentCommitmentBody = {
+      v: 1,
+      jobId: params.jobId,
+      kernelId: params.kernelId,
+      documentHash: params.documentHash,
+      destinationHash: sha256Hex(canonicalAddressForHash(params.toAddress)),
+      trackingCode: bought.trackingCode,
+      shipmentId: bought.shipmentId,
+      trackerId: bought.trackerId,
+      carrier: bought.carrier,
+      service: bought.service,
+      labelHash,
+      labelCid,
+      providerMode: bought.providerMode,
+      mock: bought.mock,
+      committedAt: this.now().toISOString(),
+    };
+    const hash = computeCommitmentHash(body);
+    const signature = this.signer ? await this.signer(body, hash) : null;
+    return { labelHash, labelCid, commitment: { ...body, hash, signature } };
+  }
+
+  /** Convenience: both phases back to back. Route code uses the phases separately so the purchase is recorded between them. */
+  async buyCheapestLabel(params: CreateLabelParams): Promise<CreateLabelResult> {
+    const bought = await this.createAndBuy(params);
+    const finalized = await this.finalizeLabel(params, bought);
+    return { ...bought, ...finalized };
+  }
+
+  private mockBought(): BoughtShipment {
     const shipmentId = `shp_mock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
     const trackerId = `trk_mock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
     const trackingCode = `EZMOCK${hashToPositiveInt(shipmentId).toString().padStart(10, "0").slice(0, 10)}`;
-    const labelUrl = `https://easypost-mock.invalid/labels/${shipmentId}.png`;
-    const mockLabelBytes = Buffer.from(`MOCK-LABEL:${shipmentId}:${trackingCode}`);
-    const labelHash = sha256Hex(mockLabelBytes);
-    const labelCid = await this.storeLabel(mockLabelBytes, "text/plain");
-
     return {
       shipmentId,
       trackerId,
       trackingCode,
-      labelUrl,
-      labelHash,
-      labelCid,
+      labelUrl: `https://easypost-mock.invalid/labels/${shipmentId}.png`,
       carrier: "USPS",
       service: "First",
       rate: "4.50",
       currency: "USD",
-      commitment: await this.buildCommitment(params, {
-        trackingCode,
-        shipmentId,
-        trackerId,
-        carrier: "USPS",
-        service: "First",
-        labelHash,
-        labelCid,
-        mock: true,
-      }),
+      providerMode: "mock",
       mock: true,
     };
   }
@@ -519,8 +557,8 @@ export class EasyPostClient {
    * with a timing-safe equality check. No timestamp/path binding in this
    * (current, documented) scheme, so a captured genuine delivery is
    * replayable at the transport layer; replay is neutralised at the
-   * application layer by the persisted per-event-id ledger in
-   * carrier-shipment-store.ts.
+   * application layer by the persisted, transactionally-claimed
+   * per-event-id ledger in carrier-shipment-store.ts.
    *
    * NOTE: EasyPost's Zendesk support article additionally references an
    * X-Hmac-Signature-V2 header with timestamp-based replay protection, but
@@ -528,8 +566,7 @@ export class EasyPostClient {
    * byte-construction could not be independently verified — NOT implemented
    * here rather than guessed. Follow-up once that page is reachable.
    *
-   * MUST be called with the raw request BYTES exactly as received — decoding
-   * and re-encoding can byte-differ from what EasyPost signed.
+   * MUST be called with the raw request BYTES exactly as received.
    */
   verifyWebhookSignature(rawBody: Buffer | string, headerValue: string | undefined | null): boolean {
     if (!this.webhookSecret) {
@@ -555,6 +592,7 @@ export class EasyPostClient {
       description?: unknown;
       result?: {
         id?: unknown;
+        mode?: unknown;
         shipment_id?: unknown;
         tracking_code?: unknown;
         status?: unknown;
@@ -571,9 +609,10 @@ export class EasyPostClient {
     if (!nonEmptyString(evt.id)) return null;
     const r = evt.result;
     if (!r || !nonEmptyString(r.tracking_code) || !nonEmptyString(r.status)) return null;
-    const occurredAt = nonEmptyString(r.updated_at) && !Number.isNaN(Date.parse(r.updated_at))
-      ? new Date(Date.parse(r.updated_at)).toISOString()
-      : null;
+    const occurredAt =
+      nonEmptyString(r.updated_at) && !Number.isNaN(Date.parse(r.updated_at))
+        ? new Date(Date.parse(r.updated_at)).toISOString()
+        : null;
     if (!occurredAt) return null; // carrier timestamp is what orders events; refuse without it
     const latest = latestTrackingDetail(r.tracking_details);
     return {
@@ -585,6 +624,7 @@ export class EasyPostClient {
       carrier: nonEmptyString(r.carrier) ? r.carrier : null,
       statusDetail: nonEmptyString(r.status_detail) ? r.status_detail : null,
       occurredAt,
+      providerMode: parseProviderMode(r.mode),
       carrierMessage: latest && nonEmptyString(latest.message) ? latest.message : null,
       trackingLocation: latest?.tracking_location ? toTrackingLocation(latest.tracking_location) : null,
     };
@@ -644,6 +684,7 @@ export function getEasyPostClient(): EasyPostClient {
       webhookSecret: process.env.EASYPOST_WEBHOOK_SECRET,
       maxRateUsd: Number.isFinite(maxRate) && maxRate > 0 ? maxRate : undefined,
       maxWeightOz: Number.isFinite(maxWeight) && maxWeight > 0 ? maxWeight : undefined,
+      requireProductionMode: process.env.NODE_ENV === "production",
       signer: defaultSigner,
     });
   }
