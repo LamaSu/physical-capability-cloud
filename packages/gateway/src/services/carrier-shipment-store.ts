@@ -192,6 +192,8 @@ export class CarrierStoreError extends Error {
       | "empty_tracking_code"
       | "invalid_transition"
       | "cas_conflict"
+      | "shipment_identity_mismatch"
+      | "commitment_identity_mismatch"
       | "not_found",
   ) {
     super(code);
@@ -274,8 +276,14 @@ export class CarrierShipmentStore {
     const prev = this.locks.get(jobKey) ?? Promise.resolve();
     const run = prev.then(fn, fn); // run regardless of the previous holder's outcome
     // Park the chain tail; swallow rejections on the CHAIN only (the caller
-    // still receives them from `run`).
-    this.locks.set(jobKey, run.catch(() => {}));
+    // still receives them from `run`). Tail-aware cleanup (R5-5): when the
+    // tail settles and is STILL the current tail, drop the key — otherwise
+    // every job/tracking-code ever seen leaves a promise resident forever.
+    const tail = run.catch(() => {});
+    this.locks.set(jobKey, tail);
+    void tail.finally(() => {
+      if (this.locks.get(jobKey) === tail) this.locks.delete(jobKey);
+    });
     return run;
   }
 
@@ -293,8 +301,22 @@ export class CarrierShipmentStore {
     if (typeof r.version !== "number" || r.version !== row.version) fail("version disagrees with SQL column");
     if ((r.trackingCode ?? null) !== (row.tracking_code ?? null)) fail("tracking_code disagrees with SQL column");
     if (!parseableIso(r.createdAt) || !parseableIso(r.updatedAt)) fail("unparseable timestamps");
+    if (typeof r.kernelId !== "string" || !r.kernelId) fail("missing kernelId");
+    if (typeof r.ownerId !== "string" || !r.ownerId) fail("missing ownerId");
+    if (typeof r.requestFingerprint !== "string" || !r.requestFingerprint) fail("missing requestFingerprint");
+    if (r.providerMode != null && r.providerMode !== "production" && r.providerMode !== "test" && r.providerMode !== "mock") {
+      fail(`unknown providerMode ${String(r.providerMode)}`);
+    }
+    if (typeof r.mock !== "boolean") fail("mock flag not boolean");
     if (REQUIRES_TRACKING.has(r.status)) {
       if (!r.trackingCode || !r.shipmentId) fail("purchased status without tracking identity");
+      if (!r.carrier || !r.service) fail("purchased status without carrier/service");
+    }
+    for (const ev of Array.isArray(r.events) ? r.events : []) {
+      const e = ev as { id?: unknown; type?: unknown; timestamp?: unknown; hash?: unknown };
+      if (typeof e?.id !== "string" || typeof e?.type !== "string" || typeof e?.hash !== "string" || !parseableIso(e?.timestamp)) {
+        fail("malformed evidence event in record");
+      }
     }
     if (r.status === "buy_in_flight" && !r.createdShipment?.shipmentId) {
       fail("buy_in_flight without a created shipment (recovery would be impossible)");
@@ -303,8 +325,13 @@ export class CarrierShipmentStore {
       fail("purchased_pending without labelUrl/providerMode (finalize would be impossible)");
     }
     if (TRACKABLE.has(r.status)) {
-      if (!r.commitment || typeof r.commitment.hash !== "string") fail("trackable status without a commitment");
-      if (!parseableIso(r.commitment.committedAt)) fail("commitment.committedAt unparseable");
+      const c = r.commitment;
+      if (!c || typeof c.hash !== "string") fail("trackable status without a commitment");
+      if (!parseableIso(c!.committedAt)) fail("commitment.committedAt unparseable");
+      if (c!.jobId !== r.jobId || c!.kernelId !== r.kernelId || c!.trackingCode !== r.trackingCode || c!.shipmentId !== r.shipmentId) {
+        fail("commitment identity disagrees with the record");
+      }
+      if (c!.labelHash !== r.labelHash || c!.labelCid !== r.labelCid) fail("commitment label binding disagrees with the record");
     }
     if (r.lastCarrierEventAt != null && !parseableIso(r.lastCarrierEventAt)) fail("lastCarrierEventAt unparseable");
     if (!Array.isArray(r.events)) fail("events not an array");
@@ -359,16 +386,36 @@ export class CarrierShipmentStore {
       if (rec.trackingCode) this.byTrackingCode.set(rec.trackingCode, rec.jobId);
     }
     for (const e of evts) this.seenEventIds.add(e.event_id);
+    // The unmatched ledger is bounded AT HYDRATION too (sol round-5 on R4-6):
+    // TTL-expired rows are dropped (and deleted) as they load, and the row
+    // cap keeps only the NEWEST entries — an oversized persisted ledger must
+    // not consume unbounded memory during boot.
+    const ttlCutoff = this.now().getTime() - this.unmatchedTtlMs;
+    const loaded: UnmatchedLedgerEntry[] = [];
     for (const u of unmatched) {
       try {
-        const entry: UnmatchedLedgerEntry = { eventId: u.event_id, trackingCode: u.tracking_code, at: u.at, data: JSON.parse(u.data) };
-        this.unmatchedIds.add(entry.eventId);
-        const list = this.unmatchedByCode.get(entry.trackingCode) ?? [];
-        list.push(entry);
-        this.unmatchedByCode.set(entry.trackingCode, list);
+        const t = Date.parse(u.at);
+        if (Number.isNaN(t) || t < ttlCutoff) {
+          this.unmatchedEvictedCount++;
+          this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE event_id = ?").run(u.event_id);
+          continue;
+        }
+        loaded.push({ eventId: u.event_id, trackingCode: u.tracking_code, at: u.at, data: JSON.parse(u.data) });
       } catch (err) {
         if (this.strict) throw new Error(`carrier store: corrupt unmatched event ${u.event_id}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+    loaded.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    while (loaded.length > this.unmatchedMaxRows) {
+      const evicted = loaded.shift()!;
+      this.unmatchedEvictedCount++;
+      this.sqlite.prepare("DELETE FROM carrier_unmatched_events WHERE event_id = ?").run(evicted.eventId);
+    }
+    for (const entry of loaded) {
+      this.unmatchedIds.add(entry.eventId);
+      const list = this.unmatchedByCode.get(entry.trackingCode) ?? [];
+      list.push(entry);
+      this.unmatchedByCode.set(entry.trackingCode, list);
     }
   }
 
@@ -520,6 +567,11 @@ export class CarrierShipmentStore {
       const rec = this.byJobId.get(jobId);
       if (!rec) throw new CarrierStoreError("not_found");
       if (rec.status !== "buy_in_flight") throw new CarrierStoreError("invalid_transition");
+      // R5-3: the purchase being recorded must be for the shipment this row
+      // dispatched — the store re-checks even though the client already did.
+      if (rec.createdShipment && bought.shipmentId !== rec.createdShipment.shipmentId) {
+        throw new CarrierStoreError("shipment_identity_mismatch");
+      }
       const code = bought.trackingCode?.trim();
       if (!code) throw new CarrierStoreError("empty_tracking_code");
       // The tracking-code mapping is registered under the CODE lock too, so
@@ -571,6 +623,23 @@ export class CarrierShipmentStore {
       if (!rec) throw new CarrierStoreError("not_found");
       if (rec.status !== "purchased_pending") throw new CarrierStoreError("invalid_transition");
       if (rec.commitment) throw new CarrierStoreError("invalid_transition"); // a commitment is never replaced (R3-2)
+      // R5-4: label_bought must never be entered with a commitment the
+      // evidence gate would later reject — the commitment's identity must
+      // equal THIS purchase, byte for byte, before the transition happens.
+      const c = finalized.commitment;
+      const identityOk =
+        c.jobId === rec.jobId &&
+        c.kernelId === rec.kernelId &&
+        c.trackingCode === rec.trackingCode &&
+        c.shipmentId === rec.shipmentId &&
+        c.trackerId === rec.trackerId &&
+        c.carrier === rec.carrier &&
+        c.service === rec.service &&
+        c.providerMode === rec.providerMode &&
+        c.mock === rec.mock &&
+        c.labelHash === finalized.labelHash &&
+        c.labelCid === finalized.labelCid;
+      if (!identityOk) throw new CarrierStoreError("commitment_identity_mismatch");
       return this.commitMutation(rec, {
         status: "label_bought",
         labelHash: finalized.labelHash,
@@ -671,7 +740,16 @@ export class CarrierShipmentStore {
    * is known — applied, deduped, or permanently rejected. Exceptions keep it).
    */
   peekUnmatched(trackingCode: string): UnmatchedLedgerEntry[] {
-    return [...(this.unmatchedByCode.get(trackingCode) ?? [])].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    const list = [...(this.unmatchedByCode.get(trackingCode) ?? [])].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    // Deep copies: a caller mutating a peeked entry must never corrupt the
+    // ledger's own copy (sol round-5 note on R4-1).
+    return list.map((e) => {
+      try {
+        return structuredClone(e);
+      } catch {
+        return { ...e, data: JSON.parse(JSON.stringify(e.data)) };
+      }
+    });
   }
 
   /** Remove ONE ledger entry after its replay reached a final outcome. */
@@ -713,18 +791,26 @@ export class CarrierShipmentStore {
     const pre = this.getByTrackingCode(webhookEvent.trackingCode);
     if (!pre) {
       // Unknown code: decide + (optionally) ledger under the CODE lock, the
-      // same lock markPurchased registers the mapping under (R4-2).
-      return this.withLock(`code:${webhookEvent.trackingCode}`, async () => {
-        const again = this.getByTrackingCode(webhookEvent.trackingCode);
-        if (!again) {
-          if (opts?.ledgerUnmatched) {
-            this.ledgeUnmatched(webhookEvent, rawForLedger ?? webhookEvent);
-            return { ok: false, reason: "unknown_tracking_code", ledgered: true };
+      // same lock markPurchased registers the mapping under (R4-2). The code
+      // lock is RELEASED before any job lock is taken — the universal lock
+      // order stays job -> code, never nested the other way (sol round-5
+      // lock-order note).
+      const decision = await this.withLock<{ done: RecordCarrierEventResult } | { jobId: string }>(
+        `code:${webhookEvent.trackingCode}`,
+        async () => {
+          const again = this.getByTrackingCode(webhookEvent.trackingCode);
+          if (!again) {
+            if (opts?.ledgerUnmatched) {
+              this.ledgeUnmatched(webhookEvent, rawForLedger ?? webhookEvent);
+              return { done: { ok: false, reason: "unknown_tracking_code", ledgered: true } };
+            }
+            return { done: { ok: false, reason: "unknown_tracking_code" } };
           }
-          return { ok: false, reason: "unknown_tracking_code" };
-        }
-        return this.applyToJob(again.jobId, webhookEvent, buildEvidenceEvent, rawForLedger, opts);
-      });
+          return { jobId: again.jobId };
+        },
+      );
+      if ("done" in decision) return decision.done;
+      return this.applyToJob(decision.jobId, webhookEvent, buildEvidenceEvent, rawForLedger, opts);
     }
     return this.applyToJob(pre.jobId, webhookEvent, buildEvidenceEvent, rawForLedger, opts);
   }

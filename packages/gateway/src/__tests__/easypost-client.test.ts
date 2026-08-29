@@ -219,6 +219,21 @@ describe("EasyPostClient — real mode, three steps (injected fetchImpl, no netw
     expect(POST_CHARGE_ERROR_CODES.has(err.code)).toBe(true);
   });
 
+  it("refuses a /buy response for a DIFFERENT shipment id — identity can never be switched post-charge (R5-3)", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/shipments") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "shp_real_123", mode: "production", rates: [{ id: "r", carrier: "USPS", service: "First", rate: "1.00", currency: "USD" }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ id: "shp_SWAPPED", mode: "production", tracking_code: "X", postage_label: { label_url: "https://x.example/l.png" } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl, blobStore: memBlobStore() });
+    const created = await client.createShipment(base);
+    const err = await client.buyRate(created).catch((e) => e);
+    expect(err.code).toBe("easypost_bought_shipment_mismatch");
+    expect(POST_CHARGE_ERROR_CODES.has(err.code)).toBe(true);
+  });
+
   it("flags a bought object whose mode disagrees with the created mode (R3-10) — a post-charge reconciliation code", async () => {
     const client = new EasyPostClient({ apiKey: "EZAKtest", fetchImpl: happyFetch([], { mode: "production", buyMode: "test" }), blobStore: memBlobStore() });
     const created = await client.createShipment(base);

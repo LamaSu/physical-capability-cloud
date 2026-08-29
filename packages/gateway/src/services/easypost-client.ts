@@ -210,6 +210,7 @@ export const POST_CHARGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "easypost_buy_ambiguous",
   "easypost_bought_but_unusable",
   "easypost_bought_mode_mismatch",
+  "easypost_bought_shipment_mismatch",
   "easypost_recovered_shipment_mismatch",
 ]);
 
@@ -510,6 +511,15 @@ export class EasyPostClient {
       throw new EasyPostError("easypost_buy_failed", buyRes.status, await safeText(buyRes));
     }
     const bought = (await buyRes.json()) as EasyPostShipment;
+    // R5-3: the charged object must BE the shipment we created — a
+    // substituted/malformed response must never replace the durable identity.
+    if (!nonEmptyString(bought.id) || bought.id !== created.shipmentId) {
+      throw new EasyPostError(
+        "easypost_bought_shipment_mismatch",
+        null,
+        `bought ${created.shipmentId}, response is ${String(bought.id)}`,
+      );
+    }
     const parsed = boughtFromShipment(bought, created.providerMode);
     if (!parsed || !parsed.labelUrl || !/^https:\/\//.test(parsed.labelUrl)) {
       throw new EasyPostError(

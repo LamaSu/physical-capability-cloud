@@ -451,6 +451,55 @@ describe("POST /api/carrier/shipments — guarded purchase lifecycle", () => {
     }
   });
 
+  it("an existing record bought by a DIFFERENT principal is never recovered/read via POST after re-ownership (R5-1)", async () => {
+    const app = await buildApp();
+    try {
+      await buyViaRoute(app);
+      // Simulate an ownership hand-over having happened: the stored record's
+      // owner is no longer the kernel's current operator.
+      const rec = getCarrierShipmentStore().getByJobId(JOB)!;
+      (rec as { ownerId: string }).ownerId = STRANGER;
+      const res = await app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("carrier_record_ownership_mismatch");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("authorization is re-judged INSIDE the purchase lock — a job completed while queued must not spend (R5-2)", async () => {
+    class SlowBuy extends EasyPostClient {
+      override async buyRate(c: CreatedShipment): Promise<BoughtShipment> {
+        await new Promise((r) => setTimeout(r, 60));
+        return super.buyRate(c);
+      }
+    }
+    _setEasyPostClientForTests(new SlowBuy({ webhookSecret: WEBHOOK_SECRET, blobStore: memBlobStore() }));
+    const app = await buildApp();
+    try {
+      const first = app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      await new Promise((r) => setTimeout(r, 10)); // first is inside buyRate, holding the purchase lock
+      const secondP = app.inject({ method: "POST", url: "/api/carrier/shipments", payload: validBody, headers: asOwner });
+      await new Promise((r) => setTimeout(r, 10));
+      await getJobFacade().updateStatus(JOB, "cancelled"); // job dies while second waits in the queue
+      const [a, b] = await Promise.all([first, secondP]);
+      try {
+        // The queued request must re-check and refuse — or, if it slipped in
+        // before observing the winner's record, observe it; it must NEVER
+        // start a NEW purchase against the now-cancelled job.
+        const codes = [a.statusCode, b.statusCode].sort();
+        expect(codes[0]).toBe(201); // the first request, authorized while active
+        expect([200, 409]).toContain(codes[1]);
+        if (codes[1] === 409) expect(["job_not_active", "job_in_flight"]).toContain(b.json().error ?? a.json().error);
+        expect(getCarrierShipmentStore().size()).toBe(1);
+      } finally {
+        await getJobFacade().updateStatus(JOB, "queued"); // restore for other tests
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it("an EXPIRED runtime reservation is reclaimed by the next request — no restart needed (R3-9)", async () => {
     _resetCarrierShipmentStoreForTests();
     initCarrierShipmentStore({ reservationTtlMs: 1 }); // everything expires ~immediately

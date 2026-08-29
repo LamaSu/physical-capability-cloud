@@ -98,7 +98,13 @@ const purchaseLocks = new Map<string, Promise<unknown>>();
 function withPurchaseLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
   const prev = purchaseLocks.get(jobId) ?? Promise.resolve();
   const run = prev.then(fn, fn);
-  purchaseLocks.set(jobId, run.catch(() => {}));
+  // Tail-aware cleanup (R5-5): drop the key once the settling promise is
+  // still the current chain tail, so the map does not grow per job forever.
+  const tail = run.catch(() => {});
+  purchaseLocks.set(jobId, tail);
+  void tail.finally(() => {
+    if (purchaseLocks.get(jobId) === tail) purchaseLocks.delete(jobId);
+  });
   return run;
 }
 /** Job states in which buying postage makes sense. Completed/failed/cancelled jobs must not spend. */
@@ -319,7 +325,18 @@ export async function carrierRoutes(app: FastifyInstance) {
       let replayed = 0;
       for (const entry of store.peekUnmatched(rec.trackingCode!)) {
         const scan = entry.data as LedgeredScan;
-        if (!scan?.parsed) {
+        // Structural validation, not just truthiness (sol round-5 on R4-1): a
+        // malformed entry is KEPT for inspection, never processed-and-deleted.
+        const p = scan?.parsed;
+        const wellFormed =
+          p &&
+          typeof p.easypostEventId === "string" &&
+          typeof p.trackingCode === "string" &&
+          typeof p.status === "string" &&
+          typeof scan.rawBodyB64 === "string" &&
+          typeof scan.signatureHeader === "string" &&
+          !Number.isNaN(Date.parse(p.occurredAt));
+        if (!wellFormed) {
           req.log.error({ eventId: entry.eventId }, "carrier: ledgered scan entry malformed — kept for inspection");
           continue;
         }
@@ -380,7 +397,21 @@ export async function carrierRoutes(app: FastifyInstance) {
       parcel: b.parcel as EasyPostParcel,
     };
 
-    // Resolve against the AUTHORITATIVE job + kernel; never trust the body's claims.
+    const requestFingerprint = sha256Hex(
+      // jobId + kernelId included (R5-4): a fingerprint that omits routing
+      // identity could let a retry finalize under different bindings.
+      canonicalize({ jobId, kernelId, toAddress: b.toAddress, fromAddress: b.fromAddress, parcel: b.parcel, documentHash: b.documentHash }),
+    );
+
+    const store = getCarrierShipmentStore();
+    const client = getEasyPostClient();
+
+    return withPurchaseLock(jobId, async () => {
+    // Authorization runs INSIDE the purchase lock (R5-2): a request that
+    // queued behind another purchase must be judged against the job/kernel
+    // state as it is NOW — not as it was before it started waiting. A job
+    // cancelled, or a kernel re-owned, while this request was queued must
+    // refuse here, immediately before any reservation or charge.
     const jobRes = await getJobFacade().getById(jobId);
     if (!jobRes.success) {
       return reply
@@ -407,16 +438,18 @@ export async function carrierRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: "not_kernel_operator" });
     }
 
-    const requestFingerprint = sha256Hex(
-      canonicalize({ toAddress: b.toAddress, fromAddress: b.fromAddress, parcel: b.parcel, documentHash: b.documentHash }),
-    );
-
-    const store = getCarrierShipmentStore();
-    const client = getEasyPostClient();
-
-    return withPurchaseLock(jobId, async () => {
     const existing = store.getByJobId(jobId);
     if (existing) {
+      // R5-1: an existing carrier record belongs to the principal who bought
+      // it. After a kernel ownership or job re-assignment change, the NEW
+      // operator must not recover/finalize/read the PREVIOUS operator's
+      // purchase — that hand-over is a human decision, not an idempotent
+      // retry. (The caller here already passed current-kernel authz; this
+      // guards the stored record's own provenance.)
+      if (existing.ownerId.toLowerCase() !== caller.toLowerCase() || existing.kernelId !== kernelId) {
+        req.log.warn({ jobId, recordOwner: existing.ownerId, caller }, "carrier: existing record owned by a different principal/kernel");
+        return reply.code(409).send({ error: "carrier_record_ownership_mismatch" });
+      }
       // A `reserved` row is adjudicated by store.reserve() below — BEFORE the
       // fingerprint check: a reservation is not a purchase, so an EXPIRED one
       // must be reclaimable even by a request with different parameters
@@ -436,32 +469,44 @@ export async function carrierRoutes(app: FastifyInstance) {
         case "buy_in_flight": {
           // A prior attempt dispatched /buy and we never learned the outcome.
           // Ask EasyPost what happened (R3-1) — never guess, never re-buy blind.
+          // Phase A: the LOOKUP. A transient failure here is retryable (state
+          // unchanged); a post-charge classification parks.
+          let recovered: Awaited<ReturnType<typeof client.getShipment>>["bought"];
           try {
-            const { bought } = await client.getShipment(existing.createdShipment!);
-            if (bought) {
-              const rec = await store.markPurchased(jobId, bought);
-              return finalizeAndRespond(req, reply, params, rec, "recovered a dispatched purchase");
-            }
-            // EasyPost shows NO purchase for the shipment we created: the
-            // charge did not happen. Safe to buy now, same shipment.
-            const bought2 = await client.buyRate(existing.createdShipment!);
-            const rec2 = await store.markPurchased(jobId, bought2);
-            return finalizeAndRespond(req, reply, params, rec2);
+            recovered = (await client.getShipment(existing.createdShipment!)).bought;
           } catch (err) {
             if (err instanceof EasyPostError && POST_CHARGE_ERROR_CODES.has(err.code)) {
               req.log.error({ code: err.code, detail: err.detail, jobId }, "carrier: recovery hit a post-charge defect — parking for reconciliation");
               return park(req, reply, jobId, err.code);
             }
-            if (err instanceof CarrierStoreError) {
-              // Recovery CONFIRMED a purchase but recording it failed — that
-              // is a post-charge fact, so it parks; it never stays ambiguous
-              // as a plain 502 (sol R3-1 residual).
-              req.log.error({ code: err.code, jobId }, "carrier: recovered purchase could not be recorded — parking for reconciliation");
-              return park(req, reply, jobId, `record_failed:${err.code}`);
-            }
             const code = err instanceof EasyPostError ? err.code : "recovery_failed";
             req.log.error({ code, jobId }, "carrier: buy_in_flight recovery lookup failed; state unchanged, retry later");
             return reply.code(502).send({ error: "recovery_failed", detailCode: code, retry: true });
+          }
+          // Phase B: no purchase on record at EasyPost — safe to buy the SAME
+          // created shipment. Ambiguity here loops back to recovery.
+          if (!recovered) {
+            try {
+              recovered = await client.buyRate(existing.createdShipment!);
+            } catch (err) {
+              if (err instanceof EasyPostError && err.code === "easypost_buy_ambiguous") {
+                return reply.code(502).send({ error: "buy_ambiguous_retry_to_recover", retry: true });
+              }
+              const code = err instanceof EasyPostError ? err.code : "easypost_buy_failed";
+              req.log.error({ code, jobId }, "carrier: recovery re-buy hit a post-dispatch defect — parking");
+              return park(req, reply, jobId, code);
+            }
+          }
+          // Phase C: a CONFIRMED purchase exists. ANY failure to record it is
+          // a post-charge fact and parks — never a plain 502 that hides a
+          // charge behind an ambiguous-looking retry (sol R3-1 residual).
+          try {
+            const rec = await store.markPurchased(jobId, recovered);
+            return finalizeAndRespond(req, reply, params, rec, "recovered a dispatched purchase");
+          } catch (err) {
+            const code = err instanceof CarrierStoreError ? err.code : "persist_failed";
+            req.log.error({ code, jobId }, "carrier: confirmed purchase could not be recorded — parking for reconciliation");
+            return park(req, reply, jobId, `record_failed:${code}`);
           }
         }
         case "purchased_pending":
