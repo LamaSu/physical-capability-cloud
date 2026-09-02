@@ -49,6 +49,7 @@
     "@pcc/bundler": "workspace:*",
     "@pcc/contract-builder": "workspace:*",
     "@pcc/contracts": "workspace:*",
+    "@pcc/coordination": "workspace:*",
     "@pcc/demand-intel": "workspace:*",
     "@pcc/dht": "workspace:*",
     "@pcc/evidence-embeddings": "workspace:*",
