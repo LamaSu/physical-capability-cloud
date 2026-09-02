@@ -20,6 +20,16 @@
  * its #1766 flip. (#1240's "utf8-string=production" was a placeholder awaiting a real vector — there is none.)
  * When a real kernel signer is built it MUST sign RAW32(bundleHash) to honour this pin.
  *
+ * SCOPE BOUNDARY (2026-09-02) — READ BEFORE COMPARING ROOTS WITH THE GOLDEN.
+ * This KAT pins ONE thing: the SIGNING CONVENTION (preimage = RAW32(bundleHash), ed25519).
+ * Its events are hand-authored fixture data carrying the PRE-#297 mail-leg payload shape, so its
+ * bundleHash (sha256:6af75929..) is DELIBERATELY NOT the same value as the re-bound composite golden's
+ * kernelSignedEventsRoot (sha256:99df718a.., re-bound to the on-master carrier.ts emitter after PR #297
+ * merged as f0fc9792). Those two roots are over different event bytes and are SUPPOSED to differ.
+ * Use the GOLDEN as the byte-target for a real producer; use THIS KAT only for the signature convention.
+ * These signature values are cross-confirmed and pinned by oracle (#1750/#1761) — do not move them
+ * without telling oracle, which is why this file was NOT re-bound along with the golden.
+ *
  * Deterministic: fixed test seed + fixed fixture. node:crypto only.
  */
 "use strict";

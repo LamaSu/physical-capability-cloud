@@ -64,14 +64,31 @@ const printEvent = {
   source: { deviceId: "printer:hp-0001", deviceType: "printer_log", kernelId: KERNEL, simulated: false },
   payload: { jobId: JOB, documentHash, labelHash, pages: 2, printerId: "hp-0001" },
 };
-// MAIL leg — courier_pickup_confirmed (carrier scan; payload carries the full recompute set, carrier.ts:119-135)
+// MAIL leg — courier_pickup_confirmed (carrier scan).
+// RE-BOUND 2026-09-02 to the ON-MASTER emitter, field-for-field: packages/gateway/src/routes/carrier.ts
+// :200-231 as merged by PR #297 (merge commit f0fc9792). The pre-merge draft shape this golden used to
+// carry diverged in ways that mattered — see the predicate note on commitmentHashValid below.
+const providerRawBody = '{"result":{"tracking_code":"' + trackingCode + '","status":"in_transit"}}';
 const mailPayload = {
-  jobId: JOB, trackingCode, trackerId: "trk_pm0001", carrier: "USPS",
-  commitment, commitmentVerified: true,
-  statusDetail: "accepted", carrierMessage: "Accepted at USPS Origin Facility",
+  jobId: JOB,
+  trackingCode,
+  trackerId: "trk_pm0001",
+  shipmentId: "shp_pm0001",
+  carrier: "USPS",
+  trackerStatus: "in_transit",
+  statusDetail: "accepted",
+  carrierMessage: "Accepted at USPS Origin Facility",
   trackingLocation: { city: "San Francisco", state: "CA", country: "US", zip: "94103" },
-  providerEventId: "evt_ezp_pm0001", occurredAt: "2026-08-27T13:30:00.000Z",
-  providerRawBody: '{"result":{"tracking_code":"' + trackingCode + '","status":"in_transit"}}',
+  providerEventId: "evt_ezp_pm0001",
+  occurredAt: "2026-08-27T13:30:00.000Z",
+  provider: "easypost",
+  providerMode: "production",
+  providerSignatureHeader: "hmac-sha256=pm0001",
+  /** Exact signed bytes, base64 — decode and re-run HMAC to re-verify (carrier.ts:227). */
+  providerRawBodyB64: Buffer.from(providerRawBody, "utf8").toString("base64"),
+  commitment,
+  commitmentHashValid: true,
+  commitmentSignatureVerified: true,
 };
 const mailEvent = {
   id: "evt-mail-0001",
@@ -99,7 +116,14 @@ function evaluate(bundleEvents, fundedJobId) {
   const b = !!mail && mail.source.simulated === false                      // (b) authenticated mail leg,
     && mail.payload.jobId === fundedJobId                                   //     anti-swap: scan.jobId == funded
     && mail.payload.commitment && mail.payload.commitment.jobId === fundedJobId
-    && mail.payload.commitmentVerified === true
+    // ON-MASTER there is NO `commitmentVerified` — carrier.ts emits TWO booleans. Checking the old
+    // single field against a real event read `undefined` and would have DISPUTED genuine production
+    // evidence (fail-closed, but wrong). Both are required: the commitment must recompute AND the
+    // gateway must actually have signed it — an unsigned commitment is unauthenticated, and this is
+    // the money path. NOTE: carrier.ts only enforces the signature when a signing key is configured
+    // (`getActiveSigningKey()`), so this predicate is deliberately STRICTER than the emitter.
+    && mail.payload.commitmentHashValid === true
+    && mail.payload.commitmentSignatureVerified === true
     && ["in_transit", "accepted", "out_for_delivery"].includes(mail.payload.statusDetail)
     && !!mail.payload.trackingLocation;                                     //     accepted-into-mail-stream proof
   const c = !!mail && !!print                                              // (c) commitment predates handoff/scan
@@ -129,13 +153,19 @@ neg.photo_cannot_close = evaluate([printEvent, photoEvent], JOB);
 const simMail = { ...mailEvent, source: { ...mailEvent.source, simulated: true } };
 simMail.hash = hashEvent(simMail);
 neg.simulated = evaluate([printEvent, simMail], JOB);
+// 5. commitment present and recomputing, but NOT gateway-signed -> dispute.
+//    An unsigned commitment is unauthenticated: nothing binds it to the gateway that issued the label.
+const unsignedMail = { ...mailEvent, payload: { ...mailPayload, commitmentSignatureVerified: false } };
+unsignedMail.hash = hashEvent(unsignedMail);
+neg.unsigned_commitment = evaluate([printEvent, unsignedMail], JOB);
 
 // ---- positive control ----------------------------------------------------------------------------
 const positive = evaluate([printEvent, mailEvent], JOB);
 
 // ---- assert + emit -------------------------------------------------------------------------------
 let failures = 0;
-const check = (name, got, want) => { const ok = got === want; if (!ok) failures++; console.log(`  ${ok ? "PASS" : "FAIL"}  ${name}: got=${got} want=${want}`); };
+let checksRun = 0;
+const check = (name, got, want) => { checksRun++; const ok = got === want; if (!ok) failures++; console.log(`  ${ok ? "PASS" : "FAIL"}  ${name}: got=${got} want=${want}`); };
 console.log("== document.print-and-mail composite bundle golden (evidence c25c8f97) ==");
 console.log("GOLDENS:");
 console.log("  documentHash            =", documentHash);
@@ -151,5 +181,6 @@ check("negative absent_mail (fail-closed)", neg.absent_mail, "dispute");
 check("negative jobid_swap (anti-swap)", neg.jobid_swap, "dispute");
 check("negative photo_cannot_close_mail", neg.photo_cannot_close, "dispute");
 check("negative simulated_evidence", neg.simulated, "dispute");
-console.log(failures === 0 ? "\nALL GREEN (7/7)" : `\n${failures} FAILURE(S)`);
+check("negative unsigned_commitment", neg.unsigned_commitment, "dispute");
+console.log(failures === 0 ? `\nALL GREEN (${checksRun}/${checksRun})` : `\n${failures} FAILURE(S) of ${checksRun}`);
 process.exit(failures === 0 ? 0 : 1);
