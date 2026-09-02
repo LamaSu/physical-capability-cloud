@@ -36,11 +36,12 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 // ── Mock the repo layer the middleware reads ──────────────────────
 let keyScopes: string;
+/** Rows the governance table returns. Empty → hardcoded defaults are used. */
+let dbScopeRows: Array<{ method: string; routePattern: string; requiredScopes: string[] }> = [];
 
 vi.mock("../db.js", () => ({
   getRepos: () => ({
-    // Empty governance table → middleware falls back to DEFAULT_SCOPE_REQUIREMENTS
-    governance: { findAllEndpointScopes: () => [] },
+    governance: { findAllEndpointScopes: () => dbScopeRows },
     apiKeys: { findById: () => ({ id: "key-1", scopes: keyScopes }) },
   }),
 }));
@@ -67,6 +68,8 @@ async function buildApp(): Promise<FastifyInstance> {
   // Registered so the "settlement does not satisfy an operator route" negative
   // control proves a 403 FROM THE SCOPE CHECK, not an incidental 404.
   app.post("/api/kernels/register", ok);
+  // Nested admin route — proves "/api/admin/**" covers more than one segment.
+  app.get("/api/admin/keys/wildcard-audit", ok);
   await app.ready();
   return app;
 }
@@ -74,6 +77,75 @@ async function buildApp(): Promise<FastifyInstance> {
 describe("scope-checker — money-path authorization", () => {
   beforeEach(() => {
     keyScopes = JSON.stringify(["contributor:read", "contributor:write"]);
+    dbScopeRows = [];
+  });
+
+  // ── A persisted rule must not be able to WEAKEN the money path ────
+  //
+  // refreshScopeCache REPLACES the hardcoded defaults wholesale as soon as the
+  // endpointScopes table has any rows. A single stale row — an escrow rule
+  // still naming `operator`, written before the settlement split — would
+  // therefore silently restore the old, weaker authorization with nothing in
+  // the code to say so. Caught by cross-family review of PR #309; MONEY_PATH_FLOOR
+  // is applied over DB rules to make that impossible.
+  describe("DB-persisted rules cannot loosen the money path", () => {
+    it("IGNORES a stale DB rule that grants escrow writes to operator", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/escrow/**", requiredScopes: ["operator", "admin"] },
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator", "admin"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("still honours a DB rule on a NON-money route (the table is not ignored)", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["template_author"] },
+      ];
+      keyScopes = JSON.stringify(["template_author"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/kernels/register" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    it("a settlement key still passes the money path when DB rows exist", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["settlement"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+  });
+
+  // ── Nested admin routes are actually covered by the admin rule ────
+  describe("admin namespace is gated at every depth", () => {
+    it("DENIES a nested admin route to a non-admin key", async () => {
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("ALLOWS a nested admin route to an admin key", async () => {
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
   });
 
   describe("funds movement is gated", () => {
