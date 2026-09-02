@@ -92,6 +92,10 @@ import { subnetRoutes } from "./routes/subnet.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
+import { carrierRoutes } from "./routes/carrier.js";
+import { initCarrierShipmentStore } from "./services/carrier-shipment-store.js";
+import { setDefaultCommitmentSigner } from "./services/easypost-client.js";
+import { gatewayCommitmentSigner } from "./services/commitment-signer.js";
 import { lobRoutes } from "./routes/lob.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
@@ -435,6 +439,9 @@ export async function createGateway(port = 3200) {
   // A2A v1.0 §8.4 — load the agent-card signing key at boot. No-op if
   // PCC_AGENT_CARD_SIGNING_KEY is unset (gateway falls back to unsigned).
   await initSigningKey();
+  // Carrier ShipmentCommitments are attested with the same key (null-safe:
+  // unsigned, visibly, when PCC_AGENT_CARD_SIGNING_KEY is unset).
+  setDefaultCommitmentSigner(gatewayCommitmentSigner);
 
   // ERC-8004 domain verification + A2A agent card (public, before auth)
   await app.register(wellKnownRoutes);
@@ -578,6 +585,35 @@ export async function createGateway(port = 3200) {
     });
   }
 
+  // Carrier shipments (print-and-mail physical-provenance oracle input) —
+  // same write-through SQLite handle as job-offers; tables created by
+  // db/src/migrate.ts (carrier_shipments, carrier_webhook_events). A pre-
+  // execution commitment must survive a restart or the carrier's genuine
+  // scan webhook has nothing to match against, and a lost reservation
+  // re-charges the operator (sol #297 findings 8, NEW-2/6/7). PRODUCTION
+  // therefore FAILS BOOT on a missing handle or corrupt rows instead of
+  // degrading to memory; dev/test keeps the in-memory fallback.
+  {
+    const isProd = process.env.NODE_ENV === "production";
+    try {
+      const rawSqlite = (getStore().db as unknown as {
+        $client?: import("./services/carrier-shipment-store.js").SqliteDatabaseLike;
+      }).$client;
+      if (!rawSqlite && isProd) {
+        throw new Error("no raw SQLite handle available from the store");
+      }
+      initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: isProd } : {});
+      if (!rawSqlite) app.log.warn("[carrier] no SQLite handle; shipment commitments are in-memory only (dev/test)");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isProd) {
+        throw new Error(`[carrier] durable store required in production: ${msg}`);
+      }
+      app.log.warn(`[carrier] could not attach SQLite (${msg}); falling back to in-memory (dev/test)`);
+      initCarrierShipmentStore({});
+    }
+  }
+
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
@@ -684,6 +720,7 @@ export async function createGateway(port = 3200) {
   await app.register(agentChatRoutes);
   await app.register(settlementRoutes);
   await app.register(fiatRampRoutes);
+  await app.register(carrierRoutes);
   await app.register(lobRoutes);
   await app.register(bountyRoutes);
   await app.register(poolRoutes);

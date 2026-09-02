@@ -308,7 +308,11 @@ export class LobClient {
    * (Step 4, the replay/timestamp-freshness check, is `isReplay` below.)
    */
   verifyWebhookSignature(
-    rawBody: string,
+    // Buffer preferred: the MAC must cover the EXACT bytes received. (Widened
+    // from string when this route unified with carrier.ts's Buffer rawBody
+    // augmentation after PR #297 merged in — a string template would coerce a
+    // Buffer lossily on invalid UTF-8, so the MAC is built incrementally.)
+    rawBody: Buffer | string,
     signatureHeader: string | undefined | null,
     timestampHeader: string | undefined | null,
   ): boolean {
@@ -319,9 +323,10 @@ export class LobClient {
     }
     if (!signatureHeader || !timestampHeader) return false;
 
-    const signatureInput = `${timestampHeader}.${rawBody}`;
+    const bodyBytes = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, "utf8");
     const expected = createHmac("sha256", this.webhookSecret)
-      .update(signatureInput, "utf8")
+      .update(`${timestampHeader}.`, "utf8")
+      .update(bodyBytes)
       .digest("hex");
 
     const a = Buffer.from(expected, "utf8");
