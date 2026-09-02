@@ -35,9 +35,14 @@ import { initStore, closeStore } from "../db.js";
 vi.mock("../telemetry.js", () => ({ pipelineTelemetry: { emit: vi.fn() } }));
 vi.mock("../services/audit-service.js", () => ({ auditService: { log: vi.fn() } }));
 vi.mock("../services/posthog-service.js", () => ({ trackServerEvent: vi.fn() }));
+// NOTE: an explicit factory REPLACES the whole module, so it must expose every
+// function the code under test imports — a missing one is `undefined` and
+// throws at call time (a 500, not a clean failure). siwe-auth.ts imports
+// canSiweNonce as of the nonce rate limit.
 vi.mock("../middleware/security-hardening.js", () => ({
   canProvision: vi.fn(() => true),
   canSiweVerify: vi.fn(() => true),
+  canSiweNonce: vi.fn(() => true),
 }));
 
 /** Mirrors apps/dashboard/src/hooks/use-auth.ts buildSiweMessage exactly. */
