@@ -27,9 +27,12 @@ import {
   type LobLetterStatus,
 } from "../services/lob-letter-store.js";
 
+// NOTE: must agree with routes/carrier.ts's identical augmentation — TS merges
+// these declarations and rejects conflicting types (that exact conflict broke
+// the build when PR #297 and #303 first met). Buffer, byte-exact, everywhere.
 declare module "fastify" {
   interface FastifyRequest {
-    rawBody?: string;
+    rawBody?: Buffer;
   }
 }
 
@@ -139,12 +142,12 @@ export async function lobRoutes(app: FastifyInstance) {
   // what Lob signed and would break verification.
   app.addContentTypeParser(
     "application/json",
-    { parseAs: "string" },
-    (req: FastifyRequest, body: string, done: (err: Error | null, body?: unknown) => void) => {
+    { parseAs: "buffer" },
+    (req: FastifyRequest, body: Buffer, done: (err: Error | null, body?: unknown) => void) => {
       req.rawBody = body;
       if (body.length === 0) return done(null, undefined);
       try {
-        done(null, JSON.parse(body));
+        done(null, JSON.parse(body.toString("utf8")));
       } catch (err) {
         done(err as Error, undefined);
       }
@@ -240,7 +243,7 @@ export async function lobRoutes(app: FastifyInstance) {
     const tsHeader = req.headers["lob-signature-timestamp"];
     const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
     const timestamp = Array.isArray(tsHeader) ? tsHeader[0] : tsHeader;
-    const rawBody = req.rawBody ?? "";
+    const rawBody = req.rawBody ?? Buffer.alloc(0);
 
     if (!client.verifyWebhookSignature(rawBody, signature, timestamp)) {
       req.log.warn(
