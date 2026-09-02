@@ -46,7 +46,9 @@ vi.mock("../db.js", () => ({
   }),
 }));
 
-const { scopeChecker } = await import("../middleware/scope-checker.js");
+const { scopeChecker, __resetScopeCacheForTests } = await import(
+  "../middleware/scope-checker.js"
+);
 
 /** Build an app with the scope-checker mounted and a key pre-attached. */
 async function buildApp(): Promise<FastifyInstance> {
@@ -78,6 +80,9 @@ describe("scope-checker — money-path authorization", () => {
   beforeEach(() => {
     keyScopes = JSON.stringify(["contributor:read", "contributor:write"]);
     dbScopeRows = [];
+    // The rule cache is module-level with a 5-minute TTL. Without this, a test
+    // that changes dbScopeRows asserts against rules a previous test loaded.
+    __resetScopeCacheForTests();
   });
 
   // ── A persisted rule must not be able to WEAKEN the money path ────
