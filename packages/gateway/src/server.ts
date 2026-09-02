@@ -96,10 +96,12 @@ import { carrierRoutes } from "./routes/carrier.js";
 import { initCarrierShipmentStore } from "./services/carrier-shipment-store.js";
 import { setDefaultCommitmentSigner } from "./services/easypost-client.js";
 import { gatewayCommitmentSigner } from "./services/commitment-signer.js";
+import { lobRoutes } from "./routes/lob.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
 import { courierJobsRoutes } from "./routes/courier-jobs.js";
+import { printAndMailRoutes } from "./routes/print-and-mail.js";
 import { jobOffersRoutes } from "./routes/job-offers.js";
 import { initJobOffersStore } from "./services/job-offers-store.js";
 import { startJobOffersSweeper } from "./services/job-offers-sweeper.js";
@@ -719,6 +721,7 @@ export async function createGateway(port = 3200) {
   await app.register(settlementRoutes);
   await app.register(fiatRampRoutes);
   await app.register(carrierRoutes);
+  await app.register(lobRoutes);
   await app.register(bountyRoutes);
   await app.register(poolRoutes);
   await app.register(telemetryRoutes);
@@ -743,6 +746,12 @@ export async function createGateway(port = 3200) {
   // Legacy /api/courier-jobs/* shim — kept for backward compat through the
   // pcc-courier migration window (target: 30 days from 2026-06-19).
   await app.register(courierJobsRoutes);
+  // document.print-and-mail HANDOFF leg — the gig worker (a courier.dispatch
+  // driver) claims via the courier-jobs claim route above, then submits
+  // print-and-seal handoff evidence here. Dovetails with the carrier leg
+  // (feat/carrier-integration) on jobId + commitment hash; see
+  // services/print-and-mail-handoff-store.ts for the post-merge bridge wiring.
+  await app.register(printAndMailRoutes);
   await app.register(assetOutboundRoutes);
   await app.register(toolSearchRoutes);
   await app.register(intentIngestRoutes);

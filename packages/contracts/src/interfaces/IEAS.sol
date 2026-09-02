@@ -39,12 +39,45 @@ struct EASAttestation {
 }
 
 /**
+ * @title AttestationRequestData
+ * @notice The per-attestation payload of an EAS `attest` call. Field order/types are VERBATIM from the
+ *         canonical EAS `Common.sol` — the EAS contract ABI-decodes this exact layout. Consumed by the
+ *         O5 cohort attester when it WRITES an O5 verdict into EAS.
+ * @param recipient       The recipient of the attestation (here: the settling escrow).
+ * @param expirationTime  Expiration timestamp (0 = never).
+ * @param revocable       Whether the attestation is revocable (O5 mints are non-revocable).
+ * @param refUID          Referenced attestation UID (0 = none).
+ * @param data            ABI-encoded schema payload (here: `abi.encode(O5Verdict)`).
+ * @param value           Native value forwarded with the attestation (here: 0).
+ */
+struct AttestationRequestData {
+    address recipient;
+    uint64 expirationTime;
+    bool revocable;
+    bytes32 refUID;
+    bytes data;
+    uint256 value;
+}
+
+/**
+ * @title AttestationRequest
+ * @notice A single-attestation `attest` request: the schema UID + its payload. Mirrors EAS `IEAS.sol`.
+ */
+struct AttestationRequest {
+    bytes32 schema;
+    AttestationRequestData data;
+}
+
+/**
  * @title IEAS
- * @notice Minimal EAS surface consumed by MilestoneEscrowV2. Only the read method the
- *         escrow needs to validate an attestation by UID is declared.
+ * @notice Minimal EAS surface. `getAttestation` is the READ the escrow uses to validate an attestation
+ *         by UID; `attest` is the WRITE the O5 cohort attester uses to BECOME the recorded `attester`.
  */
 interface IEAS {
     /// @notice Returns the attestation for the given UID. Returns a zero struct if the UID
     ///         does not exist (callers MUST check `uid != bytes32(0)`).
     function getAttestation(bytes32 uid) external view returns (EASAttestation memory);
+
+    /// @notice Creates a new attestation and returns its UID. `msg.sender` is recorded as the `attester`.
+    function attest(AttestationRequest calldata request) external payable returns (bytes32);
 }

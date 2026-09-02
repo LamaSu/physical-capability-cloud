@@ -55,8 +55,15 @@ jobs:
         with:
           submodules: recursive
 
+      # Pinned, not `stable`: on 2026-08-27 foundry v1.8.0 shipped between two master
+      # runs of byte-identical Solidity and turned forge-tests red (isolate-by-default
+      # exposed an inert vm.prank in BridgeDirectory.t.sol setUp), which skipped
+      # build-image and blocked every deploy. A floating toolchain makes the
+      # build-once/deploy-many artifact non-reproducible; bump this deliberately.
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.0
 
       - name: Install forge-std
         working-directory: packages/contracts
