@@ -178,6 +178,77 @@ describe("settlement scope — money authority is separate from operator", () =>
   const call = (key: string, url: string) =>
     app.inject({ method: "POST", url, headers: { authorization: `Bearer ${key}` } });
 
+  // ── A SIWE SESSION IS NOT A SCOPE GRANT ───────────────────────────
+  //
+  // Found by cross-family review (sol, PR #309), and it defeated the entire
+  // grant above: apiGate accepts a SIWE session and sets only `req.userId`,
+  // never `req.apiKeyId` (api-gate.ts) — and scopeChecker returns early when
+  // `apiKeyId` is absent (scope-checker.ts). So a session principal skipped the
+  // whole scope layer, allowlist and all.
+  //
+  // It was latent until this branch: SIWE login was 401ing in production, so no
+  // one could mint a session. Opening /api/auth/nonce + /verify (the other
+  // commit here) makes it reachable by anyone with a throwaway wallet. The
+  // bootstrap fix and this guard MUST ship together.
+  describe("a SIWE session alone cannot reach the money path", () => {
+    it("REFUSES escrow funding to a bare session token (no API key, no scopes)", async () => {
+      const account = privateKeyToAccount(generatePrivateKey());
+      const token = await siweSignIn(account); // not on the allowlist
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+    });
+
+    it("REFUSES fiat payout to a bare session token", async () => {
+      const account = privateKeyToAccount(generatePrivateKey());
+      const token = await siweSignIn(account);
+      const res = await app.inject({
+        method: "POST", url: "/api/fiat-ramp/payout",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+    });
+
+    // Even an ALLOWLISTED address gets nothing from the session itself — the
+    // allowlist grants `settlement` to a KEY at provision time. The session is
+    // proof of identity, not an authorization to spend.
+    it("REFUSES the money path to an allowlisted address's session token", async () => {
+      const account = privateKeyToAccount(generatePrivateKey());
+      process.env.PCC_SETTLEMENT_OPERATORS = account.address.toLowerCase();
+      const token = await siweSignIn(account);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+    });
+
+    // Sessions must still work for what they ARE for: proving identity to
+    // provision, and non-money authenticated routes.
+    it("still lets a session provision a key and reach onboarding", async () => {
+      const account = privateKeyToAccount(generatePrivateKey());
+      const token = await siweSignIn(account);
+      const prov = await app.inject({
+        method: "POST", url: "/api/auth/provision",
+        headers: { authorization: `Bearer ${token}` },
+        payload: { walletAddress: account.address },
+      });
+      expect(prov.statusCode).toBe(201);
+      const kernels = await app.inject({
+        method: "POST", url: "/api/kernels/register",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(kernels.statusCode).toBe(200);
+    });
+  });
+
   // ── The email key: onboarding yes, money no ───────────────────────
 
   describe("email-provisioned key (identity ASSERTED, not proven)", () => {
