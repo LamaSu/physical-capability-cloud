@@ -30,9 +30,13 @@ vi.mock("../services/audit-service.js", () => ({
 vi.mock("../services/posthog-service.js", () => ({
   trackServerEvent: vi.fn(),
 }));
+// An explicit factory REPLACES the whole module, so it must expose every
+// function the code under test imports (siwe-auth.ts gained canSiweNonce with
+// the nonce rate limit); a missing one is `undefined` and throws a 500.
 vi.mock("../middleware/security-hardening.js", () => ({
   canProvision: vi.fn(() => true),
   canSiweVerify: vi.fn(() => true),
+  canSiweNonce: vi.fn(() => true),
 }));
 
 /** Mirrors apps/dashboard/src/hooks/use-auth.ts buildSiweMessage exactly. */
