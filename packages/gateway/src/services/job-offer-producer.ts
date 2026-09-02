@@ -83,12 +83,17 @@ interface ResolvedMatch {
 
 /**
  * Two "matched" conventions exist in this codebase; this is the one place that
- * reconciles them. A node asserting matchStatus:"matched" is NEVER allowed to fall
- * through to the routed check below, even if its agentic id/kernel fields are
- * incomplete -- that is a corrupt/malformed state, not a direct-match node, and
- * must resolve to null (unmatched) rather than silently being reinterpreted under
- * the other convention (sol round 2: "routed fields override an explicit
- * matchStatus:'none'").
+ * reconciles them. Both agentic outcomes (matchStatus "matched" or explicit
+ * "none") are AUTHORITATIVE and never fall through to the routed check below,
+ * even when a node happens to also carry capabilityId/kernelId -- only a node
+ * where matchStatus is truly ABSENT is a real direct-match/routed node, which
+ * is exactly how the two decomposers actually produce them today (agentic
+ * always sets one of "matched"/"none"; decomposeDirectMatch never sets the
+ * field at all). A "matched" node with incomplete agentic fields, or a "none"
+ * node with stray routed-looking fields, both resolve to null (unmatched)
+ * rather than being silently reinterpreted under the other convention
+ * (sol round 2: "routed fields override an explicit matchStatus", both
+ * directions -- matched-but-incomplete, and none-but-hybrid).
  */
 function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
   if (node.matchStatus === "matched") {
@@ -97,9 +102,11 @@ function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
     }
     return null;
   }
-  const routed = node as RoutedCapabilityNode;
-  if (routed.capabilityId && routed.kernelId) {
-    return { capabilityId: routed.capabilityId, kernelId: routed.kernelId, viaAgenticConvention: false };
+  if (node.matchStatus === undefined) {
+    const routed = node as RoutedCapabilityNode;
+    if (routed.capabilityId && routed.kernelId) {
+      return { capabilityId: routed.capabilityId, kernelId: routed.kernelId, viaAgenticConvention: false };
+    }
   }
   return null;
 }
@@ -193,10 +200,18 @@ export async function produceJobOffersForRequest(
     // digest gap" and get published in degraded mode -- sol round 2's Check 1
     // finding. Requiring EVERY violation to mention the digest closes that: any
     // other simultaneous problem correctly falls through to the hold below.
+    //
+    // Match the FIXED SUFFIX composition-commitment.ts's validatePlan emits for
+    // this exact violation, not a bare substring -- a decomposer node id is
+    // buyer/LLM-influenced text that only ever lands in the "node <id>: " PREFIX
+    // of a violation string, so anchoring on the literal tail after it is immune
+    // to a node id that happens to itself contain "matchedCapabilityDigest"
+    // (sol round-2-followup: `.includes` was spoofable via a crafted node id).
+    const DIGEST_VIOLATION_SUFFIX = ": matched node missing/invalid matchedCapabilityDigest (0x + 64 hex)";
     const purelyDigestGap =
       commitment.unmatchedNodes.length === 0 &&
       commitment.violations.length > 0 &&
-      commitment.violations.every((v) => v.includes("matchedCapabilityDigest"));
+      commitment.violations.every((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX));
     if (!purelyDigestGap) {
       result.skippedUnmatched = commitment.unmatchedNodes;
       result.held = {

@@ -264,6 +264,44 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     expect(result.held!.unmatchedNodes).toEqual(["node-matched"]);
   });
 
+  it("a node explicitly marked matchStatus:'none' never falls through to the routed convention either (sol round 2, follow-up)", async () => {
+    // The decomposer explicitly said "none" -- that must be authoritative even
+    // if the node also happens to carry routed-shaped capabilityId/kernelId
+    // fields (a hybrid/stale shape). Only a node where matchStatus is truly
+    // ABSENT (the real decomposeDirectMatch shape) is a genuine routed match.
+    const hybridNone = {
+      ...UNMATCHED_NODE,
+      capabilityId: "cap-should-not-be-used",
+      kernelId: "kernel-should-not-be-used",
+    } as unknown as CapabilityNode;
+    const req = baseRequest([hybridNone]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(result.held!.unmatchedNodes).toEqual(["node-unmatched"]);
+  });
+
+  it("does not mistake a digest-shaped node id for a digest-only violation (sol round 2, follow-up: substring spoofing)", async () => {
+    // A node id that itself contains the digest-violation substring, but whose
+    // ACTUAL violation is an unrelated dangling edge. Must still hold -- the
+    // suffix-anchored check must not be fooled by attacker/LLM-influenced node
+    // ids landing in the violation string's prefix.
+    const spoofy: CapabilityNode = {
+      ...AGENTIC_MATCHED_NODE_WITH_DIGEST,
+      id: "matchedCapabilityDigest-lookalike-node",
+      dependencies: ["node-does-not-exist"],
+    };
+    const req = baseRequest([spoofy]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(
+      result.held!.violations.some((v) => v.includes("references a node not in the plan")),
+    ).toBe(true);
+  });
+
   it("is idempotent — publishing the same request twice does not double-create offers", async () => {
     const req = baseRequest([AGENTIC_MATCHED_NODE]);
     const first = await produceJobOffersForRequest(req);
