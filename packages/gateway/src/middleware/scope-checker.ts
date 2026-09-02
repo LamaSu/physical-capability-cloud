@@ -190,6 +190,18 @@ function refreshScopeCache(): void {
   lastScopeCacheRefresh = Date.now();
 }
 
+/**
+ * Test-only: drop the cached rules so the next request re-reads them.
+ *
+ * The cache is module-level with a 5-minute TTL, so a suite that changes what
+ * the governance table returns would otherwise assert against rules loaded by
+ * an earlier test. Mirrors __resetSignerLockForTests / _resetDocsAssetCacheForTests.
+ */
+export function __resetScopeCacheForTests(): void {
+  scopeCache = [];
+  lastScopeCacheRefresh = 0;
+}
+
 function ensureScopeCacheReady(): void {
   if (Date.now() - lastScopeCacheRefresh > SCOPE_CACHE_TTL) {
     refreshScopeCache();
