@@ -204,6 +204,104 @@ describe("produceJobOffersForRequest (bridge, coord #1276)", () => {
     expect(getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" })).toHaveLength(0);
   });
 
+  it("holds (does not degrade) when a digest gap sits ALONGSIDE an unrelated plan violation — the mixed-violation regression (sol round 2)", async () => {
+    // node-matched is missing its digest -- a pure digest gap on its own. node-b
+    // ALSO has a real structural violation (dangling dependency) unrelated to the
+    // digest. Before the v3 hardening, @pcc/spec's blockedOn (a .some() over
+    // violations) would have seen node-matched's digest violation and waved the
+    // WHOLE plan through as "just degraded" -- silently publishing node-b's
+    // broken plan too. It must hold instead.
+    const nodeB: CapabilityNode = {
+      ...AGENTIC_MATCHED_NODE_WITH_DIGEST,
+      id: "node-b",
+      dependencies: ["node-does-not-exist"],
+    };
+    const req = baseRequest([AGENTIC_MATCHED_NODE, nodeB]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(
+      result.held!.violations.some((v) => v.includes("references a node not in the plan")),
+    ).toBe(true);
+    expect(getJobOffersStore().listOpen({ capabilityType: "cnc-3axis" })).toHaveLength(0);
+  });
+
+  it("clears a stale matchedCapabilityDigest on a direct-match node rather than binding it to the wrong capability (sol round 2)", async () => {
+    // A direct-match node carrying a leftover matchedCapabilityDigest from some
+    // other match -- current decompose paths don't produce this shape, but the
+    // producer must not silently trust it if one ever does.
+    const routedWithStaleDigest = {
+      ...DIRECT_MATCH_NODE,
+      matchedCapabilityDigest: VALID_DIGEST_A, // stale -- belongs to a DIFFERENT capability
+    } as unknown as CapabilityNode;
+    const req = baseRequest([routedWithStaleDigest]);
+    const result = await produceJobOffersForRequest(req);
+
+    // Must NOT commit a compositionRoot bound to the stale digest -- degrades
+    // exactly like the no-digest case, proving the digest was cleared rather
+    // than trusted.
+    expect(result.created).toHaveLength(1);
+    expect(result.compositionRoot).toBeUndefined();
+    expect(result.capabilityContractRoot).toMatch(/^0x[0-9a-fA-F]{64}$/);
+  });
+
+  it("a node claiming matchStatus:'matched' with incomplete agentic fields never falls through to the routed convention (sol round 2)", async () => {
+    // matchStatus:'matched' but missing matchedKernelId -- a corrupt/malformed
+    // agentic node. It happens to also carry direct-match-shaped fields. Must
+    // resolve to unmatched (held), never silently reinterpreted as a routed match.
+    const corrupt = {
+      ...AGENTIC_MATCHED_NODE,
+      matchedKernelId: undefined,
+      capabilityId: "cap-should-not-be-used",
+      kernelId: "kernel-should-not-be-used",
+    } as unknown as CapabilityNode;
+    const req = baseRequest([corrupt]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(result.held!.unmatchedNodes).toEqual(["node-matched"]);
+  });
+
+  it("a node explicitly marked matchStatus:'none' never falls through to the routed convention either (sol round 2, follow-up)", async () => {
+    // The decomposer explicitly said "none" -- that must be authoritative even
+    // if the node also happens to carry routed-shaped capabilityId/kernelId
+    // fields (a hybrid/stale shape). Only a node where matchStatus is truly
+    // ABSENT (the real decomposeDirectMatch shape) is a genuine routed match.
+    const hybridNone = {
+      ...UNMATCHED_NODE,
+      capabilityId: "cap-should-not-be-used",
+      kernelId: "kernel-should-not-be-used",
+    } as unknown as CapabilityNode;
+    const req = baseRequest([hybridNone]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(result.held!.unmatchedNodes).toEqual(["node-unmatched"]);
+  });
+
+  it("does not mistake a digest-shaped node id for a digest-only violation (sol round 2, follow-up: substring spoofing)", async () => {
+    // A node id that itself contains the digest-violation substring, but whose
+    // ACTUAL violation is an unrelated dangling edge. Must still hold -- the
+    // suffix-anchored check must not be fooled by attacker/LLM-influenced node
+    // ids landing in the violation string's prefix.
+    const spoofy: CapabilityNode = {
+      ...AGENTIC_MATCHED_NODE_WITH_DIGEST,
+      id: "matchedCapabilityDigest-lookalike-node",
+      dependencies: ["node-does-not-exist"],
+    };
+    const req = baseRequest([spoofy]);
+    const result = await produceJobOffersForRequest(req);
+
+    expect(result.created).toHaveLength(0);
+    expect(result.held).toBeDefined();
+    expect(
+      result.held!.violations.some((v) => v.includes("references a node not in the plan")),
+    ).toBe(true);
+  });
+
   it("is idempotent — publishing the same request twice does not double-create offers", async () => {
     const req = baseRequest([AGENTIC_MATCHED_NODE]);
     const first = await produceJobOffersForRequest(req);
