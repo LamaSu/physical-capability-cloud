@@ -90,51 +90,21 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
 ];
 
 /**
- * Money-path requirements, enforced as an IMMUTABLE FLOOR.
- *
- * WRITES here move funds and require the dedicated `settlement` scope, NOT
- * `operator` — see the "why settlement is its own scope" note in the file
- * header. Reads stay ungated to avoid breaking the dashboard; what is being
- * closed is funds MOVEMENT.
- *
- * Why a floor and not just another row in the table: `refreshScopeCache` REPLACES
- * the hardcoded defaults wholesale whenever the endpointScopes DB table has any
- * rows. A single stale row — say an escrow rule still naming `operator`, written
- * before this split — would therefore silently restore the old, weaker money
- * authorization, and nothing in the code would say so. Caught by cross-family
- * review of PR #309.
- *
- * These rules are applied AFTER the DB rules and win over them, so the money
- * path is governed by code that ships with the binary, never by a row somebody
- * forgot to migrate. Operators can still TIGHTEN the money path with a DB rule
- * that matches more specifically; they cannot loosen it below this.
- */
-const MONEY_PATH_FLOOR: Array<{ method: string; pattern: string; scopes: string[] }> = [
-  { method: "POST",   pattern: "/api/escrow/**",                    scopes: ["settlement", "admin"] },
-  { method: "PUT",    pattern: "/api/escrow/**",                    scopes: ["settlement", "admin"] },
-  { method: "PATCH",  pattern: "/api/escrow/**",                    scopes: ["settlement", "admin"] },
-  { method: "DELETE", pattern: "/api/escrow/**",                    scopes: ["admin"] },
-  { method: "POST",   pattern: "/api/fiat-ramp/**",                 scopes: ["settlement", "admin"] },
-  { method: "PUT",    pattern: "/api/fiat-ramp/**",                 scopes: ["settlement", "admin"] },
-  { method: "PATCH",  pattern: "/api/fiat-ramp/**",                 scopes: ["settlement", "admin"] },
-  { method: "DELETE", pattern: "/api/fiat-ramp/**",                 scopes: ["admin"] },
-];
-
-/**
- * The scopes that authorise funds MOVEMENT. Kept as one named constant so the
- * default-deny branch below reports the same answer the rules above enforce —
- * they drifted apart once already (the deny message advertised
- * ["operator","admin"] while the rules had been changed), and a wrong hint on a
- * money route sends an integrator to ask for exactly the wrong grant.
+ * The scopes that authorise funds MOVEMENT. One named constant so the rules and
+ * the default-deny message can never disagree — they drifted apart once already
+ * (the message advertised ["operator","admin"] after the rules had changed),
+ * and a wrong hint on a money route sends an integrator to request exactly the
+ * wrong grant.
  */
 const MONEY_SCOPES = ["settlement", "admin"];
+/** Destroying a money resource is admin-only; `settlement` moves funds, it does not delete. */
+const MONEY_DELETE_SCOPES = ["admin"];
 
 /**
  * Route prefixes where a MISSING requirement means DENY rather than allow.
  *
  * Anything under these prefixes moves money or authorises movement of money, so
- * an unlisted route here is a bug, not an intentionally-public endpoint. Keep
- * this list and the money-path requirements above in sync.
+ * an unlisted route here is a bug, not an intentionally-public endpoint.
  */
 const MONEY_PATH_PREFIXES = ["/api/escrow/", "/api/fiat-ramp/", "/api/settlement/"];
 
@@ -144,6 +114,48 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 function isMoneyPath(path: string): boolean {
   return MONEY_PATH_PREFIXES.some((p) => path === p.slice(0, -1) || path.startsWith(p));
 }
+
+/**
+ * The money-path floor, DERIVED from MONEY_PATH_PREFIXES rather than written by
+ * hand. Two bugs came from hand-maintaining it, both found by the second-opinion
+ * review (bridge #1526):
+ *
+ *   - `/api/settlement/` was in the prefix list (so writes there default-deny)
+ *     but had NO floor rules, meaning a settlement write was refused to
+ *     EVERYONE, admin included. Latent only because no such route exists yet;
+ *     adding one would have shipped it dead on arrival.
+ *   - Pattern "/api/escrow/**" compiles to ^/api/escrow/.*$ and does not match
+ *     the BARE ROOT "/api/escrow", which isMoneyPath() nevertheless treats as
+ *     money — so a root money write was also refused to everyone.
+ *
+ * Deriving both the subtree and the root for every prefix makes the two lists
+ * incapable of drifting apart, which is what the old "keep this in sync"
+ * comment was asking a human to guarantee.
+ */
+const MONEY_PATH_FLOOR: ScopeRequirement[] = MONEY_PATH_PREFIXES.flatMap((prefix) => {
+  const root = prefix.slice(0, -1);          // "/api/escrow"
+  return [root, `${prefix}**`].flatMap((pattern) => [
+    { method: "POST", pattern, scopes: MONEY_SCOPES },
+    { method: "PUT", pattern, scopes: MONEY_SCOPES },
+    { method: "PATCH", pattern, scopes: MONEY_SCOPES },
+    { method: "DELETE", pattern, scopes: MONEY_DELETE_SCOPES },
+  ]);
+});
+
+/**
+ * Rules that are NON-NEGOTIABLE regardless of what the governance table says.
+ *
+ * `refreshScopeCache` REPLACES the hardcoded defaults wholesale once the DB has
+ * any rows, so a security rule that only exists in the defaults silently
+ * disappears the moment someone adds an unrelated row. That is fine for a
+ * policy choice and unacceptable for a gate: the admin namespace is the other
+ * place where a MISSING rule is a hole rather than a preference, so it is
+ * pinned here alongside the money floor.
+ */
+const NON_NEGOTIABLE_RULES: ScopeRequirement[] = [
+  ...MONEY_PATH_FLOOR,
+  { method: "*", pattern: "/api/admin/**", scopes: ["admin"] },
+];
 
 // ── Scope Cache ──────────────────────────────────────────────────
 
@@ -158,20 +170,32 @@ let lastScopeCacheRefresh = 0;
 const SCOPE_CACHE_TTL = 300_000; // 5 minutes
 
 /**
- * Drop any persisted rule that targets the money path, then append the
- * hardcoded floor. A DB row can never weaken funds-movement authorization;
- * see MONEY_PATH_FLOOR for why this is not just another table row.
+ * Put the non-negotiable rules FIRST, then whatever else survives.
+ *
+ * Order matters because the matcher sorts by wildcard COUNT and takes the first
+ * hit, and `Array.prototype.sort` is stable — so equal-wildcard rules are
+ * resolved by insertion order. The floor used to be appended LAST, which meant a
+ * broad persisted rule like "POST /api/** -> operator" (2 wildcards, same as
+ * "/api/escrow/**") tied the floor and won, letting an operator-only key move
+ * money. The floor was not immutable at all. Found by the second-opinion review
+ * (bridge #1526) and reproduced before this fix.
+ *
+ * Ordering alone is not relied upon: money WRITES bypass this table entirely and
+ * resolve against the floor directly (see the request hook). This ordering is
+ * the belt to that fix's braces, and it covers the admin namespace too.
  */
-function withMoneyFloor(rules: ScopeRequirement[]): ScopeRequirement[] {
-  const nonMoney = rules.filter((r) => !isMoneyPath(r.pattern));
-  return [...nonMoney, ...MONEY_PATH_FLOOR.map((r) => ({ ...r }))];
+function withNonNegotiable(rules: ScopeRequirement[]): ScopeRequirement[] {
+  const rest = rules.filter(
+    (r) => !isMoneyPath(r.pattern) && !r.pattern.startsWith("/api/admin"),
+  );
+  return [...NON_NEGOTIABLE_RULES.map((r) => ({ ...r })), ...rest];
 }
 
 function refreshScopeCache(): void {
   try {
     const rows = getRepos().governance.findAllEndpointScopes();
     if (rows.length > 0) {
-      scopeCache = withMoneyFloor(
+      scopeCache = withNonNegotiable(
         rows.map((r) => ({
           method: r.method,
           pattern: r.routePattern,
@@ -179,12 +203,12 @@ function refreshScopeCache(): void {
         })),
       );
     } else {
-      scopeCache = withMoneyFloor(DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r })));
+      scopeCache = withNonNegotiable(DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r })));
     }
   } catch {
     // DB not ready — use defaults
     if (scopeCache.length === 0) {
-      scopeCache = withMoneyFloor(DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r })));
+      scopeCache = withNonNegotiable(DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r })));
     }
   }
   lastScopeCacheRefresh = Date.now();
@@ -341,12 +365,25 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // decision — GET /api/admin/keys/wildcard-audit reports which remain.
     if (callerScopes.includes("*")) return;
 
-    // The floor is applied here too: this fallback is reached only if the cache
-    // is somehow empty, and it must not be the one path where a money rule is
-    // missing. (It would still fail closed via the default-deny branch below,
-    // but "denied for the right reason" beats "denied by accident".)
-    const requirements =
-      scopeCache.length > 0 ? scopeCache : withMoneyFloor(DEFAULT_SCOPE_REQUIREMENTS);
+    // MONEY WRITES RESOLVE AGAINST THE FLOOR ALONE.
+    //
+    // Not "the floor plus the table, ordered so the floor wins" — that was the
+    // previous attempt, and it lost: a persisted "POST /api/** -> operator" has
+    // the SAME wildcard count as "/api/escrow/**", so the sort tied and stable
+    // ordering decided it. Ordering is too subtle a thing to rest funds movement
+    // on. Excluding the table outright means no rule anyone can write — in the
+    // DB, in the defaults, broad or narrow — can widen who moves money. The only
+    // way to change that is to change this file.
+    //
+    // Consequence, stated so nobody is surprised: a money write can no longer be
+    // TIGHTENED by a DB rule either. Tightening is a real use case, so if it is
+    // ever wanted, it belongs here as an explicit intersect step, not as a
+    // silent side effect of table precedence.
+    const requirements = isMoneyWrite
+      ? MONEY_PATH_FLOOR
+      : scopeCache.length > 0
+        ? scopeCache
+        : withNonNegotiable(DEFAULT_SCOPE_REQUIREMENTS);
 
     // Find the most-specific matching requirement for this request.
     // We rank by specificity: fewer wildcards = more specific = checked first.
