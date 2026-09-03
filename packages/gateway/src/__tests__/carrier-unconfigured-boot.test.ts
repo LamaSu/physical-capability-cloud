@@ -72,9 +72,20 @@ describe("carrier config gate — production, nothing configured", () => {
     const app = await buildApp("production");
     try {
       const res = await app.inject({ method: "GET", url: "/api/carrier/healthz" });
+      // NOT 500. getEasyPostClient() throws mock_forbidden_in_production here
+      // (easypost-client.ts:385, requireProductionMode derived from NODE_ENV at :850), so an
+      // eager call made healthz die in exactly the case an operator is trying to diagnose.
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      // healthz already reported these; the fix must not take that visibility away.
+      // ok reflects CAPABILITY usability, not merely "the handler ran".
+      expect(body.ok).toBe(false);
+      expect(body.configured).toBe(false);
+      // It must name what is missing, or it is a dead end for whoever is on call.
+      expect(Array.isArray(body.missingConfig)).toBe(true);
+      expect(body.missingConfig.join(" ")).toContain("EASYPOST_API_KEY");
+      // Proves the degradation path actually fired rather than the client happening to build.
+      expect(typeof body.clientError).toBe("string");
+      // Visibility that existed before the fix must survive it.
       expect(body).toHaveProperty("webhookConfigured");
       expect(body).toHaveProperty("commitmentSigningConfigured");
       expect(body).toHaveProperty("durable");
@@ -130,6 +141,10 @@ describe("carrier config gate — non-production is untouched", () => {
     try {
       const res = await app.inject({ method: "GET", url: "/api/carrier/healthz" });
       expect(res.statusCode).toBe(200);
+      // Pins the behaviour carrier.test.ts already asserts (ok: true in test mode), so the
+      // ok-semantics change cannot silently regress the existing suite.
+      expect(res.json().ok).toBe(true);
+      expect(res.json().configured).toBe(true);
       // No carrier_not_configured anywhere in dev/test: the gate is production-only, which is
       // why this change cannot alter the behaviour the other carrier suites assert.
       const evidence = await app.inject({ method: "GET", url: "/api/carrier/shipments/job-1/evidence" });
