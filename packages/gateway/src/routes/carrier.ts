@@ -230,16 +230,54 @@ async function buildCarrierEvidenceEvent(
 }
 
 export async function carrierRoutes(app: FastifyInstance) {
+  // Production configuration requirements. The four checks and their reasons are UNCHANGED:
+  // buying a label or admitting a carrier scan without them means spending money on, or
+  // settling against, evidence nobody can verify.
+  //
+  // WHAT CHANGED: the failure boundary moved from BOOT to REQUEST. server.ts registers
+  // carrierRoutes unconditionally, so throwing here took down the ENTIRE gateway — including
+  // deployments that will never mail anything (printing-only, CNC-only), for which a shipping
+  // vendor's credential is not a sensible dependency. One capability's vendor became a
+  // platform-wide availability dependency, and it reddened master CI because staging boots in
+  // production mode without these set.
+  //
+  // The safety property is preserved exactly — it remains impossible to buy a label or admit a
+  // carrier scan without real credentials. Only the blast radius changed: the mail capability
+  // becomes unavailable and SAYS SO, instead of the process refusing to start. This is the same
+  // shape the webhook route below already used (503 + a named, actionable reason).
+  const missingConfig: string[] = [];
   if (process.env.NODE_ENV === "production") {
-    const missing: string[] = [];
-    if (!process.env.EASYPOST_API_KEY) missing.push("EASYPOST_API_KEY (mock labels are fabricated evidence)");
-    if (!process.env.EASYPOST_WEBHOOK_SECRET) missing.push("EASYPOST_WEBHOOK_SECRET (spending with no functioning proof webhook)");
-    if (!getActiveSigningKey()) missing.push("PCC_AGENT_CARD_SIGNING_KEY (an unsigned commitment is a hash anyone can recompute, not an attestation)");
-    if (!getCarrierShipmentStore().isDurable) missing.push("durable carrier store (in-memory commitments vanish on restart; re-purchase + unmatched webhooks)");
-    if (missing.length) {
-      throw new Error(`carrier route refuses production boot; missing: ${missing.join("; ")}`);
+    if (!process.env.EASYPOST_API_KEY) missingConfig.push("EASYPOST_API_KEY (mock labels are fabricated evidence)");
+    if (!process.env.EASYPOST_WEBHOOK_SECRET) missingConfig.push("EASYPOST_WEBHOOK_SECRET (spending with no functioning proof webhook)");
+    if (!getActiveSigningKey()) missingConfig.push("PCC_AGENT_CARD_SIGNING_KEY (an unsigned commitment is a hash anyone can recompute, not an attestation)");
+    if (!getCarrierShipmentStore().isDurable) missingConfig.push("durable carrier store (in-memory commitments vanish on restart; re-purchase + unmatched webhooks)");
+    if (missingConfig.length) {
+      app.log.error(
+        { missing: missingConfig },
+        "carrier capability DISABLED: production config incomplete — carrier routes will 503 until it is set. The rest of the gateway is unaffected.",
+      );
     }
   }
+  const carrierConfigured = missingConfig.length === 0;
+
+  /**
+   * Fail closed at request time for anything that can spend money or admit evidence.
+   * Returns true if the request was rejected, so a route can open with:
+   *   `if (rejectIfUnconfigured(reply)) return;`
+   *
+   * Discloses only env-var NAMES, which /api/carrier/healthz already reports publicly
+   * (webhookConfigured / commitmentSigningConfigured / durable) — no new disclosure.
+   */
+  const rejectIfUnconfigured = (reply: FastifyReply): boolean => {
+    if (carrierConfigured) return false;
+    reply.code(503).send({
+      error: "carrier_not_configured",
+      message:
+        "The carrier (mail) capability is not configured on this deployment. Other capabilities are unaffected.",
+      missing: missingConfig,
+    });
+    return true;
+  };
 
   // Scoped to this plugin's encapsulation context only (Fastify's default
   // per-register() isolation). Captures the exact request BYTES so the
@@ -260,17 +298,35 @@ export async function carrierRoutes(app: FastifyInstance) {
 
   app.get("/api/carrier/healthz", async () => {
     const store = getCarrierShipmentStore();
-    const client = getEasyPostClient();
+    // getEasyPostClient() THROWS mock_forbidden_in_production when NODE_ENV=production and
+    // EASYPOST_API_KEY is unset (easypost-client.ts:385, requireProductionMode derived from
+    // NODE_ENV at :850) — i.e. in exactly the unconfigured-production case this endpoint most
+    // needs to describe. Eagerly constructing it here made healthz 500 precisely when an
+    // operator is trying to find out what is wrong. Degrade instead: report the client as
+    // unavailable and still answer with everything else.
+    let client: ReturnType<typeof getEasyPostClient> | null = null;
+    let clientError: string | null = null;
+    try {
+      client = getEasyPostClient();
+    } catch (err) {
+      clientError = err instanceof Error ? err.message : String(err);
+    }
     return {
-      ok: true,
+      // `ok` reflects whether the carrier capability is actually usable, not merely whether
+      // this handler ran. An operator polling healthz should not read a green ok while the
+      // capability is disabled.
+      ok: carrierConfigured && !clientError,
       service: "carrier (EasyPost)",
-      mock: client.isMock,
-      requireProductionMode: client.requireProductionMode,
-      webhookConfigured: client.hasWebhookSecret,
+      configured: carrierConfigured,
+      missingConfig,
+      clientError,
+      mock: client?.isMock ?? null,
+      requireProductionMode: client?.requireProductionMode ?? null,
+      webhookConfigured: client?.hasWebhookSecret ?? false,
       commitmentSigningConfigured: !!getActiveSigningKey(),
       durable: store.isDurable,
-      maxRateUsd: client.maxRateUsd,
-      maxWeightOz: client.maxWeightOz,
+      maxRateUsd: client?.maxRateUsd ?? null,
+      maxWeightOz: client?.maxWeightOz ?? null,
       shipments: store.size(),
       pendingFinalize: store.listPendingFinalize().length,
       needsReconciliation: store.listNeedsReconciliation().length,
@@ -393,6 +449,8 @@ export async function carrierRoutes(app: FastifyInstance) {
   app.post<{ Body: CreateShipmentBody }>("/api/carrier/shipments", async (req, reply) => {
     const caller = callerId(req);
     if (!caller) return reply.code(401).send({ error: "authentication_required" });
+    // Gated AFTER auth: this route spends money, and an anonymous caller learns nothing.
+    if (rejectIfUnconfigured(reply)) return;
 
     const b = req.body ?? {};
     const errors: string[] = [];
@@ -627,6 +685,10 @@ export async function carrierRoutes(app: FastifyInstance) {
   app.get<{ Params: { jobId: string } }>("/api/carrier/shipments/:jobId/evidence", async (req, reply) => {
     const caller = callerId(req);
     if (!caller) return reply.code(401).send({ error: "authentication_required" });
+    // Evidence plane: an unconfigured deployment must say so rather than return an empty
+    // event list, which a kernel could mistake for "the carrier leg legitimately has no
+    // events yet" and fold into a bundle. Explicit 503 beats a silent absence here.
+    if (rejectIfUnconfigured(reply)) return;
     const record = getCarrierShipmentStore().getByJobId(req.params.jobId);
     if (!record || record.ownerId.toLowerCase() !== caller.toLowerCase()) {
       return reply.code(404).send({ error: "not_found" });
@@ -635,6 +697,11 @@ export async function carrierRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/carrier/webhook/easypost", async (req, reply) => {
+    // Admits evidence into the settlement path. No bearer auth here by design (HMAC is the
+    // authentication), so the gate goes first. Broader than the webhook-secret check below:
+    // without the signing key a commitment is unattested, and without a durable store the
+    // commitment it must match may have vanished on restart.
+    if (rejectIfUnconfigured(reply)) return;
     const client = getEasyPostClient();
     if (!client.hasWebhookSecret) {
       return reply.code(503).send({
