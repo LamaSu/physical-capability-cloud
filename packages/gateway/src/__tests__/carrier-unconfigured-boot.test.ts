@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { carrierRoutes } from "../routes/carrier.js";
-import { _resetCarrierShipmentStoreForTests, initCarrierShipmentStore } from "../services/carrier-shipment-store.js";
+import { _resetCarrierShipmentStoreForTests, initCarrierShipmentStore, getCarrierShipmentStore } from "../services/carrier-shipment-store.js";
 import { initStore, closeStore } from "../db.js";
 
 const CARRIER_ENV = ["EASYPOST_API_KEY", "EASYPOST_WEBHOOK_SECRET"] as const;
@@ -149,6 +149,64 @@ describe("carrier config gate — non-production is untouched", () => {
       // why this change cannot alter the behaviour the other carrier suites assert.
       const evidence = await app.inject({ method: "GET", url: "/api/carrier/shipments/job-1/evidence" });
       expect(evidence.statusCode).not.toBe(503);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * sol cross-family review of #316 (bulletin #1548), finding 1: the config guard was placed on
+ * the /:jobId/evidence seam but NOT on the plain /:jobId detail route, whose toShipmentDTO
+ * carries the SAME commitment + events. An authenticated owner could pull spec-shaped carrier
+ * evidence from an unconfigured deployment holding prior records, and a kernel could fold it into
+ * a signed bundle — bypassing the 503 the evidence route returns. These tests are AUTHENTICATED
+ * and run against a SEEDED record (addressing the same review's finding 4: the pre-existing
+ * unconfigured test is unauthenticated, so it would still pass if the guard were deleted). With
+ * the owner matching the record, the detail route would return 200 with the full DTO if the guard
+ * were removed — so a 503 here proves the guard specifically, not the owner check.
+ */
+describe("carrier config gate — evidence egress is guarded on EVERY route (sol #316 review, finding 1)", () => {
+  const OWNER = "0xownerguardtest";
+  const KERNEL = "kernel-guard-test";
+  const JOB = "job-guard-test";
+
+  // Production gate active AND test-auth wired (the x-test-operator onRequest hook carrier.test.ts
+  // uses), so the guard is exercised for a real authenticated owner rather than short-circuited at
+  // the 401. NODE_ENV is restored by the file-level afterEach.
+  async function buildAuthedProdApp(): Promise<FastifyInstance> {
+    process.env.NODE_ENV = "production";
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      const h = req.headers["x-test-operator"];
+      if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+    });
+    await app.register(carrierRoutes);
+    await app.ready();
+    return app;
+  }
+
+  it("503s GET /:jobId for an authed owner WITH a seeded record — commitment+events must not egress unconfigured", async () => {
+    const app = await buildAuthedProdApp();
+    try {
+      // sol's exact scenario: a durable store still holds a prior record after the key is gone.
+      getCarrierShipmentStore().reserve({ jobId: JOB, kernelId: KERNEL, ownerId: OWNER, requestFingerprint: "seeded-for-guard-test" });
+      const res = await app.inject({ method: "GET", url: `/api/carrier/shipments/${JOB}`, headers: { "x-test-operator": OWNER } });
+      expect(res.statusCode).toBe(503); // 200 (full DTO) if the guard were absent — the owner matches
+      expect(res.json().error).toBe("carrier_not_configured");
+      expect(Array.isArray(res.json().missing)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("503s GET /:jobId/evidence identically — regression lock on the route that WAS guarded", async () => {
+    const app = await buildAuthedProdApp();
+    try {
+      getCarrierShipmentStore().reserve({ jobId: JOB, kernelId: KERNEL, ownerId: OWNER, requestFingerprint: "seeded-for-guard-test" });
+      const res = await app.inject({ method: "GET", url: `/api/carrier/shipments/${JOB}/evidence`, headers: { "x-test-operator": OWNER } });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toBe("carrier_not_configured");
     } finally {
       await app.close();
     }

@@ -34,8 +34,9 @@
  * and — when a signing key is configured — its gateway signature verifies.
  * A failed gate throws (the provider retries); it never emits.
  *
- * PRODUCTION BOOT FAILS CLOSED without: an EasyPost key, a webhook secret,
- * the gateway signing key, and durable storage.
+ * PRODUCTION FAILS CLOSED AT THE REQUEST (not at boot, since #316) without: an EasyPost
+ * key, a webhook secret, the gateway signing key, and durable storage — the mail capability
+ * goes unavailable and says so (503) while the rest of the gateway boots and serves normally.
  *
  * Provider: EasyPost. No SDK dependency.
  */
@@ -668,6 +669,13 @@ export async function carrierRoutes(app: FastifyInstance) {
   app.get<{ Params: { jobId: string } }>("/api/carrier/shipments/:jobId", async (req, reply) => {
     const caller = callerId(req);
     if (!caller) return reply.code(401).send({ error: "authentication_required" });
+    // Evidence plane: toShipmentDTO carries commitment + events — the SAME spec-shaped
+    // material the /:jobId/evidence route guards below. Without this guard, an authenticated
+    // owner could pull carrier evidence from an unconfigured deployment (a durable store that
+    // still holds prior records after a key is removed) and a kernel could fold it into a
+    // signed bundle, bypassing the 503 the evidence seam returns. The config guard must cover
+    // EVERY route that egresses this evidence, not only the obvious one.
+    if (rejectIfUnconfigured(reply)) return;
     const record = getCarrierShipmentStore().getByJobId(req.params.jobId);
     // Same response for missing and not-yours: no existence oracle.
     if (!record || record.ownerId.toLowerCase() !== caller.toLowerCase()) {
