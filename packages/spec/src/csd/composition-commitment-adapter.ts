@@ -48,6 +48,35 @@ export interface MappingOptions {
   goal?: string;
 }
 
+/**
+ * Canonicalize a planner's free-text capabilityType hint into the ID alphabet the commitment
+ * scheme requires (1–128 printable ASCII, no spaces).
+ *
+ * Unmatched legs inherit the LLM planner's free-text hint verbatim (live-verified on prod
+ * 2026-08-27: "legal notarization", with a space, made even the buyer's provider-agnostic
+ * contract root refuse with INVALID_PLAN — fail-closed, but the buyer's agreement should
+ * survive an unmatched leg whose only sin is a spaced label).
+ *
+ * A value that already satisfies the ID alphabet is returned BYTE-IDENTICAL — registry-issued
+ * types (and every pinned corpus vector) pass through untouched, so no existing root changes.
+ * An invalid value is repaired deterministically: runs of characters outside \x21-\x7E become
+ * one "-", edge dashes are trimmed, and the result is truncated to 128. If nothing printable
+ * survives, the ORIGINAL value is returned so validation still refuses it by name — the repair
+ * never fabricates a type out of thin air.
+ */
+export function slugifyCapabilityTypeHint(raw: string): string {
+  if (typeof raw !== "string") return raw;
+  if (/^[\x21-\x7E]{1,128}$/.test(raw)) return raw;
+  // Repair ONLY the invalid-character class. Length is never repaired: truncating an overlong
+  // label could silently collide two distinct labels, so an overlong result falls through to
+  // the original value and validation refuses it by name.
+  const slug = raw
+    .replace(/[^\x21-\x7E]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return /^[\x21-\x7E]{1,128}$/.test(slug) ? slug : raw;
+}
+
 export function matchedDagFromCapabilityNodes(
   requestId: string,
   nodes: readonly CapabilityNode[],
@@ -58,7 +87,7 @@ export function matchedDagFromCapabilityNodes(
     const matched = n.matchStatus === "matched";
     const node: MatchedNode = {
       nodeId: n.id,
-      capabilityType: n.capabilityType,
+      capabilityType: slugifyCapabilityTypeHint(n.capabilityType),
       matchStatus: matched ? "matched" : "none",
       evidenceRequirements: (n.evidenceRequirements ?? []).map((id) => ({ requirementId: id, evidenceTypeId: id, tier: 0 })),
     };
@@ -108,10 +137,16 @@ export function commitmentReportForRequest(
     contractRootError = err instanceof Error ? err.message : String(err);
   }
   const matchedCount = dag.nodes.filter((n) => n.matchStatus === "matched").length;
+  // blockedOn is a PRECISE signal: set only when the missing digest binding is the ONLY thing
+  // refusing the commitment. A digest gap sitting alongside any other violation (malformed
+  // currency, duplicate node, …) must NOT be waved through a consumer's "just wait for the
+  // digest branch" degrade path — bridge #1520 hit exactly that against the old `.some()` and
+  // had to distrust this field; `.every()` restores it as trustworthy.
   const blockedOn =
     !commitment.committable &&
     commitment.unmatchedNodes.length === 0 &&
-    commitment.violations.some((v) => v.includes("matchedCapabilityDigest"))
+    commitment.violations.length > 0 &&
+    commitment.violations.every((v) => v.includes("matchedCapabilityDigest"))
       ? DIGEST_BLOCK
       : undefined;
   return {
