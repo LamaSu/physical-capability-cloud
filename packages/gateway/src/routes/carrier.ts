@@ -197,8 +197,16 @@ async function buildCarrierEvidenceEvent(
   const commitmentSignatureVerified = await verifyCommitmentSignature(c, gatewayCommitmentKeyResolver);
   if (!identityOk) throw new Error("evidence_gate: commitment identity does not equal the stored purchase");
   if (!commitmentHashValid) throw new Error("evidence_gate: commitment hash does not recompute");
-  if (getActiveSigningKey() && !commitmentSignatureVerified) {
-    throw new Error("evidence_gate: gateway signature configured but does not verify");
+  // Signature enforcement must be UNCONDITIONAL under production classification (sol #316
+  // re-review, row 3): the old `getActiveSigningKey() && !verified` shape re-consulted the
+  // live key AT ENFORCEMENT TIME, so a key vanishing between the request gate and this line
+  // SUPPRESSED the failure and admitted unsigned evidence — a TOCTOU on the crown-jewel
+  // path. Now production requires a verified signature no matter what the key lookup says
+  // right now; a mid-request key loss makes this throw, the provider retries, and the
+  // retry meets the request gate's 503. Dev/test keeps enforce-when-key-configured.
+  const signatureRequired = isCarrierProductionEnv() || !!getActiveSigningKey();
+  if (signatureRequired && !commitmentSignatureVerified) {
+    throw new Error("evidence_gate: commitment signature required but does not verify");
   }
 
   const providerMode = evt.providerMode ?? record.providerMode ?? "mock";
@@ -308,28 +316,45 @@ export async function carrierRoutes(app: FastifyInstance) {
   };
 
   /**
-   * STRUCTURAL gate — one preHandler for the whole plugin, so completeness is a
-   * property of the structure, not of per-route discipline (sol #316 review, systemic:
-   * finding 1 was exactly a per-handler guard omission, on the route next to a guarded one).
+   * STRUCTURAL gate — hooks for the whole plugin, so completeness is a property of the
+   * structure, not of per-route discipline (sol #316 review, systemic: finding 1 was
+   * exactly a per-handler guard omission, on the route next to a guarded one).
    *
    * Fail-closed by DEFAULT: a route registered in this plugin with no declaration gets
    * bearer auth + the full config gate. Opting out must be written into the route
    * (`config: { carrierGate: ... }`) where a reviewer can see it:
-   *   - "open"    → no gate. ONLY for routes that egress no evidence and spend nothing
-   *                 (healthz — and it still reports the missing config, behind apiGate).
+   *   - "open"    → no config gate. ONLY for routes that egress no evidence and spend
+   *                 nothing (healthz — which self-redacts for anonymous production callers).
    *   - "webhook" → public by design (HMAC is its auth), so the gate runs REDACTED:
    *                 an anonymous caller learns the capability is unconfigured, not which
    *                 of the four requirements is missing (finding 5).
-   *   - default   → 401 for anonymous callers FIRST (an anonymous caller learns nothing,
-   *                 not even the redacted posture), then the detailed 503.
+   *   - default   → the config gate, then bearer auth.
+   *
+   * TWO PHASES, deliberately (sol #316 re-review, S1): `preHandler` alone runs AFTER
+   * onRequest/parsing/preValidation, so anything with earlier side effects would precede
+   * a preHandler-only gate. The onRequest hook below is the EARLIEST extension point —
+   * an unconfigured deployment rejects before the body is even parsed, and a future
+   * route (or hook) with early-phase effects is still behind the gate. The preHandler
+   * then adds authentication for default routes and recomputes the gate, narrowing the
+   * in-request window.
+   *
+   * Detail redaction at onRequest keys off whether an EARLIER hook (apiGate at the
+   * server root, or a test auth hook) already authenticated the caller: authenticated
+   * callers get the actionable missing[] list, anonymous callers get the bare 503.
    */
-  app.addHook("preHandler", async (req, reply) => {
-    const mode = (req.routeOptions?.config as { carrierGate?: "open" | "webhook" } | undefined)?.carrierGate;
+  const gateModeOf = (req: FastifyRequest): "open" | "webhook" | undefined =>
+    (req.routeOptions?.config as { carrierGate?: "open" | "webhook" } | undefined)?.carrierGate;
+
+  app.addHook("onRequest", async (req, reply) => {
+    const mode = gateModeOf(req);
     if (mode === "open") return;
-    if (mode === "webhook") {
-      if (rejectIfUnconfigured(reply, { redact: true })) return reply;
-      return;
-    }
+    const redact = mode === "webhook" || !callerId(req);
+    if (rejectIfUnconfigured(reply, { redact })) return reply;
+  });
+
+  app.addHook("preHandler", async (req, reply) => {
+    const mode = gateModeOf(req);
+    if (mode === "open" || mode === "webhook") return;
     const caller = callerId(req);
     if (!caller) {
       reply.code(401).send({ error: "authentication_required" });
@@ -356,13 +381,26 @@ export async function carrierRoutes(app: FastifyInstance) {
   );
 
   // carrierGate "open": egresses no evidence and spends nothing — and it is the surface
-  // that must stay up to DESCRIBE an unconfigured deployment (behind apiGate at the server).
-  app.get("/api/carrier/healthz", { config: { carrierGate: "open" } }, async () => {
+  // that must stay up to DESCRIBE an unconfigured deployment. In the real gateway it sits
+  // behind apiGate, but the plugin must not DEPEND on that wrapper for confidentiality
+  // (sol #316 re-review, H1): under production classification an anonymous caller gets a
+  // redacted summary; the detailed posture (missing config, counts, ledger stats) is for
+  // authenticated callers.
+  app.get("/api/carrier/healthz", { config: { carrierGate: "open" } }, async (req) => {
     const store = getCarrierShipmentStore();
     // Fresh, not a boot snapshot: healthz must describe the deployment as it is NOW
     // (a signing key that vanished after boot shows up here, and in the 503s).
     const missingConfig = computeMissingConfig();
     const carrierConfigured = missingConfig.length === 0;
+    if (isCarrierProductionEnv() && !callerId(req)) {
+      return {
+        ok: carrierConfigured,
+        service: "carrier (EasyPost)",
+        configured: carrierConfigured,
+        redacted: true,
+        ts: new Date().toISOString(),
+      };
+    }
     // getEasyPostClient() THROWS mock_forbidden_in_production when NODE_ENV=production and
     // EASYPOST_API_KEY is unset (easypost-client.ts:385, requireProductionMode derived from
     // NODE_ENV at :850) — i.e. in exactly the unconfigured-production case this endpoint most

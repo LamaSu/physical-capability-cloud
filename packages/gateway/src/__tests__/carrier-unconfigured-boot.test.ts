@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { carrierRoutes } from "../routes/carrier.js";
 import {
@@ -24,7 +24,7 @@ import {
   getCarrierShipmentStore,
   type SqliteDatabaseLike,
 } from "../services/carrier-shipment-store.js";
-import { EasyPostClient, _setEasyPostClientForTests } from "../services/easypost-client.js";
+import { EasyPostClient, _setEasyPostClientForTests, getEasyPostClient } from "../services/easypost-client.js";
 import { initSigningKey, _resetForTests as _resetSigningKeyForTests } from "../signing-key.js";
 import { initStore, closeStore, getStore } from "../db.js";
 
@@ -118,9 +118,11 @@ describe("carrier config gate — production, nothing configured", () => {
   });
 
   it("keeps /api/carrier/healthz serving, so ops can see WHAT is unconfigured", async () => {
-    const app = await buildApp("production");
+    // AUTHENTICATED: the detailed posture is for operators. Anonymous production callers
+    // get the redacted summary (asserted in the next test — sol #316 re-review, H1).
+    const app = await buildAuthedApp("production");
     try {
-      const res = await app.inject({ method: "GET", url: "/api/carrier/healthz" });
+      const res = await app.inject({ method: "GET", url: "/api/carrier/healthz", headers: { "x-test-operator": "0xops" } });
       // NOT 500. getEasyPostClient() throws mock_forbidden_in_production here
       // (easypost-client.ts:385, requireProductionMode derived from NODE_ENV at :850), so an
       // eager call made healthz die in exactly the case an operator is trying to diagnose.
@@ -138,6 +140,24 @@ describe("carrier config gate — production, nothing configured", () => {
       expect(body).toHaveProperty("webhookConfigured");
       expect(body).toHaveProperty("commitmentSigningConfigured");
       expect(body).toHaveProperty("durable");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("REDACTS healthz for ANONYMOUS production callers — the plugin must not depend on apiGate for confidentiality (sol #316 re-review, H1)", async () => {
+    const app = await buildApp("production"); // no auth hook at all — the exported-plugin-alone shape
+    try {
+      const res = await app.inject({ method: "GET", url: "/api/carrier/healthz" });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.redacted).toBe(true);
+      expect(body.configured).toBe(false);
+      // None of the detailed posture: missing list, client error, counts, ledger stats.
+      expect(body).not.toHaveProperty("missingConfig");
+      expect(body).not.toHaveProperty("clientError");
+      expect(body).not.toHaveProperty("shipments");
+      expect(body).not.toHaveProperty("unmatchedLedger");
     } finally {
       await app.close();
     }
@@ -456,5 +476,118 @@ describe("carrier config gate — the MONEY guard is proven, not implied (sol #3
     } finally {
       await app.close();
     }
+  });
+});
+
+/**
+ * sol #316 RE-review (round 2) closures:
+ *  - S1: preHandler alone runs after parsing, so the gate now ALSO runs at onRequest —
+ *    an unconfigured deployment rejects before a single body byte is parsed.
+ *  - Finding 4 remainder: a VALIDLY SIGNED webhook must still be refused when a
+ *    non-secret requirement (the signing key) is missing, and must leave NO trace —
+ *    no store rows, no unmatched ledger entry, no claimed event id.
+ *  - Row 3b: the cached provider client must track live configuration — a rotated
+ *    webhook secret retires the old one at the very next request.
+ */
+describe("carrier config gate — whole-lifecycle + mutation-proof (sol #316 re-review)", () => {
+  it("rejects BEFORE parsing: malformed JSON to the webhook on an unconfigured deployment is a 503, not a parse 400", async () => {
+    const app = await buildApp("production");
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/carrier/webhook/easypost",
+        payload: "{this is not json",
+        headers: { "content-type": "application/json", "x-hmac-signature": "hmac-sha256-hex=deadbeef" },
+      });
+      // The onRequest gate fires before the content-type parser ever sees the body.
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toBe("carrier_not_configured");
+      expect(res.json()).not.toHaveProperty("missing");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a VALIDLY SIGNED webhook is refused while the signing key is absent — and leaves no trace it can be blamed for later", async () => {
+    // Three of four configured FOR REAL: provider key + webhook secret in env, durable
+    // store attached. The signing key PEM is in env but deliberately NOT loaded —
+    // getActiveSigningKey() is null, which is the live state the gate reads.
+    const SECRET = "whsec_mutation_proof";
+    process.env.EASYPOST_API_KEY = "EZTK_mutation_proof";
+    process.env.EASYPOST_WEBHOOK_SECRET = SECRET;
+    const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    process.env.PCC_AGENT_CARD_SIGNING_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const raw = (getStore().db as unknown as { $client?: SqliteDatabaseLike }).$client;
+    if (!raw) throw new Error("test rig: no raw SQLite handle on the store");
+    _resetCarrierShipmentStoreForTests();
+    initCarrierShipmentStore({ sqlite: raw, strictHydration: true });
+    // The shared :memory: handle carries rows hydrated from earlier tests in this file, so
+    // "no trace" is asserted RELATIVE to the state before the refused webhook.
+    const store = getCarrierShipmentStore();
+    const sizeBefore = store.size();
+    const statsBefore = store.unmatchedStats();
+
+    const app = await buildApp("production");
+    try {
+      const body = JSON.stringify({
+        id: "evt_mutation_proof_1",
+        description: "tracker.updated",
+        result: {
+          id: "trk_mutation_proof",
+          tracking_code: "EZMUTPROOF1",
+          status: "in_transit",
+          carrier: "USPS",
+          updated_at: new Date().toISOString(),
+          mode: "production",
+        },
+      });
+      const sig = "hmac-sha256-hex=" + createHmac("sha256", SECRET).update(Buffer.from(body)).digest("hex");
+      const post = () =>
+        app.inject({
+          method: "POST",
+          url: "/api/carrier/webhook/easypost",
+          payload: body,
+          headers: { "content-type": "application/json", "x-hmac-signature": sig },
+        });
+
+      const refused = await post();
+      expect(refused.statusCode).toBe(503);
+      expect(refused.json().error).toBe("carrier_not_configured");
+      expect(refused.json()).not.toHaveProperty("missing"); // redacted: the webhook is public
+      // NO NEW trace: no shipment state, no unmatched ledger entry.
+      expect(store.size()).toBe(sizeBefore);
+      expect(store.unmatchedStats()).toEqual(statsBefore);
+
+      // Complete the configuration (load the key) and replay the IDENTICAL event: it must
+      // now be PROCESSED (ledgered as pending for this unknown code). If the refused
+      // attempt had claimed the event id as seen, this replay would be swallowed —
+      // proving the 503 path performed zero writes.
+      await initSigningKey();
+      const accepted = await post();
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json().pending).toBe(true);
+      expect(store.unmatchedStats().count).toBe(statsBefore.count + 1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("the cached provider client tracks LIVE configuration — a rotated webhook secret retires the old one (sol re-review, row 3b)", async () => {
+    process.env.EASYPOST_API_KEY = "EZTK_rotation";
+    process.env.EASYPOST_WEBHOOK_SECRET = "secret_generation_A";
+    const raw = Buffer.from("payload-bytes");
+    const sigA = "hmac-sha256-hex=" + createHmac("sha256", "secret_generation_A").update(raw).digest("hex");
+    const clientA = getEasyPostClient();
+    expect(clientA.verifyWebhookSignature(raw, sigA)).toBe(true);
+
+    // Rotate the secret in the environment. The next getEasyPostClient() must observe it —
+    // the old cached client kept verifying against the RETIRED secret while the request
+    // gate read the new environment (config split-brain).
+    process.env.EASYPOST_WEBHOOK_SECRET = "secret_generation_B";
+    const clientB = getEasyPostClient();
+    expect(clientB).not.toBe(clientA);
+    expect(clientB.verifyWebhookSignature(raw, sigA)).toBe(false); // retired secret refused
+    const sigB = "hmac-sha256-hex=" + createHmac("sha256", "secret_generation_B").update(raw).digest("hex");
+    expect(clientB.verifyWebhookSignature(raw, sigB)).toBe(true);
   });
 });

@@ -828,8 +828,26 @@ function toTrackingLocation(loc: unknown): TrackingLocation | null {
 }
 
 let singleton: EasyPostClient | undefined;
+let singletonConfigGen: string | undefined;
 let testOverride: EasyPostClient | undefined;
 let defaultSigner: CommitmentSigner | undefined;
+
+/**
+ * The configuration "generation" the singleton was built from. If the live environment no
+ * longer matches, the cached client is stale and must be rebuilt (sol #316 re-review, row 3:
+ * a client built before a secret rotation kept verifying webhooks against the RETIRED
+ * secret, and one built in permissive mode stayed permissive, while the request gate read
+ * the NEW environment — a config split-brain between the gate and the enforcer).
+ */
+function currentClientConfigGen(): string {
+  return [
+    process.env.EASYPOST_API_KEY ?? "",
+    process.env.EASYPOST_WEBHOOK_SECRET ?? "",
+    process.env.EASYPOST_MAX_RATE_USD ?? "",
+    process.env.EASYPOST_MAX_WEIGHT_OZ ?? "",
+    String(isCarrierProductionEnv()),
+  ].join("\u0000");
+}
 
 /**
  * Fail-closed environment classification for the carrier surface (sol #316 review, finding 2).
@@ -856,6 +874,8 @@ export function setDefaultCommitmentSigner(signer: CommitmentSigner | undefined)
 
 export function getEasyPostClient(): EasyPostClient {
   if (testOverride) return testOverride;
+  const gen = currentClientConfigGen();
+  if (singleton && singletonConfigGen !== gen) singleton = undefined; // config rotated → stale client
   if (!singleton) {
     const maxRate = Number(process.env.EASYPOST_MAX_RATE_USD);
     const maxWeight = Number(process.env.EASYPOST_MAX_WEIGHT_OZ);
@@ -867,6 +887,7 @@ export function getEasyPostClient(): EasyPostClient {
       requireProductionMode: isCarrierProductionEnv(),
       signer: defaultSigner,
     });
+    singletonConfigGen = gen;
   }
   return singleton;
 }
