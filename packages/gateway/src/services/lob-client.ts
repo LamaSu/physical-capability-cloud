@@ -119,6 +119,8 @@ export interface CreateLetterResult {
   commitment: LetterCommitment;
   /** True in mock mode (no LOB_API_KEY). Flows to EvidenceEvent.source.simulated. */
   simulated: boolean;
+  /** computeLetterRequestDigest(params) — persisted so an idempotent reuse can prove the request was IDENTICAL (sol R1). */
+  requestDigest: string;
 }
 
 /** A normalized Lob letter event, extracted from an inbound Event webhook body. */
@@ -159,6 +161,34 @@ function canonicalAddressForHash(a: LobAddress): string {
 
 function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
+}
+
+/**
+ * Canonical digest of the COMPLETE normalized letter request (sol lob review, R1).
+ *
+ * The Idempotency-Key is the jobId, so Lob may answer a retry with the ORIGINAL
+ * letter even if the retry's body differs — and a commitment built from the NEW
+ * body over the OLD letter id would be an evidence-integrity failure (the
+ * commitment would describe a document/destination the physical letter does not
+ * have). This digest is persisted with the record; reuse of an existing record
+ * is allowed ONLY when the digests match, otherwise the route refuses with 409
+ * idempotency_conflict. Free-text and address fields are hashed individually
+ * before the fixed-order join, so no field can smuggle a delimiter.
+ */
+export function computeLetterRequestDigest(params: CreateLetterParams): string {
+  return sha256Hex(
+    [
+      params.jobId,
+      sha256Hex(canonicalAddressForHash(params.to)),
+      sha256Hex(canonicalAddressForHash(params.from)),
+      sha256Hex(params.file),
+      String(params.color ?? false),
+      String(params.doubleSided ?? false),
+      sha256Hex(params.description ?? ""),
+      params.useType ?? "operational",
+      params.mailType ?? "",
+    ].join("|"),
+  );
 }
 
 function buildCommitment(params: CreateLetterParams, lobLetterId: string): LetterCommitment {
@@ -280,6 +310,7 @@ export class LobClient {
       url: letter.url ?? "",
       commitment: buildCommitment(params, letter.id),
       simulated: false,
+      requestDigest: computeLetterRequestDigest(params),
     };
   }
 
@@ -298,6 +329,7 @@ export class LobClient {
       url: `https://lob-mock.invalid/letters/${lobLetterId}.pdf`,
       commitment: buildCommitment(params, lobLetterId),
       simulated: true,
+      requestDigest: computeLetterRequestDigest(params),
     };
   }
 
@@ -440,7 +472,7 @@ export function getLobClient(): LobClient {
   // row 3b): a rotated key or webhook secret must retire the cached client at the
   // next call — a stale singleton would keep verifying webhooks against the RETIRED
   // secret while request gates read the new environment.
-  const gen = `${process.env.LOB_API_KEY ?? ""} ${process.env.LOB_WEBHOOK_SECRET ?? ""}`;
+  const gen = `${process.env.LOB_API_KEY ?? ""}\u0000${process.env.LOB_WEBHOOK_SECRET ?? ""}`;
   if (singleton && singletonConfigGen !== gen) singleton = undefined;
   if (!singleton) {
     singleton = new LobClient({

@@ -52,6 +52,8 @@ export interface LobLetterRecord {
   expectedDeliveryDate: string | null;
   url: string;
   commitment: LetterCommitment;
+  /** Canonical digest of the normalized create request (sol R1): idempotent reuse is legal only when a retry's digest MATCHES — a changed body over the same jobId is a 409, never a silent reuse. */
+  requestDigest: string;
   /** True when the letter was fabricated by the client's mock mode (no LOB_API_KEY) — carries through to EvidenceEvent.source.simulated. */
   simulated: boolean;
   status: LobLetterStatus;
@@ -109,6 +111,7 @@ export class LobLetterStore {
     expectedDeliveryDate: string | null;
     url: string;
     commitment: LetterCommitment;
+    requestDigest: string;
     simulated: boolean;
   }): LobLetterRecord {
     const ts = this.now().toISOString();
@@ -136,6 +139,20 @@ export class LobLetterStore {
 
   size(): number {
     return this.byJobId.size;
+  }
+
+  /**
+   * Always false for this Map-backed implementation — and that is now LOAD-BEARING:
+   * routes/lob.ts lists a durable letter store as a PRODUCTION requirement (sol lob
+   * review R2/R3: on a real-money endpoint, in-memory idempotency plus Lob's 24-hour
+   * Idempotency-Key window is not "one job, one charge" — a post-window retry after a
+   * restart double-charges, and lost records orphan paid letters' webhooks). Until a
+   * durable implementation exists (SQLite-backed, reservation-before-charge, same
+   * pattern as carrier-shipment-store), production Lob stays 503 BY CONSTRUCTION
+   * rather than operating on memory.
+   */
+  get isDurable(): boolean {
+    return false;
   }
 
   /**

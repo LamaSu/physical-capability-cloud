@@ -465,3 +465,65 @@ describe("GET /api/lob/letters/:jobId — owner-only, no existence oracle", () =
     }
   });
 });
+
+/**
+ * sol lob review R1 (CRITICAL): the Idempotency-Key is the jobId, so Lob answers a
+ * changed-body retry with the ORIGINAL letter — and silently returning the existing
+ * record for a DIFFERENT body would hand out a commitment describing a document/
+ * destination the physical letter does not have. Reuse requires an IDENTICAL request.
+ */
+describe("POST /api/lob/letters — idempotent reuse requires an IDENTICAL request (sol R1)", () => {
+  it("409s idempotency_conflict when the same jobId arrives with a DIFFERENT body", async () => {
+    const app = await buildApp();
+    try {
+      const first = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      expect(first.statusCode).toBe(201);
+      const changed = await app.inject({
+        method: "POST",
+        url: "/api/lob/letters",
+        payload: { ...validBody, file: "<html><body>A DIFFERENT document</body></html>" },
+        headers: asOwner,
+      });
+      expect(changed.statusCode).toBe(409);
+      expect(changed.json().error).toBe("idempotency_conflict");
+      // No second letter, no mutated record.
+      expect(getLobLetterStore().size()).toBe(1);
+      expect(getLobLetterStore().getByJobId("job-print-mail-1")!.lobLetterId).toBe(first.json().lobLetterId);
+
+      // A changed DESTINATION is just as much a conflict as a changed document.
+      const changedDest = await app.inject({
+        method: "POST",
+        url: "/api/lob/letters",
+        payload: { ...validBody, to: { ...validBody.to, addressLine1: "999 Elsewhere Ave" } },
+        headers: asOwner,
+      });
+      expect(changedDest.statusCode).toBe(409);
+      expect(changedDest.json().error).toBe("idempotency_conflict");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("evidence events carry the tier boundary machine-readably (sol R5)", () => {
+  it("stamps provenance=operator_self_report + independentCarrierScan=false INTO the event payload", async () => {
+    _setLobClientForTests(new LobClient({ webhookSecret: WEBHOOK_SECRET }));
+    const app = await buildApp();
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      const { lobLetterId } = created.json();
+      const payload = eventBody(lobLetterId, "letter.mailed", "evt_prov_1");
+      await app.inject({ method: "POST", url: "/api/lob/webhook", payload, headers: signHeaders(payload) });
+      const record = getLobLetterStore().getByJobId("job-print-mail-1")!;
+      const event = record.events[0]!;
+      // In the SIGNED material, not just the DTO: a verifier reading the event alone
+      // (folded into a kernel-signed bundle) must be able to refuse treating this as
+      // an independent carrier scan.
+      expect(event.payload.provenance).toBe("operator_self_report");
+      expect(event.payload.independentCarrierScan).toBe(false);
+      expect(await verifyEventHash(event)).toBe(true); // provenance is INSIDE the hashed payload
+    } finally {
+      await app.close();
+    }
+  });
+});

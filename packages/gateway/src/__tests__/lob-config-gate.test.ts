@@ -152,7 +152,6 @@ describe("lob config gate — documented key prefixes are POLICY (sandbox-as-rea
     try {
       const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: OWNER });
       expect(res.statusCode).toBe(503);
-      expect(res.json().missing).toHaveLength(1);
       expect(res.json().missing[0]).toContain("live_");
     } finally {
       await app.close();
@@ -172,19 +171,25 @@ describe("lob config gate — documented key prefixes are POLICY (sandbox-as-rea
     }
   });
 
-  it("a live_ key + secret passes the gate (healthz configured:true) — and readiness is PER REQUEST", async () => {
+  it("a live_ key + secret satisfies the credential requirements, readiness is PER REQUEST — and the DURABLE STORE remains required", async () => {
     process.env.LOB_API_KEY = "live_abc123";
     process.env.LOB_WEBHOOK_SECRET = "whsec_x";
     const app = await buildApp("production");
     try {
       const before = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: OWNER });
-      expect(before.json().configured).toBe(true);
+      // Credentials satisfied — the ONLY remaining requirement is the durable letter
+      // store (sol lob review R2/R3): with a memory-only store, production Lob stays
+      // 503 BY CONSTRUCTION until a durable implementation lands. A capability that
+      // can double-charge after a restart must not be enable-able by env vars alone.
+      expect(before.json().configured).toBe(false);
       expect(before.json().keyMode).toBe("live");
+      expect(before.json().missingConfig).toHaveLength(1);
+      expect(before.json().missingConfig[0]).toContain("durable letter store");
       // The key disappears mid-process: the very next request must see it (no snapshot).
       delete process.env.LOB_API_KEY;
       const after = await app.inject({ method: "GET", url: "/api/lob/healthz", headers: OWNER });
-      expect(after.json().configured).toBe(false);
       expect(after.json().missingConfig.join(" ")).toContain("LOB_API_KEY");
+      expect(after.json().missingConfig).toHaveLength(2);
     } finally {
       await app.close();
     }

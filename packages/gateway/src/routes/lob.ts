@@ -26,7 +26,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { hashEvent, type EvidenceEvent, type EvidenceSource } from "@pcc/spec";
-import { getLobClient, lobKeyMode, type LobAddress } from "../services/lob-client.js";
+import { computeLetterRequestDigest, getLobClient, lobKeyMode, type CreateLetterParams, type LobAddress } from "../services/lob-client.js";
 import { isCarrierProductionEnv } from "../services/easypost-client.js";
 import {
   getLobLetterStore,
@@ -142,6 +142,12 @@ async function buildLobEvidenceEvent(
     lobLetterId: record.lobLetterId,
     carrier: record.carrier,
     commitmentHash: record.commitment.hash,
+    // Machine-readable tier boundary IN THE SIGNED MATERIAL (sol lob review, R5):
+    // the operator_self_report caveat must not live only in the surrounding DTO —
+    // a verifier reading the event alone (e.g. folded into a kernel-signed bundle)
+    // needs the provenance to refuse treating this as an independent carrier scan.
+    provenance: "operator_self_report",
+    independentCarrierScan: false,
   };
   // trackingNumber is optional (usually null for Lob standard letters) — only
   // include it when present, so canonical hashing omits it rather than hashing null.
@@ -167,11 +173,17 @@ export async function lobRoutes(app: FastifyInstance) {
    *    sandbox-as-real and is refused BY NAME. Missing key = mock letters = fabricated
    *    evidence — refused.
    *  - LOB_WEBHOOK_SECRET: without it the lifecycle leg cannot be authenticated.
+   *  - A DURABLE letter store (sol lob review R2/R3): Lob's Idempotency-Key covers only
+   *    a 24-hour window, so on a real-money endpoint an in-memory record is not
+   *    "one job, one charge" — a post-window retry after a restart double-charges, and
+   *    lost records orphan paid letters' webhooks. The current store is memory-only,
+   *    so in production this requirement keeps the capability 503 BY CONSTRUCTION
+   *    until a durable implementation lands. Deliberate fail-closed sequencing, not an
+   *    oversight.
    *  - NOT required (owner design calls, flagged in the carrier-lane audit as L5/L7):
-   *    the gateway signing key (the Lob commitment is currently unsigned by design —
-   *    this leg is operator_self_report tier) and a durable store (the in-memory store
-   *    plus Lob's Idempotency-Key on create keeps the money path single-charge; losing
-   *    records on restart degrades to matched:false webhooks, which is fail-safe).
+   *    the gateway signing key — the Lob commitment is currently unsigned by design;
+   *    this leg is operator_self_report tier and the event payloads now carry that
+   *    provenance machine-readably.
    */
   const computeMissingLobConfig = (): string[] => {
     if (!isCarrierProductionEnv()) return [];
@@ -184,6 +196,9 @@ export async function lobRoutes(app: FastifyInstance) {
     }
     if (!process.env.LOB_WEBHOOK_SECRET) {
       missing.push("LOB_WEBHOOK_SECRET (letter lifecycle events would be unauthenticatable)");
+    }
+    if (!getLobLetterStore().isDurable) {
+      missing.push("durable letter store (in-memory records + a 24h provider idempotency window cannot guarantee one-job-one-charge across restarts)");
     }
     return missing;
   };
@@ -351,6 +366,19 @@ export async function lobRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: "not_kernel_operator" });
     }
 
+    const letterParams: CreateLetterParams = {
+      jobId: b.jobId!,
+      to: b.to as LobAddress,
+      from: b.from as LobAddress,
+      file: b.file!,
+      color: b.color,
+      doubleSided: b.doubleSided,
+      description: b.description,
+      useType: b.useType,
+      mailType: b.mailType,
+    };
+    const requestDigest = computeLetterRequestDigest(letterParams);
+
     const store = getLobLetterStore();
     const existing = store.getByJobId(b.jobId!);
     if (existing) {
@@ -361,24 +389,26 @@ export async function lobRoutes(app: FastifyInstance) {
         req.log.warn({ jobId: b.jobId, recordOwner: existing.ownerId, caller }, "lob: existing letter owned by a different principal/kernel");
         return reply.code(409).send({ error: "lob_record_ownership_mismatch" });
       }
-      // Idempotent per jobId: never create a second letter (and second charge)
+      // Idempotent reuse is legal ONLY for an IDENTICAL request (sol R1): the
+      // Idempotency-Key is the jobId, so Lob would answer a changed-body retry
+      // with the ORIGINAL letter — and returning it here as if it matched the
+      // new body would hand the caller a record whose commitment describes a
+      // different document/destination than the physical letter. Refuse loudly.
+      if (existing.requestDigest !== requestDigest) {
+        req.log.warn({ jobId: b.jobId }, "lob: same jobId, DIFFERENT request body — refusing idempotent reuse");
+        return reply.code(409).send({
+          error: "idempotency_conflict",
+          message: "A letter already exists for this jobId with a DIFFERENT request body. One job mails one document to one destination.",
+        });
+      }
+      // Identical request: never create a second letter (and second charge)
       // for a job we already mailed.
       return reply.code(200).send({ ...toLetterDTO(existing), note: "already created for this jobId" });
     }
 
     try {
       const client = getLobClient();
-      const result = await client.createLetter({
-        jobId: b.jobId!,
-        to: b.to as LobAddress,
-        from: b.from as LobAddress,
-        file: b.file!,
-        color: b.color,
-        doubleSided: b.doubleSided,
-        description: b.description,
-        useType: b.useType,
-        mailType: b.mailType,
-      });
+      const result = await client.createLetter(letterParams);
       const record = store.create({
         jobId: b.jobId!,
         kernelId: b.kernelId!,
@@ -389,6 +419,7 @@ export async function lobRoutes(app: FastifyInstance) {
         expectedDeliveryDate: result.expectedDeliveryDate,
         url: result.url,
         commitment: result.commitment,
+        requestDigest: result.requestDigest,
         simulated: result.simulated,
       });
       return reply.code(201).send(toLetterDTO(record));
