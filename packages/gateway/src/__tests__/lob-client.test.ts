@@ -97,6 +97,12 @@ describe("LobClient — real mode (injected fetchImpl, no network)", () => {
     const authHeader = (calls[0]!.init.headers as Record<string, string>).Authorization;
     expect(authHeader).toBe(`Basic ${Buffer.from("test_key_123:").toString("base64")}`);
 
+    // Idempotency-Key = jobId (carrier audit L4): Lob collapses a retry after a
+    // timeout-after-charge, or a re-POST after a restart wiped the in-memory store,
+    // into the SAME letter for 24h — the money path's double-charge protection.
+    // Pinned so the header cannot be silently dropped.
+    expect((calls[0]!.init.headers as Record<string, string>)["Idempotency-Key"]).toBe("job-real-1");
+
     // Request body carries Lob's required fields with our sensible defaults.
     const sent = JSON.parse(calls[0]!.init.body as string);
     expect(sent.to.address_line1).toBe("60 Centre St");

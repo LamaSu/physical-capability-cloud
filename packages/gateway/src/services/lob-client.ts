@@ -245,7 +245,15 @@ export class LobClient {
     // need since `file` is an HTML string / URL / template id, not an upload).
     const res = await this.fetchImpl(`${this.baseUrl}/letters`, {
       method: "POST",
-      headers: { Authorization: this.authHeader(), "Content-Type": "application/json" },
+      headers: {
+        Authorization: this.authHeader(),
+        "Content-Type": "application/json",
+        // Lob honors Idempotency-Key for 24h: a retry after a timeout-after-charge,
+        // or a re-POST after a gateway restart wiped the in-memory store, returns the
+        // SAME letter instead of charging twice. The jobId is the natural key — one
+        // job, one letter, one charge (carrier audit L4; money-path double-charge class).
+        "Idempotency-Key": params.jobId,
+      },
       body: JSON.stringify({
         to: addressToLob(params.to),
         from: addressToLob(params.from),
@@ -409,15 +417,37 @@ function parseTimestampMs(raw: string | undefined | null): number | null {
 }
 
 let singleton: LobClient | undefined;
+let singletonConfigGen: string | undefined;
 let testOverride: LobClient | undefined;
+
+/**
+ * Lob DOCUMENTS its key prefixes (unlike EasyPost): `live_...` hits production,
+ * `test_...` hits Lob's Test Environment (real API, sandbox data, no tracking
+ * events for letters). Anything else is either mock (no key at all — this
+ * codebase's convention) or UNRECOGNIZED, which production must refuse rather
+ * than guess (carrier audit L3: a test_ key in production is sandbox-as-real).
+ */
+export function lobKeyMode(key: string | undefined): "live" | "test" | "mock" | "unknown" {
+  if (!key) return "mock";
+  if (key.startsWith("live_")) return "live";
+  if (key.startsWith("test_")) return "test";
+  return "unknown";
+}
 
 export function getLobClient(): LobClient {
   if (testOverride) return testOverride;
+  // Config-generation tracking (same fix as the EasyPost client, sol #316 re-review
+  // row 3b): a rotated key or webhook secret must retire the cached client at the
+  // next call — a stale singleton would keep verifying webhooks against the RETIRED
+  // secret while request gates read the new environment.
+  const gen = `${process.env.LOB_API_KEY ?? ""} ${process.env.LOB_WEBHOOK_SECRET ?? ""}`;
+  if (singleton && singletonConfigGen !== gen) singleton = undefined;
   if (!singleton) {
     singleton = new LobClient({
       apiKey: process.env.LOB_API_KEY,
       webhookSecret: process.env.LOB_WEBHOOK_SECRET,
     });
+    singletonConfigGen = gen;
   }
   return singleton;
 }

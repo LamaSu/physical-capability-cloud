@@ -43,6 +43,8 @@ export type LobLetterStatus =
 export interface LobLetterRecord {
   jobId: string;
   kernelId: string;
+  /** Principal who created the letter (kernel operator at creation time) — owner-only reads + provenance checks, mirroring the carrier store (sol #297 R5-1). */
+  ownerId: string;
   lobLetterId: string;
   carrier: string;
   /** Usually null — only certified/registered Lob mail carries a USPS tracking_number. */
@@ -100,6 +102,7 @@ export class LobLetterStore {
   create(input: {
     jobId: string;
     kernelId: string;
+    ownerId: string;
     lobLetterId: string;
     carrier: string;
     trackingNumber: string | null;

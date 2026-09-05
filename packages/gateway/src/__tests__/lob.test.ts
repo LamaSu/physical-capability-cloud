@@ -10,15 +10,37 @@
  * independent carrier scan) rather than hidden.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createHmac } from "node:crypto";
 import { verifyEventHash } from "@pcc/spec";
 import { lobRoutes } from "../routes/lob.js";
 import { LobClient, _setLobClientForTests } from "../services/lob-client.js";
 import { _resetLobLetterStoreForTests, getLobLetterStore } from "../services/lob-letter-store.js";
+import { initStore, closeStore } from "../db.js";
+import { getJobFacade, getKernelFacade } from "../facades/index.js";
 
 const WEBHOOK_SECRET = "whsec_test_lob_suite";
+
+// Real seeded job/kernel + real facade authz (carrier-parity hardening): the money
+// route now requires the caller to be the operator of the job's assigned kernel.
+const OWNER = "0x1111lob0000000000000000000000000000owner";
+const STRANGER = "0x2222lob00000000000000000000000000stranger";
+const asOwner = { "x-test-operator": OWNER };
+
+beforeAll(async () => {
+  process.env.PCC_DB_PATH = ":memory:";
+  initStore({ seed: false });
+  const k = await getKernelFacade().register(
+    { id: "kernel-hp-printer", name: "HP printer test kernel", operatorAddress: OWNER, location: { lat: 37.77, lng: -122.42 }, physicalAddress: "1 Shop Way", maxAssuranceTier: 2 } as never,
+    OWNER,
+  );
+  if (!k.success) throw new Error(`kernel register failed: ${JSON.stringify(k.error)}`);
+  const j = await getJobFacade().submit({ jobId: "job-print-mail-1", stepId: "step-print-mail", kernelId: "kernel-hp-printer", capabilityId: "cap-test-print-mail" }, OWNER);
+  if (!j.success) throw new Error(`job submit failed: ${JSON.stringify(j.error)}`);
+});
+
+afterAll(() => closeStore());
 
 // Lob signature: HMAC-SHA256 over `${Lob-Signature-Timestamp}.${rawBody}`, hex.
 function signHeaders(body: string, timestamp = Date.now().toString()) {
@@ -32,6 +54,12 @@ function signHeaders(body: string, timestamp = Date.now().toString()) {
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  // Same test-auth hook carrier.test.ts uses: apiGate is not mounted here, so the
+  // x-test-operator header stands in for a validated bearer key's operatorId.
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(lobRoutes);
   await app.ready();
   return app;
@@ -88,7 +116,7 @@ describe("POST /api/lob/letters", () => {
   it("rejects missing required fields with 400 + details", async () => {
     const app = await buildApp();
     try {
-      const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: {} });
+      const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: {}, headers: asOwner });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_fields");
       expect(res.json().details.length).toBeGreaterThan(0);
@@ -100,7 +128,7 @@ describe("POST /api/lob/letters", () => {
   it("creates a (mock) letter, returns a commitment, and surfaces the honest assurance tier", async () => {
     const app = await buildApp();
     try {
-      const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
       expect(res.statusCode).toBe(201);
       const body = res.json();
       expect(body.jobId).toBe("job-print-mail-1");
@@ -120,8 +148,8 @@ describe("POST /api/lob/letters", () => {
   it("is idempotent per jobId — a second call returns the SAME letter, not a new create", async () => {
     const app = await buildApp();
     try {
-      const first = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
-      const second = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      const first = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      const second = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
       expect(first.statusCode).toBe(201);
       expect(second.statusCode).toBe(200);
       expect(second.json().lobLetterId).toBe(first.json().lobLetterId);
@@ -136,7 +164,7 @@ describe("GET /api/lob/letters/:jobId", () => {
   it("404s for an unknown job", async () => {
     const app = await buildApp();
     try {
-      const res = await app.inject({ method: "GET", url: "/api/lob/letters/does-not-exist" });
+      const res = await app.inject({ method: "GET", url: "/api/lob/letters/does-not-exist", headers: asOwner });
       expect(res.statusCode).toBe(404);
     } finally {
       await app.close();
@@ -146,8 +174,8 @@ describe("GET /api/lob/letters/:jobId", () => {
   it("returns the record after a letter is created", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
-      const res = await app.inject({ method: "GET", url: "/api/lob/letters/job-print-mail-1" });
+      await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      const res = await app.inject({ method: "GET", url: "/api/lob/letters/job-print-mail-1", headers: asOwner });
       expect(res.statusCode).toBe(200);
       expect(res.json().jobId).toBe("job-print-mail-1");
     } finally {
@@ -209,7 +237,7 @@ describe("POST /api/lob/webhook", () => {
     _setLobClientForTests(new LobClient({ webhookSecret: WEBHOOK_SECRET }));
     const app = await buildApp();
     try {
-      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
       const { lobLetterId } = created.json();
 
       const payload = eventBody(lobLetterId, "letter.mailed", "evt_mailed_1");
@@ -247,7 +275,7 @@ describe("POST /api/lob/webhook", () => {
     _setLobClientForTests(new LobClient({ webhookSecret: WEBHOOK_SECRET }));
     const app = await buildApp();
     try {
-      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
       const { lobLetterId } = created.json();
       const payload = eventBody(lobLetterId, "letter.mailed", "evt_retry_1");
       const headers = signHeaders(payload);
@@ -293,7 +321,7 @@ describe("POST /api/lob/webhook", () => {
     _setLobClientForTests(new LobClient({ webhookSecret: WEBHOOK_SECRET }));
     const app = await buildApp();
     try {
-      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
       const { lobLetterId } = created.json();
 
       const mailed = eventBody(lobLetterId, "letter.mailed", "evt_a", "2026-08-27T14:22:00Z");
@@ -315,7 +343,7 @@ describe("POST /api/lob/webhook", () => {
     _setLobClientForTests(new LobClient({ webhookSecret: WEBHOOK_SECRET }));
     const app = await buildApp();
     try {
-      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      const created = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
       const { lobLetterId } = created.json();
 
       const rendered = eventBody(lobLetterId, "letter.rendered_pdf", "evt_r");
@@ -327,6 +355,111 @@ describe("POST /api/lob/webhook", () => {
       expect(res.json().status).toBe("in_transit");
       // Status advanced, but no courier_* evidence for these lifecycle-only events.
       expect(getLobLetterStore().getByJobId("job-print-mail-1")!.events).toHaveLength(0);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * Carrier-parity authorization (carrier-lane audit L2, sol #297 findings 3/4 applied to
+ * the second operator): the money route must refuse anonymous callers, non-operators,
+ * unknown jobs, and kernel mismatches — and reads must be owner-only with no existence
+ * oracle. Before this hardening, ANY bearer-key holder could charge the deployment's
+ * Lob account for ANY jobId and read any letter's commitment.
+ */
+describe("POST /api/lob/letters — authorization (carrier parity)", () => {
+  it("401s without a caller identity — creating a letter spends money", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody });
+      expect(res.statusCode).toBe(401);
+      expect(res.json().error).toBe("authentication_required");
+      expect(getLobLetterStore().size()).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("403s a caller who is not the kernel's operator", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/lob/letters",
+        payload: validBody,
+        headers: { "x-test-operator": STRANGER },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("not_kernel_operator");
+      expect(getLobLetterStore().size()).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("404s a jobId that does not exist — a letter must bind to a real PCC job", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/lob/letters",
+        payload: { ...validBody, jobId: "job-that-never-existed" },
+        headers: asOwner,
+      });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error).toBe("job_not_found");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("409s when kernelId does not match the job's assigned kernel", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/lob/letters",
+        payload: { ...validBody, kernelId: "kernel-not-the-jobs" },
+        headers: asOwner,
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("kernel_mismatch");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("GET /api/lob/letters/:jobId — owner-only, no existence oracle", () => {
+  it("401s anonymous reads (the DTO carries commitment + events)", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      const res = await app.inject({ method: "GET", url: "/api/lob/letters/job-print-mail-1" });
+      expect(res.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("404s a non-owner IDENTICALLY to a missing record — not-yours is indistinguishable from not-there", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      const notYours = await app.inject({
+        method: "GET",
+        url: "/api/lob/letters/job-print-mail-1",
+        headers: { "x-test-operator": STRANGER },
+      });
+      const notThere = await app.inject({
+        method: "GET",
+        url: "/api/lob/letters/job-that-never-existed",
+        headers: { "x-test-operator": STRANGER },
+      });
+      expect(notYours.statusCode).toBe(404);
+      expect(notThere.statusCode).toBe(404);
+      expect(notYours.json()).toEqual(notThere.json());
     } finally {
       await app.close();
     }
