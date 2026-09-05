@@ -94,7 +94,7 @@ import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { carrierRoutes } from "./routes/carrier.js";
 import { initCarrierShipmentStore } from "./services/carrier-shipment-store.js";
-import { setDefaultCommitmentSigner } from "./services/easypost-client.js";
+import { isCarrierProductionEnv, setDefaultCommitmentSigner } from "./services/easypost-client.js";
 import { gatewayCommitmentSigner } from "./services/commitment-signer.js";
 import { lobRoutes } from "./routes/lob.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
@@ -590,26 +590,32 @@ export async function createGateway(port = 3200) {
   // db/src/migrate.ts (carrier_shipments, carrier_webhook_events). A pre-
   // execution commitment must survive a restart or the carrier's genuine
   // scan webhook has nothing to match against, and a lost reservation
-  // re-charges the operator (sol #297 findings 8, NEW-2/6/7). PRODUCTION
-  // therefore FAILS BOOT on a missing handle or corrupt rows instead of
-  // degrading to memory; dev/test keeps the in-memory fallback.
+  // re-charges the operator (sol #297 findings 8, NEW-2/6/7).
+  //
+  // NEVER a boot failure (#316 platform decision): a carrier-store problem is a
+  // CAPABILITY problem, not a process problem. On any failure here the store falls
+  // back to memory, isDurable stays false, and carrier.ts's request-time config gate
+  // 503s every money/evidence route ("durable carrier store" in the missing list)
+  // while the rest of the gateway serves. Strict hydration (refusing corrupt rows)
+  // follows the same fail-closed classification as the request gate — unset or
+  // mistyped NODE_ENV counts as production (sol #316 review, finding 2).
   {
-    const isProd = process.env.NODE_ENV === "production";
+    const strict = isCarrierProductionEnv();
     try {
       const rawSqlite = (getStore().db as unknown as {
         $client?: import("./services/carrier-shipment-store.js").SqliteDatabaseLike;
       }).$client;
-      if (!rawSqlite && isProd) {
-        throw new Error("no raw SQLite handle available from the store");
+      initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: strict } : {});
+      if (!rawSqlite) {
+        app.log[strict ? "error" : "warn"](
+          "[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)",
+        );
       }
-      initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: isProd } : {});
-      if (!rawSqlite) app.log.warn("[carrier] no SQLite handle; shipment commitments are in-memory only (dev/test)");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (isProd) {
-        throw new Error(`[carrier] durable store required in production: ${msg}`);
-      }
-      app.log.warn(`[carrier] could not attach SQLite (${msg}); falling back to in-memory (dev/test)`);
+      app.log[strict ? "error" : "warn"](
+        `[carrier] could not attach SQLite (${msg}); falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration.`,
+      );
       initCarrierShipmentStore({});
     }
   }

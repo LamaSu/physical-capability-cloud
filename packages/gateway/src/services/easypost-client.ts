@@ -831,6 +831,23 @@ let singleton: EasyPostClient | undefined;
 let testOverride: EasyPostClient | undefined;
 let defaultSigner: CommitmentSigner | undefined;
 
+/**
+ * Fail-closed environment classification for the carrier surface (sol #316 review, finding 2).
+ *
+ * Production is the DEFAULT: only an explicit, recognized non-production NODE_ENV
+ * ("test" | "development") opts out of production-grade enforcement. Unset, empty, or
+ * mistyped values ("prod", "staging", "producton") classify as production, so a box that
+ * forgets or typos NODE_ENV gets the strict gate and mock refusal — never the permissive
+ * mode. `NODE_ENV === "production"` had the inverted default: any misclassification
+ * silently disabled the entire 4-requirement config gate AND allowed the mock client.
+ *
+ * Every carrier production/mock decision must go through this ONE function — two
+ * independent NODE_ENV reads are two chances to diverge.
+ */
+export function isCarrierProductionEnv(env: string | undefined = process.env.NODE_ENV): boolean {
+  return env !== "test" && env !== "development";
+}
+
 /** Wire the gateway's commitment signer (set at boot; null-safe when no key is configured). */
 export function setDefaultCommitmentSigner(signer: CommitmentSigner | undefined): void {
   defaultSigner = signer;
@@ -847,7 +864,7 @@ export function getEasyPostClient(): EasyPostClient {
       webhookSecret: process.env.EASYPOST_WEBHOOK_SECRET,
       maxRateUsd: Number.isFinite(maxRate) && maxRate > 0 ? maxRate : undefined,
       maxWeightOz: Number.isFinite(maxWeight) && maxWeight > 0 ? maxWeight : undefined,
-      requireProductionMode: process.env.NODE_ENV === "production",
+      requireProductionMode: isCarrierProductionEnv(),
       signer: defaultSigner,
     });
   }
