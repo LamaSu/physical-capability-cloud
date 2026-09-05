@@ -332,15 +332,23 @@ export async function carrierRoutes(app: FastifyInstance) {
    *
    * TWO PHASES, deliberately (sol #316 re-review, S1): `preHandler` alone runs AFTER
    * onRequest/parsing/preValidation, so anything with earlier side effects would precede
-   * a preHandler-only gate. The onRequest hook below is the EARLIEST extension point —
-   * an unconfigured deployment rejects before the body is even parsed, and a future
-   * route (or hook) with early-phase effects is still behind the gate. The preHandler
-   * then adds authentication for default routes and recomputes the gate, narrowing the
-   * in-request window.
+   * a preHandler-only gate. The onRequest hook below fires before this plugin's parsing
+   * and before every hook or route effect registered AFTER it in this plugin — that is
+   * the scope of the structural guarantee. It cannot precede PARENT-context hooks or
+   * hooks registered before it (Fastify runs those first, by design); keeping such
+   * hooks free of money/evidence side effects is the server composition's contract
+   * (apiGate authenticates, nothing more). The preHandler then re-runs the gate,
+   * narrowing the in-request window for BOTH webhook and default routes (sol round 3,
+   * N1: the webhook's late recheck must not be dropped — a signing key lost between
+   * onRequest and the handler must meet a 503, not the processing path).
    *
-   * Detail redaction at onRequest keys off whether an EARLIER hook (apiGate at the
-   * server root, or a test auth hook) already authenticated the caller: authenticated
-   * callers get the actionable missing[] list, anonymous callers get the bare 503.
+   * Anonymous callers on DEFAULT routes are NOT answered with config posture at
+   * onRequest (sol round 3, N2: that would be a configured/unconfigured oracle anyone
+   * can read, and it would mis-serve servers that authenticate later than onRequest) —
+   * they pass to the preHandler's 401. The early config rejection applies to callers an
+   * EARLIER hook (apiGate at the server root, or a test auth hook) already
+   * authenticated, with the actionable missing[] detail; the webhook — public by
+   * design — is gated at both phases, always redacted.
    */
   const gateModeOf = (req: FastifyRequest): "open" | "webhook" | undefined =>
     (req.routeOptions?.config as { carrierGate?: "open" | "webhook" } | undefined)?.carrierGate;
@@ -348,13 +356,24 @@ export async function carrierRoutes(app: FastifyInstance) {
   app.addHook("onRequest", async (req, reply) => {
     const mode = gateModeOf(req);
     if (mode === "open") return;
-    const redact = mode === "webhook" || !callerId(req);
-    if (rejectIfUnconfigured(reply, { redact })) return reply;
+    if (mode === "webhook") {
+      if (rejectIfUnconfigured(reply, { redact: true })) return reply;
+      return;
+    }
+    const caller = callerId(req);
+    if (!caller) return; // no config posture for anonymous callers; preHandler 401s them
+    if (rejectIfUnconfigured(reply)) return reply;
   });
 
   app.addHook("preHandler", async (req, reply) => {
     const mode = gateModeOf(req);
-    if (mode === "open" || mode === "webhook") return;
+    if (mode === "open") return;
+    if (mode === "webhook") {
+      // Late recheck (sol round 3, N1): config lost after onRequest — a vanished signing
+      // key or a store that stopped being durable — must still fail closed here.
+      if (rejectIfUnconfigured(reply, { redact: true })) return reply;
+      return;
+    }
     const caller = callerId(req);
     if (!caller) {
       reply.code(401).send({ error: "authentication_required" });
