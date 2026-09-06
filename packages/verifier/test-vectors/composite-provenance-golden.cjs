@@ -107,6 +107,18 @@ const independenceProgram = {
     { id: "auth",  predicate: "not-simulated" },
   ],
 };
+// honest-asymmetry tier (requiresIndependentCarrierScan:false) is a DISTINCT committed program:
+// the mail leg is plain event-present (any consistent provenance), and the verdict RECORDS
+// mailProvenance from payload.provenance so a consumer can never read a self-report as independent.
+// oracle #1865: this is the "false-tier companion" it will build + pin alongside the independence tier.
+const honestAsymmetryProgram = {
+  version: 1, schemaHash: "verification-program/v1",
+  stages: [
+    { id: "print", predicate: "event-present", eventType: "printer_job_verified" },
+    { id: "mail",  predicate: "event-present", eventType: "courier_pickup_confirmed" },
+    { id: "auth",  predicate: "not-simulated" },
+  ],
+};
 
 // ---- assert + emit -------------------------------------------------------------------------------
 let failures = 0, n = 0;
@@ -133,10 +145,14 @@ check("independent -> release-eligible", mailLeg(V.independent, false), "release
 check("absent -> release-eligible (non-independent, not forgery)", mailLeg(V.absent, false), "release-eligible");
 check("contradiction -> dispute EVEN at the lob tier (forgery signal)", mailLeg(V.contra_boolFalse, false), "dispute");
 
-console.log("COMMITTED PROGRAM (independence tier), PROPOSED — oracle confirms stage field names:");
-const ph = programHash(independenceProgram);
-console.log("  programHash =", ph);
-console.log("  program     =", JSON.stringify(independenceProgram));
+console.log("COMMITTED PROGRAMS (oracle #1865 recomputes over these exact bytes — canonicalize sorts keys, so source order is moot):");
+const phIndependence = programHash(independenceProgram);
+const phHonestAsym = programHash(honestAsymmetryProgram);
+console.log("  independence-tier  programHash =", phIndependence);
+console.log("    canonical bytes  =", canonicalize(independenceProgram));
+console.log("  honest-asymmetry   programHash =", phHonestAsym);
+console.log("    canonical bytes  =", canonicalize(honestAsymmetryProgram));
+check("the two tiers are distinct committed programs", phIndependence !== phHonestAsym, true);
 
 console.log("\nBYTE-TARGETS for oracle cross-confirm (against #323 branch 18d97b52; re-confirm on merge SHA):");
 console.log("  mailEvent.hash[independent] =", hashes.independent);
