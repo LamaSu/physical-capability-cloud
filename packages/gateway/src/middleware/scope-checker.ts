@@ -343,7 +343,11 @@ function getCallerScopes(req: FastifyRequest): string[] {
       return []; // unparseable serialization → no scopes
     }
     if (Array.isArray(parsed)) {
-      return parsed.filter((s): s is string => typeof s === "string");
+      // EVERY element must be a string; a mixed array like [42,"settlement"] is a
+      // malformed value and grants NOTHING, not its string subset — the money gate
+      // must not extract authority from a corrupt array (astra #326 re-review).
+      if (parsed.every((s) => typeof s === "string")) return parsed as string[];
+      return [];
     }
     // Valid JSON but not an array (e.g. "settlement", 42, {"*":true}) → no scopes.
     return [];

@@ -130,7 +130,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       }
       operatorId = session.address;
       siweVerified = true;
-    } else if (body.email) {
+    } else if (body.email !== undefined) {
       // Explicit email path WINS over an ambient SIWE session (finding H4). A
       // caller who put `email` in the body chose the email identity; an ambient
       // pcc_session cookie must not silently override it. The old order (session
@@ -138,6 +138,18 @@ export async function provisionRoutes(app: FastifyInstance) {
       // carrying A's `settlement` scope — on the UNVERIFIED email path, skipping
       // email validation and misattributing telemetry to the email while the key
       // belonged to the wallet. Checking body.email first makes explicit win.
+      //
+      // Gate on `!== undefined`, NOT truthiness (astra #326 re-review, finding 5):
+      // an EXPLICIT but empty/non-string email ({email:""}, {email:null},
+      // {email:1}) is still a chosen-email intent — it must be VALIDATED and
+      // rejected here, never allowed to fall through to the ambient SIWE session
+      // below (which would mint that session's key, settlement scope and all).
+      if (typeof body.email !== "string" || body.email.length === 0) {
+        return reply.status(400).send({
+          error: "invalid_email",
+          message: "email must be a non-empty string",
+        });
+      }
       // Email path — RFC 5321 max total length is 254
       if (body.email.length > 254) {
         return reply.status(400).send({
