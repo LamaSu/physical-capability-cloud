@@ -527,3 +527,25 @@ describe("evidence events carry the tier boundary machine-readably (sol R5)", ()
     }
   });
 });
+
+describe("request digest is wire-faithful (sol lob round 2, NEW-1)", () => {
+  it("doubleSided OMITTED vs doubleSided:false are DIFFERENT requests — the wire differs, so reuse is refused", async () => {
+    const app = await buildApp();
+    try {
+      const first = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: asOwner });
+      expect(first.statusCode).toBe(201);
+      // A field-join digest with String(doubleSided ?? false) aliased these two; the
+      // wire sends "omitted" vs double_sided:false, and Lob may render them differently.
+      const aliased = await app.inject({
+        method: "POST",
+        url: "/api/lob/letters",
+        payload: { ...validBody, doubleSided: false },
+        headers: asOwner,
+      });
+      expect(aliased.statusCode).toBe(409);
+      expect(aliased.json().error).toBe("idempotency_conflict");
+    } finally {
+      await app.close();
+    }
+  });
+});

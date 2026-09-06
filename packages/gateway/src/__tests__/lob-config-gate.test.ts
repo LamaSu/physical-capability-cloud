@@ -230,3 +230,33 @@ describe("lob config gate — environment classification is fail-closed", () => 
     }
   });
 });
+
+describe("lob config gate — real-money posture follows the KEY, not the label (sol lob round 2, NEW-4)", () => {
+  it("a live_ key under NODE_ENV=test still demands the money-path requirements", async () => {
+    process.env.LOB_API_KEY = "live_real_money_key";
+    // no webhook secret, memory store
+    const app = await buildApp("test");
+    try {
+      const res = await app.inject({ method: "POST", url: "/api/lob/letters", payload: validBody, headers: OWNER });
+      // Without this rule, test/development classification returned NO requirements and
+      // this request would have charged the REAL Lob account with no durability and no
+      // webhook authentication.
+      expect(res.statusCode).toBe(503);
+      const missing = res.json().missing.join(" ");
+      expect(missing).toContain("LOB_WEBHOOK_SECRET");
+      expect(missing).toContain("durable letter store");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("no key at all under NODE_ENV=test stays ungated — mock dev flows unchanged", async () => {
+    const app = await buildApp("test");
+    try {
+      const health = await app.inject({ method: "GET", url: "/api/lob/healthz" });
+      expect(health.json().configured).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+});

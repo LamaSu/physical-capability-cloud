@@ -164,7 +164,29 @@ function sha256Hex(input: string): string {
 }
 
 /**
- * Canonical digest of the COMPLETE normalized letter request (sol lob review, R1).
+ * The EXACT Lob wire body for a create-letter request. ONE construction shared by
+ * the HTTP call and the request digest, so the digest is injective with respect to
+ * the bytes actually sent (sol lob round 2, NEW-1/2/3: a field-join digest aliased
+ * `doubleSided` omitted vs false, was delimiter-ambiguous on address fields, and
+ * normalized values the wire sent unnormalized).
+ */
+function toLetterWireBody(params: CreateLetterParams) {
+  return {
+    to: addressToLob(params.to),
+    from: addressToLob(params.from),
+    file: params.file,
+    color: params.color ?? false,
+    double_sided: params.doubleSided,
+    description: params.description,
+    use_type: params.useType ?? "operational",
+    mail_type: params.mailType,
+  };
+}
+
+/**
+ * Digest of the COMPLETE letter request (sol lob review, R1) — sha256 over the
+ * jobId plus the SAME serialized wire body `createLetter` sends (undefined optional
+ * fields are omitted by JSON.stringify on the wire and in the digest identically).
  *
  * The Idempotency-Key is the jobId, so Lob may answer a retry with the ORIGINAL
  * letter even if the retry's body differs — and a commitment built from the NEW
@@ -172,23 +194,10 @@ function sha256Hex(input: string): string {
  * commitment would describe a document/destination the physical letter does not
  * have). This digest is persisted with the record; reuse of an existing record
  * is allowed ONLY when the digests match, otherwise the route refuses with 409
- * idempotency_conflict. Free-text and address fields are hashed individually
- * before the fixed-order join, so no field can smuggle a delimiter.
+ * idempotency_conflict.
  */
 export function computeLetterRequestDigest(params: CreateLetterParams): string {
-  return sha256Hex(
-    [
-      params.jobId,
-      sha256Hex(canonicalAddressForHash(params.to)),
-      sha256Hex(canonicalAddressForHash(params.from)),
-      sha256Hex(params.file),
-      String(params.color ?? false),
-      String(params.doubleSided ?? false),
-      sha256Hex(params.description ?? ""),
-      params.useType ?? "operational",
-      params.mailType ?? "",
-    ].join("|"),
-  );
+  return sha256Hex(JSON.stringify({ jobId: params.jobId, wire: toLetterWireBody(params) }));
 }
 
 function buildCommitment(params: CreateLetterParams, lobLetterId: string): LetterCommitment {
@@ -284,16 +293,8 @@ export class LobClient {
         // job, one letter, one charge (carrier audit L4; money-path double-charge class).
         "Idempotency-Key": params.jobId,
       },
-      body: JSON.stringify({
-        to: addressToLob(params.to),
-        from: addressToLob(params.from),
-        file: params.file,
-        color: params.color ?? false,
-        double_sided: params.doubleSided,
-        description: params.description,
-        use_type: params.useType ?? "operational",
-        mail_type: params.mailType,
-      }),
+      // The SAME construction the request digest hashes — see toLetterWireBody.
+      body: JSON.stringify(toLetterWireBody(params)),
     });
     if (!res.ok) {
       throw new Error(`lob_create_letter_failed: ${res.status} ${await safeText(res)}`);

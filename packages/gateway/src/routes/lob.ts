@@ -167,7 +167,9 @@ export async function lobRoutes(app: FastifyInstance) {
    * Same architecture as routes/carrier.ts post-#316-review; see that file for the
    * full findings trail (snapshot = temporal bypass, NODE_ENV===production = fail-open).
    *
-   * TWO requirements, not carrier's four, and the difference is deliberate:
+   * THREE requirements, not carrier's four, and the differences are deliberate —
+   * and they apply under production classification OR whenever a live_ key is
+   * present (real money follows the key, not the deployment label):
    *  - LOB_API_KEY must be present AND a documented `live_` key. Lob (unlike EasyPost)
    *    documents its prefixes, so a `test_` or unrecognized key in production is
    *    sandbox-as-real and is refused BY NAME. Missing key = mock letters = fabricated
@@ -186,13 +188,21 @@ export async function lobRoutes(app: FastifyInstance) {
    *    provenance machine-readably.
    */
   const computeMissingLobConfig = (): string[] => {
-    if (!isCarrierProductionEnv()) return [];
-    const missing: string[] = [];
     const keyMode = lobKeyMode(process.env.LOB_API_KEY);
-    if (keyMode === "mock") {
-      missing.push("LOB_API_KEY (no key at all means MOCK letters — fabricated evidence)");
-    } else if (keyMode !== "live") {
-      missing.push("LOB_API_KEY (a live_ key is required in production — test_/unrecognized prefixes are Lob's sandbox)");
+    const production = isCarrierProductionEnv();
+    // Real-money posture follows the KEY, not the deployment label (sol lob round 2,
+    // NEW-4): a live_ key under NODE_ENV=test/development can still charge the real
+    // Lob account, so the money-path requirements apply whenever one is present.
+    // (EasyPost cannot get this rule — it documents no key prefixes; Lob does.)
+    const realMoneyPossible = keyMode === "live";
+    if (!production && !realMoneyPossible) return [];
+    const missing: string[] = [];
+    if (production) {
+      if (keyMode === "mock") {
+        missing.push("LOB_API_KEY (no key at all means MOCK letters — fabricated evidence)");
+      } else if (keyMode !== "live") {
+        missing.push("LOB_API_KEY (a live_ key is required in production — test_/unrecognized prefixes are Lob's sandbox)");
+      }
     }
     if (!process.env.LOB_WEBHOOK_SECRET) {
       missing.push("LOB_WEBHOOK_SECRET (letter lifecycle events would be unauthenticatable)");
@@ -419,7 +429,9 @@ export async function lobRoutes(app: FastifyInstance) {
         expectedDeliveryDate: result.expectedDeliveryDate,
         url: result.url,
         commitment: result.commitment,
-        requestDigest: result.requestDigest,
+        // The ROUTE's locally computed digest, not the client result's (sol lob round 2):
+        // one source of truth, computed before any provider call.
+        requestDigest,
         simulated: result.simulated,
       });
       return reply.code(201).send(toLetterDTO(record));
