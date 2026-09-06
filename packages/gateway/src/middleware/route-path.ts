@@ -22,9 +22,17 @@
 import type { FastifyRequest } from "fastify";
 
 export function authPath(req: FastifyRequest): string {
-  const r = req as unknown as { routeOptions?: { url?: string }; routerPath?: string };
-  const matched = r.routeOptions?.url ?? r.routerPath;
-  if (typeof matched === "string" && matched.length > 0) return matched;
+  // Prefer the matched route template — immune to encoding. NOT req.routerPath:
+  // it is deprecated and removed in fastify@5, and merely reading it emits a
+  // deprecation warning; routeOptions.url is the supported accessor.
+  const url = (req as unknown as { routeOptions?: { url?: string } }).routeOptions?.url;
+  if (typeof url === "string" && url.length > 0) return url;
+  // No template (unmatched/404-bound, or a Fastify context that does not populate
+  // it): a DECODED raw path still defeats the %73->s style attack — an encoded
+  // /api/... normalizes back before the /api/ and money-prefix checks. decodeURI-
+  // Component also collapses an encoded %2F, which only ever makes a money-prefix
+  // match MORE likely (fail-safe) and never turns a private path public (the
+  // public allowlist is exact / segment-anchored).
   const raw = req.url.split("?")[0];
   try {
     return decodeURIComponent(raw);
