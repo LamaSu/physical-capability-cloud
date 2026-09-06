@@ -114,11 +114,20 @@ const PUBLIC_REGISTRY_SNAPSHOT_RE = /^\/api\/compose\/registry-snapshot(?:\/[^/]
 // POST only; nothing else under /api/carrier/ is public. sol #297 finding 15.
 const PUBLIC_CARRIER_WEBHOOK_PATH = "/api/carrier/webhook/easypost";
 
+// Lob letter webhook (Lob -> PCC). Same argument as the carrier webhook above:
+// Lob's servers cannot present a PCC API key, so gating this path on one would
+// 401 every genuine letter event before routes/lob.ts's timestamp-bound HMAC
+// verification ever ran — the webhook/evidence leg was structurally dead on any
+// apiGate-fronted deployment (carrier audit L1). POST only; nothing else under
+// /api/lob/ is public.
+const PUBLIC_LOB_WEBHOOK_PATH = "/api/lob/webhook";
+
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (method === "POST" && path === PUBLIC_CARRIER_WEBHOOK_PATH) return true;
+  if (method === "POST" && path === PUBLIC_LOB_WEBHOOK_PATH) return true;
   // Kernel discovery is public; identity-bearing creation/upsert is not.
   if (method === "GET" && path === "/api/kernels") return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;

@@ -119,6 +119,8 @@ export interface CreateLetterResult {
   commitment: LetterCommitment;
   /** True in mock mode (no LOB_API_KEY). Flows to EvidenceEvent.source.simulated. */
   simulated: boolean;
+  /** computeLetterRequestDigest(params) — persisted so an idempotent reuse can prove the request was IDENTICAL (sol R1). */
+  requestDigest: string;
 }
 
 /** A normalized Lob letter event, extracted from an inbound Event webhook body. */
@@ -159,6 +161,43 @@ function canonicalAddressForHash(a: LobAddress): string {
 
 function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
+}
+
+/**
+ * The EXACT Lob wire body for a create-letter request. ONE construction shared by
+ * the HTTP call and the request digest, so the digest is injective with respect to
+ * the bytes actually sent (sol lob round 2, NEW-1/2/3: a field-join digest aliased
+ * `doubleSided` omitted vs false, was delimiter-ambiguous on address fields, and
+ * normalized values the wire sent unnormalized).
+ */
+function toLetterWireBody(params: CreateLetterParams) {
+  return {
+    to: addressToLob(params.to),
+    from: addressToLob(params.from),
+    file: params.file,
+    color: params.color ?? false,
+    double_sided: params.doubleSided,
+    description: params.description,
+    use_type: params.useType ?? "operational",
+    mail_type: params.mailType,
+  };
+}
+
+/**
+ * Digest of the COMPLETE letter request (sol lob review, R1) — sha256 over the
+ * jobId plus the SAME serialized wire body `createLetter` sends (undefined optional
+ * fields are omitted by JSON.stringify on the wire and in the digest identically).
+ *
+ * The Idempotency-Key is the jobId, so Lob may answer a retry with the ORIGINAL
+ * letter even if the retry's body differs — and a commitment built from the NEW
+ * body over the OLD letter id would be an evidence-integrity failure (the
+ * commitment would describe a document/destination the physical letter does not
+ * have). This digest is persisted with the record; reuse of an existing record
+ * is allowed ONLY when the digests match, otherwise the route refuses with 409
+ * idempotency_conflict.
+ */
+export function computeLetterRequestDigest(params: CreateLetterParams): string {
+  return sha256Hex(JSON.stringify({ jobId: params.jobId, wire: toLetterWireBody(params) }));
 }
 
 function buildCommitment(params: CreateLetterParams, lobLetterId: string): LetterCommitment {
@@ -245,17 +284,17 @@ export class LobClient {
     // need since `file` is an HTML string / URL / template id, not an upload).
     const res = await this.fetchImpl(`${this.baseUrl}/letters`, {
       method: "POST",
-      headers: { Authorization: this.authHeader(), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        to: addressToLob(params.to),
-        from: addressToLob(params.from),
-        file: params.file,
-        color: params.color ?? false,
-        double_sided: params.doubleSided,
-        description: params.description,
-        use_type: params.useType ?? "operational",
-        mail_type: params.mailType,
-      }),
+      headers: {
+        Authorization: this.authHeader(),
+        "Content-Type": "application/json",
+        // Lob honors Idempotency-Key for 24h: a retry after a timeout-after-charge,
+        // or a re-POST after a gateway restart wiped the in-memory store, returns the
+        // SAME letter instead of charging twice. The jobId is the natural key — one
+        // job, one letter, one charge (carrier audit L4; money-path double-charge class).
+        "Idempotency-Key": params.jobId,
+      },
+      // The SAME construction the request digest hashes — see toLetterWireBody.
+      body: JSON.stringify(toLetterWireBody(params)),
     });
     if (!res.ok) {
       throw new Error(`lob_create_letter_failed: ${res.status} ${await safeText(res)}`);
@@ -272,6 +311,7 @@ export class LobClient {
       url: letter.url ?? "",
       commitment: buildCommitment(params, letter.id),
       simulated: false,
+      requestDigest: computeLetterRequestDigest(params),
     };
   }
 
@@ -290,6 +330,7 @@ export class LobClient {
       url: `https://lob-mock.invalid/letters/${lobLetterId}.pdf`,
       commitment: buildCommitment(params, lobLetterId),
       simulated: true,
+      requestDigest: computeLetterRequestDigest(params),
     };
   }
 
@@ -409,15 +450,37 @@ function parseTimestampMs(raw: string | undefined | null): number | null {
 }
 
 let singleton: LobClient | undefined;
+let singletonConfigGen: string | undefined;
 let testOverride: LobClient | undefined;
+
+/**
+ * Lob DOCUMENTS its key prefixes (unlike EasyPost): `live_...` hits production,
+ * `test_...` hits Lob's Test Environment (real API, sandbox data, no tracking
+ * events for letters). Anything else is either mock (no key at all — this
+ * codebase's convention) or UNRECOGNIZED, which production must refuse rather
+ * than guess (carrier audit L3: a test_ key in production is sandbox-as-real).
+ */
+export function lobKeyMode(key: string | undefined): "live" | "test" | "mock" | "unknown" {
+  if (!key) return "mock";
+  if (key.startsWith("live_")) return "live";
+  if (key.startsWith("test_")) return "test";
+  return "unknown";
+}
 
 export function getLobClient(): LobClient {
   if (testOverride) return testOverride;
+  // Config-generation tracking (same fix as the EasyPost client, sol #316 re-review
+  // row 3b): a rotated key or webhook secret must retire the cached client at the
+  // next call — a stale singleton would keep verifying webhooks against the RETIRED
+  // secret while request gates read the new environment.
+  const gen = `${process.env.LOB_API_KEY ?? ""}\u0000${process.env.LOB_WEBHOOK_SECRET ?? ""}`;
+  if (singleton && singletonConfigGen !== gen) singleton = undefined;
   if (!singleton) {
     singleton = new LobClient({
       apiKey: process.env.LOB_API_KEY,
       webhookSecret: process.env.LOB_WEBHOOK_SECRET,
     });
+    singletonConfigGen = gen;
   }
   return singleton;
 }
