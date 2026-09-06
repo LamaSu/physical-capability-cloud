@@ -40,24 +40,10 @@ const PUBLIC_PREFIXES = [
 ];
 
 const PUBLIC_EXACT = [
-  // ── SIWE login bootstrap ────────────────────────────────────────
-  // These two MUST be reachable unauthenticated: they are how a caller with no
-  // credential yet obtains one. Gating them is a bootstrap deadlock — you need
-  // a nonce to authenticate, and authentication to get a nonce.
-  //
-  // They were NOT allowlisted, and it was not theoretical: verified against
-  // production 2026-08-27, both returned 401 api_key_required, i.e. SIWE login
-  // was unreachable on the live gateway and every wallet-identity flow built on
-  // it (including SIWE-gated provisioning) was dead on arrival.
-  //
-  // Listed EXACT rather than as a prefix on purpose: a "/api/auth/verify"
-  // prefix entry would also open anything merely starting with that string.
-  // Risk surface of each: /nonce returns 16 random bytes and holds them in a
-  // self-expiring 5-minute map; /verify is the login endpoint itself and
-  // already carries its own per-IP rate limit (canSiweVerify, 30/min). The
-  // session-bearing routes (/me, /logout, /sessions) stay gated.
-  "/api/auth/nonce",
-  "/api/auth/verify",
+  // NOTE: the SIWE bootstrap entries (/api/auth/nonce, /api/auth/verify) live at
+  // the bottom of this list — they landed on master via #310 while #309 added an
+  // identical pair here; the post-rebase duplicate was removed in favour of the
+  // merged copy so there is exactly one.
   "/api/capabilities/types",   // Discovery is public (see what's available)
   "/api/capabilities",         // Capability listing is public
   "/api/agents/status",        // Network status is public
