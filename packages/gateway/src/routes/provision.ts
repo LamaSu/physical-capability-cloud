@@ -130,12 +130,14 @@ export async function provisionRoutes(app: FastifyInstance) {
       }
       operatorId = session.address;
       siweVerified = true;
-    } else if (session) {
-      // A verified SIWE session exists and walletAddress wasn't repeated in
-      // the body — use the cryptographically-proven address directly.
-      operatorId = session.address;
-      siweVerified = true;
     } else if (body.email) {
+      // Explicit email path WINS over an ambient SIWE session (finding H4). A
+      // caller who put `email` in the body chose the email identity; an ambient
+      // pcc_session cookie must not silently override it. The old order (session
+      // before email) let a wallet-A session + {email} mint a wallet-A key —
+      // carrying A's `settlement` scope — on the UNVERIFIED email path, skipping
+      // email validation and misattributing telemetry to the email while the key
+      // belonged to the wallet. Checking body.email first makes explicit win.
       // Email path — RFC 5321 max total length is 254
       if (body.email.length > 254) {
         return reply.status(400).send({
@@ -150,6 +152,13 @@ export async function provisionRoutes(app: FastifyInstance) {
         });
       }
       operatorId = body.email;
+    } else if (session) {
+      // A verified SIWE session with NO explicit identity in the body — use the
+      // cryptographically-proven address directly (the documented SIWE provision
+      // flow: POST /api/auth/provision {name} with the session token, walletAddress
+      // omitted). siweVerified is what gates the settlement scope below.
+      operatorId = session.address;
+      siweVerified = true;
     } else {
       return reply.status(400).send({
         error: "identifier_required",
