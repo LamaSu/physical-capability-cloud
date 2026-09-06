@@ -89,6 +89,11 @@ const mailPayload = {
   commitment,
   commitmentHashValid: true,
   commitmentSignatureVerified: true,
+  // R5 RE-BIND (carrier PR #323, master merge 7a864910 ⊇ commit 18d97b52): the EasyPost leg now
+  // asserts independent-carrier-scan provenance INSIDE the hashed payload (carrier.ts buildCarrierEvidenceEvent).
+  // These two fields move mailEvent.hash + kernelSignedEventsRoot; commitment.hash + printEvent.hash are untouched.
+  provenance: "independent_carrier_scan",
+  independentCarrierScan: true,
 };
 const mailEvent = {
   id: "evt-mail-0001",
