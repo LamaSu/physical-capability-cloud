@@ -43,12 +43,18 @@ describe("pcc://capabilities/document-print-and-mail/v1 (composite CSD, kind=wor
     expect(t1).not.toContain("confirm.target_system");
   });
 
-  it("the print leg reuses the existing document-printing vocabulary (receipt bound to that capability; log bound to printer_job_verified)", () => {
+  it("the print leg reuses the existing document-printing vocabulary (pair-to-pair per evidence §6: receipt → printer_job_verified, log → printer_log_captured)", () => {
     const csd = CsdSchema.parse(printAndMailCsd);
     const receipt = csd.evidence?.tier1?.primitives?.find((p) => p.id === "receipt.kernel_signed");
     expect(receipt?.params?.capability).toBe("document-printing");
     const log = csd.evidence?.tier1?.primitives?.find((p) => p.id === "machine.execution_log");
-    expect(log?.bind).toBe("printer_job_verified");
+    // Evidence §6 pair-to-pair map (coord #1476-S): the LOG primitive binds the log event, the
+    // RECEIPT primitive binds the verification event — one vocabulary across CSD/bundle/oracle.
+    expect(log?.bind).toBe("printer_log_captured");
+    expect(receipt?.bind).toBe("printer_job_verified");
+    const spoof = csd.evidence?.tier2?.primitives?.find((p) => p.id === "fresh.challenge_bound");
+    expect(spoof?.bind).toBe("photo_anti_spoof_check");
+    expect(csd.pricing.basePrice).toBe("6.50");
     expect(csd.evidence?.tier1?.primitives?.find((p) => p.id === "artifact.hash")?.bind).toBe("commitment.labelHash");
   });
 });
