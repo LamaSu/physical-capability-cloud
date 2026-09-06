@@ -287,40 +287,73 @@ function getCallerScopes(req: FastifyRequest): string[] {
     const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
     if (!keyRecord) return [];
 
-    let scopesRaw: unknown;
+    // Accept ONLY a valid JSON array of strings — fail CLOSED on anything else.
+    //
+    // The previous code, on a JSON.parse failure, fell back to treating the raw
+    // column as comma-separated values, so a malformed row like `scopes =
+    // settlement` parsed to ["settlement"] and could call POST /api/escrow/.../
+    // release — a privilege escalation that comes purely from bad serialization
+    // (cross-family review of #309, finding H3). Missing keys already failed
+    // closed; malformed serialization did not. Now a corrupt or non-array
+    // `scopes` grants nothing.
+    //
+    // MIGRATION NOTE: if any legacy key stored `scopes` as a bare or CSV string
+    // rather than a JSON array, it now resolves to no scopes and must be
+    // re-serialized to a JSON array before it works again. This is intentional —
+    // the money gate must not infer authority from an unparseable value.
+    let parsed: unknown;
     try {
-      scopesRaw = JSON.parse(keyRecord.scopes);
+      parsed = JSON.parse(keyRecord.scopes);
     } catch {
-      scopesRaw = keyRecord.scopes;
+      return []; // unparseable serialization → no scopes
     }
-
-    if (Array.isArray(scopesRaw)) {
-      return (scopesRaw as string[]).filter((s) => typeof s === "string");
+    if (Array.isArray(parsed)) {
+      return parsed.filter((s): s is string => typeof s === "string");
     }
-    if (typeof scopesRaw === "string" && scopesRaw.length > 0) {
-      return scopesRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    }
+    // Valid JSON but not an array (e.g. "settlement", 42, {"*":true}) → no scopes.
+    return [];
   } catch {
-    // Non-fatal
+    // Repo/DB error — a security control must not fail open.
+    return [];
   }
-
-  // FAIL CLOSED. This path is reached only when a key record exists but its
-  // `scopes` column is neither a JSON array nor a non-empty string — i.e. it is
-  // malformed. The previous behaviour returned ["*"], so a corrupt scopes value
-  // silently granted WILDCARD access to every endpoint. A security control must
-  // not fail open: an unreadable scope set grants nothing.
-  // (A legitimately empty scope set stored as "[]" parses as an array and
-  // returns [] above, so it never reaches here.)
-  return [];
 }
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
+/**
+ * The path to AUTHORIZE against — the route Fastify MATCHED, not the raw request
+ * line. find-my-way percent-decodes unreserved characters before it selects a
+ * handler, so `POST /api/%73ettlement/flush` executes the settlement handler while
+ * `req.url` still reads `/api/%73ettlement/...`. Authorizing on the raw URL let an
+ * encoded path evade isMoneyPath()/the rule table while still running the real
+ * money handler (cross-family review of #309, finding H1). The matched route
+ * template (`routeOptions.url`, e.g. "/api/escrow/:id/release") is exactly what
+ * WILL run, so it cannot be desynchronised from routing by encoding.
+ *
+ * When nothing matched (a 404-bound request) there is no template, so fall back to
+ * a decoded raw path — an encoded `/api/...` then still trips the `/api/` gate
+ * instead of slipping past a raw-string startsWith. Accessed defensively so the
+ * helper does not depend on a specific Fastify type surface.
+ */
+function authPath(req: FastifyRequest): string {
+  const r = req as unknown as { routeOptions?: { url?: string }; routerPath?: string };
+  const matched = r.routeOptions?.url ?? r.routerPath;
+  if (typeof matched === "string" && matched.length > 0) return matched;
+  const raw = req.url.split("?")[0];
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw; // malformed %-encoding — keep raw; still gated by the /api/ check
+  }
+}
+
 async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!req.url.startsWith("/api/")) return;
+    // Authorize against the route Fastify MATCHED, never the raw request line —
+    // see authPath (finding H1: percent-encoded paths bypassed the raw-URL checks).
+    const reqPath = authPath(req);
+    if (!reqPath.startsWith("/api/")) return;
 
-    const reqPath = req.url.split("?")[0];
     const isMoneyWrite =
       isMoneyPath(reqPath) && MUTATING_METHODS.has(req.method.toUpperCase());
 
@@ -395,7 +428,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
 
     let matchedRequirement: ScopeRequirement | undefined;
     for (const req_ of sorted) {
-      if (matchRoute(req.method, req.url, req_.method, req_.pattern)) {
+      if (matchRoute(req.method, reqPath, req_.method, req_.pattern)) {
         matchedRequirement = req_;
         break;
       }
@@ -408,7 +441,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     //   - Everything else → allow, preserving existing behaviour (see the header
     //     note on why the global flip is a separate, sweep-gated change).
     if (!matchedRequirement) {
-      const path = req.url.split("?")[0];
+      const path = reqPath;
       // Default-deny covers MUTATING methods only. Money-path reads stay open
       // (the dashboard does GET /api/escrow, and no GET requirement covers it),
       // because the exposure being closed here is funds MOVEMENT. A read-side
