@@ -17,8 +17,11 @@
     "build": "tsc",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --noEmit",
+    "test": "node scripts/build-dashboard-ir-kit.mjs --check && vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json",
+    "typecheck:browser": "tsc -p tsconfig.browser.json",
+    "build:ir-kit": "node scripts/build-dashboard-ir-kit.mjs",
+    "check:ir-kit": "node scripts/build-dashboard-ir-kit.mjs --check",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -79,7 +82,9 @@
   "devDependencies": {
     "@pcc/kernel-sdk": "workspace:*",
     "@types/uuid": "^9.0.0",
+    "esbuild": "0.27.3",
     "jose": "^5.6.0",
+    "jsdom": "24.1.3",
     "tsx": "^4.11.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"

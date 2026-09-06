@@ -1,0 +1,11 @@
+{
+  "//": "Type-checks the browser-only kit (entry + the 3 audited modules) with the DOM lib — esbuild bundles but does NOT type-check. `pnpm typecheck:browser`.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "types": [],
+    "noEmit": true,
+    "rootDir": "src"
+  },
+  "include": ["src/mcp/dashboard-ir-browser-entry.ts"]
+}
