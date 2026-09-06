@@ -91,7 +91,12 @@ export async function jobRoutes(app: FastifyInstance) {
         if ((job as any).submittedBy === operatorId) isAuthorized = true;
         if (!isAuthorized && (job as any).kernelId) {
           const kernel = repos.kernels.findById((job as any).kernelId);
-          if (kernel && (kernel as any).operatorId === operatorId) isAuthorized = true;
+          // shopKernels has no `operatorId` column — only `operatorAddress`
+          // (the same email/wallet identity space as the API key's
+          // operatorId; cf. resolveOperatorPayoutAddress in paid-job-flow.ts,
+          // which already compares them). Comparing the non-existent field
+          // meant this fallback could never pass for any caller.
+          if (kernel && kernel.operatorAddress === operatorId) isAuthorized = true;
         }
         if (!isAuthorized) {
           return reply.code(403).send({ error: "forbidden", message: "You can only update status for your own jobs" });
