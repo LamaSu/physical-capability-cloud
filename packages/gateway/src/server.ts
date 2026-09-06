@@ -128,6 +128,7 @@ import { ot2RelayRoutes } from "./routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "./routes/ot2-scope.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
+import { evidenceAsyncRoutes } from "./routes/evidence-async.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
 import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
@@ -825,6 +826,11 @@ export async function createGateway(port = 3200) {
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);
+
+  // Async evidence-signing (§8.5 step 6): begin / checkpoints / finalize. Collects and
+  // finalizes phase-scoped evidence into a claim-free package; settlement stays behind
+  // PUT /api/jobs/:jobId/complete (§2.4) and is NOT run here.
+  await app.register(evidenceAsyncRoutes);
 
   // Sports-commentator LLM narration over event streams
   await app.register(commentaryRoutes);

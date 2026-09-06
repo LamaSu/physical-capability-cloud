@@ -25,8 +25,12 @@ import { OrchestratorSessionRepository } from "./orchestrator-sessions.js";
 import { ContributorRepository } from "./contributor.js";
 import { RequestRepository } from "./requests.js";
 import { InvocationReceiptRepository } from "./invocation-receipts.js";
+import { GatewayReceiptRepository } from "./gateway-receipts.js";
 import { CsdUsageRepository } from "./csd-usage.js";
 import { PasskeySessionRepository } from "./passkey-sessions.js";
+import { EvidenceSessionRepository } from "./evidence-sessions.js";
+import { MilestonePackageRepository } from "./milestone-packages.js";
+import { CheckpointBodyRepository } from "./checkpoint-bodies.js";
 
 export {
   KernelRepository,
@@ -57,8 +61,12 @@ export {
   ContributorRepository,
   RequestRepository,
   InvocationReceiptRepository,
+  GatewayReceiptRepository,
   CsdUsageRepository,
   PasskeySessionRepository,
+  EvidenceSessionRepository,
+  MilestonePackageRepository,
+  CheckpointBodyRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -91,8 +99,12 @@ export function buildRepositories(db: StoreDB) {
     contributors: new ContributorRepository(db),
     requests: new RequestRepository(db),
     invocationReceipts: new InvocationReceiptRepository(db),
+    gatewayReceipts: new GatewayReceiptRepository(db),
     csdUsage: new CsdUsageRepository(db),
     passkeySessions: new PasskeySessionRepository(db),
+    evidenceSessions: new EvidenceSessionRepository(db),
+    milestonePackages: new MilestonePackageRepository(db),
+    checkpointBodies: new CheckpointBodyRepository(db),
   };
 }
 

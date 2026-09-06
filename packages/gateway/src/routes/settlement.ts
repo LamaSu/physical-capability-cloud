@@ -10,9 +10,11 @@
  * GET  /api/evidence/:jobId          — Evidence bundle details for a job
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import { timingSafeEqual } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import type { Result } from "@pcc/spec";
+import { canonicalize } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getRepos } from "../db.js";
@@ -40,6 +42,48 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
     message: result.error.message,
     ...(result.error.details ? { details: result.error.details } : {}),
   });
+}
+
+/**
+ * Round-6 A4 — privileged-caller gate for the LOW-LEVEL settlement primitives
+ * (POST /api/settlement/submit + /api/settlement/release). These accept
+ * caller-supplied settlement operations / oracle attestations and do NOT consult
+ * Step-6 evidence session/package state, so an ORDINARY provisioned agent (any
+ * valid /api/* API key, scopes ["*"]) must not be able to invoke them — only an
+ * internal/privileged caller (the keeper/oracle operator) holding the shared
+ * SETTLEMENT_ADMIN_TOKEN. Presented as `X-Settlement-Admin-Token`.
+ *
+ * FAILS CLOSED: if the token is unset the routes reject everything — a
+ * money-path-safe default. This does NOT disable automated settlement: the keeper
+ * releases via the release ACTIVITY (activities/escrow.ts) directly, not through
+ * this manual HTTP route (which the SettlementFacade supersedes). Mirrors the
+ * adminOk pattern in routes/waitlist.ts + routes/feedback.ts.
+ */
+function settlementAuthOk(req: FastifyRequest, reply: FastifyReply): boolean {
+  const token = process.env.SETTLEMENT_ADMIN_TOKEN;
+  const presented = req.headers["x-settlement-admin-token"];
+  // Round-6 A4 (re-audit): constant-time comparison — no early-exit timing side-channel on the token.
+  if (!token || typeof presented !== "string" || !constantTimeEqual(presented, token)) {
+    reply.code(403).send({
+      error: "forbidden",
+      message:
+        "Low-level settlement APIs require the internal settlement token (X-Settlement-Admin-Token).",
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Constant-time string compare (round-6 A4 re-audit). Lengths are compared first (timingSafeEqual
+ * requires equal-length buffers); the token is high-entropy, so leaking its length does not
+ * materially aid a guess, while the byte comparison itself does not short-circuit on the first mismatch.
+ */
+function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 export async function settlementRoutes(app: FastifyInstance) {
@@ -81,6 +125,8 @@ export async function settlementRoutes(app: FastifyInstance) {
       usdcValue?: string;
     };
   }>("/api/settlement/submit", async (req, reply) => {
+    // Round-6 A4: privileged-caller gate BEFORE any processing (even the batch-enabled check).
+    if (!settlementAuthOk(req, reply)) return;
     if (!isBatchEnabled()) {
       return reply.status(503).send({
         error: "batch_disabled",
@@ -154,6 +200,10 @@ export async function settlementRoutes(app: FastifyInstance) {
       attestation: OracleAttestation;
     };
   }>("/api/settlement/release", async (req, reply) => {
+    // Round-6 A4: privileged-caller gate — an ordinary provisioned agent must not invoke this
+    // low-level release primitive (it accepts a caller-supplied attestation without consulting
+    // Step-6 package state). The automated keeper uses the release ACTIVITY directly, not this route.
+    if (!settlementAuthOk(req, reply)) return;
     const body = req.body as {
       jobId?: string;
       milestoneIndex?: number;
@@ -246,6 +296,21 @@ export async function settlementRoutes(app: FastifyInstance) {
 
     if (isEvidenceHashForm(param)) {
       const repos = getRepos();
+      // §2.4 — a finalized FinalMilestonePackage is the content-addressed unit the
+      // settlement oracle fetch-and-rehashes when a job settled on the async package
+      // path (bundleHash = packageHash). Checked BEFORE the evidence-bundle lookup:
+      // on that path an evidence row is ALSO stored under the same packageHash, but
+      // the oracle MUST receive the canonical PACKAGE bytes — whose sha256 IS the
+      // packageHash — not a reconstructed envelope (that would fail the byte re-hash
+      // closed). Serve canonicalize(pkg.body) as a RAW string (Fastify must NOT
+      // re-serialize; key order / whitespace are load-bearing for the re-hash), the
+      // same discipline as the envelope branch below.
+      const pkg = repos.milestonePackages.findByPackageHash(param);
+      if (pkg) {
+        return reply
+          .type("application/json; charset=utf-8")
+          .send(canonicalize(pkg.body));
+      }
       const bundle = repos.evidence.findByHash(param);
       if (bundle) {
         const events = repos.evidence.findEventsByBundle(bundle.id);
@@ -283,6 +348,9 @@ export async function settlementRoutes(app: FastifyInstance) {
   // ── Flush (manual epoch settlement) ───────────────────────────────
 
   app.post("/api/settlement/flush", async (req, reply) => {
+    // Round-6 A4 (re-audit): /flush is another manual settlement-triggering endpoint (epoch settlement)
+    // — gate it with the same privileged-caller token as /submit + /release.
+    if (!settlementAuthOk(req, reply)) return;
     if (!isBatchEnabled()) {
       return reply.status(503).send({
         error: "batch_disabled",

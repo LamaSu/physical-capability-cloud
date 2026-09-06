@@ -8,8 +8,12 @@
  * requires). The fix derives the tier from the job's session contractTerms and
  * propagates it through the whole completion pipeline.
  *
- * Observable proof: the stored evidence bundle's assuranceTier (the same variable
- * that feeds the oracle + EAS calls) equals the negotiated tier, not 0.
+ * Observable proof (updated for audit round-2 fix #1): a tier-0 job SETTLES with its
+ * evidence bundle stored at tier 0; a PURCHASED tier >= 1 job HOLDS under the closed
+ * SEAM-2 gate (fail-closed — the required verifier is unavailable) instead of settling
+ * on the zero-address gateway placeholder, so no settled bundle is anchored. The real
+ * tier still propagates: a hardcoded 0 would have settled a tier-2 job via the tier-0
+ * fallback, and the HOLD is proof it did not.
  *
  * Mock settlement is on; IPFS + chain are mocked. The verification oracle is
  * mocked to a working (verified:true, non-degraded) verdict: S4 made the
@@ -158,29 +162,36 @@ describe("completion attests at the job's real assurance tier (finding #3 / A-3)
     return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
   }
 
-  it("stores the evidence bundle at the negotiated tier 2 (not the hardcoded 0)", async () => {
-    // evidenceTier 'full' => tier 2 on-chain (N3). Completion must attest at tier 2.
+  it("HOLDS a tier-2 job (fail-closed) instead of settling on the gateway placeholder (finding #3 + fix #1)", async () => {
+    // evidenceTier 'full' => tier 2 on-chain (N3). A-3 required the REAL tier to propagate
+    // (not hardcoded 0). Audit round-2 fix #1 CHANGED the tier>=1 completion outcome: with
+    // the SEAM-2 gate closed (the default), a PURCHASED tier >= 1 no longer settles on the
+    // zero-address gateway placeholder — it HOLDS (required-verifier-unavailable), fail
+    // closed, funds stay in escrow. The A-3 concern survives and is in fact proven by the
+    // contrast with the tier-0 case below: a tier-2 job HOLDS *because* the negotiated tier
+    // propagated as >= 1 (a hardcoded 0 would have settled via the tier-0 fallback instead).
     const jobId = await negotiateJob("a3-full", { evidenceTier: "full", quantity: 1 });
 
     const res = await complete(jobId);
     expect(res.statusCode).toBe(200);
-    expect(res.json().status).toBe("settled");
+    expect(res.json().status).toBe("hold");
 
+    // Nothing is anchored on the gateway placeholder when a purchased tier holds.
     const bundles = getRepos().evidence.findByJob(jobId);
-    expect(bundles.length).toBe(1);
-    // The stored tier is the SAME variable fed to the oracle + EAS calls.
-    expect(bundles[0].assuranceTier).toBe(2);
+    expect(bundles.length).toBe(0);
   });
 
-  it("stores the evidence bundle at the negotiated tier 1 for evidenceTier 'basic'", async () => {
+  it("HOLDS a tier-1 job (fail-closed) for evidenceTier 'basic' (finding #3 + fix #1)", async () => {
+    // tier 1 is also a PURCHASED assurance tier → HOLDS under the closed gate (fix #1),
+    // rather than the pre-fix silent downgrade onto the gateway placeholder.
     const jobId = await negotiateJob("a3-basic", { evidenceTier: "basic", quantity: 1 });
 
     const res = await complete(jobId);
     expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("hold");
 
     const bundles = getRepos().evidence.findByJob(jobId);
-    expect(bundles.length).toBe(1);
-    expect(bundles[0].assuranceTier).toBe(1);
+    expect(bundles.length).toBe(0);
   });
 
   it("keeps tier 0 for a fast-track job (submit-from-discovery is tier 0 by design)", async () => {

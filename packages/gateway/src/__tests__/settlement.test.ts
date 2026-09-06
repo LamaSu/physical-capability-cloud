@@ -157,8 +157,12 @@ function mkAttestationBody(): Record<string, unknown> {
 // Test app builder
 // ---------------------------------------------------------------------------
 
+/** Round-6 A4: the low-level settlement routes are gated by this internal token. */
+const SETTLEMENT_TOKEN = "test-settlement-admin-token";
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
+  process.env.SETTLEMENT_ADMIN_TOKEN = SETTLEMENT_TOKEN; // round-6 A4: arm the privileged-caller gate
   // POST /api/settlement/release routes through releaseMilestoneByJobActivity,
   // which uses the durable workflow store for on-chain-op idempotency. Give each
   // test a fresh in-memory store so release attempts across tests can't collide
@@ -532,6 +536,7 @@ describe("Settlement Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/settlement/release",
+        headers: { "x-settlement-admin-token": SETTLEMENT_TOKEN },
         payload: { milestoneIndex: 0 },
       });
       expect(res.statusCode).toBe(400);
@@ -546,6 +551,7 @@ describe("Settlement Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/settlement/release",
+        headers: { "x-settlement-admin-token": SETTLEMENT_TOKEN },
         payload: { jobId: "job-001", milestoneIndex: 0, attestation: mkAttestationBody() },
       });
       expect(res.statusCode).toBe(502);
@@ -560,6 +566,7 @@ describe("Settlement Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/settlement/release",
+        headers: { "x-settlement-admin-token": SETTLEMENT_TOKEN },
         payload: {
           jobId: "job-001",
           milestoneIndex: 0,
@@ -573,6 +580,65 @@ describe("Settlement Routes", () => {
       expect(body.status).toBe("released");
       expect(body.jobId).toBe("job-001");
       expect(body.milestoneIndex).toBe(0);
+    });
+
+    // ── Round-6 A4: privileged-caller gate (ordinary callers cannot invoke the low-level APIs) ──
+    it("A4: release WITHOUT the settlement token → 403 (an ordinary provisioned agent is rejected)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/release",
+        payload: { jobId: "job-001", milestoneIndex: 0, attestation: mkAttestationBody() },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("forbidden");
+    });
+
+    it("A4: release with a WRONG settlement token → 403", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/release",
+        headers: { "x-settlement-admin-token": "not-the-token" },
+        payload: { jobId: "job-001", milestoneIndex: 0, attestation: mkAttestationBody() },
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("A4: submit WITHOUT the settlement token → 403 (gated BEFORE the batch-enabled check)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/submit",
+        payload: {
+          intentId: "i1",
+          agentId: "a1",
+          escrowAddress: "0xDeAdBeEf00000000000000000000000000000001",
+          operation: { type: "release" },
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("forbidden");
+    });
+
+    it("A4: submit WITH the correct settlement token passes the gate (reaches the batch-disabled 503)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/submit",
+        headers: { "x-settlement-admin-token": SETTLEMENT_TOKEN },
+        payload: {
+          intentId: "i1",
+          agentId: "a1",
+          escrowAddress: "0xDeAdBeEf00000000000000000000000000000001",
+          operation: { type: "release" },
+        },
+      });
+      // Past the gate; batch settlement is disabled in tests → 503 (NOT 403). Proves the token opens it.
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toBe("batch_disabled");
+    });
+
+    it("A4: flush WITHOUT the settlement token → 403 (the epoch-settlement flush endpoint is gated too)", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/settlement/flush", payload: {} });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("forbidden");
     });
   });
 

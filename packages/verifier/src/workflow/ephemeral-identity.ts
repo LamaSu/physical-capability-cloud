@@ -27,7 +27,7 @@ import type {
   SessionVerificationResult,
   SessionAction,
 } from "@pcc/spec";
-import { DEFAULT_SESSION_KEY_CONFIG } from "@pcc/spec";
+import { DEFAULT_SESSION_KEY_CONFIG, canonicalSessionKeyBytes } from "@pcc/spec";
 import type { AgentRegistryId, ReputationFeedback } from "@pcc/spec";
 import { derivePath, type DerivedKey } from "./slip10-ed25519.js";
 
@@ -35,54 +35,10 @@ import { derivePath, type DerivedKey } from "./slip10-ed25519.js";
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Convert a Uint8Array to a hex string.
- * Used for deterministic JSON serialization of binary fields.
- */
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/**
- * Produce the canonical byte representation of a SessionKey struct
- * for signing/verification.
- *
- * CRITICAL: This excludes the parentSignature field.
- * The parent signs this canonical form; the signature goes INTO parentSignature.
- *
- * Deterministic JSON: sorted keys, no whitespace, binary fields as hex.
- * This format is stable across JS engines because we control key order explicitly.
- *
- * `derivationPath` is INCLUDED in the canonical form ONLY when present.
- * This keeps backward compatibility: a legacy sessionKey (no derivationPath)
- * produces the same canonical bytes it did before the field was added, so
- * its parentSignature still verifies. A derived sessionKey has derivationPath
- * set, which means the parent signs over the path as well — committing to
- * the canonical derivation location in the tree.
- */
-function canonicalSessionKeyBytes(sk: Omit<SessionKey, "parentSignature">): Uint8Array {
-  const body: Record<string, unknown> = {
-    sessionId: sk.sessionId,
-    parentAgentId: sk.parentAgentId,
-    publicKey: toHex(sk.publicKey),
-    issuedAt: sk.issuedAt,
-    expiresAt: sk.expiresAt,
-    scope: {
-      allowedActions: [...sk.scope.allowedActions].sort(),
-      contractIds: [...sk.scope.contractIds].sort(),
-      maxSignatures: sk.scope.maxSignatures,
-    },
-  };
-  // Only include derivationPath when present so legacy (fresh-keypair)
-  // sessionKeys produce byte-identical canonical output.
-  if (sk.derivationPath !== undefined) {
-    body.derivationPath = sk.derivationPath;
-  }
-  const canonical = JSON.stringify(body);
-  return new TextEncoder().encode(canonical);
-}
+// `canonicalSessionKeyBytes` (and its `toHex` helper) now live in @pcc/spec
+// (identity/ephemeral.ts) as the SINGLE canonical form — imported here, by the
+// gateway off-chain builder, and by kernel-sdk, so a producer and a verifier
+// can never diverge on the session-key signing preimage.
 
 /**
  * Produce the canonical byte representation of a revocation record
