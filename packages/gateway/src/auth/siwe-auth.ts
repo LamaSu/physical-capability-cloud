@@ -317,8 +317,11 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       });
     }
     // In-memory sweep only. Session/DB cleanup runs on the timer above, NOT on
-    // this unauthenticated request path.
-    if (sweepNonces() >= MAX_OUTSTANDING_NONCES) {
+    // this unauthenticated request path. And only SCAN when actually at capacity:
+    // sweeping on every nonce request was an O(n) map scan per call, O(n²) under a
+    // fill-flood (finding M5). The timer sweep handles the steady state; this
+    // lazy check pays the scan only at the boundary.
+    if (nonces.size >= MAX_OUTSTANDING_NONCES && sweepNonces() >= MAX_OUTSTANDING_NONCES) {
       return reply.status(503).send({
         error: "nonce_capacity",
         message: "Too many outstanding sign-in nonces. Try again shortly.",
