@@ -78,6 +78,13 @@ export type ApiScope =
   | "agent"          // scoped to specific agent actions
   | "auditor"        // read-only access to audit logs and compliance
   | "template_author" // publish and manage templates
+  // Funds MOVEMENT: fund/release/dispute an escrow, fiat on/off-ramp. Held
+  // separately from `operator` on purpose — running a shop and moving money are
+  // different authorities, so completing self-service signup grants the former
+  // and never the latter. Granted by manual approval only
+  // (PCC_SETTLEMENT_OPERATORS; see gateway routes/provision.ts) and enforced by
+  // gateway middleware/scope-checker.ts.
+  | "settlement"
   | (string & {});    // extensible
 
 /** Endpoint scope requirement */

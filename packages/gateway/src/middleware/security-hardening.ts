@@ -107,6 +107,7 @@ export function canSiweVerify(ip: string): boolean {
   const now = Date.now();
   const entry = siweVerifyAttempts.get(ip);
   if (!entry || now - entry.windowStart > SIWE_VERIFY_WINDOW_MS) {
+    boundLimiter(siweVerifyAttempts);
     siweVerifyAttempts.set(ip, { count: 1, windowStart: now });
     return true;
   }
@@ -133,6 +134,7 @@ export function canAnonA2aDiscover(ip: string): boolean {
   const now = Date.now();
   const entry = anonA2aDiscoverAttempts.get(ip);
   if (!entry || now - entry.windowStart > ANON_A2A_DISCOVER_WINDOW_MS) {
+    boundLimiter(anonA2aDiscoverAttempts);
     anonA2aDiscoverAttempts.set(ip, { count: 1, windowStart: now });
     return true;
   }
@@ -146,12 +148,67 @@ export function __resetAnonA2aDiscoverForTest(): void {
   anonA2aDiscoverAttempts.clear();
 }
 
+/**
+ * Bound a per-IP limiter map's ENTRY count (finding M5). These maps key on the
+ * client IP, and with trustProxy:true that IP is read from X-Forwarded-For — which
+ * a caller can vary freely — so a flood of distinct spoofed IPs would grow the map
+ * until the 120s cleanup sweep. Call before inserting a NEW window: at cap, evict
+ * the oldest entries (Map preserves insertion order). Evicting a legit IP's window
+ * early merely grants it a fresh window; it never denies service. Cheap O(k) where
+ * k is the small overshoot, and only runs once the map is already large.
+ */
+const MAX_LIMITER_ENTRIES = 20_000;
+function boundLimiter(map: Map<string, { count: number; windowStart: number }>): void {
+  if (map.size < MAX_LIMITER_ENTRIES) return;
+  const evict = map.size - MAX_LIMITER_ENTRIES + 1;
+  let i = 0;
+  for (const key of map.keys()) {
+    map.delete(key);
+    if (++i >= evict) break;
+  }
+}
+
+// ── Anonymous SIWE nonce-issuance limiter ────────────────────────────────────
+// Same principle as the A2A limiter above. GET /api/auth/nonce is necessarily
+// PUBLIC — it is how a caller with no credential bootstraps one — and it was
+// previously both unlimited AND doing real work per call (a full nonce-map
+// sweep plus a SQLite session DELETE), i.e. an unauthenticated amplification
+// path. Cross-family review of PR #309 flagged it. A legitimate client needs
+// ONE nonce per login, so 60/min/IP is far more than a human or agent needs and
+// far less than a flood needs.
+const siweNonceAttempts = new Map<string, { count: number; windowStart: number }>();
+const SIWE_NONCE_LIMIT = 60;
+const SIWE_NONCE_WINDOW_MS = 60_000; // 1 minute
+
+export function canSiweNonce(ip: string): boolean {
+  const now = Date.now();
+  const entry = siweNonceAttempts.get(ip);
+  if (!entry || now - entry.windowStart > SIWE_NONCE_WINDOW_MS) {
+    boundLimiter(siweNonceAttempts);
+    siweNonceAttempts.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= SIWE_NONCE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+/** Test hook — clears the nonce-issuance window between suites. */
+export function __resetSiweNonceForTest(): void {
+  siweNonceAttempts.clear();
+}
+
 // Cleanup stale SIWE entries periodically
 setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of siweVerifyAttempts) {
     if (now - entry.windowStart > SIWE_VERIFY_WINDOW_MS) {
       siweVerifyAttempts.delete(ip);
+    }
+  }
+  for (const [ip, entry] of siweNonceAttempts) {
+    if (now - entry.windowStart > SIWE_NONCE_WINDOW_MS) {
+      siweNonceAttempts.delete(ip);
     }
   }
 }, 120_000);

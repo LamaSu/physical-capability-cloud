@@ -8,6 +8,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { authPath } from "./route-path.js";
 
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
@@ -39,6 +40,10 @@ const PUBLIC_PREFIXES = [
 ];
 
 const PUBLIC_EXACT = [
+  // NOTE: the SIWE bootstrap entries (/api/auth/nonce, /api/auth/verify) live at
+  // the bottom of this list — they landed on master via #310 while #309 added an
+  // identical pair here; the post-rebase duplicate was removed in favour of the
+  // merged copy so there is exactly one.
   "/api/capabilities/types",   // Discovery is public (see what's available)
   "/api/capabilities",         // Capability listing is public
   "/api/agents/status",        // Network status is public
@@ -145,11 +150,17 @@ function isPublicRoute(url: string, method?: string): boolean {
 
 async function apiGateImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // Decide on the route Fastify MATCHED, not the raw request line — otherwise a
+    // percent-encoded path (/api/%73ettlement/flush reaching the money handler
+    // unauthenticated, or /api/auth/%6eonce 401ing a public endpoint) evades this
+    // gate while still running the real handler (sol #309 H1). See authPath.
+    const path = authPath(req);
+
     // Only gate /api/* routes
-    if (!req.url.startsWith("/api/")) return;
+    if (!path.startsWith("/api/")) return;
 
     // Skip public routes
-    if (isPublicRoute(req.url, req.method)) return;
+    if (isPublicRoute(path, req.method)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
