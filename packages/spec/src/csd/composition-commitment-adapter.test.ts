@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { CapabilityNode } from "../types/requests.js";
-import { canonicalDecimal, matchedDagFromCapabilityNodes, commitmentReportForRequest, slugifyCapabilityTypeHint } from "./composition-commitment-adapter.js";
+import { canonicalDecimal, matchedDagFromCapabilityNodes, commitmentReportForRequest, slugifyCapabilityTypeHint, normalizeCapabilityNodeConventions } from "./composition-commitment-adapter.js";
 import { deriveCompositionCommitment, DIGEST_VIOLATION_SUFFIX } from "./composition-commitment.js";
 import { readFileSync } from "node:fs";
 
@@ -160,5 +160,44 @@ describe("adapter hardening (bridge #1520 + prod finding 2026-08-27)", () => {
       expect(r.committable).toBe(true);
       if (r.committable) expect(r.compositionRoot).toBe(v.compositionRoot);
     }
+  });
+});
+
+describe("normalizeCapabilityNodeConventions (#1827 Finding B — one normalization for both matched conventions)", () => {
+  const DIGEST_B = DIG("cd");
+  type Routed = CapabilityNode & { capabilityId?: string; kernelId?: string };
+
+  it("a routed/direct-match node (no matchStatus, bare ids) normalizes to matched with its STALE digest cleared", () => {
+    const routed = { ...node({ id: "req-1-step-1", capabilityType: "cnc-3axis" }), capabilityId: "cap-9", kernelId: "kern-9", matchedCapabilityDigest: DIGEST_B } as Routed;
+    delete (routed as Partial<Routed>).matchStatus;
+    const [n] = normalizeCapabilityNodeConventions([routed]);
+    expect(n).toMatchObject({ matchStatus: "matched", matchedCapabilityId: "cap-9", matchedKernelId: "kern-9" });
+    expect((n as Routed).matchedCapabilityDigest).toBeUndefined();
+    // and the report degrades on the digest gap instead of holding as unmatched:
+    const r = commitmentReportForRequest("req-1", normalizeCapabilityNodeConventions([routed]), { currency: "USDC" });
+    expect(r.commitment.committable).toBe(false);
+    if (!r.commitment.committable) expect(r.commitment.unmatchedNodes).toEqual([]);
+    expect(r.blockedOn).toMatch(/matchedCapabilityDigest/);
+    expect(r.capabilityContractRoot).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("explicit matchStatus is AUTHORITATIVE: 'none' with routed-looking fields stays unmatched; 'matched' missing matchedKernelId is forced to 'none'", () => {
+    const noneHybrid = { ...node({ id: "a", capabilityType: "t.a", matchStatus: "none" }), capabilityId: "cap-9", kernelId: "kern-9" } as Routed;
+    const incomplete = node({ id: "b", capabilityType: "t.b", matchStatus: "matched", matchedCapabilityId: "cap-1" } as Partial<CapabilityNode> & { id: string; capabilityType: string });
+    const [x, y] = normalizeCapabilityNodeConventions([noneHybrid, incomplete]);
+    expect(x!.matchStatus).toBe("none");
+    expect(y!.matchStatus).toBe("none");
+  });
+
+  it("legacy rows (absent matchStatus, no routed fields) and complete agentic nodes pass through with IDENTICAL bytes — existing roots cannot drift", () => {
+    const legacy = node({ id: "a", capabilityType: "t.a" });
+    delete (legacy as Partial<CapabilityNode>).matchStatus;
+    const agentic = { ...node({ id: "b", capabilityType: "t.b", matchStatus: "matched", matchedCapabilityId: "cap-1", matchedCapabilityDigest: DIGEST_B } as Partial<CapabilityNode> & { id: string; capabilityType: string }), matchedKernelId: "kern-1" } as CapabilityNode;
+    const [l, a] = normalizeCapabilityNodeConventions([legacy, agentic]);
+    expect(l).toBe(legacy); // same reference — untouched
+    expect(a).toBe(agentic);
+    const before = commitmentReportForRequest("req-1", [agentic], { currency: "USDC" });
+    const after = commitmentReportForRequest("req-1", normalizeCapabilityNodeConventions([agentic]), { currency: "USDC" });
+    expect(after).toEqual(before);
   });
 });
