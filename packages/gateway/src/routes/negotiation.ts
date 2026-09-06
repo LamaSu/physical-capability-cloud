@@ -42,6 +42,7 @@ import {
 // Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
 // enforces the identical rule — see session-liveness.ts (N1).
 import { assertSessionLive as assertLive } from "./session-liveness.js";
+import { cortexRememberBestEffort } from "../cortex-client.js";
 
 /**
  * Serialize a WorkflowChallenge for the wire — converts the BigInt
@@ -721,6 +722,27 @@ export async function negotiationRoutes(app: FastifyInstance) {
               "Real settlement completed without an on-chain escrow address",
             sessionId: req.params.id,
             jobId,
+          });
+        }
+
+        // Durable negotiation provenance (fire-and-forget): persist what was
+        // actually committed — price, tier, capability, escrow — as a cited
+        // memory, so an operator agent can later prove what it quoted. Not
+        // awaited and never throws (see cortexRememberBestEffort): a memory
+        // write must not add latency to, or ever fail, the money path. Until
+        // MITOSIS_API_KEY is configured this logs one warning and no-ops.
+        {
+          const q = row.quote as { totalPrice?: string; currency?: string; validUntil?: string } | null;
+          void cortexRememberBestEffort({
+            text:
+              `Negotiation session ${req.params.id} committed at ${now}: agent ${row.userAgentId} ` +
+              `locked capability "${row.capabilityType}" on kernel ${row.kernelId} as job ` +
+              `${paidJobResult?.jobId ?? jobId} at quoted price ${q?.totalPrice ?? "unknown"} ` +
+              `${q?.currency ?? "USDC"}` +
+              `${q?.validUntil ? ` (quote valid until ${q.validUntil})` : ""}` +
+              `${paidJobResult?.escrowAddress ? `, escrow ${paidJobResult.escrowAddress}` : ", no on-chain escrow (mock settlement)"}.`,
+            kind: "negotiation-commit",
+            confidence: 1,
           });
         }
 
