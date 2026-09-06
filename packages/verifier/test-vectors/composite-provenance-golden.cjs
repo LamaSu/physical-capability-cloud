@@ -58,8 +58,12 @@ const PIN_HONEST_ASYM = "0x2acdff542bc554770bb333b2683f053f3334617f84798efd05ecc
 //      {operator_self_report,true} ALL fail -> dispute. UNIVERSAL over courier events (mixed independent +
 //      contradiction bundle => dispute; an existential good-witness does not rescue a contradiction elsewhere).
 function pairWellFormed(p) { return VALID_PAIRS.some(([prov, ind]) => p.provenance === prov && p.independentCarrierScan === ind); }
+// Scope = eventType PREFIX 'courier_' (aligned to oracle ad8fe08 #1877: broader = fail-closed, so a FUTURE
+// courier_* type is covered by default, not silently exempt). Identical to the {pickup,delivery} set on
+// today's real types; the courier_returned case below proves the fail-closed prefix behaviour differs from a set.
+function isCourierEvent(e) { return typeof e.type === "string" && e.type.startsWith("courier_"); }
 function wellFormednessPrecondition(events) {
-  return events.filter((e) => COURIER_TYPES.includes(e.type)).every((e) => pairWellFormed(e.payload));
+  return events.filter(isCourierEvent).every((e) => pairWellFormed(e.payload));
 }
 
 // ---- carrier mail event; only the provenance fields vary across cases -----------------------------
@@ -148,6 +152,12 @@ check("independent -> release-eligible", evaluate([printEvent, V.independent], h
 check("contradiction self+true -> dispute (THE FIX)", evaluate([printEvent, V.contra_selfTrue], honestAsymmetryProgram), "dispute");
 for (const k of ["contra_indFalse", "bareTrue", "absent", "unknownEnum", "stringBool", "missingBool"])
   check(`malformed ${k} -> dispute`, evaluate([printEvent, V[k]], honestAsymmetryProgram), "dispute");
+
+console.log("FAIL-CLOSED PREFIX SCOPE (oracle ad8fe08: 'courier_' prefix, not a pinned set):");
+const courierReturned = (() => { const e = { id: "evt-ret", type: "courier_returned", timestamp: "2026-08-27T14:00:00.000Z",
+  source: { deviceId: "easypost:" + trackingCode, deviceType: "courier_api", kernelId: KERNEL, simulated: false }, payload: { jobId: JOB, trackingCode } }; e.hash = hashEvent(e); return e; })();
+check("a FUTURE courier_returned (no provenance) in an otherwise-valid bundle -> dispute (a set would miss it)",
+  evaluate([printEvent, V.self_report, courierReturned], honestAsymmetryProgram), "dispute");
 
 console.log("REGRESSION DEMO — without the precondition (the v1 settlement path) the contradiction RELEASED:");
 check("no-precondition: contradiction self+true -> release-eligible (the BUG Astra found)", evaluateNoPrecondition([printEvent, V.contra_selfTrue], honestAsymmetryProgram), "release-eligible");
