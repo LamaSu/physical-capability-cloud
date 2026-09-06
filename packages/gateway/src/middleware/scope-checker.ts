@@ -86,6 +86,13 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
   { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin"] },
+  // Fiat-ramp SETUP (non-money — see MONEY_PATH_EXCEPTIONS). An operator sets up
+  // their OWN funding rails; this is not funds movement, so it needs [operator],
+  // NOT [settlement]. More specific than the /api/fiat-ramp/** floor (zero
+  // wildcards), so it is matched first. Finding H2.
+  { method: "POST",   pattern: "/api/fiat-ramp/cdp/wallet",         scopes: ["operator", "admin"] },
+  { method: "POST",   pattern: "/api/fiat-ramp/cdp/provision",      scopes: ["operator", "admin"] },
+  { method: "POST",   pattern: "/api/fiat-ramp/coinbase/onramp",    scopes: ["operator", "admin"] },
   // Money-path rules are NOT listed here — they are an immutable floor applied
   // on top of whatever this table (or the DB) says. See MONEY_PATH_FLOOR.
 ];
@@ -109,10 +116,37 @@ const MONEY_DELETE_SCOPES = ["admin"];
  */
 const MONEY_PATH_PREFIXES = ["/api/escrow/", "/api/fiat-ramp/", "/api/settlement/"];
 
+/**
+ * Exact routes that sit UNDER a money prefix but do NOT move PCC funds, so the
+ * settlement floor must not apply to them (cross-family review of #309, finding
+ * H2). Every POST under /api/fiat-ramp/ inherited [settlement,admin], which 403s
+ * an ordinary [operator] key on the documented card-free SETUP flow:
+ *   - POST /api/fiat-ramp/cdp/wallet      → createWallet(): an UNFUNDED smart wallet
+ *   - POST /api/fiat-ramp/cdp/provision   → wallet + a funding-session URL
+ *   - POST /api/fiat-ramp/coinbase/onramp → a Coinbase onramp URL (the USER funds)
+ * None of these move PCC's USDC; they are operator setup and are gated to
+ * [operator] in DEFAULT_SCOPE_REQUIREMENTS below. GRANTING spend authority (POST
+ * /api/fiat-ramp/cdp/spend-permission) is deliberately NOT here — issuing a spend
+ * permission IS a money-authority act and stays on the settlement floor.
+ *
+ * The Stripe/Yellowcard webhooks are also NOT exempted, deviating from sol's H2
+ * suggestion for a concrete reason: they are RETIRED (410 unless a dev-only legacy
+ * flag) precisely because an unsigned callback could forge a credit, so making
+ * them public would re-open that hole. Their over-scope only changes the status
+ * code of a dead endpoint, not a live callback — the public+provider-HMAC
+ * end-state belongs with re-enabling them, not here.
+ */
+const MONEY_PATH_EXCEPTIONS = new Set([
+  "/api/fiat-ramp/cdp/wallet",
+  "/api/fiat-ramp/cdp/provision",
+  "/api/fiat-ramp/coinbase/onramp",
+]);
+
 /** Methods that can move funds. Default-deny applies to these only. */
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function isMoneyPath(path: string): boolean {
+  if (MONEY_PATH_EXCEPTIONS.has(path)) return false;
   return MONEY_PATH_PREFIXES.some((p) => path === p.slice(0, -1) || path.startsWith(p));
 }
 
