@@ -663,6 +663,11 @@ describe("POST /api/carrier/webhook/easypost", () => {
       // configured there is no attestation — and the payload says so.
       expect(event.payload.commitmentHashValid).toBe(true);
       expect(event.payload.commitmentSignatureVerified).toBe(false);
+      // R5 symmetry (oracle #1587): the independent leg declares its provenance in the
+      // HASHED payload, mirroring the Lob leg's operator_self_report fields — the O5
+      // predicate requires provenance ∈ allowed-independent AND the boolean cross-check.
+      expect(event.payload.provenance).toBe("independent_carrier_scan");
+      expect(event.payload.independentCarrierScan).toBe(true);
       expect((event.payload.commitment as { labelCid: string }).labelCid).toBe(bought.labelCid);
       expect(await verifyEventHash(event)).toBe(true);
     } finally {

@@ -238,6 +238,16 @@ async function buildCarrierEvidenceEvent(
     commitment: c,
     commitmentHashValid,
     commitmentSignatureVerified,
+    // Machine-readable provenance IN THE HASHED MATERIAL (kernel-signed once the
+    // event is folded into a bundle root), symmetric with the Lob leg's
+    // operator_self_report fields (oracle #1587 / sol lob review R5): the
+    // O5 independent-carrier-scan predicate requires provenance in its allowed
+    // set AND the boolean cross-check, failing closed on absence or contradiction.
+    // These are fixed code literals — this event exists only because a carrier's
+    // HMAC-verified webhook matched a pre-purchase commitment, which is exactly
+    // what "independent carrier scan" means; no provider byte can influence them.
+    provenance: "independent_carrier_scan",
+    independentCarrierScan: true,
   };
   const withoutHash = { type, timestamp: evt.occurredAt, source, payload } as const;
   const hash = await hashEvent(withoutHash);
