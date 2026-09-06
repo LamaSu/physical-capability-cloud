@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { CapabilityNode } from "../types/requests.js";
 import { canonicalDecimal, matchedDagFromCapabilityNodes, commitmentReportForRequest, slugifyCapabilityTypeHint } from "./composition-commitment-adapter.js";
-import { deriveCompositionCommitment } from "./composition-commitment.js";
+import { deriveCompositionCommitment, DIGEST_VIOLATION_SUFFIX } from "./composition-commitment.js";
 import { readFileSync } from "node:fs";
 
 const DIG = (b: string) => "0x" + b.repeat(32);
@@ -126,6 +126,29 @@ describe("adapter hardening (bridge #1520 + prod finding 2026-08-27)", () => {
     expect(mixed.commitment.committable).toBe(false);
     if (!mixed.commitment.committable) expect(mixed.commitment.violations.length).toBeGreaterThan(1);
     expect(mixed.blockedOn).toBeUndefined();
+  });
+
+  it("blockedOn cannot be spoofed by a node id that CONTAINS 'matchedCapabilityDigest' (suffix anchor, sol round-2-followup class)", () => {
+    // One matched+digested node whose id embeds the magic substring, with a NON-digest
+    // violation (malformed currency). A substring-based classifier would read this as
+    // digest-only blockage; the suffix anchor must not.
+    const nodes = [
+      node({
+        id: "x-matchedCapabilityDigest-x",
+        capabilityType: "pizza.make",
+        matchStatus: "matched",
+        matchedCapabilityId: "cap-1",
+        matchedCapabilityDigest: DIGEST,
+        currency: "usd coin!",
+      } as Partial<CapabilityNode> & { id: string; capabilityType: string }),
+    ];
+    const r = commitmentReportForRequest("req-1", nodes, { currency: "USDC" });
+    expect(r.commitment.committable).toBe(false);
+    if (!r.commitment.committable) {
+      expect(r.commitment.violations.some((v) => v.includes("matchedCapabilityDigest"))).toBe(true); // the id lands in the prefix
+      expect(r.commitment.violations.some((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX))).toBe(false); // but no real digest violation
+    }
+    expect(r.blockedOn).toBeUndefined();
   });
 
   it("slugification does not disturb any pinned corpus root (all corpus types are already valid)", () => {

@@ -18,6 +18,7 @@ import type { CapabilityNode } from "../types/requests.js";
 import {
   COMPOSITION_DOMAIN,
   CONTRACT_DOMAIN,
+  DIGEST_VIOLATION_SUFFIX,
   deriveCapabilityContractRoot,
   deriveCompositionCommitment,
   type CommitmentResult,
@@ -141,12 +142,15 @@ export function commitmentReportForRequest(
   // refusing the commitment. A digest gap sitting alongside any other violation (malformed
   // currency, duplicate node, …) must NOT be waved through a consumer's "just wait for the
   // digest branch" degrade path — bridge #1520 hit exactly that against the old `.some()` and
-  // had to distrust this field; `.every()` restores it as trustworthy.
+  // had to distrust this field; `.every()` restores it as trustworthy. Anchored on the emitter's
+  // exported FIXED SUFFIX, not a substring: a node id may legally CONTAIN
+  // "matchedCapabilityDigest", but it can never produce this suffix (the ID alphabet has no
+  // spaces), so a crafted id cannot spoof an unrelated violation into the digest class.
   const blockedOn =
     !commitment.committable &&
     commitment.unmatchedNodes.length === 0 &&
     commitment.violations.length > 0 &&
-    commitment.violations.every((v) => v.includes("matchedCapabilityDigest"))
+    commitment.violations.every((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX))
       ? DIGEST_BLOCK
       : undefined;
   return {

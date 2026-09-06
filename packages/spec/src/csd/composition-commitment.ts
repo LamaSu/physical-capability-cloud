@@ -148,6 +148,16 @@ export interface ValidateOptions {
  * Structure (ids, types, evidence, edges, acyclicity) is always checked; provider bindings only when
  * `opts.bindings !== false`.
  */
+/**
+ * The FIXED SUFFIX of the one violation the digest-degrade paths key on. Node ids are
+ * buyer/LLM-influenced text that only ever lands in a violation's "node <id>: " PREFIX, and the
+ * ID alphabet excludes spaces, so `v.endsWith(DIGEST_VIOLATION_SUFFIX)` cannot be satisfied by a
+ * crafted node id — while a bare substring check can (sol round-2-followup vs the producer's
+ * `.includes`). Consumers classifying violations MUST anchor on this exported constant, never a
+ * private copy of the string.
+ */
+export const DIGEST_VIOLATION_SUFFIX = ": matched node missing/invalid matchedCapabilityDigest (0x + 64 hex)";
+
 export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): string[] {
   const checkBindings = opts.bindings !== false;
   const v: string[] = [];
@@ -162,7 +172,7 @@ export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): strin
     if (!ID_PATTERN.test(n?.capabilityType ?? "")) v.push(`${tag}: capabilityType is required (1-128 printable ASCII characters)`);
     if (n.matchStatus !== "matched" && n.matchStatus !== "none") v.push(`${tag}: matchStatus must be 'matched' or 'none'`);
     if (checkBindings && n.matchStatus === "matched") {
-      if (!DIGEST_PATTERN.test(n.matchedCapabilityDigest ?? "")) v.push(`${tag}: matched node missing/invalid matchedCapabilityDigest (0x + 64 hex)`);
+      if (!DIGEST_PATTERN.test(n.matchedCapabilityDigest ?? "")) v.push(`${tag}${DIGEST_VIOLATION_SUFFIX}`);
       if (!COST_PATTERN.test(n.estimatedCost ?? "")) v.push(`${tag}: matched node missing/invalid estimatedCost (canonical decimal string)`);
       if (!CURRENCY_PATTERN.test(n.currency ?? "")) v.push(`${tag}: matched node missing/invalid currency (e.g. USDC)`);
     }
