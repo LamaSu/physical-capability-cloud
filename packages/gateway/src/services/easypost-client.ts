@@ -828,8 +828,43 @@ function toTrackingLocation(loc: unknown): TrackingLocation | null {
 }
 
 let singleton: EasyPostClient | undefined;
+let singletonConfigGen: string | undefined;
 let testOverride: EasyPostClient | undefined;
 let defaultSigner: CommitmentSigner | undefined;
+
+/**
+ * The configuration "generation" the singleton was built from. If the live environment no
+ * longer matches, the cached client is stale and must be rebuilt (sol #316 re-review, row 3:
+ * a client built before a secret rotation kept verifying webhooks against the RETIRED
+ * secret, and one built in permissive mode stayed permissive, while the request gate read
+ * the NEW environment — a config split-brain between the gate and the enforcer).
+ */
+function currentClientConfigGen(): string {
+  return [
+    process.env.EASYPOST_API_KEY ?? "",
+    process.env.EASYPOST_WEBHOOK_SECRET ?? "",
+    process.env.EASYPOST_MAX_RATE_USD ?? "",
+    process.env.EASYPOST_MAX_WEIGHT_OZ ?? "",
+    String(isCarrierProductionEnv()),
+  ].join("\u0000");
+}
+
+/**
+ * Fail-closed environment classification for the carrier surface (sol #316 review, finding 2).
+ *
+ * Production is the DEFAULT: only an explicit, recognized non-production NODE_ENV
+ * ("test" | "development") opts out of production-grade enforcement. Unset, empty, or
+ * mistyped values ("prod", "staging", "producton") classify as production, so a box that
+ * forgets or typos NODE_ENV gets the strict gate and mock refusal — never the permissive
+ * mode. `NODE_ENV === "production"` had the inverted default: any misclassification
+ * silently disabled the entire 4-requirement config gate AND allowed the mock client.
+ *
+ * Every carrier production/mock decision must go through this ONE function — two
+ * independent NODE_ENV reads are two chances to diverge.
+ */
+export function isCarrierProductionEnv(env: string | undefined = process.env.NODE_ENV): boolean {
+  return env !== "test" && env !== "development";
+}
 
 /** Wire the gateway's commitment signer (set at boot; null-safe when no key is configured). */
 export function setDefaultCommitmentSigner(signer: CommitmentSigner | undefined): void {
@@ -839,6 +874,8 @@ export function setDefaultCommitmentSigner(signer: CommitmentSigner | undefined)
 
 export function getEasyPostClient(): EasyPostClient {
   if (testOverride) return testOverride;
+  const gen = currentClientConfigGen();
+  if (singleton && singletonConfigGen !== gen) singleton = undefined; // config rotated → stale client
   if (!singleton) {
     const maxRate = Number(process.env.EASYPOST_MAX_RATE_USD);
     const maxWeight = Number(process.env.EASYPOST_MAX_WEIGHT_OZ);
@@ -847,9 +884,10 @@ export function getEasyPostClient(): EasyPostClient {
       webhookSecret: process.env.EASYPOST_WEBHOOK_SECRET,
       maxRateUsd: Number.isFinite(maxRate) && maxRate > 0 ? maxRate : undefined,
       maxWeightOz: Number.isFinite(maxWeight) && maxWeight > 0 ? maxWeight : undefined,
-      requireProductionMode: process.env.NODE_ENV === "production",
+      requireProductionMode: isCarrierProductionEnv(),
       signer: defaultSigner,
     });
+    singletonConfigGen = gen;
   }
   return singleton;
 }

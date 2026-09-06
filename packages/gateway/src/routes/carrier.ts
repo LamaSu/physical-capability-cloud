@@ -37,6 +37,11 @@
  * PRODUCTION FAILS CLOSED AT THE REQUEST (not at boot, since #316) without: an EasyPost
  * key, a webhook secret, the gateway signing key, and durable storage — the mail capability
  * goes unavailable and says so (503) while the rest of the gateway boots and serves normally.
+ * Since the #316 sol review: readiness is recomputed PER REQUEST (a key that disappears
+ * after boot turns into 503s, never into silently-unverified evidence), "production" is the
+ * fail-closed DEFAULT classification (only an explicit NODE_ENV of test/development opts
+ * out — see isCarrierProductionEnv), and the gate is enforced STRUCTURALLY by one plugin
+ * preHandler whose default covers every route that does not visibly opt out.
  *
  * Provider: EasyPost. No SDK dependency.
  */
@@ -48,6 +53,7 @@ import {
   EasyPostError,
   POST_CHARGE_ERROR_CODES,
   getEasyPostClient,
+  isCarrierProductionEnv,
   isValidDocumentHash,
   sha256Hex,
   verifyCommitmentHash,
@@ -191,8 +197,16 @@ async function buildCarrierEvidenceEvent(
   const commitmentSignatureVerified = await verifyCommitmentSignature(c, gatewayCommitmentKeyResolver);
   if (!identityOk) throw new Error("evidence_gate: commitment identity does not equal the stored purchase");
   if (!commitmentHashValid) throw new Error("evidence_gate: commitment hash does not recompute");
-  if (getActiveSigningKey() && !commitmentSignatureVerified) {
-    throw new Error("evidence_gate: gateway signature configured but does not verify");
+  // Signature enforcement must be UNCONDITIONAL under production classification (sol #316
+  // re-review, row 3): the old `getActiveSigningKey() && !verified` shape re-consulted the
+  // live key AT ENFORCEMENT TIME, so a key vanishing between the request gate and this line
+  // SUPPRESSED the failure and admitted unsigned evidence — a TOCTOU on the crown-jewel
+  // path. Now production requires a verified signature no matter what the key lookup says
+  // right now; a mid-request key loss makes this throw, the provider retries, and the
+  // retry meets the request gate's 503. Dev/test keeps enforce-when-key-configured.
+  const signatureRequired = isCarrierProductionEnv() || !!getActiveSigningKey();
+  if (signatureRequired && !commitmentSignatureVerified) {
+    throw new Error("evidence_gate: commitment signature required but does not verify");
   }
 
   const providerMode = evt.providerMode ?? record.providerMode ?? "mock";
@@ -246,39 +260,127 @@ export async function carrierRoutes(app: FastifyInstance) {
   // carrier scan without real credentials. Only the blast radius changed: the mail capability
   // becomes unavailable and SAYS SO, instead of the process refusing to start. This is the same
   // shape the webhook route below already used (503 + a named, actionable reason).
-  const missingConfig: string[] = [];
-  if (process.env.NODE_ENV === "production") {
-    if (!process.env.EASYPOST_API_KEY) missingConfig.push("EASYPOST_API_KEY (mock labels are fabricated evidence)");
-    if (!process.env.EASYPOST_WEBHOOK_SECRET) missingConfig.push("EASYPOST_WEBHOOK_SECRET (spending with no functioning proof webhook)");
-    if (!getActiveSigningKey()) missingConfig.push("PCC_AGENT_CARD_SIGNING_KEY (an unsigned commitment is a hash anyone can recompute, not an attestation)");
-    if (!getCarrierShipmentStore().isDurable) missingConfig.push("durable carrier store (in-memory commitments vanish on restart; re-purchase + unmatched webhooks)");
-    if (missingConfig.length) {
+  /**
+   * Compute readiness FRESH on every call — never a registration-time snapshot
+   * (sol #316 review, finding 3: a snapshot is a temporal bypass. If the signing key
+   * disappears after boot, a snapshot keeps admitting evidence while signature
+   * verification has silently stopped; recomputing turns that into a 503).
+   *
+   * The classification is fail-closed via isCarrierProductionEnv (finding 2): only an
+   * explicit NODE_ENV of "test" or "development" opts out — unset or mistyped values
+   * get the full 4-requirement gate, so a prod box that forgets NODE_ENV can never
+   * spend money or admit evidence unconfigured. The client's mock refusal derives from
+   * the SAME function, so the gate and the mock policy cannot diverge.
+   */
+  const computeMissingConfig = (): string[] => {
+    if (!isCarrierProductionEnv()) return [];
+    const missing: string[] = [];
+    if (!process.env.EASYPOST_API_KEY) missing.push("EASYPOST_API_KEY (mock labels are fabricated evidence)");
+    if (!process.env.EASYPOST_WEBHOOK_SECRET) missing.push("EASYPOST_WEBHOOK_SECRET (spending with no functioning proof webhook)");
+    if (!getActiveSigningKey()) missing.push("PCC_AGENT_CARD_SIGNING_KEY (an unsigned commitment is a hash anyone can recompute, not an attestation)");
+    if (!getCarrierShipmentStore().isDurable) missing.push("durable carrier store (in-memory commitments vanish on restart; re-purchase + unmatched webhooks)");
+    return missing;
+  };
+
+  // One-shot ops visibility at registration. The GUARD does not use this value —
+  // it recomputes per request.
+  {
+    const missingAtBoot = computeMissingConfig();
+    if (missingAtBoot.length) {
       app.log.error(
-        { missing: missingConfig },
-        "carrier capability DISABLED: production config incomplete — carrier routes will 503 until it is set. The rest of the gateway is unaffected.",
+        { missing: missingAtBoot },
+        "carrier capability DISABLED: production config incomplete — carrier routes will 503 until the configuration is completed (environment-variable changes require a restart). The rest of the gateway is unaffected.",
       );
     }
   }
-  const carrierConfigured = missingConfig.length === 0;
 
   /**
    * Fail closed at request time for anything that can spend money or admit evidence.
-   * Returns true if the request was rejected, so a route can open with:
-   *   `if (rejectIfUnconfigured(reply)) return;`
+   * Returns true if the request was rejected.
    *
-   * Discloses only env-var NAMES, which /api/carrier/healthz already reports publicly
-   * (webhookConfigured / commitmentSigningConfigured / durable) — no new disclosure.
+   * `redact` (sol #316 review, finding 5): the webhook is the one PUBLIC carrier route
+   * and its gate runs before HMAC auth, so an anonymous caller must not receive the
+   * missing[] posture (signing-key + storage-durability status). Authenticated surfaces
+   * get the actionable detail; so does /api/carrier/healthz, which sits behind apiGate.
    */
-  const rejectIfUnconfigured = (reply: FastifyReply): boolean => {
-    if (carrierConfigured) return false;
+  const rejectIfUnconfigured = (reply: FastifyReply, opts?: { redact?: boolean }): boolean => {
+    const missing = computeMissingConfig();
+    if (missing.length === 0) return false;
     reply.code(503).send({
       error: "carrier_not_configured",
       message:
         "The carrier (mail) capability is not configured on this deployment. Other capabilities are unaffected.",
-      missing: missingConfig,
+      ...(opts?.redact ? {} : { missing }),
     });
     return true;
   };
+
+  /**
+   * STRUCTURAL gate — hooks for the whole plugin, so completeness is a property of the
+   * structure, not of per-route discipline (sol #316 review, systemic: finding 1 was
+   * exactly a per-handler guard omission, on the route next to a guarded one).
+   *
+   * Fail-closed by DEFAULT: a route registered in this plugin with no declaration gets
+   * bearer auth + the full config gate. Opting out must be written into the route
+   * (`config: { carrierGate: ... }`) where a reviewer can see it:
+   *   - "open"    → no config gate. ONLY for routes that egress no evidence and spend
+   *                 nothing (healthz — which self-redacts for anonymous production callers).
+   *   - "webhook" → public by design (HMAC is its auth), so the gate runs REDACTED:
+   *                 an anonymous caller learns the capability is unconfigured, not which
+   *                 of the four requirements is missing (finding 5).
+   *   - default   → the config gate, then bearer auth.
+   *
+   * TWO PHASES, deliberately (sol #316 re-review, S1): `preHandler` alone runs AFTER
+   * onRequest/parsing/preValidation, so anything with earlier side effects would precede
+   * a preHandler-only gate. The onRequest hook below fires before this plugin's parsing
+   * and before every hook or route effect registered AFTER it in this plugin — that is
+   * the scope of the structural guarantee. It cannot precede PARENT-context hooks or
+   * hooks registered before it (Fastify runs those first, by design); keeping such
+   * hooks free of money/evidence side effects is the server composition's contract
+   * (apiGate authenticates, nothing more). The preHandler then re-runs the gate,
+   * narrowing the in-request window for BOTH webhook and default routes (sol round 3,
+   * N1: the webhook's late recheck must not be dropped — a signing key lost between
+   * onRequest and the handler must meet a 503, not the processing path).
+   *
+   * Anonymous callers on DEFAULT routes are NOT answered with config posture at
+   * onRequest (sol round 3, N2: that would be a configured/unconfigured oracle anyone
+   * can read, and it would mis-serve servers that authenticate later than onRequest) —
+   * they pass to the preHandler's 401. The early config rejection applies to callers an
+   * EARLIER hook (apiGate at the server root, or a test auth hook) already
+   * authenticated, with the actionable missing[] detail; the webhook — public by
+   * design — is gated at both phases, always redacted.
+   */
+  const gateModeOf = (req: FastifyRequest): "open" | "webhook" | undefined =>
+    (req.routeOptions?.config as { carrierGate?: "open" | "webhook" } | undefined)?.carrierGate;
+
+  app.addHook("onRequest", async (req, reply) => {
+    const mode = gateModeOf(req);
+    if (mode === "open") return;
+    if (mode === "webhook") {
+      if (rejectIfUnconfigured(reply, { redact: true })) return reply;
+      return;
+    }
+    const caller = callerId(req);
+    if (!caller) return; // no config posture for anonymous callers; preHandler 401s them
+    if (rejectIfUnconfigured(reply)) return reply;
+  });
+
+  app.addHook("preHandler", async (req, reply) => {
+    const mode = gateModeOf(req);
+    if (mode === "open") return;
+    if (mode === "webhook") {
+      // Late recheck (sol round 3, N1): config lost after onRequest — a vanished signing
+      // key or a store that stopped being durable — must still fail closed here.
+      if (rejectIfUnconfigured(reply, { redact: true })) return reply;
+      return;
+    }
+    const caller = callerId(req);
+    if (!caller) {
+      reply.code(401).send({ error: "authentication_required" });
+      return reply;
+    }
+    if (rejectIfUnconfigured(reply)) return reply;
+  });
 
   // Scoped to this plugin's encapsulation context only (Fastify's default
   // per-register() isolation). Captures the exact request BYTES so the
@@ -297,8 +399,27 @@ export async function carrierRoutes(app: FastifyInstance) {
     },
   );
 
-  app.get("/api/carrier/healthz", async () => {
+  // carrierGate "open": egresses no evidence and spends nothing — and it is the surface
+  // that must stay up to DESCRIBE an unconfigured deployment. In the real gateway it sits
+  // behind apiGate, but the plugin must not DEPEND on that wrapper for confidentiality
+  // (sol #316 re-review, H1): under production classification an anonymous caller gets a
+  // redacted summary; the detailed posture (missing config, counts, ledger stats) is for
+  // authenticated callers.
+  app.get("/api/carrier/healthz", { config: { carrierGate: "open" } }, async (req) => {
     const store = getCarrierShipmentStore();
+    // Fresh, not a boot snapshot: healthz must describe the deployment as it is NOW
+    // (a signing key that vanished after boot shows up here, and in the 503s).
+    const missingConfig = computeMissingConfig();
+    const carrierConfigured = missingConfig.length === 0;
+    if (isCarrierProductionEnv() && !callerId(req)) {
+      return {
+        ok: carrierConfigured,
+        service: "carrier (EasyPost)",
+        configured: carrierConfigured,
+        redacted: true,
+        ts: new Date().toISOString(),
+      };
+    }
     // getEasyPostClient() THROWS mock_forbidden_in_production when NODE_ENV=production and
     // EASYPOST_API_KEY is unset (easypost-client.ts:385, requireProductionMode derived from
     // NODE_ENV at :850) — i.e. in exactly the unconfigured-production case this endpoint most
@@ -447,11 +568,11 @@ export async function carrierRoutes(app: FastifyInstance) {
     }
   }
 
+  // No carrierGate declaration on purpose: the plugin preHandler's fail-closed default
+  // (401 for anonymous, then the detailed config 503) is the gate for this money route.
   app.post<{ Body: CreateShipmentBody }>("/api/carrier/shipments", async (req, reply) => {
     const caller = callerId(req);
     if (!caller) return reply.code(401).send({ error: "authentication_required" });
-    // Gated AFTER auth: this route spends money, and an anonymous caller learns nothing.
-    if (rejectIfUnconfigured(reply)) return;
 
     const b = req.body ?? {};
     const errors: string[] = [];
@@ -666,16 +787,16 @@ export async function carrierRoutes(app: FastifyInstance) {
     });
   });
 
+  // Evidence plane: toShipmentDTO carries commitment + events — the SAME spec-shaped
+  // material as the /:jobId/evidence route below. sol's #316 review (finding 1) caught this
+  // route unguarded while its neighbour was guarded: an authenticated owner could pull
+  // carrier evidence from an unconfigured deployment (a durable store that still holds prior
+  // records after a key is removed) and a kernel could fold it into a signed bundle. The
+  // plugin preHandler's fail-closed DEFAULT now covers it — and any future egress route —
+  // structurally, so that omission cannot recur.
   app.get<{ Params: { jobId: string } }>("/api/carrier/shipments/:jobId", async (req, reply) => {
     const caller = callerId(req);
     if (!caller) return reply.code(401).send({ error: "authentication_required" });
-    // Evidence plane: toShipmentDTO carries commitment + events — the SAME spec-shaped
-    // material the /:jobId/evidence route guards below. Without this guard, an authenticated
-    // owner could pull carrier evidence from an unconfigured deployment (a durable store that
-    // still holds prior records after a key is removed) and a kernel could fold it into a
-    // signed bundle, bypassing the 503 the evidence seam returns. The config guard must cover
-    // EVERY route that egresses this evidence, not only the obvious one.
-    if (rejectIfUnconfigured(reply)) return;
     const record = getCarrierShipmentStore().getByJobId(req.params.jobId);
     // Same response for missing and not-yours: no existence oracle.
     if (!record || record.ownerId.toLowerCase() !== caller.toLowerCase()) {
@@ -690,13 +811,13 @@ export async function carrierRoutes(app: FastifyInstance) {
   // kernelSignedEventsRoot — the gateway never signs on the kernel's behalf,
   // so "the party being paid does not author the proof" holds: the kernel
   // signs a bundle CONTAINING a third-party event it could not forge.
+  // Evidence plane: an unconfigured deployment must say so rather than return an empty
+  // event list, which a kernel could mistake for "the carrier leg legitimately has no
+  // events yet" and fold into a bundle. Explicit 503 (plugin preHandler default) beats a
+  // silent absence here.
   app.get<{ Params: { jobId: string } }>("/api/carrier/shipments/:jobId/evidence", async (req, reply) => {
     const caller = callerId(req);
     if (!caller) return reply.code(401).send({ error: "authentication_required" });
-    // Evidence plane: an unconfigured deployment must say so rather than return an empty
-    // event list, which a kernel could mistake for "the carrier leg legitimately has no
-    // events yet" and fold into a bundle. Explicit 503 beats a silent absence here.
-    if (rejectIfUnconfigured(reply)) return;
     const record = getCarrierShipmentStore().getByJobId(req.params.jobId);
     if (!record || record.ownerId.toLowerCase() !== caller.toLowerCase()) {
       return reply.code(404).send({ error: "not_found" });
@@ -704,12 +825,14 @@ export async function carrierRoutes(app: FastifyInstance) {
     return { jobId: record.jobId, kernelId: record.kernelId, status: record.status, events: record.events };
   });
 
-  app.post("/api/carrier/webhook/easypost", async (req, reply) => {
-    // Admits evidence into the settlement path. No bearer auth here by design (HMAC is the
-    // authentication), so the gate goes first. Broader than the webhook-secret check below:
-    // without the signing key a commitment is unattested, and without a durable store the
-    // commitment it must match may have vanished on restart.
-    if (rejectIfUnconfigured(reply)) return;
+  // carrierGate "webhook": admits evidence into the settlement path. No bearer auth here by
+  // design (HMAC is the authentication), so the plugin preHandler runs the gate FIRST and
+  // REDACTED — an anonymous caller learns only that the capability is unconfigured, never
+  // which of the four requirements is missing (sol #316 review, finding 5). The gate is
+  // broader than the webhook-secret check below: without the signing key a commitment is
+  // unattested, and without a durable store the commitment it must match may have vanished
+  // on restart.
+  app.post("/api/carrier/webhook/easypost", { config: { carrierGate: "webhook" } }, async (req, reply) => {
     const client = getEasyPostClient();
     if (!client.hasWebhookSecret) {
       return reply.code(503).send({
