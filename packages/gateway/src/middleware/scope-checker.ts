@@ -52,6 +52,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getRepos } from "../db.js";
+import { authPath } from "./route-path.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
 
@@ -319,33 +320,6 @@ function getCallerScopes(req: FastifyRequest): string[] {
 }
 
 // ── Fastify Plugin ───────────────────────────────────────────────
-
-/**
- * The path to AUTHORIZE against — the route Fastify MATCHED, not the raw request
- * line. find-my-way percent-decodes unreserved characters before it selects a
- * handler, so `POST /api/%73ettlement/flush` executes the settlement handler while
- * `req.url` still reads `/api/%73ettlement/...`. Authorizing on the raw URL let an
- * encoded path evade isMoneyPath()/the rule table while still running the real
- * money handler (cross-family review of #309, finding H1). The matched route
- * template (`routeOptions.url`, e.g. "/api/escrow/:id/release") is exactly what
- * WILL run, so it cannot be desynchronised from routing by encoding.
- *
- * When nothing matched (a 404-bound request) there is no template, so fall back to
- * a decoded raw path — an encoded `/api/...` then still trips the `/api/` gate
- * instead of slipping past a raw-string startsWith. Accessed defensively so the
- * helper does not depend on a specific Fastify type surface.
- */
-function authPath(req: FastifyRequest): string {
-  const r = req as unknown as { routeOptions?: { url?: string }; routerPath?: string };
-  const matched = r.routeOptions?.url ?? r.routerPath;
-  if (typeof matched === "string" && matched.length > 0) return matched;
-  const raw = req.url.split("?")[0];
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw; // malformed %-encoding — keep raw; still gated by the /api/ check
-  }
-}
 
 async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
