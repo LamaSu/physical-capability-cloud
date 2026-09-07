@@ -39,6 +39,7 @@ import type {
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand, commitmentReportForRequest } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
+import { checkCallerRate } from "../middleware/security-hardening.js";
 import { matchListings } from "../services/request-matcher.js";
 import { produceJobOffersForRequest } from "../services/job-offer-producer.js";
 import {
@@ -361,6 +362,20 @@ export async function requestRoutes(app: FastifyInstance) {
       return reply.status(400).send({
         error: "bad_request",
         message: "budget must be a positive number",
+      });
+    }
+
+    // Route-level rate limit on the LLM-backed decompose (escrow #1623-B). The
+    // only throttle this route inherited was the coarse global 200/min/IP; each
+    // request here runs an agentic LLM planner, so bound it PER CALLER — keyed on
+    // the operator (falling back to IP), so a single key cannot fan a model bill
+    // out across rotating IPs.
+    const REQUESTS_DECOMPOSE_PER_MIN = 20;
+    const rateKey = req.operatorId ?? req.ip;
+    if (!checkCallerRate(rateKey, "requests.decompose", REQUESTS_DECOMPOSE_PER_MIN, 60_000)) {
+      return reply.status(429).send({
+        error: "rate_limited",
+        message: "Too many decompose requests — slow down and retry shortly.",
       });
     }
 
