@@ -79,6 +79,15 @@ export interface MatchedNode {
   estimatedCost?: string;
   /** Uppercase currency code, e.g. "USDC" — REQUIRED on a matched node. */
   currency?: string;
+  /**
+   * 0x + 40 hex — the payout wallet the operator agent REQUESTED and the payer AGREED to during
+   * negotiation (operator decision #1690: payout destination is a first-class negotiation
+   * parameter, sealed before escrow locks). Provider-bound — two operators fulfilling the same
+   * contract differ here, so it lives in the COMPOSITION root only, never the contract root.
+   * v3-only, optional: committing it requires { version: 3 }; v2 derivations refuse a plan that
+   * carries it. Committed lowercase (checksum-case must not alias two roots for one wallet).
+   */
+  operatorSettlementAddress?: string;
   evidenceRequirements?: EvidenceRequirement[];
 }
 export interface MatchedEdge { from: string; to: string; }
@@ -123,6 +132,7 @@ export const DIGEST_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 /** Canonical decimal: no sign, no leading zeros, at most 18 fraction digits. */
 export const COST_PATTERN = /^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$/;
 export const CURRENCY_PATTERN = /^[A-Z][A-Z0-9]{2,11}$/;
+export const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 export const MAX_TIER = 3;
 
 function utf8(s: string): Uint8Array { return new TextEncoder().encode(s); }
@@ -199,6 +209,8 @@ export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): strin
       if (!COST_PATTERN.test(n.estimatedCost ?? "")) v.push(`${tag}: matched node missing/invalid estimatedCost (canonical decimal string)`);
       if (!CURRENCY_PATTERN.test(n.currency ?? "")) v.push(`${tag}: matched node missing/invalid currency (e.g. USDC)`);
     }
+    if (n.operatorSettlementAddress !== undefined && !ADDRESS_PATTERN.test(n.operatorSettlementAddress))
+      v.push(`${tag}: operatorSettlementAddress must be 0x + 40 hex`);
     const seen = new Set<string>();
     for (const r of n.evidenceRequirements ?? []) {
       if (!ID_PATTERN.test(r?.requirementId ?? "")) v.push(`${tag}: evidence requirementId must be printable ASCII`);
@@ -267,6 +279,14 @@ function contractRootUnchecked(dag: MatchedDAG, version: 2 | 3 = 2): string {
 export const PROGRAM_REQUIRES_V3 =
   "verificationProgramHash: requires { version: 3 } derivation — v2 would silently drop the program selection";
 
+/** Same fail-closed rule for the negotiated payout wallet (#1690): v2 must never silently drop it. */
+export const SETTLEMENT_ADDRESS_REQUIRES_V3 =
+  "operatorSettlementAddress: requires { version: 3 } derivation — v2 would silently drop the negotiated payout wallet";
+
+function hasSettlementAddress(dag: MatchedDAG): boolean {
+  return Array.isArray(dag?.nodes) && dag.nodes.some((n) => n?.operatorSettlementAddress !== undefined);
+}
+
 /**
  * Derive the provider-agnostic capabilityContractRoot. Valid BEFORE matching (unmatched nodes are
  * fine — only structure, types and evidence are committed). Throws on an invalid plan: a commitment
@@ -275,6 +295,7 @@ export const PROGRAM_REQUIRES_V3 =
 export function deriveCapabilityContractRoot(dag: MatchedDAG, opts: DeriveOptions = {}): string {
   const version = opts.version ?? 2;
   if (version === 2 && dag?.verificationProgramHash !== undefined) throw new Error(`INVALID_PLAN: ${PROGRAM_REQUIRES_V3}`);
+  if (version === 2 && hasSettlementAddress(dag)) throw new Error(`INVALID_PLAN: ${SETTLEMENT_ADDRESS_REQUIRES_V3}`);
   // Structure only — provider bindings are not part of the contract (see ValidateOptions.bindings).
   const violations = validatePlan(dag, { bindings: false });
   if (violations.length > 0) throw new Error(`INVALID_PLAN: ${violations.join("; ")}`);
@@ -289,6 +310,7 @@ export function deriveCompositionCommitment(dag: MatchedDAG, opts: DeriveOptions
   const version = opts.version ?? 2;
   const violations = validatePlan(dag);
   if (version === 2 && dag?.verificationProgramHash !== undefined) violations.push(PROGRAM_REQUIRES_V3);
+  if (version === 2 && hasSettlementAddress(dag)) violations.push(SETTLEMENT_ADDRESS_REQUIRES_V3);
   const nodes = Array.isArray(dag?.nodes) ? dag.nodes : [];
   // GUARD 1 (the #1216 trap): every node must be matched. matchStatus, never the budget.
   const unmatched = nodes.filter((n) => n.matchStatus !== "matched").map((n) => n.nodeId);
@@ -313,6 +335,12 @@ export function deriveCompositionCommitment(dag: MatchedDAG, opts: DeriveOptions
       lp(n.matchedCapabilityDigest!.toLowerCase()),
       lp(n.estimatedCost!),
       lp(n.currency!),
+      // v3: the negotiated payout wallet (#1690), explicit presence tag — absent ≠ empty ≠ zero.
+      ...(version === 3
+        ? n.operatorSettlementAddress !== undefined
+          ? [lp("payto:1"), lp(n.operatorSettlementAddress.toLowerCase())]
+          : [lp("payto:0")]
+        : []),
     ),
   );
   const edgeBytes = sortedEdges(dag.edges).map((e) => concat(lp(e.from), lp(e.to)));
@@ -350,8 +378,10 @@ export interface SubstitutionReport {
   pureOperatorSubstitution: boolean;
 }
 
-const PROVIDER_FIELDS: ReadonlySet<string> = new Set(["matchedCapabilityDigest", "matchedCapabilityId"]);
-const NODE_FIELDS = ["capabilityType", "matchedCapabilityDigest", "matchedCapabilityId", "estimatedCost", "currency"] as const;
+// operatorSettlementAddress IS a provider binding (#1690): two operators fulfilling the same
+// contract naturally differ here, so it must not break pureOperatorSubstitution.
+const PROVIDER_FIELDS: ReadonlySet<string> = new Set(["matchedCapabilityDigest", "matchedCapabilityId", "operatorSettlementAddress"]);
+const NODE_FIELDS = ["capabilityType", "matchedCapabilityDigest", "matchedCapabilityId", "estimatedCost", "currency", "operatorSettlementAddress"] as const;
 
 function canonReqs(n: MatchedNode): string {
   return JSON.stringify([...(n.evidenceRequirements ?? [])].sort(cmpReq).map((r) => [r.evidenceTypeId, r.tier]));
@@ -383,8 +413,9 @@ export function explainSubstitution(a: MatchedDAG, b: MatchedDAG): SubstitutionR
     const x = na.get(id); const y = nb.get(id);
     if (!x || !y) { diffs.push({ nodeId: id, field: "presence" }); continue; }
     for (const f of NODE_FIELDS) {
-      const fx = f === "matchedCapabilityDigest" ? (x[f] ?? "").toLowerCase() : (x[f] ?? "");
-      const fy = f === "matchedCapabilityDigest" ? (y[f] ?? "").toLowerCase() : (y[f] ?? "");
+      const caseNormalized = f === "matchedCapabilityDigest" || f === "operatorSettlementAddress";
+      const fx = caseNormalized ? (x[f] ?? "").toLowerCase() : (x[f] ?? "");
+      const fy = caseNormalized ? (y[f] ?? "").toLowerCase() : (y[f] ?? "");
       if (fx !== fy) diffs.push({ nodeId: id, field: f });
     }
     if (canonReqs(x) !== canonReqs(y)) diffs.push({ nodeId: id, field: "evidenceRequirements" });

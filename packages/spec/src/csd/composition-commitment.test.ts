@@ -284,3 +284,55 @@ describe("v3: payer-authorized verification-program pinning (astra R5 item 1, #1
     expect(stripped.pureOperatorSubstitution).toBe(false);
   });
 });
+
+describe("v3: negotiated payout wallet — operatorSettlementAddress (#1690)", () => {
+  const base = (vectors.vectors[0] as { dag: MatchedDAG }).dag;
+  const PROG = "0x" + "ab".repeat(32);
+  const WALLET = "0x" + "42".repeat(20);
+  const withWallet = (w: string): MatchedDAG => ({
+    ...base,
+    verificationProgramHash: PROG,
+    nodes: base.nodes.map((n, i) => (i === 0 ? { ...n, operatorSettlementAddress: w } : n)),
+  });
+
+  it("v2 REFUSES a wallet-carrying plan — the negotiated destination can never be silently dropped", () => {
+    const plain = { ...base, nodes: base.nodes.map((n, i) => (i === 0 ? { ...n, operatorSettlementAddress: WALLET } : n)) };
+    expect(() => deriveCapabilityContractRoot(plain)).toThrow(/operatorSettlementAddress: requires \{ version: 3 \}/);
+    const r = deriveCompositionCommitment(plain);
+    expect(r.committable).toBe(false);
+    if (!r.committable) expect(r.violations.join(" ")).toMatch(/operatorSettlementAddress: requires/);
+  });
+
+  it("the wallet moves ONLY the composition root: contract root is byte-identical with and without it (provider-bound, buyer-agnostic)", () => {
+    const withoutW = deriveCompositionCommitment({ ...base, verificationProgramHash: PROG }, { version: 3 });
+    const withW = deriveCompositionCommitment(withWallet(WALLET), { version: 3 });
+    expect(withoutW.committable && withW.committable).toBe(true);
+    if (withoutW.committable && withW.committable) {
+      expect(withW.capabilityContractRoot).toBe(withoutW.capabilityContractRoot);
+      expect(withW.compositionRoot).not.toBe(withoutW.compositionRoot);
+    }
+  });
+
+  it("case-normalized in preimage AND opener; malformed address refused by name", () => {
+    const lower = deriveCompositionCommitment(withWallet(WALLET), { version: 3 });
+    const upper = deriveCompositionCommitment(withWallet(WALLET.toUpperCase().replace("0X", "0x")), { version: 3 });
+    expect(upper).toEqual(lower);
+    const bad = deriveCompositionCommitment(withWallet("0xnope"), { version: 3 });
+    expect(bad.committable).toBe(false);
+    if (!bad.committable) expect(bad.violations.join(" ")).toMatch(/operatorSettlementAddress must be 0x \+ 40 hex/);
+  });
+
+  it("opener: two operators differing in digest + wallet is STILL pure operator substitution (the wallet is a provider binding)", () => {
+    const opA = withWallet(WALLET);
+    const opB: MatchedDAG = {
+      ...opA,
+      nodes: opA.nodes.map((n, i) =>
+        i === 0 ? { ...n, matchedCapabilityDigest: "0x" + "ee".repeat(32), operatorSettlementAddress: "0x" + "99".repeat(20) } : n,
+      ),
+    };
+    const rep = explainSubstitution(opA, opB);
+    expect(rep.sameContract).toBe(true);
+    expect(rep.pureOperatorSubstitution).toBe(true);
+    expect(rep.differingFields.map((f) => f.field).sort()).toEqual(["matchedCapabilityDigest", "operatorSettlementAddress"]);
+  });
+});
