@@ -174,6 +174,35 @@ console.log("REGRESSION DEMO — without the precondition (the v1 settlement pat
 check("no-precondition: contradiction self+true -> release-eligible (the BUG Astra found)", evaluateNoPrecondition([printEvent, V.contra_selfTrue], honestAsymmetryProgram), "release-eligible");
 check("with-precondition: same event -> dispute (fixed, un-omittably)", evaluate([printEvent, V.contra_selfTrue], honestAsymmetryProgram), "dispute");
 
+console.log("POST-ADAPTER CONFORMANCE (oracle 5539b60 AuthenticatedEvent {eventRef,payload,fabricated}; source DROPPED):");
+// adapt() = what verifyEvidenceBundle/adapter produce post-auth: type->eventRef, source dropped,
+// fabricated = isFabricated(fullEvent) computed AT auth (source present) and stamped forward.
+const adapt = (e) => ({ eventRef: e.type, payload: e.payload, fabricated: isFabricated(e) });
+const isCourierRef = (e) => typeof e.eventRef === "string" && e.eventRef.startsWith("courier_");
+const wfPreAdapted = (aes) => aes.filter(isCourierRef).every((e) => pairWellFormed(e.payload));
+function stagePassAdapted(stage, aes) {
+  switch (stage.predicate) {
+    case "event-present": return aes.some((e) => e.eventRef === stage.eventType);
+    case "not-simulated": return !aes.some((e) => e.fabricated === true); // reads the CARRIED flag; source is gone
+    case "event-present-independent": return aes.some((e) => e.eventRef === stage.eventType && pairWellFormed(e.payload)
+      && stage.allowedProvenance.includes(e.payload.provenance) && e.payload.independentCarrierScan === true);
+    default: return false;
+  }
+}
+const evalAdapted = (aes, program) => (wfPreAdapted(aes) && program.stages.every((s) => stagePassAdapted(s, aes))) ? "release-eligible" : "dispute";
+// PARITY: oracle's post-auth-shape evaluator MUST give the same verdict as the full-event evaluator for every bundle.
+const parity = (events, program, label) => { const full = evaluate(events, program); const adapted = evalAdapted(events.map(adapt), program); check(`parity ${label}: adapted==full (${full})`, adapted, full); };
+parity([printEvent, V.independent], independenceProgram, "independent@indep");
+parity([printEvent, V.self_report], independenceProgram, "self_report@indep");
+parity([printEvent, V.self_report], honestAsymmetryProgram, "self_report@honest");
+parity([printEvent, V.contra_selfTrue], honestAsymmetryProgram, "contradiction@honest");
+parity([printEvent, V.independent, V.contra_selfTrue], independenceProgram, "mixed@indep");
+// THE carry-through case: source.simulated lives on source, which the adapter DROPS. The carried
+// fabricated flag is the ONLY post-adapter signal — bind it to isFabricated@auth exactly.
+check("carried flag == isFabricated@auth: adapt(source.simulated).fabricated === true", adapt(srcSimMail).fabricated, true);
+parity([printEvent, srcSimMail], independenceProgram, "source.simulated@indep (adapter dropped source; flag holds)");
+check("carried flag: adapt(payload.mock).fabricated === true", adapt(mailEvent({ provenance: "operator_self_report", independentCarrierScan: false, mock: true })).fabricated, true);
+
 console.log("COMMITTED PROGRAM HASHES — REVERT to oracle's #1867 cross-confirmed values (no re-pin under b):");
 const phI = programHash(independenceProgram), phH = programHash(honestAsymmetryProgram);
 console.log("  independence =", phI);
