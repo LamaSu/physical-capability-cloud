@@ -115,10 +115,16 @@ const honestAsymmetryProgram = { version: 1, schemaHash: "verification-program/v
 ] };
 
 // ---- the EVALUATOR: MANDATORY precondition, THEN the committed program stages (AND-composed) ------
+// matches @pcc/spec is-fabricated.ts (the ONE canonical detector): the fabrication tag is DUAL and both
+// fields ride INSIDE the signed payload (hashEvent covers source+payload) — source.simulated (per-DEVICE)
+// OR payload.mock (per-EVENT). not-simulated disputes if ANY event is fabricated by either signal.
+// NOTE (oracle #settle question): a post-adapter evaluator that only sees payload (source dropped) MUST
+// have the fabrication fact carried forward — a per-device source.simulated mock is invisible otherwise.
+function isFabricated(e) { return (e.source && e.source.simulated === true) || (e.payload && e.payload.mock === true); }
 function stagePass(stage, events) {
   switch (stage.predicate) {
     case "event-present": return events.some((e) => e.type === stage.eventType);
-    case "not-simulated": return !events.some((e) => e.source && e.source.simulated === true);
+    case "not-simulated": return !events.some(isFabricated);
     case "event-present-independent":
       return events.some((e) => e.type === stage.eventType && pairWellFormed(e.payload)
         && stage.allowedProvenance.includes(e.payload.provenance) && e.payload.independentCarrierScan === true);
@@ -152,6 +158,11 @@ check("independent -> release-eligible", evaluate([printEvent, V.independent], h
 check("contradiction self+true -> dispute (THE FIX)", evaluate([printEvent, V.contra_selfTrue], honestAsymmetryProgram), "dispute");
 for (const k of ["contra_indFalse", "bareTrue", "absent", "unknownEnum", "stringBool", "missingBool"])
   check(`malformed ${k} -> dispute`, evaluate([printEvent, V[k]], honestAsymmetryProgram), "dispute");
+
+console.log("NOT-SIMULATED — DUAL fabrication tag (matches @pcc/spec is-fabricated.ts; oracle #settle question):");
+check("payload.mock=true (per-event belt) on a well-formed self_report -> dispute", evaluate([printEvent, mailEvent({ provenance: "operator_self_report", independentCarrierScan: false, mock: true })], honestAsymmetryProgram), "dispute");
+const srcSimMail = (() => { const e = mailEvent({ provenance: "independent_carrier_scan", independentCarrierScan: true }); e.source = { ...e.source, simulated: true }; e.hash = hashEvent(e); return e; })();
+check("source.simulated=true (per-device suspenders) on a well-formed independent scan -> dispute", evaluate([printEvent, srcSimMail], independenceProgram), "dispute");
 
 console.log("FAIL-CLOSED PREFIX SCOPE (oracle ad8fe08: 'courier_' prefix, not a pinned set):");
 const courierReturned = (() => { const e = { id: "evt-ret", type: "courier_returned", timestamp: "2026-08-27T14:00:00.000Z",
