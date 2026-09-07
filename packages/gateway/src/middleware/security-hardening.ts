@@ -202,6 +202,14 @@ export function checkCallerRate(
   return true;
 }
 
+/** Test hook — clears the generic per-caller rate map between suites (mirrors
+ * __resetSiweNonceForTest). checkCallerRate is module-level shared state, so a
+ * suite making many calls to a rate-limited route would otherwise accumulate
+ * count across tests and trip the limit mid-run. */
+export function __resetCallerRateForTest(): void {
+  callerRateMap.clear();
+}
+
 // Cleanup stale rate-limit entries every 5 minutes
 setInterval(() => {
   const now = Date.now();
