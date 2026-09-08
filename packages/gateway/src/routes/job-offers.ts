@@ -16,7 +16,7 @@
  *                                                           ?verified=true
  *                                                           ?limit=N&offset=N
  *   GET    /api/job-offers/:id                   — single offer + events (PUBLIC)
- *   POST   /api/job-offers/:id/claim             — race-safe claim
+ *   POST   /api/job-offers/:id/claim             — race-safe claim (operator-authenticated)
  *   POST   /api/job-offers/:id/events            — operator progress event
  *   POST   /api/job-offers/:id/heartbeat         — poster liveness
  *   PATCH  /api/job-offers/:id                   — poster updates
@@ -24,8 +24,10 @@
  *   GET    /api/job-offers/healthz               — liveness (PUBLIC)
  *
  * Auth:
- *   - POST/PATCH/DELETE/heartbeat require an authenticated poster identity
+ *   - POST/PATCH/DELETE/heartbeat/claim require an authenticated identity
  *     (API key operatorId, SIWE userId, or X-Posted-By header fallback).
+ *   - claim additionally checks principal -> kernel ownership: the body's
+ *     kernelId is never trusted on its own (LO-GW-3a).
  *   - PATCH/DELETE/heartbeat check the original poster matches the current
  *     identity (or are permitted if posterDid was null at creation).
  *   - GET /open + GET /:id + healthz are PUBLIC so operator agents can poll
@@ -39,6 +41,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { getKernelFacade } from "../facades/index.js";
 import {
   getJobOffersStore,
   type ClaimInput,
@@ -73,6 +76,62 @@ function requirePoster(req: FastifyRequest, reply: FastifyReply): string | null 
     return null;
   }
   return p;
+}
+
+/** The unowned placeholder a kernel row carries before a signer is bound. */
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * LO-GW-3a — authorize `principal` to act for `kernelId`.
+ *
+ * Claiming an offer is the step that binds a job to a physical site, so the
+ * claimant has to be that site's operator. Before this, POST /:id/claim read
+ * `kernelId` straight off the request body and passed it to `store.claim()`:
+ * any caller could name ANY kernel and the offer was recorded as claimed by it.
+ * The body value is now a CLAIM about identity that has to be checked, never
+ * an identity in itself.
+ *
+ * Mirrors the guard the sibling money-path route already uses
+ * (routes/carrier.ts:637-648) and the ownership predicate in
+ * mcp/operation-policy.ts:336 — `shop_kernels.operatorAddress === principal`.
+ * Fails closed: an unknown kernel, a lookup failure, or a kernel with no
+ * recorded owner all refuse rather than defaulting to allow.
+ *
+ * Returns true when authorized. Otherwise it has already sent the reply.
+ */
+async function requireKernelOperator(
+  reply: FastifyReply,
+  principal: string,
+  kernelId: string,
+): Promise<boolean> {
+  const kernelRes = await getKernelFacade().getById(kernelId);
+  if (!kernelRes.success) {
+    void reply
+      .code(kernelRes.error.httpStatus === 404 ? 404 : 502)
+      .send({
+        error: kernelRes.error.httpStatus === 404 ? "kernel_not_found" : "kernel_lookup_failed",
+        message: `Cannot verify operator ownership of kernel '${kernelId}'`,
+      });
+    return false;
+  }
+  const owner = (kernelRes.data as { operatorAddress?: string }).operatorAddress;
+  if (!owner || owner === ZERO_ADDRESS) {
+    // No principal to authorize against — refuse rather than treat "nobody
+    // owns it" as "everybody may claim for it".
+    void reply.code(403).send({
+      error: "kernel_unowned",
+      message: `Kernel '${kernelId}' has no recorded operator; it cannot claim offers`,
+    });
+    return false;
+  }
+  if (owner.toLowerCase() !== principal.toLowerCase()) {
+    void reply.code(403).send({
+      error: "not_kernel_operator",
+      message: "You can only claim offers for a kernel you operate",
+    });
+    return false;
+  }
+  return true;
 }
 
 interface CreateBody {
@@ -265,10 +324,18 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { kernelId?: string; claimSignature?: string; etaMin?: number; contact?: string };
   }>("/api/job-offers/:id/claim", async (req, reply) => {
+    // LO-GW-3a — authenticate the claimant, then check principal -> kernel
+    // ownership, before any offer state is touched. Same shape as the sibling
+    // PATCH/DELETE/heartbeat routes below.
+    const poster = requirePoster(req, reply);
+    if (poster === null) return;
     const b = req.body || {};
     if (!b.kernelId) {
       return reply.code(400).send({ error: "missing_field", required: ["kernelId"] });
     }
+    // The body's kernelId is an assertion, not an identity: it only stands if
+    // the authenticated principal actually operates that kernel.
+    if (!(await requireKernelOperator(reply, poster, b.kernelId))) return;
     const store = getJobOffersStore();
     const claim: ClaimInput = {
       kernelId: b.kernelId,
