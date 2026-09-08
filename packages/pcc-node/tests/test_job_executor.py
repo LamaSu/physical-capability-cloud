@@ -362,6 +362,8 @@ from pcc_node.job_executor import (  # noqa: E402
     EVENT_EXECUTION_FAILED,
     EVENT_EXECUTION_UNCLASSIFIED,
     UNCLASSIFIABLE_REASON,
+    COMPLETION_FLAG_KEYS,
+    ACCEPTANCE_FLAG_KEYS,
 )
 
 
@@ -407,11 +409,56 @@ IPP_FAIL_EXCEPTION = {
 }
 
 # JobExecutor._execute_opentrons
+#
+# `submitted` is an ACCEPTANCE flag: the play action started the protocol.  A
+# run that starts and then fails at step 40 was still submitted, so the adapter
+# now polls the run to a terminal state and reports THAT.  Only the polled
+# terminal status makes this a success.
 OT_SUCCESS = {
     "runId": "run-1",
     "protocolId": "proto-abc",
     "submitted": True,
     "device": "http://192.168.1.200:31950",
+    "status": "completed",
+    "runStatus": "succeeded",
+}
+# The pre-fix shape: accepted, outcome never confirmed.  Locked as a shape that
+# must NEVER release -- it is exactly what "the run was accepted" looks like.
+OT_ACCEPTED_ONLY = {
+    "runId": "run-1",
+    "protocolId": "proto-abc",
+    "submitted": True,
+    "device": "http://192.168.1.200:31950",
+}
+OT_NONTERMINAL = {
+    "runId": "run-1",
+    "protocolId": "proto-abc",
+    "submitted": True,
+    "device": "http://192.168.1.200:31950",
+    "status": "running",
+    "runStatus": "running",
+    "note": "run started but did not reach a terminal state within 120s; outcome unknown",
+    "data": {"data": {"id": "run-1", "status": "running"}},
+}
+OT_FAIL_RUN_FAILED = {
+    "runId": "run-1",
+    "protocolId": "proto-abc",
+    "submitted": True,
+    "device": "http://192.168.1.200:31950",
+    "status": "failed",
+    "runStatus": "failed",
+    "error": "run finished with status 'failed'",
+    "data": {"data": {"id": "run-1", "status": "failed"}},
+}
+OT_FAIL_RUN_ERRORS = {
+    "runId": "run-1",
+    "protocolId": "proto-abc",
+    "submitted": True,
+    "device": "http://192.168.1.200:31950",
+    "status": "failed",
+    "runStatus": "errored",
+    "error": "run reported 1 protocol error(s): [{\"detail\": \"tip pickup failed\"}]",
+    "data": {"data": {"id": "run-1", "errors": [{"detail": "tip pickup failed"}]}},
 }
 OT_FAIL_UPLOAD = {"error": "protocol upload failed: connection refused", "uploaded": False}
 OT_FAIL_NO_UPLOAD_ID = {"error": "protocol upload returned no ID", "data": {}}
@@ -452,6 +499,17 @@ OP_FAIL_TRANSPORT = {
     "filename": "benchy.gcode",
     "status_code": 0,
     "device": "http://10.0.0.20:5000",
+    "error": "<urlopen error [Errno 111] Connection refused>",
+}
+# Reachable printer, transport-level success, DEVICE-level failure: OctoPrint
+# answers 204 (in the allowlist) with a jam report.  Captured live -- see
+# TestDeviceReportedFailureInABody.
+OP_FAIL_ERROR_IN_2XX_BODY = {
+    "printed": False,
+    "filename": "benchy.gcode",
+    "status_code": 200,
+    "device": "http://10.0.0.20:5000",
+    "error": "E_JAM: carriage jam, job aborted",
 }
 
 # JobExecutor._execute_generic_http
@@ -490,6 +548,71 @@ GH_FAIL_TRANSPORT = {
     "error": "<urlopen error [Errno 111] Connection refused>",
 }
 
+# --- transport succeeds, the DEVICE fails ----------------------------------
+# The band `200 <= status < 400` plus an error-lift gated on `status <= 0` meant
+# a REACHABLE device answering 2xx with a failure envelope minted
+# `executed: True` -> execution_completed -> golden-v4 RELEASED it.  This is the
+# ordinary instrument failure mode (JSON-RPC, SiLA, OPC-UA HTTP bridges,
+# LabVIEW web services, most vendor REST), and generic-http is the catch-all
+# branch every unmapped protocol lands on -- so it is the widest path, not an
+# edge.  Every shape below was captured from the live adapter; see
+# TestDeviceReportedFailureInABody.
+GH_FAIL_JSONRPC_ERROR_200 = {
+    "executed": False,
+    "status_code": 200,
+    "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32000, "message": "actuator jammed; job NOT executed"},
+    },
+    "device": "http://10.0.0.9",
+    "error": 'error={"code": -32000, "message": "actuator jammed; job NOT executed"}',
+}
+GH_FAIL_STATUS_ERROR_200 = {
+    "executed": False,
+    "status_code": 200,
+    "response": {"status": "error", "message": "sample rack empty"},
+    "device": "http://10.0.0.9",
+    "error": "device reported status='error'",
+}
+GH_FAIL_SUCCESS_FALSE_200 = {
+    "executed": False,
+    "status_code": 200,
+    "response": {"success": False, "error": "sample rack empty; nothing dispensed"},
+    "device": "http://10.0.0.9",
+    "error": "sample rack empty; nothing dispensed",
+}
+GH_FAIL_SOAP_FAULT_200 = {
+    "executed": False,
+    "status_code": 200,
+    "response": "<soap:Envelope><soap:Fault><faultstring>jam</faultstring></soap:Fault></soap:Envelope>",
+    "device": "http://10.0.0.9",
+    "error": "device returned a fault body (matched '<soap:fault')",
+}
+# A 3xx sat inside the old `status < 400` band: a redirect nobody followed.
+GH_FAIL_REDIRECT_304 = {
+    "executed": False,
+    "status_code": 304,
+    "response": "",
+    "device": "http://10.0.0.9",
+    "error": "device returned HTTP 304",
+}
+# The pre-fix shapes -- what the adapter USED to mint for the two cases above.
+# Retained so the classifier stays fail-closed on them even if an adapter
+# reintroduces the transport-only derivation.
+GH_2XX_FAILURE_PRE_FIX = {
+    "executed": True,
+    "status_code": 200,
+    "response": {"error": {"code": -32000, "message": "actuator jammed"}},
+    "device": "http://10.0.0.9",
+}
+GH_REDIRECT_PRE_FIX = {
+    "executed": True,
+    "status_code": 304,
+    "response": "",
+    "device": "http://10.0.0.9",
+}
+
 SUCCESS_SHAPES = [
     pytest.param(IPP_SUCCESS, id="ipp-printed-true"),
     pytest.param(OT_SUCCESS, id="opentrons-submitted-true"),
@@ -507,12 +630,22 @@ FAILURE_SHAPES = [
     pytest.param(OT_FAIL_NO_PROTOCOL_ID, id="opentrons-no-protocol-id"),
     pytest.param(OT_FAIL_RUN_CREATE, id="opentrons-run-create-failed"),
     pytest.param(OT_FAIL_RUN_ID_MISSING, id="opentrons-run-id-missing"),
+    pytest.param(OT_FAIL_RUN_FAILED, id="opentrons-run-terminal-failed"),
+    pytest.param(OT_FAIL_RUN_ERRORS, id="opentrons-run-protocol-errors"),
     pytest.param(OP_FAIL_NO_FILENAME, id="octoprint-no-filename"),
     pytest.param(OP_FAIL_BAD_STATUS, id="octoprint-bad-http-status"),
+    pytest.param(OP_FAIL_ERROR_IN_2XX_BODY, id="octoprint-error-in-2xx-body"),
     pytest.param(GH_FAIL_NO_BASE_URL, id="generic-http-no-base-url"),
     pytest.param(GH_FAIL_HTTP_ERROR, id="generic-http-error-status"),
     pytest.param(GH_FAIL_TRANSPORT, id="generic-http-transport-failure"),
     pytest.param(GH_TRANSPORT_PRE_FIX, id="generic-http-transport-pre-fix-shape"),
+    pytest.param(GH_FAIL_JSONRPC_ERROR_200, id="generic-http-jsonrpc-error-200"),
+    pytest.param(GH_FAIL_STATUS_ERROR_200, id="generic-http-status-error-200"),
+    pytest.param(GH_FAIL_SUCCESS_FALSE_200, id="generic-http-success-false-200"),
+    pytest.param(GH_FAIL_SOAP_FAULT_200, id="generic-http-soap-fault-200"),
+    pytest.param(GH_FAIL_REDIRECT_304, id="generic-http-redirect-304"),
+    pytest.param(GH_2XX_FAILURE_PRE_FIX, id="generic-http-2xx-failure-pre-fix-shape"),
+    pytest.param(GH_REDIRECT_PRE_FIX, id="generic-http-redirect-pre-fix-shape"),
     pytest.param(OP_FAIL_TRANSPORT, id="octoprint-transport-failure"),
     pytest.param(OT_FAIL_TRANSPORT, id="opentrons-transport-failure"),
 ]
@@ -526,6 +659,8 @@ UNCLASSIFIABLE_SHAPES = [
     pytest.param(0, id="int-zero"),
     pytest.param({"foo": "bar"}, id="novel-shape"),
     pytest.param({"status": "running"}, id="unknown-status-value"),
+    pytest.param(OT_ACCEPTED_ONLY, id="opentrons-accepted-outcome-unknown"),
+    pytest.param(OT_NONTERMINAL, id="opentrons-non-terminal-run"),
 ]
 
 
@@ -585,13 +720,117 @@ class TestClassifyExecutionResult:
         """Only an unambiguous boolean True counts as success (fail closed)."""
         assert classify_execution_result({flag: value}) == RESULT_FAILURE
 
-    @pytest.mark.parametrize("flag", ["printed", "submitted", "executed"])
-    def test_boolean_flag_true_is_success(self, flag):
+    @pytest.mark.parametrize("flag", COMPLETION_FLAG_KEYS)
+    def test_completion_flag_true_is_success(self, flag):
+        """`printed`/`executed` mean the device reported the WORK finished."""
         assert classify_execution_result({flag: True}) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("flag", ACCEPTANCE_FLAG_KEYS)
+    def test_acceptance_flag_true_alone_is_not_a_success(self, flag):
+        """`submitted` means the device TOOK the request, not that it finished.
+
+        An Opentrons run that is playing has been submitted and can still fail
+        at step 40, so acceptance alone must settle as neither -- it emits no
+        execution_completed for golden-v4 to release on.
+        """
+        assert classify_execution_result({flag: True}) == RESULT_UNCLASSIFIABLE
 
     @pytest.mark.parametrize("flag", ["printed", "submitted", "executed"])
     def test_boolean_flag_false_is_failure(self, flag):
         assert classify_execution_result({flag: False}) == RESULT_FAILURE
+
+    def test_acceptance_flag_plus_terminal_status_is_a_success(self):
+        assert classify_execution_result(
+            {"submitted": True, "status": "completed", "runStatus": "succeeded"}
+        ) == RESULT_SUCCESS
+
+    # --- rule order ---------------------------------------------------------
+
+    def test_false_flag_outranks_a_success_status(self):
+        """`{"status": "ok", "printed": False}` is a failure, not a success."""
+        assert classify_execution_result({"status": "ok", "printed": False}) == RESULT_FAILURE
+
+    def test_every_flag_is_checked_not_just_the_first(self):
+        """First-key-present-wins let `executed: False` hide behind `printed`."""
+        assert classify_execution_result({"printed": True, "executed": False}) == RESULT_FAILURE
+        assert classify_execution_result({"executed": True, "printed": False}) == RESULT_FAILURE
+
+    def test_unrecognised_status_string_is_never_overridden_by_a_flag(self):
+        """The device named a non-terminal outcome; a flag must not outvote it."""
+        assert classify_execution_result(
+            {"submitted": True, "status": "running"}
+        ) == RESULT_UNCLASSIFIABLE
+        assert classify_execution_result(
+            {"printed": True, "status": "paused"}
+        ) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("status", ["FAILED", "Failed", " failed ", "Error"])
+    def test_failure_status_matching_is_case_insensitive(self, status):
+        """A device that shouts its failure must not fall through to a flag."""
+        assert classify_execution_result({"status": status, "printed": True}) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("status", ["COMPLETED", "Succeeded", " ok "])
+    def test_success_status_matching_is_case_insensitive(self, status):
+        assert classify_execution_result({"status": status}) == RESULT_SUCCESS
+
+    # --- backstops on the fields an adapter derives its flag from -----------
+
+    @pytest.mark.parametrize("status_code", [0, -1, 301, 304, 400, 404, 500, 503])
+    def test_status_code_outside_2xx_outranks_a_claimed_success(self, status_code):
+        result = {"executed": True, "status_code": status_code, "response": ""}
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("status_code", [200, 201, 202, 204, 299])
+    def test_2xx_status_codes_still_permit_success(self, status_code):
+        result = {"executed": True, "status_code": status_code, "response": {"ok": True}}
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("returncode", [1, -1, "0", "1", None, 2.0])
+    def test_non_zero_returncode_outranks_a_stale_printed_flag(self, returncode):
+        result = {"printed": True, "returncode": returncode, "stderr": "lp: not accepted"}
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_zero_returncode_still_permits_success(self):
+        assert classify_execution_result({"printed": True, "returncode": 0}) == RESULT_SUCCESS
+
+    # --- the device's own answer, wherever the adapter parked it ------------
+
+    @pytest.mark.parametrize("container", ["response", "data", "body", "payload"])
+    def test_nested_error_outranks_a_transport_derived_flag(self, container):
+        """Rule 3b: an adapter that forgets to lift a nested error is still
+        fail-closed, so the guarantee does not depend on future review."""
+        result = {"executed": True, "status_code": 200, container: {"error": "jam"}}
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("body", [
+        pytest.param({"error": {"code": -32000, "message": "jammed"}}, id="jsonrpc-error"),
+        pytest.param({"errors": ["run aborted"]}, id="errors-list"),
+        pytest.param({"fault": "E_JAM"}, id="fault"),
+        pytest.param({"success": False}, id="success-false"),
+        pytest.param({"ok": False}, id="ok-false"),
+        pytest.param({"status": "error"}, id="nested-status-error"),
+        pytest.param({"status": "FAILED"}, id="nested-status-uppercase"),
+        pytest.param("<soap:Fault><faultstring>jam</faultstring></soap:Fault>", id="soap-fault"),
+        pytest.param("<error>carriage jam</error>", id="xml-error-element"),
+    ])
+    def test_nested_failure_envelopes_are_failures(self, body):
+        result = {"executed": True, "status_code": 200, "response": body}
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("body", [
+        pytest.param({"ok": True}, id="ok-true"),
+        pytest.param({"success": True}, id="success-true"),
+        pytest.param({"error": None}, id="error-null"),
+        pytest.param({"errors": []}, id="errors-empty"),
+        pytest.param({"status": "ok"}, id="nested-status-ok"),
+        pytest.param({"jobId": "abc"}, id="opaque-json"),
+        pytest.param("", id="empty-body"),
+        pytest.param("OK", id="plain-text-ok"),
+    ])
+    def test_nested_scan_does_not_invent_failures(self, body):
+        """It reads POSITIVE failure signals only -- no signal is not a failure."""
+        result = {"executed": True, "status_code": 200, "response": body}
+        assert classify_execution_result(result) == RESULT_SUCCESS
 
     def test_unhashable_status_value_does_not_raise(self):
         assert classify_execution_result({"status": ["failed"]}) == RESULT_UNCLASSIFIABLE
@@ -1090,7 +1329,15 @@ def _http_error(code, payload):
 
 
 class TestOpentronsPlayAction:
-    OT_DEVICE = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:31950"}
+    # runPollInterval 0 / runPollTimeout 5 keep the run poll instant in tests;
+    # the production defaults are OPENTRONS_RUN_POLL_INTERVAL_S / _TIMEOUT_S.
+    OT_DEVICE = {
+        "id": "ot1",
+        "protocol": "opentrons",
+        "url": "http://10.255.255.1:31950",
+        "runPollInterval": 0,
+        "runPollTimeout": 5,
+    }
     RUN_ID = "run-xyz"
     PROTOCOL_ID = "proto-abc"
 
@@ -1113,10 +1360,13 @@ class TestOpentronsPlayAction:
         ),
     ]
 
-    def _socket(self, make_play_outcome, seen):
+    def _socket(self, make_play_outcome, seen, run_body=None):
         """POST /runs succeeds; POST /runs/<id>/actions does whatever
-        `make_play_outcome()` returns (a response) or raises (an exception).
+        `make_play_outcome()` returns (a response) or raises (an exception);
+        GET /runs/<id> answers with `run_body` (default: a succeeded run).
         Every requested URL is recorded into `seen`."""
+        if run_body is None:
+            run_body = {"data": {"id": self.RUN_ID, "status": "succeeded"}}
 
         def _router(req, *args, **kwargs):
             url = req.full_url
@@ -1128,9 +1378,14 @@ class TestOpentronsPlayAction:
                 return outcome
             if url.endswith("/runs"):
                 return _FakeResponse(201, {"data": {"id": self.RUN_ID}})
+            if url.endswith(f"/runs/{self.RUN_ID}"):
+                return _FakeResponse(200, run_body)
             raise AssertionError(f"unexpected request to {url}")
 
         return mock.patch("pcc_node.http_util.urlopen", side_effect=_router)
+
+    def _polled(self, seen):
+        return [u for u in seen if u.endswith(f"/runs/{self.RUN_ID}")]
 
     def _job(self):
         return {
@@ -1177,9 +1432,108 @@ class TestOpentronsPlayAction:
             result = ex._execute_opentrons(self.OT_DEVICE, self._job())
 
         assert self._played(seen)
+        assert self._polled(seen), "the run was never polled for its outcome"
         assert result["submitted"] is True
+        assert result["runStatus"] == "succeeded"
+        assert result["status"] == "completed"
         assert "error" not in result
         assert classify_execution_result(result) == RESULT_SUCCESS
+
+    # --- the run's OWN outcome, not just its acceptance ---------------------
+    #
+    # A play that returns 201 means the protocol STARTED.  A protocol that
+    # starts and then fails at step 40 still returned `submitted: True`, so
+    # golden-v4's and(execution_completed present, execution_failed absent)
+    # RELEASED it.  The adapter now polls GET /runs/<id> to a terminal state
+    # and reports that; the tests below drive each terminal branch.
+
+    PLAY_OK = staticmethod(lambda: _FakeResponse(201, {"data": {"id": "a1"}}))
+
+    def _run_outcome(self, run_body, seen):
+        ex = JobExecutor(devices=[])
+        with self._socket(self.PLAY_OK, seen, run_body=run_body):
+            return ex._execute_opentrons(self.OT_DEVICE, self._job())
+
+    @pytest.mark.parametrize("run_status", ["failed", "stopped", "FAILED"])
+    def test_terminal_failure_run_status_is_a_failure(self, run_status):
+        seen = []
+        result = self._run_outcome(
+            {"data": {"id": self.RUN_ID, "status": run_status}}, seen
+        )
+
+        assert self._polled(seen)
+        assert result["runStatus"] == run_status.lower()
+        assert result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_protocol_errors_in_the_run_body_are_a_failure(self):
+        """`data.errors` is the run's own verdict, even before status catches up."""
+        seen = []
+        result = self._run_outcome(
+            {"data": {"id": self.RUN_ID, "errors": [{"detail": "tip pickup failed"}]}},
+            seen,
+        )
+
+        assert self._polled(seen)
+        assert "tip pickup failed" in result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_non_terminal_run_never_claims_completion(self):
+        """The budget expired with the run still going: outcome unknown.
+
+        `submitted: True` alone is what the pre-fix adapter returned for this
+        state; it must settle as neither -- no execution_completed to release on.
+        """
+        seen = []
+        result = self._run_outcome(
+            {"data": {"id": self.RUN_ID, "status": "running"}}, seen
+        )
+
+        assert self._polled(seen)
+        assert result["submitted"] is True
+        assert result["status"] == "running"
+        assert "error" not in result
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    def test_unreadable_run_poll_never_claims_completion(self):
+        """A poll that answers with no status at all is not a completion."""
+        seen = []
+        result = self._run_outcome({"data": {"id": self.RUN_ID}}, seen)
+
+        assert result["runStatus"] == "unknown"
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    def test_zero_poll_budget_disables_polling_and_fails_closed(self):
+        seen = []
+        ex = JobExecutor(devices=[])
+        device = {**self.OT_DEVICE, "runPollTimeout": 0}
+        with self._socket(self.PLAY_OK, seen):
+            result = ex._execute_opentrons(device, self._job())
+
+        assert not self._polled(seen), "polling was disabled but a poll was issued"
+        assert result["submitted"] is True
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("run_status", ["failed", "running"])
+    def test_non_succeeded_run_never_reports_completed_end_to_end(self, run_status):
+        """The acceptance vector for R1: a run that did not succeed must not
+        release, whether it failed outright or never finished."""
+        seen = []
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.OT_DEVICE], gateway_client=gateway)
+        with self._socket(
+            self.PLAY_OK, seen, run_body={"data": {"id": self.RUN_ID, "status": run_status}}
+        ):
+            bundle = ex.execute(self._job())
+
+        types = _event_types(bundle)
+        statuses = self._statuses(gateway)
+
+        assert EVENT_EXECUTION_COMPLETED not in types
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert "completed" not in statuses
+        assert "failed" in statuses
+        gateway.push_evidence.assert_called_once()
 
     def test_dead_socket_stops_at_run_creation_not_the_play_action(self):
         """Why this class exists.  With every request dead the adapter returns
@@ -1234,6 +1588,220 @@ class TestOpentronsPlayAction:
             bundle = ex.execute(self._job())
 
         assert self._played(seen)
+        types = _event_types(bundle)
+        statuses = self._statuses(gateway)
+
+        assert EVENT_EXECUTION_COMPLETED in types
+        assert EVENT_EXECUTION_FAILED not in types
+        assert "execution_failed" not in _bundle_text(bundle)
+        assert "completed" in statuses
+        assert "failed" not in statuses
+
+
+# ---------------------------------------------------------------------------
+# Transport succeeds, the DEVICE fails
+#
+# `_execute_generic_http` derived its success flag from the TRANSPORT alone
+# (`executed: 200 <= status < 400`) and lifted a nested error only when
+# `status <= 0`.  `_execute_octoprint` did the same against (200, 201, 204).
+# So a REACHABLE instrument answering 200 with an error envelope minted
+# `executed`/`printed: True` -> execution_completed -> golden-v4's
+# and(execution_completed present, execution_failed absent) RELEASED the exact
+# failure the contract exists to dispute.
+#
+# This is the widest path, not an edge: `_execute_on_device` routes every
+# protocol that is not ipp/printer/opentrons/octoprint to generic-http --
+# modbus, opcua, http, serial, mdns, camera and unknown per discovery.py /
+# detect.py, plus anything `_find_device` step 4 drops on an unmapped
+# capability.  Transport-succeeds/application-fails is the ordinary instrument
+# failure mode for JSON-RPC, SiLA, OPC-UA HTTP bridges, LabVIEW web services
+# and most vendor REST; the repo's own executor.py GenericHTTPAdapter returns
+# `{"status": status, "result": result}` precisely because the BODY carries the
+# outcome, not the status line.
+#
+# As elsewhere in this file only `urlopen` is faked: http_util, the adapters,
+# the classifier and execute() all run for real underneath.
+# ---------------------------------------------------------------------------
+
+class _RawResponse:
+    """urlopen stand-in that returns a body verbatim (may be non-JSON)."""
+
+    def __init__(self, status, raw):
+        self.status = status
+        self._raw = raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
+
+    def read(self):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _json_body(payload):
+    return json.dumps(payload)
+
+
+SOAP_FAULT_BODY = (
+    '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+    "<soap:Body><soap:Fault><faultcode>soap:Server</faultcode>"
+    "<faultstring>carriage jam; job aborted</faultstring>"
+    "</soap:Fault></soap:Body></soap:Envelope>"
+)
+
+
+class TestDeviceReportedFailureInABody:
+    GH_DEVICE = {"id": "g1", "protocol": "generic-http", "url": "http://10.0.0.9"}
+    OP_DEVICE = {"id": "op1", "protocol": "octoprint", "url": "http://10.0.0.20:5000"}
+
+    # (http status the device answers with, raw body)
+    DEVICE_FAILURES = [
+        pytest.param(
+            200,
+            _json_body({"jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000, "message": "actuator jammed; NOT executed"}}),
+            id="jsonrpc-error-200",
+        ),
+        pytest.param(
+            200, _json_body({"status": "error", "message": "sample rack empty"}),
+            id="rest-status-error-200",
+        ),
+        pytest.param(
+            200, _json_body({"success": False, "error": "nothing dispensed"}),
+            id="success-false-200",
+        ),
+        pytest.param(200, _json_body({"ok": False}), id="ok-false-200"),
+        pytest.param(
+            201, _json_body({"errors": ["carriage jam", "job aborted"]}),
+            id="errors-list-201",
+        ),
+        pytest.param(
+            204, _json_body({"error": "E_JAM: carriage jam, job aborted"}),
+            id="error-204",
+        ),
+        pytest.param(200, SOAP_FAULT_BODY, id="soap-fault-200"),
+        pytest.param(200, "<error>carriage jam</error>", id="xml-error-element-200"),
+        # A 3xx sat inside the old `status < 400` band: a redirect nobody
+        # followed, so nothing was executed.
+        pytest.param(304, "", id="redirect-304"),
+    ]
+
+    DEVICE_SUCCESSES = [
+        pytest.param(200, _json_body({"ok": True}), id="ok-true-200"),
+        pytest.param(200, _json_body({"success": True, "jobId": "abc"}), id="success-true-200"),
+        pytest.param(201, _json_body({"jobId": "abc"}), id="opaque-json-201"),
+        pytest.param(204, "", id="empty-204"),
+        pytest.param(200, "OK", id="plain-text-200"),
+    ]
+
+    def _socket(self, status, raw):
+        return mock.patch(
+            "pcc_node.http_util.urlopen",
+            side_effect=lambda req, *a, **k: _RawResponse(status, raw),
+        )
+
+    def _gateway(self):
+        g = mock.Mock()
+        g.update_job_status.return_value = True
+        g.push_evidence.return_value = True
+        return g
+
+    def _statuses(self, gateway):
+        return [call[0][1] for call in gateway.update_job_status.call_args_list]
+
+    def _job(self):
+        return {
+            "id": "job-body",
+            "capabilityType": "generic",
+            "parameters": {"path": "/execute", "filename": "benchy.gcode"},
+        }
+
+    # --- the adapters -------------------------------------------------------
+
+    @pytest.mark.parametrize("status,raw", DEVICE_FAILURES)
+    def test_generic_http_never_claims_executed_on_a_device_failure(self, status, raw):
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_generic_http(self.GH_DEVICE, self._job())
+
+        assert result["executed"] is False, (
+            f"HTTP {status} with a device failure body reported as executed: {result!r}"
+        )
+        assert result["error"], "the device's own reason must surface at the top level"
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("status,raw", DEVICE_FAILURES)
+    def test_octoprint_never_claims_printed_on_a_device_failure(self, status, raw):
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_octoprint(self.OP_DEVICE, self._job())
+
+        assert result["printed"] is False, (
+            f"HTTP {status} with a device failure body reported as printed: {result!r}"
+        )
+        assert result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("status,raw", DEVICE_SUCCESSES)
+    def test_a_genuine_success_still_succeeds(self, status, raw):
+        """Negative control: reading the body must not dispute healthy runs."""
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_generic_http(self.GH_DEVICE, self._job())
+
+        assert result["executed"] is True, f"healthy device disputed: {result!r}"
+        assert "error" not in result
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("status", [300, 301, 302, 304, 308])
+    def test_success_band_is_2xx_not_sub_400(self, status):
+        """Directly locks the band: a 3xx is a redirect, not an execution."""
+        ex = JobExecutor(devices=[])
+        with self._socket(status, ""):
+            result = ex._execute_generic_http(self.GH_DEVICE, self._job())
+
+        assert result["executed"] is False, f"HTTP {status} reported as executed"
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    # --- end to end ---------------------------------------------------------
+
+    @pytest.mark.parametrize("status,raw", DEVICE_FAILURES)
+    @pytest.mark.parametrize(
+        "device,capability",
+        [
+            pytest.param(GH_DEVICE, "generic", id="generic-http"),
+            pytest.param(OP_DEVICE, "3d-print", id="octoprint"),
+        ],
+    )
+    def test_device_failure_disputes_end_to_end(self, device, capability, status, raw):
+        """The contract's acceptance vector for a reachable-but-failed device:
+        failed -> execution_failed + no execution_completed -> oracle disputes."""
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[device], gateway_client=gateway)
+        job = {**self._job(), "capabilityType": capability}
+
+        with self._socket(status, raw):
+            bundle = ex.execute(job)
+
+        types = _event_types(bundle)
+        statuses = self._statuses(gateway)
+
+        assert EVENT_EXECUTION_FAILED in types
+        assert EVENT_EXECUTION_COMPLETED not in types
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert "failed" in statuses
+        assert "completed" not in statuses
+        gateway.push_evidence.assert_called_once()
+
+    def test_healthy_device_still_releases_end_to_end(self):
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
+
+        with self._socket(200, _json_body({"ok": True})):
+            bundle = ex.execute(self._job())
+
         types = _event_types(bundle)
         statuses = self._statuses(gateway)
 
