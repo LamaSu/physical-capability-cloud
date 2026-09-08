@@ -377,3 +377,289 @@ $ git log --oneline 7a864910..HEAD
    gateway-dispatched jobs run, because no in-process caller mints a scope.
    That is the correct fail-closed state; the remaining work is producer-side,
    in files this lane was scoped out of.
+
+### Outcome
+
+PARTIAL, and the shortfall is a scope boundary, not an unfinished edit. The
+threading and the downgrade removal are **done and proven**: `@pcc/gateway` is
+**2983 passed / 4 failed / 6 skipped**, typecheck **exit 0, zero errors**.
+
+All 4 failures are in `job-submit.test.ts` and all 4 have one cause: the
+`POST /api/jobs/submit` route supplies no execution scope, so the boundary now
+denies it. **1 of the 4 was already red at `b1be6cfe`**, before I touched
+anything; the other 3 are caused by this change and are the honest, loud version
+of a failure that was previously silent. Fixing them requires a producer-side
+change in `facades/job.facade.ts`, which this lane was explicitly scoped out of
+— and *which one-line change is right there is a security decision for the
+steward, not a mechanical fix.* See
+[Remaining producer-side gap](#remaining-producer-side-gap).
+
+Measured, not asserted — full `@pcc/gateway` suite run twice, once with
+`kernel-service.ts` reverted to `b1be6cfe` via `git checkout`, once with it
+restored, both with the new test file present:
+
+| | baseline (`b1be6cfe` code) | with this change |
+|---|---|---|
+| Passed | 2981 | **2983** |
+| Failed | 6 | **4** |
+| — `job-submit.test.ts` | 1 | 4 (+3) |
+| — `kernel-service-scope.test.ts` (new) | 5 | 0 (−5) |
+
+**5 of the 7 new tests fail against the un-fixed code and pass against the
+fixed code.** They are regression detectors, not decoration. (The other 2 pass
+either way: the layer-2 test passes at baseline because JobRunner already
+denied, and the scoped-class test passes because with a `scopeId` present the
+old ternary also produced `"scoped"` — its unscoped twin is the one that bites.)
+
+### What was actually wrong
+
+Three defects, not the one the brief anticipated.
+
+1. **`runner.run()` got no scope** — at *two* call sites, not one. The brief
+   named `:311`; there is a second, near-identical fire-and-forget block at
+   `:399` that runs whenever Sentry is uninitialised. That is the path most
+   tests and self-hosted deployments take, so threading only the first would
+   have left the fix half-applied and passing its own tests.
+2. **The pre-flight downgraded its own class** (`:241`). Removed.
+3. **The breaker double-counted, and blamed the device for the caller's
+   missing credential.** Not in the brief — found by running the tests.
+   `JobRunner.dispatch()` now goes through `validateAndRelay()`, which records
+   each command's outcome against the device breaker. `kernel-service` *also*
+   recorded once per job. So a `failureThreshold` of 2 tripped after ONE failing
+   job, and — worse — a job denied for want of a scope, which never touches the
+   adapter, was recorded as a **device** failure. An unauthorised caller could
+   therefore trip a healthy device's breaker and deny service to everyone else.
+   This is also why `job-submit.test.ts`'s "auto-select device" test was already
+   red at `b1be6cfe`: repeated unscoped submits marked the mock device failed
+   until its breaker opened. Removed the per-job recording on the success path;
+   the `.catch()` path still records, because a rejected `run()` never reached
+   the dispatch boundary at all.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `packages/gateway/src/services/kernel-service.ts` | `scopeId`/`agentDid` into `runner.run()` at **both** call sites; `cmdClass` fixed at `"scoped"`; per-job breaker recording removed from both success paths; three stale comments corrected |
+| `packages/gateway/src/__tests__/kernel-service-scope.test.ts` | **new**, 7 tests |
+| `packages/gateway/src/__tests__/kernel-service-safety.test.ts` | **setup only** — `scopeId` on 3 `submitJob` calls |
+| `packages/gateway/src/__tests__/tracing.test.ts` | **setup only** — `scopeId` on 2 `submitJob` calls |
+
+**Not touched**: `packages/kernel`, `paid-job-flow.ts` (no `submitJob` call site
+exists there to add a line to — see design note 1), `job.facade.ts`,
+`routes/setup.ts`, `kernel-agent.ts`, settlement, escrow, evidence. No new
+dependencies.
+
+**On the two setup-only edits**: `kernel-service-safety` and `tracing` submit
+unscoped jobs, which the boundary now denies before their subjects (breaker
+accounting, span shape) are ever reached. I added a `scopeId` to their setup.
+**No assertion was changed, removed or relaxed, and no check was made
+permissive.** The breaker test's original arithmetic — closed after 1 job, open
+after 2, at `failureThreshold: 2` — passes *unchanged* once the double-count is
+fixed, and that is precisely what confirms defect 3 was real rather than my
+mis-reading. Worth noting that test was passing at baseline **for the wrong
+reason**: a safety denial was being counted as the "real device failure" its
+name claims to test, and the adapter was never reached at all.
+
+### Test run
+
+```
+$ pnpm --filter @pcc/gateway exec vitest run \
+    src/__tests__/kernel-service-scope.test.ts \
+    src/__tests__/kernel-service-safety.test.ts \
+    src/__tests__/tracing.test.ts \
+    src/__tests__/paid-job-flow-dispatch.test.ts \
+    src/__tests__/setup.test.ts \
+    src/__tests__/pipeline-telemetry-coverage.test.ts
+
+ ✓ src/__tests__/pipeline-telemetry-coverage.test.ts  (15 tests) 6ms
+ ✓ src/__tests__/kernel-service-safety.test.ts  (2 tests) 70ms
+ ✓ src/__tests__/kernel-service-scope.test.ts  (7 tests) 183ms
+ ✓ src/__tests__/tracing.test.ts  (18 tests) 488ms
+ ✓ src/__tests__/setup.test.ts  (37 tests) 330ms
+ ✓ src/__tests__/paid-job-flow-dispatch.test.ts  (3 tests) 139ms
+
+ Test Files  6 passed (6)
+      Tests  82 passed (82)
+   Duration  3.38s
+```
+
+Full suite (honestly red — see Outcome):
+
+```
+$ pnpm --filter @pcc/gateway test
+
+ FAIL  src/__tests__/job-submit.test.ts > POST /api/jobs/submit > accepts a valid job and returns immediately
+ FAIL  src/__tests__/job-submit.test.ts > POST /api/jobs/submit > uses provided jobId when given
+ FAIL  src/__tests__/job-submit.test.ts > POST /api/jobs/submit > accepts optional assuranceTier and gcodeHash
+ FAIL  src/__tests__/job-submit.test.ts > GET /api/devices/:kernelId > auto-select device: deviceId in response matches mock adapter
+
+ Test Files  1 failed | 187 passed (188)
+      Tests  4 failed | 2983 passed | 6 skipped (2993)
+   Duration  23.00s
+```
+
+All four are `expected 500 to be 200` (and one consequent `expected undefined to
+be 'dev-test-machine'`), from `[safety-gateway] Job <id> denied: Class 'scoped'
+requires active scope`.
+
+Typecheck:
+
+```
+$ pnpm --filter @pcc/gateway exec tsc --noEmit -p .
+exit=0     # 0 errors
+```
+
+(This worktree needed `pnpm --filter "@pcc/gateway^..." build` once before tsc
+resolves the workspace packages — vitest reads them from source via its config
+alias, tsc needs the emitted `.d.ts`. No source change was required for that.)
+
+### Negative-control evidence
+
+The control the lane exists for — a prohibited command must cause zero
+actuation. `packages/gateway/src/__tests__/kernel-service-scope.test.ts`:
+
+```ts
+it("denies an unscoped submission and calls machine.execute ZERO times", async () => {
+  const svc = new KernelService(makeConfig());
+
+  await expect(
+    svc.submitJob({
+      jobId: "ks-scope-unscoped-1",
+      stepId: "s",
+      assuranceTier: 0,
+      deviceId: DEVICE_ID,
+      // no scopeId — load_gcode/start are class "scoped", so this is prohibited
+    }),
+  ).rejects.toThrow(/Class 'scoped' requires active scope/);
+
+  // THE ASSERTION THAT PROVES ZERO ACTUATION:
+  expect(executed).toHaveLength(0);
+
+  expect(await svc.getJobStatus("ks-scope-unscoped-1")).toMatchObject({ status: "unknown" });
+});
+```
+
+That covers layer 1 (the synchronous pre-flight). Because a boundary asserted at
+only its outer layer will rot at the inner one unnoticed, layer 2 is pinned
+separately — with the pre-flight deliberately stubbed to **fail open**:
+
+```ts
+const realValidateOnly = gw.validateOnly.bind(gw);
+vi.spyOn(gw, "validateOnly").mockImplementation(async (cmd) => {
+  if (typeof cmd?.commandId === "string" && cmd.commandId.startsWith("preflight:")) {
+    return { allowed: true, executed: false } as Awaited<ReturnType<typeof realValidateOnly>>;
+  }
+  return realValidateOnly(cmd);          // runner's own checks hit the REAL governor
+});
+...
+expect(accepted.status).toBe("accepted");                       // admission bypassed
+await waitFor(() => getRepos().jobs.findById(jobId)?.status === "failed");
+expect(executed).toHaveLength(0);                               // still zero actuation
+expect(getRepos().jobs.findById(jobId)?.status).toBe("failed");
+```
+
+Only `preflight:*` commandIds are waved through — `job-runner` builds
+`<jobId>:<stepId>:<type>`, so its own `validateOnly` calls, made from inside
+`validateAndRelay`, still meet the real governor with the real config.
+
+And the deleted downgrade is pinned directly:
+
+```ts
+// The old line was `params.scopeId ? "scoped" : "safe"`, so an unscoped job was
+// described to the governor as "safe" — the one class the default config always
+// admits — and admission could therefore never fail. "safe" here is the bug.
+expect(preflight!.class).toBe("scoped");
+expect(preflight!.scopeId).toBeUndefined();
+```
+
+Plus a control for defect 3, which has real denial-of-service consequences:
+
+```ts
+// A missing credential is the CALLER's fault, not the device's. Counting it as a
+// device failure would let an unauthorised caller trip a healthy device's
+// breaker and deny service to everyone else.
+expect(gw.getStatus().circuits.get(DEVICE_ID)?.failures ?? 0).toBe(0);
+```
+
+### Remaining producer-side gap
+
+**This is the blocking item, and it did not move.** The lane's premise was that
+threading the scope through `kernel-service` would make gateway-dispatched jobs
+work again. It does not, because **no in-process gateway caller has a scope to
+thread.** The producer side must change:
+
+| Caller | Has a scope? | Needed | Touched? |
+|---|---|---|---|
+| `facades/job.facade.ts:293` (`POST /api/jobs/submit`) | **No** | Accept `scopeId` on `SubmitJobInput` and pass it — plus a decision about what happens when a caller omits it | **No** — outside the file boundary |
+| `routes/setup.ts:814` (`POST /api/setup/test-job`) | **No**, and nothing on that path mints one | A decision: does an operator self-test actuate under a scope, or is it exempt? | **No** |
+| `routes/paid-job-flow.ts:656` | **Yes** — mints one per paid job | Nothing here; it never calls `submitJob` | **No** — no call site exists to change |
+
+The one-line fix the brief expected does not exist, because the producer of the
+scope and the caller of `submitJob` are **different code paths that never meet**.
+Bridging them is a design decision (does `POST /api/jobs/submit` require a
+client-supplied scope from the existing minting API at `device-relay.ts:708`, or
+does the route mint one on the operator's behalf?), and I will not pre-empt it by
+minting a scope inside the service.
+
+Note also that the denial currently surfaces as **HTTP 500**
+(`job_submission_failed`) because the facade re-throws. A missing authorisation
+credential is a **4xx**, not a server error — worth fixing in the same
+producer-side pass.
+
+### Honest gaps — what is NOT enforced
+
+Carrying forward the six-site inventory from the kernel lane, per site:
+
+1. **`kernel-service.ts:102`** (`initAdapters`) — **now threaded.** Fails closed
+   until a caller supplies a scope.
+2. **`kernel-service.ts:160`** (`installMachineFromDbRow`) — **now threaded**,
+   same runner path, same caveat.
+3. **`packages/agent-kernel/src/kernel-agent.ts:406`** — **NOT touched.** Still
+   dispatches unscoped, so agent-bus jobs fail closed. I had permission to touch
+   this call site but no evidence of where its scope would come from; guessing
+   one would be the same fabrication I refused elsewhere.
+4. **`packages/kernel/src/server.ts:164`** — **NOT touched** (separate process,
+   and `packages/kernel` is off-limits to this lane). Standalone kernel daemon's
+   `POST /execute` still dispatches unscoped.
+5. **`packages/onboard-kit/src/quick-start.ts:196`** — **NOT touched.** Dev/example helper.
+6. **`packages/onboard-kit/src/scaffolder.ts:646`** — **NOT touched.** Inside a
+   template string; generated operator projects will need the scope threaded too.
+
+Further gaps introduced or left standing by *this* change:
+
+7. **`agentDid` has two different defaults on one job.** The pre-flight falls
+   back to `"kernel-service"` (pre-existing, `:254`); `JobRunner` falls back to
+   `did:pcc:device:<machineId>`. So an unattributed job is rate-limited in two
+   different buckets and appears under two identities in the audit trail. I left
+   both as-is rather than change rate-limit behaviour in a safety lane, but they
+   should be reconciled.
+8. **The pre-flight still validates a synthetic command.** `type: "submit_job"`
+   with job metadata as `params` — nothing about the actual `load_gcode`/`start`
+   is inspected there. It is now honest about its *class*, which is what made it
+   vacuous, but it is still not the command that reaches hardware. The real
+   check is JobRunner's, and that is the one the layer-2 test pins.
+9. **`MACHINE_COMMAND_CLASS` is duplicated by value, not imported.** It is
+   module-private in `job-runner.ts` and not re-exported from `@pcc/kernel`, and
+   I could not touch that package to export it. If that table ever changes,
+   `kernel-service.ts:~258` must be updated by hand — nothing enforces it. The
+   cheapest permanent fix is exporting the table from `@pcc/kernel` and importing
+   it here.
+10. **A `.catch()`-path failure is still recorded as a device failure.** Left
+    deliberately (a rejected `run()` never reached the dispatch boundary, so
+    nothing else records it), but a runner bug or an evidence/storage error will
+    still be charged to the device's breaker. Narrower than before, not gone.
+11. **Everything the kernel lane listed as unenforced remains unenforced** —
+    no G-code inspection, no physical envelope for the toolpath, per-process
+    breaker state, and no `commandId` in the signed evidence bundle. Unchanged
+    by this work.
+
+### Commits
+
+```
+$ git log --oneline b1be6cfe..HEAD
+3b560f58 jobrunner-safety-gw: tests for gateway execution-scope threading
+4c8d7f6a jobrunner-safety-gw: thread the execution scope into JobRunner and stop the class downgrade
+4704fad1 jobrunner-safety-gw: design note for the gateway scope-threading follow-up
+```
+
+(this section is committed on top)
