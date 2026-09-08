@@ -156,7 +156,26 @@ SUCCESS_STATUS_VALUES = frozenset({"completed", "success", "ok"})
 #   executed  -> JobExecutor._execute_generic_http
 BOOLEAN_SUCCESS_KEYS = ("printed", "submitted", "executed")
 
+# pcc_node.http_util.http returns status_code 0 when the request never
+# completed -- connection refused, DNS failure, timeout (see its docstring).
+# No real HTTP response carries a status <= 0, so a result passing this
+# sentinel through never reached the device, whatever else the result claims.
+TRANSPORT_FAILURE_MAX_STATUS = 0
+
 UNCLASSIFIABLE_REASON = "unclassifiable_result"
+
+
+def _is_transport_failure(result: Dict) -> bool:
+    """True when a result carries http_util's transport-failure sentinel.
+
+    ``bool`` is excluded from the numeric test deliberately: ``False == 0`` in
+    Python, and a boolean in ``status_code`` is a malformed result rather than
+    a transport report -- the remaining rules classify it.
+    """
+    status_code = result.get("status_code")
+    if isinstance(status_code, bool) or not isinstance(status_code, int):
+        return False
+    return status_code <= TRANSPORT_FAILURE_MAX_STATUS
 
 
 def classify_execution_result(result: Any) -> str:
@@ -170,16 +189,23 @@ def classify_execution_result(result: Any) -> str:
     1. not a dict (``None``, str, list, ...)            -> unclassifiable
     2. empty dict                                        -> unclassifiable
     3. truthy ``error`` key                              -> failure
-    4. ``status`` in :data:`FAILURE_STATUS_VALUES`       -> failure
-    5. ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
-    6. ``printed`` / ``submitted`` / ``executed`` present
+    4. transport-failure sentinel (``status_code`` <= 0) -> failure
+    5. ``status`` in :data:`FAILURE_STATUS_VALUES`       -> failure
+    6. ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
+    7. ``printed`` / ``submitted`` / ``executed`` present
        -> success if that flag ``is True``, else failure
-    7. anything else                                     -> unclassifiable
+    8. anything else                                     -> unclassifiable
 
-    An explicit ``error`` (rule 3) outranks a boolean success flag (rule 6) so a
-    stale ``printed: True`` can never mask a populated ``error``.  Rule 6 tests
+    An explicit ``error`` (rule 3) outranks a boolean success flag (rule 7) so a
+    stale ``printed: True`` can never mask a populated ``error``.  Rule 7 tests
     ``is True`` rather than truthiness for the same fail-closed reason: only an
     unambiguous boolean True counts as a success.
+
+    Rule 4 is the backstop for the whole ``status_code`` family: a request that
+    never left the node cannot have succeeded, so it outranks both a claimed
+    success ``status`` (rule 6) and a boolean flag (rule 7) derived from that
+    same unreachable status.  It exists so a future adapter that forwards
+    http_util's sentinel is fail-closed by default rather than by review.
     """
     if not isinstance(result, dict):
         return RESULT_UNCLASSIFIABLE
@@ -188,6 +214,9 @@ def classify_execution_result(result: Any) -> str:
         return RESULT_UNCLASSIFIABLE
 
     if result.get("error"):
+        return RESULT_FAILURE
+
+    if _is_transport_failure(result):
         return RESULT_FAILURE
 
     status = result.get("status")
@@ -210,6 +239,11 @@ def describe_execution_failure(result: Any) -> str:
         error = result.get("error")
         if error:
             return str(error)
+        if _is_transport_failure(result):
+            return (
+                "device unreachable: request never completed "
+                f"(status_code={result.get('status_code')!r})"
+            )
         status = result.get("status")
         if status:
             return f"device reported status={status!r}"
@@ -579,9 +613,20 @@ class JobExecutor:
         url = f"{base_url.rstrip('/')}{path}"
         status, data = http(method, url, body=body, verify_ssl=False)
 
-        return {
-            "executed": status < 400,
+        result: Dict[str, Any] = {
+            # Explicit success band, mirroring _execute_octoprint's allowlist.
+            # A bare `status < 400` also admits http_util's transport-failure
+            # sentinel (status 0 on connection refused / DNS failure / timeout),
+            # which would report an unreachable device as a successful run.
+            "executed": 200 <= status < 400,
             "status_code": status,
             "response": data,
             "device": base_url,
         }
+        if status <= TRANSPORT_FAILURE_MAX_STATUS:
+            # The request never reached the device.  http_util nests the reason
+            # under the response body; lift it to the top level so the failure
+            # carries a readable cause.
+            transport_error = data.get("error") if isinstance(data, dict) else None
+            result["error"] = transport_error or "transport failure: device unreachable"
+        return result

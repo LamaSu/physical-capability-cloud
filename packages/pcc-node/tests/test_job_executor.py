@@ -6,6 +6,7 @@ import platform
 import subprocess
 from datetime import datetime
 from unittest import mock
+from urllib.error import URLError
 
 import pytest
 
@@ -420,6 +421,13 @@ OT_FAIL_NO_PROTOCOL_ID = {
 }
 OT_FAIL_RUN_CREATE = {"error": "run creation failed HTTP 500", "data": {}}
 OT_FAIL_RUN_ID_MISSING = {"error": "run_id_missing", "data": {}}
+# Transport failure: http_util.http yields status 0, so the run-creation
+# allowlist (`status not in (200, 201)`) rejects it -- observed from a live run
+# against a dead socket, not hand-copied from a return statement.
+OT_FAIL_TRANSPORT = {
+    "error": "run creation failed HTTP 0",
+    "data": {"error": "<urlopen error [Errno 111] Connection refused>"},
+}
 
 # JobExecutor._execute_octoprint
 OP_SUCCESS = {
@@ -438,6 +446,13 @@ OP_FAIL_BAD_STATUS = {
     "status_code": 500,
     "device": "http://10.0.0.20:5000",
 }
+# Transport failure: status 0 falls outside the (200, 201, 204) allowlist.
+OP_FAIL_TRANSPORT = {
+    "printed": False,
+    "filename": "benchy.gcode",
+    "status_code": 0,
+    "device": "http://10.0.0.20:5000",
+}
 
 # JobExecutor._execute_generic_http
 GH_SUCCESS = {
@@ -452,6 +467,27 @@ GH_FAIL_HTTP_ERROR = {
     "status_code": 503,
     "response": {"detail": "unavailable"},
     "device": "http://10.0.0.9",
+}
+# Transport failure (connection refused / DNS failure / timeout).  http_util
+# returns status_code 0 -- a value NO adapter return statement mentions, which
+# is exactly why the first census of literal return statements missed it.  Both
+# shapes below were captured from a live run against a dead socket.
+GH_TRANSPORT_PRE_FIX = {
+    # What the adapter produced BEFORE the fix: a bare `status < 400` admitted
+    # the sentinel, so an unreachable device claimed executed=True and settled
+    # as a success.  Retained as a fixture so the classifier's backstop stays
+    # fail-closed on this shape even if an adapter reintroduces it.
+    "executed": True,
+    "status_code": 0,
+    "response": {"error": "<urlopen error [Errno 111] Connection refused>"},
+    "device": "http://10.255.255.1:9",
+}
+GH_FAIL_TRANSPORT = {
+    "executed": False,
+    "status_code": 0,
+    "response": {"error": "<urlopen error [Errno 111] Connection refused>"},
+    "device": "http://10.255.255.1:9",
+    "error": "<urlopen error [Errno 111] Connection refused>",
 }
 
 SUCCESS_SHAPES = [
@@ -475,6 +511,10 @@ FAILURE_SHAPES = [
     pytest.param(OP_FAIL_BAD_STATUS, id="octoprint-bad-http-status"),
     pytest.param(GH_FAIL_NO_BASE_URL, id="generic-http-no-base-url"),
     pytest.param(GH_FAIL_HTTP_ERROR, id="generic-http-error-status"),
+    pytest.param(GH_FAIL_TRANSPORT, id="generic-http-transport-failure"),
+    pytest.param(GH_TRANSPORT_PRE_FIX, id="generic-http-transport-pre-fix-shape"),
+    pytest.param(OP_FAIL_TRANSPORT, id="octoprint-transport-failure"),
+    pytest.param(OT_FAIL_TRANSPORT, id="opentrons-transport-failure"),
 ]
 
 UNCLASSIFIABLE_SHAPES = [
@@ -874,3 +914,120 @@ class TestExecuteStatusGating:
         )
         if not completed_event:
             assert "failed" in statuses
+
+
+# ---------------------------------------------------------------------------
+# Transport-failure sentinel (http_util status 0) -- regression lock
+#
+# `pcc_node.http_util.http` returns status_code 0 when a request never
+# completes (connection refused / DNS failure / timeout).  No adapter return
+# statement mentions that value, so a census of literal return statements --
+# and every fixture hand-copied from one -- cannot contain it.  With
+# `"executed": status < 400`, an unreachable generic-HTTP device therefore
+# reported executed=True -> execution_completed -> the settlement oracle
+# RELEASED the exact failure the contract exists to dispute.
+#
+# The tests below fake ONLY `urlopen` and let every layer above it run for
+# real, so a shape the author did not think an adapter could produce is still
+# exercised.  Fixtures test what you imagined; live adapters test what the
+# code actually does.
+# ---------------------------------------------------------------------------
+
+class TestTransportFailureSentinel:
+    TRANSPORT_ERROR = URLError("[Errno 111] Connection refused")
+
+    GH_DEVICE = {"id": "g1", "protocol": "generic-http", "url": "http://10.255.255.1:9"}
+    OP_DEVICE = {"id": "op1", "protocol": "octoprint", "url": "http://10.255.255.1:9"}
+    OT_DEVICE = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:9"}
+
+    def _dead_socket(self):
+        """Patch the socket layer only -- http_util, the adapters, the
+        classifier and execute() all run for real underneath."""
+        return mock.patch("pcc_node.http_util.urlopen", side_effect=self.TRANSPORT_ERROR)
+
+    def _gateway(self):
+        g = mock.Mock()
+        g.update_job_status.return_value = True
+        g.push_evidence.return_value = True
+        return g
+
+    def _statuses(self, gateway):
+        return [call[0][1] for call in gateway.update_job_status.call_args_list]
+
+    def _execute_live(self, device, capability_type):
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[device], gateway_client=gateway)
+        job = {
+            "id": "job-transport",
+            "capabilityType": capability_type,
+            "parameters": {
+                "path": "/execute",
+                "filename": "benchy.gcode",
+                "protocolId": "proto-abc",
+            },
+        }
+        with self._dead_socket():
+            bundle = ex.execute(job)
+        return bundle, self._statuses(gateway)
+
+    # --- the classifier backstop -------------------------------------------
+
+    def test_status_code_zero_is_a_failure(self):
+        """The pre-fix shape: claims executed, but never reached the device."""
+        assert classify_execution_result(GH_TRANSPORT_PRE_FIX) == RESULT_FAILURE
+
+    def test_transport_sentinel_outranks_a_claimed_success(self):
+        result = {"status": "completed", "status_code": 0, "executed": True}
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_negative_status_code_is_also_a_failure(self):
+        assert classify_execution_result({"executed": True, "status_code": -1}) == RESULT_FAILURE
+
+    def test_real_http_status_codes_are_untouched(self):
+        assert classify_execution_result(GH_SUCCESS) == RESULT_SUCCESS
+        assert classify_execution_result(OP_SUCCESS) == RESULT_SUCCESS
+
+    def test_boolean_status_code_is_not_read_as_the_sentinel(self):
+        """`False == 0` in Python -- a bool there is a malformed result, not a
+        transport report, so the remaining rules classify it."""
+        assert classify_execution_result({"printed": True, "status_code": False}) == RESULT_SUCCESS
+
+    def test_failure_reason_names_the_transport_failure(self):
+        reason = describe_execution_failure(GH_TRANSPORT_PRE_FIX)
+        assert "unreachable" in reason
+        assert "status_code=0" in reason
+
+    # --- the live adapters --------------------------------------------------
+
+    def test_generic_http_adapter_does_not_claim_executed(self):
+        """Directly locks job_executor.py's `200 <= status < 400` band."""
+        ex = JobExecutor(devices=[])
+        with self._dead_socket():
+            result = ex._execute_generic_http(
+                self.GH_DEVICE, {"parameters": {"path": "/execute"}}
+            )
+
+        assert result["status_code"] == 0
+        assert result["executed"] is False, "unreachable device reported as executed"
+        assert result["error"], "transport error must surface at the top level"
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize(
+        "device,capability",
+        [
+            pytest.param(GH_DEVICE, "generic", id="generic-http"),
+            pytest.param(OP_DEVICE, "3d-print", id="octoprint"),
+            pytest.param(OT_DEVICE, "liquid-handler", id="opentrons"),
+        ],
+    )
+    def test_unreachable_device_disputes_end_to_end(self, device, capability):
+        """The contract's acceptance vector, driven through the real adapter:
+        failed -> execution_failed + no execution_completed -> oracle disputes."""
+        bundle, statuses = self._execute_live(device, capability)
+        types = _event_types(bundle)
+
+        assert EVENT_EXECUTION_FAILED in types
+        assert EVENT_EXECUTION_COMPLETED not in types
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert "failed" in statuses
+        assert "completed" not in statuses
