@@ -1810,3 +1810,67 @@ class TestDeviceReportedFailureInABody:
         assert "execution_failed" not in _bundle_text(bundle)
         assert "completed" in statuses
         assert "failed" not in statuses
+
+
+# ---------------------------------------------------------------------------
+# A dropped 'failed' report is loud, not silent
+#
+# `update_job_status` returns False after a bare log.warning when the gateway
+# rejects the PATCH (ws_client.py:183), and every call site in job_executor.py
+# discarded that return.  A dropped 'failed' report leaves the job non-terminal
+# upstream -- which matters because the gateway's own completion route is gated
+# on the job not already being 'failed'.  These tests lock the ERROR-level
+# surfacing; they do NOT claim the hole is closed (a retry/outbox here, or a
+# gateway-side change, is what would close it).
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+
+class TestDroppedFailureReportIsSurfaced:
+    IPP_DEVICE = {"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}
+
+    def _run(self, result, ack, caplog):
+        gateway = mock.Mock()
+        gateway.push_evidence.return_value = True
+        gateway.update_job_status.return_value = ack
+        ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=gateway)
+        job = {"id": "job-ack", "capabilityType": "document-printing", "parameters": {}}
+
+        with mock.patch("pcc_node.job_executor.execute_ipp_print") as patched:
+            patched.return_value = result
+            with caplog.at_level(logging.ERROR, logger="pcc-node.job-executor"):
+                bundle = ex.execute(job)
+        return gateway, bundle
+
+    @pytest.mark.parametrize("result", [
+        pytest.param(IPP_FAIL_TIMEOUT, id="failure"),
+        pytest.param({"foo": "bar"}, id="unclassifiable"),
+    ])
+    def test_unacknowledged_failure_report_logs_an_error(self, result, caplog):
+        self._run(result, ack=False, caplog=caplog)
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("did not acknowledge" in m for m in errors), (
+            f"a dropped 'failed' report was silent; error records were {errors}"
+        )
+
+    @pytest.mark.parametrize("result", [
+        pytest.param(IPP_FAIL_TIMEOUT, id="failure"),
+        pytest.param({"foo": "bar"}, id="unclassifiable"),
+    ])
+    def test_acknowledged_failure_report_is_quiet(self, result, caplog):
+        """Negative control: a report that lands must not raise an alarm."""
+        self._run(result, ack=True, caplog=caplog)
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_evidence_is_still_pushed_when_the_report_is_dropped(self, caplog):
+        gateway, bundle = self._run(IPP_FAIL_TIMEOUT, ack=False, caplog=caplog)
+        gateway.push_evidence.assert_called_once()
+        assert EVENT_EXECUTION_FAILED in _event_types(bundle)
+        assert "execution_completed" not in _bundle_text(bundle)
+
+    def test_a_successful_job_is_unaffected(self, caplog):
+        gateway, bundle = self._run(IPP_SUCCESS, ack=True, caplog=caplog)
+        statuses = [c[0][1] for c in gateway.update_job_status.call_args_list]
+        assert "completed" in statuses
+        assert EVENT_EXECUTION_COMPLETED in _event_types(bundle)

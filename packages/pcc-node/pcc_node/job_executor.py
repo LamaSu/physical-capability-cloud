@@ -648,18 +648,16 @@ class JobExecutor:
                 if verdict == RESULT_SUCCESS:
                     self.gateway.update_job_status(job_id, "completed", result)
                 elif verdict == RESULT_FAILURE:
-                    self.gateway.update_job_status(
+                    self._report_terminal_failure(
                         job_id,
-                        "failed",
                         {
                             "error": describe_execution_failure(result),
                             "result": result,
                         },
                     )
                 else:
-                    self.gateway.update_job_status(
+                    self._report_terminal_failure(
                         job_id,
-                        "failed",
                         {"error": UNCLASSIFIABLE_REASON, "result": result},
                     )
 
@@ -683,6 +681,32 @@ class JobExecutor:
             if self.gateway:
                 self.gateway.update_job_status(job_id, "failed", error_info)
             return error_info
+
+    def _report_terminal_failure(self, job_id: str, metadata: Dict) -> bool:
+        """Report a job failed, and say so loudly when the report does not land.
+
+        ``update_job_status`` returns False after a bare ``log.warning`` when
+        the gateway rejects the PATCH (ws_client.py), and every other call site
+        in this module discards that return.  A dropped 'failed' report leaves
+        the job non-terminal, which matters beyond this node: the gateway's own
+        completion route is gated on the job not already being 'failed'.
+
+        This does NOT close that hole -- it makes it observable rather than
+        silent.  Closing it needs a retry/outbox here or a change on the
+        gateway side, neither of which is in this module's scope.
+        """
+        acknowledged = bool(
+            self.gateway.update_job_status(job_id, "failed", metadata)
+        )
+        if not acknowledged:
+            log.error(
+                "Job %s: the gateway did not acknowledge the 'failed' status "
+                "report; the job may still look non-terminal upstream "
+                "(reason: %s)",
+                job_id,
+                metadata.get("error"),
+            )
+        return acknowledged
 
     def _find_device(self, job: Dict) -> Optional[Dict]:
         """Find the best device for this job.
