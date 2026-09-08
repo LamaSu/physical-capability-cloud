@@ -1031,3 +1031,214 @@ class TestTransportFailureSentinel:
         assert "execution_completed" not in _bundle_text(bundle)
         assert "failed" in statuses
         assert "completed" not in statuses
+
+
+# ---------------------------------------------------------------------------
+# Opentrons play action -- the "run created, protocol never started" hole
+#
+# `_execute_opentrons` makes two calls: POST /runs (create the run) and then
+# POST /runs/<id>/actions (play).  Only the play call actually starts the
+# protocol, and its return was DISCARDED -- the one discarded http() return in
+# the module -- so a rejected or unreachable play still produced
+# `submitted: True` -> execution_completed -> golden-v4's
+# and(execution_completed present, execution_failed absent) RELEASES.
+#
+# TestTransportFailureSentinel cannot reach this branch: with every socket
+# dead, POST /runs fails first at the `status not in (200, 201)` guard, so
+# `test_unreachable_device_disputes_end_to_end[opentrons]` returns through run
+# creation and never enters the play branch (locked below by
+# test_dead_socket_stops_at_run_creation_not_the_play_action).  The tests here
+# keep run creation healthy and break ONLY the play call, and each asserts the
+# /actions request was actually issued so the coverage cannot quietly regress
+# to the run-creation shortcut again.
+#
+# As above, only `urlopen` is faked: http_util, the adapter, the classifier and
+# execute() all run for real underneath.
+# ---------------------------------------------------------------------------
+
+import io  # noqa: E402
+from urllib.error import HTTPError  # noqa: E402
+
+
+class _FakeResponse:
+    """Stand-in for urlopen's return value: context manager + read + status."""
+
+    def __init__(self, status, payload):
+        self.status = status
+        self._raw = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _http_error(code, payload):
+    """How a real 4xx/5xx reaches an adapter: urlopen raises HTTPError and
+    http_util turns it into (code, parsed_body)."""
+    return HTTPError(
+        "http://10.255.255.1:31950/runs/run-xyz/actions",
+        code,
+        "error",
+        {},
+        io.BytesIO(json.dumps(payload).encode("utf-8")),
+    )
+
+
+class TestOpentronsPlayAction:
+    OT_DEVICE = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:31950"}
+    RUN_ID = "run-xyz"
+    PROTOCOL_ID = "proto-abc"
+
+    # (factory for the play-call outcome, expected error string)
+    PLAY_FAILURES = [
+        pytest.param(
+            lambda: URLError("[Errno 111] Connection refused"),
+            "run play failed HTTP 0",
+            id="play-transport-dead",
+        ),
+        pytest.param(
+            lambda: _http_error(500, {"message": "run cannot start"}),
+            "run play failed HTTP 500",
+            id="play-http-500",
+        ),
+        pytest.param(
+            lambda: _http_error(409, {"message": "run is not idle"}),
+            "run play failed HTTP 409",
+            id="play-http-409",
+        ),
+    ]
+
+    def _socket(self, make_play_outcome, seen):
+        """POST /runs succeeds; POST /runs/<id>/actions does whatever
+        `make_play_outcome()` returns (a response) or raises (an exception).
+        Every requested URL is recorded into `seen`."""
+
+        def _router(req, *args, **kwargs):
+            url = req.full_url
+            seen.append(url)
+            if url.endswith("/actions"):
+                outcome = make_play_outcome()
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+            if url.endswith("/runs"):
+                return _FakeResponse(201, {"data": {"id": self.RUN_ID}})
+            raise AssertionError(f"unexpected request to {url}")
+
+        return mock.patch("pcc_node.http_util.urlopen", side_effect=_router)
+
+    def _job(self):
+        return {
+            "id": "job-ot-play",
+            "capabilityType": "liquid-handler",
+            "parameters": {"protocolId": self.PROTOCOL_ID},
+        }
+
+    def _gateway(self):
+        g = mock.Mock()
+        g.update_job_status.return_value = True
+        g.push_evidence.return_value = True
+        return g
+
+    def _statuses(self, gateway):
+        return [call[0][1] for call in gateway.update_job_status.call_args_list]
+
+    def _played(self, seen):
+        return [u for u in seen if u.endswith("/actions")]
+
+    # --- the adapter --------------------------------------------------------
+
+    @pytest.mark.parametrize("make_play_outcome,expected_error", PLAY_FAILURES)
+    def test_play_failure_never_claims_submitted(self, make_play_outcome, expected_error):
+        seen = []
+        ex = JobExecutor(devices=[])
+        with self._socket(make_play_outcome, seen):
+            result = ex._execute_opentrons(self.OT_DEVICE, self._job())
+
+        assert self._played(seen), f"play action never issued; requests were {seen}"
+        assert result["submitted"] is False, "a run that never started reported as submitted"
+        assert result["error"] == expected_error
+        # Forensics: the caller can still find the run that was left un-played.
+        assert result["runId"] == self.RUN_ID
+        assert result["protocolId"] == self.PROTOCOL_ID
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("status_code", [200, 201])
+    def test_accepted_play_statuses_still_submit(self, status_code):
+        """The guard must not turn a run that really started into a dispute."""
+        seen = []
+        ex = JobExecutor(devices=[])
+        with self._socket(lambda: _FakeResponse(status_code, {"data": {"id": "a1"}}), seen):
+            result = ex._execute_opentrons(self.OT_DEVICE, self._job())
+
+        assert self._played(seen)
+        assert result["submitted"] is True
+        assert "error" not in result
+        assert classify_execution_result(result) == RESULT_SUCCESS
+
+    def test_dead_socket_stops_at_run_creation_not_the_play_action(self):
+        """Why this class exists.  With every request dead the adapter returns
+        at the run-creation guard, so a dead-socket test can never exercise the
+        play branch, whatever its name says."""
+        seen = []
+
+        def _all_dead(req, *args, **kwargs):
+            seen.append(req.full_url)
+            raise URLError("[Errno 111] Connection refused")
+
+        ex = JobExecutor(devices=[])
+        with mock.patch("pcc_node.http_util.urlopen", side_effect=_all_dead):
+            result = ex._execute_opentrons(self.OT_DEVICE, self._job())
+
+        assert result["error"] == "run creation failed HTTP 0"
+        assert not self._played(seen), (
+            "run creation no longer short-circuits; the play-branch tests above "
+            "are now the only thing covering it -- keep them"
+        )
+
+    # --- end to end ---------------------------------------------------------
+
+    @pytest.mark.parametrize("make_play_outcome,expected_error", PLAY_FAILURES)
+    def test_play_failure_disputes_end_to_end(self, make_play_outcome, expected_error):
+        """The contract's acceptance vector for a protocol that never started:
+        failed -> execution_failed + no execution_completed -> oracle disputes."""
+        seen = []
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.OT_DEVICE], gateway_client=gateway)
+        with self._socket(make_play_outcome, seen):
+            bundle = ex.execute(self._job())
+
+        assert self._played(seen), f"play action never issued; requests were {seen}"
+        types = _event_types(bundle)
+        statuses = self._statuses(gateway)
+
+        assert EVENT_EXECUTION_FAILED in types
+        assert EVENT_EXECUTION_COMPLETED not in types
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert "failed" in statuses
+        assert "completed" not in statuses
+        # A dispute still needs evidence to dispute ON.
+        gateway.push_evidence.assert_called_once()
+
+    def test_successful_play_still_releases_end_to_end(self):
+        """Negative control: a healthy run must keep settling."""
+        seen = []
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[self.OT_DEVICE], gateway_client=gateway)
+        with self._socket(lambda: _FakeResponse(201, {"data": {"id": "a1"}}), seen):
+            bundle = ex.execute(self._job())
+
+        assert self._played(seen)
+        types = _event_types(bundle)
+        statuses = self._statuses(gateway)
+
+        assert EVENT_EXECUTION_COMPLETED in types
+        assert EVENT_EXECUTION_FAILED not in types
+        assert "execution_failed" not in _bundle_text(bundle)
+        assert "completed" in statuses
+        assert "failed" not in statuses

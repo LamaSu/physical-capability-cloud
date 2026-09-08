@@ -552,13 +552,30 @@ class JobExecutor:
         if not run_id:
             return {"error": "run_id_missing", "data": run_data}
 
-        # Start the run
-        http(
+        # Start the run.  The play action is what actually starts the protocol,
+        # so its status is the only evidence the run began.  This was the one
+        # discarded http() return in the module: a protocol that never started
+        # still returned submitted=True, and golden-v4's and(execution_completed
+        # present, execution_failed absent) RELEASED it.  Guard mirrors the
+        # run-creation allowlist above; a status outside it fails closed.
+        play_status, play_data = http(
             "POST", f"{base_url}/runs/{run_id}/actions",
             body={"data": {"actionType": "play"}},
             headers=ot2_headers,
             verify_ssl=False,
         )
+        if play_status not in (200, 201):
+            return {
+                "error": f"run play failed HTTP {play_status}",
+                "runId": run_id,
+                "protocolId": protocol_id,
+                # Redundant with "error" by design: classify_execution_result
+                # rule 3 catches the error and rule 7 catches this flag, so the
+                # failure survives either rule being edited.
+                "submitted": False,
+                "device": base_url,
+                "data": play_data,
+            }
 
         return {
             "runId": run_id,
