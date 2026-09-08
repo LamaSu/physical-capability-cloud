@@ -127,6 +127,99 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Execution-result classification (evidence contract sec-10)
+# ---------------------------------------------------------------------------
+#
+# Device adapters signal failure by RETURNING a dict whose content says so --
+# they do not raise.  Consumers of an evidence bundle (notably the settlement
+# oracle) key off the event TYPE in the bundle, not the event payload, so a
+# failed run reported with an "execution_completed" event would settle as a
+# success.  Classification is therefore fail-closed: anything this module
+# cannot positively recognise as a success is never reported as one.
+
+RESULT_SUCCESS = "success"
+RESULT_FAILURE = "failure"
+RESULT_UNCLASSIFIABLE = "unclassifiable"
+
+EVENT_JOB_STARTED = "job_started"
+EVENT_EXECUTION_COMPLETED = "execution_completed"
+EVENT_EXECUTION_FAILED = "execution_failed"
+EVENT_EXECUTION_UNCLASSIFIED = "execution_unclassified"
+
+# Outcome reported directly by an adapter via a "status" key.
+FAILURE_STATUS_VALUES = frozenset({"failed", "error"})
+SUCCESS_STATUS_VALUES = frozenset({"completed", "success", "ok"})
+
+# Per-adapter boolean success flags, checked in this order:
+#   printed   -> execute_ipp_print, JobExecutor._execute_octoprint
+#   submitted -> JobExecutor._execute_opentrons
+#   executed  -> JobExecutor._execute_generic_http
+BOOLEAN_SUCCESS_KEYS = ("printed", "submitted", "executed")
+
+UNCLASSIFIABLE_REASON = "unclassifiable_result"
+
+
+def classify_execution_result(result: Any) -> str:
+    """Classify an adapter result as success / failure / unclassifiable.
+
+    Pure function -- no I/O, no side effects.  Returns one of
+    :data:`RESULT_SUCCESS`, :data:`RESULT_FAILURE`, :data:`RESULT_UNCLASSIFIABLE`.
+
+    First matching rule wins:
+
+    1. not a dict (``None``, str, list, ...)            -> unclassifiable
+    2. empty dict                                        -> unclassifiable
+    3. truthy ``error`` key                              -> failure
+    4. ``status`` in :data:`FAILURE_STATUS_VALUES`       -> failure
+    5. ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
+    6. ``printed`` / ``submitted`` / ``executed`` present
+       -> success if that flag ``is True``, else failure
+    7. anything else                                     -> unclassifiable
+
+    An explicit ``error`` (rule 3) outranks a boolean success flag (rule 6) so a
+    stale ``printed: True`` can never mask a populated ``error``.  Rule 6 tests
+    ``is True`` rather than truthiness for the same fail-closed reason: only an
+    unambiguous boolean True counts as a success.
+    """
+    if not isinstance(result, dict):
+        return RESULT_UNCLASSIFIABLE
+
+    if not result:
+        return RESULT_UNCLASSIFIABLE
+
+    if result.get("error"):
+        return RESULT_FAILURE
+
+    status = result.get("status")
+    if isinstance(status, str):
+        if status in FAILURE_STATUS_VALUES:
+            return RESULT_FAILURE
+        if status in SUCCESS_STATUS_VALUES:
+            return RESULT_SUCCESS
+
+    for key in BOOLEAN_SUCCESS_KEYS:
+        if key in result:
+            return RESULT_SUCCESS if result[key] is True else RESULT_FAILURE
+
+    return RESULT_UNCLASSIFIABLE
+
+
+def describe_execution_failure(result: Any) -> str:
+    """Best-effort human-readable reason for a failure result.  Never raises."""
+    if isinstance(result, dict):
+        error = result.get("error")
+        if error:
+            return str(error)
+        status = result.get("status")
+        if status:
+            return f"device reported status={status!r}"
+        for key in BOOLEAN_SUCCESS_KEYS:
+            if key in result:
+                return f"device reported {key}={result[key]!r}"
+    return "device reported failure without an error message"
+
+
+# ---------------------------------------------------------------------------
 # Evidence builder
 # ---------------------------------------------------------------------------
 
@@ -136,7 +229,18 @@ def build_evidence_bundle(
     result: Dict,
     events: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
-    """Construct an evidence bundle from execution result."""
+    """Construct an evidence bundle from execution result.
+
+    The synthesized event trail branches on :func:`classify_execution_result`
+    (evidence contract sec-10):
+
+    * success        -> ``execution_completed``
+    * failure        -> ``execution_failed`` (never ``execution_completed``)
+    * unclassifiable -> ``execution_unclassified`` -- neither of the above
+
+    Passing ``events`` explicitly bypasses the branch entirely; that caller
+    escape hatch is unchanged.
+    """
     now = datetime.now(tz=timezone.utc).isoformat()
     return {
         "jobId": job_id,
@@ -144,19 +248,56 @@ def build_evidence_bundle(
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": events or [
+        "events": events or _synthesize_events(device, result, now),
+    }
+
+
+def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
+    """Default event trail: ``job_started`` plus exactly ONE outcome event."""
+    events: List[Dict] = [
+        {
+            "type": EVENT_JOB_STARTED,
+            "timestamp": now,
+            "payload": {"deviceId": device.get("id", "unknown")},
+        }
+    ]
+
+    verdict = classify_execution_result(result)
+
+    if verdict == RESULT_SUCCESS:
+        events.append(
             {
-                "type": "job_started",
-                "timestamp": now,
-                "payload": {"deviceId": device.get("id", "unknown")},
-            },
-            {
-                "type": "execution_completed",
+                "type": EVENT_EXECUTION_COMPLETED,
                 "timestamp": now,
                 "payload": result,
-            },
-        ],
-    }
+            }
+        )
+    elif verdict == RESULT_FAILURE:
+        events.append(
+            {
+                "type": EVENT_EXECUTION_FAILED,
+                "timestamp": now,
+                "payload": {
+                    "error": describe_execution_failure(result),
+                    "result": result,
+                },
+            }
+        )
+    else:
+        # Fail closed: an unrecognised result claims neither completion nor
+        # failure, so no completion event exists for a verifier to release on.
+        events.append(
+            {
+                "type": EVENT_EXECUTION_UNCLASSIFIED,
+                "timestamp": now,
+                "payload": {
+                    "reason": UNCLASSIFIABLE_REASON,
+                    "result": result,
+                },
+            }
+        )
+
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +354,45 @@ class JobExecutor:
                 return error_result
 
             result = self._execute_on_device(device, job)
+            verdict = classify_execution_result(result)
             evidence = build_evidence_bundle(job_id, device, result)
+            device_label = device.get("id", "?")
 
             if self.gateway:
+                # Evidence is pushed for every outcome -- a failed run must
+                # still reach the verifier so that it can dispute.
                 self.gateway.push_evidence(job_id, evidence)
-                self.gateway.update_job_status(job_id, "completed", result)
 
-            log.info(f"Job {job_id} completed on device {device.get('id', '?')}")
+                if verdict == RESULT_SUCCESS:
+                    self.gateway.update_job_status(job_id, "completed", result)
+                elif verdict == RESULT_FAILURE:
+                    self.gateway.update_job_status(
+                        job_id,
+                        "failed",
+                        {
+                            "error": describe_execution_failure(result),
+                            "result": result,
+                        },
+                    )
+                else:
+                    self.gateway.update_job_status(
+                        job_id,
+                        "failed",
+                        {"error": UNCLASSIFIABLE_REASON, "result": result},
+                    )
+
+            if verdict == RESULT_SUCCESS:
+                log.info(f"Job {job_id} completed on device {device_label}")
+            elif verdict == RESULT_FAILURE:
+                log.warning(
+                    f"Job {job_id} failed on device {device_label}: "
+                    f"{describe_execution_failure(result)}"
+                )
+            else:
+                log.warning(
+                    f"Job {job_id} returned an unclassifiable result on device "
+                    f"{device_label}; reporting failed (fail-closed)"
+                )
             return evidence
 
         except Exception as e:
