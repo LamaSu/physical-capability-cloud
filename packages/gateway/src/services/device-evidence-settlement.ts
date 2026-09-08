@@ -59,7 +59,19 @@ export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /** Signature `value`s the gateway writes when it has NO real device signature.
  *  A bundle carrying one of these is a gateway placeholder, never device-signed
- *  and never eligible to anchor settlement. */
+ *  and never eligible to anchor settlement.
+ *
+ *  NOT A SUFFICIENT TEST ON ITS OWN. This set is one clause of
+ *  `isDeviceSignedSignature`, which is the only sanctioned predicate. The
+ *  operator relay's no-signature sentinel (`NO_DEVICE_SIGNATURE` in
+ *  routes/operator-relay.ts) is `{signer:"", algorithm:"none", value:""}` and is
+ *  deliberately NOT a member — it is rejected on the empty-value, empty-signer
+ *  and non-ed25519 clauses instead. A future check written as
+ *  `PLACEHOLDER_SIGNATURE_VALUES.has(sig.value)` would therefore fail to
+ *  classify it as a placeholder. Call `isDeviceSignedSignature(sig)` — never
+ *  this set directly. Pinned by
+ *  __tests__/operator-relay.test.ts ("the no-signature sentinel is not
+ *  device-signed"). */
 export const PLACEHOLDER_SIGNATURE_VALUES: ReadonlySet<string> = new Set([
   "operator-relay-auto", // legacy path-1 placeholder
   "gateway-auto-sign", // legacy path-2 placeholder

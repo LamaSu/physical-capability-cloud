@@ -464,6 +464,216 @@ describe("Operator Relay Routes", () => {
         expect(stored.bundleHash).not.toBe(`sha256:${"cd".repeat(32)}`);
       });
     });
+
+    // ── Round 2: the relay never leaves an events-less bundle behind ────────
+    //
+    // Round 1 stored the events but as a SECOND autocommitted statement after
+    // the bundle row. better-sqlite3 committed the bundle immediately, so any
+    // throw from insertEvents left a durable bundle whose content-addressed
+    // hash covers events that were never stored — served back as `events: []`,
+    // so the bytes no longer re-hash (oracle fails closed) and the
+    // authenticity-of-origin floor reads nothing. The response said
+    // `stored:false` while the row persisted, and settlement reports a job's
+    // LAST bundle, so the orphan became the job's advertised evidence.
+    describe("round 2 — events and bundle commit together, ids cannot collide", () => {
+      it("a node RETRY of the same spec-conformant bundle stores both, no orphan", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const ts = new Date().toISOString();
+        // `EvidenceEvent.id` is REQUIRED by @pcc/spec and the kernel-sdk always
+        // sets it (`id: ids.evidence()`), so stable node-supplied ids are the
+        // CANONICAL shape — and a retry after a timeout resends them verbatim
+        // under a fresh bundleId.
+        const payload = {
+          jobId,
+          kernelId,
+          evidence: {
+            events: [
+              { id: "evt-sdk-0001", type: "execution_started", timestamp: ts, payload: { a: 1 } },
+              { id: "evt-sdk-0002", type: "execution_completed", timestamp: ts, payload: { b: 2 } },
+            ],
+          },
+        };
+
+        const first = await app.inject({ method: "POST", url: "/api/operator/evidence", payload });
+        expect(first.statusCode).toBe(200);
+        expect(first.json().stored).toBe(true);
+        expect(first.json().eventsStored).toBe(2);
+
+        const retry = await app.inject({ method: "POST", url: "/api/operator/evidence", payload });
+        expect(retry.statusCode).toBe(200);
+        const r = retry.json();
+        // Before the fix this was `{stored:false, error:"storage_failed"}` with
+        // the bundle row committed anyway.
+        expect(r.stored).toBe(true);
+        expect(r.eventsStored).toBe(2);
+        expect(r.bundleId).not.toBe(first.json().bundleId);
+
+        // Both bundles hold their OWN events — the retry neither collided with
+        // the first bundle's rows nor stole them.
+        expect(getRepos().evidence.findEventsByBundle(first.json().bundleId).length).toBe(2);
+        expect(getRepos().evidence.findEventsByBundle(r.bundleId).length).toBe(2);
+
+        // And the retry's advertised hash still serves bytes that re-hash — the
+        // amplification path (settlement reports the LAST bundle for a job).
+        const got = await app.inject({ method: "GET", url: `/api/evidence/${r.bundleHash}` });
+        expect(got.statusCode).toBe(200);
+        expect(`sha256:${crypto.createHash("sha256").update(got.body).digest("hex")}`).toBe(
+          r.bundleHash,
+        );
+        expect(JSON.parse(got.body).events.length).toBe(2);
+      });
+
+      it("stored event ids are bundle-scoped, so two bundles can carry the same node id", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: {
+            jobId,
+            kernelId,
+            evidence: {
+              events: [
+                {
+                  id: "evt-stable",
+                  type: "execution_completed",
+                  timestamp: new Date().toISOString(),
+                },
+              ],
+            },
+          },
+        });
+        const { bundleId } = res.json();
+        const rows = getRepos().evidence.findEventsByBundle(bundleId);
+        expect(rows.length).toBe(1);
+        // `evidence_events.id` is a GLOBAL primary key; the node's id is only
+        // unique inside its own bundle, so the relay scopes it on the way in.
+        expect(rows[0]!.id).toBe(`${bundleId}:evt-stable`);
+      });
+
+      it("refuses a bundle whose events share an id, and commits nothing", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const before = getRepos().evidence.findByJob(jobId).length;
+        const ts = new Date().toISOString();
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: {
+            jobId,
+            kernelId,
+            evidence: {
+              events: [
+                { id: "evt-dup", type: "execution_started", timestamp: ts },
+                { id: "evt-dup", type: "execution_completed", timestamp: ts },
+              ],
+            },
+          },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe("duplicate_event_id");
+        expect(res.json().duplicateIds).toEqual(["evt-dup"]);
+        // Nothing was written — the old behaviour committed the bundle row and
+        // then failed the whole multi-row event INSERT on the PK collision.
+        expect(getRepos().evidence.findByJob(jobId).length).toBe(before);
+      });
+
+      it("rolls the bundle row back when the event write fails", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const before = getRepos().evidence.findByJob(jobId).length;
+        const repo = getRepos().evidence as unknown as Record<string, unknown>;
+        // Simulate ANY failure of the event write — the PK collision is only one
+        // cause; atomicity has to hold for all of them.
+        repo.insertEvents = () => {
+          throw new Error("simulated event-write failure");
+        };
+        let body: Record<string, unknown>;
+        try {
+          const res = await app.inject({
+            method: "POST",
+            url: "/api/operator/evidence",
+            payload: {
+              jobId,
+              kernelId,
+              evidence: {
+                events: [{ type: "execution_completed", timestamp: new Date().toISOString() }],
+              },
+            },
+          });
+          body = res.json();
+        } finally {
+          delete repo.insertEvents; // restore the prototype method
+        }
+
+        expect(body.stored).toBe(false);
+        expect(body.error).toBe("storage_failed");
+        // `stored:false` now MEANS nothing was stored.
+        expect(getRepos().evidence.findById(body.bundleId as string)).toBeUndefined();
+        expect(getRepos().evidence.findByJob(jobId).length).toBe(before);
+      });
+
+      it("refuses a signed bundle whose bundleHash could never be served back", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const before = getRepos().evidence.findByJob(jobId).length;
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          // Device-signed SHAPE, but a bundleHash `isEvidenceHashForm` does not
+          // recognise: GET /api/evidence/:hash could never return it, so the
+          // committed hash would point at nothing.
+          payload: { jobId, kernelId, evidence: realDeviceBundle(jobId, "definitely-not-a-hash") },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe("invalid_bundle_hash");
+        expect(getRepos().evidence.findByJob(jobId).length).toBe(before);
+      });
+
+      it("reports signature PRESENCE, never verification, on the signed path", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: { jobId, kernelId, evidence: realDeviceBundle(jobId) },
+        });
+        const body = res.json();
+        // A relay caller can supply ANY ed25519-shaped signature over ANY hash
+        // and land deviceSigned:true — this route does not verify it. The
+        // response says so explicitly, so presence is never read as proof.
+        expect(body.deviceSigned).toBe(true);
+        expect(body.signatureVerified).toBe(false);
+      });
+
+      it("the no-signature sentinel is not device-signed", () => {
+        // NO_DEVICE_SIGNATURE is deliberately NOT a member of
+        // PLACEHOLDER_SIGNATURE_VALUES — it is caught by the empty-value,
+        // empty-signer and non-ed25519 clauses instead. `isDeviceSignedSignature`
+        // is the only sanctioned test; a check written against the SET alone
+        // would miss this value. Pinned here so that stays true.
+        expect(isDeviceSignedSignature(NO_DEVICE_SIGNATURE)).toBe(false);
+      });
+    });
   });
 
   // ── POST /api/operator/heartbeat ────────────────────────────────
