@@ -422,13 +422,21 @@ export async function requestRoutes(app: FastifyInstance) {
     }
 
     const now = new Date().toISOString();
+    // R-06 / LO-GW-2a — the authorized ceiling is established HERE, once, from
+    // what the requester actually stated. Everything downstream reads it;
+    // nothing downstream writes it.
+    const authorizedCeiling = body.budget ?? 1000;
     const request: CapabilityRequest = {
       id: newId("req"),
       title: body.title,
       description: body.description,
       requesterEmail: body.requesterEmail,
       requesterWallet: body.requesterWallet,
-      budget: body.budget ?? 1000,
+      budget: authorizedCeiling,
+      // Same number under the name that says what it is. `rowToRequest`
+      // populates it on every read path; this construction path is the write
+      // path and has to set it too, or the response omits it.
+      authorizedCeiling,
       currency: body.currency ?? "USDC",
       deadline: body.deadline ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       urgency: body.urgency ?? "standard",
