@@ -17,7 +17,12 @@ import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
+import {
+  buildCanonicalEvidenceEnvelope,
+  type EvidenceEnvelopeEvent,
+} from "../services/evidence-envelope.js";
 import { v4 as uuidv4 } from "uuid";
+import crypto from "node:crypto";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -52,6 +57,106 @@ interface JobStatusBody {
   status: string;
   metadata?: Record<string, unknown>;
   timestamp?: number;
+}
+
+// ---------------------------------------------------------------------------
+// LO-GW-4a — the "no signature" record
+// ---------------------------------------------------------------------------
+
+/**
+ * What the unsigned relay path stores in `kernelSignature`.
+ *
+ * The honest value is SQL NULL, and that is what the ROUTE emits in its
+ * response. It is not what the column can hold: `evidence_bundles
+ * .kernel_signature` is `TEXT NOT NULL` (packages/db/src/migrate.ts:89), and
+ * relaxing that is a SQLite table rebuild on the money-path evidence table —
+ * out of scope here, and flagged as a follow-up rather than done quietly.
+ *
+ * So absence is recorded, inside the constraint, as a value that asserts
+ * NOTHING: no signer is named, the algorithm is literally "none", the value is
+ * empty. Contrast the record it replaces —
+ * `{signer: <kernelId>, algorithm: "sha256", value: "operator-relay-auto"}` —
+ * which named a real kernel as the signer of bytes it never signed.
+ * `isDeviceSignedSignature` rejects this on three independent grounds
+ * (algorithm, empty value, empty signer), so it can never anchor settlement.
+ */
+export const NO_DEVICE_SIGNATURE = {
+  signer: "",
+  algorithm: "none",
+  value: "",
+} as const;
+
+// ---------------------------------------------------------------------------
+// LO-GW-4b — relayed event extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull the `events` array out of a relayed evidence body and normalise each
+ * entry down to the six envelope fields.
+ *
+ * Why this exists: before this, POST /api/operator/evidence NEVER called
+ * `repos.evidence.insertEvents` — the string "events" did not occur anywhere in
+ * this file — so every event a pcc-node pushed was silently discarded on BOTH
+ * the signed and unsigned branches. The bundle row survived; the evidence
+ * inside it did not. `GET /api/evidence/:hash` then served an envelope with
+ * `events: []`, and the oracle's authenticity-of-origin floor (pcc-oracle
+ * PR #15) reads `bundle.events[]` off that document — a doc with no events
+ * verifies but detects nothing.
+ *
+ * Normalisation rules (all fail-open on a malformed entry, which is skipped):
+ *   - `type` is required and must be a string; anything else is not an event.
+ *   - `id` / `hash` are derived DETERMINISTICALLY when the node omitted them
+ *     (index-derived id, content hash over the other five fields) so the
+ *     canonical envelope this feeds is reproducible across a DB round-trip.
+ *   - `source` is preserved verbatim when the node supplied one. When it did
+ *     not, the gateway records where the event actually came from — the relay —
+ *     rather than inventing a device identity it cannot attest to.
+ */
+function extractRelayedEvents(
+  evidence: unknown,
+  ctx: { bundleId: string; kernelId: string; now: string },
+): EvidenceEnvelopeEvent[] {
+  if (!evidence || typeof evidence !== "object") return [];
+  const root = evidence as Record<string, unknown>;
+  // Mirror extractNodeSignedBundle's `{ bundle: {...} }` unwrap so a signed
+  // bundle's events are found on the same path its signature is.
+  const b = (root.bundle && typeof root.bundle === "object" ? root.bundle : root) as Record<
+    string,
+    unknown
+  >;
+  const raw = Array.isArray(b.events) ? b.events : Array.isArray(root.events) ? root.events : null;
+  if (!raw) return [];
+
+  const out: EvidenceEnvelopeEvent[] = [];
+  raw.forEach((entry, i) => {
+    if (!entry || typeof entry !== "object") return;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.type !== "string" || e.type === "") return;
+
+    const id = typeof e.id === "string" && e.id !== "" ? e.id : `${ctx.bundleId}-ev-${i}`;
+    const timestamp = typeof e.timestamp === "string" && e.timestamp !== "" ? e.timestamp : ctx.now;
+    const source =
+      e.source && typeof e.source === "object"
+        ? e.source
+        : {
+            // Honest provenance: the gateway saw this event arrive over the
+            // operator relay. It did NOT observe a device produce it.
+            deviceId: "operator-relay",
+            deviceType: "relay",
+            kernelId: ctx.kernelId,
+          };
+    const payload = e.payload && typeof e.payload === "object" ? e.payload : {};
+    const hash =
+      typeof e.hash === "string" && e.hash !== ""
+        ? e.hash
+        : `sha256:${crypto
+            .createHash("sha256")
+            .update(JSON.stringify({ id, type: e.type, timestamp, source, payload }))
+            .digest("hex")}`;
+
+    out.push({ id, type: e.type, timestamp, source, payload, hash });
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,27 +242,90 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       // release tier from unverified evidence. The tier is lifted only once the gated
       // #52 verifier confirms the evidence on deployed infra (SEAM-2 ready-but-gated).
       const captured = extractNodeSignedBundle(evidence);
-      const bundleHash = captured?.bundleHash ?? `sha256-${bundleId}`;
-      const kernelSignature = captured
-        ? captured.kernelSignature
-        : {
-            signer: kernelId ?? job.kernelId ?? "unknown",
-            algorithm: "sha256",
-            value: "operator-relay-auto",
-          };
+      const effectiveKernelId = kernelId ?? job.kernelId;
+      const stepId = job.stepId ?? "operator-relay";
+
+      // LO-GW-4a — HONEST SIGNATURE. The signed path keeps the device's real
+      // Ed25519 signature (unchanged). The unsigned path now stores NULL rather
+      // than inventing `{signer: <kernelId>, algorithm: "sha256", value:
+      // "operator-relay-auto"}` — a record that named a real kernel as the
+      // SIGNER of bytes it never signed. `isDeviceSignedSignature` already
+      // rejected that value, so settlement was never at risk; the defect was
+      // that the stored evidence asserted a provenance that did not exist, and
+      // ALCOA "Original" reads exactly this field. Absent evidence of a
+      // signature is recorded as absence.
+      // `storedSignature` goes into the row AND the hashed envelope; the
+      // response reports plain `null` so no caller ever reads a signature the
+      // gateway does not hold.
+      const storedSignature = captured ? captured.kernelSignature : NO_DEVICE_SIGNATURE;
+
+      // LO-GW-4b — the pushed events, on BOTH branches.
+      const events = extractRelayedEvents(evidence, {
+        bundleId,
+        kernelId: effectiveKernelId,
+        now,
+      });
+
+      // LO-GW-4b — CONTENT-ADDRESSED HASH on the unsigned path. `sha256-<uuid>`
+      // was a synthetic non-content string: it commits to nothing, and it is not
+      // in any of the three hash forms `GET /api/evidence/:hash` recognises
+      // (isEvidenceHashForm), so a bundle stored under it was unreachable by the
+      // oracle's fetch-and-verify. It is now `sha256:<sha256(canonical
+      // envelope)>` — the SAME construction paid-job-flow.ts uses (:1060) and
+      // the exact bytes the retrieval route rebuilds and serves back, so a
+      // raw-byte re-hash verifies. The signed path keeps the DEVICE's own
+      // bundleHash untouched (SEAM-2 anchors settlement on it).
+      const bundleHash =
+        captured?.bundleHash ??
+        `sha256:${crypto
+          .createHash("sha256")
+          .update(
+            buildCanonicalEvidenceEnvelope(
+              {
+                id: bundleId,
+                jobId,
+                stepId,
+                kernelId: effectiveKernelId,
+                assuranceTier: 0,
+                createdAt: now,
+                kernelSignature: storedSignature,
+              },
+              events,
+            ),
+          )
+          .digest("hex")}`;
 
       try {
         repos.evidence.insert({
           id: bundleId,
           jobId,
-          stepId: job.stepId ?? "operator-relay",
-          kernelId: kernelId ?? job.kernelId,
+          stepId,
+          kernelId: effectiveKernelId,
           assuranceTier: 0,
           bundleHash,
-          kernelSignature,
+          kernelSignature: storedSignature,
           sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
           createdAt: now,
         });
+        // Events are part of the committed bundle, not an optional extra: the
+        // hash above is taken over the envelope that CONTAINS them, so a bundle
+        // row whose events failed to land would serve bytes that no longer
+        // re-hash to its own committed hash. There is no transaction primitive
+        // on the repository interface, so a failure here is reported rather
+        // than silently tolerated.
+        if (events.length > 0) {
+          repos.evidence.insertEvents(
+            events.map((ev) => ({
+              id: ev.id,
+              bundleId,
+              type: ev.type,
+              timestamp: ev.timestamp,
+              source: ev.source as { deviceId: string; deviceType: string; kernelId: string },
+              payload: ev.payload as Record<string, unknown>,
+              hash: ev.hash,
+            })),
+          );
+        }
       } catch (insertErr) {
         // Evidence insert failed — still acknowledge receipt
         app.log.error(`operator-relay: evidence insert failed: ${insertErr}`);
@@ -175,8 +343,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         jobId,
         bundleId,
         // True when the node's real device-signed (#236) bundle was captured
-        // (real Ed25519 signature persisted); false when the placeholder was used.
+        // (real Ed25519 signature persisted); false when there was none.
         deviceSigned: !!captured,
+        // Explicitly null on the unsigned path — the response never reports a
+        // signature the gateway does not hold.
+        kernelSignature: captured ? captured.kernelSignature : null,
+        bundleHash,
+        // The bundle is UNVERIFIED evidence: tier 0 is the permissionless floor
+        // (eligibility.ts) and is not lifted by anything on this route.
+        assuranceTier: 0,
+        eventsStored: events.length,
         timestamp: now,
       };
     } catch (err) {
