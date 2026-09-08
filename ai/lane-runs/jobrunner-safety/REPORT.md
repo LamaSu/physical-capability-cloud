@@ -338,3 +338,42 @@ $ git log --oneline 7a864910..HEAD
 ```
 
 (this report is committed on top)
+
+---
+
+## Gateway follow-up (jobrunner-safety-gateway-followup-1)
+
+**Branch**: `fix/jobrunner-safety-boundary-gw` off `b1be6cfe`
+**Date**: 2026-09-08
+
+### Design note (written before editing)
+
+1. **(a) Paid path — the scope exists, but never meets a dispatch.**
+   `createJobFromSession` (paid-job-flow.ts:656) mints a real scope into
+   `execution_scopes` (`jobId`, `kernelId`, `status:"active"`, 1h `expiresAt`)
+   — but it **never calls `submitJob`**. It inserts the job row (`queued` when
+   external, `pending`/`active` when local) and returns; execution is
+   out-of-process, by an operator daemon polling `GET /api/operator/jobs`
+   (operator-relay.ts:75, a read-only poll). **There is no `submitJob` call site
+   in paid-job-flow.ts**, so the brief's step-3 premise ("add that one line at
+   the call site") does not hold, and I added no line there.
+2. **(b) test-job path — no scope, and none to mint.** `routes/setup.ts:814`
+   builds `{jobId, stepId, deviceId, assuranceTier}`. Nothing on that path mints
+   a scope. It therefore **fails closed** at the pre-flight with an explicit
+   safety reason. I did **not** mint one to make it pass.
+3. **The only two in-process dispatchers are `job.facade.ts:293`
+   (`POST /api/jobs/submit`) and `routes/setup.ts:814`** — neither holds a
+   scope, and both are outside the file boundary this lane was given.
+4. **Considered and rejected: resolving the scope from the DB by `jobId`**
+   inside `submitJob`. It would be dead code — `repos.jobs.insert`
+   (packages/db/src/repositories/jobs.ts:54) is a plain insert with no
+   `onConflict`, so re-submitting a paid job's `jobId` through
+   `POST /api/jobs/submit` throws on the primary key *before* reaching
+   `submitJob`. No live caller can present a `jobId` that owns a scope row.
+   Beyond being unverifiable, inheriting authority from an ambient row keyed by
+   a caller-supplied id is strictly weaker than threading it explicitly.
+5. **Consequence, stated plainly:** this change makes `KernelService` *carry* a
+   scope and makes the pre-flight *honest*. It does **not** make
+   gateway-dispatched jobs run, because no in-process caller mints a scope.
+   That is the correct fail-closed state; the remaining work is producer-side,
+   in files this lane was scoped out of.
