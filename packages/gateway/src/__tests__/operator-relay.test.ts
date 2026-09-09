@@ -239,6 +239,11 @@ describe("Operator Relay Routes", () => {
       // Tier stays 0 (fails closed): the node's declared tier:2 is NOT trusted until
       // the gated #52 verifier confirms the evidence.
       expect(stored!.assuranceTier).toBe(0);
+      // Fix #2 (§7.1 / §8.5-4): the gateway RECEIPT time is persisted AT INGESTION on its
+      // own column, so a later /complete uses THIS time (not the /complete wall-clock) as
+      // the authoritative effectiveEvidenceTime. It is a valid ISO-8601 timestamp.
+      expect(stored!.gatewayReceivedAt).toBeTruthy();
+      expect(Number.isNaN(new Date(stored!.gatewayReceivedAt as string).getTime())).toBe(false);
     });
 
     it("falls back to the placeholder for non-bundle evidence (backward compatible)", async () => {

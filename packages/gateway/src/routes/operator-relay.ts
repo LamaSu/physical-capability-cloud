@@ -156,6 +156,10 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           bundleHash,
           kernelSignature,
           sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
+          // §7.1 / §8.5-4 — the gateway RECEIPT time, persisted WHEN the device evidence
+          // enters. This (not the later /complete wall-clock) is the authoritative
+          // effectiveEvidenceTime when this bundle is retrieved for settlement.
+          gatewayReceivedAt: now,
           createdAt: now,
         });
       } catch (insertErr) {

@@ -74,6 +74,13 @@ export interface KernelJobRequest {
     /** Unix seconds — session must not be expired */
     expiresAt: number;
   };
+  /**
+   * Optional gateway-authorized execution window (§8.4 window 1), sourced from the
+   * job's mutually-agreed terms. `createAsyncKernelHandler` caps the minted session's
+   * `expiresAt` at `min(authorizedWindow.expiresAt, now + policy.maxTTLSeconds)`. The
+   * legacy `createKernelHandler` ignores this field (it keeps its own TTL clamp).
+   */
+  authorizedWindow?: { notBefore: number; expiresAt: number };
 }
 
 /** Response returned by `createKernelHandler` for a successful execution. */
@@ -123,6 +130,13 @@ export class KernelAuthError extends Error {
  * Usage:
  *   const handler = createKernelHandler({manifest, principalKey, principalPrivateKey, execute});
  *   fastify.post('/run', async (req) => handler(req.body));
+ *
+ * @deprecated Use {@link createAsyncKernelHandler} for the §8.5-step-6 async evidence flow
+ * (begin → checkpoints → finalize). This inline synchronous handler holds the HTTP response
+ * open for the whole execution and returns a single terminal bundle — a job longer than the
+ * session window cannot use it, and its evidence can expire before settlement. It is retained
+ * unchanged (byte-identical behavior) because operators' deployed nodes speak the old shape;
+ * removing it + its TTL clamp is a later major-version change.
  */
 export function createKernelHandler(opts: CreateKernelHandlerOptions) {
   const { manifest, principalKey, principalPrivateKey, execute } = opts;

@@ -63,6 +63,10 @@ import {
   type StoredSignature,
   type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
+import {
+  sessionRevocationStore,
+  type SessionRevocationRecord,
+} from "../services/session-revocation-store.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
   OperatorPolicy,
@@ -915,6 +919,24 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "Job not found" });
       }
 
+      // STICKY STEP-6 (round-6 P0-1): once a job has EVER opened an async evidence session for
+      // milestone 0, the async package path is AUTHORITATIVE — the legacy gateway-synthesized
+      // fallback is permanently unreachable for it. A job that began async evidence but has no
+      // finalized package MUST NOT settle on the placeholder envelope: that would bypass the
+      // terminal-completion requirement, the package receipt, and the accepted checkpoint chain.
+      // It must finalize the package first. Checked BEFORE the completion claim so a blocked job is
+      // never stranded in `completing`. (Legacy jobs that never opened a session are unaffected —
+      // no session ⇒ this guard is inert and the legacy anchor path runs byte-identically.)
+      const stickyEvidenceSession = repos.evidenceSessions.findByJobMilestone(jobId, 0);
+      const stickyFinalizedPackage = repos.milestonePackages.findByJobMilestone(jobId, 0);
+      if (stickyEvidenceSession && !stickyFinalizedPackage) {
+        return reply.status(409).send({
+          error: "evidence_not_finalized",
+          evidenceSessionId: stickyEvidenceSession.sessionId,
+          sessionStatus: stickyEvidenceSession.status,
+        });
+      }
+
       // Atomic completion claim (P1). better-sqlite3 is synchronous, so this
       // UPDATE ... WHERE ... RETURNING runs to completion without yielding the
       // event loop — only ONE caller can flip a job into 'completing'. Closes
@@ -931,7 +953,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         .where(
           and(
             eq(schema.jobs.id, jobId),
-            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed')`,
+            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed','settlement_hold')`,
           ),
         )
         .returning()
@@ -1071,6 +1093,25 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       );
       const gatewayBundleHash = `sha256:${crypto.createHash("sha256").update(envelopeCanonical).digest("hex")}`;
 
+      // ── §2.4 package-anchored settlement (ADDITIVE; activates only on new state) ──
+      // When a finalized FinalMilestonePackage exists for (job, milestone 0), the
+      // settlement anchor is the package's OWN content hash (packageHash) and the
+      // oracle is served the canonical PACKAGE bytes at GET /api/evidence/:packageHash
+      // (served package-first in settlement.ts) — NOT the gateway-synthesized envelope
+      // above. This quarantines the legacy fallback disease §2.4 names: a job carrying
+      // REAL, receipted async evidence never settles on the gateway's self-synthesized
+      // placeholder-signed envelope. Per the step-6 scope this swaps ONLY the anchored
+      // hash + the served bytes — the SEAM-2 decision, HOLD gate, tier logic, oracle,
+      // EAS and escrow below all run byte-identically, just against packageHash.
+      //   `gatewayBundleHash` is still computed above but UNUSED on the package path.
+      //   When NO package exists (every legacy job + every existing test),
+      //   `anchorFallbackHash === gatewayBundleHash` and this whole handler is
+      //   byte-identical to before (legacy zero-diff).
+      const finalizedPackage = repos.milestonePackages.findByJobMilestone(jobId, 0);
+      const anchorFallbackHash = finalizedPackage
+        ? finalizedPackage.packageHash
+        : gatewayBundleHash;
+
       // ── SEAM-2 (path 2): choose the settlement anchor. READY BUT GATED. ──
       // By DEFAULT the gate is CLOSED — the #52 machine.execution_log verifier is
       // stubbed/fail-closed AND the SEAM2_DEVICE_EVIDENCE_SETTLEMENT flag is unset —
@@ -1089,9 +1130,22 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         value: "gateway-auto-sign",
       };
       const seam2GateOpen = deviceEvidenceSettlementEnabled();
-      let seam2DeviceBundle: SettlementEvidenceSlot | null =
-        null;
+      // §7.1 / §8.5-4 — the AUTHORITATIVE effectiveEvidenceTime is the gateway RECEIPT
+      // time persisted WHEN the device evidence entered, NOT this /complete handler's
+      // wall-clock (`now`). A device bundle is captured EARLIER (operator-relay
+      // POST /api/operator/evidence) and RETRIEVED below; `now` here is the later
+      // settlement-stage clock, so using it would swap one settlement wall-clock for
+      // another. Validity (expiry/revocation) is judged at EVIDENCE time, NEVER at
+      // settlement-now, NEVER on the device's raw `createdAt` claim (§3.1 CVE-2024-55655
+      // fix). It is therefore sourced from the retrieved row's persisted gatewayReceivedAt
+      // (derived inside the gate-open block). Left undefined when there is no device row
+      // (closed path / no bundle): resolveSettlementEvidence returns the fallback/hold
+      // without consuming it, so the default money path is unchanged; and a delegated
+      // bundle that somehow lacks a trusted time then fails closed (§8.5-4, fix #3).
+      let seam2EffectiveEvidenceTime: number | undefined;
+      let seam2DeviceBundle: SettlementEvidenceSlot | null = null;
       let seam2RegisteredSigner: unknown = null;
+      let seam2Revocations: SessionRevocationRecord[] = [];
       if (seam2GateOpen) {
         // Extra lookups only when the gate is open — the closed path is unchanged.
         const priorBundles = repos.evidence.findByJob(jobId);
@@ -1099,6 +1153,28 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           isDeviceSignedSignature(r.kernelSignature as StoredSignature),
         );
         if (deviceRow) {
+          // The device's ADVISORY `createdAt` (its OWN claim) — DISTINCT from the
+          // gateway receipt time (`seam2EffectiveEvidenceTime`). Advisory only: it feeds
+          // the §8.4-A skew FLAG, never validity/expiry/revocation. Converted to Unix
+          // SECONDS; omitted if the row carries no parseable createdAt.
+          const rawCreatedAt = (deviceRow as { createdAt?: unknown }).createdAt;
+          const deviceCreatedAtSec =
+            typeof rawCreatedAt === "string" || typeof rawCreatedAt === "number"
+              ? Math.floor(new Date(rawCreatedAt).getTime() / 1000)
+              : NaN;
+          // §7.1 / §8.5-4 — the AUTHORITATIVE evidence time: the gateway RECEIPT time
+          // persisted at ingestion (gatewayReceivedAt). Legacy rows written before that
+          // column existed fall back to the row's gateway-insert time (createdAt, which
+          // operator-relay set to the gateway clock) — never `now`, never the device's
+          // advisory createdAt, never settlement time.
+          const receiptRaw =
+            (deviceRow as { gatewayReceivedAt?: unknown }).gatewayReceivedAt ??
+            (deviceRow as { createdAt?: unknown }).createdAt;
+          const receiptSec =
+            typeof receiptRaw === "string" || typeof receiptRaw === "number"
+              ? Math.floor(new Date(receiptRaw).getTime() / 1000)
+              : NaN;
+          if (Number.isFinite(receiptSec)) seam2EffectiveEvidenceTime = receiptSec;
           seam2DeviceBundle = {
             bundleHash: deviceRow.bundleHash,
             kernelSignature: deviceRow.kernelSignature as StoredSignature,
@@ -1107,22 +1183,104 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               ? { sessionKeyAuthorization: deviceRow.sessionKeyAuthorization }
               : {}),
             contractId: jobId,
+            ...(Number.isFinite(deviceCreatedAtSec)
+              ? { deviceCreatedAt: deviceCreatedAtSec }
+              : {}),
           };
         }
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
+        // §8.5-2: revocation state, keyed (inside resolveSettlementEvidence) to the
+        // authoritative §8.5-4 effectiveEvidenceTime computed above. Extra lookups only
+        // when the gate is open — the closed path is unchanged.
+        seam2Revocations = sessionRevocationStore.list();
       }
       const settlementEvidence = await resolveSettlementEvidence({
         deviceBundle: seam2DeviceBundle,
         registeredSigner: seam2RegisteredSigner,
+        // §8.5-1: the purchased tier. At tier >= 1 a missing/failed device bundle
+        // HOLDS (below) instead of silently anchoring on the gateway placeholder.
+        requestedTier: jobAssuranceTier,
         fallback: {
-          bundleHash: gatewayBundleHash,
+          // §2.4: the package's content hash when a finalized package exists,
+          // else the synthesized gateway-envelope hash (legacy, byte-identical).
+          bundleHash: anchorFallbackHash,
           kernelSignature: gatewaySignature,
           assuranceTier: jobAssuranceTier,
         },
         verifyEd25519: naclEd25519Verify,
+        // §8.5-2: revocation enforcement keyed to §8.5-4 effectiveEvidenceTime.
+        // `revocations` is empty on the CLOSED path (populated only inside the gate-open
+        // block), so it is omitted there. effectiveEvidenceTime is supplied only when a
+        // device row was retrieved (its persisted §7.1 gatewayReceivedAt); it is omitted
+        // on the closed path / when there is no bundle, where it is never consumed
+        // (fallback/hold returned) — so the default money path is unchanged.
+        ...(seam2Revocations.length > 0 ? { revocations: seam2Revocations } : {}),
+        ...(seam2EffectiveEvidenceTime !== undefined
+          ? { effectiveEvidenceTime: seam2EffectiveEvidenceTime }
+          : {}),
         gateOpen: seam2GateOpen,
       });
+
+      // ── SEAM-2 §8.5-1: HARD-GATE HOLD ──────────────────────────────────────
+      // When the purchased tier (>= 1) required real device evidence that did NOT
+      // verify (or was absent), resolveSettlementEvidence returns source:"hold"
+      // rather than silently anchoring settlement on the gateway placeholder
+      // (§7.3-3: never a silent downgrade, never an auto-refund; §8.4-C). Money
+      // HOLDS: skip the whole anchor → store → oracle → EAS → settle chain, so no
+      // on-chain write and no mock auto-settle happen and the escrow stays funded
+      // for the buyer to supplement / accept / dispute. Mode-C/D dispute calls are
+      // an owner-gated LATER step and are intentionally NOT wired here.
+      //   LIVE FOR TIER >= 1 (audit round-2 fix #1): even with the gate closed by
+      //   default (seam2GateOpen === false), a PURCHASED tier >= 1 job now resolves to
+      //   source:"hold" (required-verifier-unavailable) instead of settling on the
+      //   gateway placeholder — fail closed. Tier 0 still settles via the gateway
+      //   fallback (unchanged). NOTE: the hold performed here is MINIMAL (job status +
+      //   response only). Full hold persistence/resolution — SettlementHold record,
+      //   real escrow ids, non-reclaimable/non-arbitrary bundle, buyer
+      //   supplement/accept/dispute — is DEFERRED (§8.5, "before hold path is
+      //   operational"); the buyer's funds simply stay in escrow until then.
+      if (settlementEvidence.source === "hold") {
+        // TODO(§8.5: operationalize the hold path). Persist a SettlementHold record (real
+        // escrow id, non-reclaimable/non-arbitrary bundle), and wire buyer resolution
+        // (supplement evidence / accept / Mode-C-D dispute). Today this is the MINIMAL hold
+        // (job status + response); the money stays funded in escrow with no resolution path.
+        // Move the job off the 'completing' claim into a distinct terminal
+        // 'settlement_hold' so it is neither stuck (the claim guard excludes
+        // 'completing') nor re-runnable as if unexecuted — mirroring how the settle
+        // paths below record job status via repos.jobs.
+        repos.jobs.updateStatus(jobId, "settlement_hold");
+        pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+          metadata: {
+            bundleId,
+            settlementStatus: "hold",
+            holdReason: settlementEvidence.reason ?? "evidence-insufficient-for-tier",
+            requestedTier: jobAssuranceTier,
+          },
+        });
+        // Same response shape as the settled path below (no new contract), with a
+        // "hold" status and null anchor/settlement fields — nothing was anchored.
+        return {
+          jobId,
+          status: "hold",
+          evidenceBundleId: null,
+          evidenceHash: null,
+          escrowAddress: null,
+          escrowId: null,
+          settledAt: null,
+          ipfsCid: null,
+          starknetAnchorTxHash: null,
+          eas: null,
+          scopesRevoked: 0,
+          toolCallsRecorded: auditTrail.length,
+          oracleVerified: false,
+          oracleAttestation: null,
+          message:
+            "Job executed but the device evidence did not verify for the purchased tier. " +
+            "Settlement is on HOLD — funds remain in escrow (no release, no refund). " +
+            "Supplement evidence, accept the result, or open a dispute.",
+        };
+      }
       // The settlement anchor: drives the stored bundle, IPFS archive, oracle verify,
       // driveSettlement and the EAS bridge below. The gateway placeholder + envelope
       // hash when the gate is closed (the default).
@@ -1140,6 +1298,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         // SEAM-2: the settlement anchor's signature — the gateway placeholder when
         // the gate is closed (default), the DEVICE's real Ed25519 signature when open.
         kernelSignature: settlementSignature,
+        // §7.1 — gateway receipt time for THIS settlement-anchor row, created here at
+        // /complete (so receipt ≈ creation for this row). Persisted for the same reason
+        // as the ingestion path: the authoritative effectiveEvidenceTime if ever retrieved.
+        gatewayReceivedAt: now,
         createdAt: now,
       });
 

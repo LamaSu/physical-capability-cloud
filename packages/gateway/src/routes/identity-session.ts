@@ -14,6 +14,7 @@ import type {
   SessionAction,
   SessionSignedEvent,
 } from "@pcc/spec";
+import { sessionRevocationStore } from "../services/session-revocation-store.js";
 
 // ── Hex encoding helpers ────────────────────────────────────────────────────
 
@@ -35,13 +36,29 @@ function fromHex(hex: string): Uint8Array {
 
 const sessionKeyService = new SessionKeyService();
 
-// ── In-memory revocation set (production would use DB) ──────────────────────
-
-const revokedSessionIds = new Set<string>();
+// ── Revocation state ────────────────────────────────────────────────────────
+// Shared module-singleton store (services/session-revocation-store.ts). Extracted
+// from the former module-private `new Set<string>()` so the settlement verify path
+// (device-evidence-settlement.ts, §8.5-2) can also consult revocation state —
+// time-keyed, to judge validity at effectiveEvidenceTime (§7.3-4). Still in-memory;
+// durable/multi-instance revocation is an owner-gated later step (§8.6).
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 export async function identitySessionRoutes(app: FastifyInstance) {
+  // SECURITY STARTUP GUARD (separate pre-existing issue — NOT part of the v3 evidence
+  // slice; greenlit by audit round-2). The POST /api/identity/session handler below MOCKS
+  // the principal by deriving its Ed25519 keypair DETERMINISTICALLY from principalAgentId,
+  // so anyone who knows an agent id can mint that agent's session keys. That is acceptable
+  // only for dev/test. Fail closed in production: the real principal key must come from the
+  // agent's identity wallet before this route may ship. Throwing here refuses to register
+  // the mock route in a production boot rather than silently exposing forgeable auth.
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "identity-session routes use a MOCK deterministic principal key and must not be " +
+        "registered in production (NODE_ENV=production). Wire real principal-key custody first.",
+    );
+  }
   /**
    * POST /api/identity/session
    *
@@ -207,7 +224,7 @@ export async function identitySessionRoutes(app: FastifyInstance) {
       const result = sessionKeyService.verifySessionSignedEvent({
         event,
         action: body.action,
-        revokedSessionIds,
+        revokedSessionIds: sessionRevocationStore.revokedIdSet(),
       });
 
       return result;
@@ -244,13 +261,15 @@ export async function identitySessionRoutes(app: FastifyInstance) {
       });
     }
 
-    revokedSessionIds.add(body.sessionId);
+    // Record in the shared store (Unix seconds). Returns the effective revokedAt
+    // (earliest-wins if this session was already revoked).
+    const revokedAt = sessionRevocationStore.revoke(body.sessionId);
 
     return {
       revoked: true,
       sessionId: body.sessionId,
       reason: body.reason ?? "Revoked via gateway API",
-      revokedAt: Math.floor(Date.now() / 1000),
+      revokedAt,
     };
   });
 }
