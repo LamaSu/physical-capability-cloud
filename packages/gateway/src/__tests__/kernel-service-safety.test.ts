@@ -191,19 +191,26 @@ describe("KernelService.submitJob — real device failures trip the breaker", ()
     };
     const svc = new KernelService(config);
 
-    // Job 1 — fails.
-    await svc.submitJob({ jobId: "ks-fail-1", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
+    // Every submission below carries a scopeId. That is SETUP, not a relaxation:
+    // load_gcode/start are class "scoped", so an unscoped job is now denied at
+    // admission and never reaches the adapter — which would make this test pass
+    // for the wrong reason (a safety denial counted as a device failure) while
+    // proving nothing about REAL device failures, its actual subject.
+    const SCOPE = "scope-ks-safety-fail";
+
+    // Job 1 — the adapter really runs and really fails.
+    await svc.submitJob({ jobId: "ks-fail-1", stepId: "s", assuranceTier: 0, deviceId: "dev-fail", scopeId: SCOPE });
     await waitFor(() => (gw.getStatus().circuits.get("dev-fail")?.failures ?? 0) >= 1);
     expect(gw.getStatus().circuits.get("dev-fail")?.state).toBe("closed"); // 1 of 2
 
     // Job 2 — fails → trips.
-    await svc.submitJob({ jobId: "ks-fail-2", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" });
+    await svc.submitJob({ jobId: "ks-fail-2", stepId: "s", assuranceTier: 0, deviceId: "dev-fail", scopeId: SCOPE });
     await waitFor(() => gw.getStatus().circuits.get("dev-fail")?.state === "open");
     expect(gw.getStatus().circuits.get("dev-fail")?.state).toBe("open");
 
     // Job 3 — blocked by the tripped breaker (admission rejects before accepting).
     await expect(
-      svc.submitJob({ jobId: "ks-fail-3", stepId: "s", assuranceTier: 0, deviceId: "dev-fail" }),
+      svc.submitJob({ jobId: "ks-fail-3", stepId: "s", assuranceTier: 0, deviceId: "dev-fail", scopeId: SCOPE }),
     ).rejects.toThrow(/circuit_open|denied/i);
   });
 });

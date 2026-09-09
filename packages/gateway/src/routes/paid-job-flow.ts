@@ -40,6 +40,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { mintExecutionScope } from "../services/execution-scope-service.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -131,46 +132,6 @@ function resolveChainId(): number {
     localhost: 31337,
   };
   return chainIds[network] ?? 84532;
-}
-
-/** Default write tools for common device types */
-const DEVICE_WRITE_TOOLS: Record<string, string[]> = {
-  "liquid-handler": [
-    "ot2_run_protocol",
-    "ot2_aspirate",
-    "ot2_dispense",
-    "ot2_pick_up_tip",
-    "ot2_drop_tip",
-    "ot2_move_to",
-    "ot2_mix",
-    "ot2_blow_out",
-    "ot2_touch_tip",
-    "ot2_transfer",
-  ],
-  "fdm-printer": [
-    "printer_start_job",
-    "printer_pause",
-    "printer_resume",
-    "printer_cancel",
-    "printer_set_temperature",
-  ],
-  "cnc-mill": [
-    "cnc_start_program",
-    "cnc_pause",
-    "cnc_resume",
-    "cnc_cancel",
-    "cnc_set_speed",
-  ],
-};
-
-/** Get write tools for a device type, falling back to a generic set */
-function getWriteToolsForDeviceType(capabilityType: string): string[] {
-  return DEVICE_WRITE_TOOLS[capabilityType] ?? [
-    "device_start_job",
-    "device_pause",
-    "device_resume",
-    "device_cancel",
-  ];
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -649,24 +610,17 @@ export async function createJobFromSession(
   });
 
   // ── 3. Create execution scope ──────────────────────────────────────
-  const scopeId = `scope_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const allowedTools = getWriteToolsForDeviceType(session.capabilityType);
-  const expiry = new Date(Date.now() + 60 * 60_000).toISOString(); // 1 hour
-
-  db.insert(executionScopes).values({
-    id: scopeId,
+  // Row shape is unchanged — mintExecutionScope's defaults ARE this path's
+  // former literals (maxCommands 200, maxRetries 5, 1 h TTL, the
+  // getWriteToolsForDeviceType lookup); `createdAt: now` keeps the timestamp
+  // shared with the job/session rows written above.
+  const { scopeId } = mintExecutionScope({
     kernelId: session.kernelId,
     jobId,
     createdBy: session.userAgentId,
-    status: "active",
-    allowedTools,
-    maxCommands: 200,
-    commandCount: 0,
-    maxRetries: 5,
-    retryCount: 0,
+    capabilityType: session.capabilityType,
     createdAt: now,
-    expiresAt: expiry,
-  }).run();
+  });
 
   // ── 4. Update session with jobId, escrowAddress, scopeId ───────────
   db.update(negotiationSessions)
