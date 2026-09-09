@@ -77,12 +77,16 @@ describe("evidence vocabulary — registry validates", () => {
     expect(decl.tierSupport.map((t) => t.tier)).toEqual([0]);
   });
 
-  it("the four first-class primitives are verifier 'live'; the rest are 'stub'", () => {
+  it("the first-class + the two oracle-bound industrial primitives are 'live'; the rest are 'stub'", () => {
     for (const id of LIVE_FIRST_CLASS) {
       expect(getPrimitive(id)?.verifierStatus).toBe("live");
     }
     const live = EVIDENCE_PRIMITIVES.filter((d) => d.verifierStatus === "live");
-    expect(live.map((d) => d.id).sort()).toEqual([...LIVE_FIRST_CLASS].sort());
+    // #53 envelope_conformance + #54 coverage_gate became oracle-bound (live) once
+    // their PrimitiveVerifiers shipped (pcc-oracle feat/oracle-primitive-verifiers).
+    expect(live.map((d) => d.id).sort()).toEqual(
+      [...LIVE_FIRST_CLASS, "telemetry.envelope_conformance", "telemetry.coverage_gate"].sort(),
+    );
   });
 
   it("dependsOn only references known primitives (dependency closure is resolvable)", () => {
@@ -409,15 +413,20 @@ const INDUSTRIAL_IDS = [
 ];
 
 describe("v1.5-industrial — the four sensor/machine-log primitives", () => {
-  it("all four are registered, active, and stub-verifier (fail-closed until the oracle binds them)", () => {
+  it("all four are registered + active; #53/#54 are oracle-bound (live), #52/#55 stay stub (fail-closed)", () => {
     for (const id of INDUSTRIAL_IDS) {
       const def = getPrimitive(id);
       expect(def, id).toBeDefined();
       expect(def!.status).toBe("active");
-      // Machinery is live/extracted, but the ORACLE binding is the settlement
-      // lane's work — so verifierStatus stays "stub" (fail-closed, spec §8).
-      expect(def!.verifierStatus).toBe("stub");
     }
+    // #53 envelope_conformance + #54 coverage_gate: the oracle PrimitiveVerifier shipped
+    // (pcc-oracle feat/oracle-primitive-verifiers) — flipped to "live".
+    expect(getPrimitive("telemetry.envelope_conformance")!.verifierStatus).toBe("live");
+    expect(getPrimitive("telemetry.coverage_gate")!.verifierStatus).toBe("live");
+    // #52 machine.execution_log: BLOCKED-on-#47 (no registered kernel key source).
+    // #55 process.batch_record: PARTIAL (composes #52). Both stay "stub" (spec §8).
+    expect(getPrimitive("machine.execution_log")!.verifierStatus).toBe("stub");
+    expect(getPrimitive("process.batch_record")!.verifierStatus).toBe("stub");
   });
 
   it("every industrial def conforms to the schema (Family L 'record' is a valid enum member)", () => {
@@ -502,10 +511,11 @@ describe("v1.5-industrial — a sensor/machine-log CSD is tier-eligible via the 
     expect(report.verdict).toBe("ELIGIBLE");
     expect(report.eligibleTier).toBe(2);
     for (const t of report.perTier) expect(t.eligible).toBe(true);
-    // The new primitives are what carry it: present + stub-advisory at tier 1.
+    // #52 machine.execution_log is still stub-advisory at tier 1 (BLOCKED-on-#47);
+    // #53 envelope_conformance is now oracle-bound (live) so it is NOT stub-advisory.
     const tier1 = report.perTier.find((t) => t.tier === 1)!;
     expect(tier1.stubVerifierPrimitives).toContain("machine.execution_log");
-    expect(tier1.stubVerifierPrimitives).toContain("telemetry.envelope_conformance");
+    expect(tier1.stubVerifierPrimitives).not.toContain("telemetry.envelope_conformance");
   });
 
   it("fails CLOSED under oracle enforcement (industrial verifiers are stubs) — caps below 2", () => {
