@@ -13,9 +13,14 @@
  * hashBundle). The signing key is a FIXED test key so the vector is
  * reproducible; it is a golden fixture, never an operator key.
  *
- * Run:  npx vite-node scripts/emit-execution-log-bundle.mts -- <outfile>
+ * Run:  ../../node_modules/.bin/tsx scripts/emit-execution-log-bundle.mts <outfile>
  */
-import { createHash, generateKeyPairSync, sign as edSign } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  sign as edSign,
+} from "node:crypto";
 import { writeFileSync } from "node:fs";
 
 import { canonicalize, hashEvent, hashBundle } from "../src/util/canonical.js";
@@ -36,7 +41,6 @@ function kernelKeypair() {
     Buffer.from("302e020100300506032b657004220420", "hex"),
     seed,
   ]);
-  const { createPrivateKey, createPublicKey } = require("node:crypto");
   const privateKey = createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
   const publicKey = createPublicKey(privateKey);
   const rawPub = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
