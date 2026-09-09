@@ -153,12 +153,12 @@ describe("adapter hardening (bridge #1520 + prod finding 2026-08-27)", () => {
 
   it("slugification does not disturb any pinned corpus root (all corpus types are already valid)", () => {
     const corpus = JSON.parse(readFileSync(new URL("./composition-commitment.vectors.json", import.meta.url), "utf8")) as {
-      vectors: { name: string; dag: Parameters<typeof deriveCompositionCommitment>[0]; compositionRoot: string }[];
+      vectors: { name: string; version?: number; dag: Parameters<typeof deriveCompositionCommitment>[0]; compositionRoot: string }[];
     };
     for (const v of corpus.vectors) {
-      const r = deriveCompositionCommitment(v.dag);
-      expect(r.committable).toBe(true);
-      if (r.committable) expect(r.compositionRoot).toBe(v.compositionRoot);
+      const r = deriveCompositionCommitment(v.dag, { version: (v.version ?? 2) as 2 | 3 });
+      expect(r.committable, v.name).toBe(true);
+      if (r.committable) expect(r.compositionRoot, v.name).toBe(v.compositionRoot);
     }
   });
 });

@@ -219,21 +219,120 @@ describe("composition-commitment v2", () => {
   // === Conformance corpus (sol Q4): the SAME vectors file is run by the gateway copy. A differing root means two
   // algorithms exist; fix the implementation, never the vector. Changing a vector = deliberate domain bump.
   it("CONFORMANCE CORPUS: every vector in composition-commitment.vectors.json reproduces byte-exact", () => {
-    expect(vectors.domains).toEqual({ composition: COMPOSITION_DOMAIN, contract: CONTRACT_DOMAIN });
-    expect(vectors.vectors.length).toBeGreaterThanOrEqual(3);
+    expect(vectors.domains).toMatchObject({ composition: COMPOSITION_DOMAIN, contract: CONTRACT_DOMAIN });
+    expect(vectors.vectors.length).toBeGreaterThanOrEqual(5);
     for (const v of vectors.vectors) {
-      const r = deriveCompositionCommitment(v.dag as MatchedDAG);
+      const version = ((v as { version?: number }).version ?? 2) as 2 | 3;
+      const r = deriveCompositionCommitment(v.dag as MatchedDAG, { version });
       expect(r.committable, v.name).toBe(true);
       if (r.committable) {
         expect(r.compositionRoot, `${v.name}: compositionRoot`).toBe(v.compositionRoot);
         expect(r.capabilityContractRoot, `${v.name}: capabilityContractRoot`).toBe(v.capabilityContractRoot);
       }
-      expect(deriveCapabilityContractRoot(v.dag as MatchedDAG), `${v.name}: standalone contract root`).toBe(v.capabilityContractRoot);
+      expect(deriveCapabilityContractRoot(v.dag as MatchedDAG, { version }), `${v.name}: standalone contract root`).toBe(v.capabilityContractRoot);
     }
     // the in-file fixtures ARE the first two vectors — keep them in lockstep
     const p = deriveCompositionCommitment(pizza);
     const m = deriveCompositionCommitment(mixed);
     if (p.committable) expect(p.compositionRoot).toBe(vectors.vectors[0].compositionRoot);
     if (m.committable) expect(m.compositionRoot).toBe(vectors.vectors[1].compositionRoot);
+  });
+});
+
+describe("v3: payer-authorized verification-program pinning (astra R5 item 1, #1633)", () => {
+  const base = (vectors.vectors[0] as { dag: MatchedDAG }).dag;
+  const PROG = "0x" + "ab".repeat(32);
+  const pinned: MatchedDAG = { ...base, verificationProgramHash: PROG };
+
+  it("v2 REFUSES a program-carrying plan — a selection can never be silently dropped", () => {
+    expect(() => deriveCapabilityContractRoot(pinned)).toThrow(/requires \{ version: 3 \}/);
+    const r = deriveCompositionCommitment(pinned);
+    expect(r.committable).toBe(false);
+    if (!r.committable) expect(r.violations.join(" ")).toMatch(/requires \{ version: 3 \}/);
+  });
+
+  it("v3 pinned vs v3 unpinned vs v2: all three contract roots AND composition roots are pairwise distinct (a stripped selection always changes the root)", () => {
+    const v2 = deriveCompositionCommitment(base);
+    const v3u = deriveCompositionCommitment(base, { version: 3 });
+    const v3p = deriveCompositionCommitment(pinned, { version: 3 });
+    expect(v2.committable && v3u.committable && v3p.committable).toBe(true);
+    if (v2.committable && v3u.committable && v3p.committable) {
+      const contracts = [v2.capabilityContractRoot, v3u.capabilityContractRoot, v3p.capabilityContractRoot];
+      const compositions = [v2.compositionRoot, v3u.compositionRoot, v3p.compositionRoot];
+      expect(new Set(contracts).size).toBe(3);
+      expect(new Set(compositions).size).toBe(3);
+    }
+  });
+
+  it("v3 is deterministic and case-normalizes the program hash; a malformed hash is refused by name", () => {
+    const upper = deriveCompositionCommitment({ ...base, verificationProgramHash: PROG.toUpperCase().replace("0X", "0x") }, { version: 3 });
+    const lower = deriveCompositionCommitment(pinned, { version: 3 });
+    expect(upper).toEqual(lower);
+    const bad = deriveCompositionCommitment({ ...base, verificationProgramHash: "not-a-hash" }, { version: 3 });
+    expect(bad.committable).toBe(false);
+    if (!bad.committable) expect(bad.violations.join(" ")).toMatch(/verificationProgramHash: must be 0x/);
+  });
+
+  it("substitution opener: differing ONLY in the program is NOT operator substitution, and pinned-vs-stripped lands in different domains (sameContract false)", () => {
+    const otherProg = { ...base, verificationProgramHash: "0x" + "cd".repeat(32) };
+    const progOnly = explainSubstitution(pinned, otherProg);
+    expect(progOnly.sameContract).toBe(false);
+    expect(progOnly.pureOperatorSubstitution).toBe(false);
+    expect(progOnly.differingFields).toContainEqual({ nodeId: null, field: "verificationProgramHash" });
+    const stripped = explainSubstitution(pinned, base);
+    expect(stripped.sameContract).toBe(false);
+    expect(stripped.pureOperatorSubstitution).toBe(false);
+  });
+});
+
+describe("v3: negotiated payout wallet — operatorSettlementAddress (#1690)", () => {
+  const base = (vectors.vectors[0] as { dag: MatchedDAG }).dag;
+  const PROG = "0x" + "ab".repeat(32);
+  const WALLET = "0x" + "42".repeat(20);
+  const withWallet = (w: string): MatchedDAG => ({
+    ...base,
+    verificationProgramHash: PROG,
+    nodes: base.nodes.map((n, i) => (i === 0 ? { ...n, operatorSettlementAddress: w } : n)),
+  });
+
+  it("v2 REFUSES a wallet-carrying plan — the negotiated destination can never be silently dropped", () => {
+    const plain = { ...base, nodes: base.nodes.map((n, i) => (i === 0 ? { ...n, operatorSettlementAddress: WALLET } : n)) };
+    expect(() => deriveCapabilityContractRoot(plain)).toThrow(/operatorSettlementAddress: requires \{ version: 3 \}/);
+    const r = deriveCompositionCommitment(plain);
+    expect(r.committable).toBe(false);
+    if (!r.committable) expect(r.violations.join(" ")).toMatch(/operatorSettlementAddress: requires/);
+  });
+
+  it("the wallet moves ONLY the composition root: contract root is byte-identical with and without it (provider-bound, buyer-agnostic)", () => {
+    const withoutW = deriveCompositionCommitment({ ...base, verificationProgramHash: PROG }, { version: 3 });
+    const withW = deriveCompositionCommitment(withWallet(WALLET), { version: 3 });
+    expect(withoutW.committable && withW.committable).toBe(true);
+    if (withoutW.committable && withW.committable) {
+      expect(withW.capabilityContractRoot).toBe(withoutW.capabilityContractRoot);
+      expect(withW.compositionRoot).not.toBe(withoutW.compositionRoot);
+    }
+  });
+
+  it("case-normalized in preimage AND opener; malformed address refused by name", () => {
+    const lower = deriveCompositionCommitment(withWallet(WALLET), { version: 3 });
+    const upper = deriveCompositionCommitment(withWallet(WALLET.toUpperCase().replace("0X", "0x")), { version: 3 });
+    expect(upper).toEqual(lower);
+    const bad = deriveCompositionCommitment(withWallet("0xnope"), { version: 3 });
+    expect(bad.committable).toBe(false);
+    if (!bad.committable) expect(bad.violations.join(" ")).toMatch(/operatorSettlementAddress must be 0x \+ 40 hex/);
+  });
+
+  it("opener: two operators differing in digest + wallet is STILL pure operator substitution (the wallet is a provider binding)", () => {
+    const opA = withWallet(WALLET);
+    const opB: MatchedDAG = {
+      ...opA,
+      nodes: opA.nodes.map((n, i) =>
+        i === 0 ? { ...n, matchedCapabilityDigest: "0x" + "ee".repeat(32), operatorSettlementAddress: "0x" + "99".repeat(20) } : n,
+      ),
+    };
+    const rep = explainSubstitution(opA, opB);
+    expect(rep.sameContract).toBe(true);
+    expect(rep.pureOperatorSubstitution).toBe(true);
+    expect(rep.differingFields.map((f) => f.field).sort()).toEqual(["matchedCapabilityDigest", "operatorSettlementAddress"]);
   });
 });
