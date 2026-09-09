@@ -95,7 +95,10 @@ interface ResolvedMatch {
  * (sol round 2: "routed fields override an explicit matchStatus", both
  * directions -- matched-but-incomplete, and none-but-hybrid).
  */
-function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
+// Exported so the R-06 budget-authorization gate (routes/requests.ts) counts
+// exactly the nodes that become live job-offers — one definition of "matched",
+// not two that can drift.
+export function resolveMatch(node: CapabilityNode): ResolvedMatch | null {
   if (node.matchStatus === "matched") {
     if (node.matchedCapabilityId && node.matchedKernelId) {
       return { capabilityId: node.matchedCapabilityId, kernelId: node.matchedKernelId, viaAgenticConvention: true };
