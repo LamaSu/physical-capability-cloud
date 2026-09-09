@@ -140,7 +140,7 @@ Response (201):
   "api_key": "pcc_live_abc123...",
   "key_id": "key-uuid",
   "operator_id": "operator@example.com",
-  "scopes": ["*"],
+  "scopes": ["operator"],
   "rate_limit": 100,
   "expires_at": null,
   "warning": "Save this API key now — it will not be shown again.",
@@ -151,10 +151,32 @@ Response (201):
 }
 ```
 
-You can also provision with a wallet address instead of email:
-```json
-{"walletAddress": "0x1234...abcd", "name": "My Workshop"}
+You can also provision with a wallet address instead of email — this now requires proving you
+control that wallet via SIWE (EIP-4361) first (retire-the-wildcard #1099: an unproven
+`walletAddress` string is no longer trusted):
+
+```bash
+# 1. Get a nonce
+curl https://capability.network/api/auth/nonce
+# {"nonce": "..."}
+
+# 2. Build and sign the EIP-4361 message with your wallet (see auth/siwe-auth.ts for the
+#    exact format), then verify it — capture the returned `token`
+curl -X POST https://capability.network/api/auth/verify \
+  -H "Content-Type: application/json" \
+  -d '{"message": "<the SIWE message you signed>", "signature": "0x..."}'
+# {"token": "...", "address": "0x1234...abcd", "expiresAt": "..."}
+
+# 3. Provision using the verified session
+curl -X POST https://capability.network/api/auth/provision \
+  -H "Authorization: Bearer <token from step 2>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Workshop"}'
 ```
+
+`walletAddress` in the body is optional once you have a verified session (it's derived from the
+session), but if you do pass it, it must match the session's address or the request is rejected
+with `401 wallet_not_verified`.
 
 **Alternative**: If you have an invite code, use `POST /api/onboard/redeem` with `{inviteCode, email, password}` to get a key plus wallet, identity, and LLM proxy access in one call.
 
@@ -206,7 +228,7 @@ All endpoints are under `https://capability.network`. All require `Authorization
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. Returns `api_key`. |
+| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. `walletAddress` requires a verified SIWE session (`Authorization: Bearer <session-token>` from `/api/auth/verify`) matching that address — see Section 2 Step 1. Returns `api_key` scoped `["operator"]` (never `["*"]`). |
 | GET | `/api/auth/validate` | Validate current API key. Returns `{valid, operatorId}`. |
 | GET | `/api/auth/keys` | List your active API keys with usage stats. |
 | DELETE | `/api/auth/keys/:keyId` | Revoke an API key permanently. |

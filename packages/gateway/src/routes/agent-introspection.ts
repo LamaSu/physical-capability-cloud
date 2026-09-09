@@ -104,9 +104,29 @@ export function scopeSatisfied(held: string[], required: string | null): boolean
   if (required === null) return true;
   if (held.includes("*")) return true;
   if (held.includes(required)) return true;
-  // `operator.*` satisfies `operator.read`.
+  // `admin` is the superuser scope in middleware/scope-checker.ts — it appears
+  // in every rule there, so it satisfies everything here too.
+  if (held.includes("admin")) return true;
   const family = required.split(".")[0];
-  return held.includes(`${family}.*`);
+  // `operator.*` satisfies `operator.read`.
+  if (held.includes(`${family}.*`)) return true;
+  // A FLAT enforced scope satisfies any dotted requirement in its family:
+  // holding `operator` satisfies `operator.read` and `operator.write`.
+  //
+  // This endpoint advertises a dotted vocabulary (operator.write, jobs.read,
+  // settlement.read) while middleware/scope-checker.ts enforces a flat one
+  // (operator, settlement, admin, ...). The two sets are DISJOINT, which did
+  // not show while every key carried "*" — the docstring above says as much.
+  // Once self-service keys are minted `["operator"]` instead (PR #309), a brand
+  // new key satisfied NOTHING here and this endpoint told every fresh agent it
+  // could reach nothing — while the requests themselves would have succeeded.
+  // For an endpoint whose whole purpose is "failing a request is not an
+  // interface, needs_scope:<name> is", reporting an unreachable-everything is
+  // worse than saying nothing.
+  //
+  // The two vocabularies should be reconciled properly (one set of names, in
+  // one place); this bridges them truthfully in the meantime.
+  return held.includes(family);
 }
 
 function heldScopes(record: { scopes?: string | null }): string[] {

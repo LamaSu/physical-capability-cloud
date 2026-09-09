@@ -12,6 +12,7 @@ import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -19,6 +20,32 @@ import {
   generateOperatorWallet,
   setAgentWalletOnChain,
 } from "../services/erc8004-identity-write.js";
+
+/**
+ * Operators manually approved to receive the money-moving `settlement` scope
+ * through self-service provisioning. Comma-separated EVM addresses, matched
+ * case-insensitively (a SIWE session address is checksummed; an env var is
+ * typed by a human — neither casing should decide who can move funds).
+ *
+ * FAILS CLOSED. Empty or unset means NOBODY receives `settlement` via
+ * self-service; an admin can still grant it out-of-band. That default is
+ * deliberate: an unconfigured deploy must not hand out funds-movement
+ * authority, and this list is the manual-approval step that
+ * `settlement`-vs-`operator` exists to require.
+ *
+ * Re-read on every call (no import-time freeze) so a deploy can change the
+ * allowlist without a rebuild, mirroring isBrokerOperator/isDemandAdmin.
+ */
+function isSettlementApproved(operatorId: string): boolean {
+  const raw = process.env.PCC_SETTLEMENT_OPERATORS ?? "";
+  const approved = new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return approved.has(operatorId.toLowerCase());
+}
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -48,6 +75,13 @@ export async function provisionRoutes(app: FastifyInstance) {
     };
 
     let operatorId: string;
+    /**
+     * True only when this identity was proven by an EIP-4361 signature, never
+     * when it was merely asserted (an email is a claim, not a proof). Gates the
+     * `settlement` grant below: an unproven identity can never move funds, no
+     * matter what the allowlist says.
+     */
+    let siweVerified = false;
 
     // Type guards — prevent object/array/number injection (red team #14, #15)
     if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
@@ -66,6 +100,14 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "invalid_type", message: "publicKey must be a string" });
     }
 
+    // Wallet identity must be proven with SIWE (EIP-4361) before it can mint a
+    // key (retire-the-wildcard #1099). A bare walletAddress string used to be
+    // trusted with zero proof of control — anyone could provision a live key
+    // against an address they don't own. auth/siwe-auth.ts already implements
+    // nonce + verify; this wires it into provisioning for wallet-bearing
+    // (machine) operators. The email path is unaffected.
+    const session = resolveSession(req);
+
     if (body.walletAddress) {
       // Wallet address path — format check also implicitly caps length at 42
       if (!/^0x[0-9a-fA-F]{40}$/.test(body.walletAddress)) {
@@ -74,7 +116,25 @@ export async function provisionRoutes(app: FastifyInstance) {
           message: "walletAddress must be a valid EVM address (0x + 40 hex chars)",
         });
       }
-      operatorId = body.walletAddress;
+      if (!session || session.address.toLowerCase() !== body.walletAddress.toLowerCase()) {
+        return reply.status(401).send({
+          error: "wallet_not_verified",
+          message:
+            "walletAddress must be proven with a SIWE (EIP-4361) session before it can " +
+            "provision a key: 1) GET /api/auth/nonce  2) sign the returned SIWE message " +
+            "with this wallet  3) POST /api/auth/verify {message, signature} and capture " +
+            "the returned token  4) retry this request with Authorization: Bearer <token> " +
+            "(or the pcc_session cookie).",
+          siwe: { nonce_url: "/api/auth/nonce", verify_url: "/api/auth/verify" },
+        });
+      }
+      operatorId = session.address;
+      siweVerified = true;
+    } else if (session) {
+      // A verified SIWE session exists and walletAddress wasn't repeated in
+      // the body — use the cryptographically-proven address directly.
+      operatorId = session.address;
+      siweVerified = true;
     } else if (body.email) {
       // Email path — RFC 5321 max total length is 254
       if (body.email.length > 254) {
@@ -93,9 +153,35 @@ export async function provisionRoutes(app: FastifyInstance) {
     } else {
       return reply.status(400).send({
         error: "identifier_required",
-        message: "Either email or walletAddress is required to provision an API key",
+        message:
+          "Either email, or a verified SIWE session (see /api/auth/nonce + " +
+          "/api/auth/verify), is required to provision an API key",
       });
     }
+
+    // ── What this key is allowed to do ────────────────────────────
+    //
+    // Retire-the-wildcard #1099 (coord #615 follow-up): self-service keys no
+    // longer mint scopes:["*"]. "operator" covers the documented quick-start
+    // flow (register a kernel, submit evidence, build/negotiate a contract —
+    // see DEFAULT_SCOPE_REQUIREMENTS in middleware/scope-checker.ts) without
+    // handing out admin access.
+    //
+    // "settlement" — the scope that actually moves funds — is granted ONLY
+    // when BOTH hold:
+    //   1. the identity was PROVEN by SIWE, not merely asserted; and
+    //   2. that proven address is on the PCC_SETTLEMENT_OPERATORS allowlist,
+    //      i.e. a human approved it out-of-band.
+    // Signing up can therefore never, by itself, buy the ability to move
+    // money. An email caller gets ["operator"] and is refused at the money
+    // path; a SIWE caller who is not on the allowlist gets exactly the same.
+    //
+    // Pre-existing wildcard keys are untouched by this change and still
+    // bypass all of it — see routes/admin-key-audit.ts.
+    const scopes =
+      siweVerified && isSettlementApproved(operatorId)
+        ? ["operator", "settlement"]
+        : ["operator"];
 
     try {
       const { rawKey, record, ed25519 } = provisionApiKey({
@@ -104,7 +190,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         description: body.capability
           ? `Operator capability: ${body.capability}`
           : undefined,
-        scopes: ["*"],
+        scopes,
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),
