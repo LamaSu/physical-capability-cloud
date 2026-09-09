@@ -25,6 +25,8 @@ export type AdapterType =
   | "opentrons"
   | "hamilton"
   | "generic-http"
+  /** Real photo-evidence camera, push-fed: bytes arrive via setNextCapture() before each snapshot. */
+  | "photo"
   | "mock";
 
 /** Configuration for a single physical device */
