@@ -37,7 +37,7 @@ import type {
   IntentSource,
   DecompositionResult,
 } from "@pcc/spec";
-import { computeCompositionSignature, budgetToBand, commitmentReportForRequest } from "@pcc/spec";
+import { computeCompositionSignature, budgetToBand, commitmentReportForRequest, normalizeCapabilityNodeConventions } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
 import { matchListings } from "../services/request-matcher.js";
 import { produceJobOffersForRequest } from "../services/job-offer-producer.js";
@@ -710,7 +710,11 @@ export async function requestRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "request_not_found" });
     }
     const request = rowToRequest(row);
-    const report = commitmentReportForRequest(request.id, request.capabilityDag, {
+    // Both matched conventions, ONE normalization (#1827 Finding B): direct-match/routed nodes
+    // (bare capabilityId/kernelId, no matchStatus) previously read as UNMATCHED here while the
+    // job-offer producer normalized them privately — so this endpoint refused to reproduce the
+    // very roots those offers stamp. Same shared @pcc/spec normalize on both paths closes that.
+    const report = commitmentReportForRequest(request.id, normalizeCapabilityNodeConventions(request.capabilityDag), {
       currency: request.currency,
       goal: request.title,
     });
@@ -722,7 +726,7 @@ export async function requestRoutes(app: FastifyInstance) {
       source: { kind: "stored-request-dag", requestId: request.id, requestUpdatedAt: request.updatedAt, requestStatus: request.status },
       legacyCompositionSignature: signatureFromDag(request.capabilityDag),
       verify: {
-        recompute: "GET /api/requests/:id/dag -> matchedDagFromCapabilityNodes -> deriveCompositionCommitment (@pcc/spec)",
+        recompute: "GET /api/requests/:id/dag -> normalizeCapabilityNodeConventions -> matchedDagFromCapabilityNodes -> deriveCompositionCommitment (@pcc/spec)",
         corpus: "packages/spec/src/csd/composition-commitment.vectors.json",
       },
     };
