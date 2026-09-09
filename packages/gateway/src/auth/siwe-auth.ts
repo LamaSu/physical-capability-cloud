@@ -11,13 +11,44 @@
  * Nonces remain in-memory (short-lived, 5min TTL).
  * Supports both HTTP-only cookie and Authorization Bearer token auth.
  * Uses viem for signature verification — no `siwe` package needed.
+ *
+ * ── KNOWN LIMITATIONS (cross-family review of PR #309) ────────────
+ * Reported and deliberately NOT fixed in that PR, because each needs a config
+ * or infrastructure decision rather than a code tweak. Recorded here so they
+ * are not rediscovered as novel:
+ *
+ * 1. DOMAIN VALIDATION TRUSTS THE REQUEST HOST. `/verify` compares the SIWE
+ *    message's domain against `req.hostname`, which derives from the Host (or
+ *    forwarded-host) header. If the ingress does not canonicalize Host, a
+ *    signature intended for another relying party could be replayed here.
+ *    Correct fix: compare domain AND uri against a CONFIGURED canonical origin,
+ *    never a request header — and audit Fastify `trustProxy` alongside it.
+ *    Left alone because picking that origin per environment is an operator
+ *    decision, and getting it wrong locks everyone out.
+ *
+ * 2. NONCES AND RATE LIMITS ARE PROCESS-LOCAL. Both live in module-level Maps.
+ *    With multiple workers/replicas, a nonce issued by one instance is
+ *    unknown to another (spurious failures), and per-IP limits are enforced
+ *    once PER INSTANCE (an attacker gets N× the allowance). Correct fix: a
+ *    shared TTL store with atomic consume/increment. Same applies to the
+ *    one-time-use guarantee on nonce consumption below.
+ *
+ * 3. NO ERC-1271 / EIP-6492 SUPPORT. Verification uses viem's standalone
+ *    `verifyMessage`, which handles EOAs only. Smart-contract wallets are
+ *    rejected even when valid. Relevant to settlement: an operator using a
+ *    smart account cannot complete SIWE at all today, so such an operator
+ *    cannot be granted `settlement` via self-service.
+ *
+ * 4. NO PER-WALLET OR GLOBAL SESSION CAP. Within the rate limit, an anonymous
+ *    caller who controls any wallet can mint 24h session rows continuously.
+ *    Bounded but not capped.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
 import { getRepos } from "../db.js";
-import { canSiweVerify } from "../middleware/security-hardening.js";
+import { canSiweVerify, canSiweNonce } from "../middleware/security-hardening.js";
 
 // ---------------------------------------------------------------------------
 // In-memory nonce store (ephemeral, no DB persistence needed)
@@ -28,16 +59,49 @@ const nonces = new Map<string, number>(); // nonce -> expiry timestamp
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const NONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-/** Remove expired sessions (DB) and nonces (in-memory) */
-function cleanExpired() {
-  // Clean expired nonces from memory
+/**
+ * Hard cap on outstanding nonces. Belt to the rate limiter's braces: that
+ * limiter is per-IP and process-local, so a distributed caller could still grow
+ * this map without one. A nonce entry is tiny and a real deployment never
+ * approaches this number.
+ */
+const MAX_OUTSTANDING_NONCES = 50_000;
+
+/** Drop expired nonces from memory. Cheap, in-process, touches no DB. */
+function sweepNonces(): number {
   const now = Date.now();
   for (const [nonce, expiry] of nonces) {
     if (expiry < now) nonces.delete(nonce);
   }
-  // Clean expired sessions from DB
+  return nonces.size;
+}
+
+/**
+ * Remove expired sessions (DB) and nonces (in-memory).
+ *
+ * NO LONGER called from the public nonce path. It used to be — which meant
+ * GET /api/auth/nonce, necessarily unauthenticated, did a full map scan AND
+ * issued a SQLite DELETE on every single call: an unauthenticated
+ * amplification path. Flagged by cross-family review of PR #309, which is the
+ * PR that made that route public. Session cleanup now runs on a timer.
+ */
+function cleanExpired() {
+  sweepNonces();
   getRepos().sessions.deleteExpired(new Date().toISOString());
 }
+
+// Scheduled sweep, replacing the per-request cleanup. `unref` so an idle timer
+// never holds the process (or a test runner) open. Mirrors the interval sweeps
+// in middleware/security-hardening.ts.
+const sessionSweep = setInterval(() => {
+  try {
+    cleanExpired();
+  } catch {
+    // DB not ready or shutting down. A missed sweep is harmless — the next one
+    // collects the same rows — and must never take the process down.
+  }
+}, 5 * 60 * 1000);
+(sessionSweep as unknown as { unref?: () => void }).unref?.();
 
 // ---------------------------------------------------------------------------
 // Minimal SIWE message parser (EIP-4361)
@@ -102,8 +166,11 @@ function parseSiweMessage(message: string): ParsedSiweMessage | null {
 
   if (!uri || !version || !chainIdStr || !nonce || !issuedAt) return null;
 
+  // Strict: parseInt("1abc") is 1, so a partially-numeric chain id used to be
+  // silently accepted. An EIP-4361 Chain ID is an integer, nothing else.
+  if (!/^\d+$/.test(chainIdStr)) return null;
   const chainId = parseInt(chainIdStr, 10);
-  if (isNaN(chainId)) return null;
+  if (!Number.isSafeInteger(chainId)) return null;
 
   // Optional: statement (between address line and "URI:" line)
   const afterAddress = message.indexOf(address) + address.length;
@@ -240,8 +307,26 @@ export function listSessions(): Array<{
 
 export async function siweAuthPlugin(app: FastifyInstance) {
   // ----- GET /api/auth/nonce -----
-  app.get("/api/auth/nonce", async (_req, reply) => {
-    cleanExpired();
+  // PUBLIC by necessity: this is how a caller with no credential bootstraps
+  // one. Public must not mean unbounded — see canSiweNonce and the nonce cap.
+  app.get("/api/auth/nonce", async (req, reply) => {
+    if (!canSiweNonce(req.ip)) {
+      return reply.status(429).send({
+        error: "rate_limited",
+        message: "Too many nonce requests. Try again in a minute.",
+      });
+    }
+    // In-memory sweep only. Session/DB cleanup runs on the timer above, NOT on
+    // this unauthenticated request path. And only SCAN when actually at capacity:
+    // sweeping on every nonce request was an O(n) map scan per call, O(n²) under a
+    // fill-flood (finding M5). The timer sweep handles the steady state; this
+    // lazy check pays the scan only at the boundary.
+    if (nonces.size >= MAX_OUTSTANDING_NONCES && sweepNonces() >= MAX_OUTSTANDING_NONCES) {
+      return reply.status(503).send({
+        error: "nonce_capacity",
+        message: "Too many outstanding sign-in nonces. Try again shortly.",
+      });
+    }
     const nonce = randomBytes(16).toString("hex");
     nonces.set(nonce, Date.now() + NONCE_TTL_MS);
     return reply.send({ nonce });
@@ -285,11 +370,24 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       });
     }
 
-    // Validate issuedAt freshness (must be within last 5 minutes)
+    // Validate issuedAt freshness. These checks FAIL CLOSED: an unparseable
+    // timestamp used to slip through the `!isNaN` guard, and a FUTURE-dated
+    // message was never rejected at all, so a signature could be minted now and
+    // held. (Cross-family review of PR #309.) A small forward skew is allowed
+    // for honest clock drift.
+    const ISSUED_MAX_AGE_MS = 5 * 60 * 1000;
+    const ISSUED_MAX_SKEW_MS = 60 * 1000;
     if (parsed.issuedAt) {
       const issuedMs = new Date(parsed.issuedAt).getTime();
-      if (!isNaN(issuedMs) && Date.now() - issuedMs > 5 * 60 * 1000) {
+      if (isNaN(issuedMs)) {
+        return reply.status(401).send({ error: "SIWE Issued At is not a valid timestamp" });
+      }
+      const age = Date.now() - issuedMs;
+      if (age > ISSUED_MAX_AGE_MS) {
         return reply.status(401).send({ error: "SIWE message too old (>5 minutes)" });
+      }
+      if (age < -ISSUED_MAX_SKEW_MS) {
+        return reply.status(401).send({ error: "SIWE message is dated in the future" });
       }
     }
 
@@ -299,10 +397,15 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       return reply.status(401).send({ error: "Nonce expired or invalid" });
     }
 
-    // Validate expiration time if present
+    // Validate expiration time if present. FAILS CLOSED: an unparseable
+    // Expiration Time previously passed the `!isNaN` guard, so a message
+    // claiming to expire could carry garbage and be accepted forever.
     if (parsed.expirationTime) {
       const expires = new Date(parsed.expirationTime).getTime();
-      if (!isNaN(expires) && expires < Date.now()) {
+      if (isNaN(expires)) {
+        return reply.status(401).send({ error: "SIWE Expiration Time is not a valid timestamp" });
+      }
+      if (expires < Date.now()) {
         return reply.status(401).send({ error: "SIWE message expired" });
       }
     }
@@ -324,8 +427,19 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         .send({ error: "Signature verification failed" });
     }
 
-    // Consume nonce (one-time use)
-    nonces.delete(parsed.nonce);
+    // Consume nonce (one-time use) — ATOMICALLY.
+    //
+    // The check above happens BEFORE `await verifyMessage`, so two concurrent
+    // requests carrying the same signed message both passed it, both verified,
+    // and both minted a session: one signature, N sessions. Map mutation is
+    // synchronous within a tick, so `delete` returning false means another
+    // request already consumed this nonce — that request wins, this one is a
+    // replay. (Cross-family review of PR #309. This is process-local, like the
+    // store itself; a multi-replica deployment needs a shared atomic store —
+    // see the note in the plugin docblock.)
+    if (!nonces.delete(parsed.nonce)) {
+      return reply.status(401).send({ error: "Nonce already used" });
+    }
 
     // Create session
     const token = randomUUID();
