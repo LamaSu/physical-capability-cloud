@@ -41,7 +41,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { getKernelFacade } from "../facades/index.js";
+import { requireKernelOperator } from "../auth/kernel-operator.js";
 import {
   getJobOffersStore,
   type ClaimInput,
@@ -76,62 +76,6 @@ function requirePoster(req: FastifyRequest, reply: FastifyReply): string | null 
     return null;
   }
   return p;
-}
-
-/** The unowned placeholder a kernel row carries before a signer is bound. */
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-
-/**
- * LO-GW-3a — authorize `principal` to act for `kernelId`.
- *
- * Claiming an offer is the step that binds a job to a physical site, so the
- * claimant has to be that site's operator. Before this, POST /:id/claim read
- * `kernelId` straight off the request body and passed it to `store.claim()`:
- * any caller could name ANY kernel and the offer was recorded as claimed by it.
- * The body value is now a CLAIM about identity that has to be checked, never
- * an identity in itself.
- *
- * Mirrors the guard the sibling money-path route already uses
- * (routes/carrier.ts:637-648) and the ownership predicate in
- * mcp/operation-policy.ts:336 — `shop_kernels.operatorAddress === principal`.
- * Fails closed: an unknown kernel, a lookup failure, or a kernel with no
- * recorded owner all refuse rather than defaulting to allow.
- *
- * Returns true when authorized. Otherwise it has already sent the reply.
- */
-async function requireKernelOperator(
-  reply: FastifyReply,
-  principal: string,
-  kernelId: string,
-): Promise<boolean> {
-  const kernelRes = await getKernelFacade().getById(kernelId);
-  if (!kernelRes.success) {
-    void reply
-      .code(kernelRes.error.httpStatus === 404 ? 404 : 502)
-      .send({
-        error: kernelRes.error.httpStatus === 404 ? "kernel_not_found" : "kernel_lookup_failed",
-        message: `Cannot verify operator ownership of kernel '${kernelId}'`,
-      });
-    return false;
-  }
-  const owner = (kernelRes.data as { operatorAddress?: string }).operatorAddress;
-  if (!owner || owner === ZERO_ADDRESS) {
-    // No principal to authorize against — refuse rather than treat "nobody
-    // owns it" as "everybody may claim for it".
-    void reply.code(403).send({
-      error: "kernel_unowned",
-      message: `Kernel '${kernelId}' has no recorded operator; it cannot claim offers`,
-    });
-    return false;
-  }
-  if (owner.toLowerCase() !== principal.toLowerCase()) {
-    void reply.code(403).send({
-      error: "not_kernel_operator",
-      message: "You can only claim offers for a kernel you operate",
-    });
-    return false;
-  }
-  return true;
 }
 
 interface CreateBody {
