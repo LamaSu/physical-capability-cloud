@@ -1,0 +1,34 @@
+{
+  "name": "@pcc/adapter-galaxy-synbiocad",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Galaxy-SynBioCAD adapter for PCC — exposes the brsynth synthetic-biology / metabolic-engineering tool suite (RetroPath2.0, rpTools, Selenzyme, PartsGenie, DNA-Bot, DNA Weaver, StrainDesign, OptDOE, iCFree, AMN/DAMN, ...) as a digital kernel. One catalog-driven executor runs any tool over the Galaxy REST API; ships a JSON-Schema capability catalog agents pick from.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./catalog.json": "./dist/catalog.json"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc && node scripts/postbuild-copy.mjs",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist",
+    "regen:catalog": "python scripts/build_catalog.py"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/kernel-sdk": "workspace:*",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "rimraf": "^5.0.0"
+  }
+}

@@ -15,6 +15,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",
     "@pcc/spec": "workspace:*",
+    "@pcc/adapter-galaxy-synbiocad": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

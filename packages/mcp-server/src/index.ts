@@ -22,6 +22,7 @@ import { z } from "zod";
 import { PCC_URL, pccFetch } from "./api.js";
 import { registerCaptureTools } from "./tools/capture.js";
 import { registerNegotiateTools } from "./tools/negotiate.js";
+import { registerGalaxySynBioCadTools } from "./tools/galaxy-synbiocad.js";
 
 // ---------------------------------------------------------------------------
 // Tool result helper
@@ -1761,6 +1762,14 @@ registerCaptureTools(server);
 // ---------------------------------------------------------------------------
 
 registerNegotiateTools(server);
+
+// ---------------------------------------------------------------------------
+// Galaxy-SynBioCAD discovery tools — surface the ~50-tool synthetic-biology /
+// metabolic-engineering catalog (from @pcc/adapter-galaxy-synbiocad) so agents
+// can browse tools + JSON-Schema I/O contracts. Reads the local catalog, no net.
+// ---------------------------------------------------------------------------
+
+registerGalaxySynBioCadTools(server);
 
 // ---------------------------------------------------------------------------
 // Boot
