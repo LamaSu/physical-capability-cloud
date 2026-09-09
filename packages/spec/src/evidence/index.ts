@@ -23,6 +23,7 @@ export * from "./primitives.js";
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
 export * from "./eligibility.js";
+export * from "./measurement-profile.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
