@@ -119,7 +119,11 @@ describe("priceTagHmac + verifyPriceTag", () => {
 
   it("verifyPriceTag returns false if the tag is altered", () => {
     const tag = priceTagHmac(fields, SECRET);
-    const tampered = tag.slice(0, -2) + "00";
+    // Flip the last nibble to a value it is NOT: overwriting with a constant ("00") made this a
+    // 1/256 time-seeded flake — `validUntil` is Date.now()-derived, so each run's tag differs,
+    // and a run whose genuine tag already ended in "00" produced tampered === tag (CI run
+    // 34068244984, 2026-09-06, redding an unrelated spec PR and with it the deploy pipeline).
+    const tampered = tag.slice(0, -1) + (tag.endsWith("0") ? "1" : "0");
     expect(verifyPriceTag(tampered, fields, SECRET)).toBe(false);
   });
 
