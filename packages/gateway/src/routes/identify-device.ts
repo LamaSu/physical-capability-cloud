@@ -4,7 +4,14 @@ import Anthropic from "@anthropic-ai/sdk";
 const MODEL_TEXT = "claude-haiku-4-5-20251001";
 const MODEL_VISION = "claude-sonnet-4-6";
 const MAX_PHOTO_BYTES = 6 * 1024 * 1024;
-const RATE_PER_HOUR = 30;
+const RATE_PER_HOUR = 30;                 // per-IP fair-use throttle
+// GLOBAL hourly ceiling across ALL IPs — the actual spend guard. Under
+// trustProxy, request.ip is read from X-Forwarded-For, which a caller can vary
+// freely, so the per-IP limit alone does NOT bound Anthropic spend. This caps
+// total billable MODEL CALLS/hour regardless of source IP (escrow #1623).
+const GLOBAL_PER_HOUR = Number(process.env.IDENTIFY_DEVICE_GLOBAL_PER_HOUR ?? 500);
+// Bound the per-IP map so an X-Forwarded-For flood cannot grow it unboundedly.
+const MAX_RATE_IPS = 20_000;
 
 const KNOWN_ADAPTERS = ["hamilton", "opentrons", "octoprint", "sila", "modbus", "opcua", "mock"] as const;
 type KnownAdapter = (typeof KNOWN_ADAPTERS)[number];
@@ -57,6 +64,9 @@ Rules:
 
 export async function identifyDeviceRoutes(app: FastifyInstance) {
   const rateMap = new Map<string, { count: number; windowStart: number }>();
+  // Global spend-ceiling window (shared across all callers, not per-IP).
+  let globalCount = 0;
+  let globalWindowStart = Date.now();
   setInterval(() => {
     const now = Date.now();
     for (const [ip, e] of rateMap) if (now - e.windowStart > 3600_000) rateMap.delete(ip);
@@ -69,6 +79,11 @@ export async function identifyDeviceRoutes(app: FastifyInstance) {
       return reply.status(429).send({ error: "Too many identification requests, try again in an hour" });
     }
     if (!entry || now - entry.windowStart > 3600_000) {
+      // Bound the map (X-Forwarded-For flood): evict the oldest entry at cap.
+      if (rateMap.size >= MAX_RATE_IPS) {
+        const oldest = rateMap.keys().next().value;
+        if (oldest !== undefined) rateMap.delete(oldest);
+      }
       rateMap.set(request.ip, { count: 1, windowStart: now });
     } else {
       entry.count++;
@@ -96,6 +111,23 @@ export async function identifyDeviceRoutes(app: FastifyInstance) {
     if (!apiKey) {
       return reply.status(503).send({ error: "Device identification temporarily unavailable" });
     }
+
+    // GLOBAL hourly cost ceiling — the bill guard. Checked + incremented here,
+    // right before the billable model call, and SYNCHRONOUSLY (no await between
+    // check and increment) so concurrent requests cannot overshoot the cap. Only
+    // VALID requests reach this point, so empty-body probes never count. Because
+    // request.ip is spoofable via X-Forwarded-For, THIS ceiling — not the per-IP
+    // limit above — is what bounds worst-case Anthropic spend (escrow #1623).
+    if (now - globalWindowStart > 3600_000) {
+      globalCount = 0;
+      globalWindowStart = now;
+    }
+    if (globalCount >= GLOBAL_PER_HOUR) {
+      return reply.status(429).send({
+        error: "Device identification is at hourly capacity, try again later",
+      });
+    }
+    globalCount++;
 
     const client = new Anthropic({ apiKey, maxRetries: 1 });
     const userContent: Anthropic.ContentBlockParam[] = [];
