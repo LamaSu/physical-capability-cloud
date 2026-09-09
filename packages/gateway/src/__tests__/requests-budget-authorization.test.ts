@@ -16,8 +16,13 @@
  *     never applied.
  *   - Over the ceiling, nothing goes live: no auto-published job-offers, and
  *     `POST /:id/publish` refuses with 409 `budget_authorization_exceeded`.
- *   - The only way up is renewed acceptance — the requester raising the ceiling
- *     explicitly via `PUT /api/requests/:id`.
+ *   - The only way up is renewed acceptance — the REQUESTER raising the ceiling
+ *     explicitly via `PUT /api/requests/:id`. Round 2: that PUT had no auth and
+ *     no ownership check, so "renewed acceptance" was available to anyone — read
+ *     `derivedBudget` off a decompose response, PUT it as the new budget,
+ *     publish. The gate was real and the door beside it was open. It now
+ *     requires the authenticated requester, and so does rewriting the requester
+ *     identity the check reads.
  *
  * Fixture shape is borrowed from request-matching.test.ts: real capability rows
  * with real prices, so the "priced commitment" under test is an actual listing
@@ -90,9 +95,30 @@ async function buildApp(): Promise<FastifyInstance> {
   initJobOffersStore({});
 
   const app = Fastify({ logger: false });
+  // apiGate stand-in. The ROUTE reads `req.operatorId` exactly as it does in
+  // production; only the way that field gets populated is simulated here, so a
+  // test can act as a specific principal without running the full middleware
+  // stack. Same technique as buildAuthedApp() in requests.test.ts.
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h !== "") {
+      (req as unknown as { operatorId: string }).operatorId = h;
+    }
+  });
   await app.register(requestRoutes);
   await app.ready();
   return app;
+}
+
+/** The identity `order()` records as the request's requester. */
+const REQUESTER = "rider@example.com";
+const STRANGER = "stranger@elsewhere.test";
+
+function as(principal: string): Record<string, string> {
+  return { "x-test-operator": principal };
 }
 
 /** Direct-match order: `quantity` rides at RIDE_PRICE each, against `budget`. */
@@ -111,7 +137,7 @@ async function order(
       capabilityId: RIDE_CAP,
       quantity,
       budget,
-      requesterEmail: "rider@example.com",
+      requesterEmail: REQUESTER,
     },
   });
   return { statusCode: res.statusCode, body: res.json() };
@@ -214,11 +240,13 @@ describe("R-06 — the authorized ceiling", () => {
     const blocked = await app.inject({ method: "POST", url: `/api/requests/${id}/publish` });
     expect(blocked.statusCode).toBe(409);
 
-    // The requester explicitly agrees to more. This is the ONLY way up.
+    // The REQUESTER explicitly agrees to more. This is the ONLY way up, and it
+    // is theirs alone — see the refusals in the next describe block.
     const raised = await app.inject({
       method: "PUT",
       url: `/api/requests/${id}`,
       payload: { budget: 120 },
+      headers: as(REQUESTER),
     });
     expect(raised.statusCode).toBe(200);
     expect(raised.json().request.budget).toBe(120);
@@ -265,5 +293,192 @@ describe("R-06 — the authorized ceiling", () => {
     expect(authz.requiresReauthorization).toBe(false);
     // The stated ceiling is still untouched.
     expect(res.json().request.budget).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 2 — who may perform "renewed acceptance"
+// ---------------------------------------------------------------------------
+
+describe("R-06 — raising the ceiling is the requester's act alone", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    _resetJobOffersStoreForTests();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  it("refuses an anonymous ceiling raise, and publish stays blocked", async () => {
+    const { body } = await order(app, 20, 5); // 90 > 20
+    const id = (body.request as unknown as { id: string }).id;
+
+    const raised = await app.inject({
+      method: "PUT",
+      url: `/api/requests/${id}`,
+      payload: { budget: 120 },
+    });
+    expect(raised.statusCode).toBe(401);
+    expect(raised.json().error).toBe("authentication_required");
+    expect(raised.json().fields).toContain("budget");
+
+    // The stored ceiling did not move, and the gate still holds.
+    const after = await app.inject({ method: "GET", url: `/api/requests/${id}` });
+    expect(after.json().request.budget).toBe(20);
+    expect(after.json().request.authorizedCeiling).toBe(20);
+    const pub = await app.inject({ method: "POST", url: `/api/requests/${id}/publish` });
+    expect(pub.statusCode).toBe(409);
+    expect(getJobOffersStore().listOpen({ capabilityType: "rideshare-driver" })).toHaveLength(0);
+  });
+
+  it("refuses a STRANGER's ceiling raise — the documented bypass, closed", async () => {
+    // The refuted path verbatim: decompose, read the derived number off the
+    // response, PUT it as the new budget, publish. Step 2 now fails.
+    const { body } = await order(app, 20, 5);
+    const id = (body.request as unknown as { id: string }).id;
+    const derived = (body.budgetAuthorization as unknown as { committedEstimate: number }).committedEstimate;
+    expect(derived).toBeGreaterThan(20);
+
+    const raised = await app.inject({
+      method: "PUT",
+      url: `/api/requests/${id}`,
+      payload: { budget: derived },
+      headers: as(STRANGER),
+    });
+    expect(raised.statusCode).toBe(403);
+    expect(raised.json().error).toBe("not_requester");
+
+    const after = await app.inject({ method: "GET", url: `/api/requests/${id}` });
+    expect(after.json().request.budget).toBe(20);
+    const pub = await app.inject({ method: "POST", url: `/api/requests/${id}/publish` });
+    expect(pub.statusCode).toBe(409);
+    expect(getJobOffersStore().listOpen({ capabilityType: "rideshare-driver" })).toHaveLength(0);
+  });
+
+  it("refuses a stranger REWRITING the requester identity the check reads", async () => {
+    // Otherwise the ownership gate is decorative: become the requester first,
+    // then raise the ceiling legitimately.
+    const { body } = await order(app, 20, 5);
+    const id = (body.request as unknown as { id: string }).id;
+
+    const hijack = await app.inject({
+      method: "PUT",
+      url: `/api/requests/${id}`,
+      payload: { requesterEmail: STRANGER },
+      headers: as(STRANGER),
+    });
+    expect(hijack.statusCode).toBe(403);
+    expect(hijack.json().error).toBe("not_requester");
+    expect(hijack.json().fields).toContain("requesterEmail");
+
+    const after = await app.inject({ method: "GET", url: `/api/requests/${id}` });
+    expect(after.json().request.requesterEmail).toBe(REQUESTER);
+  });
+
+  it("still lets anyone edit non-authority fields — the gate is narrow", async () => {
+    // The fix must not turn into a blanket lock on the row: only the fields
+    // that carry or determine authority are gated.
+    const { body } = await order(app, 20, 5);
+    const id = (body.request as unknown as { id: string }).id;
+
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/requests/${id}`,
+      payload: { title: "Rides, renamed", urgency: "emergency" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().request.title).toBe("Rides, renamed");
+    expect(res.json().request.budget).toBe(20);
+  });
+
+  it("the requester may still raise their own ceiling by wallet identity", async () => {
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/requests",
+      payload: {
+        title: "Rides",
+        description: "Need rides across town",
+        capabilityType: "rideshare-driver",
+        capabilityId: RIDE_CAP,
+        quantity: 5,
+        budget: 20,
+        requesterWallet: "0xAbCdEf0000000000000000000000000000000001",
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const id = create.json().request.id;
+
+    // Case-insensitive: an EVM address differs only by EIP-55 checksum casing.
+    const raised = await app.inject({
+      method: "PUT",
+      url: `/api/requests/${id}`,
+      payload: { budget: 120 },
+      headers: as("0xabcdef0000000000000000000000000000000001"),
+    });
+    expect(raised.statusCode).toBe(200);
+    expect(raised.json().request.authorizedCeiling).toBe(120);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 2 — the "spend outside the ceiling via unmatched nodes" question
+// ---------------------------------------------------------------------------
+
+describe("R-06 — unmatched nodes get a bounty marker but no live work", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    _resetJobOffersStoreForTests();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  it("publishing a partially matched plan creates ZERO job-offers", async () => {
+    // The open question after round 1: `matchedCommitment` counts only matched
+    // nodes, while the publish loop stamps a bountyId on EVERY pending node —
+    // so could spend happen outside the ceiling, through the unmatched ones?
+    //
+    // Answer, pinned here: no. `produceJobOffersForRequest` HOLDS the whole
+    // plan when any node is unmatched (commitment not committable and not a
+    // pure digest gap), so nothing becomes claimable; and `node.bountyId` is
+    // written at routes/requests.ts and read nowhere — `bountyService` mints
+    // its own ids, so a bounty id from here resolves in no claim path. The
+    // marker is inert. If either fact ever changes, this test fails.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/requests",
+      payload: {
+        title: "Build a thing",
+        description: "Design, fabricate and assemble a small mechanical widget with a custom housing",
+        budget: 1,
+        requesterEmail: REQUESTER,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const id = res.json().request.id;
+    // Under the ceiling (nothing matched -> committedEstimate 0), so publish is
+    // allowed: the question is what publishing such a plan actually does.
+    expect(res.json().budgetAuthorization.committedEstimate).toBe(0);
+
+    const pub = await app.inject({ method: "POST", url: `/api/requests/${id}/publish` });
+    expect(pub.statusCode).toBe(200);
+
+    // Every node got a bounty marker...
+    const nodes = pub.json().request.capabilityDag as Array<{ bountyId?: string; status: string }>;
+    expect(nodes.length).toBeGreaterThan(0);
+    expect(nodes.every((n) => !!n.bountyId)).toBe(true);
+
+    // ...and NOT ONE of them is live work anyone can claim.
+    expect(pub.json().jobOffers.created).toHaveLength(0);
+    expect(pub.json().jobOffers.held).toBeTruthy();
+    expect(getJobOffersStore().size()).toBe(0);
   });
 });

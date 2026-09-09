@@ -242,6 +242,51 @@ function assessBudgetAuthorization(
   };
 }
 
+/**
+ * R-06 / LO-GW-2a (round 2) — the fields on a request that CARRY or DETERMINE
+ * authority, as opposed to describing the work.
+ *
+ * A ceiling only means something if raising it takes the requester's renewed
+ * acceptance. Round 1 built the ceiling and made `POST /:id/publish` refuse
+ * above it — with `PUT /api/requests/:id` as the documented way up. But that PUT
+ * had no ownership check and no auth at all, so ANY caller could read
+ * `budgetAuthorization.derivedBudget` off a decompose response, PUT it as the
+ * new `budget`, and publish. The gate was real and the door beside it was open.
+ *
+ * `requesterEmail` / `requesterWallet` are in this set for the same reason:
+ * they are the identity an ownership check reads, so leaving them freely
+ * writable would let a caller simply BECOME the requester and then raise the
+ * ceiling legitimately. `currency` is here because a ceiling is an amount AND a
+ * unit — re-denominating 20 USDC as 20 of something else changes the authority
+ * without touching the number.
+ *
+ * Everything else (title, description, deadline, urgency) still updates freely:
+ * this narrows the route to the authority surface rather than locking the row.
+ */
+const AUTHORITY_FIELDS: ReadonlyArray<keyof CapabilityRequest> = [
+  "budget",
+  "currency",
+  "requesterEmail",
+  "requesterWallet",
+];
+
+/**
+ * Is `callerId` the requester of `request`?
+ *
+ * Matches either recorded requester identity, case-insensitively (an EVM
+ * address varies only by EIP-55 checksum casing; an email is case-insensitive
+ * in practice). A request that records NEITHER identity has no requester to
+ * authorize against, so this returns false and the caller is refused — "nobody
+ * owns it" must not read as "anybody may raise it".
+ */
+function isRequester(request: CapabilityRequest, callerId: string): boolean {
+  const caller = callerId.trim().toLowerCase();
+  if (caller === "") return false;
+  const email = request.requesterEmail?.trim().toLowerCase();
+  const wallet = request.requesterWallet?.trim().toLowerCase();
+  return (!!email && email === caller) || (!!wallet && wallet === caller);
+}
+
 /** Compute composition signature from a request's DAG */
 function signatureFromDag(dag: CapabilityNode[]): string {
   const capabilityTypes = dag.map((n) => n.capabilityType);
@@ -745,6 +790,37 @@ export async function requestRoutes(app: FastifyInstance) {
     }
 
     const body = (req.body ?? {}) as Partial<CapabilityRequest>;
+
+    // R-06 / LO-GW-2a (round 2) — raising the ceiling IS the renewed acceptance
+    // the publish gate points at, so it is an act of authority and has to be
+    // authenticated and bound to the requester. Identity comes from apiGate /
+    // SIWE (`operatorId` / `userId`) only — deliberately NOT from a
+    // caller-settable header like X-Posted-By, which would make the principal
+    // self-asserted on the one surface where it decides how much money may be
+    // committed. Same shape as PUT /:id/nodes/:nodeId/status below.
+    const touchedAuthority = AUTHORITY_FIELDS.filter((k) => body[k] !== undefined);
+    if (touchedAuthority.length > 0) {
+      const identity = req as unknown as { operatorId?: string | null; userId?: string | null };
+      const callerId = identity.operatorId ?? identity.userId;
+      if (!callerId) {
+        return reply.status(401).send({
+          error: "authentication_required",
+          message: "Changing a request's authorized ceiling or requester identity requires authentication.",
+          fields: touchedAuthority,
+        });
+      }
+      const { isBrokerOperator } = await import("../middleware/security-hardening.js");
+      if (!isRequester(request, callerId) && !isBrokerOperator(callerId)) {
+        return reply.status(403).send({
+          error: "not_requester",
+          message:
+            "Only the requester may change this request's authorized ceiling or requester identity. "
+            + "(A request with no recorded requester cannot have them changed at all.)",
+          fields: touchedAuthority,
+        });
+      }
+    }
+
     const updates: Record<string, unknown> = {};
     const allowed: Array<keyof CapabilityRequest> = [
       "title", "description", "budget", "deadline", "urgency",
