@@ -663,3 +663,312 @@ $ git log --oneline b1be6cfe..HEAD
 ```
 
 (this section is committed on top)
+
+---
+
+## Producer follow-up (jobrunner-safety-producer-1)
+
+### Outcome
+
+**Done.** Both in-process job producers now mint an execution scope at job
+creation and pass it to `submitJob`, so gateway-dispatched jobs run again while
+the safety boundary keeps denying unscoped dispatch. Full `@pcc/gateway` suite
+green (189 files / 2995 tests), `tsc --noEmit` clean, the 4 red `job-submit`
+tests green with **no edits to them**, and the 7 `kernel-service-scope` + 14
+`job-runner-safety` boundary tests untouched and green.
+
+Three commits on `fix/jobrunner-safety-boundary-producer` on top of `b6c9c771`.
+
+### Design note (written before editing)
+
+1. **Helper.** `mintExecutionScope({ kernelId, jobId, createdBy, capabilityType?,
+   allowedTools?, maxCommands?, maxRetries?, ttlMs?, createdAt? })
+   -> { scopeId, agentDid, allowedTools, createdAt, expiresAt }`, in the new
+   `packages/gateway/src/services/execution-scope-service.ts`. It inserts one
+   `execution_scopes` row and throws on failure. It also owns
+   `getWriteToolsForDeviceType` + `DEVICE_WRITE_TOOLS`, moved verbatim out of
+   `routes/paid-job-flow.ts` — that move is the actual de-duplication, because it
+   is what lets both producers derive an allowed-tool set without importing from
+   a route module.
+2. **`createdBy` per producer.** Facade: the authenticated principal, i.e. the
+   `actorId` the route passes in (`req.operatorId ?? req.apiKeyId`). Test-job:
+   the API-key holder, read the same way `register-device` already reads it in
+   `setup.ts`. Both fall back to the sentinel `"unauthenticated"` when the
+   request carries no principal — `execution_scopes.created_by` is NOT NULL and
+   the audit trail is the point of the row, so an unauthenticated producer
+   records *that* rather than inventing a plausible operator id.
+3. **`allowedTools` per producer.** Facade: from the job's capability type
+   (`body.capabilityType ?? capabilities.findById(resolvedCapabilityId)?.type`).
+   Test-job: from `caps[0]?.type` on the target kernel, which for an unmapped or
+   absent type yields the generic minimal write set
+   `["device_start_job","device_pause","device_resume","device_cancel"]`.
+4. **`agentDid`.** `did:pcc:<principal>`, passed through unchanged when the
+   principal is already a `did:`. The governor buckets its per-minute rate limit
+   by `agentDid`; `KernelService`'s fallback is the constant `"kernel-service"`,
+   which lumps every caller into one bucket, so a per-principal DID is both more
+   correct and more useful in the audit trail.
+5. **Expiry / budget.** Facade: 1 h / 200 commands / 5 retries — identical to the
+   paid path, since a real contracted job can run long. Test-job: **15 min / 50
+   commands / 1 retry**, deliberately tighter, because `routes/device-relay.ts`
+   resolves an active scope by `(kernelId, createdBy, status)` **without**
+   filtering on `jobId` — so a generous, long-lived grant minted for a one-shot
+   onboarding self-test would widen what that same principal can relay to that
+   kernel afterwards.
+
+### Files changed
+
+```
+$ git diff b6c9c771 --stat
+ .../src/__tests__/producer-execution-scope.test.ts | 517 +++++++++++++++++++++
+ packages/gateway/src/facades/job.facade.ts         |  61 ++-
+ packages/gateway/src/routes/paid-job-flow.ts       |  62 +--
+ packages/gateway/src/routes/setup.ts               |  49 ++
+ .../src/services/execution-scope-service.ts        | 181 ++++++++
+ 5 files changed, 813 insertions(+), 57 deletions(-)
+```
+
+`packages/kernel`, `kernel-service.ts`, settlement, escrow and evidence are
+untouched — `git diff b6c9c771 --name-only` restricted to `packages/kernel`,
+`packages/gateway/src/services/kernel-service.ts` and
+`packages/gateway/src/__tests__/kernel-service-scope.test.ts` returns nothing.
+
+Both producers mint **after** the job row exists and **before** `submitJob`, and
+only on paths that actually dispatch in-process:
+
+- `job.facade.ts` mints after the external-kernel early return, so the
+  external-kernel path (which returns `queued` and dispatches nothing) still
+  mints nothing. A grant nobody redeems is a grant `device-relay` could still
+  resolve, so not minting it is the point, not an oversight.
+- `setup.ts` mints after the deviceless self-attest branch, which returns before
+  ever reaching a device.
+- A mint failure aborts the submission in both (facade: job marked `failed`, then
+  a thrown `execution_scope_mint_failed:` error -> 500; test-job: an explicit 500
+  `execution_scope_mint_failed`). Neither falls through to an unscoped dispatch,
+  because that would surface as a misleading safety-gateway denial instead of the
+  real cause.
+- `scopeId`/`agentDid` are derived in the producer and **never read off the
+  request body**, in either producer.
+
+### Paid path — byte-for-byte proof
+
+The extraction was taken. The removed literals *are* the helper's defaults:
+
+```diff
+   // ── 3. Create execution scope ──────────────────────────────────────
+-  const scopeId = `scope_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+-  const allowedTools = getWriteToolsForDeviceType(session.capabilityType);
+-  const expiry = new Date(Date.now() + 60 * 60_000).toISOString(); // 1 hour
+-
+-  db.insert(executionScopes).values({
+-    id: scopeId,
++  const { scopeId } = mintExecutionScope({
+     kernelId: session.kernelId,
+     jobId,
+     createdBy: session.userAgentId,
+-    status: "active",
+-    allowedTools,
+-    maxCommands: 200,
+-    commandCount: 0,
+-    maxRetries: 5,
+-    retryCount: 0,
++    capabilityType: session.capabilityType,
+     createdAt: now,
+-    expiresAt: expiry,
+-  }).run();
++  });
+```
+
+Field by field: `id` — same expression; `kernelId`/`jobId`/`createdBy` — passed
+through; `status: "active"` — helper literal; `allowedTools` — the same
+`getWriteToolsForDeviceType(session.capabilityType)` call, now the helper's
+default; `maxCommands: 200` = `DEFAULT_MAX_COMMANDS`; `commandCount: 0` and
+`retryCount: 0` — helper literals; `maxRetries: 5` = `DEFAULT_MAX_RETRIES`;
+`createdAt` — the caller's shared `now`, passed explicitly so it still matches
+the job/session rows written alongside it; `expiresAt` — the same
+`new Date(Date.now() + 60*60_000).toISOString()` (note: computed from
+`Date.now()`, not from `now` — preserved exactly, including that asymmetry).
+`allowedPipettes`/`allowedSlots` were unset before and are unset now.
+
+Empirically, the existing `paid-job-flow.test.ts` reads the row back through
+`GET /api/ot2/scope/:id` and asserts `status === "active"`, `jobId`, `kernelId`
+and a non-empty `allowedTools` (test: *creates an active execution scope tied to
+the job*), exercises tool calls under the scope, and checks scopes stay active
+after completion. All 16 pass, plus the 3 in `paid-job-flow-dispatch.test.ts`.
+
+### Test tails
+
+**Baseline (before any change) — the 4 reds the lane exists to fix:**
+
+```
+ FAIL  src/__tests__/job-submit.test.ts > ... > accepts a valid job and returns immediately
+ FAIL  src/__tests__/job-submit.test.ts > ... > uses provided jobId when given
+ FAIL  src/__tests__/job-submit.test.ts > ... > accepts optional assuranceTier and gcodeHash
+ FAIL  src/__tests__/job-submit.test.ts > ... > auto-select device: deviceId in response matches mock adapter
+ Test Files  1 failed | 5 passed (6)
+      Tests  4 failed | 80 passed (84)
+```
+
+**Targeted, after the change** (`pnpm --filter @pcc/gateway test -- job-submit
+kernel-service setup paid-job-flow producer-execution-scope`):
+
+```
+ ✓ src/__tests__/setup.test.ts  (37 tests) 332ms
+ ✓ src/__tests__/paid-job-flow-dispatch.test.ts  (3 tests) 155ms
+ ✓ src/__tests__/job-submit.test.ts  (19 tests) 721ms
+ ✓ src/__tests__/paid-job-flow.test.ts  (16 tests) 770ms
+ ✓ src/__tests__/producer-execution-scope.test.ts  (8 tests) 10612ms
+ Test Files  7 passed (7)
+      Tests  92 passed (92)
+   Duration  13.43s
+```
+
+**Full gateway suite:**
+
+```
+ Test Files  189 passed (189)
+      Tests  2995 passed | 6 skipped (3001)
+   Start at  17:49:11
+   Duration  23.11s (transform 14.26s, setup 1.01s, collect 258.04s, tests 78.42s, ...)
+```
+
+The first full run had 2 failed *suites* — `capture.test.ts` and
+`capture-3d.test.ts`, both `Failed to load url @pcc/verifier/dist/...`. That is
+the known unbuilt-dependency issue in a fresh worktree: `@pcc/verifier` has no
+exports map, so vitest cannot alias it to source. `pnpm --workspace-concurrency=4
+--filter "@pcc/gateway^..." build` fixed both. Not related to this change —
+neither file imports anything this lane touched.
+
+**Typecheck:**
+
+```
+$ pnpm --filter @pcc/gateway exec tsc --noEmit -p .
+tsc exit code: 0
+```
+
+(no output)
+
+**The new tests are load-bearing.** Reverting only the three producer files to
+`b6c9c771` and re-running the new file:
+
+```
+ Tests  7 failed | 1 passed (8)
+     -> expected 500 to be 200                       (scope row / principal)
+     -> expected undefined not to be undefined       (submitJob params.scopeId)
+     -> waitFor: condition not met within timeout    (nothing actuated)
+     -> expected 500 to be 200                       (unauthenticated principal)
+     -> expected 500 to be 200                       (negative control)
+     -> expected 500 to be 200                       (setup test-job completion)
+     -> expected 500 to be 200                       (setup test-job negative control)
+```
+
+The one that passes both ways is *mints no scope on the external-kernel path* —
+it asserts an *absence*, so it is a guard against a future over-eager mint rather
+than a regression test for this change. Files were restored with
+`git checkout HEAD -- <paths>`; tree verified clean afterwards.
+
+### The negative control, quoted
+
+`POST /api/jobs/submit` is given a `scopeId` naming a **real, active** scope owned
+by another operator — the strongest form of the attack, since a naive "does this
+id resolve?" check would wave it through:
+
+```ts
+const FOREIGN_SCOPE = "scope_foreign_victim_001";
+db.insert(executionScopes).values({
+  id: FOREIGN_SCOPE, kernelId: KERNEL_ID, jobId: "job-belonging-to-someone-else",
+  createdBy: "victim-operator@example.com", status: "active",
+  allowedTools: ["printer_start_job"], /* ...active, unexpired... */
+}).run();
+
+const res = await app.inject({ method: "POST", url: "/api/jobs/submit", payload: {
+  jobId: "job-producer-scope-attack", stepId: "step-attack", kernelId: KERNEL_ID,
+  // The route body schema is additionalProperties:true, so these DO
+  // arrive at the handler. They must not be honoured.
+  scopeId: FOREIGN_SCOPE,
+  agentDid: "did:pcc:victim-operator@example.com",
+}});
+
+const minted = scopesForJob("job-producer-scope-attack");
+expect(minted).toHaveLength(1);
+expect(minted[0].id).not.toBe(FOREIGN_SCOPE);
+expect(minted[0].createdBy).toBe(PRINCIPAL);
+
+// THE NEGATIVE CONTROL: what the boundary was handed is the minted scope,
+// and the victim's scope never reached it.
+const params = submitSpy.mock.calls[0][0];
+expect(params.scopeId).toBe(minted[0].id);
+expect(params.scopeId).not.toBe(FOREIGN_SCOPE);
+expect(params.agentDid).toBe(`did:pcc:${PRINCIPAL}`);
+
+// ...and the same holds all the way down at the governor.
+await waitFor(() => executed.length >= 2);
+const relayed = relaySpy.mock.calls.map((c) => c[0]);
+for (const cmd of relayed) {
+  expect(cmd.scopeId).toBe(minted[0].id);
+  expect(cmd.scopeId).not.toBe(FOREIGN_SCOPE);
+  expect(cmd.agentDid).not.toBe("did:pcc:victim-operator@example.com");
+}
+
+// The victim's grant is untouched — not consumed, not rebound.
+const victim = db.select().from(executionScopes).where(eq(executionScopes.id, FOREIGN_SCOPE)).get();
+expect(victim?.jobId).toBe("job-belonging-to-someone-else");
+expect(victim?.createdBy).toBe("victim-operator@example.com");
+```
+
+The same assertion in shorter form covers `POST /api/setup/test-job`.
+
+### Honest gaps
+
+1. **The external-kernel relay path is still a no-op, by design here.** The
+   facade's external branch returns `queued` and dispatches nothing in-process,
+   so it mints nothing — and I did not build a scope for a future relay. When
+   external-kernel dispatch is actually implemented (see the RTP-absorption
+   transport work), it will need its own grant, and the interesting question is
+   *who* holds it: a scope minted in the gateway is meaningless to a remote
+   operator daemon running its own SafetyGateway. That is a protocol decision,
+   not a code change.
+2. **Other `submitJob` callers are still unscoped.** Outside these two producers,
+   `packages/agent-kernel` and `packages/onboard-kit` have their own submission
+   paths that do not mint a scope. They are outside the file list for this lane
+   and outside the gateway package. Any of them that reaches an in-process
+   `KernelService` will fail closed at the pre-flight, exactly as the gateway
+   producers did before this change. Each needs the same treatment, and each has
+   a *different* principal — which is why this was left rather than guessed at.
+3. **Scope expiry does not bind long jobs — and does not bind anything else
+   either.** The governor's scoped-class rule is literally `return !!cmd.scopeId`;
+   it never loads the row, so `expiresAt`, `status`, `maxCommands` and
+   `allowedTools` are *not enforced on the in-process dispatch path at all*. They
+   are enforced only by `routes/device-relay.ts` for relayed tool calls. So today
+   a job outliving its 1 h scope keeps actuating, and a revoked scope keeps
+   working. Making expiry real means the governor (or `KernelService`) resolving
+   the scope row before admitting — a boundary change, deliberately not made here.
+4. **Nothing marks a scope `completed` when its job ends.** The paid path already
+   leaves scopes active on purpose (`paid-job-flow.ts` section *Execution scopes —
+   left active*; revoked at expiry, not on complete), and these producers follow
+   that precedent. Combined with gap 3, an active scope is effectively a standing
+   relay grant for `(kernelId, createdBy)` until it expires. The tighter test-job
+   budget is a mitigation for that, not a fix.
+5. **The unauthenticated fallback is a real principal in the DB.** Anything that
+   reaches these routes without auth (today: several test harnesses; in
+   production the api-gate should prevent it) mints a scope with
+   `created_by = "unauthenticated"`. Since `device-relay` matches on `createdBy`,
+   two unauthenticated callers on the same kernel would share a bucket. Rejecting
+   unauthenticated submissions outright is the right answer, but that is an
+   auth-policy change and would have required editing the 4 red tests.
+6. **`POST /api/setup/test-job` polls for its full 10 s on success.** Its loop
+   breaks only on `completed`/`failed`, but the settlement pipeline advances the
+   job row past `completed` to `evidence_stored`, so a *successful* self-test
+   always runs to the deadline and returns `evidence_stored`. Pre-existing, not
+   caused by this change; the new test asserts it as-is (evidence bundle present,
+   row in a terminal success state) rather than papering over it. It is why that
+   one test takes ~10 s.
+
+### Commits
+
+```
+$ git log --oneline b6c9c771..HEAD
+b2d23c56 jobrunner-safety-producer: tests for producer-side execution-scope minting
+8df9699d jobrunner-safety-producer: mint an execution scope at the two in-process job producers
+```
+
+(this report section is committed on top)
