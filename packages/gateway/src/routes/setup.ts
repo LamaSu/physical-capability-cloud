@@ -14,6 +14,10 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
+import {
+  mintExecutionScope,
+  UNAUTHENTICATED_PRINCIPAL,
+} from "../services/execution-scope-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
@@ -715,12 +719,16 @@ export async function setupRoutes(app: FastifyInstance) {
     const startTime = Date.now();
 
     // Insert a job record into the DB so status polling works
+    // `capabilityType` escapes this block because the execution scope minted
+    // below derives its allowed write-tool set from it.
+    let capabilityType: string | undefined;
     try {
       const repos = getRepos();
       let capabilityId: string | undefined;
       try {
         const caps = repos.capabilities.findByKernel(resolvedKernelId);
         capabilityId = caps[0]?.id;
+        capabilityType = caps[0]?.type;
       } catch {
         // No capability found — that's okay for a test job
       }
@@ -808,6 +816,45 @@ export async function setupRoutes(app: FastifyInstance) {
       };
     }
 
+    // ── Mint the execution scope for this test job ──────────────────────
+    // The onboarding self-test actuates a real device, so it needs a real
+    // grant: JobRunner classifies load_gcode/start as "scoped" and
+    // KernelService refuses to mint a scope for itself. The principal is the
+    // API-key holder running the self-test.
+    //
+    // Budget is deliberately tighter than the paid-job path's (200 commands /
+    // 5 retries / 1 h): this is a one-shot self-test that the route itself
+    // waits at most 10 s for, and routes/device-relay.ts resolves an active
+    // scope by (kernelId, createdBy, status) without filtering on jobId — so a
+    // long-lived, generous grant minted here would widen what the same
+    // principal can relay to that kernel afterwards.
+    //
+    // scopeId/agentDid are derived here, never read from the request body.
+    const principal =
+      (req as any).operatorId ?? (req as any).apiKeyId ?? UNAUTHENTICATED_PRINCIPAL;
+    let scope;
+    try {
+      scope = mintExecutionScope({
+        kernelId: resolvedKernelId,
+        jobId,
+        createdBy: principal,
+        capabilityType,
+        maxCommands: 50,
+        maxRetries: 1,
+        ttlMs: 15 * 60_000, // 15 minutes
+      });
+    } catch (err) {
+      // Never fall through and submit unscoped — the boundary would deny it
+      // and the operator would see a misleading safety-gateway error instead
+      // of the real cause.
+      return reply.code(500).send({
+        error: "execution_scope_mint_failed",
+        message: err instanceof Error ? err.message : "Unknown error",
+        jobId,
+        duration: Date.now() - startTime,
+      });
+    }
+
     // Submit the job
     let submitResult: { jobId: string; deviceId: string; status: string };
     try {
@@ -816,6 +863,8 @@ export async function setupRoutes(app: FastifyInstance) {
         stepId,
         deviceId,
         assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+        scopeId: scope.scopeId,
+        agentDid: scope.agentDid,
       });
     } catch (err) {
       return reply.code(500).send({

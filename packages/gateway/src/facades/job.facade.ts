@@ -23,6 +23,10 @@ import {
   populateJobList,
 } from "./populators/job.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
+import {
+  mintExecutionScope,
+  UNAUTHENTICATED_PRINCIPAL,
+} from "../services/execution-scope-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -288,11 +292,54 @@ export class JobFacade extends BaseFacade {
         return { jobId, deviceId: null, status: "queued" as const };
       }
 
+      // ── Mint the execution scope for this job ────────────────────────────
+      // The job row exists; the dispatch has not happened yet. KernelService
+      // classifies a job's actuation commands as "scoped" and refuses to mint
+      // a scope of its own, so this producer — which knows the authenticated
+      // principal — is the one that grants it. A mint failure aborts the
+      // submission: we never fall through and dispatch unscoped.
+      //
+      // `scopeId`/`agentDid` are derived here and NEVER read off `body`. The
+      // route's body schema is additionalProperties:true, so a caller can put
+      // a `scopeId` in the payload; it is ignored. Honouring it would let a
+      // caller present a grant issued to somebody else (routes/device-relay.ts
+      // resolves active scopes by kernelId+createdBy, not by job ownership).
+      const principal = actorId ?? UNAUTHENTICATED_PRINCIPAL;
+      let scope;
+      try {
+        scope = mintExecutionScope({
+          kernelId,
+          jobId,
+          createdBy: principal,
+          capabilityType:
+            body.capabilityType ??
+            (resolvedCapabilityId
+              ? this.repos.capabilities.findById(resolvedCapabilityId)?.type
+              : undefined),
+        });
+      } catch (error) {
+        try {
+          this.repos.jobs.updateStatus(jobId, "failed");
+        } catch {
+          // best-effort rollback
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`execution_scope_mint_failed: ${detail}`);
+      }
+
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc.submitJob({ jobId, stepId, deviceId, gcodeHash, assuranceTier });
+        const result = await svc.submitJob({
+          jobId,
+          stepId,
+          deviceId,
+          gcodeHash,
+          assuranceTier,
+          scopeId: scope.scopeId,
+          agentDid: scope.agentDid,
+        });
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, deviceId: result.deviceId },
+          metadata: { kernelId, stepId, deviceId: result.deviceId, scopeId: scope.scopeId },
         });
         trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId }, actorId);
         auditService.log({
@@ -301,7 +348,15 @@ export class JobFacade extends BaseFacade {
           resourceType: "job",
           resourceId: result.jobId,
           action: "create",
-          metadata: { kernelId, stepId, deviceId: result.deviceId, assuranceTier },
+          metadata: {
+            kernelId,
+            stepId,
+            deviceId: result.deviceId,
+            assuranceTier,
+            // Which grant authorised this dispatch, and to whom it was issued.
+            scopeId: scope.scopeId,
+            scopeCreatedBy: principal,
+          },
           ip,
           userAgent,
         });
