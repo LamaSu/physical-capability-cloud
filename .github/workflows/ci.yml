@@ -36,6 +36,9 @@ jobs:
       - name: Type check
         run: pnpm -r exec tsc --noEmit
 
+      - name: Type check (browser kit — excluded from the generic tsc)
+        run: pnpm --filter @pcc/gateway typecheck:browser
+
       - name: Agent-pack onboarding smoke (skipped when ANTHROPIC_API_KEY absent)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
