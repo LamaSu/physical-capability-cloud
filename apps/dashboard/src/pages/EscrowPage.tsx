@@ -57,7 +57,8 @@ export function EscrowPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white/80">{esc.id}</span>
-                    <GlowBadge color={esc.status === "active" ? "gold" : esc.status === "funded" ? "gray" : "green"}>
+                    {/* money honesty: exact map, gray DEFAULT -- refunded/disputed/created/unknown must NOT render green (was green-by-default). Matches MilestoneTimeline + read-route contract rule 1. */}
+                    <GlowBadge color={esc.status === "completed" ? "green" : esc.status === "disputed" ? "red" : esc.status === "active" ? "gold" : "gray"}>
                       {esc.status}
                     </GlowBadge>
                   </div>

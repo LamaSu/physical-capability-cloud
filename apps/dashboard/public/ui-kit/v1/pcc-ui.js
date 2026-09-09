@@ -293,15 +293,57 @@
     }
   }
 
-  // Status → semantic pill class (hue = meaning only).
-  function statusClass(s) {
-    var t = String(s == null ? '' : s).toLowerCase();
-    if (/(settl|releas|complet|done|paid|funded|success|approved|active)/.test(t)) return 'st-settled';
-    if (/(fail|error|denied|dispute|cancel|reject)/.test(t)) return 'st-failed';
-    if (/(wait|pending|queued|paused|review|created|needs)/.test(t)) return 'st-waiting';
-    if (/(run|progress|stream|building|in_progress)/.test(t)) return 'st-running';
-    return '';
+  // Status -> semantic pill class (hue = meaning only).
+  // MONEY HONESTY (read-route contract sec A + rule 1): settlement state is mapped by EXACT
+  // normalized key, NEVER by substring -- "funded" must not green "refunded"/"underfunded",
+  // "releas" must not green "unreleased", "complet" must not green "incomplete". A refund is a
+  // FINAL settlement where the operator was NOT paid -> never green. Allocated-not-final and any
+  // unmapped/unknown status FAIL CLOSED to a neutral pill, never "settled". Conformance target:
+  // the sec-A 10-state table + the legacy EscrowSummaryDTO enum.
+  // <status-map v1> -- extracted verbatim by test/status-map.conformance.test.mjs; keep the markers.
+  function normStatus(s) {
+    return String(s == null ? '' : s).trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   }
+  // key -> [pillClass, honest label]. NEVER map a non-release money state to st-settled (green).
+  var SETTLEMENT_STATES = {
+    // V-next sec-A finalState / unitState (the 10-state settlement machine)
+    SETTLED_RELEASED:  ['st-settled',  'operator distribution discharged'],
+    SETTLED_REFUNDED:  ['st-refunded', 'payer refunded - operator NOT paid'],
+    RELEASE_ALLOCATED: ['st-waiting',  'release allocated - payment incomplete'],
+    REFUND_ALLOCATED:  ['st-waiting',  'refund allocated - refund incomplete'],
+    AWAITING_FUNDING:  ['st-waiting',  'awaiting funding'],
+    FUNDED_ACTIVE:     ['st-running',  'active'],
+    PRIMARY_ASSERTED:  ['st-waiting',  'in a challenge window'],
+    CHALLENGED:        ['st-waiting',  'challenged - appeal running'],
+    BACKUP_PENDING:    ['st-waiting',  'escalated to backup'],
+    BACKUP_ASSERTED:   ['st-waiting',  'backup asserted'],
+    // legacy EscrowSummaryDTO status
+    CREATED:   ['st-waiting',  'escrow created - unfunded'],
+    FUNDED:    ['st-waiting',  'funds held - not released'],
+    ACTIVE:    ['st-running',  'active'],
+    COMPLETED: ['st-settled',  'released'],
+    DISPUTED:  ['st-failed',   'disputed'],
+    REFUNDED:  ['st-refunded', 'payer refunded - operator NOT paid']
+  };
+  // Generic (non-money) run/action states -- safe to tone by exact key.
+  var GENERIC_STATES = {
+    RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
+    PENDING: 'st-waiting', QUEUED: 'st-waiting', WAITING: 'st-waiting', PAUSED: 'st-waiting', REVIEW: 'st-waiting', CONFIRM: 'st-waiting', NEEDS_INPUT: 'st-waiting', NEEDS_YOU: 'st-waiting',
+    ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
+    DONE: 'st-settled', COMPLETE: 'st-settled', OK: 'st-settled', SUCCESS: 'st-settled', SUCCEEDED: 'st-settled', RESOLVED: 'st-settled', READY: 'st-settled'
+  };
+  function statusClass(s) {
+    var k = normStatus(s);
+    if (Object.prototype.hasOwnProperty.call(SETTLEMENT_STATES, k)) return SETTLEMENT_STATES[k][0];
+    if (Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return GENERIC_STATES[k];
+    return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
+  }
+  // Honest sec-A direction label for a money status; null for non-settlement/unknown.
+  function settlementLabel(s) {
+    var k = normStatus(s);
+    return Object.prototype.hasOwnProperty.call(SETTLEMENT_STATES, k) ? SETTLEMENT_STATES[k][1] : null;
+  }
+  // </status-map v1>
 
   // Pull the first array out of a response (for list windows without a select).
   function firstArray(resp) {
@@ -929,7 +971,7 @@
       amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
       amtRow.appendChild(el('span', 'pcc-receipt-cur', ' ' + currency));
       wrap._body.appendChild(amtRow);
-      var status = e.status || (e.releasedCount ? 'settled' : 'pending');
+      var status = e.status != null ? e.status : 'unknown'; // honest: do NOT infer 'settled' from releasedCount (contract rule 12 -- never key settlement off count/receipt existence)
       var pay = el('div', 'pcc-receipt-parties');
       pay.appendChild(el('span', 'pcc-mono', String(e.payer || e.funder || 'payer')));
       pay.appendChild(el('span', 'pcc-arrow', '→'));
@@ -937,6 +979,8 @@
       wrap._body.appendChild(pay);
       var railRow = el('div', 'pcc-receipt-rail');
       railRow.appendChild(el('span', 'pcc-pill ' + statusClass(status), String(status)));
+      var _slabel = settlementLabel(status);
+      if (_slabel) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + _slabel));
       railRow.appendChild(el('span', 'pcc-muted', ' · ' + (e.rail || 'escrow-milestone')));
       wrap._body.appendChild(railRow);
       // timeline of pcc.* / escrow events
@@ -1436,6 +1480,8 @@
       '.pcc-pill.st-waiting{background:var(--wait-dim);color:var(--wait);}',
       '.pcc-pill.st-failed{background:var(--deny-dim);color:var(--deny);}',
       '.pcc-pill.st-running{background:var(--info-dim);color:var(--info);}',
+      '.pcc-pill.st-refunded{background:var(--wait-dim);color:var(--wait);}',
+      '.pcc-pill.st-unknown{background:var(--surface-3);color:var(--ink-3);}',
       /* type helpers */
       '.pcc-muted{color:var(--ink-3);font:400 13px/18px var(--font);}',
       '.pcc-mono{font-family:var(--mono);font-size:12px;color:var(--ink-3);}',
