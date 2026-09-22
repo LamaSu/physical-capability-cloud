@@ -3,22 +3,17 @@ import { useNavigate } from "react-router-dom";
 import { WizardStepContent, GlassPanel, GlowBadge } from "@pcc/ui";
 import { useOnboardWizardStore } from "../../stores/onboard-wizard-store.js";
 import { apiPost } from "../../lib/api.js";
-import type {
-  GenerateConfigResponse,
-  RegisterDeviceResponse,
-  TestJobResponse,
-} from "../../lib/api.js";
+import type { TestJobResponse } from "../../lib/api.js";
+import { registerMachine } from "./register-machine.js";
+import type { RegistrationOutcome } from "./register-machine.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface SubmitState {
-  status: "idle" | "submitting" | "success" | "error";
-  errorMessage?: string;
-  registeredDeviceId?: string;
-  kernelId?: string;
-}
+type SubmitState =
+  | { status: "idle" | "submitting" }
+  | RegistrationOutcome;
 
 // ---------------------------------------------------------------------------
 // Component
@@ -45,103 +40,26 @@ export function Step7_Review() {
   }>({ status: "idle" });
 
   // ---------------------------------------------------------------------------
-  // Step 1: generate-config → register-device → /api/devices/register
+  // Register machine
   // ---------------------------------------------------------------------------
 
   const handleSubmit = async () => {
+    if (submit.status === "submitting") return;
+
     setSubmit({ status: "submitting" });
+    setTestJob({ status: "idle" });
 
-    // Build a device description from wizard state
-    const deviceName = identity.name || "unnamed-device";
-    const kernelId = `kernel_${deviceName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}_${Date.now()}`;
+    const outcome = await registerMachine(
+      {
+        name: identity.name || "",
+        manufacturer: identity.manufacturer,
+        model: identity.model,
+        capabilityIds: capabilities.map((c) => c.id),
+      },
+      { post: apiPost },
+    );
 
-    try {
-      // 1. Generate kernel config
-      let generatedConfig: GenerateConfigResponse | null = null;
-      try {
-        generatedConfig = await apiPost<GenerateConfigResponse>("/setup/generate-config", {
-          kernelId,
-          devices: [
-            {
-              name: deviceName,
-              type: "machine",
-              adapterType: "mock",
-            },
-          ],
-          mockMode: true,
-        });
-      } catch (err) {
-        // Non-fatal — gateway may be offline; continue in offline mode
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!msg.includes("Failed to fetch") && !msg.includes("NetworkError") && !msg.includes("fetch")) {
-          throw err;
-        }
-        // Swallow network errors — fallback mode
-      }
-
-      const resolvedKernelId = generatedConfig?.config.kernelId ?? kernelId;
-      const resolvedDeviceId =
-        generatedConfig?.config.devices[0]?.id ??
-        `dev_${deviceName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}_000`;
-
-      // 2. Register device via setup endpoint
-      let registeredDevice: RegisterDeviceResponse | null = null;
-      try {
-        registeredDevice = await apiPost<RegisterDeviceResponse>("/setup/register-device", {
-          kernelId: resolvedKernelId,
-          deviceId: resolvedDeviceId,
-          type: "machine",
-          model: [identity.manufacturer, identity.model].filter(Boolean).join(" ") || "unknown",
-          adapterType: "mock",
-          adapterConfig: { mockMode: true },
-          capabilities: capabilities.map((c) => c.id),
-        });
-      } catch (err) {
-        // Fallback: try /api/devices/register
-        const msg = err instanceof Error ? err.message : String(err);
-        // kernel_not_found is expected if DB is empty — try devices/register
-        if (msg.includes("kernel_not_found") || msg.includes("kernel not found")) {
-          // best-effort — ignore
-        } else if (!msg.includes("Failed to fetch") && !msg.includes("NetworkError") && !msg.includes("fetch")) {
-          throw err;
-        }
-      }
-
-      // 3. Register via /api/devices/register (broader registration)
-      try {
-        await apiPost<{ device: unknown }>("/devices/register", {
-          kernelId: resolvedKernelId,
-          id: resolvedDeviceId,
-          type: "machine",
-          model: [identity.manufacturer, identity.model].filter(Boolean).join(" ") || "unknown",
-          adapterType: "mock",
-          adapterConfig: { mockMode: true },
-          capabilities: capabilities.map((c) => c.id),
-        });
-      } catch {
-        // best-effort — DB may not have the kernel, that's okay in demo
-      }
-
-      setSubmit({
-        status: "success",
-        registeredDeviceId: registeredDevice?.device?.id ?? resolvedDeviceId,
-        kernelId: resolvedKernelId,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      // If gateway is completely offline, treat as offline success
-      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
-        const fallbackKernelId = kernelId;
-        const fallbackDeviceId = `dev_${deviceName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}_000`;
-        setSubmit({
-          status: "success",
-          registeredDeviceId: fallbackDeviceId,
-          kernelId: fallbackKernelId,
-        });
-      } else {
-        setSubmit({ status: "error", errorMessage: msg });
-      }
-    }
+    setSubmit(outcome);
   };
 
   // ---------------------------------------------------------------------------
@@ -149,11 +67,13 @@ export function Step7_Review() {
   // ---------------------------------------------------------------------------
 
   const handleRunTestJob = async () => {
+    if (submit.status !== "confirmed") return;
+
     setTestJob({ status: "running" });
     try {
       const result = await apiPost<TestJobResponse>("/setup/test-job", {
         kernelId: submit.kernelId,
-        deviceId: submit.registeredDeviceId,
+        deviceId: submit.deviceId,
         assuranceTier: 0,
       });
       setTestJob({ status: "done", result });
@@ -173,19 +93,19 @@ export function Step7_Review() {
   };
 
   // ---------------------------------------------------------------------------
-  // Render — success state
+  // Render — confirmed state
   // ---------------------------------------------------------------------------
 
-  if (submit.status === "success") {
+  if (submit.status === "confirmed") {
     return (
       <WizardStepContent
         title="Machine Registered"
-        subtitle="Your machine has been registered on the PCCP network."
+        subtitle="Your machine has been registered on the PCC network."
         onNext={() => navigate("/operator")}
         nextLabel="Go to Operator Dashboard"
       >
         <div className="space-y-4 max-w-xl">
-          {/* Success indicator */}
+          {/* Confirmation indicator */}
           <div className="flex justify-center py-2">
             <div className="w-16 h-16 rounded-full bg-green-500/15 border border-green-500/30 flex items-center justify-center">
               <span className="text-2xl text-green-400">&#10003;</span>
@@ -198,7 +118,7 @@ export function Step7_Review() {
               <div>
                 <div className="text-[10px] text-white/30 uppercase tracking-wider">Device ID</div>
                 <div className="text-xs text-white/70 font-mono truncate">
-                  {submit.registeredDeviceId}
+                  {submit.deviceId}
                 </div>
               </div>
               <div>
@@ -251,6 +171,58 @@ export function Step7_Review() {
               <div className="text-xs text-white/40">{testJob.errorMessage}</div>
             </div>
           )}
+        </div>
+      </WizardStepContent>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render — unconfirmed state
+  // ---------------------------------------------------------------------------
+
+  if (submit.status === "unconfirmed") {
+    return (
+      <WizardStepContent
+        title="Registration Not Confirmed"
+        subtitle="The gateway could not be reached, so your machine is not registered yet."
+        onBack={prevStep}
+        onNext={handleSubmit}
+        nextLabel="Try Again"
+      >
+        <div className="space-y-4 max-w-xl">
+          <div
+            role="alert"
+            className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/25 space-y-2"
+          >
+            <div className="text-sm font-medium text-amber-400">
+              Machine not registered yet
+            </div>
+            <p className="text-xs text-white/50">{submit.reason}</p>
+          </div>
+
+          <GlassPanel padding="md" className="space-y-2 border-amber-500/20">
+            <div className="text-xs font-medium text-amber-400">
+              Proposed IDs — not yet registered
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-[10px] text-white/40 uppercase tracking-wider">
+                  Proposed Device ID (not registered)
+                </div>
+                <div className="text-xs text-white/70 font-mono truncate">
+                  {submit.deviceId}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] text-white/40 uppercase tracking-wider">
+                  Proposed Kernel ID (not registered)
+                </div>
+                <div className="text-xs text-white/70 font-mono truncate">
+                  {submit.kernelId}
+                </div>
+              </div>
+            </div>
+          </GlassPanel>
         </div>
       </WizardStepContent>
     );
@@ -334,12 +306,12 @@ export function Step7_Review() {
         {submit.status === "submitting" && (
           <div className="flex items-center gap-2 p-3 rounded-lg bg-white/[0.02] border border-white/[0.06]">
             <div className="w-3 h-3 border border-green-500/50 border-t-green-500 rounded-full animate-spin" />
-            <div className="text-xs text-white/40">Registering machine on PCCP network...</div>
+            <div className="text-xs text-white/40">Registering machine on PCC network...</div>
           </div>
         )}
 
         {/* Error state */}
-        {submit.status === "error" && (
+        {submit.status === "failed" && (
           <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 space-y-2">
             <div className="text-xs text-red-400 font-medium">Registration failed</div>
             <div className="text-xs text-white/40">{submit.errorMessage}</div>
