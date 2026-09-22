@@ -135,7 +135,7 @@ API base: `https://capability.network`
 | GET | `/api/job-offers/open?capabilityType=` | Open offers operators can claim. |
 | GET | `/api/storage/:cid?public=true` | Retrieve a public blob (STL, photo, etc.). |
 | POST | `/api/auth/provision` | Provision a Bearer key. Body: `{ email }` or `{ walletAddress }`. |
-| GET | `/agent-package.json` | The full spec — 249 tools + system_prompt + examples. |
+| GET | `/agent-package.json` | The full spec — 253 tools + system_prompt + examples. |
 | GET | `/skills/pcc.md` | This file. |
 
 ### Bearer-required endpoints
@@ -205,7 +205,7 @@ Every response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `
 
 ## More
 
-- Full agent-package (249 tools + schemas): https://capability.network/agent-package.json
+- Full agent-package (253 tools + schemas): https://capability.network/agent-package.json
 - A2A agent card: https://capability.network/.well-known/agent-card.json
 - MCP server: see docs/quickstart/claude-desktop.md (or run `node packages/mcp-server/dist/index.js`)
 - npm packages (BYOK / programmatic): `@pcc/decompose-skill`, `@pcc/operator-agent-runtime`, `@pcc/evidence-judge`
