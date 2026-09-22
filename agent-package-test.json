@@ -1975,7 +1975,7 @@
 
     {
       "name": "approve_registration",
-      "description": "Approve a submitted machine registration (onboarding admins only). Moves it from 'submitted' or 'reviewing' to 'approved', ready for an admin to activate.",
+      "description": "Approve a submitted machine registration (admin only: requires the X-Admin-Key header). Moves it from 'submitted' or 'reviewing' to 'approved', ready for an admin to activate.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1987,7 +1987,7 @@
     },
     {
       "name": "reject_registration",
-      "description": "Reject a machine registration with a reason (onboarding admins only). The operator can see the rejection reason and resubmit.",
+      "description": "Reject a machine registration with a reason (admin only: requires the X-Admin-Key header). The operator can see the rejection reason and resubmit.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2000,7 +2000,7 @@
     },
     {
       "name": "activate_registration",
-      "description": "Activate an approved registration (onboarding admins only), making the operator's equipment live on the network and ready to accept jobs.",
+      "description": "Activate an approved registration (admin only: requires the X-Admin-Key header), making the operator's equipment live on the network and ready to accept jobs.",
       "input_schema": {
         "type": "object",
         "properties": {

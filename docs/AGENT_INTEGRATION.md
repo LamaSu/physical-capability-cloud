@@ -155,9 +155,9 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | POST | `/api/onboard/register` | Submit machine registration. Body: `MachineRegistration`. |
 | GET | `/api/onboard/registrations` | List all registrations. |
 | GET | `/api/onboard/registrations/:id` | Get registration detail. |
-| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (onboarding admins only). |
-| POST | `/api/onboard/registrations/:id/reject` | Reject a registration (onboarding admins only). Body: `{reason?}`. |
-| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration (onboarding admins only). |
+| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (admin key required). |
+| POST | `/api/onboard/registrations/:id/reject` | Reject a registration (admin key required). Body: `{reason?}`. |
+| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration (admin key required). |
 | POST | `/api/onboard/registrations/:id/prove` | Submit evidence for admin review. See §2.5. |
 | POST | `/api/onboard/redeem` | One-click agent onboarding with invite code. Body: `{inviteCode, email, password}`. |
 | GET | `/api/onboard/check/:code` | Validate invite code before redeeming. |
@@ -369,7 +369,7 @@ Evidence determines assurance tier:
 - **Tier 1**: Bundle hash + events with completion event.
 - **Tier 2**: Photo + device health + events (full proof).
 
-The evidence is recorded and the registration moves to `reviewing`. It is not approved or activated automatically at any tier: an onboarding admin (listed in `PCC_ONBOARD_ADMINS`, or `AUDIT_ADMINS` when that is unset) approves and activates it.
+The evidence is recorded and the registration moves to `reviewing`. It is not approved or activated automatically at any tier: an admin approves and activates it by calling `/approve` and `/activate` with an `X-Admin-Key` header that matches the gateway's `PCC_ADMIN_KEY`.
 
 ### 2.6 Check setup status
 

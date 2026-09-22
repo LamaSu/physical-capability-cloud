@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
@@ -21,22 +22,22 @@ import { tenantOpts } from "../config/tenant-enforce.js";
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
 // Onboarding review authority. /approve, /activate and /reject decide which
-// operators are live on the network, so only onboarding admins may call them.
-// Admins come from PCC_ONBOARD_ADMINS (comma-separated operator ids), falling
-// back to AUDIT_ADMINS, and are matched against the caller's operatorId/userId
-// (same identity source as routes/audit.ts). With no admins configured,
-// production refuses every call (fail closed); other environments stay open
-// so local development and tests keep working.
-function getOnboardAdmins(): Set<string> {
-  const raw = process.env.PCC_ONBOARD_ADMINS ?? process.env.AUDIT_ADMINS ?? "";
-  return new Set(raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
-}
-
+// operators are live on the network, so they require the shared admin secret:
+// an X-Admin-Key header matching PCC_ADMIN_KEY, the same credential that gates
+// admin actions in routes/kernel-marketplace.ts. A caller's operatorId is not
+// enough, because /api/auth/provision issues keys for any email or wallet
+// without proving ownership, so an identity allowlist could be claimed by
+// anyone who knows an admin's address. With PCC_ADMIN_KEY unset, production
+// refuses every call (fail closed); other environments stay open so local
+// development and tests keep working.
 function isOnboardAdmin(req: FastifyRequest): boolean {
-  const admins = getOnboardAdmins();
-  if (admins.size === 0) return process.env.NODE_ENV !== "production";
-  const caller = (req as any).operatorId ?? (req as any).userId;
-  return typeof caller === "string" && admins.has(caller.toLowerCase());
+  const expected = process.env.PCC_ADMIN_KEY;
+  if (!expected) return process.env.NODE_ENV !== "production";
+  const provided = req.headers["x-admin-key"];
+  if (typeof provided !== "string") return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export async function onboardRoutes(app: FastifyInstance) {
@@ -189,11 +190,11 @@ export async function onboardRoutes(app: FastifyInstance) {
     } catch { return { error: "not_found" }; }
   });
 
-  // ── Approve a registration (onboarding admins only) ──
+  // ── Approve a registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
     // Checked before the lookup so a non-admin learns nothing about which ids exist.
     if (!isOnboardAdmin(req)) {
-      return reply.status(403).send({ error: "forbidden", message: "Only onboarding admins can approve registrations" });
+      return reply.status(403).send({ error: "forbidden", message: "Approving a registration requires the admin key" });
     }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
@@ -215,10 +216,10 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: reg, approved: true };
   });
 
-  // ── Reject a registration (onboarding admins only) ──
+  // ── Reject a registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
     if (!isOnboardAdmin(req)) {
-      return reply.status(403).send({ error: "forbidden", message: "Only onboarding admins can reject registrations" });
+      return reply.status(403).send({ error: "forbidden", message: "Rejecting a registration requires the admin key" });
     }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
@@ -352,10 +353,10 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
   });
 
-  // ── Activate an approved registration (onboarding admins only) ──
+  // ── Activate an approved registration (admin key required) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
     if (!isOnboardAdmin(req)) {
-      return reply.status(403).send({ error: "forbidden", message: "Only onboarding admins can activate registrations" });
+      return reply.status(403).send({ error: "forbidden", message: "Activating a registration requires the admin key" });
     }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
