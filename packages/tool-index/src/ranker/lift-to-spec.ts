@@ -1,7 +1,7 @@
 /**
  * Adapter that lifts the @pcc/tool-index Phase 1 lightweight IndexedTool
  * into the @pcc/spec rich IndexedTool, so the HybridRanker can rank PCC's
- * own 218-tool agent-package alongside federated aggregator tools.
+ * own agent-package tools alongside federated aggregator tools.
  *
  * Defaults applied (since PCC's own tools are inherently PCC_NATIVE):
  *   - source.type = "pcc-native"

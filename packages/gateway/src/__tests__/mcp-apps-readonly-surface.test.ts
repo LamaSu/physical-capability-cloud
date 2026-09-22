@@ -192,7 +192,7 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
     const tools = await listTools(app, "/mcp", session);
     const names = toolNames(tools);
 
-    // Full surface is unchanged — the whole ~254-tool proxy catalog + render.
+    // Full surface is unchanged — every agent-package proxy tool + render + typed ops.
     expect(tools.length).toBeGreaterThanOrEqual(250);
     expect(names).toContain("render_pcc_dashboard");
     expect(names).toContain("list_kernels");

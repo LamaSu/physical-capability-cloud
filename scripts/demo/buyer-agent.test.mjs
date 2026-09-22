@@ -3,7 +3,7 @@
 //
 // The headline case runs against the REAL apps/dashboard/public/agent-package.json
 // so the PCC-tool → OpenAI-function translation is checked against production
-// data (253 tools), not a hand-written fixture that could drift.
+// data (the full tool catalog), not a hand-written fixture that could drift.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -85,9 +85,9 @@ describe("toOpenAiTools — whole array + real agent-package.json", () => {
     expect(tools[0].function.name).toBe(realPkg.tools[0].name);
   });
 
-  it("produces a valid OpenAI tool for ALL 253 real tools", () => {
+  it("produces a valid OpenAI tool for EVERY real tool", () => {
     const tools = toOpenAiTools(realPkg.tools);
-    expect(tools.length).toBeGreaterThan(200); // real package is ~253
+    expect(tools.length).toBeGreaterThan(200); // the real package has hundreds of tools
     for (const t of tools) {
       expect(t.type).toBe("function");
       expect(typeof t.function.name).toBe("string");

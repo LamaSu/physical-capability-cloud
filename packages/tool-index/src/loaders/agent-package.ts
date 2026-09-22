@@ -1,7 +1,7 @@
 /**
  * @pcc/tool-index — agent-package.json loader
  *
- * Reads PCC's canonical agent-package.json (the 218-tool catalog) and maps
+ * Reads PCC's canonical agent-package.json (the agent tool catalog) and maps
  * each tool to an IndexedTool with source="pcc-mcp".
  *
  * Schema mapping (input → IndexedTool):

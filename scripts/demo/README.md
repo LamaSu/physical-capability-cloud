@@ -63,7 +63,7 @@ in the repo.
 | `AISA_BASE` | `https://api.aisa.one/v1` | OpenAI-compatible base |
 | `AISA_MODEL` | `deepseek-v3.1` | Model id |
 | `AGENT_PACKAGE_URL` | `https://capability.network/agent-package.json` | Tool source (file path OK for hermetic runs) |
-| `BUYER_MAX_TOOLS` | all (253) | Cap tools exposed to the model (cost control) |
+| `BUYER_MAX_TOOLS` | all | Cap tools exposed to the model (cost control) |
 | `BUYER_MAX_TURNS` / `BUYER_MAX_TOOL_CALLS` | `4` / `3` | Brain budget ceilings |
 | `BUYER_POLL_ATTEMPTS` / `BUYER_POLL_DELAY_MS` | `5` / `2000` | Offer polling |
 | `TRANSCRIPT_PATH` | `ai/research/buyer-transcript.md` | Transcript output |
@@ -75,7 +75,7 @@ default keeps you on localhost.
 
 Pure helpers (`toOpenAiTool[s]`, `buildEndpointMap`, `buildToolRequest`,
 `extractDecomposition`, `deriveCapabilityType`, `buildAisaPayload`, …) are
-verified by `buyer-agent.test.mjs` — including the whole real 253-tool
+verified by `buyer-agent.test.mjs` — including every tool in the real
 `agent-package.json`. Run:
 
 ```bash

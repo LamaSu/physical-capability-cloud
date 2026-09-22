@@ -27,7 +27,7 @@ It is grounded in the real substrate:
 | Result type | `packages/spec/src/types/result.ts` (`PCCError`, `errRich`, `stampTrace`, `Errors.*WithHint`) | rich error envelope (trace_id + hint + docs) — **shipped** |
 | Trace id | `packages/gateway/src/middleware/trace-id.ts` (`tr_<16hex>`, `x-pcc-trace-id`) | per-request correlation id, OTel span attr `pcc.trace_id` — **shipped** |
 | Feedback | `packages/gateway/src/routes/agent-feedback.ts` (`POST /api/feedback/agent-report`) | `pcc_report` sink → `auditService` + PostHog + OTel — **shipped** |
-| Agent package | `apps/dashboard/public/agent-package.json` (v2.14.0, 249 tools) | `pcc_report` tool + system_prompt friction line — **shipped** |
+| Agent package | `apps/dashboard/public/agent-package.json` (v2.14.0 when this shipped) | `pcc_report` tool + system_prompt friction line — **shipped** |
 | Agent health | `packages/gateway/src/routes/agent-heartbeat.ts` (`GET /api/agents/health`) | liveness model the canary heartbeats into |
 | OTel | `packages/gateway/src/otel.ts` (`OTLPTraceExporter` when `OTEL_EXPORTER_OTLP_ENDPOINT` set) | the export path the sink subscribes to |
 | Audit sink | `packages/gateway/src/services/audit-service.ts` (`log`/`query`/`stats`) | durable append-only event store + ETL source |

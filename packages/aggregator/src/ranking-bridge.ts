@@ -4,7 +4,7 @@
  * The registry stores IndexedTool entries. The hybrid ranker operates on
  * the same spec IndexedTool shape — this bridge wires the two together
  * so the gateway routes get one ranker abstraction across both
- * @pcc/tool-index (PCC's own 218 tools) and @pcc/aggregator (the
+ * @pcc/tool-index (PCC's own agent-package tools) and @pcc/aggregator (the
  * federated tool catalog).
  *
  * Lifecycle: the bridge holds a HybridRanker instance, mirrors registry

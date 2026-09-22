@@ -1,8 +1,8 @@
 /**
  * @pcc/tool-index — public surface
  *
- * Phase 1 of the BigTool-style retrieval substrate for PCC's 218-tool
- * agent-package.json catalog. Phase 3 will add loaders for external MCP
+ * Phase 1 of the BigTool-style retrieval substrate for PCC's own
+ * agent-package.json tool catalog. Phase 3 will add loaders for external MCP
  * servers, OpenAPI specs, and skills — the IndexedTool shape is designed
  * to be source-agnostic for that future work.
  */
@@ -77,7 +77,7 @@ export {
   resolveShadowLogPath,
 } from "./ranker/shadow-telemetry.js";
 
-// ── Lightweight → spec adapter (for PCC's own 218-tool catalog) ──────────
+// ── Lightweight → spec adapter (for PCC's own agent-package catalog) ──────────
 export {
   liftLightweightTool,
   liftLightweightTools,

@@ -6,7 +6,7 @@
  *   POST /api/tools/reload   — auth-gated rebuild
  *
  * The index is seeded from a fixture agent-package.json so tests do not
- * depend on the live 218-tool file (which changes under us as the catalog
+ * depend on the live catalog file (which changes under us as the catalog
  * grows). PCC_AGENT_PACKAGE_PATH points at the fixture; PCC_EMBEDDING_PROVIDER
  * is left unset so the deterministic hash fallback is used (no network).
  */
