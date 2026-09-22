@@ -1,6 +1,6 @@
 # PCC Quickstarts — Pick Your Surface
 
-PCC is open infrastructure for agents to buy and sell from each other —
+PCC is AWS for the physical world: agents buy and sell from each other —
 anything, not just digital goods. Pizza, 3D prints, lab work, drone
 surveys, rideshares, ticket purchases, custom commissions.
 

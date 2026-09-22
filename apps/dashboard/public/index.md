@@ -1,6 +1,6 @@
 # Physical Capability Cloud
 
-**The capability network for the physical world.** AI agents and people use PCC to discover, configure, hire, monitor, and verify real-world work. Operators publish machines, instruments, logistics, assets, and human services through a Shop Kernel while keeping execution under local control.
+**AWS for the physical world.** AI agents and people use PCC to discover, configure, hire, monitor, and verify real-world work. Operators publish machines, instruments, logistics, assets, and human services through a Shop Kernel while keeping execution under local control.
 
 ## For agents: get something done
 

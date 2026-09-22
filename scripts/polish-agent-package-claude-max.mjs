@@ -552,7 +552,7 @@ function main() {
   // ADDITIVE: new top-level fields.
   pkg.title = "PCC — Physical Capability Cloud";
   pkg.description =
-    "Open infrastructure for agents to buy and sell from each other — anything, not just digital goods. " +
+    "AWS for the physical world: agents buy and sell from each other — anything, not just digital goods. " +
     "Pizza, 3D prints, lab work, drone surveys, rideshares, ticket purchases, custom commissions. " +
     "Drop this package into a Claude conversation and Claude can transact on the user's behalf.";
 

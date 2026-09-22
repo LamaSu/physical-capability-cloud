@@ -2,7 +2,7 @@
   "schema": "unbrowse-skill-manifest/1.0",
   "domain": "pcc-gateway-production.up.railway.app",
   "name": "Physical Capability Cloud",
-  "description": "Verifiable on-chain skill wrapper for any physical capability. Discover, price, and orchestrate manufacturing capabilities — 3D printing, CNC machining, HPLC analysis, and more.",
+  "description": "AWS for the physical world. Discover, price, and orchestrate manufacturing capabilities — 3D printing, CNC machining, HPLC analysis, and more.",
   "categories": ["manufacturing", "defi", "ai-agents", "physical-ai", "depin"],
   "endpoints": [
     {

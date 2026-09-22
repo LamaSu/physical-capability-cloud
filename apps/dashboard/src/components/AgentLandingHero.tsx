@@ -1,6 +1,7 @@
 import React from "react";
 import { HoloSkills } from "./HoloSkills.js";
 import { AGENT_PACKAGE_TOOL_COUNT } from "../lib/agent-package-meta.js";
+import { PCC_POSITIONING_LINE } from "../lib/positioning.js";
 
 /**
  * AgentLandingHero — the agent-first hero for capability.network.
@@ -43,7 +44,7 @@ export function AgentLandingHero() {
         </div>
 
         <div className="alh-hero">
-          <div className="alh-eyebrow">The cloud instance for the physical world</div>
+          <div className="alh-eyebrow">{PCC_POSITIONING_LINE}</div>
           <h1>
             Put any <span className="em">capability</span> on the network.
             <br />
