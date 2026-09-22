@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { AGENT_PACKAGE_TOOL_COUNT } from "../lib/agent-package-meta.js";
 
 // ---------------------------------------------------------------------------
 // Google Fonts — Signal mood palette
@@ -1898,7 +1899,7 @@ function ForOperatorsSection() {
                 }}
               >
                 Installs the node, auto-detects hardware, generates keys, and joins the network.
-                Your 207-tool agent package is served at{" "}
+                Your {AGENT_PACKAGE_TOOL_COUNT}-tool agent package is served at{" "}
                 <span style={{ fontFamily: mono, color: TEXT_MUTED }}>/agent-package.json</span>{" "}
                 automatically.
               </p>

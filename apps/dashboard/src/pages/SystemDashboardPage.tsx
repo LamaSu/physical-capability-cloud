@@ -3,6 +3,7 @@ import { GlassPanel } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { AGENT_PACKAGE_TOOL_COUNT } from "../lib/agent-package-meta.js";
 
 // ---------------------------------------------------------------------------
 // Types — mirrors /api/telemetry/system response shape
@@ -716,7 +717,7 @@ function makeFallbackData(): SystemPayload {
     evidence: { bundlesStored: 0, bundlesEncrypted: 0, ipfsUploads: 0, zkProofsAnchored: 0 },
     storage: { storageMode: "mock", encryptionMode: "mock" },
     near: { quotes: 0, intentsSubmitted: 0, status: "mock" },
-    agentPackage: { version: "2.0.0", toolCount: 154, lastUpdated: null },
+    agentPackage: { version: "2.0.0", toolCount: AGENT_PACKAGE_TOOL_COUNT, lastUpdated: null },
     a2a: { conversations: 0, intentsProcessed: 0, toolCalls: 0 },
     jobs: { total: 0, pending: 0, active: 0, completed: 0, failed: 0 },
     sponsors: {

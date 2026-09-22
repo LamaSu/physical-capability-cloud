@@ -18,6 +18,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GlassPanel } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
+import { AGENT_PACKAGE_TOOL_COUNT } from "../lib/agent-package-meta.js";
 
 const COPY_PASTE_SNIPPET = `I want to onboard to Physical Capability Cloud (PCC) at https://capability.network.
 
@@ -181,7 +182,7 @@ export function OnboardLandingPage(): React.ReactElement {
         <HeroCard
           badge="1 — fastest"
           title="Chat right now"
-          subtitle="No install. No keys. Talk to PCC's agent live in your browser. It calls the same 249-tool agent-pack you'd use anywhere else."
+          subtitle={`No install. No keys. Talk to PCC's agent live in your browser. It calls the same ${AGENT_PACKAGE_TOOL_COUNT}-tool agent-pack you'd use anywhere else.`}
           glow="green"
           cta={{ label: "Start a conversation →", onClick: () => navigate("/onboard/chat") }}
         >
