@@ -4,7 +4,7 @@ import { WizardStepContent, GlassPanel, GlowBadge } from "@pcc/ui";
 import { useOnboardWizardStore } from "../../stores/onboard-wizard-store.js";
 import { apiPost } from "../../lib/api.js";
 import type { TestJobResponse } from "../../lib/api.js";
-import { registerMachine } from "./register-machine.js";
+import { describeRegistrationFailure, registerMachine } from "./register-machine.js";
 import type { RegistrationOutcome } from "./register-machine.js";
 
 // ---------------------------------------------------------------------------
@@ -232,6 +232,9 @@ export function Step7_Review() {
   // Render — review state
   // ---------------------------------------------------------------------------
 
+  const failureExplanation =
+    submit.status === "failed" ? describeRegistrationFailure(submit.errorMessage) : null;
+
   return (
     <WizardStepContent
       title="Review & Submit"
@@ -312,9 +315,12 @@ export function Step7_Review() {
 
         {/* Error state */}
         {submit.status === "failed" && (
-          <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 space-y-2">
+          <div role="alert" className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 space-y-2">
             <div className="text-xs text-red-400 font-medium">Registration failed</div>
             <div className="text-xs text-white/40">{submit.errorMessage}</div>
+            {failureExplanation && (
+              <p className="text-xs text-white/60">{failureExplanation}</p>
+            )}
             <div className="flex gap-2">
               <button
                 onClick={handleSubmit}

@@ -27,8 +27,8 @@ describe("Step7_Review — registration states", () => {
   });
 
   it("imports the registration orchestrator", () => {
-    expect(source).toContain(
-      'import { registerMachine } from "./register-machine.js";',
+    expect(source).toMatch(
+      /import\s*\{[^}]*\bregisterMachine\b[^}]*\}\s*from\s*"\.\/register-machine\.js";/,
     );
   });
 });

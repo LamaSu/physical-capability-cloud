@@ -50,6 +50,17 @@ export function isNetworkError(err: unknown): boolean {
   );
 }
 
+export function describeRegistrationFailure(errorMessage: string): string | null {
+  if (
+    /kernel[_ ]not[_ ]found/i.test(errorMessage) ||
+    /kernel\s+(['"])[^'"]+\1\s+not\s+found/i.test(errorMessage)
+  ) {
+    return "The gateway has no registered site (kernel) for this machine yet, so the device could not be attached and nothing was registered.";
+  }
+
+  return null;
+}
+
 export async function registerMachine(
   input: RegisterMachineInput,
   deps: RegisterMachineDeps,

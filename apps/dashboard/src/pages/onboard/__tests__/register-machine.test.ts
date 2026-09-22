@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isNetworkError, registerMachine } from "../register-machine.js";
+import { describeRegistrationFailure, isNetworkError, registerMachine } from "../register-machine.js";
 import type {
   RegisterMachineDeps,
   RegisterMachineInput,
@@ -380,5 +380,21 @@ describe("isNetworkError", () => {
     new Error("Permission denied"),
   ])("does not classify server rejection %s as a network error", (err) => {
     expect(isNetworkError(err)).toBe(false);
+  });
+});
+
+describe("describeRegistrationFailure", () => {
+  it.each([
+    "kernel_not_found",
+    "KERNEL NOT FOUND",
+    "Kernel 'kernel_x' not found",
+  ])("explains the missing registered site for %s", (errorMessage) => {
+    expect(describeRegistrationFailure(errorMessage)).toBe(
+      "The gateway has no registered site (kernel) for this machine yet, so the device could not be attached and nothing was registered.",
+    );
+  });
+
+  it("returns null for unrelated server errors", () => {
+    expect(describeRegistrationFailure("API error: 503")).toBeNull();
   });
 });
