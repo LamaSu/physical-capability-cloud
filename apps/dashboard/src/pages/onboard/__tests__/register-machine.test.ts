@@ -272,6 +272,34 @@ describe("registerMachine", () => {
     });
   });
 
+  it("does not mistake a server rejection that echoes a 'NetworkError' machine name for an outage", async () => {
+    // Found in cross-family review: the kernel id is derived from the machine
+    // name, so the gateway's own rejection message can contain "networkerror".
+    const kernelId = "kernel_networkerror_1700000000000";
+    const { deps } = fakeGateway((path) => {
+      if (path === "/setup/generate-config") {
+        return {
+          ...generatedConfig,
+          config: { ...generatedConfig.config, kernelId },
+        };
+      }
+      if (path === "/setup/register-device") {
+        throw new TypeError("Failed to fetch");
+      }
+      throw new Error(`Kernel '${kernelId}' not found`);
+    });
+
+    const outcome = await registerMachine(
+      { ...input, name: "NetworkError" },
+      deps,
+    );
+
+    expect(outcome).toEqual({
+      status: "failed",
+      errorMessage: `Kernel '${kernelId}' not found`,
+    });
+  });
+
   it("uses the unnamed-device and unknown-model fallbacks", async () => {
     const { deps, calls } = fakeGateway(() => {
       throw new TypeError("Failed to fetch");
@@ -372,6 +400,14 @@ describe("isNetworkError", () => {
 
   it("does not classify a server message containing fetch as a network error", () => {
     expect(isNetworkError(new Error("could not fetch kernel record"))).toBe(false);
+  });
+
+  it.each([
+    new Error("Kernel 'kernel_networkerror_1700000000000' not found"),
+    new Error("upstream NetworkError while proxying"),
+    new Error("device load failed validation"),
+  ])("does not classify a server message that merely contains a transport phrase: %s", (err) => {
+    expect(isNetworkError(err)).toBe(false);
   });
 
   it.each([

@@ -41,12 +41,17 @@ function getErrorMessage(err: unknown): string {
   }
 }
 
+// fetch() reports transport failures as TypeError. The message fallback accepts
+// only the exact browser/runtime transport messages: a server rejection that merely
+// CONTAINS one of these phrases (e.g. "Kernel 'kernel_networkerror_…' not found" for
+// a machine named "NetworkError") must still count as the server answering.
+const TRANSPORT_FAILURE_MESSAGE =
+  /^(?:typeerror:\s*)?(?:failed to fetch|networkerror when attempting to fetch resource\.?|network request failed|load failed)$/i;
+
 export function isNetworkError(err: unknown): boolean {
   return (
     err instanceof TypeError ||
-    /failed to fetch|networkerror|network request failed|load failed/i.test(
-      getErrorMessage(err),
-    )
+    TRANSPORT_FAILURE_MESSAGE.test(getErrorMessage(err).trim())
   );
 }
 
