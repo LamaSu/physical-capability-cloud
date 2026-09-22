@@ -1975,7 +1975,7 @@
 
     {
       "name": "approve_registration",
-      "description": "Approve a submitted machine registration. Moves it from 'submitted' to 'approved' status, enabling the operator to activate and start accepting jobs.",
+      "description": "Approve a submitted machine registration (admin only: requires the X-Admin-Key header). Moves it from 'submitted' or 'reviewing' to 'approved', ready for an admin to activate.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1987,7 +1987,7 @@
     },
     {
       "name": "reject_registration",
-      "description": "Reject a machine registration with a reason. The operator can see the rejection reason and resubmit.",
+      "description": "Reject a machine registration with a reason (admin only: requires the X-Admin-Key header). The operator can see the rejection reason and resubmit.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2000,7 +2000,7 @@
     },
     {
       "name": "activate_registration",
-      "description": "Activate an approved registration, making the operator's equipment live on the network and ready to accept jobs.",
+      "description": "Activate an approved registration (admin only: requires the X-Admin-Key header), making the operator's equipment live on the network and ready to accept jobs.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2012,7 +2012,7 @@
     },
     {
       "name": "prove_registration",
-      "description": "Fast-track: submit evidence that your device works and get auto-approved + activated immediately. No manual review needed. Submit a photo of test output, device health snapshot, or a full evidence bundle with completion events. If evidence meets requirements, registration jumps straight to 'active'.",
+      "description": "Submit evidence that your device works: a photo of test output, a device health snapshot, or an evidence bundle with completion events. The evidence is recorded and the registration moves to 'reviewing' for an onboarding admin to approve and activate. It is never activated automatically.",
       "input_schema": {
         "type": "object",
         "properties": {
