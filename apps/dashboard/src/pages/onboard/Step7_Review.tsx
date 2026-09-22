@@ -180,11 +180,13 @@ export function Step7_Review() {
   // Render — unconfirmed state
   // ---------------------------------------------------------------------------
 
+  // Nothing here may say "saved": the wizard store is in-memory only, so a
+  // reload loses the operator's details.
   if (submit.status === "unconfirmed") {
     return (
       <WizardStepContent
-        title="Registration Not Confirmed"
-        subtitle="The gateway could not be reached, so your machine is not registered yet."
+        title="Couldn't reach the network to confirm"
+        subtitle="Your details are only kept in this browser tab — reloading or closing it will lose them."
         onBack={prevStep}
         onNext={handleSubmit}
         nextLabel="Try Again"
@@ -195,19 +197,19 @@ export function Step7_Review() {
             className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/25 space-y-2"
           >
             <div className="text-sm font-medium text-amber-400">
-              Machine not registered yet
+              Registration not confirmed
             </div>
             <p className="text-xs text-white/50">{submit.reason}</p>
           </div>
 
           <GlassPanel padding="md" className="space-y-2 border-amber-500/20">
             <div className="text-xs font-medium text-amber-400">
-              Proposed IDs — not yet registered
+              Proposed IDs — not confirmed
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <div className="text-[10px] text-white/40 uppercase tracking-wider">
-                  Proposed Device ID (not registered)
+                  Proposed Device ID (not confirmed)
                 </div>
                 <div className="text-xs text-white/70 font-mono truncate">
                   {submit.deviceId}
@@ -215,7 +217,7 @@ export function Step7_Review() {
               </div>
               <div>
                 <div className="text-[10px] text-white/40 uppercase tracking-wider">
-                  Proposed Kernel ID (not registered)
+                  Proposed Kernel ID (not confirmed)
                 </div>
                 <div className="text-xs text-white/70 font-mono truncate">
                   {submit.kernelId}

@@ -19,7 +19,7 @@ describe("Step7_Review — registration states", () => {
   });
 
   it("includes a distinct unconfirmed registration screen", () => {
-    expect(source).toContain("Registration Not Confirmed");
+    expect(source).toContain("Couldn't reach the network to confirm");
   });
 
   it("uses PCC without the old PCCP spelling", () => {

@@ -211,7 +211,13 @@ describe("Step7_Review registration rendering", () => {
 
     expect(apiPaths()).toEqual(registrationPaths);
     expect(container.textContent).not.toContain("Machine Registered");
-    expect(container.textContent).toContain("Registration Not Confirmed");
+    expect(container.textContent).toContain("Couldn't reach the network to confirm");
+    // The wizard store is in-memory only: the screen must say so, and must not
+    // claim the details were saved (copy.md §6 proposed "Saved locally").
+    expect(container.textContent).toContain(
+      "Your details are only kept in this browser tab",
+    );
+    expect(container.textContent).not.toContain("Saved locally");
     expect(findButton("Run Test Job")).toBeUndefined();
     expect(findButton("Go to Operator Dashboard")).toBeUndefined();
   });
@@ -258,7 +264,7 @@ describe("Step7_Review registration rendering", () => {
     await clickButton("Submit Registration");
 
     expect(apiPaths()).toEqual(registrationPaths);
-    expect(container.textContent).toContain("Registration Not Confirmed");
+    expect(container.textContent).toContain("Couldn't reach the network to confirm");
     expect(container.textContent).not.toContain("Machine Registered");
 
     await clickButton("Try Again");
@@ -268,7 +274,7 @@ describe("Step7_Review registration rendering", () => {
       ...registrationPaths,
       ...registrationPaths,
     ]);
-    expect(container.textContent).toContain("Registration Not Confirmed");
+    expect(container.textContent).toContain("Couldn't reach the network to confirm");
     expect(container.textContent).not.toContain("Machine Registered");
     expect(findButton("Try Again")).toBeDefined();
     expect(findButton("Run Test Job")).toBeUndefined();
