@@ -187,6 +187,41 @@ describe("PCC positioning line — one line on every published surface", () => {
     );
   });
 
+  // The whole-file check above would still pass if one of these lost the line
+  // while the <title> kept it, so each description is checked on its own.
+  it("opens every dashboard <head> description with the line", () => {
+    const file = "apps/dashboard/index.html";
+    const html = readRepoFile(file);
+    const jsonLd = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(
+      html,
+    );
+
+    expect(jsonLd, `${file}: expected a JSON-LD block`).not.toBeNull();
+
+    const graph: { "@type"?: unknown; description?: unknown }[] = JSON.parse(
+      jsonLd![1]!,
+    )["@graph"];
+    const descriptions = {
+      "og:description": /<meta property="og:description" content="([^"]*)"/.exec(
+        html,
+      )?.[1],
+      "twitter:description": /<meta name="twitter:description" content="([^"]*)"/.exec(
+        html,
+      )?.[1],
+      "JSON-LD WebSite description": graph.find(
+        (node) => node["@type"] === "WebSite",
+      )?.description,
+    };
+
+    for (const [field, value] of Object.entries(descriptions)) {
+      expect(value, `${file}: ${field} is missing`).toBeTypeOf("string");
+      expect(
+        (value as string).startsWith(PCC_POSITIONING_LINE),
+        `${file}: ${field} must open with "${PCC_POSITIONING_LINE}", got "${value}"`,
+      ).toBe(true);
+    }
+  });
+
   it.each([
     "apps/dashboard/public/about.html",
     "apps/dashboard/public/about.md",
