@@ -26,16 +26,16 @@ const wizardSteps: WizardStep[] = [
   { id: "welcome", label: "Welcome", description: "Platform overview" },
   { id: "network", label: "Network", description: "Chain configuration" },
   { id: "wallet", label: "Wallet", description: "Connect EVM wallet" },
-  { id: "identity", label: "Identity", description: "Register on PCCP" },
+  { id: "identity", label: "Identity", description: "Register on PCC" },
   { id: "complete", label: "Complete", description: "Setup summary" },
 ];
 
 const aiMessages: Record<number, { id: string; content: string; timestamp: string }> = {
-  0: { id: "ai-0", content: "I'll help you set up your PCCP instance. This takes about 2 minutes.", timestamp: "now" },
-  1: { id: "ai-1", content: "PCCP needs a gateway server for API access. If you ran `pnpm dev`, it's already running on port 3200.", timestamp: "now" },
+  0: { id: "ai-0", content: "I'll help you set up your PCC instance. This takes about 2 minutes.", timestamp: "now" },
+  1: { id: "ai-1", content: "PCC needs a gateway server for API access. If you ran `pnpm dev`, it's already running on port 3200.", timestamp: "now" },
   2: { id: "ai-2", content: "Base Sepolia is recommended for testing. You can get free test USDC from the Coinbase faucet.", timestamp: "now" },
   3: { id: "ai-3", content: "Connect any EVM wallet. MetaMask and Coinbase Wallet are most popular.", timestamp: "now" },
-  4: { id: "ai-4", content: "Your identity is registered on-chain via ERC-8004. This links your wallet to your PCCP profile.", timestamp: "now" },
+  4: { id: "ai-4", content: "Your identity is registered on-chain via ERC-8004. This links your wallet to your PCC profile.", timestamp: "now" },
 };
 
 const baseInput =
@@ -61,8 +61,8 @@ function StepWelcome() {
 
   return (
     <WizardStepContent
-      title="Welcome to PCCP"
-      subtitle="Physical Capability Cloud Protocol"
+      title="Welcome to PCC"
+      subtitle="Physical Capability Cloud"
       onNext={nextStep}
       nextLabel="Get Started"
     >
@@ -160,7 +160,7 @@ function StepNetwork() {
   return (
     <WizardStepContent
       title="Network Configuration"
-      subtitle="Select which chain PCCP should connect to."
+      subtitle="Select which chain PCC should connect to."
       onNext={nextStep}
       onBack={prevStep}
       nextDisabled={!isStepValid(1)}
@@ -356,7 +356,7 @@ function StepIdentity() {
   return (
     <WizardStepContent
       title="Platform Identity"
-      subtitle="Register your identity on the PCCP network."
+      subtitle="Register your identity on the PCC network."
       onNext={handleNext}
       onBack={prevStep}
       nextLabel={submitting ? "Registering..." : "Complete Setup"}
@@ -449,7 +449,7 @@ function StepIdentity() {
         )}
 
         <p className="text-[10px] text-white/15 italic">
-          This validates your setup and registers your identity on the PCCP network via ERC-8004.
+          This validates your setup and registers your identity on the PCC network via ERC-8004.
         </p>
       </div>
     </WizardStepContent>
@@ -475,7 +475,7 @@ function StepComplete() {
   return (
     <WizardStepContent
       title="Setup Complete"
-      subtitle="Your PCCP instance is configured and ready to go."
+      subtitle="Your PCC instance is configured and ready to go."
       onNext={() => navigate("/")}
       nextLabel="Go to Dashboard"
     >

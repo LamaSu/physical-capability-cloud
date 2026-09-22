@@ -11,7 +11,7 @@ const config = createConfig({
   chains: [baseSepolia, base],
   connectors: [
     injected(),
-    coinbaseWallet({ appName: "PCCP Command Center" }),
+    coinbaseWallet({ appName: "PCC Command Center" }),
     walletConnect({ projectId: WALLETCONNECT_PROJECT_ID }),
   ],
   transports: {

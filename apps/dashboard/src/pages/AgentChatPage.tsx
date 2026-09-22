@@ -322,8 +322,8 @@ export function AgentChatPage() {
           <h2 className="text-3xl font-bold text-white text-center">See It In Action</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {[
-              { src: "https://www.youtube.com/embed/MxWOh0DJhGE", title: "PCCP Demo" },
-              { src: "https://www.youtube.com/embed/7Dxt_UkZZto", title: "PCCP Technical Walkthrough" },
+              { src: "https://www.youtube.com/embed/MxWOh0DJhGE", title: "PCC Demo" },
+              { src: "https://www.youtube.com/embed/7Dxt_UkZZto", title: "PCC Technical Walkthrough" },
             ].map((video) => (
               <div
                 key={video.src}
