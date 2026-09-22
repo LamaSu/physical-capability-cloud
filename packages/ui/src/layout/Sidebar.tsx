@@ -75,7 +75,7 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
                 letterSpacing: "0.03em",
               }}
             >
-              PCCP
+              PCC
             </span>
             <span
               className="text-[10px] font-mono uppercase tracking-wider"
@@ -177,7 +177,7 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
             className="text-[10px] font-mono"
             style={{ color: "rgba(255,255,255,0.15)" }}
           >
-            PCCP v0.1.0
+            PCC v0.1.0
           </span>
         </div>
       )}
