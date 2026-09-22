@@ -27,12 +27,12 @@ const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production
 // admin actions in routes/kernel-marketplace.ts. A caller's operatorId is not
 // enough, because /api/auth/provision issues keys for any email or wallet
 // without proving ownership, so an identity allowlist could be claimed by
-// anyone who knows an admin's address. With PCC_ADMIN_KEY unset, production
-// refuses every call (fail closed); other environments stay open so local
-// development and tests keep working.
+// anyone who knows an admin's address. With PCC_ADMIN_KEY unset, these routes
+// stay open only when NODE_ENV is "test" or "development"; anything else,
+// including an unset NODE_ENV, fails closed.
 function isOnboardAdmin(req: FastifyRequest): boolean {
   const expected = process.env.PCC_ADMIN_KEY;
-  if (!expected) return process.env.NODE_ENV !== "production";
+  if (!expected) return process.env.NODE_ENV === "test" || process.env.NODE_ENV === "development";
   const provided = req.headers["x-admin-key"];
   if (typeof provided !== "string") return false;
   const a = Buffer.from(provided);
@@ -403,7 +403,11 @@ export async function onboardRoutes(app: FastifyInstance) {
         if (reg.status === "deleted") {
           return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
         }
-        if (reg.status !== "submitted" && reg.status !== "reviewing" && reg.status !== "approved") {
+        // Evidence is fixed once an admin approves, so what was reviewed is what stays on record.
+        if (reg.status === "approved") {
+          return reply.status(400).send({ error: "already_approved", message: "Registration is already approved; its evidence can't be changed after approval" });
+        }
+        if (reg.status !== "submitted" && reg.status !== "reviewing") {
           return reply.status(400).send({ error: "invalid_status", message: `Cannot submit evidence for a registration in "${reg.status}" status` });
         }
 
@@ -561,12 +565,10 @@ export async function onboardRoutes(app: FastifyInstance) {
         }
 
         // Record the evidence and leave the registration for an admin to review.
-        // An already-approved registration keeps its status; nothing here
-        // approves, activates, or sets approvedAt.
+        // Nothing here approves, activates, or sets approvedAt.
         const now = new Date().toISOString();
-        const nextStatus = reg.status === "approved" ? "approved" : "reviewing";
         const proofMetadata = JSON.stringify({ submittedAt: now, autoApproved: false, proofs, evidenceBundleHash: evidence.bundleHash ?? null, evidenceIpfsCid: evidence.ipfsCid ?? null, assuranceTier });
-        repos.registrations.updateStatus(req.params.id, nextStatus, { description: `PROOF SUBMITTED: ${proofMetadata}` });
+        repos.registrations.updateStatus(req.params.id, "reviewing", { description: `PROOF SUBMITTED: ${proofMetadata}` });
 
         pipelineTelemetry.emit(reg.id, "operator_verify", "started", { metadata: { proofCount: proofs.length, autoApproved: false, pendingReview: true, assuranceTier } });
         trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier, pendingReview: true });
@@ -581,7 +583,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           userAgent: req.headers["user-agent"],
         });
         return {
-          registration: { ...reg, status: nextStatus },
+          registration: { ...reg, status: "reviewing" },
           autoApproved: false,
           activated: false,
           pendingReview: true,
