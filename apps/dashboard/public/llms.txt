@@ -80,7 +80,7 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 
 - Authentication: hiring and other protected operations require `Authorization: Bearer <key>`. Public discovery includes `POST /ask`, capability types, well-known catalogs/cards, the agent package, and the MCP transport endpoint.
 - Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
-- The MCP server exposes 254 real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
+- The MCP server exposes all 253 agent-package tools, plus MCP-only helpers, over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
 - A second, read-only MCP surface at `https://capability.network/mcp/docs` serves PCC's documentation as MCP resources (`docs://pcc/agent-guide`, `docs://pcc/api`, `docs://pcc/quickstart`) plus a `search_docs` tool — use it to learn the API before calling the product server to act on it.
 - Full human + agent integration guide is served by the gateway; this file is the short index.
 

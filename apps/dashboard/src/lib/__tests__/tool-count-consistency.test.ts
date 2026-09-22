@@ -22,6 +22,13 @@ const TEXT_FILES = [
   "apps/dashboard/public/FOUR_SLOTS.md",
   "apps/dashboard/public/skills/pcc.md",
   "apps/dashboard/public/whitepaper.md",
+  "CLAUDE.md",
+  "docs/AGENT_INTEGRATION.md",
+  "docs/FOUR_SLOTS.md",
+  "docs/MCP_INSTALL.md",
+  "docs/quickstart/claude-code.md",
+  "docs/quickstart/claude-web.md",
+  "docs/OPENCLAW_INTEGRATION.md",
 ];
 
 const TSX_FILES = [
@@ -39,7 +46,16 @@ const RULES = [
   { name: "R4", re: /(agent-package\.json — )(\d+)( tools)/g },
   { name: "R5", re: /(agent-package\.json[^\s]{0,3}\s*\()(\d+)( tools)/g },
   { name: "R6", re: /(full spec — )(\d+)( tools)/g },
-  { name: "R7", re: /(agent-package \()(\d+)( tools)/g },
+  { name: "R7", re: /([Aa]gent-package \()(\d+)( tools)/g },
+  { name: "R8", re: /(## \d+\. Agent Package \()(\d+)( Tools\))/g },
+  { name: "R9", re: /(containing )(\d+)( tools with input schemas)/g },
+  { name: "R10", re: /(\| `tools` \| )(\d+)( entries)/g },
+  { name: "R11", re: /(agent-package\s+contains )(\d+)( tool schemas)/g },
+  { name: "R12", re: /(agent-package \+ )(\d+)( tools)/g },
+  { name: "R13", re: /(and cache the )(\d+)(\s+tools)/g },
+  { name: "R14", re: /(the )(\d+)( agent-package tools)/g },
+  { name: "R15", re: /(the live )(\d+)(-tool\s+package)/g },
+  { name: "R16", re: /(exposes all )(\d+)( agent-package tools)/g },
 ];
 
 function readRepoFile(relativePath: string): string {
@@ -118,6 +134,44 @@ describe("agent-package tool count — single source of truth", () => {
     ).toBe(N);
   });
 
+  it("states tools.length exactly once in llms.txt's HTTP /mcp claim", () => {
+    const { N } = readCatalog();
+    const file = "apps/dashboard/public/llms.txt";
+    const source = readRepoFile(file);
+    const rule = RULES.find(({ name }) => name === "R16")!;
+    const matches = [
+      ...source.matchAll(new RegExp(rule.re.source, rule.re.flags)),
+    ];
+
+    expect(
+      matches,
+      `${file}: the HTTP /mcp claim must contain exactly one R16 count`,
+    ).toHaveLength(1);
+
+    const match = matches[0]!;
+
+    expect(
+      match[2],
+      `${file}: the HTTP /mcp agent-package count must equal tools.length`,
+    ).toBe(String(N));
+
+    const claimLine = source.split("\n")[lineAt(source, match.index!) - 1]!;
+
+    expect(claimLine).toContain("The MCP server exposes");
+    expect(claimLine).toContain("`https://capability.network/mcp`");
+  });
+
+  it.each([
+    "apps/dashboard/public/FOUR_SLOTS.md",
+    "docs/FOUR_SLOTS.md",
+    "apps/dashboard/public/whitepaper.md",
+  ])("%s omits package versions beside tool counts", (file) => {
+    expect(
+      readRepoFile(file),
+      `${file}: omit independently drifting package versions beside tool counts`,
+    ).not.toMatch(/tools,\s*v\d/);
+  });
+
   describe("published text counts", () => {
     for (const file of TEXT_FILES) {
       it(`${file} agrees with tools.length`, () => {
@@ -183,7 +237,7 @@ describe("agent-package tool count — single source of truth", () => {
     }
   });
 
-  describe("separate MCP-server claims remain untouched", () => {
+  describe("stdio MCP-server claim stays separate", () => {
     it("preserves the published MCP claims in about.md and llms.txt", () => {
       expect(
         readRepoFile("apps/dashboard/public/about.md"),
@@ -194,23 +248,83 @@ describe("agent-package tool count — single source of truth", () => {
     });
 
     it.each([
-      "254-tool agent package",
-      "254-tool agent-pack",
-      "Agent Package — 254 tools",
-      "agent-package.json — 254 tools",
-      "agent-package.json (254 tools)",
-      "full spec — 254 tools",
-      "agent-package (254 tools)",
-    ])("rewrites %s without changing adjacent MCP counts", (claim) => {
-      const { N } = readCatalog();
-      const suffix =
-        "; 77-tool MCP server\n" +
-        "The MCP server exposes 254 real tools\n" +
-        "MCP installation: 63 tools\n";
-      const source = claim + suffix;
-      const expected = claim.replace("254", String(N)) + suffix;
+      ["R1", "254-tool agent package"],
+      ["R2", "254-tool agent-pack"],
+      ["R3", "Agent Package — 254 tools"],
+      ["R4", "agent-package.json — 254 tools"],
+      ["R5", "agent-package.json (254 tools)"],
+      ["R5", "**agent-package.json** (254 tools)"],
+      [
+        "R5",
+        "`https://capability.network/agent-package.json` (254 tools, system prompt, input schemas, endpoint mappings)",
+      ],
+      [
+        "R5",
+        "**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (254 tools, for any LLM agent)",
+      ],
+      ["R6", "full spec — 254 tools"],
+      ["R7", "agent-package (254 tools)"],
+      [
+        "R7",
+        "- Agent-package (254 tools): https://capability.network/agent-package.json",
+      ],
+      ["R8", "## 10. Agent Package (254 Tools)"],
+      [
+        "R9",
+        "The agent package is a single JSON file any LLM can consume, containing 254 tools with input schemas and endpoint mappings.",
+      ],
+      [
+        "R10",
+        "| `tools` | 254 entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |",
+      ],
+      [
+        "R11",
+        "`https://capability.network/api/...` endpoints. The agent-package\ncontains 254 tool schemas — Claude treats them like its own tool palette.",
+      ],
+      [
+        "R12",
+        "at what price — DHT + agent-package + 254 tools), **execution** (the",
+      ],
+      [
+        "R13",
+        "1. Once: have the OpenClaw agent fetch\n   `https://capability.network/agent-package.json` and cache the 254\n   tools (PUBLIC, no auth required).",
+      ],
+      [
+        "R14",
+        "- `docs/AGENT_INTEGRATION.md` — the 254 agent-package tools + MCP\n  server + REST surface",
+      ],
+      [
+        "R15",
+        "- `https://capability.network/agent-package.json` — the live 254-tool\n  package OpenClaw agents fetch and cache",
+      ],
+      [
+        "R16",
+        "The MCP server exposes all 254 agent-package tools, plus MCP-only helpers, over Streamable HTTP at `https://capability.network/mcp`.",
+      ],
+    ])(
+      "%s rewrites %s without changing adjacent MCP counts",
+      (rule, claim) => {
+        const { N } = readCatalog();
+        const matchingRules = RULES.flatMap(({ name, re }) =>
+          [...claim.matchAll(new RegExp(re.source, re.flags))].map(
+            () => name,
+          ),
+        );
 
-      expect(rewriteWithRules(source, N)).toBe(expected);
-    });
+        expect(
+          matchingRules,
+          `${claim}: each count must match exactly one rule`,
+        ).toEqual([rule]);
+
+        const suffix =
+          "; 77-tool MCP server\n" +
+          "The MCP server exposes 254 real tools\n" +
+          "MCP installation: 63 tools\n";
+        const source = claim + suffix;
+        const expected = claim.replace("254", String(N)) + suffix;
+
+        expect(rewriteWithRules(source, N)).toBe(expected);
+      },
+    );
   });
 });

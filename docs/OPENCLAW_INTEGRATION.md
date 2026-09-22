@@ -28,7 +28,7 @@ That is a complete substrate for "do anything digital."
 
 PCC owns the four primitives that make a physical job billable and
 verifiable: **discovery** (which physical capability is available, where,
-at what price — DHT + agent-package + 218 tools), **execution** (the
+at what price — DHT + agent-package + 253 tools), **execution** (the
 kernel that actually runs the job on a real machine — OctoPrint, ROS,
 SiLA, OPC-UA, Modbus, Opentrons, generic HTTP), **verification** (evidence
 bundle + ALCOA+ checks + verifier attestation + drift detection +
@@ -60,7 +60,7 @@ upgrade later without breaking earlier work.
 The shallowest path. No new infra, no MCP plumbing, no schema work.
 
 1. Once: have the OpenClaw agent fetch
-   `https://capability.network/agent-package.json` and cache the 218
+   `https://capability.network/agent-package.json` and cache the 253
    tools (PUBLIC, no auth required).
 2. Provision a PCC API key once via
    `POST /api/auth/provision` (returns `pcc_live_*`); store it as
@@ -344,14 +344,14 @@ Coordination items, ordered low-cost to high-cost:
 
 - `docs/CONTRIBUTOR_ECONOMICS.md` — the full protocol primitives:
   10-role taxonomy, RateSchedule DSL, on-chain split mechanics
-- `docs/AGENT_INTEGRATION.md` — the 218 agent-package tools + MCP
+- `docs/AGENT_INTEGRATION.md` — the 253 agent-package tools + MCP
   server + REST surface
 - `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md` — forge scripts, contract
   addresses, cast-send recipes for Base Sepolia
 - `docs/ADAPTER_BOUNTIES.md` — sister doc on adapter-author economics
   (parallel: assembler/integrator royalty paths)
 - `docs/AGENTIC_FUNDING.md` — agent funding, fiat ramps, USDC supply
-- `https://capability.network/agent-package.json` — the live 218-tool
+- `https://capability.network/agent-package.json` — the live 253-tool
   package OpenClaw agents fetch and cache
 
 **Date**: 2026-04-29

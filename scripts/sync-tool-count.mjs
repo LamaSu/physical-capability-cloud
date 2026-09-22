@@ -1,4 +1,4 @@
-// Six contradictory tool counts shipped across the published surfaces.
+// Published tool counts span the dashboard, root CLAUDE.md, and docs/.
 // tools.length is now the only source of truth. Anyone changing the catalog
 // must run: node scripts/sync-tool-count.mjs
 
@@ -21,6 +21,13 @@ const TEXT_FILES = [
   "apps/dashboard/public/FOUR_SLOTS.md",
   "apps/dashboard/public/skills/pcc.md",
   "apps/dashboard/public/whitepaper.md",
+  "CLAUDE.md",
+  "docs/AGENT_INTEGRATION.md",
+  "docs/FOUR_SLOTS.md",
+  "docs/MCP_INSTALL.md",
+  "docs/quickstart/claude-code.md",
+  "docs/quickstart/claude-web.md",
+  "docs/OPENCLAW_INTEGRATION.md",
 ];
 
 // Duplicated verbatim in tool-count-consistency.test.ts.
@@ -31,7 +38,16 @@ const RULES = [
   { name: "R4", re: /(agent-package\.json — )(\d+)( tools)/g },
   { name: "R5", re: /(agent-package\.json[^\s]{0,3}\s*\()(\d+)( tools)/g },
   { name: "R6", re: /(full spec — )(\d+)( tools)/g },
-  { name: "R7", re: /(agent-package \()(\d+)( tools)/g },
+  { name: "R7", re: /([Aa]gent-package \()(\d+)( tools)/g },
+  { name: "R8", re: /(## \d+\. Agent Package \()(\d+)( Tools\))/g },
+  { name: "R9", re: /(containing )(\d+)( tools with input schemas)/g },
+  { name: "R10", re: /(\| `tools` \| )(\d+)( entries)/g },
+  { name: "R11", re: /(agent-package\s+contains )(\d+)( tool schemas)/g },
+  { name: "R12", re: /(agent-package \+ )(\d+)( tools)/g },
+  { name: "R13", re: /(and cache the )(\d+)(\s+tools)/g },
+  { name: "R14", re: /(the )(\d+)( agent-package tools)/g },
+  { name: "R15", re: /(the live )(\d+)(-tool\s+package)/g },
+  { name: "R16", re: /(exposes all )(\d+)( agent-package tools)/g },
 ];
 
 function readFile(relativePath) {

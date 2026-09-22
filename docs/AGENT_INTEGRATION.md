@@ -220,7 +220,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | 253-tool agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
@@ -748,9 +748,9 @@ For the full contributor-economics surface (REST endpoints, DSL, walkthrough), s
 
 ---
 
-## 8. Agent Package (248 Tools)
+## 8. Agent Package (253 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 248 tools with input schemas and endpoint mappings (v2.13.0 — bumped to 248 in June 2026 after adding 11 tools for the channels substrate, suggest-templates, operator status, and the composition engine surface; previous bumps: 237 trilobio operator helpers in May 2026; 218 contributor-economics consolidation; 226 metadata; 233 hamilton + role flows).
+The agent package is a single JSON file any LLM can consume, containing 253 tools with input schemas and endpoint mappings.
 
 **Fetch it**:
 ```bash

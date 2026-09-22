@@ -18,7 +18,7 @@ Then: order me a pizza for delivery to 728 Geary St SF.
 Claude reads the JSON's `system_prompt`, picks the right tools from the
 `tools` array, and uses its built-in WebFetch to call
 `https://capability.network/api/...` endpoints. The agent-package
-contains 249 tool schemas — Claude treats them like its own tool palette.
+contains 253 tool schemas — Claude treats them like its own tool palette.
 
 ## Alternative: paste the system_prompt directly
 

@@ -95,6 +95,6 @@ when there's a match.
 ## More
 
 - Full skill source: https://capability.network/skills/pcc.md
-- Agent-package (249 tools): https://capability.network/agent-package.json
+- Agent-package (253 tools): https://capability.network/agent-package.json
 - Programmatic packages: `@pcc/decompose-skill`, `@pcc/operator-agent-runtime`, `@pcc/evidence-judge`
 - Other surfaces: [claude-desktop.md](./claude-desktop.md), [claude-web.md](./claude-web.md)
