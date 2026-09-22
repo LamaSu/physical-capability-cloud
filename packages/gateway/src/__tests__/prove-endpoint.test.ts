@@ -6,8 +6,12 @@
  *   - event timestamp validation (future, stale, valid)
  *   - assurance tier classification (0, 1, 2)
  *   - auditService.log called on prove
- *   - rejected registration cannot be proved
+ *   - rejected / deleted / suspended registrations cannot be proved
  *   - already-active registration returns error
+ *   - /prove never approves or activates, at any tier (it records evidence
+ *     and leaves the registration in "reviewing")
+ *   - /approve, /activate and /reject are restricted to onboarding admins,
+ *     so no onboarding route lets an operator make itself live
  *
  * ALL external calls (PostHog, pipelineTelemetry, auditService) are mocked.
  */
@@ -50,6 +54,12 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+  // Stand-in for the gateway auth middleware: the x-test-operator header sets
+  // the authenticated caller identity the routes read from req.operatorId.
+  app.addHook("onRequest", async (req) => {
+    const operatorId = req.headers["x-test-operator"];
+    if (typeof operatorId === "string") (req as any).operatorId = operatorId;
+  });
   await app.register(onboardRoutes);
   await app.ready();
   return app;
@@ -135,7 +145,8 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.autoApproved).toBe(true);
+      expect(body.autoApproved).toBe(false);
+      expect(body.pendingReview).toBe(true);
     });
 
     it("rejects a bundleHash that does not start with 'sha256:'", async () => {
@@ -411,7 +422,7 @@ describe("Prove Endpoint", () => {
 
       expect(auditService.log).toHaveBeenCalledWith(
         expect.objectContaining({
-          eventType: "operator.proved",
+          eventType: "operator.proof_submitted",
           action: "prove",
           resourceType: "registration",
           resourceId: regId,
@@ -440,7 +451,7 @@ describe("Prove Endpoint", () => {
         expect.objectContaining({
           metadata: expect.objectContaining({
             assuranceTier: expect.any(Number),
-            autoApproved: true,
+            autoApproved: false,
           }),
         }),
       );
@@ -453,10 +464,9 @@ describe("Prove Endpoint", () => {
     it("returns 400 for a registration in 'rejected' status", async () => {
       const regId = await registerMachine(app);
 
-      // Force the registration into 'rejected' status. The /reject route
-      // requires admin auth (requireAdmin middleware), which this isolated
-      // test deliberately does not configure — we go straight through the
-      // repo so the test stays decoupled from the admin key wiring.
+      // Force the registration into 'rejected' status straight through the
+      // repo so this test stays decoupled from the admin gate on /reject
+      // (covered in "review routes are admin-only" below).
       getRepos().registrations.updateStatus(regId, "rejected", {
         description: "REJECTED: Policy violation",
       });
@@ -478,16 +488,9 @@ describe("Prove Endpoint", () => {
     it("returns 400 for an already 'active' registration", async () => {
       const regId = await registerMachine(app);
 
-      // Prove it first to make it active
-      await app.inject({
-        method: "POST",
-        url: `/api/onboard/registrations/${regId}/prove`,
-        payload: {
-          evidence: { deviceHealth: VALID_DEVICE_HEALTH },
-        },
-      });
+      // /prove no longer activates, so set 'active' through the repo.
+      getRepos().registrations.updateStatus(regId, "active");
 
-      // Try to prove again
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
@@ -511,6 +514,50 @@ describe("Prove Endpoint", () => {
       });
 
       expect(res.statusCode).toBe(404);
+    });
+
+    it("returns 410 for a soft-deleted registration", async () => {
+      const regId = await registerMachine(app);
+      getRepos().registrations.updateStatus(regId, "deleted");
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/onboard/registrations/${regId}/prove`,
+        payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
+      });
+
+      expect(res.statusCode).toBe(410);
+      expect(getRepos().registrations.findById(regId)!.status).toBe("deleted");
+    });
+
+    it("does not let a suspended registration reinstate itself", async () => {
+      const regId = await registerMachine(app);
+      getRepos().registrations.updateStatus(regId, "suspended");
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/onboard/registrations/${regId}/prove`,
+        payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("invalid_status");
+      expect(getRepos().registrations.findById(regId)!.status).toBe("suspended");
+    });
+
+    it("keeps an already-approved registration approved (not active)", async () => {
+      const regId = await registerMachine(app);
+      getRepos().registrations.updateStatus(regId, "approved", { approvedAt: new Date().toISOString() });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/onboard/registrations/${regId}/prove`,
+        payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().registration.status).toBe("approved");
+      expect(getRepos().registrations.findById(regId)!.status).toBe("approved");
     });
   });
 
@@ -551,7 +598,7 @@ describe("Prove Endpoint", () => {
       expect(body.error).toBe("insufficient_evidence");
     });
 
-    it("activates the registration on successful prove", async () => {
+    it("records tier-0 evidence without approving or activating", async () => {
       const regId = await registerMachine(app);
 
       const res = await app.inject({
@@ -566,9 +613,152 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.registration.status).toBe("active");
-      expect(body.activated).toBe(true);
-      expect(body.autoApproved).toBe(true);
+      expect(body.registration.status).toBe("reviewing");
+      expect(body.activated).toBe(false);
+      expect(body.autoApproved).toBe(false);
+      expect(body.pendingReview).toBe(true);
+
+      const stored = getRepos().registrations.findById(regId)!;
+      expect(stored.status).toBe("reviewing");
+      expect(stored.approvedAt ?? null).toBeNull();
+      expect(stored.description).toMatch(/^PROOF SUBMITTED: /);
+    });
+
+    it("does not activate even with full tier-2 evidence", async () => {
+      const regId = await registerMachine(app);
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/onboard/registrations/${regId}/prove`,
+        payload: {
+          evidence: {
+            photoBase64: VALID_PHOTO,
+            deviceHealth: VALID_DEVICE_HEALTH,
+            events: [
+              { type: "execution_completed", timestamp: makeRecentTimestamp(), payload: {} },
+            ],
+          },
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.assuranceTier).toBe(2);
+      expect(body.activated).toBe(false);
+      expect(getRepos().registrations.findById(regId)!.status).toBe("reviewing");
+    });
+  });
+
+  // ── review routes are admin-only ──────────────────────────────────────────
+
+  describe("review routes are admin-only", () => {
+    const ENV_KEYS = ["NODE_ENV", "AUDIT_ADMINS", "PCC_ONBOARD_ADMINS"] as const;
+    const OPERATOR = "operator@example.com";
+    const ADMIN = "admin@example.com";
+    let savedEnv: Record<string, string | undefined>;
+
+    beforeEach(() => {
+      savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+      process.env.NODE_ENV = "production";
+      delete process.env.AUDIT_ADMINS;
+      delete process.env.PCC_ONBOARD_ADMINS;
+    });
+
+    afterEach(() => {
+      for (const k of ENV_KEYS) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    function registerOwned(): Promise<string> {
+      return registerMachine(app, {
+        operator: { walletAddress: OPERATOR, displayName: "Operator", certifications: [], trainingAcknowledgments: {} },
+      });
+    }
+
+    function post(url: string, operatorId: string, payload: Record<string, unknown> = {}) {
+      return app.inject({ method: "POST", url, headers: { "x-test-operator": operatorId }, payload });
+    }
+
+    it("an operator cannot make its own registration live through any onboarding route", async () => {
+      process.env.AUDIT_ADMINS = ADMIN;
+      const regId = await registerOwned();
+
+      const prove = await post(`/api/onboard/registrations/${regId}/prove`, OPERATOR, {
+        evidence: {
+          photoBase64: VALID_PHOTO,
+          deviceHealth: VALID_DEVICE_HEALTH,
+          events: [{ type: "execution_completed", timestamp: makeRecentTimestamp(), payload: {} }],
+        },
+      });
+      expect(prove.statusCode).toBe(200);
+      expect(prove.json().assuranceTier).toBe(2);
+      expect(prove.json().activated).toBe(false);
+
+      expect((await post(`/api/onboard/registrations/${regId}/approve`, OPERATOR)).statusCode).toBe(403);
+      expect((await post(`/api/onboard/registrations/${regId}/activate`, OPERATOR)).statusCode).toBe(403);
+      expect(getRepos().registrations.findById(regId)!.status).toBe("reviewing");
+    });
+
+    it("an onboarding admin can approve and then activate", async () => {
+      process.env.AUDIT_ADMINS = ADMIN;
+      const regId = await registerOwned();
+      await post(`/api/onboard/registrations/${regId}/prove`, OPERATOR, {
+        evidence: { deviceHealth: VALID_DEVICE_HEALTH },
+      });
+
+      expect((await post(`/api/onboard/registrations/${regId}/approve`, ADMIN)).statusCode).toBe(200);
+      expect((await post(`/api/onboard/registrations/${regId}/activate`, ADMIN)).statusCode).toBe(200);
+      expect(getRepos().registrations.findById(regId)!.status).toBe("active");
+    });
+
+    it("matches admin ids case-insensitively", async () => {
+      process.env.AUDIT_ADMINS = "Admin@Example.com";
+      const regId = await registerOwned();
+
+      expect((await post(`/api/onboard/registrations/${regId}/approve`, "admin@example.COM")).statusCode).toBe(200);
+    });
+
+    it("a non-admin cannot reject another operator's registration", async () => {
+      process.env.AUDIT_ADMINS = ADMIN;
+      const regId = await registerOwned();
+
+      const res = await post(`/api/onboard/registrations/${regId}/reject`, "someone-else@example.com", { reason: "test" });
+      expect(res.statusCode).toBe(403);
+      expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
+    });
+
+    it("PCC_ONBOARD_ADMINS takes precedence over AUDIT_ADMINS", async () => {
+      process.env.AUDIT_ADMINS = ADMIN;
+      process.env.PCC_ONBOARD_ADMINS = "reviewer@example.com";
+      const regId = await registerOwned();
+
+      expect((await post(`/api/onboard/registrations/${regId}/approve`, ADMIN)).statusCode).toBe(403);
+      expect((await post(`/api/onboard/registrations/${regId}/approve`, "reviewer@example.com")).statusCode).toBe(200);
+    });
+
+    it("fails closed in production when no admins are configured", async () => {
+      const regId = await registerOwned();
+
+      for (const action of ["approve", "activate", "reject"]) {
+        expect((await post(`/api/onboard/registrations/${regId}/${action}`, ADMIN)).statusCode).toBe(403);
+      }
+      expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
+    });
+
+    it("answers a non-admin with 403, not 404, for an unknown id", async () => {
+      process.env.AUDIT_ADMINS = ADMIN;
+
+      const res = await post("/api/onboard/registrations/nonexistent-reg-id/approve", OPERATOR);
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("stays open outside production when no admins are configured", async () => {
+      process.env.NODE_ENV = "test";
+      const regId = await registerOwned();
+
+      expect((await post(`/api/onboard/registrations/${regId}/approve`, OPERATOR)).statusCode).toBe(200);
     });
   });
 });

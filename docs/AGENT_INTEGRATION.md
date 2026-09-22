@@ -155,10 +155,10 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | POST | `/api/onboard/register` | Submit machine registration. Body: `MachineRegistration`. |
 | GET | `/api/onboard/registrations` | List all registrations. |
 | GET | `/api/onboard/registrations/:id` | Get registration detail. |
-| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (admin). |
-| POST | `/api/onboard/registrations/:id/reject` | Reject a registration. Body: `{reason?}`. |
-| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration. |
-| POST | `/api/onboard/registrations/:id/prove` | Submit evidence for auto-approval (fast-track). See §2.5. |
+| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (onboarding admins only). |
+| POST | `/api/onboard/registrations/:id/reject` | Reject a registration (onboarding admins only). Body: `{reason?}`. |
+| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration (onboarding admins only). |
+| POST | `/api/onboard/registrations/:id/prove` | Submit evidence for admin review. See §2.5. |
 | POST | `/api/onboard/redeem` | One-click agent onboarding with invite code. Body: `{inviteCode, email, password}`. |
 | GET | `/api/onboard/check/:code` | Validate invite code before redeeming. |
 | GET | `/api/onboard/status` | Check what the agent has provisioned (requires Bearer token from redeem). |
@@ -343,9 +343,9 @@ This submits a test job and polls for up to 10 seconds. Returns:
 }
 ```
 
-### 2.5 Prove and activate (fast-track)
+### 2.5 Submit proof for review
 
-If you registered via `/api/onboard/register`, you can skip manual approval by proving your device works:
+If you registered via `/api/onboard/register`, submit evidence that your device works so an onboarding admin can review it:
 
 ```bash
 curl -X POST https://capability.network/api/onboard/registrations/$REG_ID/prove \
@@ -369,7 +369,7 @@ Evidence determines assurance tier:
 - **Tier 1**: Bundle hash + events with completion event.
 - **Tier 2**: Photo + device health + events (full proof).
 
-On success, the registration is auto-approved and activated immediately. No manual review.
+The evidence is recorded and the registration moves to `reviewing`. It is not approved or activated automatically at any tier: an onboarding admin (listed in `PCC_ONBOARD_ADMINS`, or `AUDIT_ADMINS` when that is unset) approves and activates it.
 
 ### 2.6 Check setup status
 

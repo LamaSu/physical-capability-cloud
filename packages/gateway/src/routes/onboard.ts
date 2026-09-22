@@ -20,6 +20,25 @@ import { tenantOpts } from "../config/tenant-enforce.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
+// Onboarding review authority. /approve, /activate and /reject decide which
+// operators are live on the network, so only onboarding admins may call them.
+// Admins come from PCC_ONBOARD_ADMINS (comma-separated operator ids), falling
+// back to AUDIT_ADMINS, and are matched against the caller's operatorId/userId
+// (same identity source as routes/audit.ts). With no admins configured,
+// production refuses every call (fail closed); other environments stay open
+// so local development and tests keep working.
+function getOnboardAdmins(): Set<string> {
+  const raw = process.env.PCC_ONBOARD_ADMINS ?? process.env.AUDIT_ADMINS ?? "";
+  return new Set(raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
+}
+
+function isOnboardAdmin(req: FastifyRequest): boolean {
+  const admins = getOnboardAdmins();
+  if (admins.size === 0) return process.env.NODE_ENV !== "production";
+  const caller = (req as any).operatorId ?? (req as any).userId;
+  return typeof caller === "string" && admins.has(caller.toLowerCase());
+}
+
 export async function onboardRoutes(app: FastifyInstance) {
   // Analyze an operator/machine description and return an input-derived
   // capability analysis. Routes through the same agentic path as the live v3
@@ -170,8 +189,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     } catch { return { error: "not_found" }; }
   });
 
-  // ── Approve a registration ──
+  // ── Approve a registration (onboarding admins only) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
+    // Checked before the lookup so a non-admin learns nothing about which ids exist.
+    if (!isOnboardAdmin(req)) {
+      return reply.status(403).send({ error: "forbidden", message: "Only onboarding admins can approve registrations" });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
@@ -192,8 +215,11 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: reg, approved: true };
   });
 
-  // ── Reject a registration ──
+  // ── Reject a registration (onboarding admins only) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
+    if (!isOnboardAdmin(req)) {
+      return reply.status(403).send({ error: "forbidden", message: "Only onboarding admins can reject registrations" });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
@@ -326,8 +352,11 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
   });
 
-  // ── Activate an approved registration ──
+  // ── Activate an approved registration (onboarding admins only) ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
+    if (!isOnboardAdmin(req)) {
+      return reply.status(403).send({ error: "forbidden", message: "Only onboarding admins can activate registrations" });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
@@ -338,10 +367,13 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: { ...reg, status: "active" }, activated: true };
   });
 
-  // ── Prove capability and auto-approve ──
+  // ── Submit proof-of-capability evidence for review ──
   // Operator submits evidence of a test job (photo, sensor data, device health).
-  // If evidence meets minimum requirements, registration is auto-approved + activated.
-  // Fast-track: no manual review needed if the machine can prove it works.
+  // The evidence is recorded and the registration moves to "reviewing". It is
+  // never approved or activated here, at any tier: every field in the body is
+  // self-asserted (nothing binds it to the device or to a server-issued
+  // challenge), so it cannot establish that the machine is real. An onboarding
+  // admin approves and activates through /approve and /activate.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/prove", async (req, reply) => {
     return Sentry.startSpan(
       { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
@@ -366,6 +398,12 @@ export async function onboardRoutes(app: FastifyInstance) {
         }
         if (reg.status === "rejected") {
           return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+        }
+        if (reg.status === "deleted") {
+          return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
+        }
+        if (reg.status !== "submitted" && reg.status !== "reviewing" && reg.status !== "approved") {
+          return reply.status(400).send({ error: "invalid_status", message: `Cannot submit evidence for a registration in "${reg.status}" status` });
         }
 
         const body = req.body as {
@@ -491,7 +529,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         if (proofs.length === 0) {
           return reply.status(422).send({
             error: "insufficient_evidence",
-            message: "Evidence did not meet minimum requirements for auto-approval.",
+            message: "Evidence did not meet minimum requirements for review.",
             warnings,
             hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
           });
@@ -521,32 +559,36 @@ export async function onboardRoutes(app: FastifyInstance) {
           tierWarning = "Self-attested only — no independent verification";
         }
 
-        // Evidence passes — auto-approve and activate (PERSISTENT — survives deploys)
+        // Record the evidence and leave the registration for an admin to review.
+        // An already-approved registration keeps its status; nothing here
+        // approves, activates, or sets approvedAt.
         const now = new Date().toISOString();
-        const proveMetadata = JSON.stringify({ provedAt: now, autoApproved: true, proofs, evidenceBundleHash: evidence.bundleHash ?? null, evidenceIpfsCid: evidence.ipfsCid ?? null, assuranceTier });
-        repos.registrations.updateStatus(req.params.id, "active", { approvedAt: now, description: `PROVED: ${proveMetadata}` });
+        const nextStatus = reg.status === "approved" ? "approved" : "reviewing";
+        const proofMetadata = JSON.stringify({ submittedAt: now, autoApproved: false, proofs, evidenceBundleHash: evidence.bundleHash ?? null, evidenceIpfsCid: evidence.ipfsCid ?? null, assuranceTier });
+        repos.registrations.updateStatus(req.params.id, nextStatus, { description: `PROOF SUBMITTED: ${proofMetadata}` });
 
-        pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true, assuranceTier } });
-        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier });
+        pipelineTelemetry.emit(reg.id, "operator_verify", "started", { metadata: { proofCount: proofs.length, autoApproved: false, pendingReview: true, assuranceTier } });
+        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier, pendingReview: true });
         auditService.log({
-          eventType: "operator.proved",
+          eventType: "operator.proof_submitted",
           actor: (req as any).operatorId ?? (req as any).apiKeyId ?? reg.operator?.walletAddress,
           resourceType: "registration",
           resourceId: reg.id,
           action: "prove",
-          metadata: { proofCount: proofs.length, assuranceTier, autoApproved: true, proofs },
+          metadata: { proofCount: proofs.length, assuranceTier, autoApproved: false, proofs },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
         return {
-          registration: { ...reg, status: "active", approvedAt: now },
-          autoApproved: true,
-          activated: true,
+          registration: { ...reg, status: nextStatus },
+          autoApproved: false,
+          activated: false,
+          pendingReview: true,
           proofs,
           assuranceTier,
           warning: tierWarning,
           warnings: warnings.length > 0 ? warnings : undefined,
-          message: "Evidence accepted — registration auto-approved and activated. Your device is now live on the network.",
+          message: "Evidence recorded. The registration is pending review; an onboarding admin approves and activates it.",
         };
       },
     );
