@@ -180,13 +180,13 @@ export function Step7_Review() {
   // Render — unconfirmed state
   // ---------------------------------------------------------------------------
 
-  // Nothing here may say "saved": the wizard store is in-memory only, so a
-  // reload loses the operator's details.
+  // Claim nothing about where the details live: the wizard store is in-memory
+  // only (a reload clears it), and a lost response can hide a server-side write.
   if (submit.status === "unconfirmed") {
     return (
       <WizardStepContent
         title="Couldn't reach the network to confirm"
-        subtitle="Your details are only kept in this browser tab — reloading or closing it will lose them."
+        subtitle="Reloading or closing this tab will clear the details you entered here."
         onBack={prevStep}
         onNext={handleSubmit}
         nextLabel="Try Again"

@@ -212,10 +212,10 @@ describe("Step7_Review registration rendering", () => {
     expect(apiPaths()).toEqual(registrationPaths);
     expect(container.textContent).not.toContain("Machine Registered");
     expect(container.textContent).toContain("Couldn't reach the network to confirm");
-    // The wizard store is in-memory only: the screen must say so, and must not
+    // The wizard store is in-memory only: warn that a reload clears it, and never
     // claim the details were saved (copy.md §6 proposed "Saved locally").
     expect(container.textContent).toContain(
-      "Your details are only kept in this browser tab",
+      "Reloading or closing this tab will clear the details you entered here.",
     );
     expect(container.textContent).not.toContain("Saved locally");
     expect(findButton("Run Test Job")).toBeUndefined();
