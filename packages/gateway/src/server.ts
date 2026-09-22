@@ -68,7 +68,12 @@ import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes, unimplementedWellKnownBody } from "./routes/well-known.js";
 import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
-import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
+import {
+  agentPackageLinkSentence,
+  agentPackageToolCount,
+  appsHttpMcpRoutes,
+  httpMcpRoutes,
+} from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
 import { jwksRoutes } from "./routes/jwks.js";
 import { initSigningKey } from "./signing-key.js";
@@ -326,7 +331,7 @@ export async function createGateway(port = 3200) {
         version: process.env.npm_package_version ?? "0.1.0",
         description:
           "Agent-native API for discovering and invoking physical capabilities. " +
-          "See https://capability.network/agent-package.json for the 254-tool agent package.",
+          agentPackageLinkSentence(agentPackageToolCount()),
       },
       servers: [{ url: gatewayUrlForOpenApi }],
       components: {
@@ -949,7 +954,7 @@ export async function createGateway(port = 3200) {
             documentation: "https://capability.network/docs",
             agentPackage: {
               url: "https://capability.network/agent-package.json",
-              toolCount: 254,
+              toolCount: agentPackageToolCount(),
             },
             a2aAgentCard:
               "https://capability.network/.well-known/agent-card.json",

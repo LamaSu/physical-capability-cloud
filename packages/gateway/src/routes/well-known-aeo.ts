@@ -1,7 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CapabilityDTO } from "../facades/index.js";
 import { getCapabilityFacade } from "../facades/index.js";
-import { loadAgentPackage, PCC_MCP_ICON_URL } from "../mcp/http-mcp-server.js";
+import {
+  agentPackageToolCount,
+  loadAgentPackage,
+  PCC_MCP_ICON_URL,
+} from "../mcp/http-mcp-server.js";
 import { DOCS_MOUNT_PATH } from "../mcp/docs-mcp-server.js";
 import { getApiCapabilityTypes } from "./capabilities.js";
 
@@ -252,6 +256,7 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         url: `${PUBLIC_BASE_URL}/api/capabilities/by-type/${encodeURIComponent(capabilityType)}`,
         description: `Discover and hire ${capabilityType} capability on the PCC network.`,
       }));
+      const toolCount = agentPackageToolCount();
 
       return sendPublicJson(reply, {
         specVersion: "1.0",
@@ -266,7 +271,9 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
             type: "application/mcp-server+json",
             url: `${PUBLIC_BASE_URL}/mcp`,
             description:
-              "254-tool MCP server to discover, hire, and verify real-world physical capability.",
+              toolCount === null
+                ? "MCP server to discover, hire, and verify real-world physical capability."
+                : `MCP server exposing all ${toolCount} PCC agent-package tools, plus MCP-only helpers, to discover, hire, and verify real-world physical capability.`,
           },
           {
             identifier: "urn:ai:capability.network:agent-package",

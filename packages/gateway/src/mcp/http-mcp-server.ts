@@ -140,6 +140,27 @@ export function loadAgentPackage(): AgentPackage {
   return raw as AgentPackage;
 }
 
+/**
+ * Published counts read this instead of hand-typed literals after six
+ * contradictory counts shipped. Return null when loading fails so discovery
+ * surfaces remain available even when the package cannot be read or parsed.
+ */
+export function agentPackageToolCount(): number | null {
+  try {
+    return loadAgentPackage().tools.length;
+  } catch {
+    return null;
+  }
+}
+
+/** Build the OpenAPI package-link sentence without inventing an unavailable count. */
+export function agentPackageLinkSentence(toolCount: number | null): string {
+  if (toolCount === null) {
+    return "See https://capability.network/agent-package.json for the agent package.";
+  }
+  return `See https://capability.network/agent-package.json for the ${toolCount}-tool agent package.`;
+}
+
 function toolDescription(tool: AgentPackageTool): string {
   const description = tool.description.trim();
   return description.length >= 20

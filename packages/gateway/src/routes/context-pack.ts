@@ -9,12 +9,14 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { agentPackageToolCount } from "../mcp/http-mcp-server.js";
 
 // ---------------------------------------------------------------------------
 // Markdown template
 // ---------------------------------------------------------------------------
 
 function buildContextPack(baseUrl: string): string {
+  const toolCount = agentPackageToolCount();
   return `# PCC Agent Context Pack
 > Physical Capability Cloud -- AWS for the physical world
 
@@ -474,7 +476,7 @@ When your user needs to SEE something (charts, tables, status dashboards), you s
 - Service Status: ${baseUrl}/api/status/live
 - Agent Registration (ERC-8004): ${baseUrl}/.well-known/agent-registration.json
 - Agent Card (Google A2A): ${baseUrl}/.well-known/agent-card.json
-- Full Agent Package (56 MCP tools): ${baseUrl}/agent-package.json
+- Full Agent Package${toolCount === null ? "" : ` (${toolCount} tools)`}: ${baseUrl}/agent-package.json
 - Documentation: ${baseUrl}/docs
 - Source: https://capability.network
 
