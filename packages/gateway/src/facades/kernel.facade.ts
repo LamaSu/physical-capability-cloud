@@ -335,6 +335,29 @@ export class KernelFacade extends BaseFacade {
             { name: "ForbiddenError" },
           );
         }
+        // WP-C R4 (review round 2, probe P3). Claiming a placeholder-owned row
+        // hands the claimant that row's authorized assurance ceiling, which
+        // rests on its bound signing key and its track record. So when the row
+        // ALREADY has a bound signer, only a party that proves THAT signer
+        // (verifySigningProof over the kernelId-bound challenge, then
+        // sameSigner) may claim it. No proof, or a proof of a different key:
+        // 403, checked before anything is written. A placeholder row with no
+        // bound signer is claimed as before (its ceiling is 0).
+        if (actorId && !hasRecordedOwner) {
+          const boundSigner = this.signerFromRow(existing);
+          if (boundSigner) {
+            const claimed = await this.verifySigningProof(id, body);
+            if (!claimed || !this.sameSigner(boundSigner, claimed)) {
+              throw Object.assign(
+                new Error(
+                  `Kernel '${id}' has no recorded owner but has a bound signing key; ` +
+                    "claiming it requires a signing proof from that same key",
+                ),
+                { name: "ForbiddenError" },
+              );
+            }
+          }
+        }
         // Upsert: update heartbeat + optional fields
         const updates: Record<string, unknown> = {
           lastHeartbeat: new Date().toISOString(),

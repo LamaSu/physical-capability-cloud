@@ -191,6 +191,90 @@ describe("WP-C register: the tier is a validated claim, served capped", () => {
   });
 });
 
+// ── R4: claiming a legacy placeholder row that has a bound signer ───────────
+// Review round 2 (MEDIUM, probe P3): a placeholder-owned row (zero-address
+// owner) that already has a bound signer and a track record could be claimed by
+// ANY authenticated actor through POST /api/kernels {id} with no signing proof,
+// and the claimant then heartbeated capabilities at the row's ceiling (3).
+
+describe("WP-C R4 legacy claim: a bound signer must be proven by the claimant", () => {
+  const ZERO_OWNER = "0x0000000000000000000000000000000000000000";
+
+  /** A placeholder-owned row whose bound signer is a fresh ed25519 key, with a tier-3 track record. */
+  function boundLegacyRow(id: string) {
+    const kp = nacl.sign.keyPair();
+    const pubHex = Buffer.from(kp.publicKey).toString("hex");
+    insertKernelRow(id, {
+      operatorAddress: ZERO_OWNER,
+      signingKeyAlgorithm: "ed25519",
+      signingKeyPublicKey: `0x${pubHex}`,
+      reputation: 900,
+      totalJobsCompleted: 50,
+    });
+    return {
+      proof: buildEd25519RegistrationProof(id, {
+        algorithm: "ed25519",
+        privateKey: kp.secretKey,
+        expectedPublicKey: pubHex,
+      }),
+      pubHex,
+    };
+  }
+
+  it("[neg] P3: a claim WITHOUT a signing proof is refused (403); the row stays unowned and heartbeats stay refused", async () => {
+    const id = uid("wpc-r4-legacy");
+    insertKernelRow(id, { operatorAddress: ZERO_OWNER, ...TRUSTED });
+    const claim = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      headers: asAttacker(),
+      payload: { id, name: "mine now" },
+    });
+    expect(claim.statusCode).toBe(403);
+    expect(getRepos().kernels.findById(id)?.operatorAddress).toBe(ZERO_OWNER);
+
+    const hb = await app.inject({
+      method: "POST",
+      url: `/api/kernels/${id}/heartbeat`,
+      headers: asAttacker(),
+      payload: { capabilities: [{ type: "wpc-r4-cap", assuranceTiers: [3] }] },
+    });
+    expect(hb.statusCode).toBe(403);
+    expect(getRepos().capabilities.findById(`cap-${id}-wpc-r4-cap`)).toBeFalsy();
+  });
+
+  it("[neg] a valid proof of a DIFFERENT key does not claim it either (403, nothing written)", async () => {
+    const id = uid("wpc-r4-other-key");
+    const { pubHex } = boundLegacyRow(id);
+    const claim = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      headers: asAttacker(),
+      payload: { id, name: "mine now", ...ed25519Proof(id) },
+    });
+    expect(claim.statusCode).toBe(403);
+    const row = getRepos().kernels.findById(id)!;
+    expect(row.operatorAddress).toBe(ZERO_OWNER);
+    expect(row.signingKeyPublicKey).toBe(`0x${pubHex}`);
+    expect(row.name).toBe(`Row ${id}`);
+  });
+
+  it("the holder of the bound key CAN claim the row (positive control)", async () => {
+    const id = uid("wpc-r4-holder");
+    const { proof, pubHex } = boundLegacyRow(id);
+    const claim = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      headers: asOwner(),
+      payload: { id, name: "reclaimed", ...proof },
+    });
+    expect(claim.statusCode).toBe(200);
+    const row = getRepos().kernels.findById(id)!;
+    expect(row.operatorAddress).toBe(OWNER);
+    expect(row.signingKeyPublicKey).toBe(`0x${pubHex}`);
+  });
+});
+
 // ── C1: heartbeat is owner-only; inserted tiers are clamped ─────────────────
 
 describe("WP-C heartbeat: owner-only, clamped", () => {
