@@ -42,6 +42,7 @@ import { v4 as uuidv4 } from "uuid";
 import { parseUnits } from "viem";
 import { getRepos } from "../db.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { auditService } from "../services/audit-service.js";
 import { getStoryIPService, getLicensingEngine } from "@pcc/contracts";
 import type { ContributorRole, LicensingTerms } from "@pcc/spec";
 
@@ -178,6 +179,10 @@ const SIWE_STEPS = {
  * accepted here on purpose (see the header): their operatorId is asserted, not proven.
  */
 function verifiedWallet(req: FastifyRequest): string | null {
+  // Gateway #326 adds req.provenWallet, set by apiGate from a SIWE session or from a key minted through
+  // the SIWE path. Only apiGate writes it; a client cannot. Until then, the session is the only proof.
+  const proven = (req as { provenWallet?: unknown }).provenWallet;
+  if (typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven)) return proven.toLowerCase();
   const session = resolveSession(req);
   return session ? session.address.toLowerCase() : null;
 }
@@ -231,11 +236,22 @@ export function recordedIpOwner(ipId: string): string | null {
   return job ? kernelOperator(job.kernelId) : null;
 }
 
-/** An IP PCC has a durable record of (registration or derivative link). */
-function isKnownIp(ipId: string): boolean {
-  const repos = getRepos();
-  return repos.story.findIpById(ipId) !== undefined || repos.story.findDerivativeLinksByChild(ipId).length > 0;
+/** An IP with a recorded owner. An ownerless record is not enough: nobody could manage or claim it. */
+function hasRecordedOwner(ipId: string): boolean {
+  return recordedIpOwner(ipId) !== null;
 }
+
+/** Story real mode (STORY_MOCK=false), where the service would sign with the GATEWAY's key. */
+function storyRealMode(): boolean {
+  return process.env.STORY_MOCK === "false";
+}
+
+const GATEWAY_NEVER_PAYS = {
+  error: "not_executed",
+  message:
+    "In Story real mode the gateway would pay this royalty from its own wallet on the caller's behalf. PCC does not; " +
+    "a payer's own on-chain payment path is an operator decision (queue G). Nothing was paid.",
+};
 
 /**
  * The caller must be the IP's recorded owner. Replies (401/403/503) and returns null otherwise.
@@ -290,26 +306,54 @@ function isBaseUnitAmount(v: unknown): v is string {
 const ESCROW_CURRENCY_DECIMALS: Readonly<Record<string, number>> = { USDC: 6 };
 
 /**
- * The escrow milestone that settles a job: the job's step in the escrow of the job's workflow, or,
- * when the workflow ids disagree, the one milestone anywhere with the job's (unique) step id.
+ * The escrow milestone that settles a job: the job's step in the escrow of the job's OWN workflow.
+ * There is no fallback across workflows: another workflow's released milestone and payer must never
+ * settle this job (coord-watch #2974). A job whose workflow id matches no escrow is not settleable.
  */
 function findJobMilestone(job: { cwmId: string; stepId: string }):
   | { escrow: { id: string; payer: string; currency: string }; milestone: { stepId: string; amount: string; status: string } }
   | "none"
   | "ambiguous" {
   const repos = getRepos();
-  const direct = repos.escrows.findByCwm(job.cwmId);
-  if (direct) {
-    const ms = repos.escrows.findMilestonesByEscrow(direct.id).filter((m) => m.stepId === job.stepId);
-    if (ms.length === 1) return { escrow: direct, milestone: ms[0]! };
-    if (ms.length > 1) return "ambiguous";
-  }
-  const all = repos.escrows.findAll();
-  const byId = new Map(all.map((e) => [e.id, e] as const));
-  const ms = repos.escrows.findMilestonesByEscrowIds(all.map((e) => e.id)).filter((m) => m.stepId === job.stepId);
+  const escrow = repos.escrows.findByCwm(job.cwmId);
+  if (!escrow) return "none";
+  const ms = repos.escrows.findMilestonesByEscrow(escrow.id).filter((m) => m.stepId === job.stepId);
   if (ms.length === 0) return "none";
   if (ms.length > 1) return "ambiguous";
-  return { escrow: byId.get(ms[0]!.escrowId)!, milestone: ms[0]! };
+  return { escrow, milestone: ms[0]! };
+}
+
+// ── Once-only settlement (a durable claim in the append-only audit log) ─────
+//
+// A settlement of (jobId, childIpId) is claimed by an audit event written synchronously, before the
+// first payment call, so no other request in this process can interleave between the check and the
+// claim. A claim is permanent once anything was paid. A partial failure needs operator repair; it is
+// never retried automatically, because that would pay the paid rows twice. If nothing was paid, a
+// release event lets the settlement be tried again.
+
+const SETTLEMENT_EVENT = "ip.royalties.settlement";
+
+function activeSettlementClaims(jobId: string, childIpId: string): number {
+  const rows = getRepos()
+    .auditLog.query({ eventType: SETTLEMENT_EVENT, resourceType: "job", limit: Number.MAX_SAFE_INTEGER })
+    .filter((r) => r.resourceId === jobId && (r.metadata as { childIpId?: unknown } | null)?.childIpId === childIpId);
+  const claims = rows.filter((r) => r.action === "claim").length;
+  const releases = rows.filter((r) => r.action === "release").length;
+  return claims - releases;
+}
+
+function recordSettlement(action: "claim" | "release", jobId: string, childIpId: string, actor: string, metadata: Record<string, unknown>): void {
+  getRepos().auditLog.insert({
+    timestamp: new Date().toISOString(),
+    eventType: SETTLEMENT_EVENT,
+    actor,
+    resourceType: "job",
+    resourceId: jobId,
+    action,
+    metadata: { childIpId, ...metadata },
+    ip: null,
+    userAgent: null,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +424,7 @@ export async function ipRoutes(app: FastifyInstance) {
             registeredAt: reg.registeredAt,
           });
         } catch (dbErr) {
+          auditService.log({ eventType: "ip.registration_unrecorded", actor: wallet, resourceType: "ip", resourceId: reg.ipId, action: "repair-needed", metadata: { capabilityId: cap.id } });
           return reply.code(500).send({
             error: "registration_not_recorded",
             message: `The IP was registered as ${reg.ipId} but could not be recorded, so it has no owner: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}`,
@@ -423,8 +468,13 @@ export async function ipRoutes(app: FastifyInstance) {
       if (kernelOperator(job.kernelId) !== wallet) {
         return reply.code(403).send({ error: "not_kernel_operator", message: `Only the operator of kernel ${job.kernelId} may register this job's evidence.` });
       }
-      if (!isKnownIp(parentIpId)) {
-        return reply.code(404).send({ error: "parent_ip_not_found", message: `IP ${parentIpId} is not recorded.` });
+      // The parent is the IP of the capability this job ran, and nothing else (coord-watch #2974).
+      const capabilityIp = repos.story.findIpByCapabilityId(job.capabilityId);
+      if (!capabilityIp || capabilityIp.ipId !== parentIpId) {
+        return reply.code(409).send({
+          error: "parent_not_job_capability",
+          message: `Job ${job.id}'s evidence derives from the IP of its own capability ${job.capabilityId}, not from ${parentIpId}.`,
+        });
       }
 
       try {
@@ -449,6 +499,7 @@ export async function ipRoutes(app: FastifyInstance) {
             linkedAt: link.linkedAt,
           });
         } catch (dbErr) {
+          auditService.log({ eventType: "ip.derivative_unrecorded", actor: wallet, resourceType: "ip", resourceId: link.childIpId, action: "repair-needed", metadata: { jobId: job.id, parentIpId } });
           return reply.code(500).send({
             error: "derivative_not_recorded",
             message: `The derivative ${link.childIpId} was registered but could not be recorded, so it has no owner: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}`,
@@ -612,11 +663,28 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: "ip_not_linked_to_job", message: `IP ${childIpId} is not the registered evidence of job ${jobId}.` });
       }
 
+      if (storyRealMode()) return reply.code(501).send(GATEWAY_NEVER_PAYS);
+
       let distributions: ReturnType<typeof engine.getRoyaltyDistribution>;
       try {
         distributions = engine.getRoyaltyDistribution(childIpId, revenue);
       } catch (err) {
         return storyFailure(reply, err, "settle_royalties_failed");
+      }
+      const payable = distributions.filter((d) => d.amount !== "0");
+      if (payable.length > 0) {
+        // Check and claim with no await in between: once-only within this process.
+        try {
+          if (activeSettlementClaims(job.id, childIpId) > 0) {
+            return reply.code(409).send({
+              error: "already_settled",
+              message: `Royalties for job ${jobId} and IP ${childIpId} were already settled, or a settlement is being repaired. They are never paid twice.`,
+            });
+          }
+          recordSettlement("claim", job.id, childIpId, wallet, { revenue, payer: escrow.payer, rows: payable.length });
+        } catch {
+          return reply.code(503).send({ error: "store_unavailable", message: "A settlement cannot be recorded, so nothing is paid." });
+        }
       }
 
       // Every row reports its own outcome. A failed row fails the request: nothing is swallowed.
@@ -638,6 +706,14 @@ export async function ipRoutes(app: FastifyInstance) {
         }
       }
       const failed = rows.filter((r) => r.outcome === "failed").length;
+      if (payable.length > 0 && rows.every((r) => r.outcome === "failed")) {
+        // Nothing was paid: release the claim so the settlement can be tried again.
+        try {
+          recordSettlement("release", job.id, childIpId, wallet, { reason: "nothing paid" });
+        } catch {
+          /* the claim stands: a later attempt is refused, which is the safe side */
+        }
+      }
       const result = { jobId, childIpId, revenue, payerAddress: escrow.payer, distributions: rows, totalDistributed: String(totalDistributed) };
       if (failed > 0 && failed === rows.length && notExecuted === failed) {
         // Story's real mode executed none of it: not available, rather than a partial failure.
@@ -724,10 +800,13 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(403).send({ error: "payer_must_be_caller", message: "You can only pay as your own signed-in wallet." });
       }
       try {
-        if (!isKnownIp(ipId)) return reply.code(404).send({ error: "ip_not_found", message: `IP ${ipId} is not recorded.` });
+        if (!hasRecordedOwner(ipId)) {
+          return reply.code(403).send({ error: "ip_owner_unknown", message: `IP ${ipId} has no recorded owner, so nobody could claim what is paid into it.` });
+        }
       } catch {
         return reply.code(503).send({ error: "store_unavailable", message: "The IP cannot be looked up without the store." });
       }
+      if (storyRealMode()) return reply.code(501).send(GATEWAY_NEVER_PAYS);
 
       try {
         const result = await svc.payJobRoyalty(ipId, amount, wallet);
@@ -857,7 +936,9 @@ export async function ipRoutes(app: FastifyInstance) {
       const wallet = requireWallet(req, reply);
       if (wallet === null) return reply;
       try {
-        if (!isKnownIp(ipId)) return reply.code(404).send({ error: "ip_not_found", message: `IP ${ipId} is not recorded.` });
+        if (!hasRecordedOwner(ipId)) {
+          return reply.code(403).send({ error: "ip_owner_unknown", message: `IP ${ipId} has no recorded owner to answer a dispute.` });
+        }
       } catch {
         return reply.code(503).send({ error: "store_unavailable", message: "The IP cannot be looked up without the store." });
       }

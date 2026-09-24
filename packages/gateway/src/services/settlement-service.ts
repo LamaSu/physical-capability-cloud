@@ -295,7 +295,8 @@ export class SettlementService {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
               // The derivative is the job's kernel operator's work (N10a: never the zero address).
               const kernel = repos.kernels.findById(job.kernelId);
-              if (ipReg && kernel) {
+              const operatorOk = kernel !== undefined && /^0x[0-9a-fA-F]{40}$/.test(kernel.operatorAddress) && !/^0x0{40}$/i.test(kernel.operatorAddress);
+              if (ipReg && kernel && operatorOk) {
                 const { getStoryIPService } = await import("@pcc/contracts");
                 const storyIPService = getStoryIPService();
                 const link = await storyIPService.registerJobAsDerivative(ipReg.ipId, {
@@ -318,7 +319,9 @@ export class SettlementService {
                     linkedAt: link.linkedAt,
                   });
                 } catch (dbErr) {
-                  console.warn("[settlement] Story derivative DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+                  // The derivative exists on Story but has no owner record: flag it for operator repair.
+                  console.error("[settlement] Story derivative minted but NOT recorded:", dbErr instanceof Error ? dbErr.message : dbErr);
+                  auditService.log({ eventType: "ip.derivative_unrecorded", actor: "settlement-service", resourceType: "ip", resourceId: link.childIpId, action: "repair-needed", metadata: { jobId, parentIpId: link.parentIpId } });
                 }
                 pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
                   metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
@@ -474,31 +477,11 @@ export class SettlementService {
         // DB update non-fatal
       }
 
-      // ── Best-effort: Story Protocol royalty payment ─────────────────
-      try {
-        const repos = getRepos();
-        // Find derivative links for this job to get the IP ID
-        const derivLinks = repos.story.findDerivativeLinksByJob(jobId);
-        if (derivLinks.length > 0) {
-          const childIpId = derivLinks[0].childIpId;
-          const royaltyPercent = Number(process.env.STORY_ROYALTY_PERCENT ?? "5");
-
-          // Estimate job value from milestone index (use a placeholder amount for mock)
-          // In production this would come from the escrow contract's milestone amount
-          const milestoneAmountStr = process.env.STORY_MILESTONE_AMOUNT ?? "1000000"; // 1 USDC in atomic units
-          const royaltyAmount = String(
-            Math.floor(Number(milestoneAmountStr) * royaltyPercent / 100),
-          );
-
-          const { getStoryIPService } = await import("@pcc/contracts");
-          const storyIPService = getStoryIPService();
-          await storyIPService.payJobRoyalty(childIpId, royaltyAmount, contractAddress as string);
-          console.log(`[settlement] Story royalty paid: ipId=${childIpId} amount=${royaltyAmount} (${royaltyPercent}% of milestone)`);
-        }
-      } catch (storyErr) {
-        // Royalty payment is best-effort — escrow release succeeds regardless
-        console.warn("[settlement] Story royalty payment failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
-      }
+      // ── No automatic Story royalty payment on release (N10a, coord-watch #2974) ─────
+      // This used to pay a royalty computed from STORY_MILESTONE_AMOUNT x STORY_ROYALTY_PERCENT (an env
+      // guess, not the released amount), with the escrow contract named as payer. Royalties are now
+      // either inside each settlement unit's payouts (the economics compiler), or settled explicitly by
+      // a party to the job through POST /api/ip/settle-royalties, from the released milestone.
 
       return {
         jobId,

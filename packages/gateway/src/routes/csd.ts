@@ -12,7 +12,6 @@
 import type { FastifyInstance } from "fastify";
 import { loadBuiltinCsds, CsdRegistry, CsdSchema, dashboardV1Csd, type CsdUsageRepository } from "@pcc/spec";
 import { getRepos } from "../db.js";
-import { resolveSession } from "../auth/siwe-auth.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
@@ -169,58 +168,13 @@ export async function csdRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: message });
     }
 
-    // ── Best-effort: Auto-register as Story Protocol IP Asset ──────
-    // The IP is minted to the caller's own SIWE-proven wallet, never to a body-supplied address and
-    // never to the zero address (N10a). Without a proven wallet the CSD is still registered, and the
-    // response says why no IP was.
-    let storyIpId: string | undefined;
-    let storyIpSkipped: "verified_wallet_required" | "designer_must_be_caller" | undefined;
-    let wallet: string | null = null;
-    try {
-      const session = resolveSession(req);
-      wallet = session ? session.address.toLowerCase() : null;
-    } catch {
-      wallet = null; // no session store: no wallet can be proven, so no IP is minted
-    }
-    if (wallet === null) {
-      storyIpSkipped = "verified_wallet_required";
-    } else if (req.body.designerAddress !== undefined && String(req.body.designerAddress).toLowerCase() !== wallet) {
-      storyIpSkipped = "designer_must_be_caller";
-    }
-    if (storyIpSkipped === undefined && wallet !== null) {
-      try {
-        const { getStoryIPService } = await import("@pcc/contracts");
-        const storyIPService = getStoryIPService();
-
-        const designerAddress = wallet;
-        const designerName = req.body.designerName ?? "Unknown Designer";
-        const commercialRevShare = typeof req.body.commercialRevShare === "number" ? req.body.commercialRevShare : 5;
-
-        const csd = parsed.data;
-        const capabilityId = csd.url;
-
-        const registration = await storyIPService.registerCapabilityAsIP(
-          {
-            id: capabilityId,
-            name: csd.name,
-            type: csd.kind,
-            kernelId: "unknown",
-            description: csd.description,
-          },
-          {
-            designerAddress,
-            designerName,
-            commercialRevShare,
-          },
-        );
-
-        storyIpId = registration.ipId;
-
-        // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
-      } catch (storyErr) {
-        console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
-      }
-    }
+    // ── No automatic Story IP registration (N10a, coord-watch #2974) ──────
+    // A CSD is a design, not a recorded capability on a kernel, so an IP minted here would have no
+    // durable owner record: nobody could ever manage, claim or dispute it. IP registration goes through
+    // POST /api/ip/register-capability, by the operator of a recorded capability, which records
+    // ownership. The CSD itself is registered as before.
+    const storyIpId: string | undefined = undefined;
+    const storyIpSkipped = "register_via_capability" as const;
 
     return { registered: true, url: parsed.data.url, storyIpId, ...(storyIpSkipped ? { storyIpSkipped } : {}) };
   });
