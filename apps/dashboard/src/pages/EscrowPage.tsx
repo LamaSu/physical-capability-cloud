@@ -6,6 +6,7 @@ import {
 import { useUIStore } from "../stores/ui-store.js";
 import { useEscrows } from "../api/hooks/use-pcc-data.js";
 import { DisputeModal } from "../components/escrow/DisputeModal.js";
+import { moneyBadgeColor } from "../lib/money-badge.js";
 
 interface DisputeContext {
   escrowId: string;
@@ -57,8 +58,8 @@ export function EscrowPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white/80">{esc.id}</span>
-                    {/* money honesty: exact map, gray DEFAULT -- refunded/disputed/created/unknown must NOT render green (was green-by-default). Matches MilestoneTimeline + read-route contract rule 1. */}
-                    <GlowBadge color={esc.status === "completed" ? "green" : esc.status === "disputed" ? "red" : esc.status === "active" ? "gold" : "gray"}>
+                    {/* money honesty: the ONE canonical @pcc/spec map -- green only for a final release; refunded/allocated/unknown never green (read-route contract rule 1). */}
+                    <GlowBadge color={moneyBadgeColor(esc.status)}>
                       {esc.status}
                     </GlowBadge>
                   </div>
