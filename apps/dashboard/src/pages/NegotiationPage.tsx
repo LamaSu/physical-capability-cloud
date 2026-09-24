@@ -164,7 +164,7 @@ export function NegotiationPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   React.useEffect(() => {
-    setPageMeta("Negotiations", "Manage incoming proposals, revenue splits, and pricing floors");
+    setPageMeta("Negotiations", "Proposals, revenue splits and pricing floors");
   }, [setPageMeta]);
 
   // Sample proposals, floors and timelines render only when the viewer asked

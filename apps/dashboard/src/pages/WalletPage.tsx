@@ -828,7 +828,7 @@ function ActivityTab({ sessions }: { sessions: DemoRampSession[] }) {
 export function WalletPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   React.useEffect(() => {
-    setPageMeta("Wallet & Funding", "Agent wallet, funding and withdrawals");
+    setPageMeta("Wallet & Funding", "Agent wallet and funding");
   }, [setPageMeta]);
 
   const [activeTab, setActiveTab] = React.useState<Tab>("fund");

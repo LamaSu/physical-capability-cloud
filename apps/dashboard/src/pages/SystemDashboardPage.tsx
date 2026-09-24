@@ -818,7 +818,7 @@ function ProtocolFeeCard({ data }: { data: PrototypeSystemPayload }) {
             <h3 className="text-sm font-bold text-white/85 tracking-wide">Protocol Fee</h3>
             <p className="text-[11px] text-white/35 mt-0.5">On-chain settlement economics</p>
           </div>
-          <Badge color="green">Live</Badge>
+          <Badge color="white">Sample</Badge>
         </div>
         <div className="flex gap-4">
           <BigNumber value={`${feePct}%`} label="Fee Rate" />
