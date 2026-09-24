@@ -24,12 +24,17 @@ import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
 // Valid adapter types and device roles
 // ---------------------------------------------------------------------------
 
+// Every adapter the kernel's factory can build (kernel-config.ts AdapterType).
+// opentrons and hamilton were missing, so liquid handlers could not be
+// registered through setup (D17, kits #2613).
 const VALID_ADAPTER_TYPES: AdapterType[] = [
   "octoprint",
   "modbus",
   "opcua",
   "sila",
   "ipp",
+  "opentrons",
+  "hamilton",
   "generic-http",
   "mock",
 ];
@@ -156,6 +161,16 @@ function buildDeviceConfig(desc: DeviceDescription, kernelId: string, index: num
       if (desc.name) cfg.name = desc.name;
       cfg.mockMode = false;
       break;
+    case "opentrons":
+      // The robot server's HTTP API; the kernel defaults to http://localhost:31950.
+      if (desc.url) cfg.url = desc.url;
+      else if (desc.host) cfg.url = `http://${desc.host}:${desc.port ?? 31950}`;
+      break;
+    case "hamilton":
+      // Credentials are not taken here; supply them in the kernel's own config.
+      if (desc.url) cfg.url = desc.url;
+      else if (desc.host) cfg.url = `http://${desc.host}${desc.port ? `:${desc.port}` : ""}`;
+      break;
     case "generic-http":
       if (desc.url) cfg.url = desc.url;
       break;
@@ -215,6 +230,33 @@ function validateAdapterConfig(
           ? `OPC-UA endpoint: ${String(cfg.endpoint)}`
           : `OPC-UA adapter "${device.id}" has no endpoint set`,
       });
+      break;
+    }
+    case "opentrons": {
+      checks.push({
+        name: `device:${device.id}:url`,
+        status: cfg.url ? "pass" : "warn",
+        message: cfg.url
+          ? `Opentrons robot URL: ${String(cfg.url)}`
+          : `Opentrons adapter "${device.id}" has no url set (will default to http://localhost:31950)`,
+      });
+      break;
+    }
+    case "hamilton": {
+      checks.push({
+        name: `device:${device.id}:url`,
+        status: cfg.url ? "pass" : "warn",
+        message: cfg.url
+          ? `Hamilton URL: ${String(cfg.url)}`
+          : `Hamilton adapter "${device.id}" has no url set (will default to http://localhost)`,
+      });
+      if (!cfg.username || !cfg.password) {
+        checks.push({
+          name: `device:${device.id}:credentials`,
+          status: "warn",
+          message: `Hamilton adapter "${device.id}" has no username/password set`,
+        });
+      }
       break;
     }
     case "sila": {

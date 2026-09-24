@@ -322,6 +322,74 @@ describe("Setup API", () => {
       expect(device.config.host).toBe("192.168.1.100");
       expect(device.config.port).toBe(502);
     });
+
+    // D17 (kits #2613): liquid handlers were rejected here even though the
+    // kernel's adapter factory builds both.
+    it("configures an opentrons device from its url, with no mock settings", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/generate-config",
+        payload: {
+          devices: [
+            { name: "OT-2", type: "machine", adapterType: "opentrons", url: "http://192.168.1.60:31950" },
+          ],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const device = res.json().config.devices[0];
+      expect(device.adapterType).toBe("opentrons");
+      expect(device.config.url).toBe("http://192.168.1.60:31950");
+      expect(device.config).not.toHaveProperty("jobDurationMs");
+      expect(device.config).not.toHaveProperty("mockMode");
+    });
+
+    it("builds an opentrons url from host with the robot server's default port", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/generate-config",
+        payload: {
+          devices: [{ name: "OT-2", type: "machine", adapterType: "opentrons", host: "192.168.1.61" }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().config.devices[0].config.url).toBe("http://192.168.1.61:31950");
+    });
+
+    it("configures a hamilton device from its url and takes no credentials", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/generate-config",
+        payload: {
+          devices: [
+            {
+              name: "STAR",
+              type: "machine",
+              adapterType: "hamilton",
+              url: "http://192.168.1.70",
+              apiKey: "must-not-be-copied",
+            },
+          ],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const device = res.json().config.devices[0];
+      expect(device.adapterType).toBe("hamilton");
+      expect(device.config.url).toBe("http://192.168.1.70");
+      expect(device.config).not.toHaveProperty("apiKey");
+      expect(device.config).not.toHaveProperty("jobDurationMs");
+      expect(res.json().envLine).not.toContain("must-not-be-copied");
+    });
+
+    it("lists opentrons and hamilton among the valid adapter types", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/generate-config",
+        payload: { devices: [{ name: "Bad", type: "machine", adapterType: "nonexistent" }] },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().message).toContain("opentrons");
+      expect(res.json().message).toContain("hamilton");
+    });
   });
 
   // ── POST /api/setup/validate ─────────────────────────────────────────────
@@ -429,6 +497,47 @@ describe("Setup API", () => {
       expect(apiKeyCheck.status).toBe("warn");
     });
 
+    it("passes an opentrons device with a url and warns without one", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/validate",
+        payload: {
+          config: JSON.stringify({
+            kernelId: "kernel_lab",
+            devices: [
+              { id: "dev_ot2_001", type: "machine", adapterType: "opentrons", config: { url: "http://192.168.1.60:31950" } },
+              { id: "dev_ot2_002", type: "machine", adapterType: "opentrons", config: {} },
+            ],
+          }),
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.valid).toBe(true);
+      const find = (name: string) => body.checks.find((c: { name: string }) => c.name === name);
+      expect(find("device:dev_ot2_001:url").status).toBe("pass");
+      expect(find("device:dev_ot2_002:url").status).toBe("warn");
+    });
+
+    it("warns when a hamilton device has no credentials", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/validate",
+        payload: {
+          config: JSON.stringify({
+            kernelId: "kernel_lab",
+            devices: [{ id: "dev_star_001", type: "machine", adapterType: "hamilton", config: { url: "http://192.168.1.70" } }],
+          }),
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.valid).toBe(true);
+      const cred = body.checks.find((c: { name: string }) => c.name === "device:dev_star_001:credentials");
+      expect(cred).toBeDefined();
+      expect(cred.status).toBe("warn");
+    });
+
     it("fails for invalid adapterType in config", async () => {
       const res = await app.inject({
         method: "POST",
@@ -518,6 +627,27 @@ describe("Setup API", () => {
       expect(res.statusCode).toBe(201);
       const body = res.json();
       expect(body.device.adapterType).toBe("octoprint");
+    });
+
+    it.each(["opentrons", "hamilton"])("registers a %s device (D17)", async (adapterType) => {
+      const deviceId = `dev-setup-${adapterType}-${Date.now()}`;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId,
+          type: "machine",
+          model: adapterType === "opentrons" ? "Opentrons OT-2" : "Hamilton STAR",
+          adapterType,
+          adapterConfig: { url: "http://192.168.1.60" },
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      const body = res.json();
+      expect(body.registered).toBe(true);
+      expect(body.device.id).toBe(deviceId);
+      expect(body.device.adapterType).toBe(adapterType);
     });
 
     it("returns 400 for missing required fields", async () => {
