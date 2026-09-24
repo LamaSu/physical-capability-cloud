@@ -31,3 +31,7 @@ ai/research/judges-complete.md
 ai/supervisor/vetting-staging/
 private-strategy/
 ai/
+
+# pcc-node key pairs: never commit one (N35b). The node keeps its key under ~/.pcc-node/.
+pcc-keys.json
+**/pcc-keys.json
