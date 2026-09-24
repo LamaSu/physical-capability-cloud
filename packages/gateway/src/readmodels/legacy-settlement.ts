@@ -309,10 +309,8 @@ export function loadLegacySettlement(
 
   const onReadError = (source: string, error: unknown) =>
     req.log.warn({ jobId, source, err: error }, "legacy settlement read: source read failed");
-  const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
-    tenant,
-    onReadError,
-  });
+  // The job's tenant was checked above; its evidence is read through the job (#353 @938a180e).
+  const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, { onReadError });
   const dto = buildJobExecutionDTO(sources, asOf);
 
   let sessions: SessionRead = { ok: true, sessions: [] };

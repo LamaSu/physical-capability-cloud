@@ -96,10 +96,8 @@ export async function jobRoutes(app: FastifyInstance) {
     }
     const { job } = gate;
     const store = getStore();
-    const tenant = tenantOpts(req as any);
 
     const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
-      tenant,
       onReadError: (source, error) =>
         req.log.warn({ jobId: req.params.jobId, source, err: error }, "job execution read model: source read failed"),
     });
