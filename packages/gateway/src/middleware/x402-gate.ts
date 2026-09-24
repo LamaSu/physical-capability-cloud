@@ -367,9 +367,12 @@ export async function paymentGate(app: FastifyInstance) {
       enabled,
       protocol,
       deprecated: protocol === "x402",
-      // False while payment is enabled with no configured recipient: priced
-      // routes are then refused (503), never charged to a placeholder.
-      recipientConfigured: !unconfigured,
+      // Whether the recipient for the protocol in use is configured. False
+      // while payment is enabled without one: priced routes are then refused
+      // (503), never charged to a placeholder.
+      recipientConfigured: enabled
+        ? !unconfigured
+        : (useMpp ? mppRecipient() : x402Recipient()) !== null,
       ...stats,
       protectedRoutes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         route: key,

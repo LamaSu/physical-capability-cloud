@@ -120,13 +120,15 @@ describe("F1 — payment gate (legacy x402 path)", () => {
     await app.close();
   });
 
-  it("/api/x402/routes advertises NO payTo while unconfigured", async () => {
+  it("/api/x402/routes advertises NO payTo while unconfigured, and stats say so", async () => {
     const app = await buildGateApp();
     const res = await app.inject({ method: "GET", url: "/api/x402/routes" });
     expect(res.statusCode).toBe(200);
     expect(res.json().payTo).toBeUndefined();
     expect(res.json().configured).toBe(false);
     expect(res.body).not.toContain(PLACEHOLDER);
+    const stats = await app.inject({ method: "GET", url: "/api/x402/stats" });
+    expect(stats.json().recipientConfigured).toBe(false);
     await app.close();
   });
 
@@ -138,6 +140,8 @@ describe("F1 — payment gate (legacy x402 path)", () => {
     expect(decodePaymentRequired(res.headers["payment-required"]).accepts[0].payTo).toBe(TREASURY);
     const routes = await app.inject({ method: "GET", url: "/api/x402/routes" });
     expect(routes.json().payTo).toBe(TREASURY);
+    const stats = await app.inject({ method: "GET", url: "/api/x402/stats" });
+    expect(stats.json().recipientConfigured).toBe(true);
     await app.close();
   });
 });
@@ -192,6 +196,11 @@ describe("F1 — payment disabled is unchanged", () => {
     const app = await buildGateApp();
     const res = await app.inject({ method: "POST", url: "/api/capabilities/quote" });
     expect(res.statusCode).toBe(200);
+    // ...and it still does not claim a recipient it does not have.
+    const stats = await app.inject({ method: "GET", url: "/api/x402/stats" });
+    expect(stats.json().recipientConfigured).toBe(false);
+    const routes = await app.inject({ method: "GET", url: "/api/x402/routes" });
+    expect(routes.body).not.toContain(PLACEHOLDER);
     await app.close();
   });
 });
