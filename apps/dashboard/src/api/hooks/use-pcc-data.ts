@@ -17,6 +17,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../gateway.js";
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -169,12 +170,36 @@ export function useKernels(params?: { status?: string }) {
  * Route: GET /api/kernels/:kernelId → { kernel: KernelHealthSnapshot } (backward-compat).
  * Returns the { kernel } envelope — callers use data.kernel to access the snapshot.
  */
+/**
+ * The gateway's own answer that it has no such record. Only its not-found code
+ * counts: a 404 from a missing route or a proxy is an unavailable read.
+ */
+export class RecordNotFoundError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "RecordNotFoundError";
+  }
+}
+
 export function useKernel(kernelId: string | undefined) {
   return useQuery<{ kernel: KernelHealthSnapshot }>({
     queryKey: ["kernel", kernelId],
-    queryFn: () => api.getKernel(kernelId!),
+    // Reads the route directly (api.getKernel drops the error body) so the
+    // kernel facade's KERNEL_NOT_FOUND can be told apart from any other 404.
+    queryFn: async () => {
+      const res = await authorizedFetch(`/api/kernels/${encodeURIComponent(kernelId!)}`);
+      const body = (await res.json().catch(() => null)) as { error?: unknown; message?: unknown; kernel?: unknown } | null;
+      if (res.status === 404 && body?.error === "KERNEL_NOT_FOUND") {
+        throw new RecordNotFoundError("KERNEL_NOT_FOUND", typeof body.message === "string" ? body.message : "kernel not found");
+      }
+      if (!res.ok) throw new Error(typeof body?.message === "string" ? body.message : `API error: ${res.status}`);
+      if (!body || typeof body.kernel !== "object" || body.kernel === null) {
+        throw new Error("unexpected response shape from /api/kernels/:id");
+      }
+      return { kernel: body.kernel as KernelHealthSnapshot };
+    },
     enabled: !!kernelId,
-    retry: 1,
+    retry: (failures, error) => !(error instanceof RecordNotFoundError) && failures < 1,
   });
 }
 

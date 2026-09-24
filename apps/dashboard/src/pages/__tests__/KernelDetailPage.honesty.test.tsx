@@ -112,8 +112,25 @@ describe("KernelDetailPage", () => {
     expect(t).not.toContain("did:pcc:kernel");
   });
 
-  it("says 'not found' only when the gateway says 404", async () => {
+  it("a 404 without the kernel facade's own not-found code is unavailable, not 'not found'", async () => {
     stubKernel({ status: 404, body: { error: "not_found" } });
+    const t = await render("kernel-real-1");
+    expect(t).not.toContain("Kernel not found");
+    expect(t).toContain("Couldn't load this kernel");
+  });
+
+  it("a device or job list the snapshot left out is 'not reported', not empty", async () => {
+    const { devices: _d, recentJobs: _j, ...partial } = SNAPSHOT.kernel as Record<string, unknown>;
+    stubKernel({ status: 200, body: { kernel: partial } });
+    const t = await render("kernel-real-1");
+    expect(t).toContain("The gateway didn't report this kernel's devices.");
+    expect(t).toContain("The gateway didn't report this kernel's recent jobs.");
+    expect(t).not.toContain("No devices registered");
+    expect(t).not.toContain("No active jobs");
+  });
+
+  it("says 'not found' only when the gateway answers KERNEL_NOT_FOUND", async () => {
+    stubKernel({ status: 404, body: { error: "KERNEL_NOT_FOUND", message: "kernel 'k-x' not found" } });
     const t = await render("no-such-kernel");
     expect(t).toContain("Kernel not found");
   });

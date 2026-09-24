@@ -2,7 +2,7 @@ import React from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { GlassPanel, StatusChip, DataCell, GlowBadge, EmptyState, LoadingShell } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { useKernel } from "../api/hooks/use-pcc-data.js";
+import { useKernel, RecordNotFoundError } from "../api/hooks/use-pcc-data.js";
 import { isActiveJob, isKernelOnline } from "../lib/live-status.js";
 import { UnavailableState, StaleNotice } from "../components/LiveState.js";
 
@@ -16,9 +16,9 @@ import { UnavailableState, StaleNotice } from "../components/LiveState.js";
  * max assurance tier is the kernel's own declaration, and the label says so.
  */
 
-/** The gateway answers 404 for an unknown kernel id; any other failure is "unavailable". */
+/** Only the kernel facade's own KERNEL_NOT_FOUND means "no such kernel"; any other failure is "unavailable". */
 function isNotFound(error: unknown): boolean {
-  return error instanceof Error && /\b404\b/.test(error.message);
+  return error instanceof RecordNotFoundError && error.code === "KERNEL_NOT_FOUND";
 }
 
 const deviceStatusToPulse: Record<string, "online" | "executing" | "failed" | "offline"> = {
@@ -66,8 +66,9 @@ export function KernelDetailPage() {
   }
 
   const online = isKernelOnline(kernel);
-  const devices = kernel.devices ?? [];
-  const activeJobs = (kernel.recentJobs ?? []).filter(isActiveJob);
+  // A list the snapshot left out is "not reported", not an empty list.
+  const devices = Array.isArray(kernel.devices) ? kernel.devices : null;
+  const activeJobs = Array.isArray(kernel.recentJobs) ? kernel.recentJobs.filter(isActiveJob) : null;
   const loc = kernel.location;
   const hasCoords = loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng);
 
@@ -125,8 +126,12 @@ export function KernelDetailPage() {
 
         {/* Devices */}
         <div className="space-y-4">
-          <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Devices ({devices.length})</h3>
-          {devices.length === 0 ? (
+          <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
+            Devices{devices ? ` (${devices.length})` : ""}
+          </h3>
+          {devices === null ? (
+            <div className="text-sm text-white/30">The gateway didn't report this kernel's devices.</div>
+          ) : devices.length === 0 ? (
             <div className="text-sm text-white/30">No devices registered</div>
           ) : (
             <GlassPanel padding="md">
@@ -146,7 +151,9 @@ export function KernelDetailPage() {
 
           {/* Active Jobs */}
           <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Active Jobs</h3>
-          {activeJobs.length === 0 ? (
+          {activeJobs === null ? (
+            <div className="text-sm text-white/30">The gateway didn't report this kernel's recent jobs.</div>
+          ) : activeJobs.length === 0 ? (
             <div className="text-sm text-white/30">No active jobs</div>
           ) : (
             activeJobs.map((job) => (
