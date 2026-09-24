@@ -17,7 +17,14 @@ BRANCH="digital-verifier/foundation"
 GW="https://capability.network"
 ORACLE_TUNNEL="https://refer-proxy-joint-cleaning.trycloudflare.com"
 ORACLE_DIRECT="${ORACLE_DIRECT:-http://localhost:4100}"
-ORACLE_KEY="pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa"
+# The oracle key comes from the environment. Keys are NEVER committed to this
+# repository (WP-A fold F8: the literal that used to sit here was exposed and is
+# listed for revocation in docs/security/WILDCARD_KEY_ROTATION.md).
+ORACLE_KEY="${PCC_ORACLE_KEY:-}"
+if [ -z "$ORACLE_KEY" ]; then
+  echo "PCC_ORACLE_KEY is not set: export the oracle's x-oracle-key before running this script. Keys are never committed to this repository." >&2
+  exit 1
+fi
 REPORT_FILE="ai/supervisor/smoke-test-report.json"
 
 # ── State ───────────────────────────────────────────────────────────────────
