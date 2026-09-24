@@ -23,7 +23,25 @@
  *   6. node: every event's `source.kernelId`, and every `payload.kernelId`,
  *      equals the kernel that accepted the job;
  *   7. output, only when the subject names one: at least one event commits
- *      `payload.outputHash`, and every `payload.outputHash` equals it.
+ *      `payload.outputHash`, and every `payload.outputHash` equals it;
+ *   8. settlement unit, only when the subject names one: likewise for
+ *      `payload.settlementUnitId`, the escrow unit being settled. A job settles
+ *      unit by unit (milestones), and `jobId` alone would let evidence signed
+ *      for milestone 3 settle milestone 4 of the same job;
+ *   9. challenge, only when the subject names one: likewise for
+ *      `payload.challengeNonce`, the gateway-issued per-unit nonce the package
+ *      carries as `challengeBinding.nonce`. Evidence made before the nonce was
+ *      issued cannot contain it.
+ * Both unit fields are `0x` + 64 lowercase hex, byte-equal to the settlement
+ * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`.
+ *
+ * EVALUATE ONLY WHAT YOU HASHED. Steps 5-7 read the canonical snapshot of each
+ * event's hashed content (the JSON text `hashEvent` hashes, parsed back), with
+ * own-property reads, never the live object. A property the hash skipped (a
+ * non-enumerable or inherited `jobId`, a getter that answers differently the
+ * second time) therefore cannot bind a subject. The result returns those
+ * snapshots, and a consumer that evaluates the events further (levels,
+ * admission) must evaluate them, not its own copies.
  *
  * The subject fields are the ones the incumbent producers already hash:
  * kernel-sdk's `execution_started` / `execution_completed` commit
@@ -37,7 +55,7 @@
  * registered-key check). Neither leg is sufficient alone.
  */
 
-import { hashBundle, hashEvent } from "../util/canonical.js";
+import { canonicalize, hashBundle, sha256 } from "../util/canonical.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 import { isTaggedDigest } from "./signing-preimage.js";
 
@@ -52,7 +70,15 @@ export interface EvidenceSubject {
   kernelId: string;
   /** Digest of the delivered output, when the consumer holds one. */
   outputHash?: string;
+  /** The escrow settlement unit (milestone) being settled: `0x` + 64 lowercase
+   *  hex, from the unit record, never from the evidence. */
+  settlementUnitId?: string;
+  /** The gateway-issued challenge nonce for that unit: `0x` + 64 lowercase hex. */
+  challengeNonce?: string;
 }
+
+/** The unit fields' form: `0x` + 64 lowercase hex (a bytes32). */
+export const SUBJECT_UNIT_FIELD_PATTERN = /^0x[0-9a-f]{64}$/;
 
 export type EvidenceSubjectBindingErrorCode =
   | "malformed-subject"
@@ -65,10 +91,15 @@ export type EvidenceSubjectBindingErrorCode =
   | "job-mismatch"
   | "kernel-mismatch"
   | "output-not-committed"
-  | "output-mismatch";
+  | "output-mismatch"
+  | "unit-not-committed"
+  | "unit-mismatch"
+  | "challenge-not-committed"
+  | "challenge-mismatch";
 
 export type EvidenceSubjectBindingResult =
-  | { ok: true }
+  /** `events`: the verified canonical snapshots, in input order (see the header). */
+  | { ok: true; events: EvidenceEvent[] }
   | { ok: false; reason: EvidenceSubjectBindingErrorCode; eventIndex?: number };
 
 export interface EvidenceSubjectBindingInput {
@@ -87,6 +118,11 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+/** An own property only: never one a prototype supplies. */
+function own(obj: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+}
+
 /**
  * Check that `bundleHash` opens to `events` and that those events commit the
  * subject. Never throws; returns the first failure.
@@ -99,7 +135,11 @@ export async function verifyEvidenceSubjectBinding(
     !isPlainObject(subject) ||
     !isNonEmptyString(subject.jobId) ||
     !isNonEmptyString(subject.kernelId) ||
-    (subject.outputHash !== undefined && !isNonEmptyString(subject.outputHash))
+    (subject.outputHash !== undefined && !isNonEmptyString(subject.outputHash)) ||
+    (subject.settlementUnitId !== undefined &&
+      !(typeof subject.settlementUnitId === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.settlementUnitId))) ||
+    (subject.challengeNonce !== undefined &&
+      !(typeof subject.challengeNonce === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.challengeNonce)))
   ) {
     return { ok: false, reason: "malformed-subject" };
   }
@@ -123,25 +163,37 @@ export async function verifyEvidenceSubjectBinding(
     ) {
       return { ok: false, reason: "malformed-event", eventIndex: i };
     }
-    const event = e as unknown as EvidenceEvent;
-    const recomputed = await hashEvent({
-      type: event.type,
-      timestamp: event.timestamp,
-      source: event.source,
-      payload: event.payload,
-    });
-    if (recomputed !== event.hash) {
+    // Hash exactly what hashEvent hashes, and keep that text as the snapshot the
+    // checks below read. A value canonicalize refuses cannot be evidence.
+    let text: string;
+    try {
+      text = canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload });
+    } catch {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    if ((await sha256(text)) !== e.hash) {
       return { ok: false, reason: "event-hash-mismatch", eventIndex: i };
     }
-    events.push(event);
+    const snapshot = JSON.parse(text) as Record<string, unknown>;
+    if (!isPlainObject(snapshot.source) || !isPlainObject(snapshot.payload)) {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    events.push({
+      ...snapshot,
+      ...(typeof e.id === "string" ? { id: e.id } : {}),
+      hash: e.hash,
+    } as unknown as EvidenceEvent);
   }
   if ((await hashBundle(events)) !== input.bundleHash) {
     return { ok: false, reason: "bundle-hash-mismatch" };
   }
 
+  const payloadOf = (i: number) => events[i]!.payload as Record<string, unknown>;
+  const sourceOf = (i: number) => events[i]!.source as unknown as Record<string, unknown>;
+
   let jobCommitted = false;
   for (let i = 0; i < events.length; i++) {
-    const committed = events[i]!.payload.jobId;
+    const committed = own(payloadOf(i), "jobId");
     if (committed === undefined) continue;
     if (committed !== subject.jobId) return { ok: false, reason: "job-mismatch", eventIndex: i };
     jobCommitted = true;
@@ -149,27 +201,33 @@ export async function verifyEvidenceSubjectBinding(
   if (!jobCommitted) return { ok: false, reason: "job-not-committed" };
 
   for (let i = 0; i < events.length; i++) {
-    const { source, payload } = events[i]!;
-    if (source.kernelId !== subject.kernelId) {
+    if (own(sourceOf(i), "kernelId") !== subject.kernelId) {
       return { ok: false, reason: "kernel-mismatch", eventIndex: i };
     }
-    if (payload.kernelId !== undefined && payload.kernelId !== subject.kernelId) {
+    const payloadKernel = own(payloadOf(i), "kernelId");
+    if (payloadKernel !== undefined && payloadKernel !== subject.kernelId) {
       return { ok: false, reason: "kernel-mismatch", eventIndex: i };
     }
   }
 
-  if (subject.outputHash !== undefined) {
-    let outputCommitted = false;
+  // Optional commitments: when the subject names one, some event must commit it
+  // and every event that carries it must agree.
+  const optional = [
+    ["outputHash", subject.outputHash, "output-not-committed", "output-mismatch"],
+    ["settlementUnitId", subject.settlementUnitId, "unit-not-committed", "unit-mismatch"],
+    ["challengeNonce", subject.challengeNonce, "challenge-not-committed", "challenge-mismatch"],
+  ] as const;
+  for (const [field, expected, notCommitted, mismatch] of optional) {
+    if (expected === undefined) continue;
+    let committedOnce = false;
     for (let i = 0; i < events.length; i++) {
-      const committed = events[i]!.payload.outputHash;
+      const committed = own(payloadOf(i), field);
       if (committed === undefined) continue;
-      if (committed !== subject.outputHash) {
-        return { ok: false, reason: "output-mismatch", eventIndex: i };
-      }
-      outputCommitted = true;
+      if (committed !== expected) return { ok: false, reason: mismatch, eventIndex: i };
+      committedOnce = true;
     }
-    if (!outputCommitted) return { ok: false, reason: "output-not-committed" };
+    if (!committedOnce) return { ok: false, reason: notCommitted };
   }
 
-  return { ok: true };
+  return { ok: true, events };
 }

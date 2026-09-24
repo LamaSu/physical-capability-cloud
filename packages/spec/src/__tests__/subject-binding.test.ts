@@ -63,16 +63,18 @@ describe("LO-EV-9 evidence subject binding — positive controls", () => {
 
   it("binds a bundle to the job and kernel its events commit", async () => {
     const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
-    expect(await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_A, NODE_A) })).toEqual({
-      ok: true,
-    });
+    const r = await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_A, NODE_A) });
+    expect(r.ok).toBe(true);
+    // It returns the canonical snapshots of what was hashed, not the caller's objects.
+    expect((r as { events: unknown[] }).events).toEqual(JSON.parse(JSON.stringify(b.events)));
+    expect((r as { events: unknown[] }).events[0]).not.toBe(b.events[0]);
   });
 
   it("binds the output when the subject names one", async () => {
     const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
     expect(
       await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_A, NODE_A, OUTPUT) }),
-    ).toEqual({ ok: true });
+    ).toMatchObject({ ok: true });
   });
 
   it("does not depend on event order (hashBundle sorts the event hashes)", async () => {
@@ -84,7 +86,7 @@ describe("LO-EV-9 evidence subject binding — positive controls", () => {
         events: reversed,
         subject: subject(JOB_A, NODE_A),
       }),
-    ).toEqual({ ok: true });
+    ).toMatchObject({ ok: true });
   });
 
   it("reads JSON-round-tripped events (the stored form) the same way", async () => {
@@ -96,7 +98,7 @@ describe("LO-EV-9 evidence subject binding — positive controls", () => {
         events: stored,
         subject: subject(JOB_A, NODE_A),
       }),
-    ).toEqual({ ok: true });
+    ).toMatchObject({ ok: true });
   });
 });
 
@@ -356,5 +358,159 @@ describe("LO-EV-9 fail-closed shapes", () => {
         }),
       ).toEqual({ ok: false, reason: "malformed-event", eventIndex: 1 });
     }
+  });
+});
+
+describe("LO-EV-9 evaluates only what it hashed (coord-watch cross-cutting rule)", () => {
+  /** A genuine bundle whose events commit the kernel but no job: it must never bind a job. */
+  async function uncommittedBundle() {
+    const source = { deviceId: NODE_A, deviceType: "digital_agent" as const, kernelId: NODE_A };
+    const events = await seal([
+      { type: "gcode_hash_verified", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { kernelId: NODE_A } },
+    ]);
+    return { events, bundleHash: await hashBundle(events) };
+  }
+
+  it("baseline: a bundle that commits no job does not bind", async () => {
+    const b = await uncommittedBundle();
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) })).toMatchObject({
+      ok: false,
+      reason: "job-not-committed",
+    });
+  });
+
+  it("a non-enumerable jobId the hash never covered cannot bind a job", async () => {
+    const b = await uncommittedBundle();
+    Object.defineProperty(b.events[0]!.payload, "jobId", { value: JOB_B, enumerable: false });
+    const r = await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) });
+    expect(r.ok).toBe(false);
+  });
+
+  it("a jobId inherited from the payload's prototype cannot bind a job", async () => {
+    const b = await uncommittedBundle();
+    const e = b.events[0]!;
+    (e as { payload: unknown }).payload = Object.assign(Object.create({ jobId: JOB_B }), e.payload);
+    const r = await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) });
+    expect(r.ok).toBe(false);
+  });
+
+  it("a jobId on a polluted Object.prototype cannot bind a job", async () => {
+    const b = await uncommittedBundle();
+    const proto = Object.prototype as unknown as Record<string, unknown>;
+    proto.jobId = JOB_B;
+    try {
+      expect(await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) })).toMatchObject({
+        ok: false,
+        reason: "job-not-committed",
+      });
+    } finally {
+      delete proto.jobId;
+    }
+  });
+
+  it("never throws: an event canonicalize cannot hash (a cycle) is malformed-event", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const payload = b.events[1]!.payload as Record<string, unknown>;
+    payload.self = payload;
+    await expect(verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_A, NODE_A) })).resolves.toEqual({
+      ok: false,
+      reason: "malformed-event",
+      eventIndex: 1,
+    });
+  });
+
+  it("a getter that answers the hash with job A and the evaluator with job B cannot replay A as B", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    for (const e of b.events) {
+      const payload = e.payload as Record<string, unknown>;
+      if (payload.jobId === undefined) continue;
+      let reads = 0;
+      const rest = { ...payload };
+      delete rest.jobId;
+      (e as { payload: unknown }).payload = Object.defineProperty(rest, "jobId", {
+        get: () => (reads++ === 0 ? JOB_A : JOB_B),
+        enumerable: true,
+      });
+    }
+    const r = await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) });
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe("LO-EV-9 settlement-unit and challenge binding (oracle's milestone replay)", () => {
+  const U3 = "0x" + "03".repeat(32);
+  const U4 = "0x" + "04".repeat(32);
+  const NONCE_3 = "0x" + "a3".repeat(32);
+  const NONCE_4 = "0x" + "a4".repeat(32);
+
+  /** kernel-sdk-shaped events for one milestone: started and completed commit the unit and nonce. */
+  async function milestoneBundle(unit: string | undefined, nonce: string | undefined) {
+    const source = { deviceId: NODE_A, deviceType: "digital_agent" as const, kernelId: NODE_A };
+    const unitFields = { ...(unit ? { settlementUnitId: unit } : {}), ...(nonce ? { challengeNonce: nonce } : {}) };
+    const events = await seal([
+      { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A, ...unitFields } },
+      { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A, outputHash: OUTPUT, ...unitFields } },
+    ]);
+    return { events, bundleHash: await hashBundle(events) };
+  }
+  const unitSubject = (settlementUnitId?: string, challengeNonce?: string): EvidenceSubject => ({
+    jobId: JOB_A,
+    kernelId: NODE_A,
+    ...(settlementUnitId ? { settlementUnitId } : {}),
+    ...(challengeNonce ? { challengeNonce } : {}),
+  });
+
+  it("evidence for milestone 3 binds milestone 3", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U3, NONCE_3) })).toMatchObject({ ok: true });
+  });
+
+  it("evidence signed for milestone 3 cannot settle milestone 4 of the same job", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U4) })).toEqual({
+      ok: false,
+      reason: "unit-mismatch",
+      eventIndex: 0,
+    });
+  });
+
+  it("the unit's challenge must match too: a nonce from another unit is refused", async () => {
+    const b = await milestoneBundle(U4, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U4, NONCE_4) })).toEqual({
+      ok: false,
+      reason: "challenge-mismatch",
+      eventIndex: 0,
+    });
+  });
+
+  it("a unit-bound subject refuses evidence that commits no unit or no nonce (fails closed for old producers)", async () => {
+    const none = await milestoneBundle(undefined, undefined);
+    expect(await verifyEvidenceSubjectBinding({ ...none, subject: unitSubject(U3) })).toEqual({
+      ok: false,
+      reason: "unit-not-committed",
+    });
+    const unitOnly = await milestoneBundle(U3, undefined);
+    expect(await verifyEvidenceSubjectBinding({ ...unitOnly, subject: unitSubject(U3, NONCE_3) })).toEqual({
+      ok: false,
+      reason: "challenge-not-committed",
+    });
+  });
+
+  it("a subject that names no unit is unchanged: unit fields in the evidence are ignored", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject() })).toMatchObject({ ok: true });
+  });
+
+  it("the subject's unit fields must be 0x + 64 lowercase hex", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    for (const bad of ["0x" + "AB".repeat(32), U3.slice(2), U3 + "00", ""]) {
+      expect(await verifyEvidenceSubjectBinding({ ...b, subject: { ...unitSubject(), settlementUnitId: bad } })).toEqual({
+        ok: false,
+        reason: "malformed-subject",
+      });
+    }
+    expect(
+      await verifyEvidenceSubjectBinding({ ...b, subject: { ...unitSubject(U3), challengeNonce: "nonce-3" } }),
+    ).toEqual({ ok: false, reason: "malformed-subject" });
   });
 });

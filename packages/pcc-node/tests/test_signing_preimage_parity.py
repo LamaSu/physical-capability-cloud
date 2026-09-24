@@ -10,6 +10,7 @@ Regenerate goldens after a contract change:
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -25,9 +26,6 @@ from pcc_node.signing_preimage import (
     session_revocation_preimage,
     signing_preimage,
 )
-
-nacl_signing = pytest.importorskip("nacl.signing")
-nacl_exceptions = pytest.importorskip("nacl.exceptions")
 
 _GOLDENS = json.loads((Path(__file__).parent / "goldens.json").read_text(encoding="utf-8"))
 DIGEST = "sha256:" + "0123456789abcdef" * 4
@@ -45,11 +43,31 @@ def _code(fn, *args):
     return exc.value.code
 
 
-def _verifies(public_key_hex, message, signature_hex):
+# The signature-parity CI job sets PCC_REQUIRE_PYNACL=1 (and installs the
+# declared `crypto` extra), so a missing PyNaCl FAILS there instead of skipping
+# with a green exit. Elsewhere it skips only the signature half, visibly.
+REQUIRE_PYNACL = os.environ.get("PCC_REQUIRE_PYNACL") == "1"
+
+
+@pytest.fixture
+def nacl():
+    """PyNaCl, for the signature half only. Byte parity never needs it."""
     try:
-        nacl_signing.VerifyKey(bytes.fromhex(public_key_hex)).verify(message, bytes.fromhex(signature_hex))
+        import nacl.exceptions as exceptions
+        import nacl.signing as signing
+    except ImportError as err:
+        if REQUIRE_PYNACL:
+            pytest.fail("PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable: %s" % err)
+        pytest.skip("PyNaCl is needed for the signature half (set PCC_REQUIRE_PYNACL=1 to make this a failure)")
+    return signing, exceptions
+
+
+def _verifies(nacl, public_key_hex, message, signature_hex):
+    signing, exceptions = nacl
+    try:
+        signing.VerifyKey(bytes.fromhex(public_key_hex)).verify(message, bytes.fromhex(signature_hex))
         return True
-    except nacl_exceptions.BadSignatureError:
+    except exceptions.BadSignatureError:
         return False
 
 
@@ -58,7 +76,7 @@ def test_contract_version_matches_ts():
 
 
 def test_goldens_carry_all_contract_sections():
-    for section in ("signing_preimage", "session_delegation", "session_revocation"):
+    for section in ("signing_preimage", "session_delegation", "session_revocation", "parity_vectors"):
         assert _GOLDENS.get(section), "goldens.json lacks %s -- run gen_goldens.mjs" % section
 
 
@@ -68,40 +86,49 @@ def test_signing_preimage_parity(g):
     assert preimage.hex() == g["preimage_hex"]
     assert len(preimage) == 71
 
-    key = nacl_signing.SigningKey(bytes.fromhex(g["signer_seed_hex"]))
+
+@pytest.mark.parametrize("g", _GOLDENS["signing_preimage"], ids=lambda g: g["name"])
+def test_signing_preimage_signature_parity(g, nacl):
+    signing, _ = nacl
+    preimage = signing_preimage(g["digest"])
+    key = signing.SigningKey(bytes.fromhex(g["signer_seed_hex"]))
     assert key.verify_key.encode().hex() == g["signer_public_key_hex"]
     # Deterministic Ed25519: identical bytes to node:crypto.
     assert key.sign(preimage).signature.hex() == g["signature_hex"]
-    assert _verifies(g["signer_public_key_hex"], preimage, g["signature_hex"])
+    assert _verifies(nacl, g["signer_public_key_hex"], preimage, g["signature_hex"])
 
 
 @pytest.mark.parametrize("g", _GOLDENS["signing_preimage"], ids=lambda g: g["name"])
-def test_raw32_signature_never_verifies_against_the_preimage(g):
+def test_raw32_signature_never_verifies_against_the_preimage(g, nacl):
     preimage = signing_preimage(g["digest"])
     raw32 = bytes.fromhex(g["digest"][len("sha256:"):])
     assert len(raw32) == 32
     assert g["raw32_signature_hex"] != g["signature_hex"]
-    assert not _verifies(g["signer_public_key_hex"], preimage, g["raw32_signature_hex"])
-    assert not _verifies(g["signer_public_key_hex"], raw32, g["signature_hex"])
+    assert not _verifies(nacl, g["signer_public_key_hex"], preimage, g["raw32_signature_hex"])
+    assert not _verifies(nacl, g["signer_public_key_hex"], raw32, g["signature_hex"])
 
 
 @pytest.mark.parametrize("g", _GOLDENS["session_delegation"], ids=lambda g: g["name"])
 def test_session_delegation_parity(g):
     preimage = session_key_delegation_preimage(_session_from_golden(g))
     assert preimage == g["preimage_utf8"].encode("utf-8")
-
-    key = nacl_signing.SigningKey(bytes.fromhex(g["principal_seed_hex"]))
-    assert key.verify_key.encode().hex() == g["principal_public_key_hex"]
-    assert key.sign(preimage).signature.hex() == g["parent_signature_hex"]
-    assert _verifies(g["principal_public_key_hex"], preimage, g["parent_signature_hex"])
+    assert g["sorted_key_preimage_utf8"].encode("utf-8") != preimage
 
 
 @pytest.mark.parametrize("g", _GOLDENS["session_delegation"], ids=lambda g: g["name"])
-def test_sorted_key_delegation_is_rejected(g):
+def test_session_delegation_signature_parity(g, nacl):
+    signing, _ = nacl
     preimage = session_key_delegation_preimage(_session_from_golden(g))
-    sorted_form = g["sorted_key_preimage_utf8"].encode("utf-8")
-    assert sorted_form != preimage
-    assert not _verifies(g["principal_public_key_hex"], preimage, g["sorted_key_signature_hex"])
+    key = signing.SigningKey(bytes.fromhex(g["principal_seed_hex"]))
+    assert key.verify_key.encode().hex() == g["principal_public_key_hex"]
+    assert key.sign(preimage).signature.hex() == g["parent_signature_hex"]
+    assert _verifies(nacl, g["principal_public_key_hex"], preimage, g["parent_signature_hex"])
+
+
+@pytest.mark.parametrize("g", _GOLDENS["session_delegation"], ids=lambda g: g["name"])
+def test_sorted_key_delegation_is_rejected(g, nacl):
+    preimage = session_key_delegation_preimage(_session_from_golden(g))
+    assert not _verifies(nacl, g["principal_public_key_hex"], preimage, g["sorted_key_signature_hex"])
 
 
 def test_unicode_session_id_is_not_ascii_escaped():
@@ -132,7 +159,43 @@ def test_scope_arrays_sort_by_utf16_code_units_like_js():
 def test_session_revocation_parity(g):
     preimage = session_revocation_preimage(g["revocation"])
     assert preimage == g["preimage_utf8"].encode("utf-8")
-    assert _verifies(g["principal_public_key_hex"], preimage, g["parent_signature_hex"])
+
+
+@pytest.mark.parametrize("g", _GOLDENS["session_revocation"], ids=lambda g: g["name"])
+def test_session_revocation_signature_parity(g, nacl):
+    preimage = session_revocation_preimage(g["revocation"])
+    assert _verifies(nacl, g["principal_public_key_hex"], preimage, g["parent_signature_hex"])
+
+
+class TestSurrogatesLikeJsonStringify:
+    """JS strings are UTF-16 code units; Python strings are code points."""
+
+    def _golden(self, name):
+        return next(x for x in _GOLDENS["session_delegation"] if x["name"] == name)
+
+    def test_lone_surrogates_are_escaped_not_raised(self):
+        text = session_key_delegation_preimage(_session_from_golden(self._golden("lone_surrogate_strings"))).decode("utf-8")
+        assert '"sessionId":"sess-\\ud800-lone"' in text
+        assert '"parentAgentId":"agent-\\udfff"' in text
+
+    def test_lone_surrogate_in_derivation_path_and_revocation(self):
+        text = session_key_delegation_preimage(_session_from_golden(self._golden("surrogate_in_derivation_path"))).decode("utf-8")
+        assert text.endswith(',"derivationPath":"m/\\ud800/7\'"}')
+        rev = session_revocation_preimage({"sessionId": "s", "revokedAt": 1, "reason": "x\udfff"})
+        assert rev == b'{"sessionId":"s","revokedAt":1,"reason":"x\\udfff"}'
+
+    def test_two_surrogate_code_points_are_one_character_like_js(self):
+        # In JS "\ud83d\ude00" IS the emoji; Python holds two code points.
+        base = _session_from_golden(self._golden("fresh_session"))
+        as_pair = session_key_delegation_preimage(dict(base, sessionId="\ud83d\ude00"))
+        as_char = session_key_delegation_preimage(dict(base, sessionId="\U0001F600"))
+        assert as_pair == as_char
+        assert "\U0001F600".encode("utf-8") in as_pair
+
+    def test_lone_surrogate_scope_entries_sort_by_code_unit(self):
+        text = session_key_delegation_preimage(_session_from_golden(self._golden("lone_surrogate_strings"))).decode("utf-8")
+        # UTF-16 code units: 0xD800 < 0xD83D (the emoji's high surrogate) < 0xFF5E.
+        assert text.index("job-\\ud800") < text.index("job-\U0001F600") < text.index("job-\uff5e")
 
 
 class TestDigestParsing:
@@ -216,3 +279,40 @@ class TestMalformedSessionKeys:
 
     def test_malformed_revocation_rejected(self):
         assert _code(session_revocation_preimage, {"sessionId": "s", "revokedAt": 1.5, "reason": "x"}) == "malformed-revocation"
+
+
+def _parity_outcome(v):
+    """Decode the vector's JSON TEXT with json.loads, then build the preimage.
+
+    json.loads yields floats for 1.0 and 1e2 and accepts the NaN token, and the
+    contract takes numbers by value as JSON.parse does, so both languages must
+    land on the same bytes or the same refusal.
+    """
+    parsed = json.loads(v["json"])
+    try:
+        if v["kind"] == "revocation":
+            return session_revocation_preimage(parsed).decode("utf-8", "surrogatepass")
+        session = dict(parsed) if isinstance(parsed, dict) else parsed
+        if isinstance(session, dict):
+            session["publicKey"] = parse_ed25519_public_key_hex(session.pop("publicKeyHex", None))
+        return session_key_delegation_preimage(session).decode("utf-8", "surrogatepass")
+    except SigningPreimageError:
+        return "REJECT"
+
+
+@pytest.mark.parametrize("v", _GOLDENS["parity_vectors"], ids=lambda v: v["name"])
+def test_accept_reject_parity_with_ts(v):
+    expected = "REJECT" if v.get("reject") else v["preimage_utf8"]
+    assert _parity_outcome(v) == expected
+
+
+def test_parity_vectors_cover_the_numeric_domain_and_empty_path():
+    names = {v["name"] for v in _GOLDENS["parity_vectors"]}
+    for required in (
+        "revocation_integral_float",
+        "revocation_nan_token",
+        "revocation_above_max_safe",
+        "delegation_integral_float_issued_at",
+        "delegation_derivation_path_empty",
+    ):
+        assert required in names

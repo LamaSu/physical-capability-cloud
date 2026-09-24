@@ -21,6 +21,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -107,16 +109,19 @@ describe("resume-settlement recovers a trapped completion (finding #2 / A-2)", (
     const repos = getRepos();
     const job = repos.jobs.findById(jobId)!;
     const bundleId = `bundle-trap-${agent}`;
-    repos.evidence.insert({
+    // A genuine gateway anchor, as /complete writes it: its bundleHash is the
+    // sha256 of its canonical envelope (recovery re-verifies exactly that).
+    const meta = {
       id: bundleId,
       jobId,
       stepId: job.stepId,
       kernelId: job.kernelId,
       assuranceTier: 0,
-      bundleHash: "sha256:trapped-evidence",
-      kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "test" },
       createdAt: new Date().toISOString(),
-    } as any);
+      kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519", value: "gateway-auto-sign" },
+    };
+    const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta as any, [])).digest("hex")}`;
+    repos.evidence.insert({ ...meta, bundleHash } as any);
     repos.jobs.update(jobId, { evidenceBundleId: bundleId, status: "evidence_submitted" });
     return { jobId, escrowId, bundleId };
   }

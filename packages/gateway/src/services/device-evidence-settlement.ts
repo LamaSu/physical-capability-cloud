@@ -44,8 +44,11 @@ import {
   normalizeRegisteredSigner,
   getPrimitive,
   isTaggedDigest,
+  parseEd25519PublicKeyHex,
+  parseEd25519SignatureHex,
   signingPreimage,
   verifyEvidenceSubjectBinding,
+  type EvidenceEvent,
   type EvidenceSubject,
   type RegisteredSigner,
   type SessionKeyAuthorization,
@@ -53,6 +56,11 @@ import {
   type SessionSignedEvent,
 } from "@pcc/spec";
 import { SessionKeyService } from "@pcc/verifier";
+import { createHash } from "node:crypto";
+import {
+  buildCanonicalEvidenceEnvelope,
+  type EvidenceEnvelopeEvent,
+} from "./evidence-envelope.js";
 
 // ── The signature shape stored on / carried by an evidence bundle ────────────
 
@@ -245,16 +253,14 @@ export type VerifyEd25519 = (
   publicKeyHex: string,
 ) => boolean | Promise<boolean>;
 
-function stripHexPrefix(hex: string): string {
-  return hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
-}
-
 /**
  * Reference Ed25519 verify using tweetnacl (the same primitive the node signs
  * with — kernel-sdk `verifyBundleSignature`). Message is UTF-8 bytes of the
  * bundleHash string, which for a tagged digest is exactly the LO-EV-1
  * `signingPreimage` (callers validate the digest first); signature + public
- * key are hex (optional 0x). Returns false on any malformed input — never throws.
+ * key are hex (optional 0x, either case, exact length: a malformed or
+ * over-long value is rejected, never truncated). Returns false on any
+ * malformed input — never throws.
  */
 export function naclEd25519Verify(
   message: string,
@@ -263,9 +269,8 @@ export function naclEd25519Verify(
 ): boolean {
   try {
     const msg = new TextEncoder().encode(message);
-    const sig = Buffer.from(stripHexPrefix(signatureValue), "hex");
-    const pk = Buffer.from(stripHexPrefix(publicKeyHex), "hex");
-    if (sig.length !== 64 || pk.length !== 32) return false;
+    const sig = parseEd25519SignatureHex(signatureValue);
+    const pk = parseEd25519PublicKeyHex(publicKeyHex);
     return nacl.sign.detached.verify(msg, sig, pk);
   } catch {
     return false;
@@ -330,7 +335,7 @@ export async function verifyDeviceSignedEvidence(
       const sessionKey: SessionKey = {
         sessionId: auth.sessionId,
         parentAgentId: auth.parentAgentId as SessionKey["parentAgentId"],
-        publicKey: Uint8Array.from(Buffer.from(stripHexPrefix(auth.publicKey), "hex")),
+        publicKey: parseEd25519PublicKeyHex(auth.publicKey),
         issuedAt: auth.issuedAt,
         expiresAt: auth.expiresAt,
         scope: {
@@ -338,8 +343,11 @@ export async function verifyDeviceSignedEvidence(
           contractIds: auth.scope.contractIds,
           maxSignatures: auth.scope.maxSignatures,
         },
-        parentSignature: Uint8Array.from(Buffer.from(stripHexPrefix(auth.parentSignature), "hex")),
-        ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
+        parentSignature: parseEd25519SignatureHex(auth.parentSignature),
+        // `!== undefined`, not truthiness: a defined path is reproduced as the
+        // principal signed it. An empty path is refused by the LO-EV-1 contract
+        // before any signature check (a labelled tightening, R20 round 2).
+        ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
       };
       if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
         return { ok: false, reason: "malformed-session-authorization" };
@@ -349,11 +357,11 @@ export async function verifyDeviceSignedEvidence(
       }
       const event: SessionSignedEvent = {
         eventData: signingPreimage(input.bundleHash),
-        sessionSignature: Uint8Array.from(Buffer.from(stripHexPrefix(input.signature.value), "hex")),
+        sessionSignature: parseEd25519SignatureHex(input.signature.value),
         proof: {
           sessionKey,
-          parentPublicKey: Uint8Array.from(Buffer.from(stripHexPrefix(signer.publicKey), "hex")),
-          ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
+          parentPublicKey: parseEd25519PublicKeyHex(signer.publicKey),
+          ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
         },
       };
       const result = new SessionKeyService().verifySessionSignedEvent({
@@ -425,6 +433,9 @@ export interface SettlementEvidenceSlot {
   /** The accepted execution unit the bundle must be evidence for: this job and
    *  the kernel on the job record. A device slot without one never anchors. */
   subject?: EvidenceSubject;
+  /** The stored evidence row this slot came from, so a device decision can pin
+   *  that exact row (events + delegation) as the job's settlement anchor. */
+  bundleId?: string;
 }
 
 export interface SettlementEvidenceInput {
@@ -473,41 +484,49 @@ export async function resolveSettlementEvidence(
   }
   let firstFailure: string | undefined;
   for (const candidate of candidates) {
-    const failure = await deviceAnchorFailure(candidate, input);
-    if (failure === null) {
+    const anchor = await verifyDeviceAnchor(candidate, input);
+    if (anchor.ok) {
       return {
         source: "device",
         bundleHash: candidate.bundleHash,
         kernelSignature: candidate.kernelSignature,
         assuranceTier: candidate.assuranceTier,
+        ...(candidate.bundleId !== undefined ? { bundleId: candidate.bundleId } : {}),
+        // The binding's canonical snapshots, never the caller's objects: whatever
+        // is evaluated or archived downstream is exactly what was hashed.
+        events: anchor.events,
+        ...(candidate.sessionKeyAuthorization
+          ? { sessionKeyAuthorization: candidate.sessionKeyAuthorization }
+          : {}),
       };
     }
-    if (firstFailure === undefined) firstFailure = failure;
+    if (firstFailure === undefined) firstFailure = anchor.reason;
   }
   return { ...input.fallback, source: "gateway-fallback", reason: firstFailure };
 }
 
 /**
- * Why a device bundle may not anchor settlement, or null when it may. Both legs
- * must pass: the signed digest opens to events that commit this job and the
- * kernel that accepted it (LO-EV-9), and the signature over that digest
- * verifies against the kernel's registered signer. The delegation scope is
- * checked against the subject's job, never a separately supplied id.
+ * Whether a device bundle may anchor settlement. Both legs must pass: the
+ * signed digest opens to events that commit this job and the kernel that
+ * accepted it (LO-EV-9), and the signature over that digest verifies against
+ * the kernel's registered signer. The delegation scope is checked against the
+ * subject's job, never a separately supplied id. On success it returns the
+ * binding's canonical event snapshots.
  */
-async function deviceAnchorFailure(
+async function verifyDeviceAnchor(
   slot: SettlementEvidenceSlot,
-  input: SettlementEvidenceInput,
-): Promise<string | null> {
-  if (!slot.subject) return "missing-subject";
+  input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519">,
+): Promise<{ ok: true; events: EvidenceEvent[] } | { ok: false; reason: string }> {
+  if (!slot.subject) return { ok: false, reason: "missing-subject" };
   if (slot.contractId !== undefined && slot.contractId !== slot.subject.jobId) {
-    return "contract-subject-mismatch";
+    return { ok: false, reason: "contract-subject-mismatch" };
   }
   const binding = await verifyEvidenceSubjectBinding({
     bundleHash: slot.bundleHash,
     events: slot.events ?? [],
     subject: slot.subject,
   });
-  if (!binding.ok) return binding.reason;
+  if (!binding.ok) return { ok: false, reason: binding.reason };
   const verified = await verifyDeviceSignedEvidence({
     signature: slot.kernelSignature,
     bundleHash: slot.bundleHash,
@@ -518,5 +537,77 @@ async function deviceAnchorFailure(
     contractId: slot.subject.jobId,
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
-  return verified.ok ? null : (verified.reason ?? "verify-failed");
+  return verified.ok
+    ? { ok: true, events: binding.events }
+    : { ok: false, reason: verified.reason ?? "verify-failed" };
+}
+
+// ── Recovery: re-verify the pinned settlement anchor ────────────────────────
+
+/** A stored evidence row, as the evidence repository returns it. */
+export interface PinnedEvidenceRow {
+  id: string;
+  jobId: string;
+  stepId: string;
+  kernelId: string;
+  assuranceTier: number;
+  createdAt: string;
+  bundleHash: string;
+  kernelSignature: StoredSignature;
+  sessionKeyAuthorization?: SessionKeyAuthorization | null;
+}
+
+/**
+ * Before recovery (/resume-settlement) settles on the evidence /complete pinned
+ * as the job's anchor, re-verify it rather than trusting whichever row exists
+ * (review R1 on LO-EV-9):
+ *  - the pinned row must exist and belong to this job and its kernel;
+ *  - a device anchor must pass the same subject binding + registered-signer
+ *    signature check /complete ran;
+ *  - a gateway anchor's bundleHash must recompute from its stored envelope, the
+ *    exact bytes GET /api/evidence/:hash serves.
+ */
+export async function verifyPinnedSettlementEvidence(input: {
+  jobId: string;
+  kernelId: string;
+  row: PinnedEvidenceRow | null | undefined;
+  events: readonly EvidenceEnvelopeEvent[];
+  registeredSigner: unknown;
+  verifyEd25519?: VerifyEd25519;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const { row } = input;
+  if (!row) return { ok: false, reason: "no-pinned-evidence" };
+  if (row.jobId !== input.jobId) return { ok: false, reason: "pinned-evidence-job-mismatch" };
+  if (row.kernelId !== input.kernelId) return { ok: false, reason: "pinned-evidence-kernel-mismatch" };
+  if (isDeviceSignedSignature(row.kernelSignature)) {
+    const anchor = await verifyDeviceAnchor(
+      {
+        bundleHash: row.bundleHash,
+        kernelSignature: row.kernelSignature,
+        assuranceTier: row.assuranceTier,
+        ...(row.sessionKeyAuthorization ? { sessionKeyAuthorization: row.sessionKeyAuthorization } : {}),
+        events: input.events,
+        subject: { jobId: input.jobId, kernelId: input.kernelId },
+      },
+      {
+        registeredSigner: input.registeredSigner,
+        ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
+      },
+    );
+    return anchor.ok ? { ok: true } : { ok: false, reason: anchor.reason };
+  }
+  const envelope = buildCanonicalEvidenceEnvelope(
+    {
+      id: row.id,
+      jobId: row.jobId,
+      stepId: row.stepId,
+      kernelId: row.kernelId,
+      assuranceTier: row.assuranceTier,
+      createdAt: row.createdAt,
+      kernelSignature: row.kernelSignature,
+    },
+    [...input.events],
+  );
+  const recomputed = `sha256:${createHash("sha256").update(envelope).digest("hex")}`;
+  return recomputed === row.bundleHash ? { ok: true } : { ok: false, reason: "pinned-evidence-hash-mismatch" };
 }
