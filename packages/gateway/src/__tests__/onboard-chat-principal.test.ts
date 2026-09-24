@@ -254,6 +254,28 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     expect(stale.statusCode).toBe(200);
   });
 
+  it("resolves exactly as apiGate does: an unusable header beside a valid session cookie runs as that session", async () => {
+    const token = randomUUID();
+    const now = Date.now();
+    getRepos().sessions.insert({
+      id: randomUUID(),
+      walletAddress: WALLET,
+      token,
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 3_600_000).toISOString(),
+      lastActiveAt: new Date(now).toISOString(),
+    });
+    llm.responses.push(calls(["whoami"]), endTurn);
+    const post = await chat({
+      authorization: `Bearer pcc_live_${"0".repeat(64)}`,
+      cookie: `pcc_session=${app.signCookie(token)}`,
+    });
+    expect(post.statusCode).toBe(200);
+    expect(post.json().toolCalls[0]).toMatchObject({ status: 200, result: { userId: WALLET, apiKeyId: null } });
+    const [req] = dispatchedTo("/api/test/whoami");
+    expect(req.authorization).toBe(`Bearer ${token}`); // only the resolved session travels
+  });
+
   it("a path param cannot walk a template onto another route, and a non-/api endpoint is refused", async () => {
     const { rawKey } = provisionApiKey({ operatorId: "carol@example.com" });
     llm.responses.push(calls(["item_details", { id: ".." }], ["item_details", { id: "" }], ["generate_ui"]), endTurn);
