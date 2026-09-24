@@ -18,9 +18,15 @@ import { compileEconomics, type CompiledEconomics } from "../economics/compile.j
 import type { Clause, EconomicAgreement } from "../economics/types.js";
 import { computeManifestHash, type CompositionManifest } from "../types/composition-manifest.js";
 import { computeTrainingManifestHash, type TrainingManifest } from "../types/training-manifest.js";
+import { computeScheduleHash, type RateSchedule } from "../types/rate-schedule.js";
 import { a, baseAgreement } from "./economics-helpers.js";
 
-const SCHED = `0x${"ab".repeat(32)}`;
+/** A real sealed schedule (a flat 1%): every pinned rate must verify against a body the compile is given. */
+const SCHEDULE: RateSchedule = (() => {
+  const body = { version: 1, segments: [{ kind: "constant" as const, startTime: 0, endTime: null, bps: 100 }], publishedAt: "2026-06-01T00:00:00Z" };
+  return { ...body, scheduleHash: computeScheduleHash(body) };
+})();
+const SCHED = SCHEDULE.scheduleHash;
 const rateSource = { scheduleHash: SCHED, evaluatedAt: 1_790_000_000, context: { jobValueCents: 10000, jobsPerDay: 1, captureClass: null } };
 
 function ok(r: ReturnType<typeof compileEconomics>): CompiledEconomics {
@@ -78,7 +84,7 @@ describe("CompositionManifest adapter", () => {
     const r = clausesFromCompositionManifest({ manifest: manifest(coAuthors), pinnedRates: [{ bps: 100, rateSource }], partyByAddress, appliesTo: { allUnits: true }, idPrefix: "m" });
     if (!r.ok) throw new Error(JSON.stringify(r.refusals));
     expect(r.clauses).toHaveLength(1);
-    const c = ok(compileEconomics(agreementWith(parties, r.clauses, r.splits)));
+    const c = ok(compileEconomics(agreementWith(parties, r.clauses, r.splits), { schedules: [SCHEDULE] }));
     const byParty = Object.fromEntries(c.totals.byParty.map((p) => [p.partyId, p.amount]));
     // 1% of 1,000,000 = 10,000 for the ROLE, split equally: 5,000 each. The old walker paid 10,000 each.
     expect(byParty["alice"]).toBe("5000");
@@ -90,7 +96,7 @@ describe("CompositionManifest adapter", () => {
     const weighted = coAuthors.map((e, i) => ({ ...e, groupBps: i === 0 ? 7500 : 2500 }));
     const r = clausesFromCompositionManifest({ manifest: manifest(weighted), pinnedRates: [{ bps: 100, rateSource }], partyByAddress, appliesTo: { allUnits: true }, idPrefix: "m" });
     if (!r.ok) throw new Error(JSON.stringify(r.refusals));
-    const byParty = Object.fromEntries(ok(compileEconomics(agreementWith(parties, r.clauses, r.splits))).totals.byParty.map((p) => [p.partyId, p.amount]));
+    const byParty = Object.fromEntries(ok(compileEconomics(agreementWith(parties, r.clauses, r.splits), { schedules: [SCHEDULE] })).totals.byParty.map((p) => [p.partyId, p.amount]));
     expect([byParty["alice"], byParty["bob"]]).toEqual(["7500", "2500"]);
   });
 

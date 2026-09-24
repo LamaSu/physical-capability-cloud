@@ -152,7 +152,7 @@ The pinned `bps` must equal every such evaluation, or the refusal is `RATE_PIN_M
 
 Every rate is then clamped to `0..10000`.
 
-A pin is **verified** when the body was supplied and every evaluation was exact and equal. If the body is missing, or any unit's segment is unverifiable, the pin is unverified. The result says so (§5), and a license that requires a scheduled rate refuses it (`RATE_UNVERIFIED`, §4.1).
+A pin is **verified** when the body was supplied and every evaluation was exact and equal. **A clause that names a rate source and pays in at least one unit must be verified**, whether or not a license requires it. If the body is missing, or any unit's segment is unverifiable, the refusal is `RATE_UNVERIFIED` at `["clause", clauseId, "rateSource"]`. An unverifiable rate never produces a payout; a composer who does not claim a schedule's rate simply omits `rateSource`.
 
 ### 2.5 License
 
@@ -259,11 +259,12 @@ There is no partial result.
 | `ECONOMICS_UNDECIDED_OD4` | structure | `["clause", clauseId]` |
 | `INVALID_BOUNDS` | structure | `["clause", clauseId]`, `["license", L, "requirement", requirementId]` |
 | `RATE_PIN_MISMATCH` | structure | `["clause", clauseId, "rateSource"]`: one per clause, whichever units disagree; checked only when no id is duplicated |
+| `RATE_UNVERIFIED` | structure | `["clause", clauseId, "rateSource"]`: a clause that names a rate source and pays in some unit, whose body is missing or whose segment cannot be evaluated exactly (§2.4). It is not reported for a clause that also has `RATE_PIN_MISMATCH`, and is checked only when no id is duplicated. |
 | `TOO_MANY_ALLOCATIONS` | structure | `[]` (the agreement as a whole); checked only when no id is duplicated and no split is in a cycle |
 | `RIGHTS_UNKNOWN` | rights | `["component", ref]` |
 | `LICENSE_NOT_IN_FORCE`, `AUTHORITY_BELOW_FLOOR` | rights | `["component", ref, L]` |
 | `RIGHTS_INCOMPATIBLE` | rights | `["component", ref, L, condition]` |
-| `LICENSE_PAYMENT_MISSING`, `RATE_UNVERIFIED` | rights | `["license", L, requirementId]` |
+| `LICENSE_PAYMENT_MISSING` | rights | `["license", L, requirementId]` |
 | `LICENSE_PAYMENT_UNMATCHED` | rights | `["clause", clauseId, L]` |
 | `GROSS_OUT_OF_RANGE` | money | `["unit", unitRef]` |
 | `UNKNOWN_MEASURE` | money | `["unit", unitRef, "clause", clauseId, key]` |
@@ -271,7 +272,7 @@ There is no partial result.
 | `MULTIPLE_RESIDUALS`, `UNALLOCATED_REMAINDER`, `TOO_MANY_LEGS` | money | `["unit", unitRef]` |
 | `UNRESOLVED_PARTY`, `FORBIDDEN_RECIPIENT` | money | `["unit", unitRef, "party", partyId]` |
 
-**Structure checks** (all run, except as follows). When any `DUPLICATE_ID` is reported, the checks that resolve ids are skipped: `SPLIT_CYCLE`, `SPLIT_TOO_DEEP`, `TOO_MANY_ALLOCATIONS` and `RATE_PIN_MISMATCH`. Which object a duplicated id means is undefined, and their result would otherwise depend on the input's order.
+**Structure checks** (all run, except as follows). When any `DUPLICATE_ID` is reported, the checks that resolve ids are skipped: `SPLIT_CYCLE`, `SPLIT_TOO_DEEP`, `TOO_MANY_ALLOCATIONS`, `RATE_PIN_MISMATCH` and `RATE_UNVERIFIED`. Which object a duplicated id means is undefined, and their result would otherwise depend on the input's order.
 - `DUPLICATE_ID`, `DUPLICATE_LICENSE_SUBJECT` (two licenses for one subject).
 - `UNKNOWN_REFERENCE` for every id that points at nothing.
 - `DUPLICATE_SPLIT_MEMBER`, `SPLIT_CYCLE`, `SPLIT_TOO_DEEP`.
@@ -284,7 +285,7 @@ There is no partial result.
 - `OFFER_EXPIRED` (`terms.acceptBy` set and `asOf > acceptBy`).
 - `ECONOMICS_UNDECIDED_OD4` for every `metered` or `downstream` clause.
 - `INVALID_BOUNDS` (`min > max`).
-- `RATE_PIN_MISMATCH` (§2.4).
+- `RATE_PIN_MISMATCH` and `RATE_UNVERIFIED` (§2.4).
 
 **Money checks, per unit, in this order.** A unit stops at the first stage that refuses. Every unit is checked, and the refusals of all units are reported together.
 1. `GROSS_OUT_OF_RANGE`.
@@ -330,9 +331,7 @@ For every distinct component `R` used by any unit, once (not once per unit):
    - its `appliesTo` is neither of the two forms above;
    - or its split has a member that is a split.
 
-   Within each requirement key, sort the requirements by `requirementId` and the clauses by `clauseId`, and pair the i-th requirement with the i-th clause. Then:
-   - A requirement left without a clause is `LICENSE_PAYMENT_MISSING`.
-   - A paired `percent_by_schedule` requirement whose clause's pin is not verified (§2.4) is `RATE_UNVERIFIED`.
+   Within each requirement key, sort the requirements by `requirementId` and the clauses by `clauseId`, and pair the i-th requirement with the i-th clause. A requirement left without a clause is `LICENSE_PAYMENT_MISSING`. (A `percent_by_schedule` requirement's clause names a rate source, so an unverified pin has already been refused in the structure phase, §2.4.)
 
 In addition, for every license, used or not:
 
@@ -429,7 +428,7 @@ CompiledEconomicsV1 {
 - A leg's `attribution` lists its positive allocations. Zero allocations appear only in `zeroLegs`.
 - `rights` lists the licenses of the components some unit uses.
 - `totals.byParty` lists the parties paid a positive total.
-- A pin whose body was supplied and that applies to no unit is `verified: true`: there is no unit for it to disagree with.
+- In a successful result, every rate of a clause that pays in some unit is `verified: true` (anything else was refused). A clause that pays in no unit shows `verified: true` only if its body was supplied.
 
 ## 6. Canonical form and hashes
 
@@ -512,13 +511,16 @@ At accept time the accepted-plan compiler asks economics to split each unit's ne
 
 | Code | Refused when |
 |---|---|
+| `SERVER_FACTS_INVALID` | The server facts are missing a field, malformed, or unreadable. They are validated at runtime, never assumed from their type: for example, a missing or `NaN` clock would otherwise disable every time check. The detail names the first failing field. |
+| `PLAN_UNITS_INVALID` | The plan's units are not well formed. |
 | `SCHEMA_INVALID` | The agreement fails §3's input rules. |
 | `AGREEMENT_HASH_MISMATCH` | The agreement is not what the payer accepted; the detail names `rights`, `economics` or `envelope`. |
 | `FEE_MISMATCH`, `CURRENCY_MISMATCH` | The fee or currency is not the plan's. |
 | `AS_OF_OUT_OF_WINDOW` | `asOf` is not in `[now − maxAge, now]` on the server clock (default maximum age: one day). `asOf` decides license validity and pinned rates, so only a server moment is accepted. |
+| `OFFER_EXPIRED` | `terms.acceptBy` is set and the server's `now` is after it. The deadline is judged at the server's actual time, never at the agreement's own `asOf`. |
 | `USE_MISMATCH` | `use` is not the intended use the server derives from the plan. |
 | `LICENSE_NOT_REGISTERED`, `LICENSE_MISMATCH` | A license is not the registry's copy at `licenseId@version`, verbatim, including its authority. |
-| `PARTY_NOT_REGISTERED`, `PARTY_MISMATCH` | A party a license names (the licensor, or a declared distribution's party) is missing from the registry, or is paid at an address other than the registry's. |
+| `PARTY_NOT_REGISTERED`, `PARTY_MISMATCH` | A party is missing from the registry, or its payout address differs from the registry's. Two groups are checked:<br>1. Before compiling, every party a license names (the licensor, or a declared distribution's party).<br>2. After compiling, **every party the compile pays**, directly, through splits or as the residual. |
 | `UNIT_SET_MISMATCH`, `GROSS_MISMATCH` | The units are not the plan's nodes, or a gross is not the server's quote. |
 | `UNIT_FACTS_MISMATCH` | A unit's components (with their uses) or measures are not what the server says runs in it. A licensed component therefore cannot be left out or under-counted. |
 | `QUOTE_NOT_COVERED` | A unit's gross is less than its operator's live quote. |

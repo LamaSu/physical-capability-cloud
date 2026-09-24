@@ -650,3 +650,37 @@ describe("clean-room round 2: ids, options and value bands", () => {
     ]);
   });
 });
+
+// ── coord-watch cross-family review of #360 (astra), P1-3 ───────────────────
+
+describe("coord-watch #360 P1-3: every payout-bearing pinned rate must verify, license or not", () => {
+  const freeClause = (scheduleHash: string): Clause => ({
+    clauseId: "tip",
+    label: "A royalty nobody required",
+    role: "integrator",
+    to: { party: "priya" },
+    subject: null,
+    appliesTo: { allUnits: true },
+    underLicense: null,
+    rule: { kind: "percent", bps: 10, of: "gross", min: null, max: null, rateSource: { scheduleHash, evaluatedAt: 1_790_000_000, context: { jobValueCents: 0, jobsPerDay: 0, captureClass: null } } },
+  });
+
+  it("an absent schedule body refuses at the clause", () => {
+    const ag = exampleSparePrinter();
+    ag.clauses.push(freeClause(`0x${"cd".repeat(32)}`));
+    expect(refusals(compileEconomics(ag, WITH_SCHEDULES))).toEqual([["RATE_UNVERIFIED", ["clause", "tip", "rateSource"]]]);
+  });
+
+  it("an unevaluable segment refuses at the clause", () => {
+    const exp = schedule([{ kind: "exponential-decay", startTime: 0, endTime: null, startBps: 500, endBps: 5, decayPerSecond: 1e-9 }]);
+    const ag = exampleSparePrinter();
+    ag.clauses.push(freeClause(exp.scheduleHash));
+    expect(refusals(compileEconomics(ag, { schedules: [PRINTER_KIT_SCHEDULE, exp] }))).toEqual([["RATE_UNVERIFIED", ["clause", "tip", "rateSource"]]]);
+  });
+
+  it("a pin that pays in no unit is not payout-bearing and is not refused", () => {
+    const ag = exampleSparePrinter();
+    ag.clauses.push({ ...freeClause(`0x${"cd".repeat(32)}`), appliesTo: { usingComponent: "kit:never-used" } });
+    expect(compileEconomics(ag, WITH_SCHEDULES).ok).toBe(true);
+  });
+});

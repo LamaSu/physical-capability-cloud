@@ -9,6 +9,7 @@ import { agreementUnitGross, netSplitterFor, type PlanSplitUnit, type ServerEcon
 import { compileEconomics } from "../economics/compile.js";
 import { exampleIncompatibleLicense, exampleLabAssay, examplePrintAndMail, exampleSparePrinter, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
 import type { EconomicAgreement } from "../economics/types.js";
+import { baseAgreement, clone } from "./economics-helpers.js";
 
 /**
  * Composition's NetSplitter contract, copied verbatim from #351 (feat/accepted-plan-compiler @ 69012b4e,
@@ -221,6 +222,66 @@ describe("netSplitterFor", () => {
     const g = agreementUnitGross(examplePrintAndMail());
     expect(g).toEqual({ ok: true, gross: { "a-print": 14_000_000n, "b-mail": 8_000_000n } });
     expect(agreementUnitGross({ schema: "nope" })).toEqual({ ok: false, code: "economics:SCHEMA_INVALID" });
+  });
+
+  describe("coord-watch #360 (astra) P1 findings", () => {
+    it("P1-1: server facts are validated at runtime: a missing or NaN clock refuses, never skips the time check", () => {
+      const ag = exampleSparePrinter();
+      const run = (facts: unknown) => refusal(netSplitterFor({ agreement: ag, accepted: null, server: facts as ServerEconomicsFacts })(planUnits(ag)));
+      const { now: _now, ...noClock } = server(ag);
+      expect(run(noClock)).toBe("economics:SERVER_FACTS_INVALID:now");
+      expect(run({ ...server(ag), now: Number.NaN })).toBe("economics:SERVER_FACTS_INVALID:now");
+      expect(run({ ...server(ag), maxAgreementAgeSeconds: Number.NaN })).toBe("economics:SERVER_FACTS_INVALID:maxAgreementAgeSeconds");
+      for (const missing of ["intendedUse", "parties", "unitFacts"] as const) {
+        const { [missing]: _gone, ...rest } = server(ag);
+        expect(run(rest)).toBe(`economics:SERVER_FACTS_INVALID:${missing}`);
+      }
+      const hostile = new Proxy(server(ag), { ownKeys() { throw new Error("trap"); } });
+      expect(run(hostile)).toBe("economics:SERVER_FACTS_INVALID:unreadable");
+      expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag) })([{ nodeId: "print" }] as never))).toBe("economics:PLAN_UNITS_INVALID");
+    });
+
+    it("P1-2: every paid party, not only license-named ones, is paid at its registry address (the reviewer's counterexample)", () => {
+      const merchant = "0x00000000000000000000000000000000000000aa";
+      const elsewhere = "0x00000000000000000000000000000000000000bb";
+      const ag = baseAgreement({
+        parties: [{ partyId: "buyer", label: "Buyer", kind: "person", payTo: "0x00000000000000000000000000000000000000b1" }, { partyId: "merchant", label: "Merchant", kind: "organization", payTo: elsewhere }],
+        units: [{ unitRef: "u1", label: "Unit", gross: "100", components: [], measures: [] }],
+        clauses: [{ clauseId: "rest", label: "Merchant keeps it", role: "operator", to: { party: "merchant" }, subject: null, appliesTo: { allUnits: true }, underLicense: null, rule: { kind: "residual" } }],
+        fee: { feeBps: 0, feeRecipient: null },
+      });
+      const facts = (parties: ServerEconomicsFacts["parties"]) => server(ag, { parties });
+      const units = [{ nodeId: "u1", operator: merchant, payoutAddress: merchant, quote: 1n, g: 100n, f: 0n, n: 100n }];
+      expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: facts([{ partyId: "merchant", payTo: merchant }]) })(units))).toBe("economics:PARTY_MISMATCH:merchant");
+      expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: facts([]) })(units))).toBe("economics:PARTY_NOT_REGISTERED:merchant");
+      // Through a split, too: every allocated party is checked.
+      const viaSplit = clone(ag);
+      viaSplit.splits = [{ splitId: "s", label: "S", members: [{ to: { party: "merchant" }, weight: 1, role: null, subject: null }] }];
+      viaSplit.clauses[0]!.to = { split: "s" };
+      expect(refusal(netSplitterFor({ agreement: viaSplit, accepted: null, server: facts([{ partyId: "merchant", payTo: merchant }]) })(units))).toBe("economics:PARTY_MISMATCH:merchant");
+    });
+
+    it("P1-3: an unlicensed clause whose pinned rate cannot be verified refuses through the seam", () => {
+      const ag = examplePrintAndMail();
+      ag.clauses.push({
+        clauseId: "tip",
+        label: "A royalty nobody required",
+        role: "integrator",
+        to: { party: "inventor" },
+        subject: null,
+        appliesTo: { allUnits: true },
+        underLicense: null,
+        rule: { kind: "percent", bps: 10, of: "gross", min: null, max: null, rateSource: { scheduleHash: `0x${"cd".repeat(32)}`, evaluatedAt: ag.asOf, context: { jobValueCents: 0, jobsPerDay: 0, captureClass: null } } },
+      });
+      expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag) })(planUnits(examplePrintAndMail())))).toBe("economics:COMPILE_REFUSED:RATE_UNVERIFIED");
+    });
+
+    it("P1-4: an offer past its deadline is refused at the server's time, whatever the agreement's asOf", () => {
+      const ag = exampleSparePrinter();
+      ag.terms.acceptBy = ag.asOf; // the deadline is the agreement's own moment
+      expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag, { now: ag.asOf }) })(planUnits(ag)))).toBe("ok");
+      expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag, { now: ag.asOf + 1 }) })(planUnits(ag)))).toBe(`economics:OFFER_EXPIRED:${ag.asOf}`);
+    });
   });
 
   it("the protocol fee recipient stays the fee recipient: FEE is not in the payouts", () => {

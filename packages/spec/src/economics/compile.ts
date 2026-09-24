@@ -312,7 +312,9 @@ type PinStatus = "verified" | "unverifiable" | "no-body";
 /**
  * Pinned royalty rates (§2.4). A clause's bps must equal the schedule's rate at the agreement's `asOf`,
  * for the value of every unit the clause pays in, with the server's rate facts. The clause's own
- * `evaluatedAt` and `context` are the quoting side's record and are not trusted.
+ * `evaluatedAt` and `context` are the quoting side's record and are not trusted. A clause that names a
+ * rate source and pays in some unit must be verified: without the schedule body, or on a segment that
+ * cannot be evaluated exactly, it is refused (RATE_UNVERIFIED), whether or not a license requires it.
  */
 function checkPins(
   n: EconomicAgreement,
@@ -325,14 +327,24 @@ function checkPins(
   for (const s of o.schedules ?? []) bodies.set(s.scheduleHash.toLowerCase(), s);
   for (const c of n.clauses) {
     if (c.rule.kind !== "percent" || c.rule.rateSource === null) continue;
+    const units = selected.get(c.clauseId) ?? [];
     const body = bodies.get(c.rule.rateSource.scheduleHash);
     if (body === undefined) {
       status.set(c.clauseId, "no-body");
+      if (units.length > 0) {
+        out.push(
+          refusal("RATE_UNVERIFIED", `clause "${c.clauseId}" pins a rate from schedule ${c.rule.rateSource.scheduleHash}, which was not supplied to check it`, [
+            "clause",
+            c.clauseId,
+            "rateSource",
+          ]),
+        );
+      }
       continue;
     }
     let unverifiable = false;
     const mismatches: string[] = [];
-    for (const u of selected.get(c.clauseId) ?? []) {
+    for (const u of units) {
       const r = evaluateScheduleExact(body, {
         now: n.asOf,
         valueCents: valueInCents(BigInt(u.gross), n.currency.decimals),
@@ -345,6 +357,14 @@ function checkPins(
     if (mismatches.length > 0) {
       out.push(
         refusal("RATE_PIN_MISMATCH", `clause "${c.clauseId}" pins ${c.rule.bps} bps but the schedule gives ${mismatches.join(", ")} at asOf ${n.asOf}`, [
+          "clause",
+          c.clauseId,
+          "rateSource",
+        ]),
+      );
+    } else if (unverifiable) {
+      out.push(
+        refusal("RATE_UNVERIFIED", `clause "${c.clauseId}" pins a rate whose schedule segment at asOf cannot be evaluated exactly with the facts supplied`, [
           "clause",
           c.clauseId,
           "rateSource",
@@ -584,11 +604,7 @@ function checkStructure(
 
 // ── Phase 3: rights ──────────────────────────────────────────────────────────
 
-function checkRights(
-  n: EconomicAgreement,
-  o: ParsedOptions,
-  pins: ReadonlyMap<string, PinStatus>,
-): { refusals: Refusal[]; report: RightsReportEntry[] } {
+function checkRights(n: EconomicAgreement, o: ParsedOptions): { refusals: Refusal[]; report: RightsReportEntry[] } {
   const out: Refusal[] = [];
   const report: RightsReportEntry[] = [];
   const floor = o.authorityFloor ?? DEFAULT_AUTHORITY_FLOOR;
@@ -645,23 +661,6 @@ function checkRights(
           requirementId,
         ]),
       );
-    }
-    const requirementById = new Map(lic.requires.payments.map((q) => [q.requirementId, q] as const));
-    for (const p of m.pairs) {
-      const q = requirementById.get(p.requirementId)!;
-      if (q.rule.kind === "percent_by_schedule" && pins.get(p.clauseId) !== "verified") {
-        // The license names a schedule, not a number: unless the pinned rate was re-evaluated exactly,
-        // a composer could pin a lower one. Refuse until it is checked.
-        out.push(
-          refusal(
-            "RATE_UNVERIFIED",
-            pins.get(p.clauseId) === "unverifiable"
-              ? `license ${key} requires the rate of schedule ${q.rule.scheduleHash}, whose segment at asOf cannot be evaluated exactly with the facts supplied`
-              : `license ${key} requires the rate of schedule ${q.rule.scheduleHash}, which was not supplied to verify the pinned rate`,
-            ["license", key, p.requirementId],
-          ),
-        );
-      }
     }
     if (out.length === before) {
       report.push({
@@ -1009,7 +1008,7 @@ export function compileEconomics(input: unknown, options: CompileOptions = {}): 
   const structural = checkStructure(n, o, selected);
   if (structural.refusals.length > 0) return { ok: false, refusals: sortRefusals(structural.refusals) };
 
-  const rights = checkRights(n, o, structural.pins);
+  const rights = checkRights(n, o);
   if (rights.refusals.length > 0) return { ok: false, refusals: sortRefusals(rights.refusals) };
 
   const forbidden = new Set([ZERO_ADDRESS, ...(o.forbiddenRecipients ?? []).map((a) => a.toLowerCase())]);
