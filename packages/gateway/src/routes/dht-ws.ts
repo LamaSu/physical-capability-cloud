@@ -12,6 +12,54 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DHTNode, dhtTelemetry } from "@pcc/dht";
 import { pipelineTelemetry } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { resolveApiKeyFromToken } from "../auth/api-key-auth.js";
+import { resolveSession } from "../auth/siwe-auth.js";
+import { sameIdentity } from "../auth/reserved-identities.js";
+import { getRepos } from "../db.js";
+
+/**
+ * The principal of a DHT peer connection, or null (WP-A round 5, #2883). /ws/dht
+ * is outside /api, so apiGate never sees it: this is its only authentication. It
+ * used to accept any string starting "pcc_". Now the key must RESOLVE to an
+ * active key record, or the request must carry a valid SIWE session.
+ */
+export function dhtPeerPrincipal(req: FastifyRequest): string | null {
+  const authHeader = req.headers.authorization;
+  const bearer = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+  const queryKey = (req.query as { apiKey?: unknown } | undefined)?.apiKey;
+  const token = bearer ?? (typeof queryKey === "string" ? queryKey : undefined);
+  if (token?.startsWith("pcc_")) {
+    const key = resolveApiKeyFromToken(token);
+    if (key) return key.operatorId;
+  }
+  const session = resolveSession(req);
+  return session ? session.address : null;
+}
+
+/** Bounds on a DHT announcement (#2883): ids, sizes, lifetimes and endpoint schemes. */
+const MAX_ANNOUNCE_CAPABILITIES = 50;
+const MAX_ANNOUNCE_ENDPOINTS = 10;
+const MAX_ANNOUNCE_TTL_SECONDS = 3600;
+
+function announceShapeError(a: any): string | null {
+  if (!a || typeof a !== "object") return "a JSON object is required";
+  if (typeof a.kernelId !== "string" || a.kernelId.length === 0 || a.kernelId.length > 128) return "kernelId must be a string of 1-128 characters";
+  if (!Array.isArray(a.capabilities) || a.capabilities.length === 0 || a.capabilities.length > MAX_ANNOUNCE_CAPABILITIES) {
+    return `capabilities must be an array of 1-${MAX_ANNOUNCE_CAPABILITIES}`;
+  }
+  if (a.endpoints !== undefined) {
+    if (!Array.isArray(a.endpoints) || a.endpoints.length > MAX_ANNOUNCE_ENDPOINTS) return `endpoints must be an array of at most ${MAX_ANNOUNCE_ENDPOINTS}`;
+    for (const e of a.endpoints) {
+      if (!e || typeof e !== "object" || typeof e.url !== "string" || !/^(?:https|wss):\/\/[^\s]{1,2000}$/.test(e.url)) {
+        return "every endpoint needs an https:// or wss:// url";
+      }
+    }
+  }
+  if (a.ttlSeconds !== undefined && !(Number.isInteger(a.ttlSeconds) && a.ttlSeconds >= 1 && a.ttlSeconds <= MAX_ANNOUNCE_TTL_SECONDS)) {
+    return `ttlSeconds must be an integer from 1 to ${MAX_ANNOUNCE_TTL_SECONDS}`;
+  }
+  return null;
+}
 
 let gatewayDHTNode: DHTNode | null = null;
 
@@ -47,12 +95,8 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
 
   // ── WebSocket endpoint (auth required to prevent unauthorized DHT peers) ──
   app.get("/ws/dht", { websocket: true }, (socket: any, req: FastifyRequest) => {
-    // Require API key in query string or Authorization header
-    const { apiKey } = req.query as { apiKey?: string };
-    const authHeader = req.headers.authorization;
-    const hasAuth = authHeader?.startsWith("Bearer pcc_") || apiKey?.startsWith("pcc_") || !!(req as any).userId;
-
-    if (!hasAuth) {
+    // A key that RESOLVES, or a valid SIWE session; a "pcc_" prefix alone is not a credential.
+    if (!dhtPeerPrincipal(req)) {
       socket.close(4001, "Authentication required for DHT peer connections");
       return;
     }
@@ -76,40 +120,35 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
   });
 
   // ── REST: announce capabilities ─────────────────────────────────────
+  // Authenticated by apiGate (it is no longer on the public list, #2883) and bound
+  // to the kernel's recorded owner: a caller announces only kernels it operates,
+  // under a DID derived from the id, within bounded sizes and lifetimes.
   app.post("/api/dht/announce", async (req, reply) => {
-    // Require authentication — prevents DHT registry poisoning with fake kernels
-    const apiKeyId = (req as any).apiKeyId;
-    const operatorId = (req as any).operatorId;
-    const userId = (req as any).userId;
-    if (!apiKeyId && !userId) {
+    const actor = (req as any).operatorId ?? (req as any).userId;
+    if (!actor) {
       return reply.status(401).send({ error: "Authentication required for DHT announcements" });
     }
-
     const announcement = req.body as any;
-    if (!announcement || !announcement.kernelId || !announcement.capabilities) {
-      return reply.status(400).send({ error: "kernelId and capabilities required" });
+    const shapeError = announceShapeError(announcement);
+    if (shapeError) return reply.status(400).send({ error: "invalid_announcement", message: shapeError });
+
+    const kernel = getRepos().kernels.findById(announcement.kernelId);
+    if (!kernel) return reply.status(404).send({ error: "kernel_not_found" });
+    if (!sameIdentity(kernel.operatorAddress, actor)) {
+      return reply.status(403).send({ error: "not_kernel_owner", message: "Only the kernel's operator may announce it." });
     }
-    // Store in the registry directly
-    const registry = dhtNode.getRegistry();
-    registry.store({
-      kernelDid: announcement.kernelDid ?? `did:pcc:${announcement.kernelId}`,
+
+    const record = {
+      kernelDid: `did:pcc:${announcement.kernelId}`,
       kernelId: announcement.kernelId,
       capabilities: announcement.capabilities,
       endpoints: announcement.endpoints ?? [],
       ttlSeconds: announcement.ttlSeconds ?? 300,
       timestamp: new Date().toISOString(),
-      signature: announcement.signature ?? "",
-    });
-    // Broadcast to connected DHT peers
-    dhtNode.announce({
-      kernelDid: announcement.kernelDid ?? `did:pcc:${announcement.kernelId}`,
-      kernelId: announcement.kernelId,
-      capabilities: announcement.capabilities,
-      endpoints: announcement.endpoints ?? [],
-      ttlSeconds: announcement.ttlSeconds ?? 300,
-      timestamp: new Date().toISOString(),
-      signature: announcement.signature ?? "",
-    });
+      signature: typeof announcement.signature === "string" ? announcement.signature : "",
+    };
+    dhtNode.getRegistry().store(record);
+    dhtNode.announce(record);
     return { announced: true, kernelId: announcement.kernelId };
   });
 

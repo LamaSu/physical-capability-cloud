@@ -113,6 +113,7 @@ describe("F5 — writes on 'public' paths now require authentication", () => {
     ["DELETE", "/api/dht/peers"], // a public READ prefix no longer opens other methods
     ["PATCH", "/api/auth/provision"], // provisioning is public for POST only
     ["POST", "/api/feedback/something-else"], // only the two listed feedback writes
+    ["POST", "/api/dht/announce"], // no longer public: it is authenticated and owner-bound (#2883)
   ])("%s %s without a key -> 401 (method not declared)", async (method, url) => {
     const res = await call(method, url);
     expect(res.statusCode).toBe(401);
@@ -223,7 +224,6 @@ describe("F5 — reads and public-by-design writes keep working without a key", 
     ["POST", "/api/capabilities/templates/match"],
     ["POST", "/api/capabilities/graph-search"],
     ["POST", "/api/marketplace/roi"],
-    ["POST", "/api/dht/announce"],
     ["POST", "/api/carrier/webhook/easypost"],
     ["POST", "/api/lob/webhook"],
   ])("public-by-design %s %s passes the gate without a key", async (method, url) => {
@@ -278,7 +278,6 @@ describe("F5 — the public (method, path) set is pinned", () => {
       "POST exact /api/capabilities/templates/match",
       "POST exact /api/capabilities/graph-search",
       "POST exact /api/marketplace/roi",
-      "POST exact /api/dht/announce",
       "POST exact /api/carrier/webhook/easypost",
       "POST exact /api/lob/webhook",
     ]);
@@ -287,7 +286,7 @@ describe("F5 — the public (method, path) set is pinned", () => {
   it("every public write is EXACT and carries a justification", async () => {
     const { publicWriteJustifications, publicRouteSnapshot } = await import("../middleware/api-gate.js");
     const writes = publicWriteJustifications();
-    expect(writes.length).toBe(14);
+    expect(writes.length).toBe(13); // 14 before POST /api/dht/announce left the public list (#2883)
     for (const w of writes) {
       expect(w.why.trim().length, `${w.method} ${w.path}`).toBeGreaterThan(10);
     }

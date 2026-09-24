@@ -131,7 +131,6 @@ const PUBLIC_BY_DESIGN: PublicRoute[] = [
   { methods: POST, match: "exact", path: "/api/capabilities/templates/match", why: "heuristic template matcher for the landing-page picker (pure computation)" },
   { methods: POST, match: "exact", path: "/api/capabilities/graph-search", why: "graph search — a read-only query carried in a POST body" },
   { methods: POST, match: "exact", path: "/api/marketplace/roi", why: "ROI calculator (pure computation, stores nothing)" },
-  { methods: POST, match: "exact", path: "/api/dht/announce", why: "DHT announce authenticates itself (401s in routes/dht-ws.ts)" },
   // EasyPost / Lob cannot present a PCC key; their authentication IS the
   // verified HMAC in the route (fails closed 503 with no secret, 401 on
   // mismatch) — "being behind an API key is NOT provider authentication".
