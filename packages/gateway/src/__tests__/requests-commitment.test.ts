@@ -103,3 +103,47 @@ describe("GET /api/requests/:id/commitment", () => {
     await app.close();
   });
 });
+
+  it("routed/direct-match nodes (#1827 Finding B): the endpoint normalizes the SECOND convention instead of refusing it as unmatched", async () => {
+    const app = await buildApp();
+    const created = await app.inject({ method: "POST", url: "/api/requests", payload: PIZZA_REQUEST });
+    const id = created.json().request.id as string;
+
+    // Overwrite the stored DAG with a decomposeDirectMatch-shaped node: bare capabilityId/kernelId,
+    // NO matchStatus — exactly what the job-offer producer normalizes privately. Before the shared
+    // normalize, this endpoint read it as unmatched and could not reproduce the roots offers stamp.
+    const { getRepos } = await import("../db.js");
+    getRepos().requests.update(id, {
+      capabilityDag: [
+        {
+          id: `${id}-step-1`,
+          requestId: id,
+          name: "CNC bracket",
+          description: "",
+          category: "fabrication",
+          capabilityType: "cnc-3axis",
+          estimatedCost: 25,
+          estimatedHours: 2,
+          dependencies: [],
+          parallel: false,
+          status: "pending",
+          materials: [],
+          evidenceRequirements: ["photo_of_completed_work"],
+          capabilityId: "cap-direct-1",
+          kernelId: "kernel-direct-1",
+        },
+        // routed fields are the gateway-side RoutedCapabilityNode extension, not on CapabilityNode
+      ] as unknown as import("@pcc/spec").CapabilityNode[],
+    });
+
+    const res = await app.inject({ method: "GET", url: `/api/requests/${id}/commitment` });
+    const body = res.json();
+    // Matched via the routed convention -> no digest -> honest degrade, NOT "unmatched":
+    expect(body.matchedCount).toBe(1);
+    expect(body.commitment.committable).toBe(false);
+    expect(body.commitment.unmatchedNodes).toEqual([]);
+    expect(body.blockedOn).toMatch(/matchedCapabilityDigest/);
+    expect(body.capabilityContractRoot).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(res.statusCode).toBe(422); // still fail-closed on the missing digest binding
+    await app.close();
+  });

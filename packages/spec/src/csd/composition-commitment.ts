@@ -79,6 +79,15 @@ export interface MatchedNode {
   estimatedCost?: string;
   /** Uppercase currency code, e.g. "USDC" — REQUIRED on a matched node. */
   currency?: string;
+  /**
+   * 0x + 40 hex — the payout wallet the operator agent REQUESTED and the payer AGREED to during
+   * negotiation (operator decision #1690: payout destination is a first-class negotiation
+   * parameter, sealed before escrow locks). Provider-bound — two operators fulfilling the same
+   * contract differ here, so it lives in the COMPOSITION root only, never the contract root.
+   * v3-only, optional: committing it requires { version: 3 }; v2 derivations refuse a plan that
+   * carries it. Committed lowercase (checksum-case must not alias two roots for one wallet).
+   */
+  operatorSettlementAddress?: string;
   evidenceRequirements?: EvidenceRequirement[];
 }
 export interface MatchedEdge { from: string; to: string; }
@@ -87,6 +96,17 @@ export interface MatchedDAG {
   goal?: string;
   nodes: MatchedNode[];
   edges: MatchedEdge[];
+  /**
+   * 0x + 64 hex — hash of the ORACLE VERIFICATION PROGRAM the payer authorized for this job
+   * (astra R5 item 1, #1633: the tier-downgrade hole). Part of WHAT THE BUYER AGREED, so it is
+   * committed at the CONTRACT level (and therefore inside the composition root too). Committing
+   * it requires `{ version: 3 }` derivation — v2 derivations REFUSE a plan that carries it, so a
+   * program selection can never be silently dropped, and v3 encodes presence explicitly, so a
+   * STRIPPED selection always changes the root. Escrow pins the funded root; settlement compares
+   * the submitted program against this commitment — a weaker program cannot settle a job funded
+   * at a stronger tier.
+   */
+  verificationProgramHash?: string;
 }
 
 export type CommitmentResult =
@@ -95,6 +115,16 @@ export type CommitmentResult =
 
 export const COMPOSITION_DOMAIN = "PCC:composition-commitment:v2";
 export const CONTRACT_DOMAIN = "PCC:capability-contract:v2";
+export const COMPOSITION_DOMAIN_V3 = "PCC:composition-commitment:v3";
+export const CONTRACT_DOMAIN_V3 = "PCC:capability-contract:v3";
+
+/**
+ * Which commitment scheme to derive. v2 (default) is the shipped scheme — every root on prod
+ * verifies under it, and it REFUSES plans carrying a verificationProgramHash. v3 additionally
+ * commits the payer-authorized verification program with explicit presence encoding
+ * (pinned/unpinned are always distinguishable roots).
+ */
+export interface DeriveOptions { version?: 2 | 3 }
 
 /** 1-128 printable ASCII characters, no whitespace. Applies to every committed identifier. */
 export const ID_PATTERN = /^[\x21-\x7E]{1,128}$/;
@@ -102,6 +132,7 @@ export const DIGEST_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 /** Canonical decimal: no sign, no leading zeros, at most 18 fraction digits. */
 export const COST_PATTERN = /^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$/;
 export const CURRENCY_PATTERN = /^[A-Z][A-Z0-9]{2,11}$/;
+export const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 export const MAX_TIER = 3;
 
 function utf8(s: string): Uint8Array { return new TextEncoder().encode(s); }
@@ -162,6 +193,8 @@ export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): strin
   const checkBindings = opts.bindings !== false;
   const v: string[] = [];
   if (!ID_PATTERN.test(dag?.requestId ?? "")) v.push("requestId: must be 1-128 printable ASCII characters");
+  if (dag?.verificationProgramHash !== undefined && !DIGEST_PATTERN.test(dag.verificationProgramHash))
+    v.push("verificationProgramHash: must be 0x + 64 hex");
   if (!Array.isArray(dag?.nodes) || dag.nodes.length === 0) { v.push("nodes: empty plan"); return v; }
   const ids = new Set<string>();
   for (const n of dag.nodes) {
@@ -176,6 +209,8 @@ export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): strin
       if (!COST_PATTERN.test(n.estimatedCost ?? "")) v.push(`${tag}: matched node missing/invalid estimatedCost (canonical decimal string)`);
       if (!CURRENCY_PATTERN.test(n.currency ?? "")) v.push(`${tag}: matched node missing/invalid currency (e.g. USDC)`);
     }
+    if (n.operatorSettlementAddress !== undefined && !ADDRESS_PATTERN.test(n.operatorSettlementAddress))
+      v.push(`${tag}: operatorSettlementAddress must be 0x + 40 hex`);
     const seen = new Set<string>();
     for (const r of n.evidenceRequirements ?? []) {
       if (!ID_PATTERN.test(r?.requirementId ?? "")) v.push(`${tag}: evidence requirementId must be printable ASCII`);
@@ -211,7 +246,7 @@ export function validatePlan(dag: MatchedDAG, opts: ValidateOptions = {}): strin
   return v;
 }
 
-function contractRootUnchecked(dag: MatchedDAG): string {
+function contractRootUnchecked(dag: MatchedDAG, version: 2 | 3 = 2): string {
   const nodeBytes = sortedNodes(dag.nodes).map((n) => {
     const reqBytes = [...(n.evidenceRequirements ?? [])]
       .sort(cmpReq)
@@ -220,14 +255,36 @@ function contractRootUnchecked(dag: MatchedDAG): string {
     return concat(lp(n.nodeId), lp(n.capabilityType), lp(String(reqBytes.length)), ...reqBytes);
   });
   const edgeBytes = sortedEdges(dag.edges).map((e) => concat(lp(e.from), lp(e.to)));
+  // v3 appends the payer-authorized verification program with an EXPLICIT presence tag: absent is
+  // committed as "program:0", pinned as "program:1" + the hash. Absent ≠ empty ≠ zero — stripping
+  // a selection ALWAYS changes the root, which is the whole point (astra #1633 item 1).
+  const programBytes =
+    version === 3
+      ? dag.verificationProgramHash !== undefined
+        ? [lp("program:1"), lp(dag.verificationProgramHash.toLowerCase())]
+        : [lp("program:0")]
+      : [];
   const preimage = concat(
-    utf8(CONTRACT_DOMAIN),
+    utf8(version === 3 ? CONTRACT_DOMAIN_V3 : CONTRACT_DOMAIN),
     lp(String(dag.nodes.length)),
     ...nodeBytes,
     lp(String(dag.edges.length)),
     ...edgeBytes,
+    ...programBytes,
   );
   return toHex(keccak_256(preimage));
+}
+
+/** The violation/refusal a v2 derivation emits for a program-carrying plan — v2 must never silently drop a selection. */
+export const PROGRAM_REQUIRES_V3 =
+  "verificationProgramHash: requires { version: 3 } derivation — v2 would silently drop the program selection";
+
+/** Same fail-closed rule for the negotiated payout wallet (#1690): v2 must never silently drop it. */
+export const SETTLEMENT_ADDRESS_REQUIRES_V3 =
+  "operatorSettlementAddress: requires { version: 3 } derivation — v2 would silently drop the negotiated payout wallet";
+
+function hasSettlementAddress(dag: MatchedDAG): boolean {
+  return Array.isArray(dag?.nodes) && dag.nodes.some((n) => n?.operatorSettlementAddress !== undefined);
 }
 
 /**
@@ -235,19 +292,25 @@ function contractRootUnchecked(dag: MatchedDAG): string {
  * fine — only structure, types and evidence are committed). Throws on an invalid plan: a commitment
  * over a malformed plan is meaningless, and callers must not be able to mistake one for a root.
  */
-export function deriveCapabilityContractRoot(dag: MatchedDAG): string {
+export function deriveCapabilityContractRoot(dag: MatchedDAG, opts: DeriveOptions = {}): string {
+  const version = opts.version ?? 2;
+  if (version === 2 && dag?.verificationProgramHash !== undefined) throw new Error(`INVALID_PLAN: ${PROGRAM_REQUIRES_V3}`);
+  if (version === 2 && hasSettlementAddress(dag)) throw new Error(`INVALID_PLAN: ${SETTLEMENT_ADDRESS_REQUIRES_V3}`);
   // Structure only — provider bindings are not part of the contract (see ValidateOptions.bindings).
   const violations = validatePlan(dag, { bindings: false });
   if (violations.length > 0) throw new Error(`INVALID_PLAN: ${violations.join("; ")}`);
-  return contractRootUnchecked(dag);
+  return contractRootUnchecked(dag, version);
 }
 
 /**
  * Derive the compositionRoot (and the contract root it binds), or refuse. Deterministic: canonical
  * ordering throughout, so the same matched plan always yields the same roots regardless of input order.
  */
-export function deriveCompositionCommitment(dag: MatchedDAG): CommitmentResult {
+export function deriveCompositionCommitment(dag: MatchedDAG, opts: DeriveOptions = {}): CommitmentResult {
+  const version = opts.version ?? 2;
   const violations = validatePlan(dag);
+  if (version === 2 && dag?.verificationProgramHash !== undefined) violations.push(PROGRAM_REQUIRES_V3);
+  if (version === 2 && hasSettlementAddress(dag)) violations.push(SETTLEMENT_ADDRESS_REQUIRES_V3);
   const nodes = Array.isArray(dag?.nodes) ? dag.nodes : [];
   // GUARD 1 (the #1216 trap): every node must be matched. matchStatus, never the budget.
   const unmatched = nodes.filter((n) => n.matchStatus !== "matched").map((n) => n.nodeId);
@@ -264,7 +327,7 @@ export function deriveCompositionCommitment(dag: MatchedDAG): CommitmentResult {
     return { committable: false, reason: `UNCOMMITTABLE: invalid plan — ${violations.join("; ")}`, unmatchedNodes: [], violations };
   }
 
-  const capabilityContractRoot = contractRootUnchecked(dag);
+  const capabilityContractRoot = contractRootUnchecked(dag, version);
   const nodeBytes = sortedNodes(dag.nodes).map((n) =>
     concat(
       lp(n.nodeId),
@@ -272,12 +335,19 @@ export function deriveCompositionCommitment(dag: MatchedDAG): CommitmentResult {
       lp(n.matchedCapabilityDigest!.toLowerCase()),
       lp(n.estimatedCost!),
       lp(n.currency!),
+      // v3: the negotiated payout wallet (#1690), explicit presence tag — absent ≠ empty ≠ zero.
+      ...(version === 3
+        ? n.operatorSettlementAddress !== undefined
+          ? [lp("payto:1"), lp(n.operatorSettlementAddress.toLowerCase())]
+          : [lp("payto:0")]
+        : []),
     ),
   );
   const edgeBytes = sortedEdges(dag.edges).map((e) => concat(lp(e.from), lp(e.to)));
   // Canonical preimage: DOMAIN || requestId || contractRoot || nodeCount || sorted nodes || edgeCount || sorted edges.
+  // v3 needs no extra field here: the program is committed INSIDE the v3 contract root, and the domain differs.
   const preimage = concat(
-    utf8(COMPOSITION_DOMAIN),
+    utf8(version === 3 ? COMPOSITION_DOMAIN_V3 : COMPOSITION_DOMAIN),
     lp(dag.requestId),
     lp(capabilityContractRoot),
     lp(String(dag.nodes.length)),
@@ -308,8 +378,10 @@ export interface SubstitutionReport {
   pureOperatorSubstitution: boolean;
 }
 
-const PROVIDER_FIELDS: ReadonlySet<string> = new Set(["matchedCapabilityDigest", "matchedCapabilityId"]);
-const NODE_FIELDS = ["capabilityType", "matchedCapabilityDigest", "matchedCapabilityId", "estimatedCost", "currency"] as const;
+// operatorSettlementAddress IS a provider binding (#1690): two operators fulfilling the same
+// contract naturally differ here, so it must not break pureOperatorSubstitution.
+const PROVIDER_FIELDS: ReadonlySet<string> = new Set(["matchedCapabilityDigest", "matchedCapabilityId", "operatorSettlementAddress"]);
+const NODE_FIELDS = ["capabilityType", "matchedCapabilityDigest", "matchedCapabilityId", "estimatedCost", "currency", "operatorSettlementAddress"] as const;
 
 function canonReqs(n: MatchedNode): string {
   return JSON.stringify([...(n.evidenceRequirements ?? [])].sort(cmpReq).map((r) => [r.evidenceTypeId, r.tier]));
@@ -318,23 +390,32 @@ function canonEdges(dag: MatchedDAG): string {
   return JSON.stringify(sortedEdges(dag.edges).map((e) => [e.from, e.to]));
 }
 
-/** Open two committed plans and report exactly what differs. Uncommittable input ⇒ nothing is provable. */
+/**
+ * Open two committed plans and report exactly what differs. Uncommittable input ⇒ nothing is provable.
+ * Each plan is derived at its own natural version (3 iff it pins a verification program), so a
+ * pinned-vs-stripped pair lands in different domains: sameContract is false and substitutability
+ * fails — a tier-strip can never masquerade as an operator substitution.
+ */
 export function explainSubstitution(a: MatchedDAG, b: MatchedDAG): SubstitutionReport {
-  const ra = deriveCompositionCommitment(a);
-  const rb = deriveCompositionCommitment(b);
+  const naturalVersion = (d: MatchedDAG): 2 | 3 => (d.verificationProgramHash !== undefined ? 3 : 2);
+  const ra = deriveCompositionCommitment(a, { version: naturalVersion(a) });
+  const rb = deriveCompositionCommitment(b, { version: naturalVersion(b) });
   if (!ra.committable || !rb.committable) {
     return { sameContract: false, sameComposition: false, differingFields: [{ nodeId: null, field: "uncommittable" }], pureOperatorSubstitution: false };
   }
   const diffs: FieldDifference[] = [];
   if (a.requestId !== b.requestId) diffs.push({ nodeId: null, field: "requestId" });
+  if ((a.verificationProgramHash ?? "").toLowerCase() !== (b.verificationProgramHash ?? "").toLowerCase())
+    diffs.push({ nodeId: null, field: "verificationProgramHash" });
   const na = new Map(a.nodes.map((n) => [n.nodeId, n] as const));
   const nb = new Map(b.nodes.map((n) => [n.nodeId, n] as const));
   for (const id of new Set([...na.keys(), ...nb.keys()])) {
     const x = na.get(id); const y = nb.get(id);
     if (!x || !y) { diffs.push({ nodeId: id, field: "presence" }); continue; }
     for (const f of NODE_FIELDS) {
-      const fx = f === "matchedCapabilityDigest" ? (x[f] ?? "").toLowerCase() : (x[f] ?? "");
-      const fy = f === "matchedCapabilityDigest" ? (y[f] ?? "").toLowerCase() : (y[f] ?? "");
+      const caseNormalized = f === "matchedCapabilityDigest" || f === "operatorSettlementAddress";
+      const fx = caseNormalized ? (x[f] ?? "").toLowerCase() : (x[f] ?? "");
+      const fy = caseNormalized ? (y[f] ?? "").toLowerCase() : (y[f] ?? "");
       if (fx !== fy) diffs.push({ nodeId: id, field: f });
     }
     if (canonReqs(x) !== canonReqs(y)) diffs.push({ nodeId: id, field: "evidenceRequirements" });
