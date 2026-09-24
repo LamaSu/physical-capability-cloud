@@ -349,3 +349,139 @@ describe("N31 approvals approve / reject: owner-only", () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+// ── WP-C R2: approval SUBMISSION is not a side door ────────────────────────
+// Review round 2 (HIGH, probe P2): POST /api/operator/approvals took
+// `autoApprove: true` from the body and created an ALREADY-APPROVED job for any
+// kernel, from any key, with `submittedBy` copied from the body.
+// scripts/ot2-agent.py polls `status=approved&kernelId=K` and runs those jobs.
+
+describe("R2 approval submission and listing: no side door", () => {
+  async function submit(headers: Record<string, string>, body: Record<string, unknown>, on = app) {
+    return on.inject({ method: "POST", url: "/api/operator/approvals", headers, payload: body });
+  }
+
+  function approvalsFor(kernelId: string) {
+    return getStore().db.select().from(pendingApprovals).where(eq(pendingApprovals.kernelId, kernelId)).all();
+  }
+
+  it("[neg] P2: a NON-owner's {autoApprove:true} creates only a PENDING approval, submitted as the authenticated actor; the OT-2 poll never sees it", async () => {
+    const kernelId = await ownedKernel("r2-p2-victim");
+    const res = await submit(asAttacker(), {
+      kernelId,
+      agentId: "attacker-agent",
+      autoApprove: true,
+      capabilityType: "liquid-handler",
+      parameters: { task: "attacker-chosen protocol" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval.status).toBe("pending");
+    expect(res.json().approval.submittedBy).toBe(ATTACKER);
+
+    // Exactly the query scripts/ot2-agent.py polls before running a job.
+    const poll = await app.inject({
+      method: "GET",
+      url: `/api/operator/approvals?status=approved&kernelId=${kernelId}`,
+      headers: asOwner(),
+    });
+    expect(poll.statusCode).toBe(200);
+    expect(poll.json().approvals).toEqual([]);
+  });
+
+  it("[neg] a NON-owner creates only 'pending' even when the owner's policy is approvalMode 'auto'", async () => {
+    const kernelId = await ownedKernel("r2-auto-victim");
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/api/operator/policy/${kernelId}`,
+      headers: asOwner(),
+      payload: { approvalMode: "auto" },
+    });
+    expect(patch.statusCode).toBe(200);
+    const res = await submit(asAttacker(), { kernelId, agentId: "a", autoApprove: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval.status).toBe("pending");
+  });
+
+  it("[neg] the OWNER's body autoApprove is ignored too: under the default 'manual' policy the job is pending", async () => {
+    const kernelId = await ownedKernel("r2-owner-manual");
+    const res = await submit(asOwner(), { kernelId, agentId: "mine", autoApprove: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval.status).toBe("pending");
+    expect(res.json().approval.submittedBy).toBe(OWNER);
+  });
+
+  it("the OWNER under its own approvalMode 'auto' policy gets an approved job (derived from policy, not the body)", async () => {
+    const kernelId = await ownedKernel("r2-owner-auto");
+    await app.inject({
+      method: "PATCH",
+      url: `/api/operator/policy/${kernelId}`,
+      headers: asOwner(),
+      payload: { approvalMode: "auto" },
+    });
+    const res = await submit(asOwner(), { kernelId });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval.status).toBe("approved");
+    expect(res.json().approval.decidedAt).toBeTruthy();
+  });
+
+  it("[neg] an e-stopped kernel refuses new approvals: 503, nothing stored (owner and non-owner)", async () => {
+    const kernelId = await ownedKernel("r2-estop");
+    const stop = await app.inject({
+      method: "POST",
+      url: "/api/operator/emergency-stop",
+      headers: asOwner(),
+      payload: { kernelId, reason: "maintenance" },
+    });
+    expect(stop.statusCode).toBe(200);
+    for (const headers of [asAttacker(), asOwner()]) {
+      const res = await submit(headers, { kernelId, agentId: "x", autoApprove: true });
+      expect(res.statusCode).toBe(503);
+    }
+    expect(approvalsFor(kernelId)).toEqual([]);
+  });
+
+  it("[neg] an UNKNOWN kernel -> 404 kernel_not_found, nothing stored", async () => {
+    const kernelId = uid("r2-ghost");
+    const res = await submit(asAttacker(), { kernelId, agentId: "x", autoApprove: true });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("kernel_not_found");
+    expect(approvalsFor(kernelId)).toEqual([]);
+  });
+
+  it("[neg] NO actor at the handler (apiGate absent) -> 401 for submit and list, nothing stored", async () => {
+    const kernelId = await ownedKernel("r2-noactor");
+    const res = await submit({}, { kernelId, agentId: "x", autoApprove: true }, bareApp);
+    expect(res.statusCode).toBe(401);
+    expect(approvalsFor(kernelId)).toEqual([]);
+    const list = await bareApp.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${kernelId}` });
+    expect(list.statusCode).toBe(401);
+  });
+
+  it("[neg] GET /api/operator/approvals is owner-scoped: a non-owner gets 403 for the victim's kernel and never sees its rows", async () => {
+    const kernelId = await ownedKernel("r2-list-victim");
+    const approvalId = insertApproval(kernelId);
+
+    const direct = await app.inject({
+      method: "GET",
+      url: `/api/operator/approvals?kernelId=${kernelId}`,
+      headers: asAttacker(),
+    });
+    expect(direct.statusCode).toBe(403);
+    expect(direct.json().error).toBe("not_kernel_owner");
+
+    const all = await app.inject({ method: "GET", url: "/api/operator/approvals?status=pending", headers: asAttacker() });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().approvals.map((a: { id: string }) => a.id)).not.toContain(approvalId);
+
+    // The owner sees it, filtered or not (positive control).
+    const mine = await app.inject({ method: "GET", url: "/api/operator/approvals?status=pending", headers: asOwner() });
+    expect(mine.json().approvals.map((a: { id: string }) => a.id)).toContain(approvalId);
+    const byKernel = await app.inject({
+      method: "GET",
+      url: `/api/operator/approvals?kernelId=${kernelId}`,
+      headers: asOwner(),
+    });
+    expect(byKernel.statusCode).toBe(200);
+    expect(byKernel.json().approvals.map((a: { id: string }) => a.id)).toContain(approvalId);
+  });
+});

@@ -2,10 +2,15 @@ import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
-import { getStore } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { checkKernelOwner, requireActor, requireKernelOwner } from "../auth/kernel-owner-guard.js";
+import {
+  checkKernelOwner,
+  ownsKernel,
+  requireActor,
+  requireKernelOwner,
+} from "../auth/kernel-owner-guard.js";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -259,17 +264,53 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Pending Approvals
   // ═════════════════════════════════════════════════════════════════
 
-  /** POST /api/operator/approvals — Submit a job for approval */
+  /**
+   * POST /api/operator/approvals — Submit a job for the kernel operator's approval.
+   *
+   * WP-C R2 (review round 2, HIGH; probe P2). This route used to take
+   * `autoApprove: true` from the body and store the job as ALREADY APPROVED
+   * for any kernel, from any key, with `submittedBy` copied from the body. The
+   * in-repo OT-2 daemon (scripts/ot2-agent.py) polls `status=approved` for its
+   * kernel and runs those jobs on the robot, so this bypassed the owner-only
+   * approve route (N31) and ignored the e-stop. Now:
+   *   - a PRESENT actor is required (401), and an unknown kernel is 404;
+   *   - body `autoApprove` is ignored. A job is created 'approved' only when
+   *     the actor OWNS the kernel and the kernel's policy says
+   *     `approvalMode: "auto"`. Everyone else creates 'pending', which only
+   *     the owner can approve;
+   *   - `submittedBy` is the authenticated actor, never a body field;
+   *   - a kernel whose policy has `emergencyStop` set refuses new approvals
+   *     (503, the same answer the job and negotiation routes give).
+   * Any key may still SUBMIT a job for a kernel's approval; that is the
+   * purpose of the queue.
+   */
   app.post("/api/operator/approvals", async (req, reply) => {
-    const { kernelId, agentId, capabilityType, parameters, autoApprove } = (req.body ?? {}) as {
-      kernelId?: string; agentId?: string; capabilityType?: string;
-      parameters?: Record<string, unknown>; autoApprove?: boolean;
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
+    const { kernelId, capabilityType, parameters } = (req.body ?? {}) as {
+      kernelId?: unknown; capabilityType?: string; parameters?: Record<string, unknown>;
     };
-    if (!kernelId || !agentId) {
-      return reply.status(400).send({ error: "kernelId and agentId required" });
+    if (typeof kernelId !== "string" || !kernelId) {
+      return reply.status(400).send({ error: "kernelId required" });
     }
+    // Owner check WITHOUT refusing non-owners: 404 / 502 refuse, 403 means
+    // "may submit, but only as pending".
+    const verdict = await checkKernelOwner(actor, kernelId);
+    if (!verdict.ok && verdict.status !== 403) {
+      return reply.status(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId });
+    }
+    const isOwner = verdict.ok;
     try {
       const { db } = getStore();
+      const policyRow = db.select().from(operatorPolicies)
+        .where(eq(operatorPolicies.kernelId, kernelId))
+        .get();
+      const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+      if (policy.emergencyStop) {
+        return reply.status(503).send({ error: "Operator has activated emergency stop", kernelId });
+      }
+      const approved = isOwner && policy.approvalMode === "auto";
+
       const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const now = new Date().toISOString();
@@ -279,11 +320,11 @@ export async function operatorRoutes(app: FastifyInstance) {
         id,
         kernelId,
         jobId,
-        submittedBy: agentId,
+        submittedBy: actor,
         jobSummary: { capabilityType: capabilityType ?? "liquid-handler", parameters: parameters ?? {} },
-        status: autoApprove ? "approved" : "pending",
+        status: approved ? "approved" : "pending",
         createdAt: now,
-        decidedAt: autoApprove ? now : null,
+        decidedAt: approved ? now : null,
         expiresAt: expires,
       }).run();
 
@@ -294,9 +335,26 @@ export async function operatorRoutes(app: FastifyInstance) {
     }
   });
 
-  /** GET /api/operator/approvals — List pending approvals */
-  app.get("/api/operator/approvals", async (req) => {
+  /**
+   * GET /api/operator/approvals — List approvals.
+   *
+   * OWNER-SCOPED (WP-C R2). A present actor is required (401). With
+   * `?kernelId=` the actor must own that kernel (404 unknown, 403
+   * not_kernel_owner). Without it, only approvals for kernels the actor owns
+   * are listed, resolved with one batched kernel lookup. (Before: any key
+   * could read every kernel's queue, including the job parameters.)
+   */
+  app.get("/api/operator/approvals", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { kernelId, status } = req.query as { kernelId?: string; status?: string };
+    if (kernelId) {
+      // String(): a repeated ?kernelId= arrives as an array and names no kernel (404).
+      const verdict = await checkKernelOwner(actor, String(kernelId));
+      if (!verdict.ok) {
+        return reply.status(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId });
+      }
+    }
 
     try {
       const { db } = getStore();
@@ -316,6 +374,16 @@ export async function operatorRoutes(app: FastifyInstance) {
           .all();
       } else {
         rows = db.select().from(pendingApprovals).all();
+      }
+
+      if (!kernelId) {
+        const kernelIds = [...new Set(rows.map((r) => r.kernelId))];
+        const owned = new Set(
+          getRepos().kernels.findByIds(kernelIds)
+            .filter((k) => ownsKernel(k.operatorAddress, actor))
+            .map((k) => k.id),
+        );
+        rows = rows.filter((r) => owned.has(r.kernelId));
       }
 
       return { approvals: rows };
