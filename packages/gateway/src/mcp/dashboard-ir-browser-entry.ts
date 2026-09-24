@@ -277,11 +277,15 @@ function renderManifest(manifest: unknown): void {
   const mount = document.getElementById(MOUNT_ID);
   if (!mount) return;
   if (tooLarge(manifest)) { rendered = true; inert(mount, "This dashboard is too large and was not rendered."); return; }
-  const r = dashboardManifestToIr(manifest as never);
+  // Any exception while adapting or validating is the same inert failure, never a partial render.
+  let r: ReturnType<typeof dashboardManifestToIr>;
+  try { r = dashboardManifestToIr(manifest as never); } catch { r = { ok: false, reason: "adapter threw" }; }
   if (!r.ok) { rendered = true; inert(mount, "This dashboard could not be verified and was not rendered."); return; }
   rendered = true;
   const container = wrapEl(document.createElement("div"));
-  const painted = bootIrView(rdoc, container as unknown as RElement, r.doc, validateIr); // in-browser re-validate + paint
+  let painted = false;
+  try { painted = bootIrView(rdoc, container as unknown as RElement, r.doc, validateIr); } // in-browser re-validate + paint
+  catch { inert(mount, "This dashboard could not be verified and was not rendered."); return; }
   mount.replaceChildren(container._el);
   if (painted) { liveDoc = r.doc; liveRoot = container._el; startBinds(r.doc, container._el); }
 }

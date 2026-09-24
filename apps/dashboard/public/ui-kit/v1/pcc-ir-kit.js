@@ -46,6 +46,66 @@
     cleanNodes: 5e4
     // deepClean traversal budget — >> any legit manifest/IR, kills wide-object DoS (sol R6)
   };
+  var LIST_ROW_CAP = LIM.listRows;
+  var WITHHELD_PROSE = "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+  var LOOKALIKE = {
+    "\u0430": "a",
+    "\u0435": "e",
+    "\u043E": "o",
+    "\u0440": "p",
+    "\u0441": "c",
+    "\u0443": "y",
+    "\u0445": "x",
+    "\u0456": "i",
+    "\u0458": "j",
+    "\u0455": "s",
+    "\u0501": "d",
+    "\u04BB": "h",
+    "\u0391": "A",
+    "\u0392": "B",
+    "\u0395": "E",
+    "\u0397": "H",
+    "\u0399": "I",
+    "\u039A": "K",
+    "\u039C": "M",
+    "\u039D": "N",
+    "\u039F": "O",
+    "\u03A1": "P",
+    "\u03A4": "T",
+    "\u03A7": "X",
+    "\u03A5": "Y",
+    "\u03BF": "o",
+    "\u03B1": "a",
+    "\u03C1": "p"
+  };
+  function foldForClaims(text) {
+    let t = text.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");
+    t = t.replace(/[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
+    return t;
+  }
+  var AMOUNT_RE = /[$\u20ac\u00a3\u00a5\u20bf]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
+  var CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
+  function isMoneyClaim(text) {
+    const t = foldForClaims(text);
+    return AMOUNT_RE.test(t) || CLAIM_RE.test(t);
+  }
+  function proseText(text) {
+    return isMoneyClaim(text) ? WITHHELD_PROSE : text;
+  }
+  var LIST_PROFILES = {
+    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
+    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+  };
+  function listProfileViolation(path, props) {
+    const prof = LIST_PROFILES[path];
+    if (!prof) return `no list field profile for ${path}`;
+    if (typeof props.rowTitle !== "string" || !prof.title.includes(props.rowTitle)) return `list title field not in the ${path} profile`;
+    const meta = Array.isArray(props.rowMeta) ? props.rowMeta : [];
+    for (const m of meta) if (typeof m !== "string" || !prof.meta.includes(m)) return `list meta field not in the ${path} profile`;
+    if (props.statusFrom !== void 0 && (typeof props.statusFrom !== "string" || !prof.status.includes(props.statusFrom))) return `list status field not in the ${path} profile`;
+    return null;
+  }
   var APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
   var PATH_GRAMMAR = /^\/api\/[A-Za-z0-9._~\-/]+$/;
   var SSE_GRAMMAR = /^\/sse\/[A-Za-z0-9._~\-/]+$/;
@@ -107,7 +167,19 @@
     // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
     // assert a settlement that never occurred. The authoritative receipt is the out-of-band
     // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
-    list: { sourceClass: "authoritative", schemaId: "collection-v1", maxAgeMs: 3e5, routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+    // list: collection reads whose rows are listable ONLY through a PCC-owned field profile
+    // (LIST_PROFILES). Escrow is NOT listable: money state appears only in schema cards.
+    list: {
+      sourceClass: "authoritative",
+      schemaId: "collection-v1",
+      maxAgeMs: 3e5,
+      routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities")],
+      queryByRoute: {
+        "/api/jobs": ["kernelId", "status", "offset", "limit"],
+        "/api/kernels": ["status"],
+        "/api/capabilities": ["type", "offset", "limit"]
+      }
+    },
     // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
     // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
     // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
@@ -253,8 +325,10 @@
     if (!policy.needsSelect && bind.select !== void 0) return `${key} may not select`;
     if (bind.query !== void 0) {
       if (!isPlain(bind.query) || Object.keys(bind.query).length > LIM.queryKeys) return "bind.query shape";
+      const allowedQuery = policy.queryByRoute?.[bind.path] ?? [];
       for (const [k, v] of Object.entries(bind.query)) {
         if (!isSelector(k)) return "query key grammar";
+        if (isCredentialName(k) || !allowedQuery.includes(k)) return `query key "${k}" not allowed for ${bind.path}`;
         const t = typeof v;
         if (!(t === "string" && v.length <= LIM.str) && t !== "boolean" && !(t === "number" && Number.isFinite(v))) return "query value type";
       }
@@ -279,8 +353,9 @@
     if (!deepClean(m)) return { ok: false, reason: "prototype/nonfinite/symbol in manifest" };
     const mm = m;
     if (!onlyKeys(mm, ["csd", "title", "description", "theme", "sections"])) return { ok: false, reason: "unexpected top-level key" };
-    const title = strictStr(mm.title, LIM.title);
-    if (title === null) return { ok: false, reason: "title invalid" };
+    const rawTitle = strictStr(mm.title, LIM.title);
+    if (rawTitle === null) return { ok: false, reason: "title invalid" };
+    const title = proseText(rawTitle);
     if (!Array.isArray(mm.sections)) return { ok: false, reason: "sections not array" };
     if (mm.sections.length > LIM.sections) return { ok: false, reason: "too many sections" };
     let count = 0;
@@ -301,7 +376,7 @@
         const h = strictStr(secRaw.heading, LIM.title);
         if (h === null) return { ok: false, reason: "section.heading invalid" };
         if (!budget()) return { ok: false, reason: "node budget" };
-        children.push({ type: "heading", id: nextId(), props: { level: 2, text: h }, untrusted: true });
+        children.push({ type: "heading", id: nextId(), props: { level: 2, text: proseText(h) }, untrusted: true });
       }
       for (const w of secRaw.windows) {
         const r = mapWindow(w, nextId, budget, bindBudget);
@@ -329,7 +404,7 @@
         {
           const text = strictStr(w.text);
           if (text === null) return { ok: false, reason: "note.text" };
-          return { ok: true, node: { type: "text", id, props: { text }, untrusted: true } };
+          return { ok: true, node: { type: "text", id, props: { text: proseText(text) }, untrusted: true } };
         }
       case "metric":
         if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
@@ -377,6 +452,8 @@
             if (!isSelector(item.statusFrom)) return { ok: false, reason: "list.statusFrom selector" };
             props.statusFrom = item.statusFrom;
           }
+          const offProfile = listProfileViolation(b.bind.path, props);
+          if (offProfile) return { ok: false, reason: offProfile };
           if (w.limit !== void 0) {
             if (typeof w.limit !== "number" || !Number.isInteger(w.limit) || w.limit <= 0 || w.limit > LIM.listRows) return { ok: false, reason: "list.limit" };
             props.limit = w.limit;
@@ -427,7 +504,7 @@
             if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
             const label = strictStr(a.label, LIM.title);
             if (label === null) return { ok: false, reason: "action.label" };
-            children.push({ type: "badge", id: nextId(), props: { text: label, tone: "neutral" }, untrusted: true });
+            children.push({ type: "badge", id: nextId(), props: { text: proseText(label), tone: "neutral" }, untrusted: true });
           }
           return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } };
         }
@@ -470,12 +547,12 @@
       if (PROTO_KEYS.has(key) || isCredentialName(key)) return { ok: false, reason: "credential/proto field" };
       const def = props[key];
       if (!isPlain(def) || !onlyKeys(def, ["type", "title", "description", "enum", "format", "minimum", "maximum", "minLength", "maxLength"])) return { ok: false, reason: "form field-def shape" };
-      if (def.type !== void 0 && !["string", "number", "integer", "boolean"].includes(String(def.type))) return { ok: false, reason: "form field type" };
+      if (def.type !== void 0 && (typeof def.type !== "string" || !["string", "number", "integer", "boolean"].includes(def.type))) return { ok: false, reason: "form field type" };
       if (def.title !== void 0 && strictStr(def.title, LIM.title) === null) return { ok: false, reason: "form field title" };
       const rawLabel = typeof def.title === "string" ? def.title : key;
       const s = strictStr(rawLabel, LIM.title);
       if (s === null) return { ok: false, reason: "field label" };
-      labels.push(s);
+      labels.push(proseText(s));
     }
     return { ok: true, labels };
   }
@@ -589,6 +666,16 @@
         const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
         if (expected === null) return "stat (route, source) not an allowlisted metric field";
         if (n.props?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+      }
+      if (n.type === "list") {
+        const bp = n.bind?.path;
+        const off = typeof bp === "string" ? listProfileViolation(bp, n.props ?? {}) : "list without a bound path";
+        if (off) return off;
+      }
+      if (spec.prose) {
+        const p = n.props ?? {};
+        const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
+        if (t !== WITHHELD_PROSE && isMoneyClaim(t)) return `prose ${n.type} states an amount or a money/verification status`;
       }
       if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
       if (!spec.prose && n.untrusted !== void 0) return `non-prose ${n.type} marked untrusted`;
@@ -840,7 +927,7 @@
     const rowTitle = String(node.props?.rowTitle ?? "");
     const rowMeta = Array.isArray(node.props?.rowMeta) ? node.props.rowMeta : [];
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
-    const limit = typeof node.props?.limit === "number" ? node.props.limit : rows.length;
+    const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
@@ -1296,7 +1383,12 @@
       inert(mount, "This dashboard is too large and was not rendered.");
       return;
     }
-    const r = dashboardManifestToIr(manifest);
+    let r;
+    try {
+      r = dashboardManifestToIr(manifest);
+    } catch {
+      r = { ok: false, reason: "adapter threw" };
+    }
     if (!r.ok) {
       rendered = true;
       inert(mount, "This dashboard could not be verified and was not rendered.");
@@ -1304,7 +1396,13 @@
     }
     rendered = true;
     const container = wrapEl(document.createElement("div"));
-    const painted = bootIrView(rdoc, container, r.doc, validateIr);
+    let painted = false;
+    try {
+      painted = bootIrView(rdoc, container, r.doc, validateIr);
+    } catch {
+      inert(mount, "This dashboard could not be verified and was not rendered.");
+      return;
+    }
     mount.replaceChildren(container._el);
     if (painted) {
       liveDoc = r.doc;
