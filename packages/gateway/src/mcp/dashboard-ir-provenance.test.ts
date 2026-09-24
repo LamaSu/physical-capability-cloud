@@ -264,3 +264,94 @@ describe("PX-4 end-to-end on the rebuilt pcc-ir-kit.js", () => {
     s.close();
   });
 });
+
+// ── absence is not evidence: failure and off-schema payloads (found by a live trace) ──────
+// Production `/api/kernels` answers `{ kernels: [...] }` and `/api/jobs` answers 401 to an
+// anonymous read. Before this, both rendered as an EMPTY authoritative list (the first with a
+// fresh "as of" line), which reads as "none". They must say "unavailable" instead.
+const listManifest = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec L", windows: [
+  { kind: "list", binding: { path: "/api/capabilities" }, item: { title: "name", statusFrom: "available" } },
+] }] };
+const listOf = (s: ReturnType<typeof scene>) => s.w.document.querySelector(".pcc-list") as any;
+const lineOf = (s: ReturnType<typeof scene>) => listOf(s).nextElementSibling as any;
+const rowsOf = (s: ReturnType<typeof scene>) => Array.from(listOf(s).querySelectorAll(".pcc-row")).map((r: any) => r.textContent);
+
+describe("PX-4 absence is not evidence (rebuilt kit)", () => {
+  it("a FIRST read that fails says 'unavailable · HTTP 401', never an empty authoritative list", async () => {
+    const s = scene([{ status: 401 }], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(listOf(s).className).toContain("pcc-unavail");
+    expect(lineOf(s).textContent).toBe("unavailable · HTTP 401");
+    expect(listOf(s).getAttribute("data-as-of")).toBeNull(); // nothing was observed
+    expect(rowsOf(s)).toEqual([]);
+    expect(listOf(s).querySelector(".pcc-empty")).toBeNull(); // and it does NOT claim "none"
+    s.close();
+  });
+
+  it("a failed first read of a stat says unavailable, not a value", async () => {
+    const s = scene([{ status: 503 }], T0);
+    s.deliver(statManifest); await s.settle();
+    expect(s.stat().className).toContain("pcc-unavail");
+    expect(s.fresh().textContent).toBe("unavailable · HTTP 503");
+    expect(s.stat().getAttribute("data-as-of")).toBeNull();
+    s.close();
+  });
+
+  it("a payload that is not a collection is unreadable, not an empty list", async () => {
+    const s = scene([{ status: 200, json: { kernels: [{ name: "k1", status: "online" }] } }], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(listOf(s).className).toContain("pcc-unavail");
+    expect(lineOf(s).textContent).toBe("unavailable · unexpected response shape");
+    expect(listOf(s).getAttribute("data-as-of")).toBeNull();
+    expect(rowsOf(s)).toEqual([]);
+    s.close();
+  });
+
+  it("rows present but none readable is unreadable, not 'none'", async () => {
+    const s = scene([{ status: 200, json: { items: [{ nope: 1 }, { nope: 2 }] } }], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(listOf(s).className).toContain("pcc-unavail");
+    expect(listOf(s).querySelector(".pcc-empty")).toBeNull();
+    s.close();
+  });
+
+  it("a genuinely empty collection is a valid state: 'none', as of its time", async () => {
+    const s = scene([{ status: 200, json: { items: [], asOf: iso(T0 - 1_000) } }], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(listOf(s).querySelector(".pcc-empty")!.textContent).toBe("none");
+    expect(lineOf(s).textContent).toBe("as of 11:59:59Z");
+    expect(listOf(s).className).not.toContain("pcc-unavail");
+    s.close();
+  });
+
+  it("after good rows, an off-schema refresh KEEPS the rows and marks them stale", async () => {
+    const s = scene([
+      { status: 200, json: { items: [{ name: "Alpha", available: true }], asOf: iso(T0 - 1_000) } },
+      { status: 200, json: { kernels: [] } },
+    ], T0);
+    s.deliver(listManifest); await s.settle();
+    expect(rowsOf(s)).toEqual(["Alphatrue"]);
+    await s.nextPoll();
+    expect(rowsOf(s)).toEqual(["Alphatrue"]); // not wiped by the rejected payload
+    expect(listOf(s).className).toContain("pcc-stale");
+    expect(lineOf(s).textContent).toBe("as of 11:59:59Z · stale");
+    s.close();
+  });
+
+  it("'unavailable' recovers to fresh data on the next good read", async () => {
+    const s = scene([
+      { status: 401 },
+      { status: 200, json: { items: [{ name: "Beta", available: false }], asOf: iso(T0 + 5_000) } },
+    ], T0);
+    // A declared 10s poll, so the one-failure backoff (x2) lands inside the harness's poll window.
+    const fast = JSON.parse(JSON.stringify(listManifest));
+    fast.sections[0].windows[0].binding.pollMs = 10_000;
+    s.deliver(fast); await s.settle();
+    expect(listOf(s).className).toContain("pcc-unavail");
+    await s.nextPoll();
+    expect(rowsOf(s)).toEqual(["Betafalse"]);
+    expect(listOf(s).className).not.toContain("pcc-unavail");
+    expect(lineOf(s).textContent).toMatch(/^as of \d{2}:\d{2}:\d{2}Z$/);
+    s.close();
+  });
+});

@@ -646,7 +646,9 @@
     schemaCard: "pcc-schema-card",
     field: "pcc-fieldlabel",
     fresh: "pcc-fresh",
-    stale: "pcc-stale"
+    stale: "pcc-stale",
+    unavail: "pcc-unavail",
+    empty: "pcc-empty"
   };
   function readOwnPath(obj, sel) {
     let cur = obj;
@@ -817,11 +819,17 @@
   }
   function applyFreshness(host, meta, asOf, stale) {
     host.setAttr("data-as-of", asOf);
-    const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale).join(" ");
+    const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale && c !== CLS.unavail).join(" ");
     host.className = stale ? base + " " + CLS.stale : base;
     const hhmmss = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})/.exec(asOf);
     meta.className = CLS.fresh;
     meta.textContent = "as of " + (hhmmss ? hhmmss[1] + "Z" : "unknown time") + (stale ? " \xB7 stale" : "");
+  }
+  function applyUnavailable(host, meta, why) {
+    const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale && c !== CLS.unavail).join(" ");
+    host.className = base + " " + CLS.unavail;
+    meta.className = CLS.fresh;
+    meta.textContent = "unavailable \xB7 " + why;
   }
   function renderIrDoc(doc, mount, ir) {
     while (mount.children.length) mount.children.pop();
@@ -852,6 +860,8 @@
       listEl.appendChild(line);
       shown++;
     }
+    if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none"));
+    return shown;
   }
   function bindScalar(node, data) {
     const sel = node.bind?.select;
@@ -948,7 +958,7 @@
       sse = deps.openSse(sseUrl, (d) => {
         if (!stopped) onData(d);
       }, () => {
-        if (!stopped && onStale) onStale();
+        if (!stopped && onStale) onStale("stream error");
         stop();
       });
     } else {
@@ -963,13 +973,13 @@
             onData(r.json);
           } else {
             fails++;
-            if (onStale) onStale();
+            if (onStale) onStale(r.redirected ? "redirected" : r.bytesOver ? "response too large" : "HTTP " + r.status);
           }
           pollTimer = deps.setTimer(tick, nextDelay());
         }).catch(() => {
           if (stopped) return;
           fails++;
-          if (onStale) onStale();
+          if (onStale) onStale("network error");
           pollTimer = deps.setTimer(tick, nextDelay());
         });
       };
@@ -1176,17 +1186,23 @@
     const host = wrapEl(el2);
     const meta = wrapEl(metaReal);
     let last = null;
+    const failed = (why) => {
+      if (last !== null) {
+        if (prov) applyFreshness(host, meta, last, true);
+      } else applyUnavailable(host, meta, why);
+    };
     return {
       onData: (data) => {
         const asOf = asOfFrom(data, Date.now());
         if (!acceptsNewer(last, asOf)) return;
+        if (!paint(data)) {
+          failed("unexpected response shape");
+          return;
+        }
         last = asOf;
-        paint(data);
         if (prov) applyFreshness(host, meta, asOf, isStale(asOf, prov.maxAgeMs, Date.now()));
       },
-      onStale: () => {
-        if (last !== null && prov) applyFreshness(host, meta, last, true);
-      }
+      onStale: failed
     };
   }
   function startBinds(doc, root) {
@@ -1231,6 +1247,7 @@
         const pv = provenanced(node, el2, (data) => {
           const v = bindScalar(node, data);
           slot.textContent = v !== "" ? v : "\u2014";
+          return true;
         });
         push(startBind(node, deps, pv.onData, pv.onStale));
       }
@@ -1241,16 +1258,23 @@
       const schema = node.bind?.schema;
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
-      const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots));
+      const pv = provenanced(node, el2, (data) => {
+        bindSchemaCard(schema, data, slots);
+        return true;
+      });
       push(startBind(node, deps, pv.onData, pv.onStale));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];
       if (!el2) return;
       const pv = provenanced(node, el2, (data) => {
-        const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : [];
-        el2.replaceChildren();
-        bindListRows(rdoc, wrapEl(el2), node, rows);
+        const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : null;
+        if (rows === null) return false;
+        const staging = document.createElement("div");
+        const shown = bindListRows(rdoc, wrapEl(staging), node, rows);
+        if (rows.length > 0 && shown === 0) return false;
+        el2.replaceChildren(...Array.from(staging.childNodes));
+        return true;
       });
       push(startBind(node, deps, pv.onData, pv.onStale));
     });

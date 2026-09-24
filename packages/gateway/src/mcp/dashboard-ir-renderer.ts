@@ -34,14 +34,14 @@ export interface RElement {
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fresh" | "stale", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fresh" | "stale" | "unavail" | "empty", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
   plan: "pcc-plan", "form-summary": "pcc-form", "field-label": "pcc-field",
   untrusted: "pcc-untrusted", invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
   note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
-  fresh: "pcc-fresh", stale: "pcc-stale",
+  fresh: "pcc-fresh", stale: "pcc-stale", unavail: "pcc-unavail", empty: "pcc-empty",
 };
 
 /** own-property read via a dotted selector (NO prototype traversal, NO traversal THROUGH
@@ -232,11 +232,23 @@ function paintNode(doc: RDocument, node: IrNode): RElement {
  *  datum is visibly stale on every host. `asOf` is a normalized ISO string (asOfFrom). */
 export function applyFreshness(host: RElement, meta: RElement, asOf: string, stale: boolean): void {
   host.setAttr("data-as-of", asOf);
-  const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale).join(" ");
+  const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale && c !== CLS.unavail).join(" ");
   host.className = stale ? base + " " + CLS.stale : base;
   const hhmmss = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})/.exec(asOf);
   meta.className = CLS.fresh;
   meta.textContent = "as of " + (hhmmss ? hhmmss[1] + "Z" : "unknown time") + (stale ? " · stale" : "");
+}
+
+/** PX-4 failure marker for a bound node that has shown NO datum yet: the read failed, or
+ *  the payload does not fit the route's schema. The view says so (TEXT ONLY: "unavailable ·
+ *  HTTP 401") instead of showing an empty authoritative view, which would read as "none":
+ *  absence is not evidence. No `data-as-of`, because nothing was observed. `why` is a fixed
+ *  reason from the binder or the painter, never response text. */
+export function applyUnavailable(host: RElement, meta: RElement, why: string): void {
+  const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale && c !== CLS.unavail).join(" ");
+  host.className = base + " " + CLS.unavail;
+  meta.className = CLS.fresh;
+  meta.textContent = "unavailable · " + why;
 }
 
 /** Paint a validated IrDoc into `mount`. Clears mount, appends title then root. */
@@ -249,7 +261,7 @@ export function renderIrDoc(doc: RDocument, mount: RElement, ir: IrDoc): void {
 /** Schema-validated dynamic ROW rendering for a list node: read ONLY the declared
  * selectors from each fetched row via own-property traversal; drop rows that yield
  * no title. Every field reaches the DOM via textContent. */
-export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): void {
+export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): number {
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
   const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
@@ -267,6 +279,8 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     listEl.appendChild(line);
     shown++;
   }
+  if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none")); // a real empty collection says so
+  return shown;
 }
 
 /** Fill a STAT value slot from a fetched object via the node's `select` — own-property,

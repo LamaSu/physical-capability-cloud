@@ -109,11 +109,12 @@ export function acceptsNewer(currentAsOf: string | null, incomingAsOf: string): 
 /**
  * Start binding one node; returns a `{ stop }` handle. GET-only, single channel,
  * bounded, and auto-stopping after the session cap. `onData(json)` hands a validated
- * clean-200 payload to the painter. `onStale()` (optional) fires when a refresh FAILS,
- * so the view can mark the last-shown datum stale instead of implying it is current.
- * No data (and no staleness) is delivered after `stop()`.
+ * clean-200 payload to the painter. `onStale(why)` (optional) fires when a read FAILS,
+ * with a short fixed reason ("HTTP 401", "network error", ...), so the view can mark the
+ * last-shown datum stale, or say the source is unavailable, instead of implying it is
+ * current. No data (and no staleness) is delivered after `stop()`.
  */
-export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: () => void): { stop: () => void } {
+export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: (why: string) => void): { stop: () => void } {
   const bind = node.bind;
   let stopped = false;
   let pollTimer: unknown = null;
@@ -133,7 +134,7 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
 
   if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
     const sseUrl = deps.origin + bind.sse;                // sse path already policy-validated
-    sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => { if (!stopped && onStale) onStale(); stop(); });
+    sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => { if (!stopped && onStale) onStale("stream error"); stop(); });
   } else {
     // ONE in-flight request per bind (the next tick is scheduled only after this one
     // settles — a timer never overlaps its request). Failures back off exponentially
@@ -145,9 +146,9 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
       deps.getJson(url, deps.makeSignal()).then((r) => {
         if (stopped) return;
         if (r.status === 200 && !r.redirected && !r.bytesOver) { fails = 0; onData(r.json); } // consume ONLY a clean same-origin 200
-        else { fails++; if (onStale) onStale(); } // refresh failed: the shown datum is no longer current
+        else { fails++; if (onStale) onStale(r.redirected ? "redirected" : r.bytesOver ? "response too large" : "HTTP " + r.status); } // the read failed: nothing current to show
         pollTimer = deps.setTimer(tick, nextDelay());
-      }).catch(() => { if (stopped) return; fails++; if (onStale) onStale(); pollTimer = deps.setTimer(tick, nextDelay()); });
+      }).catch(() => { if (stopped) return; fails++; if (onStale) onStale("network error"); pollTimer = deps.setTimer(tick, nextDelay()); });
     };
     tick();
   }
