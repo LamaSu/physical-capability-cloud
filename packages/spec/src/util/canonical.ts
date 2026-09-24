@@ -39,12 +39,18 @@ export class NonCanonicalValueError extends Error {
  * a bigint, a function, a symbol, a Date, a Map or any other non-plain object —
  * throws NonCanonicalValueError instead of producing text only this function
  * could reproduce.
+ *
+ * Numbers follow the evidence number policy D5 (evidence commitment profile v1
+ * §1), which the oracle and VCR enforce too: an integer outside the safe range
+ * (|n| > 2^53 - 1) has already lost precision and must travel as a decimal
+ * string, so it is refused. A sparse-array hole and a cyclic reference are
+ * refused as well; JSON has no form for either.
  */
 export function canonicalize(value: unknown): string {
-  return canonicalizeAt(value, "$");
+  return canonicalizeAt(value, "$", new Set());
 }
 
-function canonicalizeAt(value: unknown, path: string): string {
+function canonicalizeAt(value: unknown, path: string, ancestors: Set<object>): string {
   if (value === null || value === undefined) {
     return "null";
   }
@@ -56,23 +62,40 @@ function canonicalizeAt(value: unknown, path: string): string {
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new NonCanonicalValueError(path, String(value));
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      throw new NonCanonicalValueError(
+        path,
+        `the integer ${String(value)}, outside the safe range (send it as a decimal string)`,
+      );
+    }
     return String(value);
   }
-  if (Array.isArray(value)) {
-    return "[" + value.map((v, i) => canonicalizeAt(v, `${path}[${i}]`)).join(",") + "]";
-  }
   if (typeof value === "object") {
-    const proto = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) {
-      const name = (value as { constructor?: { name?: string } }).constructor?.name ?? "non-plain";
-      throw new NonCanonicalValueError(path, `a ${name} object`);
+    if (ancestors.has(value)) throw new NonCanonicalValueError(path, "a cyclic reference");
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) {
+        const items: string[] = [];
+        for (let i = 0; i < value.length; i++) {
+          if (!(i in value)) throw new NonCanonicalValueError(`${path}[${i}]`, "a hole in a sparse array");
+          items.push(canonicalizeAt(value[i], `${path}[${i}]`, ancestors));
+        }
+        return "[" + items.join(",") + "]";
+      }
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) {
+        const name = (value as { constructor?: { name?: string } }).constructor?.name ?? "non-plain";
+        throw new NonCanonicalValueError(path, `a ${name} object`);
+      }
+      const record = value as Record<string, unknown>;
+      const pairs = Object.keys(record)
+        .sort()
+        .filter((k) => record[k] !== undefined)
+        .map((k) => JSON.stringify(k) + ":" + canonicalizeAt(record[k], `${path}.${k}`, ancestors));
+      return "{" + pairs.join(",") + "}";
+    } finally {
+      ancestors.delete(value);
     }
-    const record = value as Record<string, unknown>;
-    const pairs = Object.keys(record)
-      .sort()
-      .filter((k) => record[k] !== undefined)
-      .map((k) => JSON.stringify(k) + ":" + canonicalizeAt(record[k], `${path}.${k}`));
-    return "{" + pairs.join(",") + "}";
   }
   throw new NonCanonicalValueError(path, `a ${typeof value}`);
 }

@@ -187,7 +187,7 @@ describe("canonicalize — only JSON values have a canonical form", () => {
       s: "é\u0000\"",
       n: -0,
       f: 1.5,
-      e: 1e21,
+      e: 1e-7,
       t: true,
       z: null,
       a: [1, undefined, { b: 2 }],
@@ -195,8 +195,60 @@ describe("canonicalize — only JSON values have a canonical form", () => {
       o: Object.assign(Object.create(null), { k: "v" }),
     };
     expect(canonicalize(value)).toBe(
-      '{"a":[1,null,{"b":2}],"e":1e+21,"f":1.5,"n":0,"o":{"k":"v"},"s":"é\\u0000\\"","t":true,"z":null}',
+      '{"a":[1,null,{"b":2}],"e":1e-7,"f":1.5,"n":0,"o":{"k":"v"},"s":"é\\u0000\\"","t":true,"z":null}',
     );
     expect(JSON.parse(canonicalize(value))).toEqual(JSON.parse(JSON.stringify(value)));
+  });
+});
+
+describe("canonicalize — number policy D5, sparse arrays and cycles (oracle #2473)", () => {
+  const refusedAt = (value: unknown): string => {
+    try {
+      canonicalize(value);
+    } catch (e) {
+      if (e instanceof NonCanonicalValueError) return e.path;
+      throw e;
+    }
+    return "accepted";
+  };
+
+  it("refuses an integer outside the safe range: it has already lost precision", () => {
+    expect(refusedAt({ n: 1e21 })).toBe("$.n");
+    expect(refusedAt([2 ** 53])).toBe("$[0]");
+    expect(refusedAt([-(2 ** 53)])).toBe("$[0]");
+    expect(refusedAt({ n: 123456789012345680000 })).toBe("$.n");
+    expect(refusedAt({ n: Number.MAX_VALUE })).toBe("$.n");
+  });
+
+  it("the shared cross-repo corpus 'numbers' case is refused at its first unsafe integer", () => {
+    const numbers = [0, -0, 1, -1, 1e21, 1.5e-7, 0.30000000000000004, 123456789012345680000, 5e-324, 1.7976931348623157e308];
+    expect(refusedAt(numbers)).toBe("$[4]");
+  });
+
+  it("keeps every safe number's bytes exactly as JSON writes them", () => {
+    const safe = [Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER, 0, -0, 1.5e-7, 0.30000000000000004, 5e-324, 3.14];
+    expect(canonicalize(safe)).toBe(JSON.stringify(safe));
+    expect(canonicalize(safe)).toBe("[9007199254740991,-9007199254740991,0,0,1.5e-7,0.30000000000000004,5e-324,3.14]");
+  });
+
+  it("refuses a hole in a sparse array, but an explicit undefined element is null", () => {
+    // eslint-disable-next-line no-sparse-arrays
+    expect(refusedAt([1, , 3])).toBe("$[1]");
+    expect(refusedAt({ a: [1, 2, , 4] })).toBe("$.a[2]");
+    expect(canonicalize([1, undefined, 3])).toBe("[1,null,3]");
+  });
+
+  it("refuses a cycle with a named error instead of overflowing the stack", () => {
+    const o: Record<string, unknown> = { a: 1 };
+    o.self = o;
+    expect(refusedAt(o)).toBe("$.self");
+    const arr: unknown[] = [1];
+    arr.push(arr);
+    expect(refusedAt(arr)).toBe("$[1]");
+  });
+
+  it("a value shared twice without a cycle is still fine", () => {
+    const shared = { k: "v" };
+    expect(canonicalize({ p: shared, q: [shared, shared] })).toBe('{"p":{"k":"v"},"q":[{"k":"v"},{"k":"v"}]}');
   });
 });
