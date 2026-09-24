@@ -242,9 +242,12 @@ describe("template matcher (live)", () => {
     expect(t).toContain("Matched physical-operator keywords: printing, shop");
     expect(t).toContain("match 13%");
     expect(t).toContain("Default — no data-product keywords matched");
-    expect(stub).toHaveBeenCalledTimes(1);
-    const [input, init] = stub.mock.calls[0]!;
+    // One match request (the card also reads the template directory for names).
+    const matchCalls = stub.mock.calls.filter(([i]) => pathOf(i) === MATCH_ROUTE);
+    expect(matchCalls).toHaveLength(1);
+    const [input, init] = matchCalls[0]!;
     expect(pathOf(input)).toBe(MATCH_ROUTE);
+    for (const [, i] of stub.mock.calls) expect(JSON.stringify(i?.headers ?? {})).not.toMatch(/authorization|x-api-key/i);
     expect(init?.method).toBe("POST");
     expect(JSON.parse(String(init?.body))).toEqual({ input: "I run a 3D printing shop" });
     // The matcher is public: no key is attached to it.
