@@ -27,8 +27,10 @@
  *     output list is sorted, so any permutation of the inputs yields the same
  *     plan and the same `provenancePlanDigest`.
  *
- * Whether a tier is FUNDABLE is decided by the pre-funding gate (#349's
- * resolveAcceptedProgram), not by this plan.
+ * Whether a tier is FUNDABLE is decided by the pre-funding gate, not by this
+ * plan: #349's assertAcceptedProgramForTier, which also requires tiers 0..T
+ * eligible with implemented verifiers (this plan's requireImplementedVerifier
+ * mode shows that side) and the committed program hash.
  */
 
 import type { SHA256 } from "../types/common.js";
