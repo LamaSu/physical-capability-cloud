@@ -45,9 +45,13 @@ export const PHASE_VIEW: Readonly<Record<ExecutionPhase, { label: string; pulse:
   unknown: { label: "Unrecognized status", pulse: "offline" },
 });
 
-/** Payout summary. Only `paid` is green, and the gateway sets it only from a release record. */
+/**
+ * Payout summary. Only `paid` is green, and only a settlement read model sets it; the
+ * gateway's escrow records never do (their "released" is `reported_released`, gray).
+ */
 export const PAYOUT_VIEW: Readonly<Record<PayoutState, { label: string; color: MoneyBadgeColor }>> = Object.freeze({
   paid: { label: "Released to the operator", color: "green" },
+  reported_released: { label: "Recorded as released (not confirmed)", color: "gray" },
   refunded: { label: "Refunded to the payer (operator not paid)", color: "gray" },
   not_paid: { label: "Not released", color: "gray" },
   simulated: { label: "Simulated escrow: no money moved", color: "gray" },
@@ -97,7 +101,7 @@ export function payoutBasisText(s: SettlementAxis): string | null {
   if (s.payoutBasis === "milestone_record") {
     if (s.payout === "unknown") return "This job's milestone and the escrow record disagree, so the payment is unknown.";
     if (s.payoutConfirmation === "record_only") {
-      return "From this job's milestone in the gateway's escrow record. Not confirmed on chain.";
+      return "From this job's milestone in the gateway's escrow record. No settlement read or chain receipt confirms it.";
     }
     return "From this job's milestone in the gateway's escrow record.";
   }

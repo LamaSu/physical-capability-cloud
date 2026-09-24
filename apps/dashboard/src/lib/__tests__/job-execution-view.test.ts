@@ -23,7 +23,7 @@ const PHASES: ExecutionPhase[] = [
   "pending", "queued", "dispatched", "running", "awaiting_handoff", "paused",
   "completed", "failed", "timed_out", "cancelled", "unknown",
 ];
-const PAYOUTS: PayoutState[] = ["paid", "refunded", "not_paid", "simulated", "unknown"];
+const PAYOUTS: PayoutState[] = ["paid", "reported_released", "refunded", "not_paid", "simulated", "unknown"];
 
 describe("phase view", () => {
   it("has a label for every phase", () => {
@@ -52,6 +52,12 @@ describe("payout view", () => {
     for (const p of PAYOUTS) {
       expect(PAYOUT_VIEW[p].color, p).toBe(p === "paid" ? "green" : "gray");
     }
+  });
+
+  it("NEGATIVE (PX-1): a recorded release is gray and says it is not confirmed", () => {
+    expect(PAYOUT_VIEW.reported_released.color).toBe("gray");
+    expect(PAYOUT_VIEW.reported_released.label).toMatch(/not confirmed/);
+    expect(Object.keys(PAYOUT_VIEW).sort()).toEqual([...PAYOUTS].sort());
   });
 
   it("says a refund did not pay the operator, and a simulated escrow moved no money", () => {
@@ -142,10 +148,10 @@ describe("settlement wording", () => {
       ...over,
     } as any);
 
-  it("qualifies a paid record claim as not confirmed on chain", () => {
-    expect(payoutBasisText(linkedRecord({ payout: "paid", payoutBasis: "milestone_record", payoutConfirmation: "record_only" }))).toMatch(
-      /Not confirmed on chain/,
-    );
+  it("qualifies a recorded release as unconfirmed by any settlement read or chain receipt", () => {
+    expect(
+      payoutBasisText(linkedRecord({ payout: "reported_released", payoutBasis: "milestone_record", payoutConfirmation: "record_only" })),
+    ).toMatch(/No settlement read or chain receipt confirms it/);
   });
 
   it("says when the milestone and escrow records disagree", () => {
