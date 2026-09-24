@@ -18,8 +18,15 @@
  * and then, in ONE transaction, consumes the reservation while sealing `plan.acceptedDealDigest` (R13).
  * The reservation checks here are an early pre-check; the consume must re-check them atomically and
  * RECOMPUTE the digest from the plan it encodes (the #351 consumer contract).
+ *
+ * Every input is read ONCE into owned plain data before it is used (the pattern that closed the
+ * compiler and R10 under cross-family review): the submission, the principal, each dependency, the
+ * policy and the reservation record. A getter, a proxy or a callback cannot change a value between
+ * its check and its use, and a failure to READ data is a typed refusal. A dependency CALL that throws
+ * is a server fault and propagates.
  */
 
+import { createHash } from "node:crypto";
 import {
   compileAcceptedPlan,
   type Address,
@@ -99,7 +106,7 @@ export type SeamRefusal =
   | { stage: "submission"; reason: "malformed-submission" }
   | {
       stage: "reservation";
-      reason: "not-found" | "not-issued" | "expired" | "wrong-principal" | "wrong-request";
+      reason: "not-found" | "not-issued" | "expired" | "wrong-principal" | "wrong-request" | "malformed-reservation";
     }
   | { stage: "revalidation"; verdicts: NodeVerdict[] }
   | { stage: "currency"; nodeId: string; reason: "node-currency-differs-from-reservation" }
@@ -108,72 +115,261 @@ export type SeamRefusal =
   | { stage: "evidence"; nodeId: string; reason: "no-evidence-contract-for-tier" }
   | { stage: "compile"; violations: CompileViolation[] };
 
+/**
+ * `submissionDigest` fingerprints the submission EXACTLY as evaluated (see `submissionDigest`), so a
+ * read model can prove the submission it displays is the one this outcome belongs to. `verdicts` is
+ * every node's R10 verdict, present whenever R10 ran. Neither grants anything.
+ */
 export type SeamResult =
-  | { ok: true; plan: CompiledAcceptedPlan; resolved: ResolvedNodeTerms[] }
-  | { ok: false; refusal: SeamRefusal };
+  | { ok: true; plan: CompiledAcceptedPlan; resolved: ResolvedNodeTerms[]; verdicts: NodeVerdict[]; submissionDigest: `0x${string}` }
+  | { ok: false; refusal: SeamRefusal; verdicts?: NodeVerdict[]; submissionDigest?: `0x${string}` };
 
 /** The plan id is derived from the reservation: one reservation, one plan, and no caller-chosen job ids. */
 export function planIdForReservation(reservationId: string): string {
   return `plan.${reservationId}`;
 }
 
+// ── Read-once snapshots ──────────────────────────────────────────────────────────────────────────
+
+/** An owned stand-in for a non-primitive where a primitive belongs: fails every check, holds no caller reference. */
+const NOT_DATA: object = Object.freeze(Object.create(null));
+
+function leaf(v: unknown): unknown {
+  return (typeof v === "object" && v !== null) || typeof v === "function" ? NOT_DATA : v;
+}
+
+/** A list's elements, its length read once and capped; null for a non-array or a lying or over-cap length. */
+function listOnce(x: unknown, max: number): unknown[] | null {
+  if (!Array.isArray(x)) return null;
+  const n: unknown = x.length;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > max) return null;
+  const out: unknown[] = [];
+  for (let i = 0; i < n; i++) out.push(x[i]);
+  return out;
+}
+
+const MAX_SUBMISSION_NODES = 1024;
+const MAX_SUBMISSION_EDGES = 4096;
+const NODE_FIELDS = [
+  "nodeId", "capabilityId", "price", "currency", "tierKey", "kernelId", "operator",
+  "capabilityType", "csd", "matchedCapabilityDigest", "committedProgramHash",
+] as const;
+
+/** A submission as owned plain data: every field read exactly once; non-primitives become NOT_DATA. */
+export interface SubmissionSnapshot {
+  requestId: unknown;
+  reservationId: unknown;
+  nodes: ReadonlyArray<Readonly<Record<(typeof NODE_FIELDS)[number], unknown>> | null>;
+  edges: ReadonlyArray<Readonly<{ from: unknown; to: unknown }> | null>;
+}
+
+/** Read a submission once. Null when it cannot be read as a submission at all. Never throws. */
+export function snapshotSubmission(sub: unknown): SubmissionSnapshot | null {
+  try {
+    if (typeof sub !== "object" || sub === null) return null;
+    const s = sub as Record<string, unknown>;
+    const requestId = leaf(s.requestId);
+    const reservationId = leaf(s.reservationId);
+    const nodesRaw = listOnce(s.nodes, MAX_SUBMISSION_NODES);
+    const edgesRaw = listOnce(s.edges, MAX_SUBMISSION_EDGES);
+    if (!nodesRaw || !edgesRaw) return null;
+    const nodes = nodesRaw.map((n) => {
+      if (typeof n !== "object" || n === null) return null;
+      const o = n as Record<string, unknown>;
+      const out = {} as Record<(typeof NODE_FIELDS)[number], unknown>;
+      for (const f of NODE_FIELDS) out[f] = leaf(o[f]);
+      return Object.freeze(out);
+    });
+    const edges = edgesRaw.map((e) => {
+      if (typeof e !== "object" || e === null) return null;
+      const o = e as Record<string, unknown>;
+      return Object.freeze({ from: leaf(o.from), to: leaf(o.to) });
+    });
+    return Object.freeze({ requestId, reservationId, nodes: Object.freeze(nodes), edges: Object.freeze(edges) });
+  } catch {
+    return null;
+  }
+}
+
+/** A type-tagged, collision-free encoding of one snapshot value (absent, null and "null" all differ). */
+function tag(v: unknown): unknown[] {
+  if (v === undefined) return ["u"];
+  if (v === null) return ["z"];
+  if (typeof v === "string") return ["s", v];
+  if (typeof v === "number") return ["n", Number.isFinite(v) ? v : String(v)];
+  if (typeof v === "boolean") return ["b", v];
+  if (typeof v === "bigint") return ["i", v.toString()];
+  return ["x"];
+}
+
+/** sha256 over a deterministic encoding of the submission AS EVALUATED (fields in a fixed order). */
+export function submissionDigest(snap: SubmissionSnapshot): `0x${string}` {
+  const pre = JSON.stringify([
+    "PCC:external-plan-submission:v1",
+    tag(snap.requestId),
+    tag(snap.reservationId),
+    snap.nodes.map((n) => (n === null ? ["null-node"] : NODE_FIELDS.map((f) => tag(n[f])))),
+    snap.edges.map((e) => (e === null ? ["null-edge"] : [tag(e.from), tag(e.to)])),
+  ]);
+  return `0x${createHash("sha256").update(pre, "utf8").digest("hex")}`;
+}
+
+/** A reservation record as owned plain data, or why it cannot be used. */
+type ReservationRead =
+  | { ok: true; r: Record<keyof ReservationRecord, unknown> }
+  | { ok: false; reason: "not-found" | "malformed-reservation" };
+
+function readReservation(raw: unknown): ReservationRead {
+  if (raw === null || raw === undefined) return { ok: false, reason: "not-found" };
+  try {
+    if (typeof raw !== "object") return { ok: false, reason: "malformed-reservation" };
+    const o = raw as Record<string, unknown>;
+    const r = {
+      reservationId: leaf(o.reservationId),
+      principal: leaf(o.principal),
+      requestId: leaf(o.requestId),
+      currency: leaf(o.currency),
+      maxAmountBaseUnits: leaf(o.maxAmountBaseUnits),
+      expiresAt: leaf(o.expiresAt),
+      state: leaf(o.state),
+      payer: leaf(o.payer),
+      minTier: leaf(o.minTier),
+    };
+    const minTierOk = r.minTier === undefined || (typeof r.minTier === "number" && Number.isInteger(r.minTier) && r.minTier >= 0 && r.minTier <= 3);
+    if (typeof r.expiresAt !== "number" || !Number.isFinite(r.expiresAt) || !minTierOk) {
+      return { ok: false, reason: "malformed-reservation" };
+    }
+    return { ok: true, r };
+  } catch {
+    return { ok: false, reason: "malformed-reservation" };
+  }
+}
+
+// ── The seam ─────────────────────────────────────────────────────────────────────────────────────
+
 export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext, deps: SeamDeps): SeamResult {
+  // Dependencies and policy, read once, before any input. They are server wiring: if they cannot be
+  // read, or are not functions, that is a wiring fault reported as a TypeError — the only exception
+  // the seam raises itself. Each is later called with `deps` as its receiver, so method-style
+  // dependencies keep their `this`.
+  let revalidation: unknown;
+  let resolveProgramFn: unknown;
+  let gateFn: unknown;
+  let evidenceForFn: unknown;
+  let loadReservationFn: unknown;
+  let nowFnRaw: unknown;
+  let feeBps: unknown;
+  let feeRecipient: unknown;
+  let reclaimAfterSec: unknown;
+  try {
+    revalidation = deps.revalidation;
+    resolveProgramFn = deps.resolveProgram;
+    gateFn = deps.assertProgramForTier;
+    evidenceForFn = deps.evidenceFor;
+    loadReservationFn = deps.loadReservation;
+    nowFnRaw = deps.now;
+    const policy: unknown = deps.policy;
+    const pol = (typeof policy === "object" && policy !== null ? policy : {}) as Record<string, unknown>;
+    feeBps = leaf(pol.feeBps);
+    feeRecipient = leaf(pol.feeRecipient);
+    reclaimAfterSec = leaf(pol.reclaimAfterSec);
+  } catch {
+    throw new TypeError("acceptExternalPlan: SeamDeps could not be read (a wiring fault)");
+  }
+  const call = (fn: unknown, args: unknown[]): unknown => Reflect.apply(fn as (...a: unknown[]) => unknown, deps, args);
+  const resolveProgram = resolveProgramFn;
+  const assertProgramForTier = gateFn;
+  const evidenceFor = evidenceForFn;
+  const loadReservation = loadReservationFn;
+  const nowFn = nowFnRaw;
   if (
-    !sub ||
-    typeof sub.requestId !== "string" ||
-    typeof sub.reservationId !== "string" ||
-    !Array.isArray(sub.nodes) ||
-    !Array.isArray(sub.edges)
+    typeof revalidation !== "object" ||
+    revalidation === null ||
+    typeof resolveProgram !== "function" ||
+    typeof assertProgramForTier !== "function" ||
+    typeof evidenceFor !== "function" ||
+    typeof loadReservation !== "function" ||
+    typeof nowFn !== "function" ||
+    typeof reclaimAfterSec !== "number" ||
+    !Number.isSafeInteger(reclaimAfterSec) ||
+    reclaimAfterSec < 0
   ) {
-    return { ok: false, refusal: { stage: "submission", reason: "malformed-submission" } };
+    throw new TypeError("acceptExternalPlan: malformed SeamDeps (functions and an integer reclaimAfterSec required)");
   }
 
-  // Authority first: the reservation is the server's record, read from the durable store. The id in
-  // the submission is only a lookup key; authority is the stored record plus the authenticated
-  // principal, and an empty principal matches nothing.
-  const principal = ctx?.principal;
+  // The submission, read once. Everything below uses only this copy.
+  const snap = snapshotSubmission(sub);
+  if (!snap || typeof snap.requestId !== "string" || typeof snap.reservationId !== "string") {
+    return { ok: false, refusal: { stage: "submission", reason: "malformed-submission" } };
+  }
+  const requestId = snap.requestId;
+  const reservationId = snap.reservationId;
+  const submissionDigestValue = submissionDigest(snap);
+  const refuse = (refusal: SeamRefusal, verdicts?: NodeVerdict[]): SeamResult => ({
+    ok: false,
+    refusal,
+    submissionDigest: submissionDigestValue,
+    ...(verdicts ? { verdicts } : {}),
+  });
+
+  // Authority first. The id in the submission is only a lookup key; authority is the stored record
+  // plus the authenticated principal, and an empty principal matches nothing.
+  let principal: unknown;
+  let tenantId: unknown;
+  try {
+    principal = leaf(ctx?.principal);
+    tenantId = leaf(ctx?.tenantId ?? null);
+  } catch {
+    principal = undefined;
+  }
   if (typeof principal !== "string" || principal.length === 0) {
     return refuse({ stage: "reservation", reason: "wrong-principal" });
   }
-  const resv = deps.loadReservation(sub.reservationId);
-  if (!resv) return refuse({ stage: "reservation", reason: "not-found" });
+  const read = readReservation(call(loadReservation, [reservationId]));
+  if (!read.ok) return refuse({ stage: "reservation", reason: read.reason });
+  const resv = read.r;
   if (resv.principal !== principal) return refuse({ stage: "reservation", reason: "wrong-principal" });
-  if (resv.requestId !== sub.requestId) return refuse({ stage: "reservation", reason: "wrong-request" });
+  if (resv.requestId !== requestId) return refuse({ stage: "reservation", reason: "wrong-request" });
   if (resv.state !== "issued") return refuse({ stage: "reservation", reason: "not-issued" });
   // Whole seconds (a `Date.now() / 1000` clock must not make BigInt throw). A broken clock is a
   // server fault: throw rather than let NaN compare as "not expired".
-  const now = Math.floor(deps.now());
+  const now = Math.floor(call(nowFn, []) as number);
   if (!Number.isFinite(now)) throw new TypeError("acceptExternalPlan: deps.now() must return finite unix seconds");
-  if (resv.expiresAt <= now) return refuse({ stage: "reservation", reason: "expired" });
+  if ((resv.expiresAt as number) <= now) return refuse({ stage: "reservation", reason: "expired" });
 
-  // R10: every claim against the live rows. Anything but `current` everywhere is refused with the
-  // verdicts (a stale verdict carries the re-quote the agent can re-submit against).
-  const revalidated = revalidatePlanSnapshots(sub.nodes, deps.revalidation, { tenantId: ctx.tenantId ?? null });
+  // R10 on the COPIED nodes. Anything but `current` everywhere is refused with the verdicts (a stale
+  // verdict carries the re-quote the agent can re-submit against).
+  const revalidated = revalidatePlanSnapshots(snap.nodes as unknown as SnapshotClaim[], revalidation as RevalidationDeps, {
+    tenantId: (typeof tenantId === "string" ? tenantId : null) as string | null,
+  });
+  const verdicts = revalidated.verdicts;
   if (!revalidated.ok) {
-    return refuse({ stage: "revalidation", verdicts: revalidated.verdicts.filter((v) => v.status !== "current") });
+    return refuse({ stage: "revalidation", verdicts: verdicts.filter((v) => v.status !== "current") }, verdicts);
   }
-  const resolved = revalidated.verdicts.map((v) => (v as Extract<NodeVerdict, { status: "current" }>).resolved);
-  const claimed = new Map(sub.nodes.map((n) => [n.nodeId, n]));
+  const resolved = verdicts.map((v) => (v as Extract<NodeVerdict, { status: "current" }>).resolved);
+  const claimed = new Map<string, unknown>();
+  for (const n of snap.nodes) if (n && typeof n.nodeId === "string") claimed.set(n.nodeId, n.committedProgramHash);
 
   const nodes = [];
   for (const r of resolved) {
     if (r.currency !== resv.currency) {
-      return refuse({ stage: "currency", nodeId: r.nodeId, reason: "node-currency-differs-from-reservation" });
+      return refuse({ stage: "currency", nodeId: r.nodeId, reason: "node-currency-differs-from-reservation" }, verdicts);
     }
-    if (resv.minTier !== undefined && !(r.tier >= resv.minTier)) {
-      return refuse({ stage: "tier", nodeId: r.nodeId, reason: "below-reservation-minimum" });
+    if (resv.minTier !== undefined && !(r.tier >= (resv.minTier as number))) {
+      return refuse({ stage: "tier", nodeId: r.nodeId, reason: "below-reservation-minimum" }, verdicts);
     }
     // R11: the program is the server's for (csd, tier). A claimed one is only a cross-check.
-    const program = r.tier === 0 ? null : deps.resolveProgram(r.csd, r.tierKey);
-    const claim: unknown = claimed.get(r.nodeId)!.committedProgramHash;
+    const resolvedProgram = r.tier === 0 ? null : leaf(call(resolveProgram, [r.csd, r.tierKey]));
+    const program = typeof resolvedProgram === "string" ? resolvedProgram : null; // anything else fails closed below
+    const claim = claimed.get(r.nodeId);
     if (claim !== undefined) {
-      if (claim !== null && typeof claim !== "string") return refuse({ stage: "submission", reason: "malformed-submission" });
-      if ((claim?.toLowerCase() ?? null) !== (program?.toLowerCase() ?? null)) {
-        return refuse({ stage: "program", nodeId: r.nodeId, reason: "claimed-program-mismatch" });
+      if (claim !== null && typeof claim !== "string") return refuse({ stage: "submission", reason: "malformed-submission" }, verdicts);
+      if ((claim === null ? null : claim.toLowerCase()) !== (program === null ? null : program.toLowerCase())) {
+        return refuse({ stage: "program", nodeId: r.nodeId, reason: "claimed-program-mismatch" }, verdicts);
       }
     }
-    const evidence = deps.evidenceFor(r.csd, r.tierKey);
-    if (!evidence) return refuse({ stage: "evidence", nodeId: r.nodeId, reason: "no-evidence-contract-for-tier" });
+    const evidence = call(evidenceFor, [r.csd, r.tierKey]) as EvidenceRequirement[] | null;
+    if (!evidence) return refuse({ stage: "evidence", nodeId: r.nodeId, reason: "no-evidence-contract-for-tier" }, verdicts);
     nodes.push({
       nodeId: r.nodeId,
       capabilityId: r.capabilityId,
@@ -185,36 +381,33 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
       grossBaseUnits: r.grossBaseUnits,
       matchedCapabilityDigest: r.matchedCapabilityDigest,
       committedProgramHash: program, // null here at a non-zero tier is refused by the compiler
-      evidenceRequirements: evidence,
+      evidenceRequirements: evidence, // the compiler copies it once into owned data
     });
   }
 
-  // R12: the deterministic compile. The compiler re-checks the reservation's request, currency and
-  // ceiling, gates every non-zero tier through evidence's program check, and seals the whole deal.
+  // R12: the deterministic compile, on owned values only. The compiler re-checks the reservation's
+  // request, currency and ceiling, gates every non-zero tier through evidence's program check, and
+  // seals the whole deal.
   const compiled = compileAcceptedPlan(
     {
-      planId: planIdForReservation(resv.reservationId),
-      requestId: sub.requestId,
-      payer: resv.payer,
-      currency: resv.currency,
-      feeBps: deps.policy.feeBps,
-      feeRecipient: deps.policy.feeRecipient,
-      reclaimAt: BigInt(now) + BigInt(deps.policy.reclaimAfterSec),
+      planId: planIdForReservation(reservationId),
+      requestId,
+      payer: resv.payer as Address,
+      currency: resv.currency as string,
+      feeBps: feeBps as number,
+      feeRecipient: feeRecipient as Address,
+      reclaimAt: BigInt(now) + BigInt(reclaimAfterSec),
       nodes,
-      edges: sub.edges.map((e) => ({ from: e?.from, to: e?.to })),
+      edges: snap.edges.map((e) => ({ from: e?.from as string, to: e?.to as string })),
       reservation: {
-        reservationId: resv.reservationId,
-        requestId: resv.requestId,
-        currency: resv.currency,
-        maxAmountBaseUnits: resv.maxAmountBaseUnits,
+        reservationId: resv.reservationId as string,
+        requestId: resv.requestId as string,
+        currency: resv.currency as string,
+        maxAmountBaseUnits: resv.maxAmountBaseUnits as bigint,
       },
     },
-    { assertProgramForTier: deps.assertProgramForTier },
+    { assertProgramForTier: (a) => call(assertProgramForTier, [a]) as ReturnType<ProgramGate> },
   );
-  if (!compiled.ok) return refuse({ stage: "compile", violations: compiled.violations });
-  return { ok: true, plan: compiled.plan, resolved };
-}
-
-function refuse(refusal: SeamRefusal): SeamResult {
-  return { ok: false, refusal };
+  if (!compiled.ok) return refuse({ stage: "compile", violations: compiled.violations }, verdicts);
+  return { ok: true, plan: compiled.plan, resolved, verdicts, submissionDigest: submissionDigestValue };
 }
