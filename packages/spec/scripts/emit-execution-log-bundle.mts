@@ -3,17 +3,23 @@
  * events carry machine.execution_log, in the shape oracle asked for (bus #2125).
  *
  * Oracle does not host @pcc/spec PrimitiveVerifiers — it authenticates a bundle
- * (Ed25519 over bundleHash, bundleHash == kernelSignedEventsRoot) and runs its
- * committed program. So the consumer run is driven by handing it THIS artifact:
+ * (Ed25519 over the bundle digest) and runs its committed program. So the
+ * consumer run is driven by handing it THIS artifact:
  *   - execution_completed        success receipt
  *   - printer_job_verified       tier>=1 supporting log-chain
  *   - execution_failed           ABSENT (its presence must flip the outcome)
+ *
+ * Every signature covers `signingPreimage(digest)` — the LO-EV-1 byte contract
+ * (`pcc.evidence.signing-preimage.v1`): the UTF-8 bytes of the tagged digest
+ * string `sha256:<64 lowercase hex>`, 71 bytes. The 2026-09-09 vector signed
+ * the bundle over the raw 32 digest bytes instead; that form is emitted below
+ * only as a labelled negative so the test can prove it is rejected.
  *
  * Hashes come from the PRODUCTION canonicalizer (util/canonical.ts hashEvent /
  * hashBundle). The signing key is a FIXED test key so the vector is
  * reproducible; it is a golden fixture, never an operator key.
  *
- * Run:  ../../node_modules/.bin/tsx scripts/emit-execution-log-bundle.mts <outfile>
+ * Run:  ../../node_modules/.bin/tsx scripts/emit-execution-log-bundle.mts [outfile]
  */
 import {
   createHash,
@@ -22,9 +28,15 @@ import {
   sign as edSign,
 } from "node:crypto";
 import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { canonicalize, hashEvent, hashBundle } from "../src/util/canonical.js";
+import { hashEvent, hashBundle } from "../src/util/canonical.js";
+import { SIGNING_PREIMAGE_CONTRACT, signingPreimage } from "../src/evidence/signing-preimage.js";
 import { computeLogEntryHash, GENESIS_HASH } from "../src/evidence/verifiers/log-chain.js";
+
+const DEFAULT_OUT = fileURLToPath(
+  new URL("../src/__tests__/fixtures/lose3-execution-log-bundle.json", import.meta.url),
+);
 
 const JOB_ID = "job-lose3-consumer-run-001";
 const STEP_ID = "step-print-1";
@@ -48,7 +60,7 @@ function kernelKeypair() {
 }
 
 async function main() {
-  const out = process.argv[process.argv.length - 1];
+  const out = process.argv[2] ?? DEFAULT_OUT;
   const { privateKey, rawPub } = kernelKeypair();
 
   // ── the machine's own execution record: a kernel-signed hash chain ──
@@ -61,7 +73,7 @@ async function main() {
   for (let i = 0; i < rawLines.length; i++) {
     const capturedAt = iso(1000 + i * 500);
     const entryHash = await computeLogEntryHash(rawLines[i]!, DEVICE_ID, capturedAt);
-    const sig = edSign(null, Buffer.from(entryHash), privateKey).toString("hex");
+    const sig = edSign(null, signingPreimage(entryHash), privateKey).toString("hex");
     chain.push({
       entryId: `log-${i}`,
       entryHash,
@@ -99,9 +111,11 @@ async function main() {
   for (const e of rawEvents) events.push({ ...e, id: `${JOB_ID}-${e.type}`, hash: await hashEvent(e as never) });
 
   const bundleHash = await hashBundle(events as never);
-  // Signature is over the RAW 32 bytes of the digest (strip the "sha256:" tag).
-  const raw32 = Buffer.from(bundleHash.replace(/^sha256:/, ""), "hex");
-  const kernelSignature = edSign(null, raw32, privateKey).toString("hex");
+  const kernelSignature = edSign(null, signingPreimage(bundleHash), privateKey).toString("hex");
+
+  // The superseded 2026-09-09 form, kept only as a negative for the test.
+  const raw32 = Buffer.from(bundleHash.slice("sha256:".length), "hex");
+  const raw32KernelSignature = edSign(null, raw32, privateKey).toString("hex");
 
   const bundle = {
     id: `bundle-${JOB_ID}`,
@@ -120,8 +134,14 @@ async function main() {
     producedBy: "sensors 7a438686",
     note: "machine.execution_log carried as authenticated events; execution_failed deliberately ABSENT",
     kernelPublicKeyHex: rawPub.toString("hex"),
-    signatureScheme: "ed25519 over raw32(bundleHash)",
+    signingPreimageContract: SIGNING_PREIMAGE_CONTRACT,
+    signatureScheme: "ed25519 over signingPreimage(bundleHash) = UTF-8 of the tagged digest string (71 bytes)",
     bundle,
+    negatives: {
+      raw32KernelSignature,
+      raw32Note:
+        "ed25519 over the raw 32 digest bytes — the superseded 2026-09-09 form; must NOT verify under signingPreimage",
+    },
     expectations: {
       executionFailedAbsent: true,
       supportingLogChainEntries: chain.length,
@@ -134,7 +154,6 @@ async function main() {
   console.log("bundleHash      =", bundleHash);
   console.log("kernelPublicKey =", rawPub.toString("hex"));
   console.log("kernelSignature =", kernelSignature.slice(0, 32) + "...");
-  console.log("canonical check =", canonicalize({ ok: true }));
   console.log("wrote", out);
 }
 

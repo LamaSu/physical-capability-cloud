@@ -1,0 +1,91 @@
+{
+  "vector": "lose3-execution-log-consumer-run",
+  "producedBy": "sensors 7a438686",
+  "note": "machine.execution_log carried as authenticated events; execution_failed deliberately ABSENT",
+  "kernelPublicKeyHex": "c5bf93302d2423cfb0979068a7ac1b32e212cd04b67f6d3c6824c9ead3f2a7a0",
+  "signingPreimageContract": "pcc.evidence.signing-preimage.v1",
+  "signatureScheme": "ed25519 over signingPreimage(bundleHash) = UTF-8 of the tagged digest string (71 bytes)",
+  "bundle": {
+    "id": "bundle-job-lose3-consumer-run-001",
+    "jobId": "job-lose3-consumer-run-001",
+    "stepId": "step-print-1",
+    "kernelId": "kernel-hp-3301-golden",
+    "assuranceTier": 1,
+    "events": [
+      {
+        "type": "execution_completed",
+        "timestamp": "2026-09-09T20:00:03.000Z",
+        "source": {
+          "deviceId": "dev-hp-3301-0D253A",
+          "kernelId": "kernel-hp-3301-golden"
+        },
+        "payload": {
+          "jobId": "job-lose3-consumer-run-001",
+          "stepId": "step-print-1",
+          "success": true,
+          "impressions": 1
+        },
+        "id": "job-lose3-consumer-run-001-execution_completed",
+        "hash": "sha256:5414e2bd84ff35835b28bbcbcb20e4c7c0c095cfacec2b7ec8cb922d0aad2e33"
+      },
+      {
+        "type": "printer_job_verified",
+        "timestamp": "2026-09-09T20:00:03.500Z",
+        "source": {
+          "deviceId": "dev-hp-3301-0D253A",
+          "kernelId": "kernel-hp-3301-golden"
+        },
+        "payload": {
+          "jobId": "job-lose3-consumer-run-001",
+          "primitive": "machine.execution_log",
+          "params": {
+            "logKind": "job_log"
+          },
+          "entries": [
+            {
+              "entryId": "log-0",
+              "entryHash": "sha256:4c54717e0c0be145ff123749d0dc13ed15142d2ddef75e6150617740021e86e3",
+              "previousHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "rawContent": "IPP job 1042 accepted: document=lose3-golden.pdf pages=1",
+              "source": "dev-hp-3301-0D253A",
+              "capturedAt": "2026-09-09T20:00:01.000Z",
+              "kernelSignature": "8c413ae152f15af6442a0d0b9b4d1fca65cbaefced8a601a691a8115831a302110cfd96608ee46747495c91821618a7328f3e6ccce689d2ff9858356dd7c1007"
+            },
+            {
+              "entryId": "log-1",
+              "entryHash": "sha256:266b6417ebf92f46d8f0a621d0317f8e156110274ffe00c80a6ccf61429cc055",
+              "previousHash": "sha256:4c54717e0c0be145ff123749d0dc13ed15142d2ddef75e6150617740021e86e3",
+              "rawContent": "IPP job 1042 state=processing",
+              "source": "dev-hp-3301-0D253A",
+              "capturedAt": "2026-09-09T20:00:01.500Z",
+              "kernelSignature": "12bebd4d5809b3d1743cf43b7630447859c5cd79056117d1ddf80b19c722dd0173fc17463a8f202112be61e200d0207c8bc7d4f5710d171e0ebfdb169c9e2809"
+            },
+            {
+              "entryId": "log-2",
+              "entryHash": "sha256:b683508305b1a47715c42880b2e00685a228bbd3ec480ca2b5a54d17d9cf3c9f",
+              "previousHash": "sha256:266b6417ebf92f46d8f0a621d0317f8e156110274ffe00c80a6ccf61429cc055",
+              "rawContent": "IPP job 1042 state=completed impressions=1",
+              "source": "dev-hp-3301-0D253A",
+              "capturedAt": "2026-09-09T20:00:02.000Z",
+              "kernelSignature": "2329e691c40c1b024a00783887c945f76e58e0d74332f227193162ab892f05c6d62529963e72ce7684a9d3cf89ea3c9f8a77e61978ca07e840fa6fdbed061803"
+            }
+          ]
+        },
+        "id": "job-lose3-consumer-run-001-printer_job_verified",
+        "hash": "sha256:b8b645b39424171f2d4cb84e3a02c32cfded0af1e0620c9d79654ed2dfc9cde0"
+      }
+    ],
+    "bundleHash": "sha256:5baa7c6c321698cdf8e7c199334b1b1d7972624943b4c9f31aec70067439b01d",
+    "kernelSignature": "c0636f7e87232c43e8d41078a9b4ec6e5c761d70a94f6f75604fb43d948de66be726d6710ef96fcc4bd2f7feeca071dfdd91a81d8c43ef39fb3cf9dc68f53007",
+    "finalizedAt": "2026-09-09T20:00:04.000Z"
+  },
+  "negatives": {
+    "raw32KernelSignature": "61c008e214250a83bb9667ad4c75e100434177521f5fa302e9eff5fd78634e2b43b5e33cffea5eb8baebe8c9a93feb2ed1fbe1ebaac61c07ec22f71ec081420a",
+    "raw32Note": "ed25519 over the raw 32 digest bytes — the superseded 2026-09-09 form; must NOT verify under signingPreimage"
+  },
+  "expectations": {
+    "executionFailedAbsent": true,
+    "supportingLogChainEntries": 3,
+    "negativeControl": "re-run with an execution_failed event appended, or one rawContent byte altered, must not settle"
+  }
+}
