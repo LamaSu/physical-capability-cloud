@@ -213,6 +213,18 @@ describe("missing / unavailable / incompatible", () => {
     }
   });
 
+  it("astra's confirmation: a sparse or implausibly long tier array is malformed; a shadowed `every` cannot throw", () => {
+    const verdictFor = (assuranceTiers: number[], tierKey = "tier0") =>
+      only(revalidatePlanSnapshots([claim({ nodeId: "a", tierKey })], deps([cap({ id: "cap-print", assuranceTiers })])));
+    const sparse = new Array<number>(2);
+    sparse[0] = 0; // [0, <hole>]: `every` skips the hole
+    expect(verdictFor(sparse)).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-tiers" });
+    expect(verdictFor(new Array<number>(1_000_000).fill(0))).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-tiers" });
+    const shadowed = Object.assign([0], { every: null }) as unknown as number[];
+    expect(() => verdictFor(shadowed)).not.toThrow();
+    expect(verdictFor(shadowed).status).toBe("current"); // a real [0] list: its own methods are never called
+  });
+
   it("REQUIRED (freshness): an operator rotation since the quote is stale even when the claimed digest still matches", () => {
     const rotated: LiveKernel[] = [{ id: "k-1", operatorAddress: `0x${"ef".repeat(20)}`, status: "online" }];
     const v = only(revalidatePlanSnapshots([claim({ nodeId: "a", matchedCapabilityDigest: digestAt(6.5) })], deps([cap({ id: "cap-print" })], rotated)));
