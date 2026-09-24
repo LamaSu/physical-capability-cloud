@@ -352,6 +352,12 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
     expect(r.body).not.toContain("escrow-milestone");
   });
 
+  it("an amount without a currency shows no invented currency", async () => {
+    const r = await receiptOf(RC, { finalState: "SETTLED_RELEASED", isAllocated: true, totalAmount: "10.00", payer: "0xP", payee: "0xQ" });
+    expect(r.body).toContain("10.00");
+    expect(r.body).not.toContain("USDC");
+  });
+
   it("a /lifecycle read with a numeric unitState renders by its ordinal; a disagreement is unknown", async () => {
     const LC = "/api/settlement/units/u1/lifecycle";
     const ok = await receiptOf(LC, lifecycle(8));
