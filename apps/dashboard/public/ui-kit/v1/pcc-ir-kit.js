@@ -1443,7 +1443,7 @@
           cur = cur[seg];
         }
         if (want === "number" ? !(typeof cur === "number" && Number.isFinite(cur)) : !(typeof cur === "string" && cur !== "")) return "mistyped field";
-        slot.textContent = String(cur);
+        slot.textContent = recordValueText(String(node.bind?.select ?? ""), String(cur));
         return true;
       }, () => {
         slot.textContent = "";

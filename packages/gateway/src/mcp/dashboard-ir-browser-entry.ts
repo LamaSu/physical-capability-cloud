@@ -23,7 +23,7 @@
  * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
  * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
  */
-import { dashboardManifestToIr, validateIr, provenanceOf, metricSourceType } from "./dashboard-ir.js";
+import { dashboardManifestToIr, validateIr, provenanceOf, metricSourceType, recordValueText } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
 import { bootIrView, bindListRows, listRowsReadable, bindSchemaCard, applyFreshness, applyUnavailable, applyUnknownTime } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
@@ -304,7 +304,8 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
         cur = (cur as Record<string, unknown>)[seg];
       }
       if (want === "number" ? !(typeof cur === "number" && Number.isFinite(cur)) : !(typeof cur === "string" && cur !== "")) return "mistyped field";
-      slot.textContent = String(cur);
+      // A status metric's money-state word is qualified, exactly as bindScalar does (#3013).
+      slot.textContent = recordValueText(String(node.bind?.select ?? ""), String(cur));
       return true;
     }, () => { slot.textContent = ""; });
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
