@@ -6,6 +6,7 @@ SSL verification is relaxed for local-network device probing.
 
 import json
 import ssl
+from http.client import HTTPException
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -65,6 +66,33 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
             return e.code, raw
     except (URLError, OSError) as e:
         return 0, {"error": str(e)}
+
+
+def http_bytes(method, url, data=None, headers=None, timeout=30, verify_ssl=True):
+    """Make an HTTP request with a binary body.  Returns (status_code, bytes).
+
+    :func:`http` JSON-encodes the request and UTF-8/JSON-decodes the answer,
+    so it cannot carry a binary protocol such as IPP (``application/ipp``).
+    This sends ``data`` verbatim and returns the raw response bytes.
+
+    status_code is 0 (and the body ``b""``) when the request never completed
+    -- connection refused, DNS failure, timeout, a malformed HTTP exchange --
+    the same transport sentinel :func:`http` uses.
+    """
+    hdrs = dict(headers or {})
+    hdrs.setdefault("User-Agent", USER_AGENT)
+    req = Request(url, data=data, headers=hdrs, method=method)
+    ctx = None if verify_ssl else _relaxed_ctx
+    try:
+        with urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.status, resp.read()
+    except HTTPError as e:
+        try:
+            return e.code, e.read()
+        except (OSError, HTTPException):
+            return e.code, b""
+    except (URLError, OSError, HTTPException):
+        return 0, b""
 
 
 def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30):

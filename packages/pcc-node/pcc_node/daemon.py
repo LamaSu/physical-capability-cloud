@@ -6,6 +6,8 @@ Combines all node subsystems into a single long-running process:
   3. Register kernel with PCC gateway (HTTP POST)
   4. Announce capabilities (signed)
   5. Start HTTP polling loop:
+     - Check jobs a device only accepted for device-reported completion
+       (JobExecutor.poll_awaiting: IPP job-state, OctoPrint /api/job)
      - Poll /api/operator/jobs every N seconds
      - Execute each job via JobExecutor
      - Push evidence bundle back to gateway
@@ -290,6 +292,16 @@ def run_daemon(config: NodeConfig):
     gateway_client.send_heartbeat("online")
 
     while running:
+        # Device-reported completion for jobs a device only ACCEPTED earlier
+        # (IPP job-state, OctoPrint /api/job): one non-blocking check per job
+        # per cycle.  Guarded on its own, ahead of the job poll, so an error in
+        # it neither kills the loop nor skips the poll below -- and an error
+        # in the poll below never skips it.
+        try:
+            job_executor.poll_awaiting()
+        except Exception as e:
+            log.error(f"Completion check failed: {e}")
+
         try:
             # Poll for queued jobs
             jobs = gateway_client.poll_for_jobs()
