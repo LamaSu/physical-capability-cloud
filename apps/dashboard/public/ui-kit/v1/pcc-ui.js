@@ -58,10 +58,10 @@
   // money. A new or unrecognised route therefore cannot slip through as "not money": being unlisted
   // already gates it (a new non-money route is merely over-gated until listed). Entries are exact
   // route templates (":" = one id segment) matched against the path the wire carries (canonicalPath).
-  // The paid x402 routes (capabilities quote/simulate/route) are money and stay OFF this list.
+  // The paid x402 routes (capabilities quote/simulate/route) are money and stay OFF this list. So do
+  // artifact create/fork: they PUBLISH under the viewer's identity (visibility comes from the body),
+  // so they pass the Approval gate, which shows exactly what would be published.
   var NON_MONEY_WRITES = [
-    'POST /api/artifacts',             // save a dashboard artifact
-    'POST /api/artifacts/:/fork',      // fork a dashboard artifact
     'POST /api/csd/validate',          // validate a CSD document
     'POST /api/csd/resolve',           // resolve a CSD by canonical URL
     'POST /api/feedback',              // product feedback
@@ -361,7 +361,7 @@
       ok: false, method: actionMethod(action), path: null, canonical: null, url: null,
       money: true, destination: null, reason: null, body: own, amounts: amounts, refs: refs,
       amount: amounts.length ? amounts[0][1] : null,
-      asset: assets.length ? assets[0][1] : (amounts.length ? 'USDC' : null),
+      asset: assets.length ? assets[0][1] : null,
       assetField: assets.length ? assets[0][0] : null,
       refId: refs.length ? refs[0][1] : null
     };
@@ -1043,13 +1043,15 @@
     wrap._body.appendChild(loadingLine());
     resolveBinding(ctx, w.binding).then(function (r) {
       clear(wrap._body);
-      var info = r.data || {};
-      wrap._body.appendChild(approvalDetails(info));
       if (w.approve && w.approve.label) wrap._body.appendChild(untrustedLabel(w.approve.label));
-      // The ONE descriptor for this approval (directive 10, ruling 3): displayed here, and exactly
-      // what Approve sends -- never manifest confirmation text.
+      // The ONE descriptor for this approval (directive 10, ruling 3) comes FIRST: it is exactly what
+      // Approve sends -- never manifest confirmation text. The bound record follows as attributed
+      // context (review charlie F1): the manifest chose its path, and a PCC read can carry user text.
       var desc = requestDescriptor(w.approve, (w.approve && w.approve.body) || {}, ctx.mode === 'host', ctx.apiBase);
       wrap._body.appendChild(realRequestNode(desc));
+      var mismatch = recordAmountMismatch(r.data, desc);
+      if (mismatch) wrap._body.appendChild(el('p', 'pcc-action-status st-failed pcc-mismatch', mismatch));
+      wrap._body.appendChild(recordNode(r, desc));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
       var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve'); // kit text, never w.approve.label
@@ -1108,7 +1110,34 @@
     if (desc.money) { pill.textContent = 'submitted'; pill.className = 'pcc-pill st-waiting'; }
     else { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-ack'; }
   }
-  function approvalDetails(info) {
+  // What the BOUND RECORD says about an approval: attributed context, never the request. Its amount
+  // line is dropped whenever the request carries an amount (the request's amount is what is sent),
+  // and a failed or empty read says so instead of showing nothing (review charlie F1, N5).
+  function recordNode(r, desc) {
+    var box = el('div', 'pcc-approval-record');
+    box.appendChild(el('div', 'pcc-untrusted-k', 'The bound record says (context, not what will be sent):'));
+    if (r.error || !r.data || typeof r.data !== 'object') {
+      box.appendChild(el('p', 'pcc-muted', 'Details unavailable' + (r.error ? ': ' + String(r.error) : '.')));
+      return box;
+    }
+    box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }));
+    return box;
+  }
+  // A kit warning when the bound record states an amount that no amount in the request matches.
+  function recordAmountMismatch(data, desc) {
+    if (!data || typeof data !== 'object' || !desc.amounts || !desc.amounts.length) return null;
+    var ra = data.amount != null ? data.amount
+      : (data.totalAmount != null ? data.totalAmount
+      : (data.price && typeof data.price === 'object' ? (data.price.base != null ? data.price.base : data.price.amount) : null));
+    if (ra == null) return null;
+    var sent = [];
+    for (var i = 0; i < desc.amounts.length; i++) {
+      if (sameAmount(ra, desc.amounts[i][1])) return null;
+      sent.push(amountText(desc.amounts[i][1]));
+    }
+    return 'The bound record says ' + amountText(ra) + ', but the request sends ' + sent.join(' / ') + '. Approve sends the request, not the record.';
+  }
+  function approvalDetails(info, opts) {
     var box = el('div', 'pcc-approval');
     // what
     var summary = info.summary || info.name || info.description;
@@ -1118,8 +1147,8 @@
     var payee = info.payee || (info.provider && (info.provider.id || info.provider.name)) || info.operatorAddress;
     if (payee) line.appendChild(el('span', 'pcc-mono', 'to ' + payee));
     var amount = info.amount || info.totalAmount || (info.price && (info.price.base || info.price.amount));
-    var currency = info.currency || (info.price && info.price.currency) || 'USDC';
-    if (amount != null) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', fmtUsd(amount) + ' ' + currency));
+    var currency = info.currency || (info.price && info.price.currency) || '';
+    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', amountText(amount) + (currency ? ' ' + wireText(currency) : '')));
     if (line.childNodes.length) box.appendChild(line);
     if (info.rationale) box.appendChild(el('p', 'pcc-approval-rationale', String(info.rationale)));
     // args table (ui.summaryKeys when present)
@@ -1415,7 +1444,14 @@
     }
     st.posting = true;
     show('pcc-action-status', 'Working…');
-    return ctx.tx.send(desc, sendBody, key).then(function (res) {
+    var sending;
+    try { sending = ctx.tx.send(desc, sendBody, key); }
+    catch (e) { // the request never started (review charlie F6): release the guard, say so honestly
+      st.posting = false;
+      show('pcc-action-status st-failed', 'Refused: the request could not be started - nothing was sent.');
+      return Promise.resolve({ ok: false, sent: false });
+    }
+    return sending.then(function (res) {
       st.posting = false;
       if (res.ok) {
         delete st.keys[fp]; // this intent is resolved
@@ -1484,7 +1520,8 @@
     // its field, so a small first "amount" can never stand in for a larger "totalAmount" that is also
     // sent. A value that is not a plain decimal is shown as sent (JSON), never coerced into a sum.
     var amts = desc.amounts || [], refs = desc.refs || [], shown = {};
-    var asset = desc.asset != null ? ' ' + wireText(desc.asset) : '';
+    // The unit is shown only when the request states one; the kit never supplies a currency.
+    var asset = desc.asset != null ? ' ' + wireText(desc.asset) : ' (no currency in the request)';
     for (var i = 0; i < amts.length; i++) {
       shown[amts[i][0]] = true;
       box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum',
@@ -1495,10 +1532,12 @@
       shown[refs[j][0]] = true;
       box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', (refs.length > 1 ? refs[j][0] : 'ref') + ' ' + wireText(refs[j][1])));
     }
-    // ...and every OTHER field of the body, exactly as the wire carries it (the kit adds only
-    // idempotencyKey). Nothing the request sends is left off this block.
-    var rest = Object.keys(desc.body || {}).filter(function (k) { return !shown[k]; });
-    if (rest.length) {
+    // ...and every OTHER field of the body, exactly as the wire carries it. A POST's idempotencyKey
+    // is the KIT's (one per request intent; it replaces any value the body names), so it is shown
+    // as that, never with the body's value. Nothing the request sends is left off this block.
+    var post = desc.ok && desc.method === 'POST';
+    var rest = Object.keys(desc.body || {}).filter(function (k) { return !shown[k] && !(post && k === 'idempotencyKey'); });
+    if (rest.length || post) {
       var tbl = el('div', 'pcc-args pcc-realreq-body');
       for (var r = 0; r < rest.length; r++) {
         var kv = el('div', 'pcc-args-row');
@@ -1506,17 +1545,34 @@
         kv.appendChild(el('span', 'pcc-args-v pcc-mono', JSON.stringify(desc.body[rest[r]])));
         tbl.appendChild(kv);
       }
+      if (post) {
+        var kr = el('div', 'pcc-args-row pcc-args-kit');
+        kr.appendChild(el('span', 'pcc-args-k', 'idempotencyKey'));
+        kr.appendChild(el('span', 'pcc-args-v pcc-muted', 'set by the kit when sent'));
+        tbl.appendChild(kr);
+      }
       box.appendChild(tbl);
     }
     return box;
   }
   // A string as itself; anything else as its JSON (what the wire carries).
   function wireText(v) { return typeof v === 'string' ? v : JSON.stringify(v); }
-  // Only a plain number or decimal string is formatted as a sum; anything else (true, [1000],
-  // "0x0F4240", an object) is shown exactly as sent, so the display never invents an amount.
+  // An amount is formatted as a sum only when the formatting is EXACT: a number whose 2-decimal form
+  // round-trips, or a decimal string with at most 2 decimals (and a safe integer part). Anything else
+  // (0.0049, "1234.5678", true, [1000], "0x0F4240", an object) is shown exactly as sent, so the display
+  // never rounds, coerces or invents an amount.
   function amountText(v) {
-    var plain = (typeof v === 'number' && isFinite(v)) || (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v));
-    return plain ? fmtUsd(v) : JSON.stringify(v);
+    if (typeof v === 'number' && isFinite(v)) {
+      var f = fmtUsd(v);
+      return Number(f.replace(/,/g, '')) === v ? f : String(v);
+    }
+    if (typeof v === 'string' && /^-?\d{1,15}(\.\d{1,2})?$/.test(v)) return fmtUsd(v);
+    return JSON.stringify(v);
+  }
+  // Do two wire amounts denote the same number? (Both must be numbers or numeric strings.)
+  function sameAmount(a, b) {
+    var ok = function (v) { return (typeof v === 'number' && isFinite(v)) || (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v)); };
+    return ok(a) && ok(b) && Number(a) === Number(b);
   }
 
   // The kit's Approval window as a floating modal — only its kit-labelled Approve sends, and it sends
@@ -1528,8 +1584,11 @@
     var st = actionState(action);
     // An intent in flight or already accepted: say so, never open a gate whose Approve would be inert.
     if (st.posting || st.done) { alreadySubmitted(opts && opts.status, st); return; }
-    // One approval modal per action: a rapid second click must not stack a second gate.
-    if (st.gate) return;
+    // One approval modal per action: a rapid second click must not stack a second gate (and says so).
+    if (st.gate) {
+      if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; opts.status.textContent = 'An approval window for this is already open.'; }
+      return;
+    }
     var gate = {}; // THIS opening's identity: only it may release the one-gate guard
     st.gate = gate;
     var overlay = el('div', 'pcc-overlay');
@@ -1864,7 +1923,13 @@
       '.pcc-realreq-line{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;}',
       '.pcc-realreq-method{font:650 12px/18px var(--font);color:var(--ink);}',
       '.pcc-realreq-dest{color:var(--ink-2);word-break:break-all;}',
-      '.pcc-realreq-amt{font:650 14px/20px var(--font);color:var(--ink);}',
+      '.pcc-realreq-amt{font:650 16px/22px var(--font);color:var(--ink);}',
+      /* the bound record is attributed context under the request (review charlie F1) */
+      '.pcc-approval-record{display:flex;flex-direction:column;gap:6px;border-top:1px dashed var(--hairline-strong);padding-top:8px;}',
+      '.pcc-approval-record .pcc-approval-what{font:450 13px/19px var(--font);color:var(--ink-2);}',
+      '.pcc-approval-record .pcc-approval-cost{font:450 13px/19px var(--font);color:var(--ink-2);}',
+      '.pcc-mismatch{margin:0;}',
+      '.pcc-args-kit .pcc-args-v{font-style:italic;}',
       '.pcc-realreq-ref{color:var(--ink-3);}',
       '.pcc-realreq-blocked{color:var(--deny);font:650 12px/18px var(--font);}',
       /* receipt */

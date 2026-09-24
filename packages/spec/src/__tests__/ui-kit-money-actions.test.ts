@@ -378,17 +378,17 @@ describe("F2: money detection is fail-closed by construction (unlisted writes ar
     });
   }
 
-  it("an ALLOWLISTED non-money write (POST /api/artifacts) posts directly and reads 'Done'", async () => {
+  it("an ALLOWLISTED non-money write (POST /api/feedback) posts directly and reads 'Done'", async () => {
     const calls = installFetch(() => ({ status: 200 }));
-    boot(act({ path: "/api/artifacts", body: { title: "t" } }));
+    boot(act({ path: "/api/feedback", body: { message: "t" } }));
     btn("Go").click();
     await flush();
     expect(document.querySelector(".pcc-overlay")).toBeNull();
-    expect(posts(calls, "/api/artifacts").length).toBe(1);
+    expect(posts(calls, "/api/feedback").length).toBe(1);
     expect(document.body.textContent).toContain("Done");
   });
 
-  for (const [kind, p] of [["patch", "/api/artifacts"], ["post", "/API/artifacts"], ["post", "/api/artifacts/a1/fork/x"], ["post", "/api/artifactsX"], ["post", "/api/artifacts?x=1"], ["post", "/api/artifacts/"]] as Array<[string, string]>) {
+  for (const [kind, p] of [["patch", "/api/feedback"], ["post", "/API/feedback"], ["post", "/api/feedback/agent-report/x"], ["post", "/api/feedbackX"], ["post", "/api/feedback?x=1"], ["post", "/api/feedback/"]] as Array<[string, string]>) {
     it(`a near-miss of the allowlist (${kind.toUpperCase()} ${p}) is still money`, () => {
       const calls = installFetch(() => ({ status: 200 }));
       boot(act({ kind, path: p }));
@@ -470,14 +470,14 @@ describe("F6/F7: idempotency state is kit-owned; keys follow the body", () => {
     const calls = installFetch(() => ({ status: 200 }));
     const body = { title: "t" };
     boot(man([{ kind: "actions", actions: [
-      { id: "a", label: "Save", kind: "post", path: "/api/artifacts", body,
+      { id: "a", label: "Save", kind: "post", path: "/api/feedback", body,
         __idem: { key: "", fp: JSON.stringify(body) }, __posting: true, __gateOpen: true },
       { id: "m", label: "Fund", kind: "post", path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 },
         __idem: { key: "attacker-chosen", fp: JSON.stringify({ amount: 1 }) }, __gateOpen: true },
     ] }]));
     btn("Save").click();
     await flush();
-    const save = posts(calls, "/api/artifacts");
+    const save = posts(calls, "/api/feedback");
     expect(save.length).toBe(1);
     expect(save[0]!.headers["Idempotency-Key"]).toMatch(/^idem-/);
     btn("Fund").click();
@@ -495,7 +495,7 @@ describe("F5 + nits: failure text never asserts an outcome the kit cannot know",
   for (const code of [500, 502, 503, 504]) {
     it(`HTTP ${code} says the outcome is unknown (never 'nothing was charged')`, async () => {
       installFetch(() => ({ status: code }));
-      boot(act({ path: "/api/artifacts" }));
+      boot(act({ path: "/api/feedback" }));
       btn("Go").click();
       await flush();
       const t = document.body.textContent!;
@@ -506,7 +506,7 @@ describe("F5 + nits: failure text never asserts an outcome the kit cannot know",
 
   it("410 (removed endpoint, pre-execution) still says nothing was executed", async () => {
     installFetch(() => ({ status: 410 }));
-    boot(act({ path: "/api/artifacts" }));
+    boot(act({ path: "/api/feedback" }));
     btn("Go").click();
     await flush();
     expect(document.body.textContent).toContain("Nothing was executed");
@@ -529,7 +529,7 @@ describe("F5 + nits: failure text never asserts an outcome the kit cannot know",
 
   it("a structured server error renders as JSON text, not '[object Object]'", async () => {
     installFetch(() => ({ status: 400, body: { error: { code: "E_BAD", detail: "nope" } } }));
-    boot(act({ path: "/api/artifacts" }));
+    boot(act({ path: "/api/feedback" }));
     btn("Go").click();
     await flush();
     expect(document.body.textContent).not.toContain("[object Object]");
@@ -1153,7 +1153,7 @@ describe("F: Approval-gate cleanup is instance-specific", () => {
 describe("G (ruling 2): acknowledgements are neutral; settled-green only comes from a read model", () => {
   it("a non-money 2xx reads 'Done' in the neutral st-ack class", async () => {
     installFetch(() => ({ status: 200 }));
-    boot(act({ path: "/api/artifacts", body: { title: "t" } }));
+    boot(act({ path: "/api/feedback", body: { title: "t" } }));
     btn("Go").click();
     await flush();
     expect(barStatus().textContent).toBe("Done");
@@ -1188,7 +1188,7 @@ describe("G (ruling 2): acknowledgements are neutral; settled-green only comes f
 
   it("the kit stylesheet renders st-ack without a hue (never the signal green)", () => {
     installFetch(() => ({ status: 200 }));
-    boot(act({ path: "/api/artifacts" }));
+    boot(act({ path: "/api/feedback" }));
     const css = document.getElementById("pcc-ui-styles")!.textContent!;
     expect(css).toContain(".pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}");
     expect(css).toContain(".pcc-action-status.st-ack{color:var(--ink-2);}");
@@ -1296,7 +1296,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     const calls = installFetch(() => ({ status: 200 }));
     boot(act({ path: FUND, body: { amount: 1, totalAmount: 1000000 } }));
     btn("Go").click();
-    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["amount 1.00 USDC", "totalAmount 1,000,000.00 USDC"]);
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["amount 1.00 (no currency in the request)", "totalAmount 1,000,000.00 (no currency in the request)"]);
     gateApproveBtn()!.click();
     await flush();
     expect(posts(calls)[0]!.body).toMatchObject({ amount: 1, totalAmount: 1000000 });
@@ -1314,9 +1314,9 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     const body = { escrowId: "esc-1", amount: 21.99, payee: "0xevil", split: { a: 1 }, note: "5" };
     boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, body } }]));
     await flush();
-    expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["Amount 21.99 USDC"]);
+    expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["Amount 21.99 (no currency in the request)"]);
     expect(all(".pcc-win .pcc-realreq-ref")).toEqual(["ref esc-1"]);
-    expect(bodyRows(".pcc-win")).toEqual([["payee", '"0xevil"'], ["split", '{"a":1}'], ["note", '"5"']]);
+    expect(bodyRows(".pcc-win")).toEqual([["payee", '"0xevil"'], ["split", '{"a":1}'], ["note", '"5"'], ["idempotencyKey", "set by the kit when sent"]]);
     btn("Approve").click();
     await flush();
     const { idempotencyKey, ...wire } = posts(calls)[0]!.body!;
@@ -1331,7 +1331,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     btn("Go").click();
     expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["Amount 3.00 USDC"]); // amount + its currency
     expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId j1", "offerId o1"]);
-    expect(bodyRows(".pcc-overlay")).toEqual([["asset", '"ETH"'], ["memo", '"m"'], ["n", "null"], ["deep", '{"x":[1,2]}']]);
+    expect(bodyRows(".pcc-overlay")).toEqual([["asset", '"ETH"'], ["memo", '"m"'], ["n", "null"], ["deep", '{"x":[1,2]}'], ["idempotencyKey", "set by the kit when sent"]]);
     gateApproveBtn()!.click();
     await flush();
     expect(Object.keys(posts(calls)[0]!.body!).sort()).toEqual([...Object.keys(body), "idempotencyKey"].sort());
@@ -1340,13 +1340,159 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
   it("an amount that is not a plain number is shown as sent, never coerced into a sum", () => {
     installFetch(() => ({ status: 200 }));
     const cases: Array<[unknown, string]> = [
-      [true, "Amount true USDC"], [[1000], "Amount [1000] USDC"], ["0x0F4240", 'Amount "0x0F4240" USDC'],
-      [{ v: 5 }, 'Amount {"v":5} USDC'], ["21.99", "Amount 21.99 USDC"], [12, "Amount 12.00 USDC"],
+      [true, "Amount true (no currency in the request)"], [[1000], "Amount [1000] (no currency in the request)"],
+      ["0x0F4240", 'Amount "0x0F4240" (no currency in the request)'], [{ v: 5 }, 'Amount {"v":5} (no currency in the request)'],
+      ["21.99", "Amount 21.99 (no currency in the request)"], [12, "Amount 12.00 (no currency in the request)"],
     ];
     for (const [amount, shown] of cases) {
       boot(act({ path: FUND, body: { amount } }));
       btn("Go").click();
       expect(text(".pcc-overlay .pcc-realreq-amt"), JSON.stringify(amount)).toBe(shown);
     }
+  });
+});
+
+describe("review charlie (#342 @17a8a7f0): the approval display follows the request, never the record", () => {
+  const FUND = "/api/escrow/chain/0xabc/fund";
+  const all = (sel: string) => Array.from(document.querySelectorAll(sel)).map((e) => e.textContent);
+  const rows = (scope: string) => Array.from(document.querySelectorAll(`${scope} .pcc-realreq-body .pcc-args-row`)).map((r) => [
+    r.querySelector(".pcc-args-k")!.textContent, r.querySelector(".pcc-args-v")!.textContent,
+  ]);
+  const recordWin = (approveBody: Record<string, unknown>) => ({
+    kind: "approval", binding: { path: "/api/artifacts/free-sample" },
+    approve: { id: "fund", label: "Claim free sample", kind: "post", path: FUND, body: approveBody },
+    deny: { id: "deny", label: "Deny", kind: "post", path: FUND, body: {} },
+  });
+  const FREE = { summary: "Free sample - no charge", payee: "PCC Official", amount: 0.01, currency: "USDC", rationale: "Approve to receive your free sample. Nothing will be charged." };
+  const withRecord = (record: unknown, getStatus = 200) => installFetch((c) => (c.method === "GET" ? { status: getStatus, body: record } : { status: 200 }));
+
+  it("F1: 'This will send' comes first; the bound record is attributed context below it, without its own amount", async () => {
+    withRecord(FREE);
+    boot(man([recordWin({ escrowId: "esc-1", amount: 5000, currency: "USDC" })]));
+    await flush();
+    const send = document.querySelector(".pcc-win .pcc-realreq")!;
+    const record = document.querySelector(".pcc-win .pcc-approval-record")!;
+    expect(send.compareDocumentPosition(record) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(record.textContent).toContain("The bound record says (context, not what will be sent)");
+    expect(record.textContent).toContain("Free sample - no charge");
+    expect(document.querySelector(".pcc-win .pcc-approval-cost")).toBeNull(); // the record's 0.01 is not shown as a cost
+    expect(text(".pcc-win .pcc-realreq-amt")).toBe("Amount 5,000.00 USDC");
+  });
+
+  it("F1: a record amount that no request amount matches raises a kit warning (st-failed)", async () => {
+    withRecord(FREE);
+    boot(man([recordWin({ escrowId: "esc-1", amount: 5000, currency: "USDC" })]));
+    await flush();
+    const warn = document.querySelector(".pcc-win .pcc-mismatch")!;
+    expect(warn.className).toContain("st-failed");
+    expect(warn.textContent).toContain("0.01");
+    expect(warn.textContent).toContain("5,000.00");
+    expect(warn.textContent).toContain("Approve sends the request, not the record");
+  });
+
+  it("F1: matching amounts raise no warning; with no amount in the request the record's amount shows, attributed, with no invented currency", async () => {
+    withRecord({ summary: "Pizza", amount: "21.99" });
+    boot(man([recordWin({ escrowId: "esc-1", amount: 21.99 })]));
+    await flush();
+    expect(document.querySelector(".pcc-win .pcc-mismatch")).toBeNull();
+    withRecord({ summary: "Pizza", amount: 12 });
+    boot(man([recordWin({ escrowId: "esc-1" })]));
+    await flush();
+    expect(text(".pcc-win .pcc-approval-record .pcc-approval-cost")).toBe("12.00");
+  });
+
+  it("N5: a failed record read says 'Details unavailable'; the request block still shows what would be sent", async () => {
+    withRecord(undefined, 404);
+    boot(man([recordWin({ escrowId: "esc-1", amount: 5 })]));
+    await flush();
+    expect(text(".pcc-win .pcc-approval-record")).toContain("Details unavailable");
+    expect(text(".pcc-win .pcc-realreq-dest")).toBe(`${PCC}${FUND}`);
+  });
+
+  it("F2: an amount is never rounded for display: a value two decimals cannot hold is shown as sent", () => {
+    installFetch(() => ({ status: 200 }));
+    const cases: Array<[unknown, string]> = [
+      [0.0049, "Amount 0.0049 ETH"], ["0.0049", 'Amount "0.0049" ETH'], [1234.5678, "Amount 1234.5678 ETH"],
+      [0.005, "Amount 0.005 ETH"], [12.5, "Amount 12.50 ETH"], ["1,000", 'Amount "1,000" ETH'],
+    ];
+    for (const [amount, shown] of cases) {
+      boot(act({ path: FUND, body: { amount, asset: "ETH" } }));
+      btn("Go").click();
+      expect(text(".pcc-overlay .pcc-realreq-amt"), JSON.stringify(amount)).toBe(shown);
+    }
+  });
+
+  it("F3: with no currency in the request the display says so; it never supplies one", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ path: FUND, body: { amount: 5 } }));
+    btn("Go").click();
+    expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("Amount 5.00 (no currency in the request)");
+    boot(act({ path: FUND, body: { amount: 5, currency: "" } }));
+    btn("Go").click();
+    expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("Amount 5.00 (no currency in the request)");
+    expect(rows(".pcc-overlay")).toContainEqual(["currency", '""']);
+  });
+
+  it("F4: a POST's idempotencyKey is shown as the kit's (what the wire carries), never the body's value", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ path: FUND, body: { amount: 5, idempotencyKey: "manifest-chosen" } }));
+    btn("Go").click();
+    expect(rows(".pcc-overlay")).toContainEqual(["idempotencyKey", "set by the kit when sent"]);
+    expect(text(".pcc-overlay .pcc-realreq") || "").not.toContain("manifest-chosen");
+    gateApproveBtn()!.click();
+    await flush();
+    const p = posts(calls)[0]!;
+    expect(p.body!.idempotencyKey).toMatch(/^idem-/);
+    expect(p.headers["Idempotency-Key"]).toBe(p.body!.idempotencyKey);
+  });
+
+  it("F4: a PATCH body's idempotencyKey is plain data: shown and sent as is (the kit keys PATCH by header only)", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ kind: "patch", path: "/api/jobs/j1/status", body: { status: "done", idempotencyKey: "m" } }));
+    btn("Go").click();
+    expect(rows(".pcc-overlay")).toContainEqual(["idempotencyKey", '"m"']);
+    expect(all(".pcc-overlay .pcc-args-kit")).toEqual([]);
+    gateApproveBtn()!.click();
+    await flush();
+    expect(posts(calls)[0]!.body!.idempotencyKey).toBe("m");
+  });
+
+  it("F5: artifact create/fork publish under the viewer's identity, so they pass the gate, which shows what is published", async () => {
+    for (const p of ["/api/artifacts", "/api/artifacts/a1/fork"]) {
+      const calls = installFetch(() => ({ status: 201 }));
+      boot(man([{ kind: "actions", actions: [{ id: "r", label: "Refresh", kind: "post", path: p, body: { name: "Legit", visibility: "public" } }] }]));
+      expect(btn("Refresh").textContent).toBe("Refresh · needs approval");
+      btn("Refresh").click();
+      expect(overlays()).toBe(1);
+      expect(posts(calls).length).toBe(0);
+      expect(rows(".pcc-overlay")).toContainEqual(["visibility", '"public"']);
+      gateApproveBtn()!.click();
+      await flush();
+      expect(posts(calls).map((c) => c.url)).toEqual([`${PCC}${p}`]);
+    }
+    expect(/var NON_MONEY_WRITES = \[([\s\S]*?)\];/.exec(kitSrc)![1]).not.toContain("/api/artifacts");
+  });
+
+  it("F6: a transport that throws synchronously leaves nothing stuck: honest refusal, and a later click can send", async () => {
+    (window as unknown as { fetch: unknown }).fetch = () => { throw new Error("sync transport failure"); };
+    boot(act({ path: "/api/feedback", body: { message: "m" } }));
+    btn("Go").click();
+    await flush();
+    expect(barStatus().className).toContain("st-failed");
+    expect(barStatus().textContent).toBe("Refused: the request could not be started - nothing was sent.");
+    const calls = installFetch(() => ({ status: 200 }));
+    btn("Go").click();
+    await flush();
+    expect(posts(calls, "/api/feedback").length).toBe(1);
+    expect(barStatus().textContent).not.toContain("Already submitted");
+  });
+
+  it("N1: a second click while this action's gate is open says so (never silently swallowed)", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ path: FUND, body: { amount: 1 } }));
+    btn("Go").click();
+    btn("Go").click();
+    expect(overlays()).toBe(1);
+    expect(barStatus().textContent).toBe("An approval window for this is already open.");
   });
 });
