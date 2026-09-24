@@ -1,8 +1,12 @@
 /**
  * AuditService — persistent, append-only audit log backed by SQLite.
  *
- * All writes are fire-and-forget: they never block request handling and
- * never throw errors that could crash the server.
+ * `log()` is fire-and-forget: it never throws, so an audit failure cannot
+ * crash request handling. `logStrict()` is the same write without the
+ * swallow, for audit records that must commit together with the change they
+ * record: the write goes through the same synchronous better-sqlite3
+ * connection as the repositories, so calling it inside a DB transaction makes
+ * the change and its audit record commit or roll back as one.
  */
 
 import { getRepos } from "../db.js";
@@ -27,21 +31,32 @@ class AuditService {
    */
   log(entry: AuditEntry): void {
     try {
-      const repos = getRepos();
-      repos.auditLog.insert({
-        timestamp: new Date().toISOString(),
-        eventType: entry.eventType,
-        actor: entry.actor ?? null,
-        resourceType: entry.resourceType ?? null,
-        resourceId: entry.resourceId ?? null,
-        action: entry.action,
-        metadata: entry.metadata ?? null,
-        ip: entry.ip ?? null,
-        userAgent: entry.userAgent ?? null,
-      });
+      this.logStrict(entry);
     } catch {
       // Audit failures must never crash request handling — swallow silently.
     }
+  }
+
+  /**
+   * Append an audit entry and throw if the write fails.
+   *
+   * Use this inside the DB transaction of an authority-bearing change (e.g. an
+   * onboarding status transition): a failed audit write then rolls the change
+   * back instead of leaving it committed with no audit record.
+   */
+  logStrict(entry: AuditEntry): void {
+    const repos = getRepos();
+    repos.auditLog.insert({
+      timestamp: new Date().toISOString(),
+      eventType: entry.eventType,
+      actor: entry.actor ?? null,
+      resourceType: entry.resourceType ?? null,
+      resourceId: entry.resourceId ?? null,
+      action: entry.action,
+      metadata: entry.metadata ?? null,
+      ip: entry.ip ?? null,
+      userAgent: entry.userAgent ?? null,
+    });
   }
 
   /**

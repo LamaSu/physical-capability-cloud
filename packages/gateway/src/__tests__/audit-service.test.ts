@@ -70,6 +70,25 @@ describe("AuditService", () => {
     });
   });
 
+  // ── logStrict() ───────────────────────────────────────────────────────────
+
+  describe("logStrict()", () => {
+    it("persists the entry like log()", () => {
+      auditService.logStrict({ eventType: "operator.approved", action: "approve", actor: "admin-key:0123abcd" });
+      const rows = auditService.query({ eventType: "operator.approved" });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.actor).toBe("admin-key:0123abcd");
+    });
+
+    it("throws when the write fails, so a surrounding transaction can roll back", () => {
+      closeStore();
+      expect(() => auditService.logStrict({ eventType: "boom", action: "create" })).toThrow();
+      // log() stays fire-and-forget on the same failure.
+      expect(() => auditService.log({ eventType: "boom", action: "create" })).not.toThrow();
+      initStore({ seed: false });
+    });
+  });
+
   // ── query() ───────────────────────────────────────────────────────────────
 
   describe("query()", () => {
