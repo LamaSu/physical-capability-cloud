@@ -251,17 +251,24 @@ export interface VerificationAxis {
 // ── Settlement axis ─────────────────────────────────────────────────────────
 
 /**
- * `linked`: exactly one settlement record is linked to the job. `not_linked`: none is.
- * `ambiguous`: more than one candidate, so none is chosen. `unavailable`: the settlement
- * store could not be read.
+ * `linked`: every recorded identifier for the job points at the SAME single settlement
+ * record. `not_linked`: none points anywhere. `ambiguous`: one identifier matches more
+ * than one record. `conflicting`: identifiers disagree (they point at different records,
+ * or a record found through one identifier contradicts another recorded identifier).
+ * `unavailable`: the settlement store could not be read. Only `linked` carries a record.
  */
-export type SettlementLink = "linked" | "not_linked" | "ambiguous" | "unavailable";
+export type SettlementLink = "linked" | "not_linked" | "ambiguous" | "conflicting" | "unavailable";
 
-/** How the job was tied to its settlement record. */
+/**
+ * An identifier that ties a job to an escrow record. The job's negotiation session
+ * records the escrow it created for the job (its contract address and CWM id); the job
+ * row carries its own CWM id. `job_cwm` alone is accepted only when the job has no
+ * negotiation session.
+ */
 export type SettlementLinkBasis =
+  | "negotiation_session_escrow_address"
   | "negotiation_session_cwm"
-  | "job_cwm"
-  | "negotiation_session_escrow_address";
+  | "job_cwm";
 
 /** A money status exactly as the canonical @pcc/spec money map classifies it. */
 export interface MoneyStateView {
@@ -290,7 +297,9 @@ export interface SettlementRecordView {
   /**
    * Match of the job's step against the escrow's milestones:
    *   exact               exactly one milestone is this job's step
-   *   no_milestones       the escrow records no milestones (one whole-escrow payment)
+   *   no_milestones       the escrow records no milestones. That does not prove one
+   *                       whole-escrow payment for this job (several jobs can share an
+   *                       escrow), so the payout is unknown.
    *   step_not_in_escrow  milestones exist, none for this step: the record does not
    *                       cover this job, so other steps' releases say nothing about it
    *   ambiguous           more than one milestone claims this step
@@ -309,30 +318,48 @@ export interface SettlementRecordView {
   escrowTotal: { amount: string; currency: string };
   createdAt: string;
   deadline: string;
+  /**
+   * When the recorded statuses were last observed or changed. The escrow record stores no
+   * such time today, so this is null: a fresh `asOf` dates the READ, not the settlement.
+   */
+  statusObservedAt: string | null;
 }
 
 /**
- * Whether the operator was paid for this job, per the linked settlement record.
+ * Whether the operator was paid for this job, per the linked settlement record. It is read
+ * from the job's OWN milestone and reconciled with the escrow's own status; any
+ * disagreement is `unknown`.
  *
- *   paid       released to the operator (canonical tone `settled`), on a real escrow
- *   refunded   refunded to the payer. The operator was NOT paid.
- *   not_paid   linked, and the record says nothing has been released yet
+ *   paid       this job's milestone record says released to the operator, and the escrow
+ *              record does not contradict it (not refunded, disputed, slashed, expired or
+ *              unrecognized). A RECORD claim: see `payoutConfirmation`.
+ *   refunded   this job's milestone record says refunded to the payer, and the escrow
+ *              record does not contradict it. The operator was NOT paid.
+ *   not_paid   this job's milestone is not released and the escrow record does not claim
+ *              everything was released
  *   simulated  the linked escrow is a mock-settlement record. Nothing was paid.
- *   unknown    not linked, ambiguous, unreadable, or an unknown status
+ *   unknown    not linked, ambiguous, conflicting, unreadable, no milestone for this job,
+ *              an unrecognized status, or milestone and escrow records that disagree
  */
 export type PayoutState = "paid" | "refunded" | "not_paid" | "simulated" | "unknown";
 
 export interface SettlementAxis {
   link: SettlementLink;
+  /** The strongest identifier that points at the linked record (null unless linked). */
   linkBasis: SettlementLinkBasis | null;
+  /** Every recorded identifier that points at the linked record (empty unless linked). */
+  linkMatches: SettlementLinkBasis[];
   source: "gateway_escrow_record";
   record: SettlementRecordView | null;
   payout: PayoutState;
+  /** The job's own milestone record when it decided the payout; otherwise null. */
+  payoutBasis: "milestone_record" | null;
   /**
-   * Which record status the payout was read from: the job's own milestone, or the whole
-   * escrow when the escrow records no milestones. Null when no status was usable.
+   * How far a `paid` or `refunded` claim is confirmed. `record_only`: it comes from the
+   * gateway's escrow record; no chain receipt or finalized read confirms it. Null when
+   * the payout claims no movement of money.
    */
-  payoutBasis: "milestone_record" | "escrow_record" | null;
+  payoutConfirmation: "record_only" | null;
   error: ReadError | null;
 }
 
@@ -357,6 +384,10 @@ export type JobExecutionNoticeCode =
   | "fabricated_evidence"
   /** The linked settlement record is a mock-settlement escrow. */
   | "simulated_settlement"
+  /** The job's milestone record and the escrow record disagree about money. */
+  | "settlement_records_conflict"
+  /** The job's recorded settlement identifiers point at different records. */
+  | "settlement_link_conflict"
   /** The job-row status is not a documented job status. */
   | "unknown_execution_status";
 
