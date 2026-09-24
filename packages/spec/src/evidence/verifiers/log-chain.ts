@@ -60,6 +60,10 @@ export interface LogChainVerification {
  * `KernelKeychain.verifySignature`; in the oracle it resolves the signer against
  * the registered-key snapshot (#47). Returns true iff the signature over
  * `entryHash` is valid for the expected signer.
+ *
+ * Every implementation must verify over `signingPreimage(entryHash)` — the
+ * UTF-8 bytes of the tagged digest string (LO-EV-1,
+ * `evidence/signing-preimage.ts`) — never the 32 raw digest bytes.
  */
 export type VerifyKernelSignature = (
   entryHash: SHA256,

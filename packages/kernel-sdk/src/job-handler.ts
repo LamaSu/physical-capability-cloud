@@ -24,7 +24,14 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { canonicalize, ids, sha256 } from "@pcc/spec";
+import {
+  canonicalize,
+  ids,
+  parseEd25519SignatureHex,
+  sessionKeyDelegationPreimage,
+  sha256,
+  signingPreimage,
+} from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Hex helpers (serialising bytes over JSON)
@@ -199,21 +206,10 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       },
     };
 
-    const sessionCanonical = new TextEncoder().encode(
-      JSON.stringify({
-        sessionId: sessionKeyBody.sessionId,
-        parentAgentId: sessionKeyBody.parentAgentId,
-        publicKey: toHex(sessionKeyBody.publicKey),
-        issuedAt: sessionKeyBody.issuedAt,
-        expiresAt: sessionKeyBody.expiresAt,
-        scope: {
-          allowedActions: [...sessionKeyBody.scope.allowedActions].sort(),
-          contractIds: [...sessionKeyBody.scope.contractIds].sort(),
-          maxSignatures: sessionKeyBody.scope.maxSignatures,
-        },
-      }),
+    const parentSig = nacl.sign.detached(
+      sessionKeyDelegationPreimage(sessionKeyBody),
+      principalPrivateKey,
     );
-    const parentSig = nacl.sign.detached(sessionCanonical, principalPrivateKey);
     const sessionKey: SessionKey = {
       ...sessionKeyBody,
       parentSignature: parentSig,
@@ -335,8 +331,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     // ── Finalise bundle (hash + sign with sessionKey) ───────────────────
     const sortedHashes = events.map((e) => e.hash).sort();
     const bundleHash = await sha256(canonicalize(sortedHashes));
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const bundleSig = nacl.sign.detached(bundleHashBytes, sessionKeypair.secretKey);
+    const bundleSig = nacl.sign.detached(signingPreimage(bundleHash), sessionKeypair.secretKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -377,9 +372,11 @@ export function verifyBundleSignature(
   sessionPublicKey: Uint8Array,
 ): boolean {
   try {
-    const bundleHashBytes = new TextEncoder().encode(bundle.bundleHash);
-    const sig = fromHex(bundle.kernelSignature.value);
-    return nacl.sign.detached.verify(bundleHashBytes, sig, sessionPublicKey);
+    return nacl.sign.detached.verify(
+      signingPreimage(bundle.bundleHash),
+      parseEd25519SignatureHex(bundle.kernelSignature.value),
+      sessionPublicKey,
+    );
   } catch {
     return false;
   }

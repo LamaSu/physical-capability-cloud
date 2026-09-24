@@ -11,9 +11,14 @@
  * `packages/spec/src/evidence/verifiers/log-chain.ts:76`:
  *   sha256(canonicalize({ capturedAt, rawContent, source }))  -> "sha256:"+hex.
  *
- * Emits tests/goldens.json with two sections:
+ * Emits tests/goldens.json with these sections:
  *   - entry_hash: [{name, rawContent, source, capturedAt, expected}]  (money seam)
  *   - canonical:  [{name, value, expected}]  (raw canonical STRING, structural)
+ *   - signing_preimage / session_delegation / session_revocation: the LO-EV-1
+ *     signing byte contract (`pcc.evidence.signing-preimage.v1`), mirroring
+ *     packages/spec/src/evidence/signing-preimage.ts, with deterministic
+ *     RFC 8032 Ed25519 signatures from fixed, labelled TEST seeds. Both the TS
+ *     helper and pcc_node/signing_preimage.py are checked against them.
  *
  * Tricky fixture strings (quote, backslash, control chars) are built from
  * explicit code points via String.fromCharCode so there are NO raw control
@@ -22,7 +27,7 @@
  * Run:  node packages/pcc-node/tests/gen_goldens.mjs
  */
 
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -129,12 +134,128 @@ const CANONICAL_FIXTURES = [
   { name: "slash_not_escaped", value: { url: "cups://job/1?x=2" } },
 ];
 
+// --- LO-EV-1 signing byte contract ------------------------------------------
+// Logic mirror of packages/spec/src/evidence/signing-preimage.ts. The spec
+// test and the Python test both check these outputs, so a drift in any of the
+// three copies fails CI.
+function signingPreimage(digest) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error("not a tagged digest: " + digest);
+  return Buffer.from(digest, "utf8");
+}
+
+function sessionKeyDelegationPreimage(sk) {
+  const body = {
+    sessionId: sk.sessionId,
+    parentAgentId: sk.parentAgentId,
+    publicKey: sk.publicKeyHex,
+    issuedAt: sk.issuedAt,
+    expiresAt: sk.expiresAt,
+    scope: {
+      allowedActions: [...sk.scope.allowedActions].sort(),
+      contractIds: [...sk.scope.contractIds].sort(),
+      maxSignatures: sk.scope.maxSignatures,
+    },
+  };
+  if (sk.derivationPath !== undefined) body.derivationPath = sk.derivationPath;
+  return Buffer.from(JSON.stringify(body), "utf8");
+}
+
+function sessionRevocationPreimage(r) {
+  return Buffer.from(JSON.stringify({ sessionId: r.sessionId, revokedAt: r.revokedAt, reason: r.reason }), "utf8");
+}
+
+// Ed25519 (RFC 8032) is deterministic: a fixed seed + message gives a fixed
+// signature in node:crypto and pynacl alike. Seeds are derived from public
+// labels -- these are TEST keys and sign nothing real.
+const PKCS8_ED25519_SEED_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+function testKey(label) {
+  const seed = createHash("sha256").update("pcc-lo-ev-1-test-key:" + label, "utf8").digest();
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([PKCS8_ED25519_SEED_PREFIX, seed]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const publicKey = createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32);
+  return {
+    seedHex: seed.toString("hex"),
+    publicKeyHex: publicKey.toString("hex"),
+    sign: (bytes) => sign(null, bytes, privateKey).toString("hex"),
+  };
+}
+
+const KERNEL_KEY = testKey("kernel");
+const PRINCIPAL_KEY = testKey("principal");
+
+const SIGNING_PREIMAGE_FIXTURES = [
+  {
+    // The oracle shared vector's entry hash (first entry_hash fixture).
+    name: "oracle_shared_entry_hash",
+    digest: computeEntryHash("hello", "cups://job-1", "2026-07-09T00:00:00.000Z"),
+  },
+  { name: "genesis", digest: "sha256:" + "0".repeat(64) },
+  {
+    // A bundle hash: sha256(canonicalize(sorted event hashes)), as hashBundle().
+    name: "bundle_hash",
+    digest: sha256(
+      canonicalize(
+        [
+          computeEntryHash("start", "cups://job-7", "2026-09-24T00:00:00.000Z"),
+          computeEntryHash("done", "cups://job-7", "2026-09-24T00:00:05.000Z"),
+        ].sort(),
+      ),
+    ),
+  },
+];
+
+const SESSION_BASE = {
+  sessionId: "sess-001",
+  parentAgentId: "eip155:84532:0x1111111111111111111111111111111111111111",
+  publicKeyHex: KERNEL_KEY.publicKeyHex,
+  issuedAt: 1727200000,
+  expiresAt: 1727203600,
+  scope: {
+    allowedActions: ["workflow_step_complete", "evidence_submit"],
+    contractIds: ["job-b", "job-a"],
+    maxSignatures: 100,
+  },
+};
+
+const SESSION_DELEGATION_FIXTURES = [
+  { name: "fresh_session", session: SESSION_BASE },
+  { name: "derived_session", session: { ...SESSION_BASE, derivationPath: "m/44'/60'/0'/0'/7'" } },
+  // Non-ASCII pins ensure_ascii=False on the Python side.
+  { name: "unicode_session_id", session: { ...SESSION_BASE, sessionId: "sesión-ü-" + CC(0x65e5) } },
+];
+
+// The sorted-key (canonicalize) form of a session: NOT the contract. Kept as a
+// negative control -- its bytes differ and its signature must not verify.
+function sortedKeyDelegation(sk) {
+  return Buffer.from(
+    canonicalize({
+      sessionId: sk.sessionId,
+      parentAgentId: sk.parentAgentId,
+      publicKey: sk.publicKeyHex,
+      issuedAt: sk.issuedAt,
+      expiresAt: sk.expiresAt,
+      scope: {
+        allowedActions: [...sk.scope.allowedActions].sort(),
+        contractIds: [...sk.scope.contractIds].sort(),
+        maxSignatures: sk.scope.maxSignatures,
+      },
+    }),
+    "utf8",
+  );
+}
+
 const goldens = {
   _comment:
     "Generated by tests/gen_goldens.mjs from the VERBATIM canonicalize() of " +
     "packages/spec/src/util/canonical.ts. entry_hash = computeLogEntryHash " +
-    "parity (money seam); canonical = raw canonicalize() string parity. " +
-    "Regenerate if canonical.ts changes.",
+    "parity (money seam); canonical = raw canonicalize() string parity; " +
+    "signing_preimage / session_delegation / session_revocation = the LO-EV-1 " +
+    "signing byte contract (pcc.evidence.signing-preimage.v1) with deterministic " +
+    "Ed25519 test-key signatures. Regenerate if canonical.ts or " +
+    "evidence/signing-preimage.ts changes.",
   entry_hash: ENTRY_HASH_FIXTURES.map((f) => ({
     ...f,
     expected: computeEntryHash(f.rawContent, f.source, f.capturedAt),
@@ -144,6 +265,47 @@ const goldens = {
     value: f.value,
     expected: canonicalize(f.value),
   })),
+  signing_preimage: SIGNING_PREIMAGE_FIXTURES.map((f) => {
+    const preimage = signingPreimage(f.digest);
+    const raw32 = Buffer.from(f.digest.slice("sha256:".length), "hex");
+    return {
+      name: f.name,
+      digest: f.digest,
+      preimage_hex: preimage.toString("hex"),
+      signer_seed_hex: KERNEL_KEY.seedHex,
+      signer_public_key_hex: KERNEL_KEY.publicKeyHex,
+      signature_hex: KERNEL_KEY.sign(preimage),
+      // Negative control: the same key over the 32 raw digest bytes.
+      raw32_signature_hex: KERNEL_KEY.sign(raw32),
+    };
+  }),
+  session_delegation: SESSION_DELEGATION_FIXTURES.map((f) => {
+    const preimage = sessionKeyDelegationPreimage(f.session);
+    const sorted = sortedKeyDelegation(f.session);
+    return {
+      name: f.name,
+      session: f.session,
+      preimage_utf8: preimage.toString("utf8"),
+      principal_seed_hex: PRINCIPAL_KEY.seedHex,
+      principal_public_key_hex: PRINCIPAL_KEY.publicKeyHex,
+      parent_signature_hex: PRINCIPAL_KEY.sign(preimage),
+      // Negative control: the sorted-key form and a signature over it.
+      sorted_key_preimage_utf8: sorted.toString("utf8"),
+      sorted_key_signature_hex: PRINCIPAL_KEY.sign(sorted),
+    };
+  }),
+  session_revocation: [
+    { name: "rotated", revocation: { sessionId: "sess-001", revokedAt: 1727201000, reason: "rotated" } },
+  ].map((f) => {
+    const preimage = sessionRevocationPreimage(f.revocation);
+    return {
+      name: f.name,
+      revocation: f.revocation,
+      preimage_utf8: preimage.toString("utf8"),
+      principal_public_key_hex: PRINCIPAL_KEY.publicKeyHex,
+      parent_signature_hex: PRINCIPAL_KEY.sign(preimage),
+    };
+  }),
 };
 
 const outPath = join(dirname(fileURLToPath(import.meta.url)), "goldens.json");

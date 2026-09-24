@@ -22,6 +22,9 @@ export * from "./primitives.js";
 // isFabricated / bundleHasFabricatedEvents — the ONE canonical fabricated-evidence
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
+// signingPreimage / sessionKeyDelegationPreimage — the ONE LO-EV-1 signing byte
+// contract every Ed25519 producer and consumer of evidence builds its message from.
+export * from "./signing-preimage.js";
 export * from "./eligibility.js";
 export * from "./measurement-profile.js";
 export * from "./verifier-interface.js";
