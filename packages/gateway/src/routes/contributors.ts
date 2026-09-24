@@ -33,6 +33,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
+import { isReservedIdentity, IDENTITY_RESERVED_RESPONSE } from "../auth/reserved-identities.js";
 import { getEmbeddedWalletAdapter } from "../auth/embedded-wallet.js";
 import {
   RateSegmentSchema,
@@ -515,6 +516,15 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const body = parse.data;
+
+    // The key minted below is bound to this email as its operatorId, and the
+    // email is ASSERTED, not proven — the same unverified-identity path as
+    // POST /api/auth/provision {email}. Refuse an email on any admin allowlist
+    // BEFORE creating a wallet or a key (WP-A A7).
+    if (isReservedIdentity(body.email)) {
+      return reply.code(403).send(IDENTITY_RESERVED_RESPONSE);
+    }
+
     const adapter = getEmbeddedWalletAdapter();
 
     // 1. Create / recover the embedded wallet for this email.

@@ -13,6 +13,7 @@ import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { isReservedIdentity, IDENTITY_RESERVED_RESPONSE } from "../auth/reserved-identities.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -163,6 +164,14 @@ export async function provisionRoutes(app: FastifyInstance) {
           message: "Please provide a valid email address",
         });
       }
+      // The email is ASSERTED, not proven. Several routes authorize by an
+      // operatorId allowlist (AUDIT_ADMINS, PCC_DEMAND_ADMINS, ...), so minting a
+      // key for an allowlisted email would hand that admin identity to anyone who
+      // can type it (WP-A A7). Refuse before anything is minted. The wallet paths
+      // above/below are SIWE-proven and are not restricted by this.
+      if (isReservedIdentity(body.email)) {
+        return reply.status(403).send(IDENTITY_RESERVED_RESPONSE);
+      }
       operatorId = body.email;
     } else if (session) {
       // A verified SIWE session with NO explicit identity in the body — use the
@@ -197,8 +206,10 @@ export async function provisionRoutes(app: FastifyInstance) {
     // money. An email caller gets ["operator"] and is refused at the money
     // path; a SIWE caller who is not on the allowlist gets exactly the same.
     //
-    // Pre-existing wildcard keys are untouched by this change and still
-    // bypass all of it — see routes/admin-key-audit.ts.
+    // Pre-existing wildcard keys still exist, but are no longer money or admin
+    // authority (middleware/scope-checker.ts migration note); listing and
+    // retiring them is routes/admin-key-audit.ts +
+    // docs/security/WILDCARD_KEY_ROTATION.md.
     const scopes =
       siweVerified && isSettlementApproved(operatorId)
         ? ["operator", "settlement"]
