@@ -14,7 +14,7 @@ import { describe, it, expect } from "vitest";
 import type { EvidenceRequirement } from "@pcc/spec";
 import { BudgetReservationStore, createDatabase } from "@pcc/store";
 import { agentPlanRoutes, type AgentPlanRouteDeps } from "../routes/agent-plans.js";
-import { MAX_RESERVATION_TTL_SEC, MIN_RESERVATION_TTL_SEC, reservationRoutes, type ReservationIssueWiring } from "../routes/reservations.js";
+import { MAX_RESERVATION_TTL_SEC, MIN_RESERVATION_TTL_SEC, reservationRoutes, type ParentUnitResolver, type ReservationIssueWiring } from "../routes/reservations.js";
 import type { DealEncoder } from "../services/agent-plan-deal.js";
 import type { ExternalPlanSubmission, SeamDeps } from "../services/external-plan-seam.js";
 import type { LiveCapability, LiveKernel } from "../services/plan-snapshot-revalidation.js";
@@ -26,6 +26,8 @@ const PRINT = "document-print-and-mail";
 const PROGRAM = `0x${"d2".repeat(32)}`;
 const BUYER = "agent:buyer-1";
 const WALLET = A("11");
+const OPERATOR = A("aa"); // the print unit's operator, authenticated by its wallet
+const OPERATOR_WALLET = A("a9");
 
 const CAPS: LiveCapability[] = [
   { id: "cap-print", type: PRINT, kernelId: "k-print", pricing: { currency: "USDC", baseCost: "6.50", minimum: "6.50" }, assuranceTiers: [0, 1, 2], tenantId: null },
@@ -46,9 +48,11 @@ const encoder: DealEncoder = (plan) =>
 const REQUESTS: Record<string, { owner: string; currency: string; ceilingBaseUnits: bigint }> = {
   "req-42": { owner: BUYER, currency: "USDC", ceilingBaseUnits: 30_000_000n },
   "req-theirs": { owner: "agent:someone-else", currency: "USDC", ceilingBaseUnits: 30_000_000n },
+  "req-child": { owner: OPERATOR, currency: "USDC", ceilingBaseUnits: 0n }, // the operator's subcontract request
+  "req-child-usdt": { owner: OPERATOR, currency: "USDT", ceilingBaseUnits: 0n },
 };
 
-function world(over: Partial<ReservationIssueWiring> = {}) {
+function world(over: Partial<ReservationIssueWiring> = {}, reclaimAfterSec = 7 * 24 * 3600) {
   const { sqlite } = createDatabase(":memory:");
   const store = new BudgetReservationStore(sqlite);
   store.ensureSchema();
@@ -59,7 +63,7 @@ function world(over: Partial<ReservationIssueWiring> = {}) {
       const r = REQUESTS[requestId];
       return r && r.owner === principal ? { currency: r.currency, ceilingBaseUnits: r.ceilingBaseUnits } : null;
     },
-    payerFor: (principal) => (principal === BUYER ? WALLET : null),
+    payerFor: (principal) => (principal === BUYER ? WALLET : principal === OPERATOR ? OPERATOR_WALLET : null),
     now: () => NOW,
     newId: () => `resv_test_${++n}`,
     ...over,
@@ -75,20 +79,20 @@ function world(over: Partial<ReservationIssueWiring> = {}) {
     assertProgramForTier: ({ committedProgramHash }) => (committedProgramHash === PROGRAM ? { ok: true } : { ok: false, code: "program-hash-mismatch" }),
     evidenceFor: (csd, tierKey) => EVIDENCE[`${csd}|${tierKey}`] ?? null,
     loadReservation: wiring.loadReservation,
-    policy: { feeBps: 235, feeRecipient: A("fe"), reclaimAfterSec: 7 * 24 * 3600 },
+    policy: { feeBps: 235, feeRecipient: A("fe"), reclaimAfterSec },
     now: () => NOW,
   };
   const accept: AgentPlanRouteDeps = { revalidation: seam.revalidation, accept: { seam, encodeDeal: encoder, consumeReservation: wiring.consumeReservation } };
   return { store, issue, accept };
 }
 
-async function appWith(w: { issue: ReservationIssueWiring | { missing: string[] }; accept: AgentPlanRouteDeps }): Promise<FastifyInstance> {
+async function appWith(w: { issue: ReservationIssueWiring | { missing: string[] }; accept: AgentPlanRouteDeps; parentUnits?: ParentUnitResolver | { missing: string[] } }): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   app.addHook("onRequest", async (req) => {
     const p = req.headers["x-test-principal"];
     if (typeof p === "string" && p) (req as unknown as { operatorId?: string }).operatorId = p;
   });
-  await app.register(reservationRoutes, { wiring: () => w.issue });
+  await app.register(reservationRoutes, { wiring: () => w.issue, ...(w.parentUnits ? { parentUnits: () => w.parentUnits! } : {}) });
   await app.register(agentPlanRoutes, { deps: () => w.accept });
   await app.ready();
   return app;
@@ -173,5 +177,92 @@ describe("R13 over HTTP: issue -> accept -> read, on one durable store", () => {
     const faulty = await appWith(world({ requestCeiling: () => { throw new Error("db password in message"); } }));
     const f = await issue(faulty, issueBody());
     expect([f.statusCode, f.json()]).toEqual([500, { error: "internal-error" }]);
+  });
+});
+
+describe("MC 9: bounded child authority over HTTP (#2301)", () => {
+  /** A stand-in for the sealed-deal store: the plans the accept route sealed, keyed by reservation. */
+  function sealedDeals() {
+    const deals = new Map<string, { jobs: Array<{ operator: string; units: Array<{ n: string; reclaimAt: string }> }>; nodeToUnit: Array<{ jobIndex: number; jobId: string; milestoneIndex: number }> }>();
+    const resolver: ParentUnitResolver = (parentId, unit) => {
+      const plan = deals.get(parentId);
+      const b = plan?.nodeToUnit.find((x) => `${x.jobId}#${x.milestoneIndex}` === unit);
+      if (!plan || !b) return null;
+      const u = plan.jobs[b.jobIndex]!.units[b.milestoneIndex]!;
+      return { reservationId: parentId, unit, operator: plan.jobs[b.jobIndex]!.operator, netBaseUnits: BigInt(u.n), reclaimAt: Number(u.reclaimAt) };
+    };
+    return { deals, resolver };
+  }
+  const childBody = (unit: string, over: Record<string, unknown> = {}) => ({ unit, requestId: "req-child", currency: "USDC", maxAmountBaseUnits: "4000000", purpose: "subcontract the envelope stuffing", expiresInSec: 3600, ...over });
+  const child = (app: FastifyInstance, parentId: string, body: unknown, principal: string = OPERATOR) =>
+    app.inject({ method: "POST", url: `/api/settlement/reservations/${parentId}/children`, payload: body as object, headers: AS(principal) });
+
+  async function sealedParent(over: Partial<ReservationIssueWiring> = {}, reclaimAfterSec?: number) {
+    const w = world(over, reclaimAfterSec);
+    const sealed = sealedDeals();
+    const app = await appWith({ ...w, parentUnits: sealed.resolver });
+    const parent = (await issue(app, issueBody())).json().reservation.reservationId;
+    const accepted = await app.inject({ method: "POST", url: "/api/settlement/agent-plans/accept", payload: dag(parent), headers: AS(BUYER) });
+    expect(accepted.statusCode).toBe(200);
+    const plan = accepted.json().plan;
+    sealed.deals.set(parent, plan);
+    const print = plan.nodeToUnit.find((b: { nodeId: string }) => b.nodeId === "print");
+    const printUnit = `${print.jobId}#${print.milestoneIndex}`;
+    const n = BigInt(plan.jobs[print.jobIndex].units[print.milestoneIndex].n);
+    return { w, app, parent, printUnit, n, plan };
+  }
+
+  it("end to end: the print unit's operator carves a child from the sealed deal with ITS OWN wallet, and a subcontracted child plan is accepted against it", async () => {
+    const { app, parent, printUnit } = await sealedParent();
+    const res = await child(app, parent, childBody(printUnit));
+    expect(res.statusCode).toBe(201);
+    const c = res.json().reservation;
+    expect(c).toMatchObject({ parentReservationId: parent, parentUnit: printUnit, payerAddress: OPERATOR_WALLET, maxAmountBaseUnits: "4000000", requestId: "req-child", state: "issued" });
+    // The operator subcontracts the mail drop to another operator, paid from the child reservation.
+    const sub: ExternalPlanSubmission = { requestId: "req-child", reservationId: c.reservationId, nodes: [dag(c.reservationId).nodes[0]!], edges: [] };
+    const accepted = await app.inject({ method: "POST", url: "/api/settlement/agent-plans/accept", payload: sub, headers: AS(OPERATOR) });
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json().plan.jobs[0].payer).toBe(OPERATOR_WALLET); // never the parent payer
+  });
+
+  it("bounds: all children of the unit fit its n; none outlives its reclaimAt; the parent payer's wallet is refused; before the parent is sealed it is 409", async () => {
+    const { app, parent, printUnit, n, plan } = await sealedParent();
+    expect((await child(app, parent, childBody(printUnit, { requestId: "req-42" }))).json()).toEqual({ error: "request-not-found" }); // the child's request must be the operator's own
+    expect((await child(app, parent, childBody(printUnit, { currency: "USDT" }))).json()).toEqual({ error: "currency-mismatch" });
+    // The child's OWN request must be in the reservation's currency too, even when the parent's matches.
+    expect((await child(app, parent, childBody(printUnit, { requestId: "req-child-usdt" }))).json()).toEqual({ error: "currency-mismatch" });
+    expect((await child(app, parent, childBody(printUnit, { maxAmountBaseUnits: (n + 1n).toString() }))).json()).toEqual({ error: "over-parent-unit" });
+    expect((await child(app, parent, childBody(printUnit, { maxAmountBaseUnits: (n - 1n).toString() }))).statusCode).toBe(201);
+    expect((await child(app, parent, childBody(printUnit, { maxAmountBaseUnits: "2" }))).json()).toEqual({ error: "over-parent-unit" }); // n - 1 + 2 > n
+    expect((await child(app, parent, childBody(printUnit, { maxAmountBaseUnits: "1" }))).statusCode).toBe(201); // exactly n in total
+    // A parent deal with a one-day reclaim window, so "outlives the unit" fits inside the TTL bound.
+    const short = await sealedParent({}, 24 * 3600);
+    const reclaimAt = Number(short.plan.jobs[0].units[0].reclaimAt);
+    expect(reclaimAt).toBe(NOW + 24 * 3600);
+    const outlives = await child(short.app, short.parent, childBody(short.printUnit, { expiresInSec: reclaimAt - NOW + 1 }));
+    expect([outlives.statusCode, outlives.json()]).toEqual([422, { error: "child-outlives-parent-unit" }]);
+    expect((await child(short.app, short.parent, childBody(short.printUnit, { expiresInSec: reclaimAt - NOW }))).statusCode).toBe(201); // exactly at reclaimAt
+    const parentsWallet = await sealedParent({ payerFor: (p) => (p === BUYER || p === OPERATOR ? WALLET : null) });
+    expect((await child(parentsWallet.app, parentsWallet.parent, childBody(parentsWallet.printUnit))).json()).toEqual({ error: "child-payer-is-parent-payer" });
+    // A parent that is issued but not yet sealed.
+    const w = world();
+    const sealed = sealedDeals();
+    const app2 = await appWith({ ...w, parentUnits: sealed.resolver });
+    const unsealed = (await issue(app2, issueBody())).json().reservation.reservationId;
+    sealed.deals.set(unsealed, plan); // terms known, but the parent reservation is not consumed
+    expect((await child(app2, unsealed, childBody(printUnit))).json()).toEqual({ error: "parent-deal-not-sealed" });
+  });
+
+  it("no oracle: another principal, a missing parent and an unknown unit are the same 404; production is 503; a malformed unit is 400", async () => {
+    const { app, parent, printUnit } = await sealedParent();
+    const asBuyer = await child(app, parent, childBody(printUnit), BUYER); // the payer is not the unit's operator
+    const missing = await child(app, "resv_nope", childBody(printUnit));
+    const noUnit = await child(app, parent, childBody("plan.x:0xaa#9"));
+    expect([asBuyer.statusCode, missing.statusCode, noUnit.statusCode]).toEqual([404, 404, 404]);
+    expect(new Set([asBuyer.body, missing.body, noUnit.body]).size).toBe(1);
+    for (const unit of ["", "no-hash", "job#-1", "job#100", "job#01"]) expect([unit, (await child(app, parent, childBody(unit))).statusCode]).toEqual([unit, 400]);
+    const prod = await appWith({ ...world() }); // no sealed-deal store wired
+    const r = await child(prod, parent, childBody(printUnit));
+    expect([r.statusCode, r.json().error]).toEqual([503, "issue-not-wired"]);
   });
 });
