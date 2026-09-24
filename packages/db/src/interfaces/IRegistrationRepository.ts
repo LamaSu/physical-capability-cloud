@@ -36,6 +36,20 @@ export interface IRegistrationRepository {
     extra?: { approvedAt?: string; description?: string },
   ): RegistrationRow | undefined;
   /**
+   * Compare-and-swap status transition. One statement,
+   * `UPDATE ... SET status = toStatus WHERE id = ? AND status IN (fromStatuses)`,
+   * so the status check and the write cannot be separated by another writer.
+   * Returns the updated row, or null when the row is missing or its status is
+   * not in `fromStatuses` (a lost race or a disallowed transition). An empty
+   * `fromStatuses` matches nothing.
+   */
+  transitionStatus(
+    id: string,
+    fromStatuses: readonly string[],
+    toStatus: string,
+    extra?: { approvedAt?: string; description?: string },
+  ): RegistrationRow | null;
+  /**
    * T2.2 — partial update of a registration. Only the fields listed in
    * RegistrationPatch are honored; status changes go through updateStatus.
    * Returns the updated row, or undefined if the id isn't found.
