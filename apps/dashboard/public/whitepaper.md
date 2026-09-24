@@ -2,6 +2,8 @@
 
 **Version**: 3.0 | **Date**: June 13, 2026
 
+**Status (September 2026)**: public beta. Settlement runs on test networks. Sections marked *Roadmap* describe designs that are not yet deployed.
+
 ---
 
 > *The internet made information programmable. Cloud computing made compute programmable. We never did the same for the rest of the economy.*
@@ -20,7 +22,7 @@ Coordination is the expensive part of every value chain. A pizza shop pays 30% t
 
 The Physical Capability Cloud (PCC) is the substrate that lets agents compose verifiable primitives directly — so the rent-extracting middle becomes unnecessary. Any capability that can be expressed as a typed contract — *I will make a pizza*, *I will mill aluminum to ±0.01mm*, *I will run an HPLC*, *I will drive a same-day route* — becomes a node any agent in the network can discover, negotiate, escrow, execute, verify, and settle against.
 
-The substrate is the moat. Every UX surface that talks to PCC — voice, forms, mobile apps, chat, autonomous-asset agents — is an early adapter on top of the substrate. They will evolve. The substrate underneath does not need to.
+Every UX surface that talks to PCC — voice, forms, mobile apps, chat, autonomous-asset agents — is an early adapter on top of the substrate. They will evolve. The substrate underneath does not need to.
 
 Three structural goals, conventionally treated as a two-of-three trade-off in economic theory, become simultaneously achievable when coordination is a protocol:
 
@@ -452,7 +454,7 @@ The escrow lifecycle creates a sealed, time-boxed settlement window that removes
 
 This structure means the economic risk is symmetric and clearly allocated before work begins — a significant improvement over traditional manufacturing contracts where payment disputes can extend for months.
 
-### 7.3 DePIN Reward Epochs
+### 7.3 DePIN Reward Epochs (*Roadmap*)
 
 Operators who consistently execute verified work earn additional rewards from the network treasury through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
 
@@ -496,7 +498,7 @@ The vision is radical accessibility: a person with any networked device — a 3D
 
 The test for the onboarding experience is not "can a DevOps engineer configure this" — it is "can my 70-year-old dad in Florida get his Canon inkjet printer earning money on the PCC network." This standard forces radical simplification.
 
-The flow:
+The target flow (not yet end to end in the beta):
 
 1. Dad installs the PCC agent (npm package or standalone binary)
 2. Agent scans the local network via mDNS, finds Canon PIXMA TR8620a at `192.168.1.50`
@@ -504,7 +506,7 @@ The flow:
 4. Dad says yes
 5. Agent generates a wallet, requests testnet funds from the faucet, and registers the device
 6. Agent prints a test page to verify the pipeline: submit → IPP Print-Job → evidence collected → settlement
-7. Done. The printer is live on PCC
+7. Done. The printer can take jobs on PCC
 
 The full onboarding requires exactly three decisions from the operator: confirm the detected device is correct, approve the generated config, and optionally fund the wallet if on-chain settlement is needed. Everything else is automated.
 
@@ -993,7 +995,7 @@ Templates can be free (the default — pure substrate primitive) or monetized th
 
 ### What the substrate's existence implies
 
-With the March 2026 session, PCC crossed from prototype to working distributed system. Operators can join the network with `pip install pcc-node && pcc-node start`. Hardware is auto-detected. Capabilities are announced with Ed25519 signatures and discoverable via a gossip DHT. Agent-to-agent messages are encrypted end-to-end with NaCl box. Execution scopes enforce a four-class security model that allows AI agents to control physical equipment while bounding the blast radius of errors. A real Opentrons OT-2 liquid handler has run jobs through the complete pipeline: brain reasoning on DGX Spark, tool calls relayed through PCC, execution on the device, camera frames streaming back to the dashboard.
+In March 2026, PCC's distributed pieces ran end to end in testing. Operators can join the network with `pip install pcc-node && pcc-node start`. Hardware is auto-detected. Capabilities are announced with Ed25519 signatures and discoverable via a gossip DHT. Agent-to-agent messages are encrypted end-to-end with NaCl box. Execution scopes enforce a four-class security model that allows AI agents to control physical equipment while bounding the blast radius of errors. A real Opentrons OT-2 liquid handler has run jobs through the complete pipeline: brain reasoning on DGX Spark, tool calls relayed through PCC, execution on the device, camera frames streaming back to the dashboard.
 
 The result is a network where a machinist in Detroit and a biologist in Boston can form a trustless workflow without a broker, a marketplace, or a negotiated contract. Where the intellectual property embedded in a manufacturing process earns royalties for its designer forever. Where verified physical work builds permanent on-chain credentials. Where any AI agent can discover, book, and settle a physical capability through a typed API, the same way it calls any other microservice.
 
