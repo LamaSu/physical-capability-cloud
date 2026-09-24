@@ -207,7 +207,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
     const { kernelId, status = "online", capabilities, timestamp } = req.body ?? {};
 
-    if (!kernelId) {
+    if (typeof kernelId !== "string" || !kernelId) {
       return reply.code(400).send({ error: "kernelId required" });
     }
 
