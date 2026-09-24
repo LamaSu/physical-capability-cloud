@@ -270,6 +270,73 @@ describe("Funded Key tab: shows what the gateway returns", () => {
     const link = [...container.querySelectorAll("a")].find((a) => a.textContent?.includes("Open card checkout"));
     expect(link?.getAttribute("href")).toBe(checkout);
     expect(requests(stub)).toEqual(["POST /api/fiat-ramp/cdp/wallet", "POST /api/fiat-ramp/coinbase/onramp"]);
+    // The checkout is asked for the wallet's own network.
+    expect(JSON.parse(String(stub.mock.calls[1]![1]?.body))).toMatchObject({ network: "base" });
+  });
+
+  it("a real testnet wallet is not offered the mainnet card checkout", async () => {
+    const stub = stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x3333333333333333333333333333333333333333", network: "base-sepolia", smartAccount: true, mock: false },
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    expect(text()).toContain("Card funding is off for a base-sepolia wallet");
+    expect(button(/Add funds with a card/)).toBeUndefined();
+    expect(requests(stub)).toEqual(["POST /api/fiat-ramp/cdp/wallet"]);
+  });
+
+  it("an onramp the gateway marks mock shows its note, not a checkout link", async () => {
+    stubFetch({
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+      },
+      "/api/fiat-ramp/coinbase/onramp": {
+        status: 200,
+        body: {
+          provider: "coinbase",
+          onrampUrl: "https://pay.coinbase.com/buy/select-asset?appId=pcc-hackathon",
+          mock: true,
+          note: "Using default app ID. Set COINBASE_APP_ID env var for production.",
+        },
+      },
+    });
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    await click(button(/Add funds with a card/));
+    expect(text()).toContain("No card checkout on this gateway: Using default app ID.");
+    expect([...container.querySelectorAll("a")].some((a) => a.textContent?.includes("Open card checkout"))).toBe(false);
+  });
+
+  it("a key reads REVOKED only when the gateway confirms it", async () => {
+    const perm = { permissionId: "0xperm", spender: "0x4444444444444444444444444444444444444444", allowanceUSDC: 50, periodSec: 86400, expiresAt: "2026-10-01T00:00:00Z", revoked: false };
+    const routes: Record<string, { status: number; body: unknown }> = {
+      "/api/fiat-ramp/cdp/wallet": {
+        status: 200,
+        body: { walletAddress: "0x2222222222222222222222222222222222222222", network: "base", smartAccount: true, mock: false },
+      },
+      "/api/fiat-ramp/cdp/spend-permission": { status: 200, body: perm },
+      "/api/fiat-ramp/cdp/spend-permission/0xperm": { status: 200, body: { ok: true } },
+    };
+    stubFetch(routes);
+    await renderPage();
+    await click(button("Funded Key"));
+    await click(button("Create wallet — no card"));
+    typeInto(container.querySelector('input[placeholder="Agent address (0x…)"]'), perm.spender);
+    await click(button("Issue scoped key"));
+    await click(button("Revoke"));
+    expect(text()).toContain("didn't confirm the revocation");
+    expect(text()).toContain("ACTIVE");
+    expect(text()).not.toContain("REVOKED");
+
+    routes["/api/fiat-ramp/cdp/spend-permission/0xperm"] = { status: 200, body: { revoked: true, permissionId: "0xperm" } };
+    await click(button("Revoke"));
+    expect(text()).toContain("REVOKED");
   });
 
   it("a gateway error is shown with its reason, and no wallet appears", async () => {

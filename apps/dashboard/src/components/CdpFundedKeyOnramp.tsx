@@ -66,6 +66,8 @@ export function CdpFundedKeyOnramp() {
   const [wallet, setWallet] = React.useState<Wallet | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [onrampUrl, setOnrampUrl] = React.useState<string | null>(null);
+  // Set when the gateway answered the onramp request with mock: true.
+  const [onrampNote, setOnrampNote] = React.useState<string | null>(null);
   const [funding, setFunding] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
 
@@ -78,6 +80,10 @@ export function CdpFundedKeyOnramp() {
 
   // The gateway said this wallet is simulated: nothing controls its address.
   const simulated = wallet?.mock === true;
+  // Coinbase's card checkout pays out USDC on Base mainnet. Only a real wallet
+  // on "base" can receive it. A base-sepolia (testnet) wallet would be paid
+  // real money on a network PCC doesn't read for it.
+  const cardFundable = !!wallet && !simulated && wallet.network === "base";
 
   async function createWallet() {
     setCreating(true);
@@ -92,14 +98,22 @@ export function CdpFundedKeyOnramp() {
   }
 
   async function fund() {
-    if (!wallet || simulated) return;
+    if (!wallet || !cardFundable) return;
     setFunding(true);
     setErr(null);
     try {
-      const r = await api("/api/fiat-ramp/coinbase/onramp", "POST", {
+      const r = (await api("/api/fiat-ramp/coinbase/onramp", "POST", {
         walletAddress: wallet.walletAddress,
-      });
-      setOnrampUrl(r.onrampUrl);
+        network: wallet.network,
+      })) as { onrampUrl?: unknown; mock?: unknown; note?: unknown };
+      if (r.mock === true) {
+        // No Coinbase app is configured on this gateway, so its URL is not a checkout to offer.
+        setOnrampNote(typeof r.note === "string" && r.note ? r.note : "This gateway has no Coinbase app configured.");
+      } else if (typeof r.onrampUrl === "string" && r.onrampUrl.startsWith("https://")) {
+        setOnrampUrl(r.onrampUrl);
+      } else {
+        setErr("The gateway returned no checkout link.");
+      }
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -132,8 +146,10 @@ export function CdpFundedKeyOnramp() {
     setRevoking(true);
     setErr(null);
     try {
-      await api(`/api/fiat-ramp/cdp/spend-permission/${perm.permissionId}`, "DELETE");
-      setPerm({ ...perm, revoked: true });
+      const r = (await api(`/api/fiat-ramp/cdp/spend-permission/${perm.permissionId}`, "DELETE")) as { revoked?: unknown } | null;
+      // Only the gateway's explicit confirmation marks the key revoked.
+      if (r?.revoked === true) setPerm({ ...perm, revoked: true });
+      else setErr("The gateway didn't confirm the revocation, so the key may still be active.");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -204,6 +220,13 @@ export function CdpFundedKeyOnramp() {
                 Card funding is off for a simulated wallet: money sent to its address could not be
                 recovered.
               </p>
+            ) : !cardFundable ? (
+              <p className="text-[12px] text-white/40">
+                Card funding is off for a {wallet.network} wallet: the card checkout pays out USDC on
+                Base mainnet, not on this wallet's network.
+              </p>
+            ) : onrampNote ? (
+              <p className="text-[12px] text-amber-400/80">No card checkout on this gateway: {onrampNote}</p>
             ) : !onrampUrl ? (
               <button
                 onClick={fund}
