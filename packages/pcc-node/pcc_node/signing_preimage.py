@@ -93,13 +93,24 @@ def parse_ed25519_public_key_hex(value):
     return _parse_fixed_hex(value, 32, "malformed-public-key")
 
 
-def _is_safe_uint(value):
-    # bool is an int subclass in Python; JSON would render it true/false.
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 <= value <= _MAX_SAFE_INTEGER
-    )
+def _as_safe_uint(value):
+    """The contract's number domain, taken by value as JavaScript does.
+
+    A non-negative safe integer (0..2**53-1). An integral float such as the
+    ``1.0`` or ``1e3`` that ``json.loads`` yields is that integer, because
+    ``JSON.parse`` gives the same JS number for ``1``, ``1.0`` and ``1e0``.
+    Returns the int, or None outside the domain: fractions, NaN, infinities,
+    negatives, values above 2**53-1, and bool (an int subclass in Python).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    if not isinstance(value, int):
+        return None
+    return value if 0 <= value <= _MAX_SAFE_INTEGER else None
 
 
 def _is_str_list(value):
@@ -163,20 +174,25 @@ def session_key_delegation_preimage(session_key):
     ``derivationPath`` key corresponds to TypeScript ``undefined``.
     """
     sk = session_key
-    scope = sk.get("scope") if isinstance(sk, dict) else None
+    is_dict = isinstance(sk, dict)
+    scope = sk.get("scope") if is_dict else None
+    issued_at = _as_safe_uint(sk.get("issuedAt")) if is_dict else None
+    expires_at = _as_safe_uint(sk.get("expiresAt")) if is_dict else None
+    max_signatures = _as_safe_uint(scope.get("maxSignatures")) if isinstance(scope, dict) else None
     ok = (
-        isinstance(sk, dict)
+        is_dict
         and isinstance(sk.get("sessionId"), str)
         and isinstance(sk.get("parentAgentId"), str)
         and isinstance(sk.get("publicKey"), (bytes, bytearray))
         and len(sk["publicKey"]) == 32
-        and _is_safe_uint(sk.get("issuedAt"))
-        and _is_safe_uint(sk.get("expiresAt"))
+        and issued_at is not None
+        and expires_at is not None
         and isinstance(scope, dict)
         and _is_str_list(scope.get("allowedActions"))
         and _is_str_list(scope.get("contractIds"))
-        and _is_safe_uint(scope.get("maxSignatures"))
-        and ("derivationPath" not in sk or isinstance(sk["derivationPath"], str))
+        and max_signatures is not None
+        # Present means a non-empty string: an empty path is refused (R20 round 2).
+        and ("derivationPath" not in sk or (isinstance(sk["derivationPath"], str) and sk["derivationPath"] != ""))
     )
     if not ok:
         raise SigningPreimageError(
@@ -186,12 +202,12 @@ def session_key_delegation_preimage(session_key):
         "sessionId": sk["sessionId"],
         "parentAgentId": sk["parentAgentId"],
         "publicKey": bytes(sk["publicKey"]).hex(),
-        "issuedAt": sk["issuedAt"],
-        "expiresAt": sk["expiresAt"],
+        "issuedAt": issued_at,
+        "expiresAt": expires_at,
         "scope": {
             "allowedActions": _js_sorted(scope["allowedActions"]),
             "contractIds": _js_sorted(scope["contractIds"]),
-            "maxSignatures": scope["maxSignatures"],
+            "maxSignatures": max_signatures,
         },
     }
     if "derivationPath" in sk:
@@ -202,15 +218,16 @@ def session_key_delegation_preimage(session_key):
 def session_revocation_preimage(revocation):
     """The bytes a principal signs to revoke a session key."""
     r = revocation
+    revoked_at = _as_safe_uint(r.get("revokedAt")) if isinstance(r, dict) else None
     if not (
         isinstance(r, dict)
         and isinstance(r.get("sessionId"), str)
-        and _is_safe_uint(r.get("revokedAt"))
+        and revoked_at is not None
         and isinstance(r.get("reason"), str)
     ):
         raise SigningPreimageError(
             "malformed-revocation", "revocation fields do not match the revocation contract"
         )
     return _compact_json(
-        {"sessionId": r["sessionId"], "revokedAt": r["revokedAt"], "reason": r["reason"]}
+        {"sessionId": r["sessionId"], "revokedAt": revoked_at, "reason": r["reason"]}
     ).encode("utf-8")

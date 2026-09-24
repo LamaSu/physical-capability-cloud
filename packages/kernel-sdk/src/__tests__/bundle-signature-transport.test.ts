@@ -44,6 +44,16 @@ describe("verifyBundleSignature — no widening over the pre-LO-EV-1 verifier", 
     ["one extra nibble", `${SIG_HEX}0`],
     ["one nibble short", SIG_HEX.slice(0, -1)],
     ["empty", ""],
+    // R20 round 2: oversized, whitespace and NUL transports.
+    ["130 hex characters (65 bytes)", `${SIG_HEX}00`],
+    ["132 hex characters", `${SIG_HEX}0000`],
+    ["trailing space", `${SIG_HEX} `],
+    ["trailing newline", `${SIG_HEX}\n`],
+    ["trailing NUL", `${SIG_HEX}\u0000`],
+    ["leading space", ` ${SIG_HEX}`],
+    ["inner space", `${SIG_HEX.slice(0, 64)} ${SIG_HEX.slice(64)}`],
+    ["inner NUL", `${SIG_HEX.slice(0, 64)}\u0000${SIG_HEX.slice(64)}`],
+    ["non-hex character", `${SIG_HEX.slice(0, -1)}g`],
   ];
 
   for (const [name, value] of cases) {
@@ -69,6 +79,20 @@ describe("verifyBundleSignature — no widening over the pre-LO-EV-1 verifier", 
   it("documented narrowing: a trailing extra nibble used to be truncated and verify; it no longer does", () => {
     expect(oldVerify(bundleWith(`${SIG_HEX}0`), keyPair.publicKey)).toBe(true);
     expect(verifyBundleSignature(bundleWith(`${SIG_HEX}0`), keyPair.publicKey)).toBe(false);
+  });
+
+  it("documented narrowing: one trailing whitespace or NUL used to be dropped and verify; it no longer does", () => {
+    for (const value of [`${SIG_HEX} `, `${SIG_HEX}\n`, `${SIG_HEX}\u0000`]) {
+      expect(oldVerify(bundleWith(value), keyPair.publicKey), JSON.stringify(value)).toBe(true);
+      expect(verifyBundleSignature(bundleWith(value), keyPair.publicKey), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it("every malformed transport is rejected now: oversized, whitespace, NUL, non-hex", () => {
+    const malformed = cases.filter(([, v]) => v !== SIG_HEX && v !== SIG_HEX.toUpperCase());
+    for (const [name, value] of malformed) {
+      expect(verifyBundleSignature(bundleWith(value), keyPair.publicKey), name).toBe(false);
+    }
   });
 
   it("a non-string signature value fails closed instead of throwing", () => {
