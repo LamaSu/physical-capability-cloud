@@ -33,6 +33,7 @@ import {
   verifyDeviceSignedEvidence,
   naclEd25519Verify,
   resolveSettlementEvidence,
+  verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
   machineLogVerifierLive,
   deviceEvidenceSettlementFlagEnabled,
@@ -830,5 +831,122 @@ describe("device evidence — an empty derivationPath is part of the signed dele
       contractId: "job-empty-path",
     });
     expect(result).toMatchObject({ ok: true });
+  });
+});
+
+// ── LO-EV-9 review R1: re-verifying the pinned settlement anchor on recovery ──
+
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
+
+describe("verifyPinnedSettlementEvidence — what recovery may settle on", () => {
+  async function deviceRow(jobId = SUBJECT_JOB, kernelId = SUBJECT_KERNEL) {
+    const dev = await boundDeviceEvidence({ jobId, kernelId });
+    const row = {
+      id: "ev-relayed-1",
+      jobId,
+      stepId: "operator-relay",
+      kernelId,
+      assuranceTier: 0,
+      createdAt: "2026-09-24T12:00:00.000Z",
+      bundleHash: dev.bundleHash,
+      kernelSignature: dev.signature,
+    };
+    return { dev, row, signer: ed25519Signer(dev.keyPair.publicKey) };
+  }
+
+  function gatewayRow(events: Array<Record<string, unknown>> = []) {
+    const meta = {
+      id: "bundle-gw-1",
+      jobId: SUBJECT_JOB,
+      stepId: "step-1",
+      kernelId: SUBJECT_KERNEL,
+      assuranceTier: 0,
+      createdAt: "2026-09-24T12:00:00.000Z",
+      kernelSignature: { signer: ZERO_ADDRESS, algorithm: "ed25519", value: "gateway-auto-sign" },
+    };
+    const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta, events as never)).digest("hex")}`;
+    return { ...meta, bundleHash };
+  }
+
+  it("a device anchor that still binds and verifies may be settled", async () => {
+    const { dev, row, signer } = await deviceRow();
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("a device anchor whose stored events were altered may not", async () => {
+    const { dev, row, signer } = await deviceRow();
+    const altered = dev.events.map((e, i) => (i === 0 ? { ...e, payload: { ...e.payload, extra: 1 } } : e));
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: altered,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: false, reason: "event-hash-mismatch" });
+  });
+
+  it("a device anchor is re-checked against the kernel's registered key", async () => {
+    const { dev, row } = await deviceRow();
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: ed25519Signer(nacl.sign.keyPair().publicKey),
+      }),
+    ).toEqual({ ok: false, reason: "signature-invalid" });
+  });
+
+  it("a row for another job or another kernel may not be settled for this one", async () => {
+    const { dev, row, signer } = await deviceRow();
+    const base = { events: dev.events, registeredSigner: signer };
+    expect(
+      await verifyPinnedSettlementEvidence({ ...base, jobId: "job-other", kernelId: SUBJECT_KERNEL, row }),
+    ).toEqual({ ok: false, reason: "pinned-evidence-job-mismatch" });
+    expect(
+      await verifyPinnedSettlementEvidence({ ...base, jobId: SUBJECT_JOB, kernelId: "kernel-other", row }),
+    ).toEqual({ ok: false, reason: "pinned-evidence-kernel-mismatch" });
+  });
+
+  it("a gateway anchor must recompute from its stored envelope", async () => {
+    const events = [
+      { id: "e1", type: "execution_completed", timestamp: "t", source: { deviceId: "gateway", deviceType: "controller", kernelId: SUBJECT_KERNEL }, payload: { toolCallCount: 1 }, hash: "sha256:" + "0".repeat(64) },
+    ];
+    const row = gatewayRow(events);
+    const base = { jobId: SUBJECT_JOB, kernelId: SUBJECT_KERNEL, registeredSigner: null };
+    expect(await verifyPinnedSettlementEvidence({ ...base, row, events })).toEqual({ ok: true });
+    const altered = [{ ...events[0]!, payload: { toolCallCount: 2 } }];
+    expect(await verifyPinnedSettlementEvidence({ ...base, row, events: altered })).toEqual({
+      ok: false,
+      reason: "pinned-evidence-hash-mismatch",
+    });
+    expect(await verifyPinnedSettlementEvidence({ ...base, row: { ...row, bundleHash: "sha256:trapped" }, events })).toEqual({
+      ok: false,
+      reason: "pinned-evidence-hash-mismatch",
+    });
+  });
+
+  it("no pinned row, no settlement", async () => {
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row: undefined,
+        events: [],
+        registeredSigner: null,
+      }),
+    ).toEqual({ ok: false, reason: "no-pinned-evidence" });
   });
 });
