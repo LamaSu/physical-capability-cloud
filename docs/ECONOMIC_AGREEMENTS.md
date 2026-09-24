@@ -521,8 +521,17 @@ At accept time the accepted-plan compiler asks economics to split each unit's ne
 | `PARTY_NOT_REGISTERED`, `PARTY_MISMATCH` | A party a license names (the licensor, or a declared distribution's party) is missing from the registry, or is paid at an address other than the registry's. |
 | `UNIT_SET_MISMATCH`, `GROSS_MISMATCH` | The units are not the plan's nodes, or a gross is not the server's quote. |
 | `UNIT_FACTS_MISMATCH` | A unit's components (with their uses) or measures are not what the server says runs in it. A licensed component therefore cannot be left out or under-counted. |
+| `QUOTE_NOT_COVERED` | A unit's gross is less than its operator's live quote. |
 | `COMPILE_REFUSED` | The compile, given the server's fee, schedules, rate facts, authority floor and forbidden recipients, refuses. The detail lists the codes. |
 | `FEE_RULE_DIVERGED` | The compile's per-unit fee differs from the plan's. |
+| `OPERATOR_BELOW_QUOTE` | The unit pays the operator's payout address less than `quote − floor(quote × feeBps / 10000)`. |
+
+**The operator's quote is its price for its own work.** What an agreement adds (licenses, modules, methods, the composer's margin) is on top of the quote, paid by the buyer. It is never taken out of the operator's price.
+- Each plan unit carries the operator's live `quote`. `g`, what the buyer funds, is the agreement's unit gross.
+- The accepted-plan compiler reads each unit's gross before compiling (`agreementUnitGross`) so it can reserve it.
+- The binding then re-checks that gross against the plan and the quote (`GROSS_MISMATCH`, `QUOTE_NOT_COVERED`).
+- After compiling it checks the operator's floor (`OPERATOR_BELOW_QUOTE`).
+- A royalty the operator itself owes (for example for a kit on its own printer) is part of its quote, and it prices that in.
 
 On success it returns each unit's payouts in plan order, with `agreementHash` and both terms hashes.
 
