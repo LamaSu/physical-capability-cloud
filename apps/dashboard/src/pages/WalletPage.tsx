@@ -9,111 +9,78 @@ import {
   EmptyState,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
 import { CdpFundedKeyOnramp } from "../components/CdpFundedKeyOnramp.js";
+import { NotLiveState, DemoBanner } from "../components/DemoState.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import {
+  DEMO_WALLET_SUMMARY,
+  DEMO_RAMP_SESSIONS,
+  DEMO_CREDIT_USAGE,
+  DEMO_COUNTRIES,
+  DEMO_WITHDRAW_FEE_PERCENT,
+  DEMO_SETTLEMENT_ADDRESS,
+  type DemoRampProvider,
+  type DemoRampSession,
+} from "../demo/WalletPage.fixtures.js";
+
+/**
+ * Wallet & Funding.
+ *
+ * Live: the Funded Key tab (components/CdpFundedKeyOnramp.tsx). It calls the
+ * gateway's CDP wallet, Coinbase onramp and spend-permission routes and shows
+ * what they return, including their errors.
+ *
+ * Not live: balances, card and bank funding, withdrawals, API credits and the
+ * activity list. The prototype for them read GET /api/wallet/balance and
+ * posted to /api/fiat-ramp/yellowcard/withdrawal and /api/credits/purchase,
+ * none of which the gateway serves; it posted to the Stripe and Yellowcard
+ * deposit routes without the fields they require; and it swallowed every
+ * failure behind a 1.5 s spinner while showing invented balances. Outside demo
+ * mode each of those sections says what is missing. In demo mode
+ * (lib/demo-mode.ts) the prototype renders sample values under a DemoBanner,
+ * and its buttons submit nothing.
+ */
 
 // ── Types ────────────────────────────────────────────────────────
 
 type Tab = "fund" | "withdraw" | "credits" | "activity" | "fundedkey";
-type Provider = "stripe" | "yellowcard" | "wise" | "all";
+type ProviderFilter = DemoRampProvider | "all";
 
-interface FiatRampSession {
-  id: string;
-  provider: Provider;
-  direction: "deposit" | "withdrawal";
-  amountUsd: string;
-  amountLocal?: string;
-  localCurrency?: string;
-  status: "pending" | "completed" | "failed";
-  createdAt: number;
-}
+// ── What the gateway doesn't serve (shown outside demo mode) ─────
 
-interface CreditUsageEntry {
-  id: string;
-  description: string;
-  credits: number;
-  createdAt: number;
-}
+const BALANCE_NOT_LIVE =
+  "No gateway route reports a balance, pending deposits or total funded for your account " +
+  "(GET /api/wallet/balance is not served).";
 
-// ── Mock Data ────────────────────────────────────────────────────
-
-const MOCK_SESSIONS: FiatRampSession[] = [
-  {
-    id: "fr_001",
-    provider: "stripe",
-    direction: "deposit",
-    amountUsd: "500.00",
-    status: "completed",
-    createdAt: Date.now() - 3_600_000,
+const NOT_LIVE: Record<Exclude<Tab, "fundedkey">, { what: string; detail: string }> = {
+  fund: {
+    what: "Funding by card or bank transfer",
+    detail:
+      "This form can't fund a wallet. The gateway's Stripe and Yellowcard deposit routes need a " +
+      "wallet address and identity details it doesn't collect, and they return simulated sessions " +
+      "unless provider keys are configured. The Funded Key tab creates a wallet and links to " +
+      "Coinbase's card checkout.",
   },
-  {
-    id: "fr_002",
-    provider: "yellowcard",
-    direction: "deposit",
-    amountUsd: "200.00",
-    amountLocal: "323,460",
-    localCurrency: "NGN",
-    status: "completed",
-    createdAt: Date.now() - 7_200_000,
+  withdraw: {
+    what: "Withdrawal to a bank or mobile money",
+    detail:
+      "This form posted to /api/fiat-ramp/yellowcard/withdrawal, which the gateway doesn't serve. " +
+      "The gateway's Yellowcard withdrawal route needs a wallet address, a channel ID and sender " +
+      "identity details this form doesn't collect. Nothing is sent from this page.",
   },
-  {
-    id: "fr_003",
-    provider: "yellowcard",
-    direction: "withdrawal",
-    amountUsd: "150.00",
-    amountLocal: "242,595",
-    localCurrency: "NGN",
-    status: "pending",
-    createdAt: Date.now() - 1_800_000,
+  credits: {
+    what: "API credits",
+    detail:
+      "API credits are retired: the gateway bills in USDC, and no route sells credits or reports " +
+      "a credit balance (POST /api/credits/purchase is not served).",
   },
-  {
-    id: "fr_004",
-    provider: "stripe",
-    direction: "deposit",
-    amountUsd: "1000.00",
-    status: "completed",
-    createdAt: Date.now() - 86_400_000,
+  activity: {
+    what: "Your funding activity",
+    detail:
+      "No gateway route lists your own deposits and withdrawals. GET /api/fiat-ramp/sessions " +
+      "returns every session in the gateway's memory, for all accounts, and loses them on restart.",
   },
-  {
-    id: "fr_005",
-    provider: "wise",
-    direction: "withdrawal",
-    amountUsd: "300.00",
-    status: "completed",
-    createdAt: Date.now() - 172_800_000,
-  },
-  {
-    id: "fr_006",
-    provider: "yellowcard",
-    direction: "deposit",
-    amountUsd: "75.00",
-    amountLocal: "121,297",
-    localCurrency: "NGN",
-    status: "failed",
-    createdAt: Date.now() - 259_200_000,
-  },
-];
-
-const MOCK_CREDIT_USAGE: CreditUsageEntry[] = [
-  { id: "cu_001", description: "Agent job submission — kernel-03", credits: -250, createdAt: Date.now() - 1_200_000 },
-  { id: "cu_002", description: "API credits purchased", credits: 10_000, createdAt: Date.now() - 3_600_000 },
-  { id: "cu_003", description: "Evidence verification — bundle_xyz", credits: -100, createdAt: Date.now() - 7_200_000 },
-  { id: "cu_004", description: "Protocol run — FDM v1.2", credits: -500, createdAt: Date.now() - 14_400_000 },
-  { id: "cu_005", description: "API credits purchased", credits: 5_000, createdAt: Date.now() - 86_400_000 },
-];
-
-const COUNTRIES = [
-  { code: "NG", label: "Nigeria", currency: "NGN", rate: 1617.3, channels: ["Bank Transfer", "Mobile Money"] },
-  { code: "KE", label: "Kenya", currency: "KES", rate: 129.5, channels: ["Bank Transfer", "M-PESA"] },
-  { code: "ZA", label: "South Africa", currency: "ZAR", rate: 18.6, channels: ["Bank Transfer", "EFT"] },
-  { code: "GH", label: "Ghana", currency: "GHS", rate: 15.7, channels: ["Bank Transfer", "Mobile Money"] },
-  { code: "BR", label: "Brazil", currency: "BRL", rate: 5.02, channels: ["Bank Transfer", "PIX"] },
-  { code: "MX", label: "Mexico", currency: "MXN", rate: 17.1, channels: ["Bank Transfer", "SPEI"] },
-  { code: "IN", label: "India", currency: "INR", rate: 83.4, channels: ["Bank Transfer", "UPI"] },
-  { code: "PH", label: "Philippines", currency: "PHP", rate: 55.9, channels: ["Bank Transfer", "GCash"] },
-];
-
-const SETTLEMENT_CONTRACT = "0x91E60e0613810449d098b0b5Ec8b51A0FE8c8985";
+};
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -128,6 +95,9 @@ function formatTime(ts: number): string {
 function formatNumber(n: number, decimals = 2): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
+
+const DISABLED_BUTTON =
+  "w-full px-4 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-white/30 cursor-not-allowed";
 
 // ── Inline SVG Icons ─────────────────────────────────────────────
 
@@ -205,6 +175,11 @@ function TrustBadges({ items }: { items: string[] }) {
   );
 }
 
+/** Under every prototype button: in demo mode nothing is submitted. */
+function DemoActionNote() {
+  return <p className="text-[11px] text-violet-200/60">Demo: this button doesn't submit anything.</p>;
+}
+
 function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
   const tabs: { id: Tab; label: string }[] = [
     { id: "fund", label: "Fund Wallet" },
@@ -232,45 +207,58 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
   );
 }
 
-// ── Tab: Fund Wallet ─────────────────────────────────────────────
+// ── Demo: KPI row ────────────────────────────────────────────────
+
+function DemoKpiRow() {
+  const s = DEMO_WALLET_SUMMARY;
+  return (
+    <div className="grid grid-cols-4 gap-4">
+      <GlassPanel padding="md" glow="green">
+        <DataCell
+          label="Wallet Balance"
+          value={<AmountDisplay amount={s.walletBalance} size="md" glow />}
+        />
+      </GlassPanel>
+      <GlassPanel padding="md">
+        <DataCell
+          label="Pending Deposits"
+          value={s.pendingDeposits}
+          sub="awaiting confirmation"
+          mono
+        />
+      </GlassPanel>
+      <GlassPanel padding="md">
+        <DataCell
+          label="Total Funded"
+          value={<AmountDisplay amount={s.totalFunded} size="md" />}
+          sub="all-time"
+        />
+      </GlassPanel>
+      <GlassPanel padding="md">
+        <DataCell
+          label="API Credits"
+          value={s.creditBalance.toLocaleString("en-US")}
+          sub="remaining"
+          mono
+        />
+      </GlassPanel>
+    </div>
+  );
+}
+
+// ── Demo tab: Fund Wallet ────────────────────────────────────────
 
 function FundWalletTab() {
   const [stripeAmount, setStripeAmount] = React.useState("");
-  const [stripeSubmitting, setStripeSubmitting] = React.useState(false);
 
   const [ycAmount, setYcAmount] = React.useState("");
   const [ycCountryIdx, setYcCountryIdx] = React.useState(0);
   const [ycChannel, setYcChannel] = React.useState(0);
-  const [ycSubmitting, setYcSubmitting] = React.useState(false);
 
-  const selectedCountry = COUNTRIES[ycCountryIdx];
+  const selectedCountry = DEMO_COUNTRIES[ycCountryIdx];
   const ycLocalAmount = parseFloat(ycAmount) > 0
     ? formatNumber(parseFloat(ycAmount) * selectedCountry.rate, 2)
     : "—";
-
-  const handleStripe = async () => {
-    setStripeSubmitting(true);
-    await fetch("/api/fiat-ramp/stripe/onramp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({ amountUsd: stripeAmount }),
-    }).catch(() => {});
-    setTimeout(() => setStripeSubmitting(false), 1500);
-  };
-
-  const handleYellowcard = async () => {
-    setYcSubmitting(true);
-    await fetch("/api/fiat-ramp/yellowcard/deposit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({
-        amountUsd: ycAmount,
-        country: selectedCountry.code,
-        channel: selectedCountry.channels[ycChannel],
-      }),
-    }).catch(() => {});
-    setTimeout(() => setYcSubmitting(false), 1500);
-  };
 
   return (
     <div className="grid grid-cols-2 gap-4">
@@ -305,17 +293,10 @@ function FundWalletTab() {
             </div>
           </div>
 
-          <button
-            onClick={handleStripe}
-            disabled={stripeSubmitting || !stripeAmount}
-            className={`w-full px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
-              stripeSubmitting || !stripeAmount
-                ? "bg-white/5 text-white/30 cursor-not-allowed"
-                : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
-            }`}
-          >
-            {stripeSubmitting ? "Opening Stripe…" : "Fund via Stripe"}
+          <button type="button" disabled className={DISABLED_BUTTON}>
+            Fund via Stripe
           </button>
+          <DemoActionNote />
 
           <TrustBadges items={["Stripe handles KYC", "Fraud protection included", "USDC on Base"]} />
 
@@ -349,7 +330,7 @@ function FundWalletTab() {
               onChange={(e) => { setYcCountryIdx(Number(e.target.value)); setYcChannel(0); }}
               className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors"
             >
-              {COUNTRIES.map((c, i) => (
+              {DEMO_COUNTRIES.map((c, i) => (
                 <option key={c.code} value={i} className="bg-[#0a0a0a]">{c.label} ({c.currency})</option>
               ))}
             </select>
@@ -399,17 +380,10 @@ function FundWalletTab() {
             </div>
           </div>
 
-          <button
-            onClick={handleYellowcard}
-            disabled={ycSubmitting || !ycAmount}
-            className={`w-full px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
-              ycSubmitting || !ycAmount
-                ? "bg-white/5 text-white/30 cursor-not-allowed"
-                : "bg-yellow-500/15 text-yellow-400 border border-yellow-500/25 hover:bg-yellow-500/25"
-            }`}
-          >
-            {ycSubmitting ? "Connecting…" : "Deposit via Yellowcard"}
+          <button type="button" disabled className={DISABLED_BUTTON}>
+            Deposit via Yellowcard
           </button>
+          <DemoActionNote />
 
           <TrustBadges items={["Licensed in 34 countries", "Instant mobile money"]} />
         </div>
@@ -432,8 +406,8 @@ function FundWalletTab() {
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs text-white/30">
-              Settlement contract:
-              <AddressDisplay address={SETTLEMENT_CONTRACT} chars={6} />
+              Settlement contract (sample):
+              <AddressDisplay address={DEMO_SETTLEMENT_ADDRESS} chars={6} />
             </div>
           </div>
         </GlassPanel>
@@ -442,7 +416,7 @@ function FundWalletTab() {
   );
 }
 
-// ── Tab: Withdraw ────────────────────────────────────────────────
+// ── Demo tab: Withdraw ───────────────────────────────────────────
 
 function WithdrawTab() {
   const [amount, setAmount] = React.useState("");
@@ -451,9 +425,8 @@ function WithdrawTab() {
   const [accountName, setAccountName] = React.useState("");
   const [accountNumber, setAccountNumber] = React.useState("");
   const [phone, setPhone] = React.useState("");
-  const [submitting, setSubmitting] = React.useState(false);
 
-  const selectedCountry = COUNTRIES[countryIdx];
+  const selectedCountry = DEMO_COUNTRIES[countryIdx];
   const localAmount = parseFloat(amount) > 0
     ? formatNumber(parseFloat(amount) * selectedCountry.rate, 2)
     : "—";
@@ -461,26 +434,9 @@ function WithdrawTab() {
     || selectedCountry.channels[payoutMethod]?.toLowerCase().includes("pesa")
     || selectedCountry.channels[payoutMethod]?.toLowerCase().includes("gcash");
 
-  const FEE_PERCENT = 0.015;
   const numAmount = parseFloat(amount) || 0;
-  const feeAmount = numAmount * FEE_PERCENT;
+  const feeAmount = numAmount * DEMO_WITHDRAW_FEE_PERCENT;
   const netAmount = numAmount - feeAmount;
-
-  const handleSubmit = async () => {
-    setSubmitting(true);
-    await fetch("/api/fiat-ramp/yellowcard/withdrawal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({
-        amountUsd: amount,
-        country: selectedCountry.code,
-        channel: selectedCountry.channels[payoutMethod],
-        accountName,
-        accountNumber: isMobileMoney ? phone : accountNumber,
-      }),
-    }).catch(() => {});
-    setTimeout(() => setSubmitting(false), 1500);
-  };
 
   return (
     <div className="grid grid-cols-3 gap-4">
@@ -523,7 +479,7 @@ function WithdrawTab() {
                   onChange={(e) => { setCountryIdx(Number(e.target.value)); setPayoutMethod(0); }}
                   className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 focus:border-green-500/30 focus:outline-none transition-colors"
                 >
-                  {COUNTRIES.map((c, i) => (
+                  {DEMO_COUNTRIES.map((c, i) => (
                     <option key={c.code} value={i} className="bg-[#0a0a0a]">{c.label}</option>
                   ))}
                 </select>
@@ -605,9 +561,14 @@ function WithdrawTab() {
                 Send to institutional bank accounts in 40+ currencies via Wise.
                 Ideal for enterprises that prefer traditional banking rails.
               </p>
-              <button className="mt-2 px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white/50 hover:text-white/70 text-xs transition-colors">
+              <button
+                type="button"
+                disabled
+                className="mt-2 px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white/30 text-xs cursor-not-allowed"
+              >
                 Configure Wise Payout
               </button>
+              <DemoActionNote />
             </div>
           </div>
         </GlassPanel>
@@ -621,7 +582,10 @@ function WithdrawTab() {
             <div className="space-y-2">
               {[
                 { label: "Amount", value: numAmount > 0 ? `$${formatNumber(numAmount)}` : "—" },
-                { label: "Network fee (1.5%)", value: numAmount > 0 ? `-$${formatNumber(feeAmount)}` : "—" },
+                {
+                  label: `Network fee (${formatNumber(DEMO_WITHDRAW_FEE_PERCENT * 100, 1)}%)`,
+                  value: numAmount > 0 ? `-$${formatNumber(feeAmount)}` : "—",
+                },
               ].map(({ label, value }) => (
                 <div key={label} className="flex items-center justify-between text-xs">
                   <span className="text-white/40">{label}</span>
@@ -653,17 +617,10 @@ function WithdrawTab() {
               </div>
             </div>
 
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || !amount || !accountName || (!isMobileMoney ? !accountNumber : !phone)}
-              className={`w-full px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                submitting || !amount || !accountName
-                  ? "bg-white/5 text-white/30 cursor-not-allowed"
-                  : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
-              }`}
-            >
-              {submitting ? "Submitting…" : "Submit Withdrawal"}
+            <button type="button" disabled className={DISABLED_BUTTON}>
+              Submit Withdrawal
             </button>
+            <DemoActionNote />
           </div>
         </GlassPanel>
 
@@ -678,25 +635,14 @@ function WithdrawTab() {
   );
 }
 
-// ── Tab: API Credits ─────────────────────────────────────────────
+// ── Demo tab: API Credits ────────────────────────────────────────
 
 function CreditsTab({ creditBalance }: { creditBalance: number }) {
   const [buyAmount, setBuyAmount] = React.useState("");
-  const [buying, setBuying] = React.useState(false);
 
   const creditsToReceive = parseFloat(buyAmount) > 0
     ? Math.floor(parseFloat(buyAmount) * 100)
     : 0;
-
-  const handleBuy = async () => {
-    setBuying(true);
-    await fetch("/api/credits/purchase", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({ amountUsd: buyAmount }),
-    }).catch(() => {});
-    setTimeout(() => setBuying(false), 1500);
-  };
 
   return (
     <div className="grid grid-cols-3 gap-4">
@@ -706,7 +652,7 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
           <div className="space-y-1">
             <p className="text-[10px] uppercase tracking-wider text-white/40">Current Credit Balance</p>
             <div className="text-4xl font-mono font-bold text-emerald-400">
-              {creditBalance.toLocaleString()}
+              {creditBalance.toLocaleString("en-US")}
             </div>
             <p className="text-xs text-white/30">API credits</p>
           </div>
@@ -731,7 +677,7 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
               </div>
               {creditsToReceive > 0 && (
                 <p className="text-xs text-white/40 font-mono">
-                  You will receive: <span className="text-emerald-400">{creditsToReceive.toLocaleString()} credits</span>
+                  You will receive: <span className="text-emerald-400">{creditsToReceive.toLocaleString("en-US")} credits</span>
                 </p>
               )}
             </div>
@@ -742,17 +688,10 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
               Credits deducted per API call, job submission, and evidence verification
             </div>
 
-            <button
-              onClick={handleBuy}
-              disabled={buying || !buyAmount}
-              className={`w-full px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                buying || !buyAmount
-                  ? "bg-white/5 text-white/30 cursor-not-allowed"
-                  : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
-              }`}
-            >
-              {buying ? "Processing…" : "Buy Credits"}
+            <button type="button" disabled className={DISABLED_BUTTON}>
+              Buy Credits
             </button>
+            <DemoActionNote />
           </div>
         </GlassPanel>
       </div>
@@ -761,7 +700,7 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
       <div className="space-y-3">
         <p className="text-[10px] uppercase tracking-wider text-white/40">Recent Usage</p>
         <div className="space-y-2">
-          {MOCK_CREDIT_USAGE.map((entry) => (
+          {DEMO_CREDIT_USAGE.map((entry) => (
             <GlassPanel key={entry.id} padding="sm">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1 min-w-0">
@@ -771,7 +710,7 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
                 <span className={`text-sm font-mono font-semibold shrink-0 ${
                   entry.credits > 0 ? "text-emerald-400" : "text-red-400/80"
                 }`}>
-                  {entry.credits > 0 ? "+" : ""}{entry.credits.toLocaleString()}
+                  {entry.credits > 0 ? "+" : ""}{entry.credits.toLocaleString("en-US")}
                 </span>
               </div>
             </GlassPanel>
@@ -782,30 +721,30 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
   );
 }
 
-// ── Tab: Activity ─────────────────────────────────────────────────
+// ── Demo tab: Activity ────────────────────────────────────────────
 
-function ActivityTab({ sessions }: { sessions: FiatRampSession[] }) {
-  const [filterProvider, setFilterProvider] = React.useState<Provider>("all");
+function ActivityTab({ sessions }: { sessions: DemoRampSession[] }) {
+  const [filterProvider, setFilterProvider] = React.useState<ProviderFilter>("all");
 
   const filtered = filterProvider === "all"
     ? sessions
     : sessions.filter((s) => s.provider === filterProvider);
 
-  const providerFilters: { id: Provider; label: string }[] = [
+  const providerFilters: { id: ProviderFilter; label: string }[] = [
     { id: "all", label: "All" },
     { id: "stripe", label: "Stripe" },
     { id: "yellowcard", label: "Yellowcard" },
     { id: "wise", label: "Wise" },
   ];
 
-  function providerBadgeColor(p: Provider): "teal" | "gold" | "green" | "gray" {
+  function providerBadgeColor(p: DemoRampProvider): "teal" | "gold" | "green" | "gray" {
     if (p === "stripe") return "teal";
     if (p === "yellowcard") return "gold";
     if (p === "wise") return "green";
     return "gray";
   }
 
-  function sessionStatus(s: FiatRampSession["status"]): "completed" | "executing" | "failed" {
+  function sessionStatus(s: DemoRampSession["status"]): "completed" | "executing" | "failed" {
     if (s === "completed") return "completed";
     if (s === "pending") return "executing";
     return "failed";
@@ -894,81 +833,50 @@ function ActivityTab({ sessions }: { sessions: FiatRampSession[] }) {
 export function WalletPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   React.useEffect(() => {
-    setPageMeta("Wallet & Funding", "Fund your agent wallet or withdraw earnings");
+    setPageMeta("Wallet & Funding", "Agent wallet, funding and withdrawals");
   }, [setPageMeta]);
 
   const [activeTab, setActiveTab] = React.useState<Tab>("fund");
-
-  // Mock wallet data — try API first, fall back to mock
-  const [walletBalance, setWalletBalance] = React.useState("1,234.56");
-  const [pendingDeposits, setPendingDeposits] = React.useState(2);
-  const [totalFunded, setTotalFunded] = React.useState("6,420.00");
-  const [creditBalance, setCreditBalance] = React.useState(14_150);
-  const [sessions, setSessions] = React.useState<FiatRampSession[]>(MOCK_SESSIONS);
-
-  React.useEffect(() => {
-    fetch("/api/wallet/balance", { headers: { ...getAuthHeaders() } })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.balance) setWalletBalance(d.balance);
-        if (d.pendingDeposits !== undefined) setPendingDeposits(d.pendingDeposits);
-        if (d.totalFunded) setTotalFunded(d.totalFunded);
-        if (d.creditBalance !== undefined) setCreditBalance(d.creditBalance);
-      })
-      .catch(() => {}); // keep mock
-
-    fetch("/api/fiat-ramp/sessions", { headers: { ...getAuthHeaders() } })
-      .then((r) => r.json())
-      .then((d) => {
-        if (Array.isArray(d.sessions) && d.sessions.length > 0) setSessions(d.sessions);
-      })
-      .catch(() => {});
-  }, []);
+  const demo = isDemoMode();
 
   return (
     <div className="space-y-6 p-6">
-      {/* KPI Row */}
-      <div className="grid grid-cols-4 gap-4">
-        <GlassPanel padding="md" glow="green">
-          <DataCell
-            label="Wallet Balance"
-            value={<AmountDisplay amount={walletBalance} size="md" glow />}
-          />
-        </GlassPanel>
+      {demo && <DemoBanner what="Wallet & Funding" />}
+
+      {/* KPI Row: no route serves balances, so outside demo mode say so */}
+      {demo ? (
+        <DemoKpiRow />
+      ) : (
         <GlassPanel padding="md">
-          <DataCell
-            label="Pending Deposits"
-            value={pendingDeposits}
-            sub="awaiting confirmation"
-            mono
-          />
+          <NotLiveState what="Your wallet balance" detail={BALANCE_NOT_LIVE} hasDemo />
         </GlassPanel>
-        <GlassPanel padding="md">
-          <DataCell
-            label="Total Funded"
-            value={<AmountDisplay amount={totalFunded} size="md" />}
-            sub="all-time"
-          />
-        </GlassPanel>
-        <GlassPanel padding="md">
-          <DataCell
-            label="API Credits"
-            value={creditBalance.toLocaleString()}
-            sub="remaining"
-            mono
-          />
-        </GlassPanel>
-      </div>
+      )}
 
       {/* Tab Bar */}
       <TabBar active={activeTab} onChange={setActiveTab} />
 
       {/* Tab Content */}
-      {activeTab === "fund" && <FundWalletTab />}
-      {activeTab === "withdraw" && <WithdrawTab />}
-      {activeTab === "credits" && <CreditsTab creditBalance={creditBalance} />}
-      {activeTab === "activity" && <ActivityTab sessions={sessions} />}
-      {activeTab === "fundedkey" && <CdpFundedKeyOnramp />}
+      {activeTab === "fundedkey" ? (
+        <div className="space-y-3">
+          {demo && (
+            <p className="text-[11px] text-white/40">
+              This tab is live in demo mode too: it calls the gateway and shows what it returns.
+            </p>
+          )}
+          <CdpFundedKeyOnramp />
+        </div>
+      ) : demo ? (
+        <>
+          {activeTab === "fund" && <FundWalletTab />}
+          {activeTab === "withdraw" && <WithdrawTab />}
+          {activeTab === "credits" && <CreditsTab creditBalance={DEMO_WALLET_SUMMARY.creditBalance} />}
+          {activeTab === "activity" && <ActivityTab sessions={DEMO_RAMP_SESSIONS} />}
+        </>
+      ) : (
+        <GlassPanel padding="lg">
+          <NotLiveState what={NOT_LIVE[activeTab].what} detail={NOT_LIVE[activeTab].detail} hasDemo />
+        </GlassPanel>
+      )}
     </div>
   );
 }
