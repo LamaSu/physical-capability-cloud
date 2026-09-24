@@ -330,18 +330,25 @@ export interface SettlementRecordView {
  * from the job's OWN milestone and reconciled with the escrow's own status; any
  * disagreement is `unknown`.
  *
- *   paid       this job's milestone record says released to the operator, and the escrow
- *              record does not contradict it (not refunded, disputed, slashed, expired or
- *              unrecognized). A RECORD claim: see `payoutConfirmation`.
- *   refunded   this job's milestone record says refunded to the payer, and the escrow
- *              record does not contradict it. The operator was NOT paid.
- *   not_paid   this job's milestone is not released and the escrow record does not claim
- *              everything was released
- *   simulated  the linked escrow is a mock-settlement record. Nothing was paid.
- *   unknown    not linked, ambiguous, conflicting, unreadable, no milestone for this job,
- *              an unrecognized status, or milestone and escrow records that disagree
+ *   paid               RESERVED for an authoritative settlement read model: a V-next
+ *                      lifecycle or receipt that classifySettlementRecord (@pcc/spec) shows
+ *                      as released, its fields agreeing. The gateway's escrow records are
+ *                      bare status words, which never prove payment (PX-1; steward #2490),
+ *                      so they never produce it.
+ *   reported_released  this job's milestone record says released, and the escrow record
+ *                      does not contradict it. A RECORD claim that no settlement read
+ *                      confirms (on a V-next escrow "released" can mean the outcome was
+ *                      allocated, not paid out): never shown as paid. See `payoutConfirmation`.
+ *   refunded           this job's milestone record says refunded to the payer, and the escrow
+ *                      record does not contradict it. The operator was NOT paid.
+ *   not_paid           this job's milestone is not released and the escrow record does not
+ *                      claim everything was released
+ *   simulated          the linked escrow is a mock-settlement record. Nothing was paid.
+ *   unknown            not linked, ambiguous, conflicting, unreadable, no milestone for this
+ *                      job, an unrecognized or ambiguous status, or milestone and escrow
+ *                      records that disagree
  */
-export type PayoutState = "paid" | "refunded" | "not_paid" | "simulated" | "unknown";
+export type PayoutState = "paid" | "reported_released" | "refunded" | "not_paid" | "simulated" | "unknown";
 
 export interface SettlementAxis {
   link: SettlementLink;
@@ -355,9 +362,9 @@ export interface SettlementAxis {
   /** The job's own milestone record when it decided the payout; otherwise null. */
   payoutBasis: "milestone_record" | null;
   /**
-   * How far a `paid` or `refunded` claim is confirmed. `record_only`: it comes from the
-   * gateway's escrow record; no chain receipt or finalized read confirms it. Null when
-   * the payout claims no movement of money.
+   * How far a `reported_released` or `refunded` claim is confirmed. `record_only`: it comes
+   * from the gateway's escrow record; no settlement read, chain receipt or finalized read
+   * confirms it. Null when the payout claims no movement of money.
    */
   payoutConfirmation: "record_only" | null;
   error: ReadError | null;

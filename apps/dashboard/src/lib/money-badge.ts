@@ -3,9 +3,10 @@
  *
  * Semantics come from the ONE canonical map in @pcc/spec (classifyMoneyStatus):
  * exact keys, no substring inference, unknown fails closed. This module only
- * maps a semantic tone to a presentation color. Green is reserved for a
- * documented FINAL release to the operator; a refund, an allocated-not-final
- * state, or anything unknown is never green. (GlowBadge itself defaults to
+ * maps a semantic tone to a presentation color. A bare escrow status is
+ * never green: settlement tone comes only from a settlement read model (see
+ * classifySettlementRecord). A refund, an allocated-not-final state, or anything
+ * unknown is never green either. (GlowBadge itself defaults to
  * green, so a money badge must always pass an explicit color from here.)
  */
 import { classifyMoneyStatus, type MoneyTone } from "@pcc/spec";

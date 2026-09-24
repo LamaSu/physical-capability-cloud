@@ -178,14 +178,16 @@ describe("NEGATIVE: completed is never paid", () => {
 });
 
 describe("settlement axis", () => {
-  it("paid only when the job's own milestone says released and the escrow does not contradict it", () => {
+  it("NEGATIVE (PX-1): the job's own milestone saying released is reported_released, never paid", () => {
     const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "released" })]) } });
-    expect(dto.settlement.payout).toBe("paid");
+    expect(dto.settlement.payout).toBe("reported_released");
     expect(dto.settlement.payoutBasis).toBe("milestone_record");
-    // A record claim, qualified as such: no chain receipt confirms it, and no status time exists.
+    // A record claim, qualified as such: no settlement read or chain receipt confirms it,
+    // and no status time exists.
     expect(dto.settlement.payoutConfirmation).toBe("record_only");
     expect(dto.settlement.record?.statusObservedAt).toBeNull();
-    expect(dto.settlement.record?.milestone?.status).toMatchObject({ sourceStatus: "released", tone: "settled", known: true });
+    // Under PX-1 the bare word is a waiting tone; the payout still reads the word exactly.
+    expect(dto.settlement.record?.milestone?.status).toMatchObject({ sourceStatus: "released", tone: "waiting", known: true });
     expect(dto.settlement.record?.kind).toBe("gateway_escrow_record");
     expect(dto.settlement.linkMatches).toEqual(["negotiation_session_escrow_address", "negotiation_session_cwm"]);
   });
@@ -218,8 +220,8 @@ describe("settlement axis", () => {
     const completed = v("completed", "escrow_record");
     const refundedE = v("refunded", "escrow_record");
     const unknownE = v("??", "escrow_record");
-    expect(reconcilePayout(released, active)).toEqual({ payout: "paid", conflict: false });
-    expect(reconcilePayout(released, completed)).toEqual({ payout: "paid", conflict: false });
+    expect(reconcilePayout(released, active)).toEqual({ payout: "reported_released", conflict: false });
+    expect(reconcilePayout(released, completed)).toEqual({ payout: "reported_released", conflict: false });
     expect(reconcilePayout(released, refundedE)).toEqual({ payout: "unknown", conflict: true });
     expect(reconcilePayout(refundedM, active)).toEqual({ payout: "refunded", conflict: false });
     expect(reconcilePayout(refundedM, completed)).toEqual({ payout: "unknown", conflict: true });
@@ -227,6 +229,28 @@ describe("settlement axis", () => {
     expect(reconcilePayout(funded, refundedE)).toEqual({ payout: "not_paid", conflict: false });
     expect(reconcilePayout(funded, completed)).toEqual({ payout: "unknown", conflict: true });
     expect(reconcilePayout(released, unknownE)).toEqual({ payout: "unknown", conflict: false });
+  });
+
+  it("NEGATIVE (PX-1): no gateway escrow record, whatever its words, produces paid", async () => {
+    const { MONEY_STATUS_MAP } = await import("@pcc/spec");
+    const words = [...Object.keys(MONEY_STATUS_MAP), "released", "completed", "settled", "paid", "success", "??"];
+    for (const m of words) {
+      for (const e of words) {
+        const dto = build({ settlement: { ok: true, value: linked(escrow({ status: e }), [milestone({ status: m })]) } });
+        expect(dto.settlement.payout, `${m}/${e}`).not.toBe("paid");
+      }
+    }
+  });
+
+  it("NEGATIVE: a milestone saying 'completed' is ambiguous (completion is not release): unknown", () => {
+    const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "completed" })]) } });
+    expect(dto.settlement.payout).toBe("unknown");
+    expect(dto.settlement.payoutConfirmation).toBeNull();
+  });
+
+  it("a V-next word on the milestone record is read the same way: settled_released is reported_released", () => {
+    const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "SETTLED_RELEASED" })]) } });
+    expect(dto.settlement.payout).toBe("reported_released");
   });
 
   it("NEGATIVE: a refund is refunded (or unknown), never paid", () => {

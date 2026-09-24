@@ -31,6 +31,7 @@ import {
   isFabricated,
   isTerminalExecutionPhase,
   normalizeJobRowStatus,
+  normalizeMoneyStatus,
   type CaptureCheckSummary,
   type CaptureCheckVerdict,
   type EvidenceAxis,
@@ -294,34 +295,47 @@ function moneyView(status: string, vocabulary: MoneyStateView["vocabulary"]): Mo
   return { sourceStatus: String(status ?? ""), vocabulary, tone: c.tone, label: c.label, known: c.known };
 }
 
+/** Milestone words (escrow_milestones.status) that claim this job's money was released. */
+const MILESTONE_RELEASED = new Set(["RELEASED", "SETTLED_RELEASED"]);
+/** A milestone word that may or may not mean released: never read either way. */
+const MILESTONE_AMBIGUOUS = new Set(["COMPLETED"]);
+/** Escrow words (escrows.status) that claim everything in the escrow was released. */
+const ESCROW_ALL_RELEASED = new Set(["COMPLETED", "RELEASED", "SETTLED_RELEASED"]);
+
 /**
  * The payout for a REAL (non-simulated) record: this job's milestone status, reconciled
- * with the escrow's own status. A combination the two records cannot both be true for is
- * a conflict, and a conflict is `unknown`, never the milestone's claim.
+ * with the escrow's own status. Both are exact words from the gateway's escrow tables (their
+ * source schema), so the words are read here, not only their display tone: under PX-1 a
+ * bare "released" is a waiting tone, and that must not turn a release claim into "not paid".
+ * A combination the two records cannot both be true for is a conflict, and a conflict is
+ * `unknown`.
  *
- *   milestone released  + escrow refunded/disputed/slashed/expired  -> conflict
- *   milestone refunded  + escrow completed (everything released)    -> conflict
- *   milestone unreleased + escrow completed (everything released)   -> conflict
- *   either status unrecognized                                     -> unknown
+ *   milestone released  + escrow refunded/disputed/slashed/unrecognized -> conflict
+ *   milestone released  + anything else                  -> reported_released (never paid)
+ *   milestone refunded  + escrow says everything released -> conflict
+ *   milestone unreleased + escrow says everything released -> conflict
+ *   milestone "completed" (ambiguous for a milestone)      -> unknown
+ *   either status unrecognized                             -> unknown
  */
 export function reconcilePayout(
   milestone: MoneyStateView,
   escrow: MoneyStateView,
-): { payout: Exclude<PayoutState, "simulated">; conflict: boolean } {
+): { payout: Exclude<PayoutState, "simulated" | "paid">; conflict: boolean } {
   if (!milestone.known || !escrow.known || milestone.tone === "unknown" || escrow.tone === "unknown") {
     return { payout: "unknown", conflict: false };
   }
-  const escrowAllReleased = escrow.tone === "settled";
+  const m = normalizeMoneyStatus(milestone.sourceStatus);
+  const escrowAllReleased = ESCROW_ALL_RELEASED.has(normalizeMoneyStatus(escrow.sourceStatus));
   const escrowAgainstRelease = escrow.tone === "refunded" || escrow.tone === "failed";
-  switch (milestone.tone) {
-    case "settled":
-      return escrowAgainstRelease ? { payout: "unknown", conflict: true } : { payout: "paid", conflict: false };
-    case "refunded":
-      return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "refunded", conflict: false };
-    default:
-      // waiting / running / failed: this job's money has not been released.
-      return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "not_paid", conflict: false };
+  if (MILESTONE_AMBIGUOUS.has(m)) return { payout: "unknown", conflict: false };
+  if (MILESTONE_RELEASED.has(m)) {
+    return escrowAgainstRelease ? { payout: "unknown", conflict: true } : { payout: "reported_released", conflict: false };
   }
+  if (milestone.tone === "refunded") {
+    return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "refunded", conflict: false };
+  }
+  // Not released (waiting / running / failed): this job's money has not been released.
+  return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "not_paid", conflict: false };
 }
 
 function buildSettlement(
@@ -413,7 +427,7 @@ function buildSettlement(
     record,
     payout,
     payoutBasis,
-    payoutConfirmation: payout === "paid" || payout === "refunded" ? "record_only" : null,
+    payoutConfirmation: payout === "reported_released" || payout === "refunded" ? "record_only" : null,
     error: null,
     recordsConflict,
     rowConflict,
