@@ -50,6 +50,26 @@ export type IntentSource =
 /** How the captured intent ultimately got served (filled later by the fulfillment loop) */
 export type FulfillmentPath = "auto" | "concierge" | "unfulfilled";
 
+/**
+ * Why one capability type in an intent had no usable supply at capture time.
+ * Design: ai/research/intent-demand-sourcing.md Part B.
+ */
+export type UnmetReason =
+  | "no_capability_type"   // no template/CSD registered for this type at all
+  | "no_kernel_offering"   // type known, but zero capability instances offer it
+  | "no_capacity"          // instances exist but all offline / queue-full / stale
+  | "tier_too_high"        // no offering kernel meets the requested assurance tier
+  | "price_exceeds_budget" // cheapest quote > request budget band
+  | "region_unavailable";  // offerings exist but none serve the requested region
+
+/** One capability type in an intent that no live supply could serve. */
+export interface UnmetCapability {
+  capabilityType: string;
+  reason: UnmetReason;
+  /** Live offerings found for this type at capture time */
+  supplyCount: number;
+}
+
 // ── Envelope ─────────────────────────────────────────────────────
 
 /**
@@ -80,6 +100,13 @@ export interface DemandEnvelope {
   requesterIdHash?: string;
   /** Filled by the fulfillment loop after capture */
   fulfillmentPath?: FulfillmentPath;
+  /**
+   * Capability types no live supply could serve, computed by the server at a
+   * first-party capture point. Like `fulfillmentPath`, this is server-owned:
+   * a caller-supplied value is not authoritative (see
+   * `stripServerOnlyDemandFields`).
+   */
+  unmet?: UnmetCapability[];
   /** ISO 8601 */
   createdAt: Timestamp;
 }
@@ -192,6 +219,35 @@ export const IntentSourceSchema = z.enum([
 
 export const FulfillmentPathSchema = z.enum(["auto", "concierge", "unfulfilled"]);
 
+export const UnmetReasonSchema = z.enum([
+  "no_capability_type",
+  "no_kernel_offering",
+  "no_capacity",
+  "tier_too_high",
+  "price_exceeds_budget",
+  "region_unavailable",
+]);
+
+export const UnmetCapabilitySchema = z.object({
+  capabilityType: z.string().min(1),
+  reason: UnmetReasonSchema,
+  supplyCount: z.number().int().nonnegative(),
+});
+
+/**
+ * Remove the fields only the server may set (`fulfillmentPath`, `unmet`) from
+ * an envelope that arrived from outside: `/api/intent/ingest`, the
+ * `@pcc/intent-collector` SDK, or any other caller. Anyone with an API key can
+ * post those fields, so trusting them would let a single caller forge unmet
+ * demand and steer what the kit bounties fund.
+ */
+export function stripServerOnlyDemandFields<T extends Partial<DemandEnvelope>>(
+  envelope: T,
+): Omit<T, "fulfillmentPath" | "unmet"> {
+  const { fulfillmentPath: _fp, unmet: _unmet, ...rest } = envelope;
+  return rest;
+}
+
 export const DemandEnvelopeSchema = z.object({
   id: z.string(),
   source: IntentSourceSchema,
@@ -208,6 +264,17 @@ export const DemandEnvelopeSchema = z.object({
   requesterIdHash: z.string().optional(),
   fulfillmentPath: FulfillmentPathSchema.optional(),
   createdAt: z.string(),
+});
+
+/**
+ * An envelope the SERVER produced at a first-party capture point, including
+ * the server-computed `unmet` list. Parse only server-origin intent events
+ * with this schema (never `intent.external_ingest`, never request bodies).
+ * `DemandEnvelopeSchema`, which validates caller input, deliberately has no
+ * `unmet` field, so zod strips a caller-supplied one on parse.
+ */
+export const ServerCapturedDemandEnvelopeSchema = DemandEnvelopeSchema.extend({
+  unmet: z.array(UnmetCapabilitySchema).max(50).optional(),
 });
 
 export const DemandSnapshotCompositionSchema = z.object({
