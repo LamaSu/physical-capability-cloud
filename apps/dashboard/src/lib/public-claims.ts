@@ -8,10 +8,20 @@
 // in `requires` is armed. A `forbidden` claim either breaks a standing rule (an
 // architectural invariant or an operator rule; `requires` starts "Never:") or
 // names a defence that is off until the steward records it armed (`requires`
-// starts "Until armed:"). src/lib/__tests__/public-claims.test.ts fails CI when
-// a published surface uses a claim that is not `live`.
+// starts "Until armed:"). A `positioning` claim states purpose, not a live
+// capability; it may appear only with the statement in `alongside` within
+// ALONGSIDE_WINDOW characters of it. src/lib/__tests__/public-claims.test.ts
+// fails CI when a published surface uses a claim that is not `live`, or a
+// positioning claim without its companion.
 
-export type ClaimStatus = "live" | "testnet" | "preview" | "demo" | "roadmap" | "forbidden";
+export type ClaimStatus =
+  | "live"
+  | "positioning"
+  | "testnet"
+  | "preview"
+  | "demo"
+  | "roadmap"
+  | "forbidden";
 
 export interface GuardedClaim {
   id: string;
@@ -22,7 +32,12 @@ export interface GuardedClaim {
   requires: string;
   /** A phrase the pattern must catch; the test proves each pattern still matches. */
   example: string;
+  /** For `positioning`: the statement that must sit beside every occurrence. */
+  alongside?: RegExp;
 }
+
+/** How close (in characters, before or after) a positioning claim's companion must be. */
+export const ALONGSIDE_WINDOW = 400;
 
 export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
   {
@@ -134,6 +149,23 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
     requires: "Until armed: the security monitor's blocking runs on application routes (N45)",
     example: "The security monitor blocks malicious requests.",
   },
+  {
+    id: "thesis",
+    pattern: /turn abilities and inventions into trusted, economically callable capacity/i,
+    status: "positioning",
+    alongside: /public beta: payments settle on a test network/i,
+    requires: "The public-beta status sentence beside it (steward #2807, product-steward #2574)",
+    example:
+      "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.",
+  },
+  {
+    id: "retired-tagline",
+    pattern:
+      /(?<!(not|or) ["“]?)AWS for the physical world|cloud instance for the physical world|decentralized control plane|capability network for the physical world|verifiable on-chain skill wrapper/i,
+    status: "forbidden",
+    requires: "Never: the operator's thesis replaces these one-line definitions (PX-17, #2574)",
+    example: "PCC is AWS for the physical world.",
+  },
 ];
 
 /** Repo-relative files that are served publicly or read by external agents. */
@@ -213,7 +245,10 @@ export interface ClaimViolation {
   match: string;
 }
 
-/** Guarded claims in `text` that are not yet `live`. */
+/**
+ * Guarded claims in `text` that are not yet `live`, plus positioning claims
+ * that appear without their companion statement close by.
+ */
 export function findClaimViolations(
   text: string,
   claims: readonly GuardedClaim[] = GUARDED_CLAIMS,
@@ -221,8 +256,16 @@ export function findClaimViolations(
   const violations: ClaimViolation[] = [];
   for (const claim of claims) {
     if (claim.status === "live") continue;
-    const match = new RegExp(claim.pattern.source, claim.pattern.flags).exec(text);
-    if (match) violations.push({ id: claim.id, status: claim.status, match: match[0] });
+    const flags = claim.pattern.flags.includes("g") ? claim.pattern.flags : `${claim.pattern.flags}g`;
+    for (const match of text.matchAll(new RegExp(claim.pattern.source, flags))) {
+      if (claim.status === "positioning" && claim.alongside) {
+        const start = Math.max(0, match.index - ALONGSIDE_WINDOW);
+        const nearby = text.slice(start, match.index + match[0].length + ALONGSIDE_WINDOW);
+        if (claim.alongside.test(nearby)) continue;
+      }
+      violations.push({ id: claim.id, status: claim.status, match: match[0] });
+      break;
+    }
   }
   return violations;
 }

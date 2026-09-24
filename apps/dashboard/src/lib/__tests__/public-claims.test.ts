@@ -62,6 +62,21 @@ describe("public claims gate", () => {
     expect(findClaimViolations(seeded).map((v) => v.id)).toEqual(["proof-on-every-job"]);
   });
 
+  it("allows the thesis only with the public-beta status beside it", () => {
+    const thesis = GUARDED_CLAIMS.find((claim) => claim.id === "thesis") as GuardedClaim;
+    const status = "Public beta: payments settle on a test network.";
+    expect(findClaimViolations(`${thesis.example} ${status}`, [thesis])).toEqual([]);
+    expect(findClaimViolations(`${status} ${thesis.example}`, [thesis])).toEqual([]);
+    expect(findClaimViolations(`${thesis.example} ${"x".repeat(2000)} ${status}`, [thesis])).toHaveLength(1);
+  });
+
+  it("allows the whitepaper to reject a retired tagline but not to use one", () => {
+    const retired = GUARDED_CLAIMS.find((claim) => claim.id === "retired-tagline") as GuardedClaim;
+    expect(findClaimViolations('Not "AWS for the physical world" — the protocol…', [retired])).toEqual([]);
+    expect(findClaimViolations('a manufacturing app, or "AWS for the physical world."', [retired])).toEqual([]);
+    expect(findClaimViolations("PCC is AWS for the physical world.", [retired])).toHaveLength(1);
+  });
+
   it("lets a claim through once the steward marks it live", () => {
     const escrow = GUARDED_CLAIMS.find((claim) => claim.id === "escrow-pays-wallet") as GuardedClaim;
     const armed: GuardedClaim = { ...escrow, status: "live" };
