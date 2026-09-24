@@ -6,7 +6,7 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useJobs, useKernels, useEscrows, useGatewayHealth } from "../api/hooks/use-pcc-data.js";
-import { isActiveJob, isKernelOnline } from "../lib/live-status.js";
+import { formatCount, isActiveJob, isKernelOnline, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
 import { UnavailableState } from "../components/LiveState.js";
 
 /** Canonical job statuses (types/dto.ts StepStatus) to a pulse; the label always carries the status text. */
@@ -63,6 +63,8 @@ export function DashboardPage() {
 
   const onlineKernels = kernels?.filter(isKernelOnline).length;
   const activeJobs = jobs?.filter(isActiveJob);
+  // /api/jobs returns one page and no total: counts over a full page are lower bounds.
+  const jobsTruncated = jobs ? mayBeTruncated(jobs) : false;
 
   // "Nothing yet" only when every read succeeded and came back empty.
   const isEmpty =
@@ -88,8 +90,14 @@ export function DashboardPage() {
         <GlassPanel glow={activeJobs?.length ? "green" : undefined} padding="lg" hover onClick={() => navigate("/jobs")}>
           <DataCell
             label="Active Jobs"
-            value={activeJobs ? activeJobs.length : <Unavailable />}
-            sub={jobs ? (jobs.length ? `${jobs.filter((j) => j.status === "completed").length} completed` : "none yet") : "unavailable"}
+            value={activeJobs ? formatCount(activeJobs.length, jobsTruncated) : <Unavailable />}
+            sub={
+              jobs
+                ? jobs.length
+                  ? `${formatCount(jobs.filter((j) => j.status === "completed").length, jobsTruncated)} completed`
+                  : "none yet"
+                : "unavailable"
+            }
             mono
           />
         </GlassPanel>
@@ -135,6 +143,11 @@ export function DashboardPage() {
               <EmptyState title="No active jobs" description="Submit a job or discover capabilities to get started." />
             ) : (
               <div className="space-y-3">
+                {jobsTruncated && (
+                  <p className="text-xs text-white/35">
+                    Active jobs among the first {JOBS_PAGE_SIZE} the gateway returned; there may be more.
+                  </p>
+                )}
                 {activeJobs.map((job) => (
                   <div
                     key={job.id}

@@ -16,6 +16,11 @@ export interface StatusBarProps {
   kernelsOnline?: number | null;
   /** Active jobs. Same unknown-is-not-zero rule as `kernelsOnline`. */
   activeJobs?: number | null;
+  /**
+   * The active-job count came from a list that may be truncated, so it is a
+   * lower bound: rendered as "N+", never as an exact count.
+   */
+  activeJobsAtLeast?: boolean;
   networkStatus?: StatusBarNetworkStatus;
   blockNumber?: number;
   /**
@@ -40,11 +45,18 @@ const NETWORK_PULSE: Record<StatusBarNetworkStatus, "online" | "executing" | "of
   unknown: "offline",
 };
 
-function Count({ value, className }: { value: number | null | undefined; className: string }) {
+function Count({ value, atLeast = false, className }: { value: number | null | undefined; atLeast?: boolean; className: string }) {
   if (value === undefined || value === null) {
     return (
       <span className="text-white/40" title="Unavailable">
         —
+      </span>
+    );
+  }
+  if (atLeast) {
+    return (
+      <span className={className} title={`At least ${value}; the list this came from may be truncated`}>
+        {value}+
       </span>
     );
   }
@@ -54,6 +66,7 @@ function Count({ value, className }: { value: number | null | undefined; classNa
 export function StatusBar({
   kernelsOnline,
   activeJobs,
+  activeJobsAtLeast = false,
   networkStatus = "unknown",
   blockNumber,
   network,
@@ -77,7 +90,7 @@ export function StatusBar({
       </div>
       <div className="text-white/25">|</div>
       <div className="text-white/30">
-        <Count value={activeJobs} className="text-gold-300/60" /> active jobs
+        <Count value={activeJobs} atLeast={activeJobsAtLeast} className="text-gold-300/60" /> active jobs
       </div>
       {blockNumber !== undefined && (
         <>

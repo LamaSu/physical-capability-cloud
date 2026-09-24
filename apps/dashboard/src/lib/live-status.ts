@@ -24,6 +24,24 @@ export function isActiveJob(job: Pick<JobDTO, "status">): boolean {
 }
 
 /**
+ * GET /api/jobs returns at most this many rows when the caller sets no limit
+ * (packages/gateway/src/facades/job.facade.ts), and the route does not report
+ * a total. A full page may therefore be truncated, and any count taken from
+ * it is a lower bound, not a total.
+ */
+export const JOBS_PAGE_SIZE = 50;
+
+/** True when a job list came back full, so counts over it are only lower bounds. */
+export function mayBeTruncated(rows: readonly unknown[], pageSize: number = JOBS_PAGE_SIZE): boolean {
+  return rows.length >= pageSize;
+}
+
+/** "12" for an exact count, "12+" for a lower bound. */
+export function formatCount(value: number, atLeast: boolean): string {
+  return atLeast ? `${value}+` : String(value);
+}
+
+/**
  * A kernel is online only if it reports "online" and its heartbeat is fresh.
  * The gateway sets `isStale` when an online kernel has not sent a heartbeat
  * recently (facades/populators/kernel.populator.ts).
@@ -47,6 +65,8 @@ export interface LiveStatus {
   /** undefined when unknown: loading, or the latest read failed. Never 0 by default. */
   kernelsOnline: number | undefined;
   activeJobs: number | undefined;
+  /** activeJobs came from a full, possibly truncated page: a lower bound. */
+  activeJobsAtLeast: boolean;
 }
 
 /**
@@ -71,6 +91,7 @@ export function deriveLiveStatus(reads: {
     kernels.isSuccess && kernels.data ? kernels.data.filter(isKernelOnline).length : undefined;
 
   const activeJobs = jobs.isSuccess && jobs.data ? jobs.data.filter(isActiveJob).length : undefined;
+  const activeJobsAtLeast = Boolean(jobs.isSuccess && jobs.data && mayBeTruncated(jobs.data));
 
-  return { networkStatus, kernelsOnline, activeJobs };
+  return { networkStatus, kernelsOnline, activeJobs, activeJobsAtLeast };
 }

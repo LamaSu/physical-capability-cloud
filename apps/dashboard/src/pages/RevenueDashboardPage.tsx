@@ -6,7 +6,7 @@ import {
 import { useUIStore } from "../stores/ui-store.js";
 import { useJobs, useEscrows } from "../api/hooks/use-pcc-data.js";
 import { useNavigate } from "react-router-dom";
-import { isActiveJob } from "../lib/live-status.js";
+import { formatCount, isActiveJob, mayBeTruncated } from "../lib/live-status.js";
 import { UnavailableState } from "../components/LiveState.js";
 
 const FINISHED = new Set(["completed", "failed", "cancelled"]);
@@ -47,7 +47,9 @@ export function RevenueDashboardPage() {
   const completedJobs = jobs.filter((j) => j.status === "completed");
   const finishedCount = jobs.filter((j) => FINISHED.has(j.status)).length;
   const activeEscrows = escrows.filter((e) => e.status === "active");
-  const successRate = finishedCount > 0
+  // /api/jobs returns one page and no total: a rate over a partial page would be a guess.
+  const truncated = mayBeTruncated(jobs);
+  const successRate = finishedCount > 0 && !truncated
     ? Math.round((completedJobs.length / finishedCount) * 100 * 10) / 10
     : null;
 
@@ -58,13 +60,18 @@ export function RevenueDashboardPage() {
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <GlassPanel padding="md">
-          <DataCell label="Active Jobs" value={<AnimatedNumber value={jobs.filter(isActiveJob).length} />} sub="pending, queued, running or paused" mono />
+          <DataCell label="Active Jobs" value={truncated ? formatCount(jobs.filter(isActiveJob).length, true) : <AnimatedNumber value={jobs.filter(isActiveJob).length} />} sub="pending, queued, running or paused" mono />
         </GlassPanel>
         <GlassPanel padding="md">
-          <DataCell label="Success Rate" value={successRate != null ? `${successRate}%` : "--"} sub={successRate != null ? "completed of finished jobs" : "no finished jobs"} mono />
+          <DataCell
+            label="Success Rate"
+            value={successRate != null ? `${successRate}%` : "--"}
+            sub={successRate != null ? "completed of finished jobs" : truncated ? "needs the gateway's job total" : "no finished jobs"}
+            mono
+          />
         </GlassPanel>
         <GlassPanel padding="md">
-          <DataCell label="Completed" value={<AnimatedNumber value={completedJobs.length} />} sub="total jobs" mono />
+          <DataCell label="Completed" value={truncated ? formatCount(completedJobs.length, true) : <AnimatedNumber value={completedJobs.length} />} sub="total jobs" mono />
         </GlassPanel>
       </div>
 
