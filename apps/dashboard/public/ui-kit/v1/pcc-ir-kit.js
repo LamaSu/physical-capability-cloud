@@ -79,11 +79,11 @@
     "\u03C1": "p"
   };
   function foldForClaims(text) {
-    let t = text.normalize("NFKC").replace(/[​-‏⁠﻿­]/g, "");
-    t = t.replace(/[Ͱ-ϿЀ-ӿԀ-ԯ]/g, (c) => LOOKALIKE[c] ?? c);
+    let t = text.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");
+    t = t.replace(/[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
     return t;
   }
-  var AMOUNT_RE = /[$€£¥₿]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
+  var AMOUNT_RE = /[$\u20ac\u00a3\u00a5\u20bf]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
   var CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
   function isMoneyClaim(text) {
     const t = foldForClaims(text);

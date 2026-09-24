@@ -57,17 +57,17 @@ export const LIST_ROW_CAP = LIM.listRows;
 export const WITHHELD_PROSE =
   "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
 const LOOKALIKE: Readonly<Record<string, string>> = {
-  "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
-  "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "һ": "h", "Α": "A", "Β": "B",
-  "Ε": "E", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O",
-  "Ρ": "P", "Τ": "T", "Χ": "X", "Υ": "Y", "ο": "o", "α": "a", "ρ": "p",
+  "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04bb": "h", "\u0391": "A", "\u0392": "B",
+  "\u0395": "E", "\u0397": "H", "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
+  "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03a5": "Y", "\u03bf": "o", "\u03b1": "a", "\u03c1": "p",
 };
 function foldForClaims(text: string): string {
-  let t = text.normalize("NFKC").replace(/[​-‏⁠﻿­]/g, "");
-  t = t.replace(/[Ͱ-ϿЀ-ӿԀ-ԯ]/g, (c) => LOOKALIKE[c] ?? c);
+  let t = text.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");
+  t = t.replace(/[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
   return t;
 }
-const AMOUNT_RE = /[$€£¥₿]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
+const AMOUNT_RE = /[$\u20ac\u00a3\u00a5\u20bf]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
 const CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
 export function isMoneyClaim(text: string): boolean {
   const t = foldForClaims(text);
