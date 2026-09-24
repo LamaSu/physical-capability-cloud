@@ -74,3 +74,9 @@ export * from "./reputation.js";
 export * from "./graph-search.js";
 // UI artifacts — the On-Ramp's saved/shared/forkable dashboard entity
 export * from "./ui-artifact.js";
+// Capability Kits: content-addressed kit manifests (ledger R5/R6)
+export * from "./capability-kit.js";
+// Operator binding read projection (ledger R8/R41)
+export * from "./operator-binding.js";
+// Public opportunities: funded offers, kit-build requests, demand aggregates (PX-13)
+export * from "./opportunity.js";
