@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { CapabilityNode } from "../types/requests.js";
-import { canonicalDecimal, matchedDagFromCapabilityNodes, commitmentReportForRequest } from "./composition-commitment-adapter.js";
+import { canonicalDecimal, matchedDagFromCapabilityNodes, commitmentReportForRequest, slugifyCapabilityTypeHint, normalizeCapabilityNodeConventions } from "./composition-commitment-adapter.js";
+import { deriveCompositionCommitment, DIGEST_VIOLATION_SUFFIX } from "./composition-commitment.js";
+import { readFileSync } from "node:fs";
 
 const DIG = (b: string) => "0x" + b.repeat(32);
 
@@ -80,5 +82,122 @@ describe("composition-commitment adapter (CapabilityNode[] -> MatchedDAG)", () =
     if (!r.commitment.committable) expect(r.commitment.unmatchedNodes).toEqual(["n2"]);
     expect(r.blockedOn).toBeUndefined();
     expect(r.capabilityContractRoot).toMatch(/^0x[0-9a-f]{64}$/); // the buyer's contract is still well-defined
+  });
+});
+
+describe("adapter hardening (bridge #1520 + prod finding 2026-08-27)", () => {
+  const DIGEST = DIG("aa");
+
+  it("slugifyCapabilityTypeHint: valid types pass through BYTE-IDENTICAL; free-text hints are repaired; unrepairable hints are returned as-is", () => {
+    expect(slugifyCapabilityTypeHint("wood-fired-pizza")).toBe("wood-fired-pizza");
+    expect(slugifyCapabilityTypeHint("mail.drop")).toBe("mail.drop");
+    expect(slugifyCapabilityTypeHint("legal notarization")).toBe("legal-notarization");
+    expect(slugifyCapabilityTypeHint("  padded  type  ")).toBe("padded-type");
+    expect(slugifyCapabilityTypeHint("crème brûlée torching")).toBe("cr-me-br-l-e-torching");
+    expect(slugifyCapabilityTypeHint("　")).toBe("　"); // nothing printable survives -> original, so validation refuses by name
+    expect(slugifyCapabilityTypeHint("x".repeat(200))).toBe("x".repeat(200)); // valid alphabet but overlong: NOT silently truncated
+  });
+
+  it("an unmatched leg with a spaced free-text hint no longer poisons the buyer's contract root (the 'legal notarization' prod case)", () => {
+    const nodes = [
+      node({ id: "req-1-step-1", capabilityType: "cnc-3axis", matchStatus: "matched", matchedCapabilityId: "cap-1", matchedCapabilityDigest: DIGEST } as Partial<CapabilityNode> & { id: string; capabilityType: string }),
+      node({ id: "req-1-step-2", capabilityType: "legal notarization", matchStatus: "none", dependencies: ["req-1-step-1"] }),
+    ];
+    const r = commitmentReportForRequest("req-1", nodes, { currency: "USDC" });
+    expect(r.commitment.committable).toBe(false);
+    if (!r.commitment.committable) expect(r.commitment.unmatchedNodes).toEqual(["req-1-step-2"]);
+    // Before: INVALID_PLAN (capabilityType is required...) and capabilityContractRoot null. Now:
+    expect(r.contractRootError).toBeUndefined();
+    expect(r.capabilityContractRoot).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(r.blockedOn).toBeUndefined(); // unmatched, not digest-blocked
+  });
+
+  it("blockedOn is PRECISE: a digest gap alongside an unrelated violation does NOT claim digest-only blockage (#1520)", () => {
+    const clean = [
+      node({ id: "req-1-step-1", capabilityType: "pizza.make", matchStatus: "matched", matchedCapabilityId: "cap-1" }),
+      node({ id: "req-1-step-2", capabilityType: "courier.deliver", matchStatus: "matched", matchedCapabilityId: "cap-2", dependencies: ["req-1-step-1"] }),
+    ];
+    // digest gap ONLY -> blockedOn set (unchanged behaviour)
+    const only = commitmentReportForRequest("req-1", clean, { currency: "USDC" });
+    expect(only.blockedOn).toMatch(/matchedCapabilityDigest/);
+    // digest gap + malformed currency on one node -> blockedOn MUST be absent
+    const alsoMalformed = clean.map((n, i) => (i === 0 ? ({ ...n, currency: "usd coin!" } as CapabilityNode) : n));
+    const mixed = commitmentReportForRequest("req-1", alsoMalformed, { currency: "USDC" });
+    expect(mixed.commitment.committable).toBe(false);
+    if (!mixed.commitment.committable) expect(mixed.commitment.violations.length).toBeGreaterThan(1);
+    expect(mixed.blockedOn).toBeUndefined();
+  });
+
+  it("blockedOn cannot be spoofed by a node id that CONTAINS 'matchedCapabilityDigest' (suffix anchor, sol round-2-followup class)", () => {
+    // One matched+digested node whose id embeds the magic substring, with a NON-digest
+    // violation (malformed currency). A substring-based classifier would read this as
+    // digest-only blockage; the suffix anchor must not.
+    const nodes = [
+      node({
+        id: "x-matchedCapabilityDigest-x",
+        capabilityType: "pizza.make",
+        matchStatus: "matched",
+        matchedCapabilityId: "cap-1",
+        matchedCapabilityDigest: DIGEST,
+        currency: "usd coin!",
+      } as Partial<CapabilityNode> & { id: string; capabilityType: string }),
+    ];
+    const r = commitmentReportForRequest("req-1", nodes, { currency: "USDC" });
+    expect(r.commitment.committable).toBe(false);
+    if (!r.commitment.committable) {
+      expect(r.commitment.violations.some((v) => v.includes("matchedCapabilityDigest"))).toBe(true); // the id lands in the prefix
+      expect(r.commitment.violations.some((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX))).toBe(false); // but no real digest violation
+    }
+    expect(r.blockedOn).toBeUndefined();
+  });
+
+  it("slugification does not disturb any pinned corpus root (all corpus types are already valid)", () => {
+    const corpus = JSON.parse(readFileSync(new URL("./composition-commitment.vectors.json", import.meta.url), "utf8")) as {
+      vectors: { name: string; version?: number; dag: Parameters<typeof deriveCompositionCommitment>[0]; compositionRoot: string }[];
+    };
+    for (const v of corpus.vectors) {
+      const r = deriveCompositionCommitment(v.dag, { version: (v.version ?? 2) as 2 | 3 });
+      expect(r.committable, v.name).toBe(true);
+      if (r.committable) expect(r.compositionRoot, v.name).toBe(v.compositionRoot);
+    }
+  });
+});
+
+describe("normalizeCapabilityNodeConventions (#1827 Finding B — one normalization for both matched conventions)", () => {
+  const DIGEST_B = DIG("cd");
+  type Routed = CapabilityNode & { capabilityId?: string; kernelId?: string };
+
+  it("a routed/direct-match node (no matchStatus, bare ids) normalizes to matched with its STALE digest cleared", () => {
+    const routed = { ...node({ id: "req-1-step-1", capabilityType: "cnc-3axis" }), capabilityId: "cap-9", kernelId: "kern-9", matchedCapabilityDigest: DIGEST_B } as Routed;
+    delete (routed as Partial<Routed>).matchStatus;
+    const [n] = normalizeCapabilityNodeConventions([routed]);
+    expect(n).toMatchObject({ matchStatus: "matched", matchedCapabilityId: "cap-9", matchedKernelId: "kern-9" });
+    expect((n as Routed).matchedCapabilityDigest).toBeUndefined();
+    // and the report degrades on the digest gap instead of holding as unmatched:
+    const r = commitmentReportForRequest("req-1", normalizeCapabilityNodeConventions([routed]), { currency: "USDC" });
+    expect(r.commitment.committable).toBe(false);
+    if (!r.commitment.committable) expect(r.commitment.unmatchedNodes).toEqual([]);
+    expect(r.blockedOn).toMatch(/matchedCapabilityDigest/);
+    expect(r.capabilityContractRoot).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("explicit matchStatus is AUTHORITATIVE: 'none' with routed-looking fields stays unmatched; 'matched' missing matchedKernelId is forced to 'none'", () => {
+    const noneHybrid = { ...node({ id: "a", capabilityType: "t.a", matchStatus: "none" }), capabilityId: "cap-9", kernelId: "kern-9" } as Routed;
+    const incomplete = node({ id: "b", capabilityType: "t.b", matchStatus: "matched", matchedCapabilityId: "cap-1" } as Partial<CapabilityNode> & { id: string; capabilityType: string });
+    const [x, y] = normalizeCapabilityNodeConventions([noneHybrid, incomplete]);
+    expect(x!.matchStatus).toBe("none");
+    expect(y!.matchStatus).toBe("none");
+  });
+
+  it("legacy rows (absent matchStatus, no routed fields) and complete agentic nodes pass through with IDENTICAL bytes — existing roots cannot drift", () => {
+    const legacy = node({ id: "a", capabilityType: "t.a" });
+    delete (legacy as Partial<CapabilityNode>).matchStatus;
+    const agentic = { ...node({ id: "b", capabilityType: "t.b", matchStatus: "matched", matchedCapabilityId: "cap-1", matchedCapabilityDigest: DIGEST_B } as Partial<CapabilityNode> & { id: string; capabilityType: string }), matchedKernelId: "kern-1" } as CapabilityNode;
+    const [l, a] = normalizeCapabilityNodeConventions([legacy, agentic]);
+    expect(l).toBe(legacy); // same reference — untouched
+    expect(a).toBe(agentic);
+    const before = commitmentReportForRequest("req-1", [agentic], { currency: "USDC" });
+    const after = commitmentReportForRequest("req-1", normalizeCapabilityNodeConventions([agentic]), { currency: "USDC" });
+    expect(after).toEqual(before);
   });
 });

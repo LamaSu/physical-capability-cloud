@@ -18,6 +18,7 @@ import type { CapabilityNode } from "../types/requests.js";
 import {
   COMPOSITION_DOMAIN,
   CONTRACT_DOMAIN,
+  DIGEST_VIOLATION_SUFFIX,
   deriveCapabilityContractRoot,
   deriveCompositionCommitment,
   type CommitmentResult,
@@ -30,6 +31,60 @@ export type CapabilityNodeWithBinding = CapabilityNode & {
   matchedCapabilityDigest?: string;
   currency?: string;
 };
+
+/**
+ * The SECOND matched convention in the codebase: request-decomposer's
+ * `decomposeDirectMatch` emits routed nodes carrying bare `capabilityId`/`kernelId`
+ * and NO `matchStatus` at all. Structural — the type lives gateway-side.
+ */
+type RoutedConventionFields = { capabilityId?: string; kernelId?: string };
+
+/**
+ * Reconcile BOTH matched conventions onto the agentic shape this adapter reads —
+ * the ONE normalization, shared by every caller that computes roots from a stored
+ * plan (the job-offer producer normalized privately first; #1827 Finding B is that
+ * GET /:id/commitment did NOT, so the endpoint refused to reproduce the very roots
+ * offers stamp for routed/direct-match requests).
+ *
+ * Rules (byte-equivalent to the producer's resolveMatch/normalizeForCommitment,
+ * sol-round-2-hardened there, pinned by tests here):
+ * - `matchStatus:"matched"` is authoritative but must be COMPLETE: without both
+ *   matchedCapabilityId and matchedKernelId it is forced to "none" — a corrupt
+ *   "matched" flag must read unmatched everywhere, not pass through unexamined.
+ * - `matchStatus:"none"` is authoritative: routed-looking fields on such a node are
+ *   never reinterpreted.
+ * - ABSENT matchStatus with both routed fields = the routed convention: normalized
+ *   to matched with those ids, and `matchedCapabilityDigest` CLEARED — a digest on
+ *   a routed node was never set alongside ITS ids, so keeping it would bind a real,
+ *   valid-looking digest to the wrong capability. Cleared, the node falls into the
+ *   honest digest-gap degrade path instead of committing a corrupted binding.
+ * - ABSENT matchStatus without routed fields = legacy row, unchanged (absent reads
+ *   as "none" downstream).
+ * - Agentic matched nodes pass through with IDENTICAL bytes — roots cannot drift
+ *   for the existing convention.
+ */
+export function normalizeCapabilityNodeConventions(
+  nodes: readonly CapabilityNode[],
+): CapabilityNode[] {
+  return nodes.map((node) => {
+    if (node.matchStatus === "matched") {
+      return node.matchedCapabilityId && node.matchedKernelId ? node : { ...node, matchStatus: "none" as const };
+    }
+    if (node.matchStatus === undefined) {
+      const routed = node as CapabilityNode & RoutedConventionFields;
+      if (routed.capabilityId && routed.kernelId) {
+        return {
+          ...node,
+          matchStatus: "matched" as const,
+          matchedCapabilityId: routed.capabilityId,
+          matchedKernelId: routed.kernelId,
+          matchedCapabilityDigest: undefined,
+        } as CapabilityNode;
+      }
+    }
+    return node;
+  });
+}
 
 /**
  * Canonical decimal string for a JS number: no sign, no leading zeros, no exponent, <= 18 fraction digits.
@@ -48,6 +103,35 @@ export interface MappingOptions {
   goal?: string;
 }
 
+/**
+ * Canonicalize a planner's free-text capabilityType hint into the ID alphabet the commitment
+ * scheme requires (1–128 printable ASCII, no spaces).
+ *
+ * Unmatched legs inherit the LLM planner's free-text hint verbatim (live-verified on prod
+ * 2026-08-27: "legal notarization", with a space, made even the buyer's provider-agnostic
+ * contract root refuse with INVALID_PLAN — fail-closed, but the buyer's agreement should
+ * survive an unmatched leg whose only sin is a spaced label).
+ *
+ * A value that already satisfies the ID alphabet is returned BYTE-IDENTICAL — registry-issued
+ * types (and every pinned corpus vector) pass through untouched, so no existing root changes.
+ * An invalid value is repaired deterministically: runs of characters outside \x21-\x7E become
+ * one "-", edge dashes are trimmed, and the result is truncated to 128. If nothing printable
+ * survives, the ORIGINAL value is returned so validation still refuses it by name — the repair
+ * never fabricates a type out of thin air.
+ */
+export function slugifyCapabilityTypeHint(raw: string): string {
+  if (typeof raw !== "string") return raw;
+  if (/^[\x21-\x7E]{1,128}$/.test(raw)) return raw;
+  // Repair ONLY the invalid-character class. Length is never repaired: truncating an overlong
+  // label could silently collide two distinct labels, so an overlong result falls through to
+  // the original value and validation refuses it by name.
+  const slug = raw
+    .replace(/[^\x21-\x7E]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return /^[\x21-\x7E]{1,128}$/.test(slug) ? slug : raw;
+}
+
 export function matchedDagFromCapabilityNodes(
   requestId: string,
   nodes: readonly CapabilityNode[],
@@ -58,7 +142,7 @@ export function matchedDagFromCapabilityNodes(
     const matched = n.matchStatus === "matched";
     const node: MatchedNode = {
       nodeId: n.id,
-      capabilityType: n.capabilityType,
+      capabilityType: slugifyCapabilityTypeHint(n.capabilityType),
       matchStatus: matched ? "matched" : "none",
       evidenceRequirements: (n.evidenceRequirements ?? []).map((id) => ({ requirementId: id, evidenceTypeId: id, tier: 0 })),
     };
@@ -108,10 +192,19 @@ export function commitmentReportForRequest(
     contractRootError = err instanceof Error ? err.message : String(err);
   }
   const matchedCount = dag.nodes.filter((n) => n.matchStatus === "matched").length;
+  // blockedOn is a PRECISE signal: set only when the missing digest binding is the ONLY thing
+  // refusing the commitment. A digest gap sitting alongside any other violation (malformed
+  // currency, duplicate node, …) must NOT be waved through a consumer's "just wait for the
+  // digest branch" degrade path — bridge #1520 hit exactly that against the old `.some()` and
+  // had to distrust this field; `.every()` restores it as trustworthy. Anchored on the emitter's
+  // exported FIXED SUFFIX, not a substring: a node id may legally CONTAIN
+  // "matchedCapabilityDigest", but it can never produce this suffix (the ID alphabet has no
+  // spaces), so a crafted id cannot spoof an unrelated violation into the digest class.
   const blockedOn =
     !commitment.committable &&
     commitment.unmatchedNodes.length === 0 &&
-    commitment.violations.some((v) => v.includes("matchedCapabilityDigest"))
+    commitment.violations.length > 0 &&
+    commitment.violations.every((v) => v.endsWith(DIGEST_VIOLATION_SUFFIX))
       ? DIGEST_BLOCK
       : undefined;
   return {
