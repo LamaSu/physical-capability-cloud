@@ -7,6 +7,7 @@ import type {
   DeliveryQuote,
   LogisticsTimelineEvent,
 } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data
@@ -306,10 +307,78 @@ const mockTimeline: LogisticsTimelineEvent[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Demo gate (board N34, the server side of PX-3)
+// ---------------------------------------------------------------------------
+//
+// Every route in this plugin answers from the fixtures above. No route reads the
+// logistics tables or asks a provider anything, and the quote prices a made-up formula
+// under two fixture providers' names. Served as live data, that is plausible fiction. So
+// outside demo mode the WHOLE plugin fails closed: the onRequest hook in logisticsRoutes
+// answers 501 not_available before the body is parsed and before any handler runs, so
+// nothing is read from a fixture, priced, or changed (the PATCH route edits a fixture in
+// memory). A route added to this plugin later is refused by default. Both hooks are
+// encapsulated: server.ts registers this plugin with app.register and no fastify-plugin
+// wrapper, so no other plugin sees them.
+//
+// With PCC_DEMO_ROUTES=true the fixtures are served as before, and every response says
+// so: the x-pcc-demo: true header, plus mock: true, demo: true on object bodies.
+
+const DEMO_HEADER = "x-pcc-demo";
+
+const exampleOnly = (what: string) =>
+  `${what} is not recorded on this gateway, so nothing is returned rather than an example.`;
+
+/** The refusal for each route pattern. `see` lists real routes that exist on this gateway. */
+const REFUSALS: Record<string, { message: string; see: string[] }> = {
+  "/api/logistics/providers": { message: exampleOnly("Logistics provider data"), see: [] },
+  "/api/logistics/providers/:id": { message: exampleOnly("Logistics provider data"), see: [] },
+  // Carrier shipments (a label bought for a job) are the only shipments this gateway records.
+  "/api/logistics/shipments": {
+    message: exampleOnly("Logistics shipment data"),
+    see: ["GET /api/carrier/shipments/:jobId"],
+  },
+  "/api/logistics/shipments/:id": {
+    message: exampleOnly("Logistics shipment data"),
+    see: ["GET /api/carrier/shipments/:jobId"],
+  },
+  "/api/logistics/shipments/quote": { message: exampleOnly("Freight pricing"), see: [] },
+  "/api/logistics/bookings": { message: exampleOnly("Space booking data"), see: [] },
+  "/api/logistics/bookings/:id": { message: exampleOnly("Space booking data"), see: [] },
+  "/api/logistics/installations": { message: exampleOnly("Installation order data"), see: [] },
+  "/api/logistics/installations/:id": { message: exampleOnly("Installation order data"), see: [] },
+  "/api/logistics/installations/:id/steps/:stepId": {
+    message:
+      "Installation order data is not recorded on this gateway, so no step was updated and " +
+      "nothing is returned rather than an example.",
+    see: [],
+  },
+  "/api/logistics/timeline": { message: exampleOnly("Logistics timeline data"), see: [] },
+  "/api/logistics/summary": { message: exampleOnly("Logistics activity"), see: [] },
+};
+const FALLBACK_REFUSAL = { message: exampleOnly("Logistics data"), see: [] as string[] };
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 export async function logisticsRoutes(app: FastifyInstance) {
+  // Demo gate (see above). Refuses before parsing, so nothing below runs outside demo mode.
+  app.addHook("onRequest", async (req, reply) => {
+    if (isDemoRoutesOn()) {
+      reply.header(DEMO_HEADER, "true");
+      return;
+    }
+    const refusal = REFUSALS[req.routeOptions.url ?? ""] ?? FALLBACK_REFUSAL;
+    return reply.code(501).send({ error: "not_available", message: refusal.message, see: refusal.see });
+  });
+  // A demo response's object body says so too; the header above covers any other shape.
+  app.addHook("preSerialization", async (_req, reply, payload: unknown) =>
+    reply.getHeader(DEMO_HEADER) === "true" && isPlainObject(payload) ? markDemo("demo", payload) : payload,
+  );
+
   // --- Providers ---
 
   app.get("/api/logistics/providers", async (req) => {
