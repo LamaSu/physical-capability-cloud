@@ -60,7 +60,7 @@ function deps(caps: LiveCapability[], kernels: LiveKernel[] = KERNELS, calls?: C
 }
 
 function claim(p: Partial<SnapshotClaim> & { nodeId: string }): SnapshotClaim {
-  return { capabilityId: "cap-print", price: "6.50", currency: "USDC", tierKey: "tier0", ...p };
+  return { capabilityId: "cap-print", price: "6.50", currency: "USDC", tierKey: "tier0", kernelId: "k-1", operator: OP, ...p };
 }
 
 /** The deal-snapshot digest exactly as the decomposer computes it for a row at a given price. */
@@ -203,6 +203,58 @@ describe("missing / unavailable / incompatible", () => {
     expect(reason(KERNELS, cap({ id: "cap-print", assuranceTiers: [0, 7] }))).toBe("malformed-tiers");
   });
 
+  it("astra's counterexample: missing, null or empty live tiers are NEVER defaulted into a sellable tier", () => {
+    for (const assuranceTiers of [null, undefined, []] as Array<number[] | null | undefined>) {
+      const row = cap({ id: "cap-print" });
+      if (assuranceTiers === undefined) delete (row as Partial<LiveCapability>).assuranceTiers;
+      else row.assuranceTiers = assuranceTiers;
+      const v = only(revalidatePlanSnapshots([claim({ nodeId: "a", tierKey: "tier1" })], deps([row])));
+      expect(v).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-tiers" });
+    }
+  });
+
+  it("REQUIRED (freshness): an operator rotation since the quote is stale even when the claimed digest still matches", () => {
+    const rotated: LiveKernel[] = [{ id: "k-1", operatorAddress: `0x${"ef".repeat(20)}`, status: "online" }];
+    const v = only(revalidatePlanSnapshots([claim({ nodeId: "a", matchedCapabilityDigest: digestAt(6.5) })], deps([cap({ id: "cap-print" })], rotated)));
+    expect(v.status).toBe("stale");
+    if (v.status === "stale") expect(v.diffs.map((d) => d.field)).toEqual(["operator"]); // the digest never saw it
+  });
+
+  it("a foreign-tenant capability triggers NO kernel lookup (no existence side channel)", () => {
+    const calls: Calls = { caps: [], kernels: [] };
+    const v = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([cap({ id: "cap-print", tenantId: "t-other" })], KERNELS, calls), { tenantId: "t-1" }));
+    expect(v).toEqual({ nodeId: "a", status: "missing", reason: "capability-not-found" });
+    expect(calls.caps).toEqual([["cap-print"]]);
+    expect(calls.kernels).toEqual([]);
+  });
+
+  it("malformed rows from a loader get typed verdicts, never a throw", () => {
+    const withCaps = (rows: unknown[], kernels: unknown[] = KERNELS): RevalidationDeps => ({
+      ...deps([]),
+      loadCapabilities: () => rows as LiveCapability[],
+      loadKernels: () => kernels as LiveKernel[],
+    });
+    const verdictOf = (d: RevalidationDeps) => only(revalidatePlanSnapshots([claim({ nodeId: "a" })], d));
+    for (const rows of [[null], [{}], [{ id: 5 }], ["cap-print"]]) {
+      expect(verdictOf(withCaps(rows))).toEqual({ nodeId: "a", status: "missing", reason: "capability-not-found" });
+    }
+    // a row for an id nobody asked for is not attributed to the claim
+    expect(verdictOf(withCaps([cap({ id: "cap-other" })])).status).toBe("missing");
+    expect(verdictOf(withCaps([{ ...cap({ id: "cap-print" }), type: 7 }]))).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-live-row" });
+    expect(verdictOf(withCaps([cap({ id: "cap-print" })], [null]))).toEqual({ nodeId: "a", status: "missing", reason: "kernel-not-found" });
+    expect(verdictOf(withCaps([cap({ id: "cap-print" })], [{ id: "k-1", operatorAddress: OP, status: 1 }]))).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-live-row" });
+  });
+
+  it("a caller-supplied payout address is ignored: the payout is the live operator's", () => {
+    const attacker = `0x${"66".repeat(20)}`;
+    const v = only(revalidatePlanSnapshots([{ ...claim({ nodeId: "a" }), payoutAddress: attacker } as SnapshotClaim], deps([cap({ id: "cap-print" })])));
+    expect(v.status).toBe("current");
+    if (v.status === "current") {
+      expect(v.resolved.payoutAddress).toBe(OP);
+      expect(JSON.stringify(v.resolved, (_k, x) => (typeof x === "bigint" ? x.toString() : x))).not.toContain("6666");
+    }
+  });
+
   it("a capability type with no CSD has no evidence contract to settle against: incompatible", () => {
     const v = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([cap({ id: "cap-print", type: "interpretive-dance" })])));
     expect(v).toEqual({ nodeId: "a", status: "incompatible", reason: "no-csd-for-type" });
@@ -257,15 +309,19 @@ describe("invalid claims", () => {
       [{ currency: "usdc" }, "malformed-currency"],
       [{ tierKey: "TIER2" }, "malformed-tier"],
       [{ tierKey: "tier4" }, "malformed-tier"],
-      [{ operator: "0x123" }, "malformed-cross-check"],
+      [{ operator: "0x123" }, "malformed-operator"],
+      [{ operator: undefined }, "malformed-operator"], // required: the digest does not cover the operator
+      [{ kernelId: ["k-1"] as unknown as string }, "malformed-kernel-id"],
+      [{ kernelId: undefined }, "malformed-kernel-id"],
       [{ matchedCapabilityDigest: "0xabc" }, "malformed-cross-check"],
-      [{ kernelId: ["k-1"] as unknown as string }, "malformed-cross-check"],
+      [{ capabilityType: 7 as unknown as string }, "malformed-cross-check"],
     ];
     for (const [p, reason] of bad) {
       const v = only(revalidatePlanSnapshots([claim({ nodeId: "a", ...p })], deps([cap({ id: "cap-print" })], KERNELS, calls)));
       expect(v).toEqual({ nodeId: "a", status: "invalid-claim", reason });
     }
     expect(calls.caps).toEqual([]); // nothing valid, nothing loaded
+    expect(calls.kernels).toEqual([]);
   });
 
   it("a duplicated node id gets ONE verdict (never two units), regardless of which copy comes first", () => {
@@ -287,7 +343,7 @@ describe("determinism, batching and the ok flag", () => {
   const live = [cap({ id: "cap-print" }), cap({ id: "cap-mail", type: "mail.drop", kernelId: "k-2" })];
   const claims = [
     claim({ nodeId: "print" }),
-    claim({ nodeId: "mail", capabilityId: "cap-mail" }),
+    claim({ nodeId: "mail", capabilityId: "cap-mail", kernelId: "k-2", operator: OP2 }),
     claim({ nodeId: "print-2" }), // a second unit of the same capability
   ];
 

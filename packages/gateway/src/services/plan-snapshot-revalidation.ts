@@ -2,11 +2,13 @@
  * Live provider re-read for an externally authored plan (reconciliation row R10; MUST-CLOSE 3 and 4).
  *
  * An external agent's plan names, for each node, the capability it wants and the deal it believes
- * it is getting: a price, a currency, a tier, and optionally the deal-snapshot digest it was quoted
- * against. NONE of that is authoritative — a snapshot the caller signed is still the caller's
- * claim. This service re-reads every capability and its kernel LIVE, recomputes the deal-snapshot
- * digest from the live row with the decomposer's own function, and returns one typed verdict per
- * node:
+ * it is getting: a price, a currency, a tier, the kernel that performs it and the operator it pays,
+ * and optionally the deal-snapshot digest it was quoted against. NONE of that is authoritative — a
+ * snapshot the caller signed is still the caller's claim. This service re-reads every capability and
+ * its kernel LIVE, recomputes the deal-snapshot digest from the live row with the decomposer's own
+ * function, and returns one typed verdict per node. The kernel and operator are REQUIRED in the
+ * claim: the digest does not cover the operator, so an operator rotation since the quote is only
+ * detectable if the caller states whom it expects to pay (cross-family review, #355).
  *
  *  - current       the claim matches the live row; `resolved` carries the SERVER's terms (operator,
  *                  gross in base units, digest, CSD). These are the only values the accepted-plan
@@ -15,8 +17,9 @@
  *                  change since the quote, a different kernel. `diffs` names each field and `live`
  *                  is the re-quote. Never silently accepted: the caller re-submits against `live`.
  *  - missing       no such capability (or not visible to this tenant), or its kernel is gone.
- *  - unavailable   the operator is suspended, has no valid settlement address, or the row's tiers
- *                  are malformed.
+ *  - unavailable   the operator is suspended or has no valid settlement address, or the live row is
+ *                  malformed — including missing, empty or out-of-range tiers, which are NEVER
+ *                  defaulted (a default would sell a tier the row does not offer).
  *  - unpriceable   the live row has no exact flat price in a settleable currency.
  *  - incompatible  the capability's type maps to no CSD, so there is no evidence contract to settle
  *                  against.
@@ -55,11 +58,13 @@ export interface SnapshotClaim {
   currency: string;
   /** The tier the node is bought at, e.g. "tier2". */
   tierKey: string;
+  /** The kernel the caller was quoted — who performs the work. Must equal the live row's. */
+  kernelId: string;
+  /** The operator address the caller expects to pay. Must equal the live kernel's. */
+  operator: string;
   /** Optional cross-checks: each one, if present, must equal the live value. */
   capabilityType?: string;
-  kernelId?: string;
   csd?: string;
-  operator?: string;
   matchedCapabilityDigest?: string;
 }
 
@@ -148,7 +153,11 @@ export type NodeVerdict =
   | { nodeId: string; status: "current"; resolved: ResolvedNodeTerms }
   | { nodeId: string; status: "stale"; diffs: FieldDiff[]; live: LiveTerms }
   | { nodeId: string; status: "missing"; reason: "capability-not-found" | "kernel-not-found" }
-  | { nodeId: string; status: "unavailable"; reason: "operator-suspended" | "operator-address-invalid" | "malformed-tiers" }
+  | {
+      nodeId: string;
+      status: "unavailable";
+      reason: "operator-suspended" | "operator-address-invalid" | "malformed-tiers" | "malformed-live-row";
+    }
   | {
       nodeId: string;
       status: "unpriceable";
@@ -173,6 +182,8 @@ export type NodeVerdict =
         | "malformed-price"
         | "malformed-currency"
         | "malformed-tier"
+        | "malformed-kernel-id"
+        | "malformed-operator"
         | "malformed-cross-check";
     };
 
@@ -261,10 +272,9 @@ function claimError(c: SnapshotClaim): Extract<NodeVerdict, { status: "invalid-c
   if (canonicalDecimal(c.price) === null) return "malformed-price";
   if (typeof c.currency !== "string" || !CURRENCY_PATTERN.test(c.currency)) return "malformed-currency";
   if (tierFromKey(c.tierKey) === null) return "malformed-tier";
-  for (const x of [c.capabilityType, c.kernelId, c.csd]) if (x !== undefined && !isId(x)) return "malformed-cross-check";
-  if (c.operator !== undefined && !(typeof c.operator === "string" && ADDRESS_PATTERN.test(c.operator))) {
-    return "malformed-cross-check";
-  }
+  if (!isId(c.kernelId)) return "malformed-kernel-id";
+  if (!(typeof c.operator === "string" && ADDRESS_PATTERN.test(c.operator))) return "malformed-operator";
+  for (const x of [c.capabilityType, c.csd]) if (x !== undefined && !isId(x)) return "malformed-cross-check";
   if (c.matchedCapabilityDigest !== undefined && !(typeof c.matchedCapabilityDigest === "string" && DIGEST_PATTERN.test(c.matchedCapabilityDigest))) {
     return "malformed-cross-check";
   }
@@ -299,33 +309,48 @@ export function revalidatePlanSnapshots(
   }
   for (const [id, n] of counts) if (n > 1) verdicts.push({ nodeId: id, status: "invalid-claim", reason: "duplicate-node-id" });
 
+  // Capabilities, then visibility, THEN kernels. A capability scoped to another tenant is dropped
+  // before any kernel lookup, so it is indistinguishable from one that does not exist: in the
+  // verdict, in the kernel loader's calls, and in timing. A returned row that is not an object with
+  // a requested string id cannot be attributed to a claim and is ignored (fail closed).
   const caps = new Map<string, LiveCapability>();
   const capIds = [...new Set(valid.map((c) => c.capabilityId))].sort();
-  for (const row of capIds.length > 0 ? deps.loadCapabilities(capIds) : []) caps.set(row.id, row);
+  const requested = new Set(capIds);
+  for (const row of capIds.length > 0 ? deps.loadCapabilities(capIds) : []) {
+    if (isRow(row) && requested.has(row.id) && visibleTo(row, opts)) caps.set(row.id, row);
+  }
   const kernels = new Map<string, LiveKernel>();
-  const kernelIds = [...new Set([...caps.values()].map((r) => r.kernelId))].sort();
-  for (const row of kernelIds.length > 0 ? deps.loadKernels(kernelIds) : []) kernels.set(row.id, row);
+  const kernelIds = [...new Set([...caps.values()].map((r) => r.kernelId).filter(isId))].sort();
+  for (const row of kernelIds.length > 0 ? deps.loadKernels(kernelIds) : []) {
+    if (isRow(row)) kernels.set(row.id, row);
+  }
 
-  for (const c of valid) verdicts.push(judge(c, caps.get(c.capabilityId), deps, opts, kernels));
+  for (const c of valid) verdicts.push(judge(c, caps.get(c.capabilityId), deps, kernels));
 
   verdicts.sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
   return { ok: verdicts.length > 0 && verdicts.every((v) => v.status === "current"), verdicts };
+}
+
+function isRow(row: unknown): row is { id: string } {
+  return typeof row === "object" && row !== null && isId((row as { id?: unknown }).id);
+}
+
+function visibleTo(cap: LiveCapability, opts: RevalidationOpts): boolean {
+  return cap.tenantId === undefined || cap.tenantId === null || cap.tenantId === (opts.tenantId ?? null);
 }
 
 function judge(
   c: SnapshotClaim,
   cap: LiveCapability | undefined,
   deps: RevalidationDeps,
-  opts: RevalidationOpts,
   kernels: Map<string, LiveKernel>,
 ): NodeVerdict {
   const nodeId = c.nodeId;
-  // A capability scoped to another tenant is reported exactly like one that does not exist.
-  if (!cap || (cap.tenantId !== undefined && cap.tenantId !== null && cap.tenantId !== (opts.tenantId ?? null))) {
-    return { nodeId, status: "missing", reason: "capability-not-found" };
-  }
+  if (!cap) return { nodeId, status: "missing", reason: "capability-not-found" };
+  if (!isId(cap.type) || !isId(cap.kernelId)) return { nodeId, status: "unavailable", reason: "malformed-live-row" };
   const kernel = kernels.get(cap.kernelId);
   if (!kernel) return { nodeId, status: "missing", reason: "kernel-not-found" };
+  if (typeof kernel.status !== "string") return { nodeId, status: "unavailable", reason: "malformed-live-row" };
   const csd = deps.csdForType(cap.type);
   if (!isId(csd)) return { nodeId, status: "incompatible", reason: "no-csd-for-type" };
   if (kernel.status === "suspended") return { nodeId, status: "unavailable", reason: "operator-suspended" };
@@ -333,9 +358,10 @@ function judge(
   if (typeof operator !== "string" || !ADDRESS_PATTERN.test(operator) || operator.toLowerCase() === ZERO_ADDRESS) {
     return { nodeId, status: "unavailable", reason: "operator-address-invalid" };
   }
-  // The decomposer's default, mirrored so both digests agree (the column is NOT NULL in the schema).
-  const tiers = cap.assuranceTiers ?? [0, 1];
-  if (!Array.isArray(tiers) || !tiers.every((t) => Number.isInteger(t) && t >= 0 && t <= 3)) {
+  // Tiers are NEVER defaulted. The decomposer's `?? [0, 1]` would sell tier 1 on a row that offers
+  // nothing; SQL NOT NULL does not validate the JSON inside the column (cross-family review, #355).
+  const tiers = cap.assuranceTiers;
+  if (!Array.isArray(tiers) || tiers.length === 0 || !tiers.every((t) => Number.isInteger(t) && t >= 0 && t <= 3)) {
     return { nodeId, status: "unavailable", reason: "malformed-tiers" };
   }
   const priced = livePrice(cap);
@@ -377,11 +403,11 @@ function judge(
   if (c.capabilityType !== undefined && c.capabilityType !== live.capabilityType) {
     diffs.push({ field: "capabilityType", claimed: c.capabilityType, live: live.capabilityType });
   }
-  if (c.kernelId !== undefined && c.kernelId !== live.kernelId) {
+  if (c.kernelId !== live.kernelId) {
     diffs.push({ field: "kernelId", claimed: c.kernelId, live: live.kernelId });
   }
   if (c.csd !== undefined && c.csd !== live.csd) diffs.push({ field: "csd", claimed: c.csd, live: live.csd });
-  if (c.operator !== undefined && c.operator.toLowerCase() !== live.operator.toLowerCase()) {
+  if (c.operator.toLowerCase() !== live.operator.toLowerCase()) {
     diffs.push({ field: "operator", claimed: c.operator, live: live.operator });
   }
   if (
