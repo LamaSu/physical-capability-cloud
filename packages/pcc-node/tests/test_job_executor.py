@@ -2753,3 +2753,37 @@ class TestR31OpentronsConflictingMarkers:
         assert result["status"] == "completed"
         assert result["response"] == run_body
         assert classify_execution_result(result) == RESULT_SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict item 4 (non-blocking boundedness): no infinite or NaN
+# budgets, and a poll request never waits longer than the remaining budget.
+# ---------------------------------------------------------------------------
+
+
+class TestR31PollBoundedness:
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_config_numbers_fall_back(self, value):
+        from pcc_node.job_executor import _as_float
+        assert _as_float(value, 5.0) == 5.0
+
+    def test_a_poll_request_never_outlives_the_budget(self):
+        seen_timeouts = []
+        run_id = "run-t"
+
+        def _router(req, *args, **kwargs):
+            url = req.full_url
+            if url.endswith("/actions"):
+                return _FakeResponse(201, {"data": {"id": "a1"}})
+            if url.endswith("/runs"):
+                return _FakeResponse(201, {"data": {"id": run_id}})
+            seen_timeouts.append(kwargs.get("timeout"))
+            return _FakeResponse(200, {"data": {"id": run_id, "status": "succeeded"}})
+
+        device = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:31950",
+                  "runPollInterval": 0, "runPollTimeout": 3}
+        with mock.patch("pcc_node.http_util.urlopen", side_effect=_router):
+            JobExecutor(devices=[])._execute_opentrons(device, {"parameters": {"protocolId": "p"}})
+
+        assert seen_timeouts, "the run was never polled"
+        assert all(t is not None and t <= 3 for t in seen_timeouts), seen_timeouts

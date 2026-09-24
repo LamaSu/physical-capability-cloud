@@ -10,6 +10,7 @@ This module handles the full job execution lifecycle:
 
 import json
 import logging
+import math
 import os
 import platform
 import subprocess
@@ -301,6 +302,8 @@ OPENTRONS_TERMINAL_FAILURE = frozenset({"failed", "stopped"})
 # run-completion watcher is the fix; releasing on "the run was accepted" is not.
 OPENTRONS_RUN_POLL_TIMEOUT_S = 120.0
 OPENTRONS_RUN_POLL_INTERVAL_S = 2.0
+# Upper bound for a single poll request; the remaining budget can lower it.
+POLL_REQUEST_TIMEOUT_MAX_S = 30.0
 
 UNCLASSIFIABLE_REASON = "unclassifiable_result"
 
@@ -535,10 +538,15 @@ def _describe_transport_status(status: int, data: Any) -> str:
 
 
 def _as_float(value: Any, default: float) -> float:
-    """Read a numeric device-config override; fall back on anything unusable."""
+    """Read a numeric device-config override; fall back on anything unusable.
+
+    Infinity and NaN are unusable (r31 astra verdict item 4): an infinite poll
+    budget never ends, and NaN compares false against every deadline.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    return float(value)
+    number = float(value)
+    return number if math.isfinite(number) else default
 
 
 def _readable_status_code(result: Dict) -> Optional[int]:
@@ -1210,8 +1218,14 @@ class JobExecutor:
         deadline = time.monotonic() + timeout_s
         last_body: Any = None
         while True:
+            # Each request gets at most the remaining budget (r31 item 4): a
+            # device that stops answering cannot hold the poll past its deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, last_body
             status, body = http(
-                "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False
+                "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False,
+                timeout=max(1.0, min(POLL_REQUEST_TIMEOUT_MAX_S, remaining)),
             )
             last_body = body
             if status in (200, 201):
