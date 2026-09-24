@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
 import type { RegistrationRow } from "@pcc/store";
@@ -64,18 +64,15 @@ function isOnboardAdmin(req: FastifyRequest): boolean {
 }
 
 /**
- * Audit identity for an admin-key action: "admin-key:" + the first 8 hex of
- * sha256(provided key). The key itself is never recorded. "admin-key:none"
- * only occurs where the routes are open (PCC_ADMIN_KEY unset, NODE_ENV test or
- * development) and no key was sent.
+ * Audit identity for an admin-key action: the constant "admin-key", plus how
+ * the route was authorized (adminAuth: "admin-key", or "open-test-dev" where
+ * PCC_ADMIN_KEY is unset in test/development). Nothing derived from the
+ * provided key is recorded (WP-B round 5, L3): any deterministic function of
+ * the key alone, even 32 bits of its sha256, lets anyone who can read audit
+ * rows test guesses of a weak PCC_ADMIN_KEY offline.
  */
-function adminAuditIdentity(req: FastifyRequest): { actor: string; adminAuth: "admin-key" | "open-test-dev" } {
-  const provided = req.headers["x-admin-key"];
-  const actor =
-    typeof provided === "string" && provided.length > 0
-      ? `admin-key:${createHash("sha256").update(provided).digest("hex").slice(0, 8)}`
-      : "admin-key:none";
-  return { actor, adminAuth: process.env.PCC_ADMIN_KEY ? "admin-key" : "open-test-dev" };
+function adminAuditIdentity(): { actor: "admin-key"; adminAuth: "admin-key" | "open-test-dev" } {
+  return { actor: "admin-key", adminAuth: process.env.PCC_ADMIN_KEY ? "admin-key" : "open-test-dev" };
 }
 
 /** The authenticated caller set by the auth middleware, for audit attribution only. */
@@ -550,7 +547,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, APPROVE_LABEL);
     }
     const at = new Date().toISOString();
-    const admin = adminAuditIdentity(req);
+    const admin = adminAuditIdentity();
     const outcome = commitTransition({
       id: reg.id,
       expectedFrom: reg.status,
@@ -598,7 +595,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     }
     const reason = typeof rawReason === "string" && rawReason.length > 0 ? rawReason : "No reason provided";
     const at = new Date().toISOString();
-    const admin = adminAuditIdentity(req);
+    const admin = adminAuditIdentity();
     const outcome = commitTransition({
       id: reg.id,
       expectedFrom: reg.status,
@@ -757,7 +754,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, ACTIVATE_LABEL);
     }
     const at = new Date().toISOString();
-    const admin = adminAuditIdentity(req);
+    const admin = adminAuditIdentity();
     const outcome = commitTransition({
       id: reg.id,
       expectedFrom: reg.status,

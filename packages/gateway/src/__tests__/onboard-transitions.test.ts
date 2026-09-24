@@ -34,7 +34,8 @@ vi.mock("../telemetry.js", () => ({
 
 const OWNER = "owner@example.com";
 const ADMIN_KEY = "wp-b-admin-key-0123456789abcdef";
-const KEY_FINGERPRINT = `admin-key:${createHash("sha256").update(ADMIN_KEY).digest("hex").slice(0, 8)}`;
+/** sha256(ADMIN_KEY): no part of it may appear in the audit log (L3). */
+const KEY_SHA256 = createHash("sha256").update(ADMIN_KEY).digest("hex");
 const ENV_KEYS = ["NODE_ENV", "PCC_ADMIN_KEY"] as const;
 
 async function buildApp(): Promise<FastifyInstance> {
@@ -242,18 +243,20 @@ describe("onboarding review transitions are atomic and audited", () => {
       expect(rows).toHaveLength(1);
       const row = rows[0]!;
       expect(row.action).toBe(e.action);
-      expect(row.actor).toBe(KEY_FINGERPRINT);
-      expect(row.actor).toMatch(/^admin-key:[0-9a-f]{8}$/);
+      // L3: the actor carries no bits derived from the key.
+      expect(row.actor).toBe("admin-key");
       expect(Date.parse(row.timestamp)).not.toBeNaN();
       expect(row.metadata).toMatchObject({ registrationId: e.id, from: e.from, to: e.to, adminAuth: "admin-key", caller: "reviewer@example.com" });
       expect(row.metadata).toHaveProperty("evidenceDigest");
       expect(Date.parse((row.metadata as { at: string }).at)).not.toBeNaN();
     }
 
-    // No admin-key material anywhere in the audit trail.
+    // No admin-key material anywhere in the audit trail, and nothing derived
+    // from the key (a hash prefix is an offline oracle for a weak key).
     const everything = JSON.stringify(getRepos().auditLog.query({ limit: 1000 }));
     expect(everything).not.toContain(ADMIN_KEY);
     expect(everything).not.toContain(ADMIN_KEY.slice(0, 12));
+    expect(everything).not.toContain(KEY_SHA256.slice(0, 8));
   });
 
   // M1: the evidence digest an approval records comes from the latest
