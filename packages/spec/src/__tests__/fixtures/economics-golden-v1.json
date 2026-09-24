@@ -1,5 +1,5 @@
 {
-  "_comment": "Economic agreements v1 golden outputs for the five worked examples (docs/ECONOMIC_AGREEMENTS.md). Amounts are USDC base units. Hand-checked; to be independently recomputed from the spec alone. Changing any value is a spec change.",
+  "_comment": "Economic agreements v1 golden outputs for the five worked examples (docs/ECONOMIC_AGREEMENTS.md). Amounts are USDC base units. Amounts hand-checked; all 27 payout legs and all 15 hashes independently reproduced from the spec alone by a clean-room Python implementation (returns/pcc-economics-work/cleanroom, 2026-09-24, after the spec's payee.distribution sort was stated). Changing any value is a spec change.",
   "schedules": "examples.ts PRINTER_KIT_SCHEDULE is supplied as the rate schedule body",
   "agreements": {
     "ex1-spare-printer": {
@@ -201,5 +201,6 @@
         }
       }
     }
-  }
+  },
+  "compileOptions": "{ schedules: [PRINTER_KIT_SCHEDULE] } and defaults otherwise: authorityFloor counterparty-accepted, no forbidden recipients beyond the zero address."
 }

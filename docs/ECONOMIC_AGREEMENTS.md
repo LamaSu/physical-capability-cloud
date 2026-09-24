@@ -11,14 +11,17 @@ Everything below is exact. Two implementations that follow this document produce
 
 ## 1. Conventions
 
-- **Amount:** a non-negative integer number of base units of the agreement's currency, written as a decimal string with no sign, no leading zeros (`"0"` is allowed), no exponent. Arithmetic is exact integer arithmetic (`bigint`). Amounts never pass through floating point.
+- **Amount:** a non-negative integer number of base units of the agreement's currency, written as a decimal string of 1 to 78 digits with no sign, no leading zeros (`"0"` is allowed) and no exponent: `^(0|[1-9][0-9]{0,77})$`. Arithmetic is exact integer arithmetic (`bigint`). Amounts never pass through floating point.
 - **bps:** an integer basis-point value, `0 <= bps <= 10000`. "Of 10000" means exactly `x * bps / 10000` with the rounding named where it is used.
 - **Id:** 1 to 128 printable ASCII characters without spaces, `^[\x21-\x7E]{1,128}$`. This is exactly the accepted-plan compiler's node-id grammar, so a plan's node id is always a valid unit reference. All ids are ASCII, so string order is byte order in every language, and canonical JSON escapes only `"` and `\`. Ids are compared exactly (case-sensitive).
-- **Address:** `0x` followed by 40 hex digits. It is normalized to lowercase before anything else. The zero address is never a valid payee.
+- **Address:** `0x` followed by 40 hex digits, in either case. It is normalized to lowercase before anything else. The zero address is never a valid payee.
+- **Hash:** `0x` followed by 64 hex digits, in either case. It is normalized to lowercase before anything else (§6).
+- **Integer:** a JSON number with no fractional part (`1.0` parses as `1` and is accepted). Unless a narrower range is stated, integer fields are within `0 .. 2^53 − 1`; `version` fields are `1 .. 10^9`.
 - **Label:** human text shown to people. 1 to 200 characters, Unicode NFC, with no control characters (U+0000–U+001F, U+007F–U+009F) and no unpaired surrogates. Labels are hashed, so a relabelled agreement is a different agreement.
-- **Time:** an integer count of unix seconds.
+- **Time:** an integer count of unix seconds, `0 .. 2^53 − 1`.
 - **Unknown fields are rejected.** Every object is closed. A field this document does not define is a schema error, never ignored.
 - **Order-free input.** Input arrays are sets. The compiler sorts them canonically (§6), so the order an agent happened to emit never changes a hash or a payout.
+- **Bounds and uniqueness** are part of the schema. Every array's length limit is written next to it below. These arrays must not repeat an entry, or the input fails the schema: `appliesTo.units`, `grants.fieldsOfUse`, `grants.regions`, `use.modifies`, the `requirementId`s of one license, and the `party`s of one payee `distribution`. Duplicate ids elsewhere (parties, units, splits, clauses, licenses, and the component refs and measure keys of one unit) are structure refusals (`DUPLICATE_ID`, §3).
 
 ## 2. The agreement
 
@@ -61,8 +64,8 @@ Unit {
   unitRef:    Id                                       // composition's node/step identity
   label:      Label
   gross:      Amount                                   // G, funded by the payer
-  components: { ref: Id, uses: Amount }[]              // what the accepted plan runs in this unit; uses >= 1; refs unique
-  measures:   { key: Id, value: Amount }[]             // named quantities, e.g. pages; keys unique
+  components: { ref: Id, uses: Amount }[] (0..64)      // what the accepted plan runs in this unit; uses >= 1
+  measures:   { key: Id, value: Amount }[] (0..64)     // named quantities, e.g. pages
 }
 ```
 
@@ -77,7 +80,7 @@ Split { splitId: Id, label: Label, members: SplitMember[] (1..32) }
 SplitMember { to: { party: Id } | { split: Id }, weight: integer 1..1000000, role: Role | null, subject: Id | null }
 ```
 
-A member's `role` / `subject`, when not null, replace the ones inherited from the paying clause (for example, dataset contributors inside a model author's share). Within one split, no two members may have the same `to`. Splits must not form a cycle, and no payment path may pass through more than 8 splits.
+A member's `role` / `subject`, when not null, replace the ones inherited from the paying clause (for example, dataset contributors inside a model author's share). Within one split, no two members may have the same `to`. Splits must not form a cycle. A split's **depth** is 1 plus the largest depth among the splits it pays into, and no split may be deeper than 8, whether or not any clause pays into it.
 
 ### 2.4 Clause
 
@@ -98,7 +101,7 @@ Clause {
 
 `Role` is one of the 11 canonical contributor roles in `@pcc/spec` `CONTRIBUTOR_ROLES`: `operator`, `verifier`, `insurer`, `integrator`, `protocol-author`, `model-author`, `dataset-contributor`, `backend-author`, `curator`, `assembler`, `network-treasury`.
 
-**`appliesTo` selects the units a clause pays in.** `units` names them. `allUnits` is every unit. `usingComponent: R` is every unit whose `components` contains `R`. `oncePerJobUsing: R` is only the first such unit in `unitRef` order, for a fee owed once per job. That selector is how **participation** is expressed: a clause that applies only where a component actually runs is owed only in the units that run it, and each such unit pays it only if that unit is released. A declared contributor whose component runs nowhere in the job is owed nothing. The compiler reports it as not eligible, not as a payment of zero.
+**`appliesTo` selects the units a clause pays in.** `units` names them. `allUnits` is every unit. `usingComponent: R` is every unit whose `components` contains `R`. `oncePerJobUsing: R` is only the first such unit in `unitRef` order, for a fee owed once per agreement. The name predates agreements that span several V-next jobs; "once" means once for the whole agreement. That selector is how **participation** is expressed: a clause that applies only where a component actually runs is owed only in the units that run it, and each such unit pays it only if that unit is released. A declared contributor whose component runs nowhere in the job is owed nothing. The compiler reports it as not eligible, not as a payment of zero.
 
 **Rules.** Each rule is evaluated separately in every unit the clause applies to.
 
@@ -154,6 +157,8 @@ A `distribution` payee is the licensor's own declared division of the payment, f
 
 `percent_by_schedule` is `{ kind, scheduleHash: Hash, of: "gross" | "net", min: Amount | null, max: Amount | null }`. A job-dependent royalty cannot be required as a fixed number, so the license names the schedule instead. The requirement is met by a `percent` clause whose `rateSource.scheduleHash` is that schedule and whose `of`, `min` and `max` are equal. The compile must also be given the schedule body so the pinned bps can be checked; otherwise it refuses (`RATE_UNVERIFIED`), because an unchecked pin would let a composer pay less than the schedule asks.
 
+For every other rule kind, "equal" means equal in every field, including a `percent` rule's `rateSource` (normally `null` in a requirement). `requirementId`s are unique within a license, and `party`s are unique within one `distribution` (schema). Every `distribution` party must be a party of the agreement (`UNKNOWN_REFERENCE`).
+
 `fieldsOfUse` and `regions` hold ids or `"*"`, meaning any. `authority` says how the licensor's right to license the subject is established. It is set by the server resolver, not by the licensor: `registry-anchored` means the licensor holds the subject's registered identity (ContributorNFT / IP registration with the published schedule), and `externally-attested` means an off-platform attestation.
 
 ### 2.6 Intended use
@@ -170,6 +175,8 @@ IntendedUse {
 }
 ```
 
+As for a license, `outbound.shareAlikeTag` is required exactly when `outbound.class` is `share-alike` (schema).
+
 ## 3. Validation and refusals
 
 A compile returns exactly one of:
@@ -177,29 +184,68 @@ A compile returns exactly one of:
 - `{ ok: true, ... }` (§5), or
 - `{ ok: false, refusals: Refusal[] }` with at least one refusal.
 
-There is no partial result. `Refusal = { code, message, path: Id[] }`, where `path` names the offending objects (party, unit, clause, split, license or component ids). Refusals are sorted by `(phase, code, path joined with "/")`.
+There is no partial result.
 
-Phases run in order, and a phase runs only if every earlier phase produced no refusal:
+**A refusal is identified by `(code, path)`.** `Refusal = { code, message, path: string[] }`. The `message` is informative: implementations may word it differently, and it never makes two refusals distinct. Two refusals with the same code and path are one refusal. The list is sorted by phase, then code (byte order), then path. Paths compare element by element in byte order, and a path sorts before any longer path it is a prefix of.
 
-1. **Schema** (`SCHEMA_INVALID`). Closed objects, field types, ranges, id/address/label grammar.
-2. **Structure.**
-   - `DUPLICATE_ID`: two parties, units, splits or clauses with the same id, two licenses with the same `(licenseId, version)`, or a repeated component ref or measure key inside one unit.
-   - `DUPLICATE_LICENSE_SUBJECT`: two licenses for the same subject.
-   - `UNKNOWN_REFERENCE`: any id that points at nothing (payer, clause `to`, split member, `appliesTo.units`, `underLicense`, licensor).
-   - `SPLIT_CYCLE`, `SPLIT_TOO_DEEP` (more than 8), `DUPLICATE_SPLIT_MEMBER`.
-   - `FEE_INVALID`: the §2 fee rules.
-   - `OFFER_EXPIRED`: `terms.acceptBy` is set and `asOf > acceptBy`.
-   - `ECONOMICS_UNDECIDED_OD4`: any `metered` or `downstream` clause.
-   - `INVALID_BOUNDS`: `min > max`, in a clause or a license requirement.
-   - `SCHEDULE_HASH_MISMATCH`, `RATE_PIN_MISMATCH`: a pinned royalty rate whose supplied schedule body does not match (§2.4).
+**Phases** run in order. A phase runs only if every earlier phase produced no refusal. Within a phase, every check runs and every refusal is reported, except where an order is stated below.
+
+1. **Schema** (`SCHEMA_INVALID`): closed objects, field types, ranges, grammar, bounds and uniqueness (§1). Only the code is normative here. An input that fails the schema yields one or more `SCHEMA_INVALID` refusals and no other code. Their paths are JSON paths of failing fields (object keys, and array indices in decimal), but which failing fields are listed is implementation-defined.
+2. **Structure** (below).
 3. **Rights** (§4.1).
 4. **Money** (§4.2–§4.6).
+
+**Path grammar.** In the table below, `L` is a license written `licenseId@version` (for example `lic-kit@2`), and a payee key is `party:<id>` or `split:<id>`.
+
+| Code | Phase | Path(s) |
+|---|---|---|
+| `DUPLICATE_ID` | structure | `["party"\|"unit"\|"split"\|"clause", id]`, `["license", L]`, `["unit", unitRef, "component", ref]`, `["unit", unitRef, "measure", key]` |
+| `DUPLICATE_LICENSE_SUBJECT` | structure | `["license-subject", subject]` |
+| `UNKNOWN_REFERENCE` | structure | `["payer", id]`; `["clause", clauseId, "to", payeeKey]`; `["clause", clauseId, "appliesTo", unitRef]`; `["clause", clauseId, "underLicense", L]`; `["license", L, "licensor", partyId]`; `["license", L, "requirement", requirementId, "party", partyId]`; `["split", splitId, "member", payeeKey]`; `["use", "modifies", ref]` |
+| `DUPLICATE_SPLIT_MEMBER` | structure | `["split", splitId, payeeKey]` |
+| `SPLIT_CYCLE` | structure | `["split", splitId]` for **every** split that can reach itself through its members |
+| `SPLIT_TOO_DEEP` | structure | `["split", splitId]` for every split deeper than 8 (§2.3); checked only when no split is in a cycle |
+| `FEE_INVALID` | structure | At most one, the first that applies: `feeBps > 0` with no recipient gives `["fee"]`; `feeBps == 0` with a recipient gives `["fee"]`; a recipient that is the zero address or a forbidden recipient gives `["fee", "forbidden-recipient"]` |
+| `OFFER_EXPIRED` | structure | `["terms", "acceptBy"]` |
+| `ECONOMICS_UNDECIDED_OD4` | structure | `["clause", clauseId]` |
+| `INVALID_BOUNDS` | structure | `["clause", clauseId]`, `["license", L, "requirement", requirementId]` |
+| `SCHEDULE_HASH_MISMATCH` | structure | `["clause", clauseId, "rateSource"]`: only for a clause whose schedule body was supplied, and it takes precedence over `RATE_PIN_MISMATCH` for that clause |
+| `RATE_PIN_MISMATCH` | structure | `["clause", clauseId, "rateSource"]` |
+| `RIGHTS_UNKNOWN` | rights | `["component", ref]` |
+| `LICENSE_NOT_IN_FORCE`, `AUTHORITY_BELOW_FLOOR` | rights | `["component", ref, L]` |
+| `RIGHTS_INCOMPATIBLE` | rights | `["component", ref, L, condition]` |
+| `LICENSE_PAYMENT_MISSING`, `RATE_UNVERIFIED` | rights | `["license", L, requirementId]` |
+| `LICENSE_PAYMENT_UNMATCHED` | rights | `["clause", clauseId, L]` |
+| `GROSS_OUT_OF_RANGE` | money | `["unit", unitRef]` |
+| `UNKNOWN_MEASURE` | money | `["unit", unitRef, "clause", clauseId, key]` |
+| `OVER_ALLOCATED` | money | `["unit", unitRef, "percent-gross"\|"percent-net"]` (§4.3), `["unit", unitRef]` (§4.4) |
+| `MULTIPLE_RESIDUALS`, `UNALLOCATED_REMAINDER`, `TOO_MANY_LEGS` | money | `["unit", unitRef]` |
+| `UNRESOLVED_PARTY`, `FORBIDDEN_RECIPIENT` | money | `["unit", unitRef, "party", partyId]` |
+
+**Structure checks** (all run):
+- `DUPLICATE_ID`, `DUPLICATE_LICENSE_SUBJECT` (two licenses for one subject).
+- `UNKNOWN_REFERENCE` for every id that points at nothing.
+- `DUPLICATE_SPLIT_MEMBER`, `SPLIT_CYCLE`, `SPLIT_TOO_DEEP`.
+- `FEE_INVALID` (§2 fee rules and the forbidden-recipient list).
+- `OFFER_EXPIRED` (`terms.acceptBy` set and `asOf > acceptBy`).
+- `ECONOMICS_UNDECIDED_OD4` for every `metered` or `downstream` clause.
+- `INVALID_BOUNDS` (`min > max`).
+- `SCHEDULE_HASH_MISMATCH` / `RATE_PIN_MISMATCH` (§2.4).
+
+**Money checks, per unit, in this order.** A unit stops at the first stage that refuses. Every unit is checked, and the refusals of all units are reported together.
+1. `GROSS_OUT_OF_RANGE`.
+2. Clause amounts: `UNKNOWN_MEASURE` for each `per_use` clause whose measure is missing, and `OVER_ALLOCATED` for each percent base over 10000 bps (§4.3).
+3. `OVER_ALLOCATED` for the whole unit (§4.4).
+4. `MULTIPLE_RESIDUALS`.
+5. `UNALLOCATED_REMAINDER`.
+6. `UNRESOLVED_PARTY` / `FORBIDDEN_RECIPIENT` for every positive allocation. A party with no `payTo` is `UNRESOLVED_PARTY`; otherwise a forbidden address is `FORBIDDEN_RECIPIENT`.
+7. `TOO_MANY_LEGS`.
 
 ## 4. The compile
 
 ### 4.1 Rights (before any money)
 
-For every unit, and every component `R` it uses:
+For every distinct component `R` used by any unit, once (not once per unit):
 
 1. The license with `subject == R`. If there is none, the refusal is `RIGHTS_UNKNOWN`. **Unknown rights never mean permission.** A component that really is free to use needs an explicit `open` license.
 2. `validFrom <= asOf` (when set) and `asOf < validUntil` (when set), else `LICENSE_NOT_IN_FORCE`.
@@ -238,7 +284,7 @@ The clauses that apply to the unit are its **applicable clauses** (§2.4 `applie
 
 Take every applicable `percent` clause and group them by `of` ("gross" with base `G`, "net" with base `N`). In each group:
 
-1. If `Σ bps > 10000`, the refusal is `OVER_ALLOCATED` (path: unit, "percent-" + base).
+1. If `Σ bps > 10000`, the refusal is `OVER_ALLOCATED` with path `["unit", unitRef, "percent-gross"]` or `["unit", unitRef, "percent-net"]`.
 2. The claimants are the group's clauses plus one **rest** claimant with weight `10000 − Σ bps`.
 3. **Largest remainder, exactly:** every claimant gets `floor(base × w / 10000)`. The leftover `L = base − Σ floors` (always `< number of claimants`) is given one unit at a time to the claimants with the largest `(base × w) mod 10000`. Ties go to clauses in ascending `clauseId` order, and the rest claimant loses every tie.
 4. Then each clause is clamped: `max(amount, min)` when `min` is set, then `min(amount, max)` when `max` is set.
@@ -253,7 +299,7 @@ In the unit:
 
 - `fixed`, `per_use` and `pass_through` amounts per §2.4.
 - `S = Σ` of every non-residual applicable clause's amount (all of §4.3 after clamping, plus this list).
-- `rest = N − S`. If `rest < 0`, the refusal is `OVER_ALLOCATED` (path: unit).
+- `rest = N − S`. If `rest < 0`, the refusal is `OVER_ALLOCATED` with path `["unit", unitRef]`.
 - At most one `residual` clause may apply to a unit (`MULTIPLE_RESIDUALS`).
 - If `rest > 0` and no residual clause applies, the refusal is `UNALLOCATED_REMAINDER`. **Nobody receives money by default.** The agreement must name who gets what is left.
 - A residual clause's amount is `rest`, which may be 0.
@@ -270,7 +316,7 @@ An allocation's role and subject are the clause's, replaced by the nearest split
 2. **Leg identity** is `(payTo, role, subject)`. Allocations with the same identity are one leg: their amounts add, and the leg keeps every contributing `(partyId, path, amount)` as its attribution. Two different identities stay two legs, even at the same address. The same wallet paid as operator and as assembler is two legs, so each is separately visible in the escrow's per-leg claims.
 3. Zero-amount legs are not payouts (the escrow forbids them). They are listed in the result's `zeroLegs`.
 4. If a unit has more than 16 legs, legs with the same `payTo` are merged (**compaction**). The merged leg's identity is `(payTo, roles joined "+", subjects joined "+")`, both sorted and de-duplicated, and it keeps all attribution. If there are still more than 16, the refusal is `TOO_MANY_LEGS`.
-5. Legs are ordered by `payTo`, then role, then subject (subject `null` sorts as the empty string).
+5. Legs are ordered by `payTo`, then role, then subject (subject `null` sorts as the empty string). A compacted leg is the only leg at its `payTo`, so it needs no further key.
 6. The unit ends with 1 to 16 legs, each `> 0`, summing to exactly `N`. This holds by construction: every clause amount is fully apportioned, and whatever is left goes to the residual or is refused. The compiler asserts it and never emits a unit that breaks it. An agreement may span several V-next jobs (one per operator). Grouping its units into jobs, and the escrow's per-job limits of 16 units and 256 legs, belong to the accepted-plan compiler, which refuses a plan that does not fit.
 
 Refusals from different units are all reported, not only the first unit's.
@@ -302,9 +348,19 @@ CompiledEconomicsV1 {
 
 `payouts` is exactly what the escrow's V-next compiler places in each unit's `UnitConfig.payouts`, with `g = gross`, `feeBps` and `feeRecipient` from `fee`, so `f` and `n` follow. Composition supplies each unit's `milestoneIndex`, `stepId`, tier, `reclaimAt` and composition fields, and fixes the unit order.
 
+**Orders in the result** (all byte order; paths element by element as in §3):
+- `units` by `unitRef`, and legs as §4.6.
+- A leg's `partyIds`, `roles` and `subjects` sorted and without repeats.
+- A leg's `attribution` by `clauseId`, then path, then `partyId`.
+- A unit's `zeroLegs` by `partyId`, then role, then subject (`null` as the empty string), then path.
+- A unit's `clauses` by `clauseId`.
+- `notEligible` and `rates` by `clauseId`.
+- `rights` by `(licenseId, version)`.
+- `totals.byParty` by `partyId`.
+
 ## 6. Canonical form and hashes
 
-**Normalization.** Addresses are lowercased. Arrays are sorted:
+**Normalization.** Addresses and hashes (`supersedes`, every `scheduleHash`) are lowercased. Arrays are sorted:
 
 - `parties` by `partyId`
 - `units` by `unitRef`
@@ -315,6 +371,7 @@ CompiledEconomicsV1 {
 - `unit.measures` by `key`
 - `split.members` by their target key
 - `license.requires.payments` by `requirementId`
+- each requirement's `payee.distribution` by `party`
 - `appliesTo.units`, `grants.fieldsOfUse`, `grants.regions` and `use.modifies` as ascending sets (duplicates are a schema error)
 
 **Canonical JSON** is `@pcc/spec` `canonicalize`: object keys sorted, no whitespace, strings as JSON strings, `null` kept. All amounts are strings. All other numbers are small integers.
@@ -325,7 +382,7 @@ CompiledEconomicsV1 {
 - `economicTermsHash = H("PCC:economic-terms:v1", { currency, payer, parties, units, splits, clauses, fee })`. This covers the payment facts only.
 - `agreementHash = H("PCC:economic-agreement:v1", { agreementId, version, supersedes, asOf, terms, economicTermsHash, rightsTermsHash })`.
 
-A change to any rights fact moves `rightsTermsHash` and leaves `economicTermsHash` alone. A change to any payment fact does the reverse. Both move `agreementHash`. Accepting an agreement means binding `agreementHash`, or both terms hashes, into the funded deal (composition's accepted-plan compiler owns where). A version changed after acceptance therefore no longer matches what was accepted: `verifyAcceptedAgreement(expectedHash, agreement)` refuses with `AGREEMENT_HASH_MISMATCH` and says which half moved (`RIGHTS_TERMS_CHANGED` / `ECONOMIC_TERMS_CHANGED`).
+A change to any rights fact moves `rightsTermsHash` and leaves `economicTermsHash` alone. A change to any payment fact does the reverse. Both move `agreementHash`. Accepting an agreement means binding `agreementHash`, or both terms hashes, into the funded deal (composition's accepted-plan compiler owns where). A version changed after acceptance therefore no longer matches what was accepted: `verifyAcceptedAgreement(accepted, agreement)`, given the three accepted hashes, answers `AGREEMENT_HASH_MISMATCH` with `changed` listing what moved: `rights`, `economics`, or `envelope` when neither terms hash moved but the agreement's own fields did.
 
 ## 7. Simulation
 

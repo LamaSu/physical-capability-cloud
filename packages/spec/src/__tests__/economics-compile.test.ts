@@ -567,6 +567,60 @@ describe("ids match the accepted-plan compiler's grammar", () => {
   });
 });
 
+// ── Refusal identity and paths (clean-room findings, 2026-09-24) ─────────────
+
+describe("refusal identity is (code, path), with a normative path grammar", () => {
+  it("one refusal per (code, path), however many clauses cause it (clean-room P09)", () => {
+    const ag = baseAgreement({
+      parties: [baseAgreement().parties[0]!, { ...baseAgreement().parties[1]!, payTo: null }],
+      clauses: [
+        ...baseAgreement().clauses,
+        { clauseId: "tip", label: "Tip", role: "operator", to: { party: "seller" }, subject: null, appliesTo: { allUnits: true }, underLicense: null, rule: { kind: "fixed", amount: "100" } },
+      ],
+    });
+    const r = compileEconomics(ag);
+    expect(r.ok ? [] : r.refusals.map((x) => [x.code, x.path])).toEqual([["UNRESOLVED_PARTY", ["unit", "u1", "party", "seller"]]]);
+  });
+
+  it("a payee distribution naming an unknown party is UNKNOWN_REFERENCE, not a payment mismatch (clean-room P05)", () => {
+    const ag = exampleLabAssay();
+    const req = ag.licenses.find((l) => l.licenseId === "lic-peak-detect")!.requires.payments[0]!;
+    if (!("distribution" in req.payee)) throw new Error("fixture");
+    req.payee.distribution[1]!.party = "ghost";
+    const r = compileEconomics(ag);
+    expect(r.ok ? [] : r.refusals.map((x) => [x.code, x.path])).toEqual([
+      ["UNKNOWN_REFERENCE", ["license", "lic-peak-detect@3", "requirement", "royalty", "party", "ghost"]],
+    ]);
+  });
+
+  it("paths compare element by element, so ids containing '/' cannot tie or misorder", () => {
+    const ag = baseAgreement({
+      units: [
+        { unitRef: "a/b", label: "One", gross: "4", components: [], measures: [] },
+        { unitRef: "a", label: "Two", gross: "3", components: [], measures: [] },
+      ],
+    });
+    const r = compileEconomics(ag);
+    expect(r.ok ? [] : r.refusals.map((x) => x.path)).toEqual([
+      ["unit", "a"],
+      ["unit", "a/b"],
+    ]);
+  });
+
+  it("the payee distribution is order-free: its order moves no hash (clean-room M1)", () => {
+    const a = exampleLabAssay();
+    const b = exampleLabAssay();
+    const req = b.licenses.find((l) => l.licenseId === "lic-peak-detect")!.requires.payments[0]!;
+    if (!("distribution" in req.payee)) throw new Error("fixture");
+    req.payee.distribution.reverse();
+    const ra = compileEconomics(a);
+    const rb = compileEconomics(b);
+    if (!ra.ok || !rb.ok) throw new Error("fixtures compile");
+    expect(rb.rightsTermsHash).toBe(ra.rightsTermsHash);
+    expect(rb.agreementHash).toBe(ra.agreementHash);
+  });
+});
+
 // ── Every refusal, provoked ──────────────────────────────────────────────────
 
 describe("every refusal code is reachable", () => {

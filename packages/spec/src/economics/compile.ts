@@ -17,7 +17,7 @@ import type { CaptureClass } from "../types/capture.js";
 import { canonicalize } from "../util/canonical.js";
 import { BPS_DENOMINATOR, floorMulDiv, largestRemainder, maxBigint, minBigint, sumBigints } from "./exact.js";
 import { cmpStr, hashNormalizedAgreement, normalizeAgreement, payeeKey } from "./hash.js";
-import { refusal, sortRefusals, type Refusal } from "./refusals.js";
+import { comparePaths, refusal, sortRefusals, type Refusal } from "./refusals.js";
 import {
   AUTHORITY_LEVELS,
   EconomicAgreementSchema,
@@ -212,16 +212,9 @@ function clauseMeetsRequirement(
   );
 }
 
+/** One refusal per (code, path), canonically ordered (§3). */
 function dedupeRefusals(refusals: readonly Refusal[]): Refusal[] {
-  const seen = new Set<string>();
-  const out: Refusal[] = [];
-  for (const r of refusals) {
-    const k = `${r.code}|${r.path.join("/")}|${r.message}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(r);
-  }
-  return sortRefusals(out);
+  return sortRefusals(refusals);
 }
 
 // ── Phase 2: structure ───────────────────────────────────────────────────────
@@ -305,8 +298,24 @@ function checkStructure(n: EconomicAgreement, options: CompileOptions): Refusal[
     }
     for (const req of l.requires.payments) {
       const r = req.rule;
-      if (r.kind === "percent" && r.min !== null && r.max !== null && BigInt(r.min) > BigInt(r.max)) {
+      if ((r.kind === "percent" || r.kind === "percent_by_schedule") && r.min !== null && r.max !== null && BigInt(r.min) > BigInt(r.max)) {
         out.push(refusal("INVALID_BOUNDS", `license ${licenseKey(l)} requirement "${req.requirementId}" has min > max`, ["license", licenseKey(l), "requirement", req.requirementId]));
+      }
+      if ("distribution" in req.payee) {
+        for (const d of req.payee.distribution) {
+          if (!partyIds.has(d.party)) {
+            out.push(
+              refusal("UNKNOWN_REFERENCE", `license ${licenseKey(l)} requirement "${req.requirementId}" distributes to unknown party "${d.party}"`, [
+                "license",
+                licenseKey(l),
+                "requirement",
+                req.requirementId,
+                "party",
+                d.party,
+              ]),
+            );
+          }
+        }
       }
     }
   }
@@ -542,7 +551,7 @@ function legSortKey(l: LegDraft): [string, string, string] {
 
 function finishLeg(l: LegDraft): CompiledLeg {
   const attribution = [...l.allocations]
-    .sort((a, b) => cmpStr(a.clauseId, b.clauseId) || cmpStr(a.path.join("/"), b.path.join("/")) || cmpStr(a.partyId, b.partyId))
+    .sort((a, b) => cmpStr(a.clauseId, b.clauseId) || comparePaths(a.path, b.path) || cmpStr(a.partyId, b.partyId))
     .map((a) => ({ clauseId: a.clauseId, partyId: a.partyId, path: a.path, amount: a.amount.toString() }));
   return {
     recipient: l.recipient,
@@ -750,7 +759,7 @@ function compileUnit(
       cmpStr(a.partyId, b.partyId) ||
       cmpStr(a.role, b.role) ||
       cmpStr(a.subject ?? "", b.subject ?? "") ||
-      cmpStr(a.path.join("/"), b.path.join("/")),
+      comparePaths(a.path, b.path),
   );
 
   const compiledLegs = legs.map(finishLeg);

@@ -56,15 +56,33 @@ export function refusal(code: RefusalCode, message: string, path: string[]): Ref
   return { code, message, path };
 }
 
-/** Deterministic order (§3): phase, then code, then path joined with "/". */
+/** Paths compare element by element (byte order), and a path sorts before any path it prefixes. */
+export function comparePaths(a: readonly string[], b: readonly string[]): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return a[i]! < b[i]! ? -1 : 1;
+  }
+  return a.length - b.length;
+}
+
+/**
+ * The canonical refusal list (§3): one refusal per (code, path), the first message kept (messages are
+ * informative, never part of a refusal's identity), sorted by phase, then code, then path.
+ */
 export function sortRefusals(refusals: readonly Refusal[]): Refusal[] {
+  const seen = new Set<string>();
+  const unique: Refusal[] = [];
+  for (const r of refusals) {
+    const key = `${r.code}\u0000${r.path.join("\u0000")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
   const phaseIndex = (c: RefusalCode) => REFUSAL_PHASES.indexOf(REFUSAL_CODES[c]);
-  return [...refusals].sort((a, b) => {
+  return unique.sort((a, b) => {
     const p = phaseIndex(a.code) - phaseIndex(b.code);
     if (p !== 0) return p;
     if (a.code !== b.code) return a.code < b.code ? -1 : 1;
-    const pa = a.path.join("/");
-    const pb = b.path.join("/");
-    return pa < pb ? -1 : pa > pb ? 1 : 0;
+    return comparePaths(a.path, b.path);
   });
 }
