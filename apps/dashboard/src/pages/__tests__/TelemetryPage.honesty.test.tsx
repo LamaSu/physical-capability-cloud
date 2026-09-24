@@ -331,7 +331,7 @@ describe("gateway answering", () => {
     const t = (await renderPage()).text();
     // The old page drew the generated "job-demo" timeline whenever no pipeline had events.
     expectNoFixtures(t);
-    expect(t).toContain("No pipeline activity in the last hour.");
+    expect(t).toContain("No pipeline activity in the last hour");
     expect(t).toContain("No pipeline selected.");
     expect(t).toContain("No log entries recorded yet.");
     expect(t).toMatch(/Success Rate—/);

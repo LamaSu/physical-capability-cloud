@@ -725,6 +725,7 @@ function TelemetryLive() {
     es.addEventListener("log_entry", (e: MessageEvent) => {
       try {
         const entry = JSON.parse(e.data) as LogEntry;
+        if (typeof entry?.message !== "string") return;
         setLiveLogEntries((prev) => [...prev.slice(-500), entry]);
       } catch { /* malformed event: skip it */ }
     });
@@ -732,6 +733,7 @@ function TelemetryLive() {
     es.addEventListener("telemetry_event", (e: MessageEvent) => {
       try {
         const evt = JSON.parse(e.data) as TelemetryEvent;
+        if (typeof evt?.jobId !== "string" || typeof evt.phase !== "string") return;
         setLiveTelemetryEvents((prev) => [...prev.slice(-500), evt]);
         // Auto-select new job if none selected
         setSelectedJobId((cur) => cur ?? evt.jobId);
@@ -833,10 +835,17 @@ function TelemetryLive() {
         {activeQuery.isError && (
           <StaleNotice what="recent pipelines" updatedAt={activeQuery.dataUpdatedAt} onRetry={retryActive} />
         )}
-        {activeJobs.length > 0 && (
-          <p className="text-[11px] text-white/25">Pipelines with a phase running or an event in the last hour.</p>
+        {activeJobs.length > 0 ? (
+          <>
+            <p className="text-[11px] text-white/25">Pipelines with a phase running or an event in the last hour.</p>
+            <ActiveJobSelector jobs={activeJobs} selectedJobId={selectedJobId} onSelect={setSelectedJobId} />
+          </>
+        ) : (
+          <EmptyState
+            title="No pipeline activity in the last hour"
+            description="A pipeline appears here when the gateway records telemetry for it: a negotiation, a job submission, or an escrow or settlement step."
+          />
         )}
-        <ActiveJobSelector jobs={activeJobs} selectedJobId={selectedJobId} onSelect={setSelectedJobId} />
       </>
     );
   } else if (activeQuery.isError) {
