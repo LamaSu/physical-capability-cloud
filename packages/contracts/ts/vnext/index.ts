@@ -52,3 +52,5 @@ export {
   encodeFundCalldata,
 } from "./abi.js";
 export { VNEXT_GOLDEN } from "./golden.js";
+export { preflightVNextFunding, describeRevert } from "./preflight.js";
+export type { PreflightCheck, VNextFundingPreflight } from "./preflight.js";
