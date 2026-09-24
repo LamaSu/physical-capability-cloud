@@ -3,7 +3,7 @@ import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { signAgentCard, type AgentCard } from "@pcc/a2a-signing";
 import { getActiveSigningKey } from "../signing-key.js";
-import { paymentRecipient } from "../config/payment-recipient.js";
+import { getPaymentGateState } from "../middleware/x402-gate.js";
 
 /**
  * /.well-known/ routes for discovery:
@@ -71,8 +71,10 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       ],
       // Only when a real payment recipient is configured (WP-A fold F1): with
       // none, the gateway refuses priced routes, so it must not claim support.
-      x402Support:
-        paymentRecipient(process.env.PCC_X402_LEGACY === "true" ? "x402" : "mpp") !== null,
+      // Only when the gate is ACTIVE with a configured recipient (WP-A round 5): read
+      // from the gate's frozen state, so discovery can never promise what the gate is
+      // not doing (disabled, unconfigured, or a config change since startup).
+      x402Support: getPaymentGateState().status === "active",
       active: true,
       registrations,
       supportedTrust: ["reputation", "crypto-economic"],
@@ -88,8 +90,6 @@ export async function wellKnownRoutes(app: FastifyInstance) {
   // A2A Agent Card — Google A2A protocol discovery
   // -----------------------------------------------------------------------
 
-  // MPP is the default; x402 is legacy opt-in via PCC_X402_LEGACY=true
-  const mppEnabled = process.env.PCC_X402_LEGACY !== "true";
 
   app.get(
     "/.well-known/agent-card.json",
@@ -129,7 +129,10 @@ export async function wellKnownRoutes(app: FastifyInstance) {
     // fold F1). It used to fall back to 0x…0001 — an address nobody controls —
     // and tell every discovering agent to pay it. With no recipient, the scheme
     // and its `x-recipient` are omitted entirely (the gate 503s priced routes).
-    const recipient = paymentRecipient(mppEnabled ? "mpp" : "x402");
+    // Protocol and recipient come from the gate as it RUNS (WP-A round 5, #2963).
+    const running = getPaymentGateState();
+    const recipient = running.status === "active" ? running.recipient : null;
+    const mppEnabled = running.protocol === "mpp";
     const paymentScheme = recipient
       ? {
           x402: {

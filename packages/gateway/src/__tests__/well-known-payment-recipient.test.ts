@@ -22,6 +22,8 @@ const ENV_KEYS = [
   "PCC_TREASURY_ADDRESS",
   "TEMPO_RECIPIENT",
   "PCC_X402_LEGACY",
+  "PCC_PAYMENT_ENABLED",
+  "MPP_SECRET_KEY",
   "PCC_AGENT_CARD_SIGNING_KEY",
   "PCC_AGENT_CARD_SIGNING_KID",
 ] as const;
@@ -35,6 +37,12 @@ async function buildApp(): Promise<FastifyInstance> {
   _resetForTests();
   await initSigningKey(); // no key configured -> the unsigned card
   const a = Fastify({ logger: false });
+  // Discovery reflects the payment gate as it RUNS (WP-A round 5, #2963), so the gate
+  // is initialized first: enabled, with an MPP secret unless a test says otherwise.
+  if (process.env.PCC_PAYMENT_ENABLED === undefined) process.env.PCC_PAYMENT_ENABLED = "true";
+  if (process.env.MPP_SECRET_KEY === undefined) process.env.MPP_SECRET_KEY = "test-only-mpp-secret-key-0123456789abcdef";
+  const { paymentGate } = await import("../middleware/x402-gate.js");
+  await paymentGate(a);
   await a.register(wellKnownRoutes);
   await a.ready();
   return a;
@@ -120,13 +128,50 @@ describe("F1 — the A2A agent card advertises no placeholder recipient", () => 
 });
 
 describe("F1 — the ERC-8004 registration file claims x402 support only when payable", () => {
-  it("x402Support is false with no recipient, true with one", async () => {
+  it("x402Support is false with no recipient, true with one (each read at startup, as the gate is)", async () => {
     app = await buildApp();
     const off = await app.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
     expect(off.json().x402Support).toBe(false);
+    await app.close();
 
+    // WP-A round 5 (#2963): a recipient set after startup no longer flips discovery on its
+    // own (the gate would not be charging it). A restart picks it up for both.
     process.env.PCC_TREASURY_ADDRESS = TREASURY;
+    app = await buildApp();
     const on = await app.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
     expect(on.json().x402Support).toBe(true);
+  });
+});
+
+// ── WP-A round 5 (sol #2963): discovery follows the gate, not the environment ──
+describe("discovery reflects the payment gate as initialized", () => {
+  it("[neg] payments DISABLED: no scheme and no x402Support, even with a recipient configured", async () => {
+    process.env.PCC_TREASURY_ADDRESS = TREASURY;
+    process.env.TEMPO_RECIPIENT = TEMPO;
+    process.env.PCC_PAYMENT_ENABLED = "false";
+    const { body, json } = await card();
+    expect(json.securitySchemes?.x402).toBeUndefined();
+    expect(body).not.toContain(TEMPO);
+    const reg = await app!.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
+    if (reg.statusCode === 200) expect(reg.json().x402Support).toBe(false);
+  });
+
+  it("[neg] MPP without MPP_SECRET_KEY: the gate runs x402, so the card says x402 with the treasury, never MPP", async () => {
+    process.env.PCC_TREASURY_ADDRESS = TREASURY;
+    process.env.TEMPO_RECIPIENT = TEMPO;
+    process.env.MPP_SECRET_KEY = "";
+    const { body } = await card();
+    expect(body).toContain('"x-payment-protocol":"x402"');
+    expect(body).toContain(TREASURY);
+    expect(body).not.toContain(TEMPO);
+  });
+
+  it("[neg] a config change after startup does not change what discovery advertises (restart required)", async () => {
+    process.env.TEMPO_RECIPIENT = TEMPO;
+    app = await buildApp();
+    process.env.TEMPO_RECIPIENT = "0x7a3f9b1c2d4e5f60718293a4b5c6d7e8f9012345"; // changed after the gate initialized
+    const res = await app.inject({ method: "GET", url: "/.well-known/agent-card.json" });
+    expect(res.body).toContain(TEMPO);
+    expect(res.body).not.toContain("0x7a3f9b1c2d4e5f60718293a4b5c6d7e8f9012345");
   });
 });

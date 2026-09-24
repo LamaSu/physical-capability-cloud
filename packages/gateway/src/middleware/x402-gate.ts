@@ -151,7 +151,39 @@ const stats: PaymentStats = {
   recentPayments: [],
 };
 
+/**
+ * What the payment gate actually runs, FROZEN when it initializes (WP-A round 5,
+ * sol #2963). Discovery (/.well-known/*) and the stats endpoint read this, never
+ * the environment. Otherwise a config change after startup made discovery
+ * advertise a recipient or protocol the gate was not charging: the gate built
+ * its middleware once, while discovery re-read env per request. MPP falls back
+ * to x402 without MPP_SECRET_KEY, and discovery used to say MPP anyway. A
+ * payment config change therefore takes effect on restart, for gate and
+ * discovery together.
+ */
+export interface PaymentGateState {
+  status: "disabled" | "active" | "unconfigured";
+  /** The protocol the gate RUNS: after the MPP→x402 fallback, null when disabled. */
+  protocol: "mpp" | "x402" | null;
+  /** The recipient the gate charges to; null unless active. */
+  recipient: `0x${string}` | null;
+}
+
+const DISABLED_STATE: PaymentGateState = Object.freeze({ status: "disabled", protocol: null, recipient: null });
+let gateState: PaymentGateState = DISABLED_STATE;
+
+/** The payment gate's initialized state (disabled until paymentGate() runs). */
+export function getPaymentGateState(): PaymentGateState {
+  return gateState;
+}
+
+/** Test-only: forget the initialized state. */
+export function _resetPaymentGateStateForTests(): void {
+  gateState = DISABLED_STATE;
+}
+
 export async function paymentGate(app: FastifyInstance) {
+  gateState = DISABLED_STATE; // each initialization decides afresh
   // Payment gate is controlled by env var — disabled by default for dev
   // Support both old (PCC_X402_ENABLED) and new (PCC_PAYMENT_ENABLED) names
   const enabled =
@@ -206,7 +238,10 @@ export async function paymentGate(app: FastifyInstance) {
         x402Middleware = new X402Middleware(x402ConfigFor(x402Treasury), buildX402Routes(x402Treasury));
       }
     }
+    if (mppMiddleware) gateState = Object.freeze({ status: "active", protocol: "mpp", recipient: mppRecipient() });
+    else if (x402Middleware) gateState = Object.freeze({ status: "active", protocol: "x402", recipient: x402Treasury });
     if (unconfigured) {
+      gateState = Object.freeze({ status: "unconfigured", protocol: useMpp && process.env.MPP_SECRET_KEY ? "mpp" : "x402", recipient: null });
       app.log.error(
         "[payment-gate] payment is ENABLED but no payment recipient is configured " +
           "(PCC_TREASURY_ADDRESS / TEMPO_RECIPIENT unset, malformed, or a placeholder). " +
@@ -363,16 +398,14 @@ export async function paymentGate(app: FastifyInstance) {
   // Payment stats endpoint (admin/debug)
   // Note: URL kept as /api/x402/stats for backwards compat — deprecated when MPP is active
   app.get("/api/x402/stats", async () => {
+    // From the frozen gate state: the protocol that actually RUNS (after the MPP→x402
+    // fallback), and whether the gate is charging a configured recipient (#2963).
+    const running = getPaymentGateState();
     return {
       enabled,
-      protocol,
-      deprecated: protocol === "x402",
-      // Whether the recipient for the protocol in use is configured. False
-      // while payment is enabled without one: priced routes are then refused
-      // (503), never charged to a placeholder.
-      recipientConfigured: enabled
-        ? !unconfigured
-        : (useMpp ? mppRecipient() : x402Recipient()) !== null,
+      protocol: running.protocol ?? protocol,
+      deprecated: (running.protocol ?? protocol) === "x402",
+      recipientConfigured: running.status === "active",
       ...stats,
       protectedRoutes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         route: key,
