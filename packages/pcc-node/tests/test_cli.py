@@ -92,31 +92,6 @@ class TestConfigCommand:
         assert data["kernel_name"] == "liquid-handler-node"
 
 
-class TestStartCommand:
-    def test_already_running(self, runner):
-        with mock.patch("pcc_node.cli.is_running", return_value=(True, 999)):
-            result = runner.invoke(main, ["start"])
-        assert result.exit_code == 1
-        assert "already running" in result.output
-
-    def test_start_flow(self, runner, tmp_path):
-        config_path = str(tmp_path / "node-config.json")
-
-        with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
-             mock.patch("pcc_node.cli.detect_all", return_value=[]), \
-             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)), \
-             mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
-             mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
-             mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
-             mock.patch("pcc_node.cli.announce_capabilities"), \
-             mock.patch("pcc_node.cli.run_daemon") as mock_daemon:
-            result = runner.invoke(main, ["start", "-c", config_path, "--api-key", "k"])
-        assert result.exit_code == 0
-        assert "Detecting hardware" in result.output
-        assert "Node running" in result.output
-        mock_daemon.assert_called_once()
-
-
 class TestStartRegistrationTruth:
     """``start`` never claims a registration the gateway did not confirm.
 
@@ -262,3 +237,29 @@ class TestStartRegistrationTruth:
                 env=self.CLEAN_ENV,
             )
         assert result.exit_code == 1
+
+
+class TestStartCommand:
+    def test_already_running(self, runner):
+        with mock.patch("pcc_node.cli.is_running", return_value=(True, 999)):
+            result = runner.invoke(main, ["start"])
+        assert result.exit_code == 1
+        assert "already running" in result.output
+
+    def test_start_flow(self, runner, tmp_path):
+        config_path = str(tmp_path / "node-config.json")
+
+        with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+             mock.patch("pcc_node.cli.detect_all", return_value=[]), \
+             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)), \
+             mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
+             mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
+             mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
+             mock.patch("pcc_node.cli.announce_capabilities"), \
+             mock.patch("pcc_node.cli.run_daemon") as mock_daemon:
+            result = runner.invoke(main, ["start", "-c", config_path, "--api-key", "k"])
+        assert result.exit_code == 0
+        assert "Detecting hardware" in result.output
+        assert "Node running" in result.output
+        mock_daemon.assert_called_once()
+
