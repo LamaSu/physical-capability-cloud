@@ -15,7 +15,7 @@ import {
   type CompileViolation,
 } from "./accepted-plan-compiler.js";
 import { deriveCompositionCommitment } from "./composition-commitment.js";
-import { acceptedDealDigest, SETTLEMENT_TOKEN_DECIMALS } from "./accepted-plan-compiler.js";
+import { acceptedDealDigest, SETTLEMENT_TOKEN_DECIMALS, type NetSplitter } from "./accepted-plan-compiler.js";
 
 const ADDR = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const DIG = (b: string) => `0x${b.repeat(32)}`;
@@ -478,4 +478,149 @@ describe("cross-family review of #351 (sol + astra): every settlement term is se
     const tampered = { ...rest, jobs: rest.jobs.map((j, i) => (i === 0 ? { ...j, units: j.units.map((u, k) => (k === 0 ? { ...u, n: u.n - 1n } : u)) } : j)) };
     expect(acceptedDealDigest(tampered)).not.toBe(sealed);
   });
+});
+
+describe("economics split (R15): economics splits each unit's net; the compiler holds it to its own numbers", () => {
+  const LICENSOR = ADDR("c1");
+  const withSplit = (p: AcceptedPlanInput, splitNet: NetSplitter) => compileAcceptedPlan(p, { splitNet });
+  /** A stand-in for economics' compileEconomics: 10% of each unit's net to a licensor, the rest to the payout address. */
+  const tenPercent: NetSplitter = (units) => ({
+    ok: true,
+    economicTermsHash: DIG("E1"),
+    rightsTermsHash: DIG("f1"),
+    units: units.map((u) => {
+      const royalty = u.n / 10n;
+      return {
+        unitRef: u.nodeId,
+        gross: u.g.toString(),
+        fee: u.f.toString(),
+        net: u.n.toString(),
+        payouts: [
+          { recipient: u.payoutAddress, amount: (u.n - royalty).toString() },
+          { recipient: LICENSOR, amount: royalty.toString() },
+        ],
+      };
+    }),
+  });
+  const tweak = (f: (u: ReturnType<typeof tenPercentUnits>[number]) => object): NetSplitter => (units) => {
+    const r = tenPercent(units);
+    if (!r.ok) return r;
+    return { ...r, units: r.units.map((u) => ({ ...u, ...f(u) })) };
+  };
+  const tenPercentUnits = (units: Parameters<NetSplitter>[0]) => {
+    const r = tenPercent(units);
+    if (!r.ok) throw new Error("x");
+    return r.units;
+  };
+  const fee235 = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+
+  it("splits each unit's net exactly, seals both terms hashes, and receives units in canonical order", () => {
+    const seen: string[][] = [];
+    const spy: NetSplitter = (units) => {
+      seen.push(units.map((u) => u.nodeId));
+      return tenPercent(units);
+    };
+    const r = withSplit(plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [...fee235.nodes].reverse() }), spy);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(seen).toEqual([["print", "mail"]]); // canonical plan order, whatever order the planner listed
+    const u0 = r.plan.jobs[0]!.units[0]!;
+    expect(u0.payouts).toEqual([
+      { recipient: ADDR("a1"), amount: 8_788_500n },
+      { recipient: LICENSOR, amount: 976_500n },
+    ]);
+    expect(u0.payouts.reduce((a, p) => a + p.amount, 0n)).toBe(u0.n);
+    expect(r.plan.economicTermsHash).toBe(DIG("e1")); // lowercased
+    expect(r.plan.rightsTermsHash).toBe(DIG("f1"));
+    const plainDeal = compileAcceptedPlan(fee235);
+    expect(plainDeal.ok && plainDeal.plan.economicTermsHash === null && plainDeal.plan.rightsTermsHash === null).toBe(true);
+    if (plainDeal.ok) expect(r.plan.acceptedDealDigest).not.toBe(plainDeal.plan.acceptedDealDigest);
+  });
+
+  it("the terms hashes are sealed: a different economicTermsHash alone changes the deal digest", () => {
+    const a = withSplit(fee235, tenPercent);
+    const b = withSplit(fee235, (units) => ({ ...(tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>), economicTermsHash: DIG("e2") }));
+    expect(a.ok && b.ok).toBe(true);
+    if (a.ok && b.ok) {
+      expect(b.plan.jobs).toEqual(a.plan.jobs); // same money...
+      expect(b.plan.acceptedDealDigest).not.toBe(a.plan.acceptedDealDigest); // ...different terms, different deal
+    }
+  });
+
+  it("an economics refusal is a compile refusal", () => {
+    const r = withSplit(fee235, () => ({ ok: false, code: "license-incompatible" }));
+    expect(r.ok === false && r.violations).toEqual([{ code: "economics-refused", reason: "license-incompatible" }]);
+  });
+
+  it("economics that disagrees with the compiler's gross/fee/net is refused, never adopted", () => {
+    const r = withSplit(fee235, tweak((u) => ({ fee: (BigInt(u.fee) + 1n).toString() })));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(codes(r)).toEqual(["economics-mismatch", "economics-mismatch"]); // one per unit
+    const g = withSplit(fee235, tweak((u) => ({ gross: `${u.gross}0` })));
+    expect(g.ok === false && g.violations.every((v) => v.code === "economics-mismatch")).toBe(true);
+  });
+
+  it("exactly the plan's units: a missing, extra or duplicated unit is refused", () => {
+    const drop: NetSplitter = (units) => {
+      const r = tenPercent(units);
+      return r.ok ? { ...r, units: r.units.slice(1) } : r;
+    };
+    const extra: NetSplitter = (units) => {
+      const r = tenPercent(units);
+      return r.ok ? { ...r, units: [...r.units, { ...r.units[0]!, unitRef: "ghost" }] } : r;
+    };
+    const dup: NetSplitter = (units) => {
+      const r = tenPercent(units);
+      return r.ok ? { ...r, units: [...r.units, r.units[0]!] } : r;
+    };
+    expect(withSplit(fee235, drop)).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "unit-set" }] });
+    expect(withSplit(fee235, extra)).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "unit-set" }] });
+    expect(withSplit(fee235, dup)).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "unit-ref" }] });
+  });
+
+  it("legs must conserve EXACTLY: one base unit over or under is refused", () => {
+    for (const delta of [1n, -1n]) {
+      const r = withSplit(fee235, tweak((u) => ({ payouts: [u.payouts[0]!, { ...u.payouts[1]!, amount: (BigInt(u.payouts[1]!.amount) + delta).toString() }] })));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(codes(r)).toEqual(["payout-sum-mismatch", "payout-sum-mismatch"]); // every unit reported, not just the first
+    }
+  });
+
+  it("a leg to the zero address, a zero or fractional or non-string amount, or more than 16 legs is refused", () => {
+    const bad = [
+      { recipient: ADDR("00"), amount: "1" },
+      { recipient: LICENSOR, amount: "0" },
+      { recipient: LICENSOR, amount: "1.5" },
+      { recipient: LICENSOR, amount: 5 as unknown as string },
+      { recipient: "0x1234", amount: "1" },
+    ];
+    for (const leg of bad) {
+      const r = withSplit(fee235, tweak((u) => ({ payouts: [...u.payouts, leg] })));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(codes(r)).toContain("invalid-payout-leg");
+    }
+    const many = withSplit(fee235, tweak((u) => ({ payouts: Array.from({ length: 17 }, () => ({ recipient: LICENSOR, amount: "1" })) })));
+    expect(many.ok === false && codes(many)).toEqual(["too-many-payout-legs", "too-many-payout-legs"]);
+  });
+
+  it("malformed economics output (no result, a non-boolean ok, bad hashes, non-array units) is refused, never a throw", () => {
+    const outputs = [
+      null,
+      { ok: "yes" },
+      { ...(tenPercent(unitsOf()) as object), economicTermsHash: "0xabc" },
+      { ok: true, units: "x", economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1") },
+    ];
+    for (const out of outputs) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = withSplit(fee235, () => out as unknown as ReturnType<NetSplitter>);
+      }).not.toThrow();
+      expect(r?.ok).toBe(false);
+      if (r && !r.ok) expect(codes(r)).toEqual(["economics-malformed"]);
+    }
+  });
+
+  function unitsOf(): Parameters<NetSplitter>[0] {
+    return [{ nodeId: "print", operator: OP_A, payoutAddress: ADDR("a1"), g: 10n * USDC, f: 235_000n, n: 9_765_000n }];
+  }
 });
