@@ -2,8 +2,10 @@
  * R13 over HTTP: issuing and reading one-use budget reservations (operator decision #2240, amended by
  * #2301/#2302). The accept route (#391) consumes them.
  *
- *   POST /api/settlement/reservations       issue a reservation for the authenticated principal
- *   GET  /api/settlement/reservations/:id   read one of the principal's own reservations
+ *   POST /api/settlement/reservations                  issue a reservation for the authenticated principal
+ *   POST /api/settlement/reservations/:id/children     MC 9: a composite operator issues a CHILD reservation
+ *                                                      carved from one unit of a sealed parent deal
+ *   GET  /api/settlement/reservations/:id              read one of the principal's own reservations
  *
  * Authority. Every term that grants money authority is the server's; the body names only what the
  * principal asks for.
@@ -26,7 +28,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { BudgetReservation, BudgetReservationStore } from "@pcc/store";
+import type { BudgetReservation, BudgetReservationStore, ParentUnitTerms } from "@pcc/store";
 import { authenticatedPrincipal } from "./agent-plans.js";
 
 /** The request's authorized ceiling, exact, for the principal who owns the request; null otherwise. */
@@ -43,9 +45,19 @@ export interface ReservationIssueWiring {
   newId(): string;
 }
 
+/**
+ * MC 9: the terms of one unit of a SEALED parent deal, read by the server from where the sealed deal is
+ * stored: its operator, its net n, and its reclaimAt. Null when the parent reservation or unit is unknown.
+ * The sealed deal itself is not persisted yet (a proposed amendment to operator decision #2240), so
+ * production answers 503.
+ */
+export type ParentUnitResolver = (parentReservationId: string, unit: string) => ParentUnitTerms | null;
+
 export interface ReservationRouteOptions {
   /** Test injection. Production: `productionReservationWiring`. */
   wiring?: () => ReservationIssueWiring | { missing: string[] };
+  /** Test injection for MC 9 child issuance. Production: missing (no sealed-deal store yet). */
+  parentUnits?: () => ParentUnitResolver | { missing: string[] };
 }
 
 export const MIN_RESERVATION_TTL_SEC = 60;
@@ -63,6 +75,9 @@ export function productionReservationWiring(): { missing: string[] } {
   };
 }
 
+/** The unit reference a child names: `${jobId}#${milestoneIndex}` of the parent's sealed deal. */
+const UNIT_REF = /^[\x21-\x7e]{1,300}#(0|[1-9][0-9]?)$/;
+
 /** A reservation as JSON: exact amounts as decimal strings. */
 function view(r: BudgetReservation) {
   return {
@@ -73,6 +88,8 @@ function view(r: BudgetReservation) {
     purpose: r.purpose,
     minTier: r.minTier,
     payerAddress: r.payerAddress,
+    parentReservationId: r.parentReservationId,
+    parentUnit: r.parentUnit,
     expiresAt: r.expiresAt,
     state: r.state,
     consumedDealDigest: r.consumedDealDigest,
@@ -109,6 +126,7 @@ function readIssueBody(body: unknown):
 
 export async function reservationRoutes(app: FastifyInstance, opts: ReservationRouteOptions = {}): Promise<void> {
   const wiringOf = opts.wiring ?? productionReservationWiring;
+  const parentUnitsOf = opts.parentUnits ?? (() => ({ missing: ["sealed-deal store for parent unit terms (MC 9; proposed amendment to operator decision #2240)"] }));
 
   app.post("/api/settlement/reservations", async (req: FastifyRequest, reply: FastifyReply) => {
     const principal = authenticatedPrincipal(req);
@@ -145,6 +163,86 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
       return reply.status(201).send({ reservation: view(result.reservation) });
     } catch (err) {
       req.log.error({ err }, "reservations issue: server fault");
+      return reply.status(500).send({ error: "internal-error" });
+    }
+  });
+
+  /**
+   * MC 9 (#2301): a composite operator subcontracts part of a unit it was paid for. The child is funded
+   * by its OWN wallet (never the parent payer's), is held by the parent unit's operator only, and all
+   * children of one unit fit that unit's net n and expire by its reclaimAt. The store enforces every
+   * bound in one immediate transaction. The child's request must be the operator's own, in the same
+   * currency. A principal who is not the parent unit's operator gets the same 404 as a missing parent,
+   * so the route is not an oracle for other principals' deals.
+   */
+  app.post("/api/settlement/reservations/:id/children", async (req: FastifyRequest, reply: FastifyReply) => {
+    const principal = authenticatedPrincipal(req);
+    if (principal === null) return reply.status(401).send({ error: "authentication-required" });
+    try {
+      const wiring = wiringOf();
+      const parentUnits = parentUnitsOf();
+      const missing = [...("missing" in wiring ? wiring.missing : []), ...("missing" in parentUnits ? parentUnits.missing : [])];
+      if (missing.length > 0 || "missing" in wiring || "missing" in parentUnits) return reply.status(503).send({ error: "issue-not-wired", missing });
+      const parentId = (req.params as { id?: unknown }).id;
+      const raw: unknown = req.body;
+      const unit = typeof raw === "object" && raw !== null ? (raw as { unit?: unknown }).unit : undefined;
+      const body = readIssueBody(raw);
+      if (body === null || typeof parentId !== "string" || typeof unit !== "string" || !UNIT_REF.test(unit)) {
+        return reply.status(400).send({ error: "malformed-body" });
+      }
+      const terms = parentUnits(parentId, unit);
+      // Only the parent unit's operator may carve a child. Anyone else gets exactly the missing-parent
+      // answer, BEFORE any other check, so no later answer can reveal that the parent exists. The store
+      // re-checks it atomically.
+      if (terms === null || terms.operator.toLowerCase() !== principal.toLowerCase()) {
+        return reply.status(404).send({ error: "parent-unit-not-found" });
+      }
+      // The child's own request: the operator's, in the same currency. Its ceiling does not bound a child;
+      // the parent unit does.
+      const request = wiring.requestCeiling(body.requestId, principal);
+      if (request === null) return reply.status(404).send({ error: "request-not-found" });
+      if (request.currency !== body.currency) return reply.status(422).send({ error: "currency-mismatch" });
+      const payer = wiring.payerFor(principal);
+      if (payer === null) return reply.status(409).send({ error: "no-payer-wallet" });
+      const now = Math.floor(wiring.now());
+      const result = wiring.store.issue({
+        reservationId: wiring.newId(),
+        principal,
+        payerAddress: payer,
+        currency: body.currency,
+        maxAmountBaseUnits: body.maxAmountBaseUnits,
+        purpose: body.purpose,
+        requestId: body.requestId,
+        minTier: body.minTier,
+        expiresAt: now + body.expiresInSec,
+        now,
+        requestCeilingBaseUnits: 0n,
+        parent: terms,
+      });
+      if (!result.ok) {
+        switch (result.reason) {
+          case "parent-not-found":
+          case "child-principal-not-parent-operator":
+            return reply.status(404).send({ error: "parent-unit-not-found" });
+          case "parent-not-consumed":
+            return reply.status(409).send({ error: "parent-deal-not-sealed" });
+          case "parent-currency-mismatch":
+            return reply.status(422).send({ error: "currency-mismatch" });
+          case "child-payer-is-parent-payer":
+            return reply.status(409).send({ error: "child-payer-is-parent-payer" });
+          case "over-parent-unit":
+            return reply.status(409).send({ error: "over-parent-unit" });
+          case "child-outlives-parent-unit":
+            return reply.status(422).send({ error: "child-outlives-parent-unit" });
+          case "invalid-input":
+            return reply.status(400).send({ error: "malformed-body" });
+          default:
+            throw new Error(`child reservation refused: ${result.reason}`);
+        }
+      }
+      return reply.status(201).send({ reservation: view(result.reservation) });
+    } catch (err) {
+      req.log.error({ err }, "reservations child issue: server fault");
       return reply.status(500).send({ error: "internal-error" });
     }
   });
