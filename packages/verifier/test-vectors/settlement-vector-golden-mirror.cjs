@@ -113,7 +113,7 @@ const packageDigest=sha256b(Buffer.from(jcs({body,signatures}),'utf8'));
 
 // ── evidenceCommitment + gatewayReceipt both bind THIS packageDigest to THIS unit ──
 const evidenceCommitment=keccak256(enc(['bytes32','uint256','address','bytes32','uint16','uint8','bytes32'],
-  [K('PCC:vnext:evidence-commitment:v1'),chainId,escrow,settlementUnitId,1n,2n,packageDigest]));   // packageFormat 2
+  [K('PCC:vnext:evidence-commitment:v1'),chainId,escrow,settlementUnitId,1n,1n,packageDigest]));   // packageFormat 1 = the escrow's FIXED commitment-layout label (EVIDENCE_PACKAGE_FORMAT_V1; escrow #2620, steward ruling #2442) -- NOT the package body's own format "2". Was 2 here (golden 0xb1391d21, now retired).
 const receivedAt=1700000000n;
 const gatewayReceipt=keccak256(enc(['bytes32','uint16','uint256','address','bytes32','bytes32','uint64'],
   [K('PCC:vnext:gateway-receipt:v1'),1n,chainId,escrow,settlementUnitId,packageDigest,receivedAt]));
@@ -142,7 +142,7 @@ chk(signatures.length===2 && sha256b(Buffer.from(jcs({body,signatures:canonicalS
 
 // ADVERSARIAL — cross-unit replay + policy-divergence FAIL (money-path).
 const otherUnit=K('other-unit');
-const commitB=keccak256(enc(['bytes32','uint256','address','bytes32','uint16','uint8','bytes32'],[K('PCC:vnext:evidence-commitment:v1'),chainId,escrow,otherUnit,1n,2n,packageDigest]));
+const commitB=keccak256(enc(['bytes32','uint256','address','bytes32','uint16','uint8','bytes32'],[K('PCC:vnext:evidence-commitment:v1'),chainId,escrow,otherUnit,1n,1n,packageDigest]));
 chk(commitB.toLowerCase()!==evidenceCommitment.toLowerCase() && body.unitBinding.settlementUnitId!==otherUnit,'adversarial replay: re-wrap packageDigest under unitB -> different commitment AND body still names unitA -> oracle rejects');
 const bodyDiv={...body,unitBinding:{...body.unitBinding,acceptedEnvelopeHash:K('divergent-policy')}};
 chk(sha256b(Buffer.from(jcs({body:bodyDiv,signatures}),'utf8'))!==packageDigest,'adversarial policy-divergence: acceptedEnvelopeHash != committed acceptedPolicyDigest -> different packageDigest -> oracle rejects (all-4-agree)');
@@ -151,7 +151,7 @@ chk(packageBodyHash!==packageDigest,'sol: packageBodyHash (physical-statement id
 
 // pinned golden for the coherent chain (the NEW values that bind the real policy)
 const EXPECT={ packageDigest:'0xf78103a17702d1fe490a36dd3a02320ba334d52fa966e730c1876501d928dea2',
-  evidenceCommitment:'0xb1391d217932aba1e2c50a3cd4b08ecc3156507ef5e3dbe679bf626b9d23ab9b',
+  evidenceCommitment:'0x31e2d4a7d0f62918322c7862c7eb45c1962c4767814302fba9fd4ab38bbe7f24',   // packageFormat 1 (N14); cross-checked with viem encodeAbiParameters AND escrow's frozen compiler evidenceCommitment() (#367 @f701e6b4)
   gatewayReceipt:'0xca508df81e7e84060306ae6925ae82baeda835af8c7b326177143d680eea9bac' };
 for (const [k,v] of [['packageDigest',packageDigest],['evidenceCommitment',evidenceCommitment],['gatewayReceipt',gatewayReceipt]])
   chk(v.toLowerCase()===EXPECT[k].toLowerCase(),`pinned coherent-chain golden ${k} == ${EXPECT[k]}`);
