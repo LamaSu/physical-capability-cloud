@@ -54,7 +54,9 @@ describe("public AEO discovery routes", () => {
     );
 
     const created = await getCapabilityFacade().create({
-      id: "cap-ai-catalog-robot-polishing",
+      // WP-C R5: the derived id cap-<kernelId>-<type> (old: the caller-chosen
+      // "cap-ai-catalog-robot-polishing", which the facade now refuses).
+      id: "cap-kernel-nyc-robot-polishing",
       kernelId: "kernel-nyc",
       type: capabilityType,
       name: "Robot polishing",
