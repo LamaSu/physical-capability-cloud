@@ -179,10 +179,13 @@ const SIWE_STEPS = {
  * accepted here on purpose (see the header): their operatorId is asserted, not proven.
  */
 function verifiedWallet(req: FastifyRequest): string | null {
-  // Gateway #326 adds req.provenWallet, set by apiGate from a SIWE session or from a key minted through
-  // the SIWE path. Only apiGate writes it; a client cannot. Until then, the session is the only proof.
+  // Gateway #326 adds req.provenWallet, set by apiGate on every request from a SIWE session or from a key
+  // minted through the SIWE path: a wallet, or null. Only apiGate writes it; a client cannot. Once it is
+  // set it is final, null included: apiGate deliberately answers null for a SIWE cookie riding on another
+  // identity's API key (gateway #3160), so the session must not be consulted behind its back. Before
+  // #326, the field is absent and the session is the only proof.
   const proven = (req as { provenWallet?: unknown }).provenWallet;
-  if (typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven)) return proven.toLowerCase();
+  if (proven !== undefined) return typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven) ? proven.toLowerCase() : null;
   const session = resolveSession(req);
   return session ? session.address.toLowerCase() : null;
 }

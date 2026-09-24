@@ -398,6 +398,28 @@ describe("N10a: /api/ip/* authorization", () => {
       expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: { "x-test-proven": "1" }, payload })).statusCode).toBe(200);
       expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", payload })).statusCode).toBe(401);
     });
+
+    it("once apiGate has decided, its null is final: the owner's session is not consulted behind it (gateway #3160)", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      app.addHook("onRequest", async (req) => {
+        // What #326's apiGate does for a SIWE cookie riding on another identity's API key: it proves no wallet.
+        if (req.headers["x-test-gate-null"] === "1") (req as { provenWallet?: string | null }).provenWallet = null;
+      });
+      await app.register(ipRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app);
+      const payload = { ipId, splits: [{ address: OWNER, role: "integrator", percentage: 100, label: "all" }] };
+      // With no verdict from the gate, the owner's own SIWE session is the proof.
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OWNER), payload })).statusCode).toBe(200);
+      // The same session, after the gate answered null, proves nothing.
+      const res = await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: { ...as(OWNER), "x-test-gate-null": "1" }, payload });
+      expect(res.statusCode).toBe(401);
+      expect(res.json<{ error: string }>().error).toBe("verified_wallet_required");
+    });
   });
 
   describe("Story real mode that refuses to execute (N10b's STORY_NOT_EXECUTED) is 501, not a 500", () => {
