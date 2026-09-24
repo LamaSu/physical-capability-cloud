@@ -7,6 +7,23 @@ import { kernelRoutes } from "../routes/kernels.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
 
+/**
+ * A fresh Ed25519 proof-of-possession for `kernelId`. WP-C: the owner in the
+ * last test registers WITH a proven signer, so the kernel's authorized ceiling
+ * is 1 (fresh reputation). The tier assertion there can then tell the two
+ * outcomes apart: the owner's omitted claim (0) serves 0, while an applied
+ * attacker claim of 3 would serve min(3, 1) = 1. Without a signer the ceiling
+ * is 0 and both outcomes would read 0.
+ */
+function ownerSigningProof(kernelId: string) {
+  const kp = nacl.sign.keyPair();
+  return buildEd25519RegistrationProof(kernelId, {
+    algorithm: "ed25519",
+    privateKey: kp.secretKey,
+    expectedPublicKey: Buffer.from(kp.publicKey).toString("hex"),
+  });
+}
+
 describe("POST /api/kernels authentication and ownership", () => {
   let app: FastifyInstance;
 
@@ -70,22 +87,11 @@ describe("POST /api/kernels authentication and ownership", () => {
   it("rejects an authenticated non-owner mutation without a signing proof", async () => {
     const owner = provisionApiKey({ operatorId: "operator-owner" }).rawKey;
     const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
-    // WP-C: the owner registers WITH a proven signer, so the kernel's
-    // authorized ceiling is 1 (fresh reputation). The tier assertion below can
-    // then tell the two outcomes apart: the owner's omitted claim (0) serves 0,
-    // while an applied attacker claim of 3 would serve min(3, 1) = 1. Without
-    // a signer the ceiling is 0 and both outcomes would read 0.
-    const kp = nacl.sign.keyPair();
-    const ownerProof = buildEd25519RegistrationProof("owned-profile", {
-      algorithm: "ed25519",
-      privateKey: kp.secretKey,
-      expectedPublicKey: Buffer.from(kp.publicKey).toString("hex"),
-    });
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
       headers: { authorization: `Bearer ${owner}` },
-      payload: { id: "owned-profile", name: "Owner profile", ...ownerProof },
+      payload: { id: "owned-profile", name: "Owner profile", ...ownerSigningProof("owned-profile") },
     });
     expect(first.statusCode).toBe(201);
     expect(first.json().kernel.signingKey?.algorithm).toBe("ed25519");
