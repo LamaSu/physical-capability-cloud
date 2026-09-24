@@ -2,16 +2,15 @@ import { describe, it, expect } from "vitest";
 import {
   APP_HOME,
   WORKSPACE_HOME,
-  legacyRedirect,
+  canonicalRedirect,
   nextWorkspace,
   workspaceForPath,
 } from "../workspaces.js";
 
 describe("workspaceForPath", () => {
-  it("maps /app and /spatial to the spatial workspace", () => {
+  it("maps /app to the spatial workspace", () => {
     expect(workspaceForPath("/app")).toBe("spatial");
     expect(workspaceForPath("/app/jobs")).toBe("spatial");
-    expect(workspaceForPath("/spatial")).toBe("spatial");
   });
 
   it("maps /agent to the agent workspace", () => {
@@ -43,19 +42,24 @@ describe("workspace switching", () => {
   });
 });
 
-describe("legacyRedirect", () => {
+describe("canonicalRedirect", () => {
+  it("sends /spatial to /app, so each workspace has one address", () => {
+    expect(canonicalRedirect("/spatial")).toBe("/app");
+  });
+
   it("strips the /legacy prefix", () => {
-    expect(legacyRedirect("/legacy/jobs")).toBe("/jobs");
-    expect(legacyRedirect("/legacy/jobs/job-9")).toBe("/jobs/job-9");
+    expect(canonicalRedirect("/legacy/jobs")).toBe("/jobs");
+    expect(canonicalRedirect("/legacy/jobs/job-9")).toBe("/jobs/job-9");
   });
 
   it("sends a bare /legacy to the app home", () => {
-    expect(legacyRedirect("/legacy")).toBe(APP_HOME);
-    expect(legacyRedirect("/legacy/")).toBe(APP_HOME);
+    expect(canonicalRedirect("/legacy")).toBe(APP_HOME);
+    expect(canonicalRedirect("/legacy/")).toBe(APP_HOME);
   });
 
-  it("leaves other paths alone", () => {
-    expect(legacyRedirect("/jobs")).toBeNull();
-    expect(legacyRedirect("/legacyish")).toBeNull();
+  it("leaves canonical paths alone", () => {
+    for (const p of ["/jobs", "/legacyish", "/app", "/agent", "/dashboard"]) {
+      expect(canonicalRedirect(p)).toBeNull();
+    }
   });
 });

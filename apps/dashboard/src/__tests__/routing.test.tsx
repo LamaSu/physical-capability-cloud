@@ -140,6 +140,12 @@ describe("redirects", () => {
     expect(r.text()).toContain(DASHBOARD_NAV_MARK);
   });
 
+  it("/spatial goes to /app, the spatial workspace's one address", async () => {
+    const r = await renderAt("/spatial", { signedIn: true });
+    expect(r.path()).toBe("/app");
+    expect(r.text()).toContain(SPATIAL_MARK);
+  });
+
   it("a signed-in /login goes to the app home, not the landing page", async () => {
     const r = await renderAt("/login", { signedIn: true });
     expect(r.path()).toBe("/dashboard");

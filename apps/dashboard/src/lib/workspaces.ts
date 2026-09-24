@@ -9,6 +9,12 @@
  *
  * Switching workspace is navigation, so a deep link such as /jobs/:id always
  * opens that page, whatever workspace the user was in last.
+ *
+ * This is the canonical route model (product-steward decision D1, bus #2373):
+ * /app becomes the one authenticated adaptive shell, and /dashboard plus the
+ * page routes are the inspect/expert family ("All tools"). /agent is interim:
+ * in Wave 4 the agent conversation becomes a component of /app and the
+ * three-way mode toggle retires.
  */
 
 export type Workspace = "spatial" | "agent" | "dashboard";
@@ -27,7 +33,7 @@ export const APP_HOME = WORKSPACE_HOME.dashboard;
 export const WORKSPACE_CYCLE: readonly Workspace[] = ["spatial", "agent", "dashboard"];
 
 export function workspaceForPath(pathname: string): Workspace {
-  if (pathname === "/app" || pathname.startsWith("/app/") || pathname === "/spatial") return "spatial";
+  if (pathname === "/app" || pathname.startsWith("/app/")) return "spatial";
   if (pathname === "/agent") return "agent";
   return "dashboard";
 }
@@ -38,10 +44,13 @@ export function nextWorkspace(current: Workspace): Workspace {
 }
 
 /**
- * Old bookmarks under /legacy/* point at pages that now live at the root:
- * /legacy/jobs/42 -> /jobs/42. Returns null for any other path.
+ * Addresses that are not canonical, and where each one now lives:
+ *   /spatial        -> /app (one address per workspace)
+ *   /legacy/jobs/42 -> /jobs/42 (old bookmarks for pages that now live at the root)
+ * Returns null when the path is already canonical.
  */
-export function legacyRedirect(pathname: string): string | null {
+export function canonicalRedirect(pathname: string): string | null {
+  if (pathname === "/spatial") return WORKSPACE_HOME.spatial;
   if (pathname !== "/legacy" && !pathname.startsWith("/legacy/")) return null;
   const rest = pathname.slice("/legacy".length);
   return rest && rest !== "/" ? rest : APP_HOME;

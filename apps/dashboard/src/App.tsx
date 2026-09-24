@@ -18,7 +18,7 @@ import { usePageTracking } from "./hooks/use-page-tracking.js";
 import { SpatialApp } from "./SpatialApp.js";
 import { AgentLandingHero } from "./components/AgentLandingHero.js";
 import { FeedbackButton } from "./components/FeedbackButton.js";
-import { APP_HOME, legacyRedirect, workspaceForPath } from "./lib/workspaces.js";
+import { APP_HOME, canonicalRedirect, workspaceForPath } from "./lib/workspaces.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
@@ -319,10 +319,10 @@ function Shell() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const path = location.pathname;
 
-  // Old bookmarks: /legacy/jobs -> /jobs.
-  const legacyTarget = legacyRedirect(path);
-  if (legacyTarget) {
-    return <Navigate to={legacyTarget + location.search + location.hash} replace />;
+  // Non-canonical addresses: /spatial -> /app, old bookmarks /legacy/jobs -> /jobs.
+  const canonical = canonicalRedirect(path);
+  if (canonical) {
+    return <Navigate to={canonical + location.search + location.hash} replace />;
   }
 
   if (path === "/login") {
