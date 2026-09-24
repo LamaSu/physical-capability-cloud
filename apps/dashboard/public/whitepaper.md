@@ -592,11 +592,11 @@ For complex operations (especially those requiring LLM reasoning), PCC implement
 
 This split is critical for lab instruments on private networks. An OT-2 robot on a lab's internal network cannot be directly reached by a cloud LLM. Instead:
 
-1. Brain posts `POST /api/ot2/tool-call` to PCC with tool name and arguments
-2. Executor polls `GET /api/ot2/tool-call/pending` from PCC
+1. Brain posts `POST /api/relay/:kernelId/tool-call` to PCC with tool name, arguments and its scope
+2. Executor polls `GET /api/relay/:kernelId/tool-call/pending` from PCC with the kernel operator's key
 3. Executor runs the tool call locally against the OT-2
-4. Executor posts result via `POST /api/ot2/tool-result`
-5. Brain retrieves result via `GET /api/ot2/tool-result/:id`
+4. Executor posts result via `POST /api/relay/:kernelId/tool-result`
+5. Brain retrieves result via `GET /api/relay/:kernelId/tool-result/:id`
 
 PCC is a relay, not a controller. The relay stores nothing permanently — tool calls and results have a TTL and are garbage-collected.
 
@@ -606,8 +606,8 @@ Operators can stream camera frames from their equipment to the PCC dashboard for
 
 1. Auto-detects V4L2 capture devices on Linux
 2. Captures JPEG frames via `v4l2-ctl`, `ffmpeg`, or `dd` (automatic fallback)
-3. Pushes base64-encoded frames to `POST /api/ot2/camera/frame`
-4. Dashboard users view frames via `GET /api/ot2/camera/latest` (raw JPEG) or subscribe to `GET /api/ot2/camera/stream` (SSE notifications)
+3. Pushes base64-encoded frames to `POST /api/relay/:kernelId/camera/frame` (kernel operator only)
+4. The kernel operator, or an agent holding an active scope on that kernel, views frames via `GET /api/relay/:kernelId/camera/latest` (raw JPEG) or subscribes to `GET /api/relay/:kernelId/camera/stream` (SSE notifications)
 
 Only the latest 5 frames per kernel are retained to avoid database bloat.
 
@@ -686,7 +686,7 @@ PCC classifies every tool call into one of four security classes:
 | **SCOPED WRITE** | Requires active execution scope | Upload protocol, create run, play/pause/stop run |
 | **PRIVILEGED** | Requires explicit operator approval | Shell commands, self-update |
 
-This classification is enforced at the gateway. Every `POST /api/ot2/tool-call` is validated before relay:
+This classification is enforced at the gateway. Every `POST /api/relay/:kernelId/tool-call` is validated before relay:
 
 1. Class 1/2 tools pass immediately
 2. Class 3 tools require a `scopeId` in the request body. The gateway checks: is the scope active? Has it expired? Is this tool in the scope's `allowedTools`? Has the command budget been exhausted?
@@ -700,7 +700,7 @@ An execution scope moves through a defined state machine:
 PROPOSED → ACTIVE → COMPLETED / EXPIRED / REVOKED
 ```
 
-**Creation** (`POST /api/ot2/scope`): The user agent proposes a scope specifying which tools are needed, which pipettes and deck slots will be used, a command budget, a retry budget, a time limit, and optionally a protocol hash (SHA-256 of the protocol file content). The operator (or an auto-approve policy) activates the scope.
+**Creation**: A scope specifies which tools are needed, which pipettes and deck slots will be used, a command budget, a retry budget, a time limit, and optionally a protocol hash (SHA-256 of the protocol file content). Only the kernel's operator can mint one over HTTP (`POST /api/relay/:kernelId/scope`), for itself or for the agent it grants; a paid job's scope is minted by the gateway when the job is created. An agent cannot mint its own.
 
 **Validation**: On every Class 3 tool call, the gateway increments the scope's `commandCount`, checks it against `maxCommands`, and verifies tool membership. Protocol uploads are hash-verified: the SHA-256 of the uploaded content must match the scope's `protocolHash`, preventing the brain from uploading a different protocol than what was approved.
 
@@ -717,11 +717,11 @@ Physical operations fail routinely. A tip pickup misses. A well plate is offset.
 
 ### 11.5 Audit Trail
 
-Every tool call is logged with scope ID, tool name, arguments (hashed for sensitive data), validation result (allowed/rejected with reason), execution result, timestamp, and requestor identity. The audit trail is queryable via `GET /api/ot2/scope/:id/audit`.
+Every tool call is logged with scope ID, tool name, arguments (hashed for sensitive data), validation result (allowed/rejected with reason), execution result, timestamp, and requestor identity. The audit trail is queryable by the kernel operator or the scope's holder via `GET /api/relay/:kernelId/scope/:scopeId/audit`.
 
 ### 11.6 Chat Relay
 
-Operators and agents can communicate in real-time through the chat relay (`/api/ot2/chat`). This provides a human-in-the-loop communication channel for escalation, status updates, and manual override coordination. Messages are persisted per-kernel and queryable by role.
+Operators and agents holding a scope on the kernel can communicate in real-time through the chat relay (`/api/relay/:kernelId/chat`). This provides a human-in-the-loop communication channel for escalation, status updates, and manual override coordination. Messages are persisted per-kernel and queryable by role.
 
 ---
 
@@ -786,11 +786,11 @@ The OT-2 integration demonstrates the complete PCC stack:
 ```
 Claude (Brain, on DGX Spark)
     |
-    | POST /api/ot2/tool-call
+    | POST /api/relay/:kernelId/tool-call
     v
 PCC Gateway (capability.network)
     |
-    | GET /api/ot2/tool-call/pending
+    | GET /api/relay/:kernelId/tool-call/pending
     v
 pcc-node (on OT-2's Raspberry Pi)
     |
