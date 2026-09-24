@@ -65,8 +65,8 @@ function EmergencyStopPanel({ kernels }: { kernels: Kernel[] }) {
     const names = target.map((k) => `• ${kernelLabel(k)}`).join("\n");
     if (!window.confirm(
       `EMERGENCY STOP\n\nPCC will refuse new work for:\n${names}\n\n` +
-      "This does not stop a job that is already running and does not cut power. " +
-      "Use each machine's own emergency stop for that.\n\nContinue?",
+      "Their pending approvals are rejected. This does not stop a job that is already running " +
+      "and does not cut power. Use each machine's own emergency stop for that.\n\nContinue?",
     )) return;
     setBusy(true);
     const results = await Promise.all(target.map((k) => emergencyStop(k.id)));
@@ -97,8 +97,8 @@ function EmergencyStopPanel({ kernels }: { kernels: Kernel[] }) {
         {busy ? "Sending…" : kernels.length > 1 ? `EMERGENCY STOP: all ${kernels.length} of your machines` : "EMERGENCY STOP"}
       </button>
       <p className="text-[11px] text-white/35">
-        Stops PCC from sending or accepting new work for your machines. It does not stop a job that is already running and
-        does not cut power: use the machine's own emergency stop for that.
+        Stops PCC from sending or accepting new work for your machines and rejects their pending approvals. It does not
+        stop a job that is already running and does not cut power: use the machine's own emergency stop for that.
       </p>
 
       {failed.length > 0 && (
