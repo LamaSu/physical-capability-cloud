@@ -22,10 +22,20 @@
  *  - BOUNDED AUTHORITY. The plan's whole obligation (`Σ g`) must fit inside the server-issued
  *    reservation (R13), in its currency, for this request. Issuing and consuming the reservation
  *    atomically is the reservation store's job; the output names it so the consume can seal this plan.
- *  - ASSURANCE. Every non-zero-tier unit must pass the injected program gate (evidence's
- *    `assertAcceptedProgramForTier`, #349). With no gate injected, a non-zero tier is refused.
- *  - ONE ALGORITHM. The v3 composition root is derived here, from the same input the units come from,
- *    and echoed into every unit; the caller cannot pass a root that disagrees with the units.
+ *  - ASSURANCE. Every non-zero-tier unit must carry a program hash AND pass the injected program gate
+ *    (evidence's `assertAcceptedProgramForTier`, #349). A missing hash is refused here even if a
+ *    permissive gate would approve it; with no gate injected, a non-zero tier is refused.
+ *  - A SEALED DEAL. `acceptedDealDigest` = sha256 over the canonical form of the ENTIRE compiled deal:
+ *    every job, every unit field (tier, fee, amounts, payees, order), the signing operators, the
+ *    reservation, the currency and its decimals, and both v3 roots. This is the digest the reservation
+ *    consume seals (MUST-CLOSE 8). The v3 `compositionRoot` is derived here from the same input and
+ *    echoed into every unit, but it commits the PLAN (contract, providers, prices, wallets, program),
+ *    NOT the settlement terms: two deals that differ only in a node's tier, the fee, or the signing
+ *    operator share a compositionRoot and differ in acceptedDealDigest (cross-family review, #351).
+ *    On-chain, each job's `prePolicyRoot` binds its own units.
+ *  - SERVER-RESOLVED DECIMALS. Token decimals come from `SETTLEMENT_TOKEN_DECIMALS`, never from the
+ *    caller: a wrong decimals value would make the committed cost disagree with the gross actually
+ *    pulled (e.g. g = 10^7 at "6" vs "18" decimals). An unknown currency is refused.
  *  - FROZEN-ABI LIMITS. At most 16 units per job, 1–16 payout legs per unit, 256 legs per job;
  *    `5 <= g <= 2^128−1`; `feeBps <= 1000`; `n > 0`; operator ≠ payer; no zero addresses.
  *    (Recipient rules that need chain context — not the escrow, token or factory — and the calldata
@@ -37,6 +47,8 @@
  */
 
 import { keccak_256 } from "@noble/hashes/sha3";
+import { sha256 } from "@noble/hashes/sha256";
+import { canonicalize } from "../util/canonical.js";
 import {
   ADDRESS_PATTERN,
   CURRENCY_PATTERN,
@@ -58,6 +70,13 @@ export const MAX_FEE_BPS = 1000;
 export const BPS_DENOMINATOR = 10_000n;
 /** Stored in each UnitConfig; 0 means "not composed". */
 export const COMPOSITION_SCHEMA_VERSION = 3;
+/** Domain tag inside the accepted-deal digest's canonical preimage. */
+export const ACCEPTED_DEAL_DOMAIN = "PCC:accepted-deal:v1";
+/**
+ * Settlement tokens this compiler will price, with their on-chain decimals. Server-owned: decimals
+ * are never taken from a caller. Add a token here only with its real decimals.
+ */
+export const SETTLEMENT_TOKEN_DECIMALS: Readonly<Record<string, number>> = Object.freeze({ USDC: 6 });
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
@@ -101,10 +120,8 @@ export interface AcceptedPlanInput {
   planId: string;
   requestId: string;
   payer: Address;
-  /** Settlement token symbol, e.g. "USDC". */
+  /** Settlement token symbol, e.g. "USDC". Its decimals come from `SETTLEMENT_TOKEN_DECIMALS`. */
   currency: string;
-  /** Token decimals, used only to render the v3 root's decimal cost strings. */
-  currencyDecimals: number;
   feeBps: number;
   /** Must be the zero address when feeBps is 0, and non-zero otherwise. */
   feeRecipient: Address;
@@ -168,6 +185,10 @@ export interface CompiledAcceptedPlan {
   requestId: string;
   reservationId: string;
   currency: string;
+  /** The settlement token's decimals, resolved server-side. */
+  currencyDecimals: number;
+  /** sha256 over the canonical form of this whole compiled deal; what the reservation consume seals. */
+  acceptedDealDigest: `0x${string}`;
   /** Σ g over every unit of every job. At most the reservation's maximum. */
   totalObligationBaseUnits: bigint;
   compositionRoot: Bytes32;
@@ -194,6 +215,8 @@ export type CompileViolation =
   | { code: "fee-recipient-must-be-zero" }
   | { code: "fee-recipient-missing" }
   | { code: "program-on-tier-zero"; nodeId: string }
+  | { code: "program-required-for-tier"; nodeId: string }
+  | { code: "currency-not-settleable"; currency: string }
   | { code: "program-gate-missing"; nodeId: string }
   | { code: "program-gate-refused"; nodeId: string; reason: string }
   | { code: "mixed-programs-not-committable-v3"; programs: string[] }
@@ -322,8 +345,11 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
   if (!ID_PATTERN.test(input.requestId ?? "")) v.push({ code: "invalid-plan-field", field: "requestId" });
   if (!isNonZeroAddress(input.payer)) v.push({ code: "invalid-plan-field", field: "payer" });
   if (!CURRENCY_PATTERN.test(input.currency ?? "")) v.push({ code: "invalid-plan-field", field: "currency" });
-  if (!Number.isInteger(input.currencyDecimals) || input.currencyDecimals < 0 || input.currencyDecimals > 18) {
-    v.push({ code: "invalid-plan-field", field: "currencyDecimals" });
+  const currencyDecimals = Object.prototype.hasOwnProperty.call(SETTLEMENT_TOKEN_DECIMALS, input.currency)
+    ? SETTLEMENT_TOKEN_DECIMALS[input.currency]!
+    : undefined;
+  if (CURRENCY_PATTERN.test(input.currency ?? "") && currencyDecimals === undefined) {
+    v.push({ code: "currency-not-settleable", currency: input.currency });
   }
   if (typeof input.reclaimAt !== "bigint" || input.reclaimAt <= 0n) {
     v.push({ code: "invalid-plan-field", field: "reclaimAt" });
@@ -423,6 +449,10 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
       if (n.committedProgramHash !== null) v.push({ code: "program-on-tier-zero", nodeId: id });
       continue;
     }
+    if (n.committedProgramHash === null) {
+      v.push({ code: "program-required-for-tier", nodeId: id });
+      continue;
+    }
     if (!deps.assertProgramForTier) {
       v.push({ code: "program-gate-missing", nodeId: id });
       continue;
@@ -455,7 +485,9 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
     if (ids.length > MAX_UNITS_PER_JOB) v.push({ code: "too-many-units-for-operator", operator: op, count: ids.length });
   }
 
-  if (v.length > 0 || order === null || !r) return { ok: false, violations: v };
+  if (v.length > 0 || order === null || !r || currencyDecimals === undefined) {
+    return { ok: false, violations: sortViolations(v) };
+  }
 
   // The v3 root, derived from the same bytes the units come from.
   const program = programs.size === 1 ? [...programs][0]! : undefined;
@@ -469,7 +501,7 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
         matchStatus: "matched" as const,
         matchedCapabilityDigest: n.matchedCapabilityDigest,
         matchedCapabilityId: n.capabilityId,
-        estimatedCost: baseUnitsToCanonicalDecimal(n.grossBaseUnits, input.currencyDecimals),
+        estimatedCost: baseUnitsToCanonicalDecimal(n.grossBaseUnits, currencyDecimals),
         currency: input.currency,
         operatorSettlementAddress: n.payoutAddress,
         evidenceRequirements: n.evidenceRequirements,
@@ -533,18 +565,80 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
     jobs.push({ jobId, operator: first.operator, payer: input.payer, units, nodeIds: [...ids] });
   }
 
-  return {
-    ok: true,
-    plan: {
-      planId: input.planId,
-      requestId: input.requestId,
-      reservationId: r.reservationId,
-      currency: input.currency,
-      totalObligationBaseUnits: total,
-      compositionRoot,
-      capabilityContractRoot: commitment.capabilityContractRoot as Bytes32,
-      jobs,
-      nodeToUnit,
-    },
+  const unsealed = {
+    planId: input.planId,
+    requestId: input.requestId,
+    reservationId: r.reservationId,
+    currency: input.currency,
+    currencyDecimals,
+    totalObligationBaseUnits: total,
+    compositionRoot,
+    capabilityContractRoot: commitment.capabilityContractRoot as Bytes32,
+    jobs,
+    nodeToUnit,
   };
+  return { ok: true, plan: { ...unsealed, acceptedDealDigest: acceptedDealDigest(unsealed) } };
+}
+
+/** Deterministic total order over violations, so a rejected plan's diagnostics are permutation-stable. */
+function sortViolations(v: CompileViolation[]): CompileViolation[] {
+  return [...v].sort((a, b) => {
+    const x = canonicalize(a);
+    const y = canonicalize(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+}
+
+/**
+ * sha256 over the canonical JSON of the whole compiled deal (bigints as decimal strings, addresses
+ * and hashes lowercased — hex case carries no meaning). Any change to any settlement-significant
+ * term — tier, fee, amount, payee, signing operator, unit order, reservation, currency or decimals —
+ * changes this digest.
+ */
+export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): `0x${string}` {
+  const lc = (x: string | null) => (x === null ? null : x.toLowerCase());
+  const preimage = canonicalize({
+    domain: ACCEPTED_DEAL_DOMAIN,
+    planId: plan.planId,
+    requestId: plan.requestId,
+    reservationId: plan.reservationId,
+    currency: plan.currency,
+    currencyDecimals: plan.currencyDecimals,
+    totalObligationBaseUnits: plan.totalObligationBaseUnits.toString(),
+    compositionRoot: lc(plan.compositionRoot),
+    capabilityContractRoot: lc(plan.capabilityContractRoot),
+    jobs: plan.jobs.map((j) => ({
+      jobId: j.jobId,
+      operator: lc(j.operator),
+      payer: lc(j.payer),
+      nodeIds: j.nodeIds,
+      units: j.units.map((u) => ({
+        milestoneIndex: u.milestoneIndex.toString(),
+        stepId: lc(u.stepId),
+        requiredTier: u.requiredTier,
+        requestedTier: u.requestedTier,
+        g: u.g.toString(),
+        f: u.f.toString(),
+        n: u.n.toString(),
+        feeBps: u.feeBps,
+        feeRecipient: lc(u.feeRecipient),
+        reclaimAt: u.reclaimAt.toString(),
+        compositionSchemaVersion: u.compositionSchemaVersion,
+        compositionRoot: lc(u.compositionRoot),
+        payouts: u.payouts.map((p) => ({ recipient: lc(p.recipient), amount: p.amount.toString() })),
+      })),
+    })),
+    nodeToUnit: plan.nodeToUnit.map((b) => ({
+      nodeId: b.nodeId,
+      jobIndex: b.jobIndex,
+      jobId: b.jobId,
+      operator: lc(b.operator),
+      milestoneIndex: b.milestoneIndex,
+      stepId: b.stepId,
+      stepIdBytes32: lc(b.stepIdBytes32),
+      tier: b.tier,
+      committedProgramHash: lc(b.committedProgramHash),
+    })),
+  });
+  return toHex(sha256(new TextEncoder().encode(preimage)));
 }

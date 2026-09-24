@@ -15,6 +15,7 @@ import {
   type CompileViolation,
 } from "./accepted-plan-compiler.js";
 import { deriveCompositionCommitment } from "./composition-commitment.js";
+import { acceptedDealDigest, SETTLEMENT_TOKEN_DECIMALS } from "./accepted-plan-compiler.js";
 
 const ADDR = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const DIG = (b: string) => `0x${b.repeat(32)}`;
@@ -46,7 +47,6 @@ function plan(partial: Partial<AcceptedPlanInput> = {}): AcceptedPlanInput {
     requestId: "req-1",
     payer: PAYER,
     currency: "USDC",
-    currencyDecimals: 6,
     feeBps: 0,
     feeRecipient: ADDR("00"),
     reclaimAt: 1_900_000_000n,
@@ -182,7 +182,7 @@ describe("accepted-plan compiler — determinism (settlement order is independen
     }
   });
 
-  it("compiling the same accepted plan twice is idempotent (a duplicate dispatch cannot create a second obligation)", () => {
+  it("compiling the same accepted plan twice is idempotent (same units, same unit ids downstream)", () => {
     expect(compileAcceptedPlan(plan())).toEqual(compileAcceptedPlan(plan()));
   });
 
@@ -349,5 +349,87 @@ describe("identity helpers", () => {
     expect(tierFromKey("tier4")).toBeNull();
     expect(tierFromKey("TIER2")).toBeNull();
     expect(tierFromKey("2")).toBeNull();
+  });
+});
+
+describe("cross-family review of #351 (sol + astra): every settlement term is sealed", () => {
+  const openGate: ProgramGate = () => ({ ok: true });
+  const deal = (p: AcceptedPlanInput, g: ProgramGate = gate) => {
+    const r = compileAcceptedPlan(p, { assertProgramForTier: g });
+    if (!r.ok) throw new Error(JSON.stringify(r.violations));
+    return r.plan;
+  };
+
+  it("TIER: swapping which node is tier2 keeps the PLAN root but changes the sealed deal digest", () => {
+    const a = deal(plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 }), node({ nodeId: "y" })], edges: [] }));
+    const b = deal(plan({ nodes: [node({ nodeId: "x" }), node({ nodeId: "y", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] }));
+    // The v3 compositionRoot commits the plan (contract, providers, prices, wallets, program) — not unit tiers:
+    expect(a.compositionRoot).toBe(b.compositionRoot);
+    // ...so the tier is sealed by the accepted-deal digest instead:
+    expect(a.acceptedDealDigest).not.toBe(b.acceptedDealDigest);
+    expect(a.jobs[0]!.units.map((u) => u.requiredTier)).toEqual([2, 0]);
+    expect(b.jobs[0]!.units.map((u) => u.requiredTier)).toEqual([0, 2]);
+  });
+
+  it("TIER, isolated (sol's counterexample): tier1 vs tier2 with the SAME program and nothing else different", () => {
+    const t1 = deal(plan({ nodes: [node({ nodeId: "x", tierKey: "tier1", committedProgramHash: PROGRAM_T2 })], edges: [] }), openGate);
+    const t2 = deal(plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] }), openGate);
+    expect(t1.compositionRoot).toBe(t2.compositionRoot); // the plan root does not carry the unit tier
+    expect(t1.jobs[0]!.units[0]!.requiredTier).toBe(1);
+    expect(t2.jobs[0]!.units[0]!.requiredTier).toBe(2);
+    expect(t1.acceptedDealDigest).not.toBe(t2.acceptedDealDigest); // ...the sealed deal does
+  });
+
+  it("FEE: changing the fee changes every net payout and the sealed deal digest", () => {
+    const a = deal(plan());
+    const b = deal(plan({ feeBps: 1000, feeRecipient: ADDR("fe") }));
+    expect(a.compositionRoot).toBe(b.compositionRoot);
+    expect(a.acceptedDealDigest).not.toBe(b.acceptedDealDigest);
+    expect(b.jobs[0]!.units[0]!.n).toBe(9_000_000n);
+  });
+
+  it("OPERATOR: re-assigning the signing operator (same payout wallets) changes the sealed deal digest", () => {
+    const a = deal(plan());
+    const b = deal(plan({ nodes: [node({ nodeId: "print" }), node({ nodeId: "mail", capabilityType: "mail.drop", operator: OP_B })] }));
+    expect(a.compositionRoot).toBe(b.compositionRoot); // same wallets, same plan
+    expect(a.jobs).toHaveLength(1);
+    expect(b.jobs).toHaveLength(2);
+    expect(a.acceptedDealDigest).not.toBe(b.acceptedDealDigest);
+  });
+
+  it("DECIMALS are server-resolved: USDC is 6; an unknown currency is refused (no caller decimals to spoof)", () => {
+    expect(SETTLEMENT_TOKEN_DECIMALS.USDC).toBe(6);
+    const ok = deal(plan());
+    expect(ok.currencyDecimals).toBe(6);
+    const r = compileAcceptedPlan(plan({ currency: "EURC", reservation: { reservationId: "resv-1", requestId: "req-1", currency: "EURC", maxAmountBaseUnits: 100n * USDC } }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(codes(r)).toContain("currency-not-settleable");
+    // a prototype key is not a settlement token
+    const proto = compileAcceptedPlan(plan({ currency: "CONSTRUCTOR" as string, reservation: { reservationId: "resv-1", requestId: "req-1", currency: "CONSTRUCTOR", maxAmountBaseUnits: 100n * USDC } }));
+    expect(proto.ok === false && codes(proto).includes("currency-not-settleable")).toBe(true);
+  });
+
+  it("a non-zero tier with NO program hash is refused even when a permissive gate would approve it", () => {
+    const r = compileAcceptedPlan(plan({ nodes: [node({ nodeId: "pm", tierKey: "tier2", committedProgramHash: null })], edges: [] }), { assertProgramForTier: openGate });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(codes(r)).toContain("program-required-for-tier");
+  });
+
+  it("rejection diagnostics are permutation-stable (sorted), not input-ordered", () => {
+    const bad = [node({ nodeId: "a", grossBaseUnits: 4n }), node({ nodeId: "b", grossBaseUnits: 4n })];
+    const r1 = compileAcceptedPlan(plan({ nodes: bad, edges: [] }));
+    const r2 = compileAcceptedPlan(plan({ nodes: [...bad].reverse(), edges: [] }));
+    expect(r1.ok).toBe(false);
+    expect(r1).toEqual(r2);
+  });
+
+  it("the deal digest is a pure function of the compiled deal (recomputable by any holder)", () => {
+    const d = deal(plan({ feeBps: 235, feeRecipient: ADDR("fe") }));
+    const { acceptedDealDigest: sealed, ...rest } = d;
+    expect(acceptedDealDigest(rest)).toBe(sealed);
+    expect(sealed).toMatch(/^0x[0-9a-f]{64}$/);
+    // one base unit anywhere changes it
+    const tampered = { ...rest, jobs: rest.jobs.map((j, i) => (i === 0 ? { ...j, units: j.units.map((u, k) => (k === 0 ? { ...u, n: u.n - 1n } : u)) } : j)) };
+    expect(acceptedDealDigest(tampered)).not.toBe(sealed);
   });
 });
