@@ -98,6 +98,30 @@ function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp
   return { client: ycClient, offramp: ycOfframp!, onramp: ycOnramp! };
 }
 
+/**
+ * The configured Wise profile id, or null when it is missing or malformed. A LIVE
+ * Wise token without a valid profile is not a configured provider: the payout
+ * handlers refuse it (503) instead of paying from a placeholder profile. They used
+ * to fall back to "12345" (sol #2963, WP-A round 5).
+ */
+function wiseProfileId(): number | null {
+  const raw = process.env.WISE_PROFILE_ID?.trim();
+  if (!raw || !/^[1-9][0-9]{0,18}$/.test(raw)) return null;
+  return Number(raw);
+}
+
+/** 503 for a live Wise token with no valid profile id; null when the payout may proceed. */
+function wiseNotConfigured(): { error: string; provider: string; message: string } | null {
+  if (process.env.WISE_API_TOKEN && wiseProfileId() === null) {
+    return {
+      error: "provider_not_configured",
+      provider: "wise",
+      message: "WISE_PROFILE_ID is missing or invalid, so no payout was attempted.",
+    };
+  }
+  return null;
+}
+
 function getWise(): { client: WiseClient; payout: WisePayoutService } {
   if (!wiseClient) {
     const mock = !process.env.WISE_API_TOKEN;
@@ -690,9 +714,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "sourceAmount, recipient, and reference are required" });
     }
 
+    const notConfigured = wiseNotConfigured();
+    if (notConfigured) return reply.status(503).send(notConfigured);
     try {
       const { payout } = getWise();
-      const profileId = parseInt(process.env.WISE_PROFILE_ID ?? "12345", 10);
+      // Live mode always has a validated profile here; mock mode (no token) never calls Wise.
+      const profileId = wiseProfileId() ?? 0;
       const result = await payout.sendPayout({
         profileId,
         sourceAmount: body.sourceAmount as number,
@@ -740,9 +767,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "payouts array is required" });
     }
 
+    const notConfigured = wiseNotConfigured();
+    if (notConfigured) return reply.status(503).send(notConfigured);
     try {
       const { payout } = getWise();
-      const profileId = parseInt(process.env.WISE_PROFILE_ID ?? "12345", 10);
+      // Live mode always has a validated profile here; mock mode (no token) never calls Wise.
+      const profileId = wiseProfileId() ?? 0;
       const requests = payouts.map((p: unknown) => {
         const item = p as Record<string, unknown>;
         return {
