@@ -66,23 +66,23 @@ async function renderAt(path: string, { signedIn }: { signedIn: boolean }) {
   return {
     text: () => container.textContent ?? "",
     path: () => window.location.pathname,
+    spatial: () => container.querySelector('[data-shell="spatial"]') !== null,
   };
 }
 
-const SPATIAL_MARK = "You are using the limited web interface.";
 const DASHBOARD_NAV_MARK = "Protocol Library"; // a sidebar item only the dashboard shell renders
 
 describe("signed-in deep links open their page, not the spatial canvas", () => {
   it("/dashboard renders the dashboard shell", async () => {
     const r = await renderAt("/dashboard", { signedIn: true });
     expect(r.text()).toContain(DASHBOARD_NAV_MARK);
-    expect(r.text()).not.toContain(SPATIAL_MARK);
+    expect(r.spatial()).toBe(false);
   });
 
   it("/jobs/:id renders inside the dashboard shell", async () => {
     const r = await renderAt("/jobs/job-123", { signedIn: true });
     expect(r.text()).toContain(DASHBOARD_NAV_MARK);
-    expect(r.text()).not.toContain(SPATIAL_MARK);
+    expect(r.spatial()).toBe(false);
   });
 
   it("/settings renders the settings page", async () => {
@@ -100,7 +100,12 @@ describe("signed-in deep links open their page, not the spatial canvas", () => {
 describe("workspaces have addresses", () => {
   it("/app renders the spatial workspace", async () => {
     const r = await renderAt("/app", { signedIn: true });
-    expect(r.text()).toContain(SPATIAL_MARK);
+    expect(r.spatial()).toBe(true);
+  });
+
+  it("/app does not call itself a limited fallback (product-qa #21; launch owns the copy)", async () => {
+    const r = await renderAt("/app", { signedIn: true });
+    expect(r.text()).not.toMatch(/limited web interface|better interface than this/);
   });
 
   it("/agent renders the live agent conversation, not the retired showcase", async () => {
@@ -119,7 +124,7 @@ describe("workspaces have addresses", () => {
     await act(async () => toggle().click());
     await settle();
     expect(r.path()).toBe("/app");
-    expect(r.text()).toContain(SPATIAL_MARK);
+    expect(r.spatial()).toBe(true);
 
     await act(async () => toggle().click());
     await settle();
@@ -143,7 +148,7 @@ describe("redirects", () => {
   it("/spatial goes to /app, the spatial workspace's one address", async () => {
     const r = await renderAt("/spatial", { signedIn: true });
     expect(r.path()).toBe("/app");
-    expect(r.text()).toContain(SPATIAL_MARK);
+    expect(r.spatial()).toBe(true);
   });
 
   it("a signed-in /login goes to the app home, not the landing page", async () => {
