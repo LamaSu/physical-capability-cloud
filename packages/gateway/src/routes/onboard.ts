@@ -195,23 +195,33 @@ function transitionAuditFields(pre: RegistrationRow, post: RegistrationRow, at: 
   };
 }
 
-function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure: TransitionFailure, action: string) {
+/** Which transition failed, for messages: `verb` ("approve") and `noun` ("approval"). */
+interface TransitionLabel {
+  verb: string;
+  noun: string;
+}
+const APPROVE_LABEL: TransitionLabel = { verb: "approve", noun: "approval" };
+const REJECT_LABEL: TransitionLabel = { verb: "reject", noun: "rejection" };
+const ACTIVATE_LABEL: TransitionLabel = { verb: "activate", noun: "activation" };
+const PROVE_LABEL: TransitionLabel = { verb: "submit evidence for", noun: "evidence submission" };
+
+function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure: TransitionFailure, label: TransitionLabel) {
   if (failure.kind === "conflict") {
     return reply.status(409).send({
       error: "invalid_transition",
-      message: `Cannot ${action} this registration from its current status (${failure.currentStatus ?? "missing"}).`,
+      message: `Cannot ${label.verb} this registration from its current status (${failure.currentStatus ?? "missing"}).`,
       currentStatus: failure.currentStatus,
     });
   }
-  req.log.error({ err: failure.error }, `[onboard] ${action} rolled back (${failure.kind})`);
-  Sentry.captureException(failure.error, { extra: { action, failure: failure.kind, url: req.url } });
+  req.log.error({ err: failure.error }, `[onboard] ${label.noun} rolled back (${failure.kind})`);
+  Sentry.captureException(failure.error, { extra: { transition: label.noun, failure: failure.kind, url: req.url } });
   if (failure.kind === "audit_failed") {
     return reply.status(500).send({
       error: "audit_write_failed",
-      message: `The ${action} was rolled back because its audit record could not be written.`,
+      message: `The ${label.noun} was rolled back because its audit record could not be written.`,
     });
   }
-  return reply.status(500).send({ error: "transition_failed", message: `The ${action} could not be applied.` });
+  return reply.status(500).send({ error: "transition_failed", message: `The ${label.noun} could not be applied.` });
 }
 
 export async function onboardRoutes(app: FastifyInstance) {
@@ -382,7 +392,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (!APPROVE_FROM.includes(reg.status)) {
-      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, "approve");
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, APPROVE_LABEL);
     }
     const at = new Date().toISOString();
     const admin = adminAuditIdentity(req);
@@ -402,7 +412,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         userAgent: req.headers["user-agent"],
       }),
     });
-    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "approve");
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, APPROVE_LABEL);
     return { registration: outcome.row, approved: true };
   });
 
@@ -414,7 +424,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (!REJECT_FROM.includes(reg.status)) {
-      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, "reject");
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, REJECT_LABEL);
     }
     const rawReason = (req.body as { reason?: unknown } | undefined)?.reason;
     if (rawReason !== undefined && rawReason !== null && (typeof rawReason !== "string" || rawReason.length > REJECT_REASON_MAX_CHARS)) {
@@ -439,7 +449,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         userAgent: req.headers["user-agent"],
       }),
     });
-    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "reject");
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, REJECT_LABEL);
     return { registration: outcome.row, rejected: true };
   });
 
@@ -571,7 +581,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (!ACTIVATE_FROM.includes(reg.status)) {
-      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, "activate");
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, ACTIVATE_LABEL);
     }
     const at = new Date().toISOString();
     const admin = adminAuditIdentity(req);
@@ -590,7 +600,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         userAgent: req.headers["user-agent"],
       }),
     });
-    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "activate");
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, ACTIVATE_LABEL);
     return { registration: outcome.row, activated: true };
   });
 
@@ -818,7 +828,7 @@ export async function onboardRoutes(app: FastifyInstance) {
               userAgent: req.headers["user-agent"],
             }),
           });
-          if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "evidence submission");
+          if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
 
           pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
             metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },
