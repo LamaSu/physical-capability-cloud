@@ -901,6 +901,7 @@ describe("input snapshot, round 3 (astra review of ce18cf42): no caller referenc
     const input = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", tierKey: "tier2", committedProgramHash: PROGRAM_T2 }), node({ nodeId: "mail", capabilityType: "mail.drop" })] });
     const viaProxy = compileAcceptedPlan(counting(input, counts), { assertProgramForTier: gate });
     const plain = compileAcceptedPlan(input, { assertProgramForTier: gate });
+    expect(plain.ok).toBe(true);
     expect(viaProxy).toEqual(plain);
     const reread = [...counts.entries()].filter(([, n]) => n > 1);
     expect(reread).toEqual([]);
