@@ -36,6 +36,7 @@ import {
 } from "../services/external-plan-seam.js";
 import type { LiveCapability, LiveKernel } from "../services/plan-snapshot-revalidation.js";
 import { submissionFromComposeResponse } from "../services/compose-plan-adapter.js";
+import { presentPlan, type PresentPlanArgs } from "../services/plan-presentation.js";
 
 const A = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const OP_PRINT = A("aa");
@@ -481,6 +482,116 @@ describe("the server composer is one planner among many: /api/compose output ent
   });
 });
 
+describe("PlanPresentation: the product read model, built only from server truth", () => {
+  const ASOF = "2026-09-24T13:00:00.000Z";
+
+  it("proposed only: Layer C, every node 'proposed', no preview and no deal", () => {
+    const p = presentPlan({ submission: agentDag(), asOf: ASOF });
+    expect(p).toMatchObject({ schema: "pcc.plan-presentation.v1", layer: "C", state: "proposed", requestId: "req-42", reservationId: "resv-1", asOf: ASOF });
+    expect(p.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "proposed"], ["print", "proposed"]]);
+    expect(p.preview).toBeUndefined();
+    expect(p.deal).toBeUndefined();
+  });
+
+  it("compiled: live terms, the execution unit and exact money per node; preview totals; still Layer C", () => {
+    const outcome = acceptExternalPlan(agentDag(), CTX, world().deps);
+    const p = presentPlan({ submission: agentDag(), outcome, asOf: ASOF });
+    expect(p.state).toBe("compiled");
+    expect(p.layer).toBe("C"); // compiled is not accepted: nothing is sealed yet
+    const print = p.nodes.find((n) => n.nodeId === "print")!;
+    expect(print.state).toBe("compiled");
+    expect(print.live).toMatchObject({ priceDecimal: "6.5", operator: OP_PRINT, csd: PRINT, assuranceTiers: [0, 1, 2] });
+    expect(print.unit).toEqual({
+      jobId: `plan.resv-1:${OP_PRINT}`,
+      milestoneIndex: 0,
+      stepId: "print",
+      stepIdBytes32: stepIdBytes32("print"),
+      tier: 2,
+      committedProgramHash: PROGRAM,
+    });
+    expect(print.money?.net).toEqual({ baseUnits: "6347250", currency: "USDC", decimals: 6 });
+    expect(p.preview).toEqual({
+      gross: { baseUnits: "9750000", currency: "USDC", decimals: 6 },
+      fee: { baseUnits: "229125", currency: "USDC", decimals: 6 },
+      net: { baseUnits: "9520875", currency: "USDC", decimals: 6 },
+      payoutsByRecipient: [
+        { recipient: OP_PRINT, amount: { baseUnits: "6347250", currency: "USDC", decimals: 6 } },
+        { recipient: OP_MAIL, amount: { baseUnits: "3173625", currency: "USDC", decimals: 6 } },
+      ],
+      tierByNode: [
+        { nodeId: "mail", tier: 0 },
+        { nodeId: "print", tier: 2 },
+      ],
+      reclaimAt: String(NOW + 7 * 24 * 3600),
+    });
+    expect(p.deal?.sealed).toBe(false);
+  });
+
+  it("sealed: Layer B only when the reservation store sealed EXACTLY this deal's digest", () => {
+    const { store, deps } = world();
+    const outcome = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    const wrong = presentPlan({ submission: agentDag(), outcome, sealed: { reservationId: "resv-1", acceptedDealDigest: `0x${"ab".repeat(32)}` }, asOf: ASOF });
+    expect(wrong).toMatchObject({ layer: "C", state: "compiled", deal: { sealed: false } });
+    expect(wrong.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "compiled"], ["print", "compiled"]]);
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    // the right digest recorded under ANOTHER reservation is not this plan's seal
+    expect(presentPlan({ submission: agentDag(), outcome, sealed: { reservationId: "resv-other", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF }).layer).toBe("C");
+    const p = presentPlan({ submission: agentDag(), outcome, sealed: { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF });
+    expect(p).toMatchObject({ layer: "B", state: "sealed", deal: { sealed: true, acceptedDealDigest: outcome.plan.acceptedDealDigest } });
+    expect(p.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "sealed"], ["print", "sealed"]]);
+  });
+
+  it("content cannot raise authority: layer/state/sealed fields in the submission are ignored", () => {
+    const forged = { ...agentDag(), layer: "B", state: "sealed", deal: { sealed: true } } as unknown as ExternalPlanSubmission;
+    expect(presentPlan({ submission: forged, asOf: ASOF })).toMatchObject({ layer: "C", state: "proposed" });
+    const outcome = acceptExternalPlan(agentDag(), CTX, world().deps);
+    expect(presentPlan({ submission: forged, outcome, asOf: ASOF })).toMatchObject({ layer: "C", state: "compiled" });
+  });
+
+  it("needs-requote: the stale node carries its diffs and the live re-quote; the other node stays current", () => {
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, price: "5.00" };
+    const p = presentPlan({ submission: dag, outcome: acceptExternalPlan(dag, CTX, world().deps), asOf: ASOF });
+    expect(p.state).toBe("needs-requote");
+    const print = p.nodes.find((n) => n.nodeId === "print")!;
+    expect(print).toMatchObject({ state: "stale", diffs: [{ field: "price", claimed: "5", live: "6.5" }], live: { priceDecimal: "6.5" } });
+    expect(p.nodes.find((n) => n.nodeId === "mail")!.state).toBe("current");
+    expect(p.preview).toBeUndefined();
+  });
+
+  it("refused: before R10 the nodes stay 'proposed'; a missing capability is 'refused', never a re-quote", () => {
+    const early = presentPlan({ submission: agentDag(), outcome: acceptExternalPlan(agentDag(), { principal: "agent:intruder" }, world().deps), asOf: ASOF });
+    expect(early).toMatchObject({ state: "refused", refusal: { stage: "reservation", reason: "wrong-principal" } });
+    expect(early.nodes.every((n) => n.state === "proposed")).toBe(true);
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, capabilityId: "ghost" };
+    const gone = presentPlan({ submission: dag, outcome: acceptExternalPlan(dag, CTX, world().deps), asOf: ASOF });
+    expect(gone.state).toBe("refused");
+    expect(gone.nodes.find((n) => n.nodeId === "print")).toMatchObject({ state: "missing", reason: "capability-not-found" });
+  });
+
+  it("money is always exact base-unit strings, never a float", () => {
+    const p = presentPlan({ submission: agentDag(), outcome: acceptExternalPlan(agentDag(), CTX, world().deps), asOf: ASOF });
+    const amounts: string[] = [];
+    JSON.stringify(p, (_k, v) => {
+      if (v && typeof v === "object" && "baseUnits" in v) amounts.push((v as { baseUnits: string }).baseUnits);
+      return v;
+    });
+    expect(amounts.length).toBeGreaterThan(8);
+    for (const a of amounts) expect(a).toMatch(/^[0-9]+$/);
+  });
+
+  it("a malformed submission renders as 'invalid' without throwing, and shows nothing", () => {
+    const junk = { requestId: Object.create(null), reservationId: 5, nodes: [null, { nodeId: "x", capabilityId: Object.create(null) }], edges: [null, { from: 1, to: "x" }] };
+    let p: ReturnType<typeof presentPlan> | undefined;
+    expect(() => {
+      p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
+    }).not.toThrow();
+    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [] });
+  });
+});
+
 describe("seam read-once (the review pattern of #351/#355): every input is read once into owned data", () => {
   it("a node getter is read once: the program cross-check uses the value that was read", () => {
     let reads = 0;
@@ -579,6 +690,100 @@ describe("seam read-once (the review pattern of #351/#355): every input is read 
   });
 });
 
+describe("PlanPresentation hardening (astra review of #357): bound, intact, validated, total", () => {
+  const ASOF = "2026-09-24T13:00:00.000Z";
+  const reseal = (p: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): CompiledAcceptedPlan => ({ ...p, acceptedDealDigest: acceptedDealDigest(p) });
+  const accepted = () => {
+    const { store, deps } = world();
+    const outcome = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    return { store, outcome };
+  };
+
+  it("a genuine sealed outcome paired with ANOTHER submission is invalid, never Layer B", () => {
+    const { store, outcome } = accepted();
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const seal = { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! };
+    const others: ExternalPlanSubmission[] = [
+      { ...agentDag(), nodes: [agentDag().nodes[0]!, { ...agentDag().nodes[1]!, capabilityId: "cap-evil" }] },
+      { ...agentDag(), edges: [] },
+      { ...agentDag(), reservationId: "resv-2" },
+    ];
+    for (const submission of others) {
+      const p = presentPlan({ submission, outcome, sealed: seal, asOf: ASOF });
+      expect(p).toMatchObject({ layer: "C", state: "invalid", invalid: { reason: "submission-mismatch" }, nodes: [] });
+    }
+  });
+
+  it("a plan altered after sealing (old digest kept) is invalid; a RE-sealed plan bound elsewhere is invalid too", () => {
+    const { store, outcome } = accepted();
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const seal = { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! };
+    const altered = { ...outcome, plan: { ...outcome.plan, jobs: outcome.plan.jobs.map((j) => ({ ...j, units: j.units.map((u) => ({ ...u, payouts: [{ recipient: A("66"), amount: u.n }] })) })) } };
+    expect(presentPlan({ submission: agentDag(), outcome: altered, sealed: seal, asOf: ASOF })).toMatchObject({ layer: "C", state: "invalid", invalid: { reason: "plan-integrity" } });
+    const { acceptedDealDigest: _d, ...rest } = outcome.plan;
+    const elsewhere = { ...outcome, plan: reseal({ ...rest, requestId: "req-other" }) };
+    expect(presentPlan({ submission: agentDag(), outcome: elsewhere, asOf: ASOF })).toMatchObject({ state: "invalid", invalid: { reason: "plan-binding" } });
+    const uneven = { ...outcome, plan: reseal({ ...rest, jobs: rest.jobs.map((j, i) => (i === 0 ? { ...j, units: j.units.map((u) => ({ ...u, reclaimAt: u.reclaimAt + 1n })) } : j)) }) };
+    expect(presentPlan({ submission: agentDag(), outcome: uneven, asOf: ASOF })).toMatchObject({ state: "invalid", invalid: { reason: "plan-integrity" } });
+  });
+
+  it("a forged verdict status, a malformed verdict list, or an outcome without its submission digest is invalid", () => {
+    const { outcome } = accepted();
+    const cases: unknown[] = [
+      { ...outcome, verdicts: [{ ...outcome.verdicts[0]!, status: "sealed" }, outcome.verdicts[1]!] },
+      { ...outcome, verdicts: {} },
+      { ...outcome, verdicts: [null, null] },
+      { ...outcome, submissionDigest: undefined },
+      { ...outcome, plan: { ...outcome.plan, totalObligationBaseUnits: "9750000" } },
+      null,
+      Object.defineProperty({}, "ok", { get: () => { throw new Error("x"); } }),
+    ];
+    for (const c of cases) {
+      let p: ReturnType<typeof presentPlan> | undefined;
+      expect(() => {
+        p = presentPlan({ submission: agentDag(), outcome: c as SeamResult, asOf: ASOF });
+      }).not.toThrow();
+      expect(p?.state).toBe("invalid");
+      expect(p?.layer).toBe("C");
+      expect(p?.nodes).toEqual([]);
+    }
+  });
+
+  it("a forged status inside a REFUSAL's verdicts is invalid, never a node shown as 'sealed'", () => {
+    const d = submissionDigest(snapshotSubmission(agentDag())!);
+    const forged = { ok: false, refusal: { stage: "revalidation", verdicts: [{ nodeId: "print", status: "sealed", reason: "x" }] }, submissionDigest: d } as unknown as SeamResult;
+    const p = presentPlan({ submission: agentDag(), outcome: forged, asOf: ASOF });
+    expect(p).toMatchObject({ state: "invalid", layer: "C", nodes: [] });
+  });
+
+  it("an empty or mixed revalidation refusal is 'refused', never a re-quote", () => {
+    const d = submissionDigest(snapshotSubmission(agentDag())!);
+    const empty = { ok: false, refusal: { stage: "revalidation", verdicts: [] }, submissionDigest: d } as unknown as SeamResult;
+    expect(presentPlan({ submission: agentDag(), outcome: empty, asOf: ASOF }).state).toBe("refused");
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, capabilityId: "ghost" };
+    const mixed = acceptExternalPlan(dag, CTX, world().deps);
+    expect(presentPlan({ submission: dag, outcome: mixed, asOf: ASOF }).state).toBe("refused");
+  });
+
+  it("a non-string asOf, or a throwing getter anywhere in the arguments, is invalid and never throws", () => {
+    const { outcome } = accepted();
+    const inputs: unknown[] = [
+      { submission: agentDag(), outcome, asOf: 5 },
+      Object.defineProperty({ submission: agentDag(), asOf: ASOF }, "outcome", { enumerable: true, get: () => { throw new Error("x"); } }),
+      null,
+    ];
+    for (const i of inputs) {
+      let p: ReturnType<typeof presentPlan> | undefined;
+      expect(() => {
+        p = presentPlan(i as PresentPlanArgs);
+      }).not.toThrow();
+      expect(p?.state).toBe("invalid");
+    }
+  });
+});
+
 describe("N25 through the seam: the accepted deal seals each node's execution inputs", () => {
   const DOC = "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3";
   /** The agent's DAG with execution JSON: which document, how many pages, by when, to whom. */
@@ -668,6 +873,89 @@ describe("N25 through the seam: the accepted deal seals each node's execution in
     expect(d(withExec({ print: { inputs: { pages: Number.NaN } } }))).toBe(d(withExec({ print: { inputs: { pages: Infinity } } })));
     expect(d(withExec({ print: { inputs: { pages: Number.NaN } } }))).not.toBe(d(withExec({ print: { inputs: { pages: 2 } } })));
     expect(d(withExec())).toBe(d(withExec())); // deterministic
+  });
+});
+
+describe("PlanPresentation and N25: what each unit runs on is shown only from the intact, bound, sealed deal", () => {
+  const ASOF = "2026-09-24T15:30:00.000Z";
+  const DOC = "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3";
+  const sub = (): ExternalPlanSubmission => {
+    const d = agentDag();
+    return {
+      ...d,
+      nodes: d.nodes.map((n) => (n.nodeId === "print" ? { ...n, inputs: { documentHash: DOC, pages: 2 }, constraints: { deadline: "2026-09-30" } } : n)),
+    };
+  };
+  const reseal = (p: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): CompiledAcceptedPlan => ({ ...p, acceptedDealDigest: acceptedDealDigest(p) });
+  const accepted = () => {
+    const { store, deps } = world();
+    const s = sub();
+    const outcome = acceptExternalPlan(s, CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    return { store, s, outcome };
+  };
+
+  it("a sealed deal shows each unit's execution (planHash, inputs, constraints) and the deal's agreementHash", () => {
+    const { store, s, outcome } = accepted();
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const p = presentPlan({ submission: s, outcome, sealed: { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF });
+    expect([p.layer, p.state]).toEqual(["B", "sealed"]);
+    const print = p.nodes.find((n) => n.nodeId === "print")!;
+    const printBinding = outcome.plan.nodeToUnit.find((b) => b.nodeId === "print")!;
+    expect(print.execution).toEqual({ planHash: printBinding.planHash, inputs: { documentHash: DOC, pages: 2 }, constraints: { deadline: "2026-09-30" } });
+    expect(p.nodes.find((n) => n.nodeId === "mail")!.execution).toEqual({ planHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), inputs: {}, constraints: {} });
+    expect(p.deal?.agreementHash).toBeNull();
+    // A deal that carries an agreement (economics' split) shows exactly its agreementHash.
+    const { acceptedDealDigest: _d, ...rest } = outcome.plan;
+    const withAgreement = reseal({ ...rest, agreementHash: `0x${"ab".repeat(32)}` });
+    const shown = presentPlan({ submission: s, outcome: { ...outcome, plan: withAgreement }, asOf: ASOF });
+    expect(shown.deal?.agreementHash).toBe(`0x${"ab".repeat(32)}`);
+    const proposed = presentPlan({ submission: s, asOf: ASOF });
+    expect(proposed.nodes.every((n) => n.execution === undefined)).toBe(true); // a proposal shows no sealed execution
+  });
+
+  it("execution content altered under the old hashes is plan-integrity; a resealed plan whose contract names another node is plan-binding", () => {
+    const { s, outcome } = accepted();
+    const { acceptedDealDigest: _d, ...rest } = outcome.plan;
+    const patch = (i: number, cp: Record<string, unknown>) => ({ ...rest, nodeToUnit: rest.nodeToUnit.map((b, k) => (k === i ? { ...b, canonicalPlan: { ...b.canonicalPlan, ...cp } } : b)) });
+    const i = rest.nodeToUnit.findIndex((b) => b.nodeId === "print");
+    const altered = { ...outcome, plan: { ...patch(i, { inputs: { documentHash: DOC, pages: 3 } }), acceptedDealDigest: outcome.plan.acceptedDealDigest } };
+    expect(presentPlan({ submission: s, outcome: altered as SeamResult, asOf: ASOF }).invalid).toEqual({ reason: "plan-integrity" });
+    const renamed = { ...outcome, plan: reseal(patch(i, { planNodeId: "mail" }) as Omit<CompiledAcceptedPlan, "acceptedDealDigest">) };
+    expect(presentPlan({ submission: s, outcome: renamed as SeamResult, asOf: ASOF }).invalid).toEqual({ reason: "plan-binding" });
+    const otherPlan = { ...outcome, plan: reseal(patch(i, { planId: "plan.other" }) as Omit<CompiledAcceptedPlan, "acceptedDealDigest">) };
+    expect(presentPlan({ submission: s, outcome: otherPlan as SeamResult, asOf: ASOF }).invalid).toEqual({ reason: "plan-binding" });
+  });
+
+  it("non-JSON execution content inside an outcome is invalid, never shown and never a throw", () => {
+    const { s, outcome } = accepted();
+    const i = outcome.plan.nodeToUnit.findIndex((b) => b.nodeId === "print");
+    for (const bad of [{ pages: Number.NaN }, [], { when: new Date(0) }]) {
+      const plan = { ...outcome.plan, nodeToUnit: outcome.plan.nodeToUnit.map((b, k) => (k === i ? { ...b, canonicalPlan: { ...b.canonicalPlan, inputs: bad } } : b)) };
+      let p: ReturnType<typeof presentPlan> | undefined;
+      expect(() => {
+        p = presentPlan({ submission: s, outcome: { ...outcome, plan } as unknown as SeamResult, asOf: ASOF });
+      }).not.toThrow();
+      expect(p?.state).toBe("invalid");
+      expect(p?.nodes).toEqual([]);
+      // Resealed, so integrity alone would pass: only the JSON check refuses it.
+      const { acceptedDealDigest: _d, ...rest } = plan as unknown as CompiledAcceptedPlan;
+      const resealed = presentPlan({ submission: s, outcome: { ...outcome, plan: reseal(rest) } as unknown as SeamResult, asOf: ASOF });
+      expect(resealed.invalid).toEqual({ reason: "malformed-outcome" });
+    }
+  });
+
+  it("the seam's invalid-execution-json refusal is shown as refused, with one code per bad field and nothing sealed", () => {
+    const bad = { ...sub(), nodes: sub().nodes.map((n) => (n.nodeId === "mail" ? { ...n, inputs: { a: Number.NaN }, constraints: [] as unknown as Record<string, unknown> } : n)) };
+    const outcome = acceptExternalPlan(bad, CTX, world().deps);
+    const p = presentPlan({ submission: bad, outcome, asOf: ASOF });
+    expect([p.layer, p.state]).toEqual(["C", "refused"]);
+    expect(p.refusal).toEqual({
+      stage: "submission",
+      reason: "invalid-execution-json",
+      codes: ["constraints:not-an-object@mail", "inputs:non-finite-number@mail"],
+    });
+    expect(p.nodes.every((n) => n.execution === undefined && n.state === "proposed")).toBe(true);
   });
 });
 
@@ -761,5 +1049,23 @@ describe("R15 through the seam (economics option b: royalties on top): the agree
     const b = new Binding({ print: 7_000_000n, mail: 3_250_000n });
     expect(acceptExternalPlan(agentDag(), CTX, withEcon(b)).ok).toBe(true);
     expect(b.calls).toEqual({ unitGross: 1, splitNet: 1 });
+  });
+});
+
+describe("PlanPresentation and R15: an economics refusal is shown as refused, with the node and economics' code", () => {
+  it("a missing unit gross, a gross below the quote, and an agreement refusal each render as refused (Layer C), never a re-quote", () => {
+    const ASOF = "2026-09-24T16:00:00.000Z";
+    const split: EconomicsBinding["splitNet"] = () => ({ ok: false, code: "unused" });
+    const cases: Array<[EconomicsBinding, { stage: string; reason: string; nodeId?: string; codes?: string[] }]> = [
+      [{ unitGross: () => ({ ok: true, gross: { print: 7_000_000n } }), splitNet: split }, { stage: "economics", reason: "unit-gross-missing", nodeId: "mail" }],
+      [{ unitGross: () => ({ ok: true, gross: { print: 6_000_000n, mail: 3_250_000n } }), splitNet: split }, { stage: "economics", reason: "quote-not-covered", nodeId: "print" }],
+      [{ unitGross: () => ({ ok: false, code: "economics:SCHEMA_INVALID" }), splitNet: split }, { stage: "economics", reason: "agreement-refused", codes: ["economics:SCHEMA_INVALID"] }],
+    ];
+    for (const [economics, refusalView] of cases) {
+      const outcome = acceptExternalPlan(agentDag(), CTX, { ...world().deps, economics });
+      const p = presentPlan({ submission: agentDag(), outcome, asOf: ASOF });
+      expect([p.layer, p.state]).toEqual(["C", "refused"]);
+      expect(p.refusal).toEqual(refusalView);
+    }
   });
 });
