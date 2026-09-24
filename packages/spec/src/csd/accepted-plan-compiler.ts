@@ -1109,8 +1109,18 @@ function sortViolations(v: CompileViolation[]): CompileViolation[] {
  * the economic agreement (its whole hash, envelope included) — changes this digest.
  */
 export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): `0x${string}` {
+  return toHex(sha256(new TextEncoder().encode(acceptedDealPreimage(plan))));
+}
+
+/**
+ * The canonical preimage `acceptedDealDigest` hashes: its UTF-8 bytes hash to the digest exactly. R13
+ * stores it as the sealed deal (amendment #3231), so anyone holding the bytes can verify them against the
+ * sealed digest. It carries every settlement term and each node's planHash, but not the canonicalPlan
+ * contents; those are verified against their planHash.
+ */
+export function acceptedDealPreimage(plan: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): string {
   const lc = (x: string | null) => (x === null ? null : x.toLowerCase());
-  const preimage = canonicalize({
+  return canonicalize({
     domain: ACCEPTED_DEAL_DOMAIN,
     planId: plan.planId,
     requestId: plan.requestId,
@@ -1160,5 +1170,4 @@ export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDea
       canonicalPlanHash: planHashOf(b.canonicalPlan),
     })),
   });
-  return toHex(sha256(new TextEncoder().encode(preimage)));
 }

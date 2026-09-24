@@ -19,8 +19,16 @@
  *
  * The consume never trusts a caller-carried digest for integrity: the caller (the gateway's consume
  * protocol) RECOMPUTES `acceptedDealDigest` from the compiled plan before calling it (the #351
- * consumer contract). This store records the digest it is given.
+ * consumer contract).
+ *
+ * The sealed deal itself is stored too (amendment #3231, steward conditions #3235). `consumed_deal_json`
+ * holds the digest's own canonical PREIMAGE, so sha256(stored bytes) == consumed_deal_digest holds
+ * literally, and the consume refuses otherwise. It holds every settlement term: each job's operator,
+ * each unit's g/f/n, payouts and reclaimAt, and each node's planHash. MC 9 derives a parent unit's
+ * terms from it. It is never part of the reservation object this store returns; only
+ * `sealedDealPreimage` reads it, for server-side use (condition b).
  */
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 
 export type BudgetReservationState = "issued" | "consumed" | "expired" | "released";
@@ -111,6 +119,8 @@ export interface ConsumeReservationInput {
   minUnitTier: number;
   /** `acceptedDealDigest` RECOMPUTED by the caller from the compiled plan. */
   dealDigest: string;
+  /** That digest's canonical preimage (#351 `acceptedDealPreimage`). It must hash to `dealDigest`, and it is stored. */
+  dealPreimage: string;
   now: number;
 }
 
@@ -124,7 +134,8 @@ export type ConsumeRefusal =
   | "not-issued"
   | "expired"
   | "over-reservation"
-  | "below-min-tier";
+  | "below-min-tier"
+  | "deal-preimage-mismatch";
 
 export type ConsumeResult = { ok: true; reservation: BudgetReservation } | { ok: false; reason: ConsumeRefusal };
 
@@ -147,9 +158,11 @@ export const BUDGET_RESERVATIONS_DDL = `
       expires_at INTEGER NOT NULL,
       state TEXT NOT NULL CHECK (state IN ('issued', 'consumed', 'expired', 'released')),
       consumed_deal_digest TEXT,
+      consumed_deal_json TEXT CHECK (consumed_deal_json IS NULL OR length(CAST(consumed_deal_json AS BLOB)) <= 1048576),
       created_at INTEGER NOT NULL,
       consumed_at INTEGER,
       CHECK ((state = 'consumed') = (consumed_deal_digest IS NOT NULL)),
+      CHECK ((state = 'consumed') = (consumed_deal_json IS NOT NULL)),
       CHECK ((parent_reservation_id IS NULL) = (parent_unit IS NULL))
     );
     CREATE INDEX IF NOT EXISTS budget_reservations_request_idx ON budget_reservations(request_id, state);
@@ -158,6 +171,8 @@ export const BUDGET_RESERVATIONS_DDL = `
 
 const BASE_UNITS = /^(0|[1-9][0-9]{0,77})$/;
 const DIGEST = /^0x[0-9a-fA-F]{64}$/;
+/** The largest sealed-deal preimage stored (condition c): 64 units' terms fit well inside it. */
+export const MAX_DEAL_PREIMAGE_BYTES = 1 << 20;
 const TEXT_ID = /^[\x21-\x7e]{1,128}$/;
 const MAX_UINT256 = (1n << 256n) - 1n;
 
@@ -230,6 +245,17 @@ export class BudgetReservationStore {
   /** Create the table if needed (idempotent). `migrateDatabase` also runs this DDL. */
   ensureSchema(): void {
     this.sqlite.exec(BUDGET_RESERVATIONS_DDL);
+  }
+
+  /**
+   * The sealed deal's canonical preimage for a consumed reservation, or null. Server-side only (MC 9's
+   * parent terms, funding, VCR delivery). Never serve it on a public or non-party read path (#3235 b).
+   */
+  sealedDealPreimage(reservationId: string): string | null {
+    const r = this.sqlite
+      .prepare("SELECT consumed_deal_json AS j FROM budget_reservations WHERE id = ? AND state = 'consumed'")
+      .get(reservationId) as { j: string | null } | undefined;
+    return r?.j ?? null;
   }
 
   findById(reservationId: string): BudgetReservation | null {
@@ -311,9 +337,14 @@ export class BudgetReservationStore {
     if (
       !isId(c.reservationId) || !isId(c.principal) || !isId(c.requestId) || !isId(c.currency) ||
       !Array.isArray(c.payerAddresses) || c.payerAddresses.length === 0 || !c.payerAddresses.every(isId) ||
-      !isAmount(c.obligationBaseUnits) || !isTier(c.minUnitTier) || typeof c.dealDigest !== "string" || !DIGEST.test(c.dealDigest) || !isUnix(c.now)
+      !isAmount(c.obligationBaseUnits) || !isTier(c.minUnitTier) || typeof c.dealDigest !== "string" || !DIGEST.test(c.dealDigest) || !isUnix(c.now) ||
+      typeof c.dealPreimage !== "string" || Buffer.byteLength(c.dealPreimage, "utf8") > MAX_DEAL_PREIMAGE_BYTES
     ) {
       return { ok: false, reason: "invalid-input" };
+    }
+    // Condition (a): the stored bytes must BE the sealed deal, i.e. its digest's own preimage.
+    if (`0x${createHash("sha256").update(c.dealPreimage, "utf8").digest("hex")}` !== c.dealDigest.toLowerCase()) {
+      return { ok: false, reason: "deal-preimage-mismatch" };
     }
     const run = this.sqlite.transaction((): ConsumeResult => {
       const r = this.findById(c.reservationId);
@@ -327,8 +358,8 @@ export class BudgetReservationStore {
       if (c.obligationBaseUnits > r.maxAmountBaseUnits) return { ok: false, reason: "over-reservation" };
       if (r.minTier !== null && c.minUnitTier < r.minTier) return { ok: false, reason: "below-min-tier" };
       const changed = this.sqlite
-        .prepare("UPDATE budget_reservations SET state = 'consumed', consumed_deal_digest = ?, consumed_at = ? WHERE id = ? AND state = 'issued'")
-        .run(c.dealDigest, c.now, c.reservationId).changes;
+        .prepare("UPDATE budget_reservations SET state = 'consumed', consumed_deal_digest = ?, consumed_deal_json = ?, consumed_at = ? WHERE id = ? AND state = 'issued'")
+        .run(c.dealDigest.toLowerCase(), c.dealPreimage, c.now, c.reservationId).changes;
       if (changed !== 1) return { ok: false, reason: "not-issued" };
       return { ok: true, reservation: this.findById(c.reservationId)! };
     });

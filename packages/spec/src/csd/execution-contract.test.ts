@@ -8,8 +8,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import {
   acceptedDealDigest,
+  acceptedDealPreimage,
   compileAcceptedPlan,
   type AcceptedPlanInput,
   type AcceptedPlanNode,
@@ -314,6 +316,19 @@ describe("canonicalPlan and planHash (N25): VCR's execution contract, sealed per
     const plan = compiled({ ...golden, nodes: [print as unknown as AcceptedPlanNode, golden.nodes[1]!] });
     expect(reads).toEqual({ inputs: 1, constraints: 1 });
     expect(plan.acceptedDealDigest).toBe(compiled().acceptedDealDigest);
+  });
+});
+
+describe("acceptedDealPreimage: the bytes R13 stores as the sealed deal (amendment #3231)", () => {
+  it("the digest IS sha256 of the preimage's UTF-8 bytes; the preimage carries the settlement terms and each planHash", () => {
+    const { acceptedDealDigest: sealed, ...rest } = compiled();
+    const pre = acceptedDealPreimage(rest);
+    expect(`0x${createHash("sha256").update(pre, "utf8").digest("hex")}`).toBe(sealed);
+    expect(acceptedDealDigest(rest)).toBe(sealed);
+    const parsed = JSON.parse(pre);
+    expect(parsed.domain).toBe("PCC:accepted-deal:v2");
+    expect(parsed.jobs.flatMap((j: { units: Array<{ n: string }> }) => j.units.map((u) => typeof u.n))).toEqual(["string", "string"]);
+    expect(parsed.nodeToUnit.map((b: { planHash: string }) => b.planHash)).toEqual(rest.nodeToUnit.map((b) => b.planHash));
   });
 });
 
