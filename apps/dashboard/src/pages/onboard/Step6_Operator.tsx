@@ -1,7 +1,6 @@
 import React from "react";
 import { WizardStepContent, CertificationBadge } from "@pcc/ui";
 import { useOnboardWizardStore } from "../../stores/onboard-wizard-store.js";
-import { mockCertifications } from "../../api/mock-onboarding-data.js";
 
 const baseInput = "w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/70 placeholder:text-white/20 focus:border-green-500/30 focus:outline-none transition-colors";
 
@@ -12,14 +11,10 @@ const trainingItems = [
 ];
 
 export function Step6_Operator() {
-  const { operatorName, setOperatorName, certifications, addCertification, trainingAcknowledgments, setTrainingAck, nextStep, prevStep, isStepValid } =
+  // PX-10 Wave 0: this step used to add example certifications (mock data) to
+  // the user's profile on first view, shown as the operator's own. It adds none.
+  const { operatorName, setOperatorName, certifications, trainingAcknowledgments, setTrainingAck, nextStep, prevStep, isStepValid } =
     useOnboardWizardStore();
-
-  React.useEffect(() => {
-    if (certifications.length === 0) {
-      mockCertifications.forEach((c) => addCertification(c));
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <WizardStepContent
@@ -43,6 +38,11 @@ export function Step6_Operator() {
         {/* Certifications */}
         <div className="space-y-2">
           <span className="text-xs text-white/30">Certifications</span>
+          {certifications.length === 0 && (
+            <p className="text-xs text-white/20">
+              No certifications added. This wizard can't record or verify them yet.
+            </p>
+          )}
           {certifications.map((c) => (
             <CertificationBadge
               key={c.id}
