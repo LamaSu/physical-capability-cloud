@@ -29,7 +29,12 @@
 
 import { createHash } from "node:crypto";
 import { keccak256, toBytes } from "viem";
-import { canonicalize } from "@pcc/spec";
+import {
+  canonicalize,
+  devicePrincipalMatchesSigner,
+  operatorPrincipalMatchesSigner,
+  principalFromRegistry,
+} from "@pcc/spec";
 import { canonicalSignatures, type PackageSignature } from "./package-digest-v2.js";
 
 export type Hex = `0x${string}`;
@@ -319,12 +324,20 @@ const MINT_SIGNER_PROFILE: Readonly<Record<string, { signer: RegExp; sig: RegExp
  *  - the challenge nonce is not the interim placeholder;
  *  - exactly one D1 and one D2 signature, each with exactly the keys
  *    {signer, scheme, sig} and the profile's signer and signature forms, so no
- *    duplicate, extra, relabelled or foreign-scheme entry can reach the digest.
+ *    duplicate, extra, relabelled or foreign-scheme entry can reach the digest;
+ *  - the principal ids are the pinned forms (`pcc.evidence.principal-id.v1`)
+ *    and bound to those signatures: operatorPrincipalId is
+ *    eip155:<unit chainId>:<the D1 signer>, and devicePrincipalId is
+ *    ed25519:<the D2 signer>, which must be the key the kernel registry holds
+ *    for producer.kernelId (`registeredDeviceSigner`) and never a key whose
+ *    secret is public.
  * Returns the validated body and the canonical signatures to hash.
  */
 export function assertMintablePackage(
   body: unknown,
   sigs: unknown,
+  /** The kernel registry's signer for `producer.kernelId`, as the registry returns it. */
+  registeredDeviceSigner: unknown,
 ): { body: FinalMilestonePackageV2Body; signatures: PackageSignature[] } {
   const valid = validatePackageBody(body);
   if (isInterimNonce(valid)) {
@@ -361,5 +374,27 @@ export function assertMintablePackage(
       throw new PackageNotMintableError(`${path}.sig`, `not a ${profile.role} signature`);
     }
   });
-  return { body: valid, signatures: canonicalSignatures(sigs as PackageSignature[]) };
+  const entries = sigs as PackageSignature[];
+  const d1 = entries.find((e) => e.scheme === "secp256k1")!;
+  const d2 = entries.find((e) => e.scheme === "ed25519")!;
+  const chainId = Number(valid.unitBinding.chainId);
+  if (!operatorPrincipalMatchesSigner(valid.producer.operatorPrincipalId, d1.signer, chainId)) {
+    throw new PackageNotMintableError(
+      "$.producer.operatorPrincipalId",
+      "must be eip155:<unitBinding.chainId>:<the D1 signer's address> (pcc.evidence.principal-id.v1)",
+    );
+  }
+  if (!devicePrincipalMatchesSigner(valid.producer.devicePrincipalId, d2.signer)) {
+    throw new PackageNotMintableError(
+      "$.producer.devicePrincipalId",
+      "must be ed25519:<the D2 signer's key>, never a key whose secret is public (pcc.evidence.principal-id.v1)",
+    );
+  }
+  if (principalFromRegistry(registeredDeviceSigner, chainId) !== valid.producer.devicePrincipalId) {
+    throw new PackageNotMintableError(
+      "$.producer.devicePrincipalId",
+      "is not the key the kernel registry holds for producer.kernelId",
+    );
+  }
+  return { body: valid, signatures: canonicalSignatures(entries) };
 }

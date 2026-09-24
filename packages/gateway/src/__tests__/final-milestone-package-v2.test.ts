@@ -28,6 +28,7 @@ import {
   type FinalMilestonePackageV2Body,
 } from "../settlement/final-milestone-package-v2.js";
 import { packageDigestV2, type PackageSignature } from "../settlement/package-digest-v2.js";
+import { COMPROMISED_DEVICE_PUBLIC_KEYS } from "@pcc/spec";
 
 const H = (n: string) => `0x${n.repeat(64).slice(0, 64)}`;
 
@@ -293,22 +294,28 @@ describe("validatePackageBody — pinned forms", () => {
 describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted", () => {
   const D1 = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1", sig: `0x${"11".repeat(65)}` };
   const D2 = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519", sig: `0x${"22".repeat(64)}` };
+  // A mintable body names its principals in the pinned forms, bound to D1 and D2,
+  // and the registry holds D2's key for the producing kernel.
+  const MINTABLE = clone(BODY);
+  MINTABLE.producer.operatorPrincipalId = `eip155:${BODY.unitBinding.chainId}:${D1.signer}`;
+  MINTABLE.producer.devicePrincipalId = `ed25519:${D2.signer}`;
+  const REGISTRY = { algorithm: "ed25519", publicKey: D2.signer };
 
   it("accepts a real D1 + D2 set and hashes exactly what the digest function would", () => {
-    const minted = assertMintablePackage(BODY, [D2, D1]);
+    const minted = assertMintablePackage(MINTABLE, [D2, D1], REGISTRY);
     expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1", "ed25519"]);
-    expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(BODY, [D1, D2]));
+    expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(MINTABLE, [D1, D2]));
   });
 
   it("refuses the interim challenge nonce", () => {
-    const b = clone(BODY);
+    const b = clone(MINTABLE);
     b.challengeBinding.nonce = INTERIM_NONCE;
-    expect(() => assertMintablePackage(b, [D1, D2])).toThrow(PackageNotMintableError);
+    expect(() => assertMintablePackage(b, [D1, D2], REGISTRY)).toThrow(PackageNotMintableError);
   });
 
   it("refuses anything but exactly one D1 and one D2", () => {
     for (const sigs of [[D1], [D1, D2, { ...D2, signer: `0x${"ef".repeat(32)}` }], [D1, { ...D1, signer: `0x${"cc".repeat(20)}` }], "D1,D2"]) {
-      expect(() => assertMintablePackage(BODY, sigs)).toThrow(PackageNotMintableError);
+      expect(() => assertMintablePackage(MINTABLE, sigs, REGISTRY)).toThrow(PackageNotMintableError);
     }
   });
 
@@ -321,13 +328,53 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       { ...D2, sig: `0x${"22".repeat(65)}` },
     ];
     for (const d2 of bad) {
-      expect(() => assertMintablePackage(BODY, [D1, d2]), JSON.stringify(d2)).toThrow(PackageNotMintableError);
+      expect(() => assertMintablePackage(MINTABLE, [D1, d2], REGISTRY), JSON.stringify(d2)).toThrow(PackageNotMintableError);
     }
   });
 
   it("the published golden's sample signature set is not a mintable set", () => {
     // Its "ed25519" entry carries a 40-hex signer: fine as a digest vector,
     // never as a real kernel signature.
-    expect(() => assertMintablePackage(JSON.parse(GOLDEN.jcsBody), GOLDEN.rawSigs)).toThrow(PackageNotMintableError);
+    expect(() => assertMintablePackage(JSON.parse(GOLDEN.jcsBody), GOLDEN.rawSigs, REGISTRY)).toThrow(PackageNotMintableError);
+  });
+
+  it("refuses principal ids that are not the pinned forms bound to D1 and D2 (pcc.evidence.principal-id.v1)", () => {
+    const withProducer = (patch: Partial<typeof MINTABLE.producer>) => {
+      const b = clone(MINTABLE);
+      Object.assign(b.producer, patch);
+      return b;
+    };
+    const cases: [string, typeof MINTABLE][] = [
+      ["free-text operator", withProducer({ operatorPrincipalId: "op-1" })],
+      ["operator not the D1 signer", withProducer({ operatorPrincipalId: `eip155:${BODY.unitBinding.chainId}:0x${"ee".repeat(20)}` })],
+      ["operator on another chain", withProducer({ operatorPrincipalId: `eip155:1:${D1.signer}` })],
+      ["checksum-case operator", withProducer({ operatorPrincipalId: `eip155:${BODY.unitBinding.chainId}:${D1.signer.toUpperCase().replace("0X", "0x")}` })],
+      ["free-text device", withProducer({ devicePrincipalId: "dev-1" })],
+      ["device not the D2 signer", withProducer({ devicePrincipalId: `ed25519:0x${"ef".repeat(32)}` })],
+    ];
+    for (const [name, b] of cases) {
+      expect(() => assertMintablePackage(b, [D1, D2], REGISTRY), name).toThrow(PackageNotMintableError);
+    }
+  });
+
+  it("refuses a device principal the registry holds when the D2 signature is by another key", () => {
+    const other = `0x${"ef".repeat(32)}`;
+    const b = clone(MINTABLE);
+    b.producer.devicePrincipalId = `ed25519:${other}`;
+    expect(() => assertMintablePackage(b, [D1, D2], { algorithm: "ed25519", publicKey: other })).toThrow(PackageNotMintableError);
+  });
+
+  it("refuses a device key the registry does not hold for the producing kernel", () => {
+    for (const registry of [{ algorithm: "ed25519", publicKey: `0x${"ef".repeat(32)}` }, null, { algorithm: "secp256k1", address: D1.signer }]) {
+      expect(() => assertMintablePackage(MINTABLE, [D1, D2], registry), JSON.stringify(registry)).toThrow(PackageNotMintableError);
+    }
+  });
+
+  it("refuses a device principal whose secret is public, even when the registry and D2 agree", () => {
+    const leaked = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!;
+    const b = clone(MINTABLE);
+    b.producer.devicePrincipalId = `ed25519:${leaked}`;
+    const d2 = { ...D2, signer: leaked };
+    expect(() => assertMintablePackage(b, [D1, d2], { algorithm: "ed25519", publicKey: leaked })).toThrow(PackageNotMintableError);
   });
 });
