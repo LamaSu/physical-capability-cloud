@@ -74,10 +74,10 @@ export const AGENT_OPERATIONS: AgentOperation[] = [
   { id: "jobs.accept", method: "POST", path: "/api/jobs/{jobId}/accept", summary: "Accept an offered job", scope: "jobs.write", consequential: true },
 
   // Operator — machines and standing.
-  { id: "operator.machines", method: "GET", path: "/api/operator/machines", summary: "Machines this operator has onboarded", scope: "operator.read" },
-  { id: "operator.earnings", method: "GET", path: "/api/operator/earnings", summary: "Earnings and what is owed", scope: "operator.read" },
-  { id: "operator.certifications", method: "GET", path: "/api/operator/certifications", summary: "Certifications held", scope: "operator.read" },
-  { id: "operator.maintenance", method: "GET", path: "/api/operator/maintenance", summary: "Maintenance windows", scope: "operator.read" },
+  { id: "operator.machines", method: "GET", path: "/api/operator/machines", summary: "Not available yet (501); this operator's kernels and devices are in /api/agent/me", scope: "operator.read" },
+  { id: "operator.earnings", method: "GET", path: "/api/operator/earnings", summary: "Not available yet (501); per-job payment state is at /api/jobs/{jobId}/execution", scope: "operator.read" },
+  { id: "operator.certifications", method: "GET", path: "/api/operator/certifications", summary: "Not available yet (501): no certification store", scope: "operator.read" },
+  { id: "operator.maintenance", method: "GET", path: "/api/operator/maintenance", summary: "Not available yet (501): nothing records maintenance events", scope: "operator.read" },
   { id: "operator.emergencyStop", method: "POST", path: "/api/operator/emergency-stop", summary: "Halt this operator's machines", scope: "operator.write", consequential: true },
 
   // Settlement — money. Always consequential, always separately scoped.
