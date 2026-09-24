@@ -20,6 +20,12 @@ import { getIntentClassifier } from "../services/intent-classifier.js";
 import { getEventBus } from "../services/event-bus.js";
 import type { DemandEnvelope } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
+import {
+  buildAssuranceCeilingMap,
+  ceilingFor,
+  clampAssuranceTiers,
+  effectiveMaxAssuranceTier,
+} from "../services/assurance-ceiling.js";
 
 /** Build-intent heuristic — matches verbs that imply a future capability need */
 const BUILD_INTENT_RE = /\b(build|make|find me|i need|order|buy|deliver|schedule|book)\b/i;
@@ -187,11 +193,20 @@ function executeIntentQuery(
 
     case "find_capability": {
       const capType = String(slots["capabilityType"] ?? "");
-      const capabilities = capType
-        ? repos.capabilities.findByType(capType)
-        : repos.capabilities.findAll();
+      const capabilities = (
+        capType ? repos.capabilities.findByType(capType) : repos.capabilities.findAll()
+      ).slice(0, 20);
+      // WP-C: a row's assuranceTiers is the operator's CLAIM. Serve it clamped
+      // to the owning kernel's authorized ceiling, the same as the capability
+      // DTO (one batched kernel load; an unknown kernel is ceiling 0).
+      const ceilings = buildAssuranceCeilingMap(
+        repos.kernels.findByIds([...new Set(capabilities.map((c) => c.kernelId))]),
+      );
       return {
-        rows: (capabilities as unknown as Record<string, unknown>[]).slice(0, 20),
+        rows: capabilities.map((c) => ({
+          ...(c as unknown as Record<string, unknown>),
+          assuranceTiers: clampAssuranceTiers(c.assuranceTiers, ceilingFor(ceilings, c.kernelId)),
+        })),
         table: "capabilities",
       };
     }
@@ -200,15 +215,21 @@ function executeIntentQuery(
     case "operator_stats":
     case "kernel_health": {
       const kernelId = String(slots["kernelId"] ?? "");
+      // WP-C: a kernel row's maxAssuranceTier is the operator's CLAIM. Serve
+      // min(claim, authorized ceiling), the same as the kernel DTO.
+      const served = (k: object): Record<string, unknown> => ({
+        ...(k as Record<string, unknown>),
+        maxAssuranceTier: effectiveMaxAssuranceTier(k as Parameters<typeof effectiveMaxAssuranceTier>[0]),
+      });
       if (kernelId) {
         const kernel = repos.kernels.findById(kernelId);
         return {
-          rows: kernel ? [kernel as unknown as Record<string, unknown>] : [],
+          rows: kernel ? [served(kernel)] : [],
           table: "shop_kernels",
         };
       }
       return {
-        rows: (repos.kernels.findAll() as unknown as Record<string, unknown>[]).slice(0, 20),
+        rows: repos.kernels.findAll().slice(0, 20).map(served),
         table: "shop_kernels",
       };
     }

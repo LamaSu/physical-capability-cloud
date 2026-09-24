@@ -276,6 +276,43 @@ describe("WP-C heartbeat: owner-only, clamped", () => {
     expect(getRepos().capabilities.findById(`cap-${id}-wpc-mill`)?.assuranceTiers).toEqual([1, 0]);
   });
 
+  it("[neg] an owner's heartbeat never refreshes ANOTHER kernel's row that squats its derived capability id", async () => {
+    const victim = uid("wpc-hb-squat-victim");
+    expect((await registerKernel(victim)).statusCode).toBe(201);
+    // The attacker owns its own kernel and lists a capability on it under the id
+    // the victim's heartbeat will derive (cap-<victimKernel>-<type>).
+    const squatter = uid("wpc-hb-squatter");
+    const reg = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      headers: asAttacker(),
+      payload: { id: squatter, name: "squatter" },
+    });
+    expect(reg.statusCode).toBe(201);
+    const squatId = `cap-${victim}-wpc-squat`;
+    const pub = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asAttacker(),
+      payload: { kernelId: squatter, type: "wpc-squat", id: squatId },
+    });
+    expect(pub.statusCode).toBe(201);
+    const oldBeat = "2026-01-01T00:00:00.000Z";
+    getRepos().capabilities.update(squatId, { lastHeartbeatAt: oldBeat, validUntil: oldBeat } as never);
+
+    const hb = await app.inject({
+      method: "POST",
+      url: `/api/kernels/${victim}/heartbeat`,
+      headers: asOwner(),
+      payload: { capabilities: [{ type: "wpc-squat" }] },
+    });
+    expect(hb.statusCode).toBe(200);
+    const row = getRepos().capabilities.findById(squatId)!;
+    expect(row.kernelId).toBe(squatter);
+    expect(row.lastHeartbeatAt).toBe(oldBeat);
+    expect(row.validUntil).toBe(oldBeat);
+  });
+
   it("[neg] per-capability heartbeat by a NON-owner -> 403, TTL untouched", async () => {
     const id = uid("wpc-caphb");
     expect((await registerKernel(id)).statusCode).toBe(201);
