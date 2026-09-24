@@ -48,6 +48,9 @@ export interface SqliteDatabaseLike {
   exec?(sql: string): unknown;
 }
 
+/** Persisted-row key for the private claimant; never part of the public JobOffer. */
+const CLAIMANT_FIELD = "_privateClaimantOperatorId" as const;
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
@@ -158,6 +161,13 @@ export interface CreateJobOfferInput {
 
 export interface ClaimInput {
   kernelId: string;
+  /**
+   * The AUTHENTICATED principal making the claim (API-key operatorId or SIWE
+   * userId). Kept privately by the store and never serialized on the offer:
+   * offers and their events are publicly readable, and an operatorId can be an
+   * email address.
+   */
+  operatorId?: string;
   claimSignature?: string;
   etaMin?: number;
   contact?: string;
@@ -355,6 +365,8 @@ export class JobOffersStore {
   private readonly events = new Map<string, JobOfferEvent[]>();
   private readonly claimLocks = new Map<string, Promise<void>>();
   private readonly idempotencyIndex = new Map<string, string>(); // key -> id
+  /** offerId -> authenticated claimant operatorId. Private: never on the public offer. */
+  private readonly claimants = new Map<string, string>();
   private readonly verify: VerifyFn;
   private readonly validateSchema: CapabilitySchemaValidator;
   private readonly nowFn: () => Date;
@@ -386,7 +398,11 @@ export class JobOffersStore {
         .all() as Array<{ id: string; data: string }>;
       for (const r of rows) {
         try {
-          const offer = JSON.parse(r.data) as JobOffer;
+          const stored = JSON.parse(r.data) as JobOffer & { [CLAIMANT_FIELD]?: string | null };
+          const claimant = stored[CLAIMANT_FIELD];
+          delete stored[CLAIMANT_FIELD];
+          const offer = stored as JobOffer;
+          if (typeof claimant === "string" && claimant !== "") this.claimants.set(offer.id, claimant);
           this.offers.set(offer.id, offer);
           if (offer.idempotencyKey) {
             this.idempotencyIndex.set(offer.idempotencyKey, offer.id);
@@ -423,7 +439,9 @@ export class JobOffersStore {
           offer.id,
           offer.capabilityType,
           offer.status,
-          JSON.stringify(offer),
+          // The claimant rides in the persisted row so it survives a restart,
+          // but hydration strips it back out of the public offer object.
+          JSON.stringify({ ...offer, [CLAIMANT_FIELD]: this.claimants.get(offer.id) ?? null }),
           offer.postedAt,
           offer.posterDid,
           offer.validUntil,
@@ -457,6 +475,13 @@ export class JobOffersStore {
   getEvents(id: string): JobOfferEvent[] { return this.events.get(id) ?? []; }
 
   size(): number { return this.offers.size; }
+
+  /**
+   * The authenticated operatorId that claimed this offer, or null when it is
+   * unclaimed or was claimed before claimant binding existed. Private: routes
+   * use it to authorize progress events and never put it in a response.
+   */
+  claimantOf(id: string): string | null { return this.claimants.get(id) ?? null; }
 
   countByStatus(status: JobOfferStatus): number {
     let n = 0;
@@ -627,6 +652,7 @@ export class JobOffersStore {
       o.claimedByKernelId = claim.kernelId;
       o.claimedAt = this.nowIso();
       o.claimSignature = claim.claimSignature ?? null;
+      if (claim.operatorId) this.claimants.set(o.id, claim.operatorId);
       o.driverEtaMin = claim.etaMin ?? null;
       o.driverContact = claim.contact ?? null;
       this.persistOffer(o);
