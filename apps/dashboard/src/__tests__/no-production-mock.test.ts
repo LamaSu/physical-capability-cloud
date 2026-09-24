@@ -85,7 +85,6 @@ const KNOWN_OFFENDERS: Record<string, string> = {
   // pcc-shell 47b47970: this lane's remaining pages, in a follow-up PR (their implementer agents stopped at the account's weekly limit)
   "pages/AgentLogPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/NegotiationPage.tsx": "pcc-shell 47b47970: follow-up PR",
-  "pages/MarketplaceDetailPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/ROICalculatorPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/SpaceFinderPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/SpaceDetailPage.tsx": "pcc-shell 47b47970: follow-up PR",
