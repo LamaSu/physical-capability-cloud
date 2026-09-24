@@ -5,10 +5,13 @@
  * eligibility and verification. Negative control (memo): a post-commit
  * parameter or tolerance change must not authorize under the old digest.
  */
+import { createHash } from "node:crypto";
+
 import { describe, it, expect } from "vitest";
 
 import {
   MEASUREMENT_PROFILE_DOMAIN,
+  MEASUREMENT_PROFILE_DIGEST_PATTERN,
   computeMeasurementProfileDigest,
   validateMeasurementProfile,
   profileGoverns,
@@ -16,7 +19,7 @@ import {
   InvalidMeasurementProfileError,
   type MeasurementProfileV1,
 } from "../evidence/measurement-profile.js";
-import { canonicalize, sha256 } from "../util/canonical.js";
+import { canonicalize } from "../util/canonical.js";
 
 /** The CP-0 print pilot's profile: one photo of the printed page. */
 function printPilotProfile(): MeasurementProfileV1 {
@@ -59,15 +62,20 @@ function printPilotProfile(): MeasurementProfileV1 {
   };
 }
 
+/** Independent recomputation of the commitment-family digest. */
+function expectedDigest(domain: string, profile: unknown): string {
+  return "0x" + createHash("sha256").update(canonicalize({ domain, profile })).digest("hex");
+}
+
 describe("measurement profile — validation fails closed", () => {
   it("the print pilot profile validates", () => {
     expect(validateMeasurementProfile(printPilotProfile())).toEqual([]);
   });
 
-  it("simulationProhibited must be asserted true, not defaulted", async () => {
+  it("simulationProhibited must be asserted true, not defaulted", () => {
     const p = { ...printPilotProfile(), simulationProhibited: false as unknown as true };
     expect(validateMeasurementProfile(p).some((v) => v.path === "simulationProhibited")).toBe(true);
-    await expect(computeMeasurementProfileDigest(p)).rejects.toBeInstanceOf(InvalidMeasurementProfileError);
+    expect(() => computeMeasurementProfileDigest(p)).toThrow(InvalidMeasurementProfileError);
   });
 
   it("a mock adapter can never satisfy a profile", () => {
@@ -114,77 +122,103 @@ describe("measurement profile — validation fails closed", () => {
   });
 });
 
-describe("measurement profile — digest uses the production canonicalizer", () => {
-  it("digest equals sha256(canonicalize({domain, profile})) computed independently", async () => {
+describe("measurement profile — digest is the commitment family over the production canonicalizer", () => {
+  it("digest equals 0x + hex(sha256(canonicalize({domain, profile}))) computed independently", () => {
     const p = printPilotProfile();
-    const digest = await computeMeasurementProfileDigest(p);
-    const expected = await sha256(canonicalize({ domain: MEASUREMENT_PROFILE_DOMAIN, profile: p }));
-    expect(digest).toBe(expected);
-    expect(digest.startsWith("sha256:")).toBe(true);
+    expect(computeMeasurementProfileDigest(p)).toBe(expectedDigest(MEASUREMENT_PROFILE_DOMAIN, p));
   });
 
-  it("is stable across key order (canonicalizer sorts)", async () => {
+  it("is 0x + 64 lowercase hex, never the sha256:-tagged evidence-event family", () => {
+    const digest = computeMeasurementProfileDigest(printPilotProfile());
+    expect(digest).toMatch(MEASUREMENT_PROFILE_DIGEST_PATTERN);
+    expect(digest.startsWith("sha256:")).toBe(false);
+  });
+
+  it("the print pilot profile digest is pinned (a drift in form or content fails here)", () => {
+    expect(computeMeasurementProfileDigest(printPilotProfile())).toBe(PINNED_PRINT_PILOT_DIGEST);
+  });
+
+  it("is stable across key order (canonicalizer sorts)", () => {
     const a = printPilotProfile();
     const reordered = JSON.parse(JSON.stringify({ ...a })) as MeasurementProfileV1;
-    expect(await computeMeasurementProfileDigest(reordered)).toBe(await computeMeasurementProfileDigest(a));
+    expect(computeMeasurementProfileDigest(reordered)).toBe(computeMeasurementProfileDigest(a));
   });
 
-  it("is domain-separated: the same body under another domain differs", async () => {
+  it("is domain-separated: the same body under another domain differs", () => {
     const p = printPilotProfile();
-    const real = await computeMeasurementProfileDigest(p);
-    const other = await sha256(canonicalize({ domain: "PCC:something-else:v1", profile: p }));
-    expect(real).not.toBe(other);
+    expect(computeMeasurementProfileDigest(p)).not.toBe(expectedDigest("PCC:something-else:v1", p));
   });
 });
 
 describe("measurement profile — the mutation negative control", () => {
-  it("governs when the presented profile is the committed one", async () => {
+  it("governs when the presented profile is the committed one", () => {
     const p = printPilotProfile();
-    const committed = await computeMeasurementProfileDigest(p);
-    const res = await profileGoverns(committed, p);
+    const res = profileGoverns(computeMeasurementProfileDigest(p), p);
     expect(res.governs).toBe(true);
     expect(res.reasons).toEqual([]);
   });
 
-  it("a post-commit TOLERANCE change cannot authorize under the old digest", async () => {
+  it("a post-commit TOLERANCE change cannot authorize under the old digest", () => {
     const original = printPilotProfile();
     original.measurement.tolerance = { comparator: ">=", target: 0.9 };
-    const committed = await computeMeasurementProfileDigest(original);
+    const committed = computeMeasurementProfileDigest(original);
 
     const loosened = printPilotProfile();
     loosened.measurement.tolerance = { comparator: ">=", target: 0.1 };
 
-    const res = await profileGoverns(committed, loosened);
+    const res = profileGoverns(committed, loosened);
     expect(res.governs).toBe(false);
     expect(res.reasons.join(" ")).toContain("digest mismatch");
   });
 
-  it("a post-commit SAMPLING change cannot authorize under the old digest", async () => {
+  it("a post-commit SAMPLING change cannot authorize under the old digest", () => {
     const original = printPilotProfile();
     original.measurement.sampling = { minSamples: 5, maxIntervalMs: 1000 };
-    const committed = await computeMeasurementProfileDigest(original);
+    const committed = computeMeasurementProfileDigest(original);
 
     const thinned = printPilotProfile();
     thinned.measurement.sampling = { minSamples: 1, maxIntervalMs: 60000 };
 
-    expect((await profileGoverns(committed, thinned)).governs).toBe(false);
+    expect(profileGoverns(committed, thinned).governs).toBe(false);
   });
 
-  it("a post-commit DEVICE swap cannot authorize under the old digest", async () => {
-    const original = printPilotProfile();
-    const committed = await computeMeasurementProfileDigest(original);
+  it("a post-commit DEVICE swap cannot authorize under the old digest", () => {
+    const committed = computeMeasurementProfileDigest(printPilotProfile());
     const swapped = printPilotProfile();
     swapped.device.deviceId = "dev-some-other-camera";
-    expect((await profileGoverns(committed, swapped)).governs).toBe(false);
+    expect(profileGoverns(committed, swapped).governs).toBe(false);
   });
 
-  it("an invalid presented profile never governs, and never throws", async () => {
-    const committed = await computeMeasurementProfileDigest(printPilotProfile());
+  it("an invalid presented profile never governs, and never throws", () => {
+    const committed = computeMeasurementProfileDigest(printPilotProfile());
     const bad = { ...printPilotProfile(), simulationProhibited: false as unknown as true };
-    const res = await profileGoverns(committed, bad);
+    const res = profileGoverns(committed, bad);
     expect(res.governs).toBe(false);
     expect(res.presentedDigest).toBeNull();
     expect(res.reasons.join(" ")).toContain("simulationProhibited");
+  });
+});
+
+describe("measurement profile — a committed digest in the wrong family fails closed", () => {
+  const hex = computeMeasurementProfileDigest(printPilotProfile()).slice(2);
+
+  it("the same hash in the sha256:-tagged evidence-event form is rejected as the wrong family", () => {
+    const res = profileGoverns(`sha256:${hex}`, printPilotProfile());
+    expect(res.governs).toBe(false);
+    expect(res.presentedDigest).toBeNull();
+    expect(res.reasons.join(" ")).toContain("evidence-event family");
+  });
+
+  it("uppercase hex is rejected (one canonical spelling per digest)", () => {
+    expect(profileGoverns(`0x${hex.toUpperCase()}`, printPilotProfile()).governs).toBe(false);
+  });
+
+  it("a truncated digest is rejected", () => {
+    expect(profileGoverns(`0x${hex.slice(0, 62)}`, printPilotProfile()).governs).toBe(false);
+  });
+
+  it("a non-string committed digest is rejected without throwing", () => {
+    expect(profileGoverns(null as unknown as string, printPilotProfile()).governs).toBe(false);
   });
 });
 
@@ -205,11 +239,17 @@ describe("measurement profile — result levels stay separate", () => {
     expect(acceptsInspectedOutput(p)).toBe(false);
   });
 
-  it("changing the accepted level changes the digest (a level is a committed term)", async () => {
-    const strict = printPilotProfile();
-    const committed = await computeMeasurementProfileDigest(strict);
+  it("changing the accepted level changes the digest (a level is a committed term)", () => {
+    const committed = computeMeasurementProfileDigest(printPilotProfile());
     const weakened = printPilotProfile();
     weakened.interpretation.acceptanceLevel = "device_reported";
-    expect((await profileGoverns(committed, weakened)).governs).toBe(false);
+    expect(profileGoverns(committed, weakened).governs).toBe(false);
   });
 });
+
+/**
+ * Pinned digest of printPilotProfile(), computed independently as
+ * "0x" + sha256(canonicalize({domain: "PCC:measurement-profile:v1", profile})).
+ */
+const PINNED_PRINT_PILOT_DIGEST =
+  "0x7efecb6c05ae4241a87dc5082f7c9d1bac9158060a78beb01dcdfb2496e9bb6a";

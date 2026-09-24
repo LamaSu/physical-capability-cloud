@@ -24,16 +24,31 @@
  * checkable claim instead of a reading of an event name.
  *
  * Canonicalization is the PRODUCTION one (`util/canonical.ts`: sorted keys,
- * `String()` numbers, `sha256:`-prefixed). This module never hand-rolls an
- * encoder — the 2026-08-25 cross-family finding was that mirror-form
- * canonicalizers silently diverge from production inside the digest preimage.
+ * `String()` numbers). This module never hand-rolls an encoder — the 2026-08-25
+ * cross-family finding was that mirror-form canonicalizers silently diverge from
+ * production inside the digest preimage.
+ *
+ * The digest is in the COMMITMENT family — `0x` + 64 lowercase hex of
+ * SHA-256, the same form as `computeVerificationProgramHash` — not the
+ * `sha256:`-tagged evidence-event family. A profile is committed before
+ * execution and is a peer of `committedProgramHash`: it reaches the chain by
+ * being a policy subject folded into the accepted-policy digest, so it needs no
+ * separate keccak twin (two forms of one fact can drift). A `sha256:`-tagged
+ * value presented as a committed profile digest is rejected as the wrong family.
  */
 
-import { canonicalize, sha256 } from "../util/canonical.js";
-import type { SHA256 } from "../types/common.js";
+import { createHash } from "node:crypto";
+
+import { canonicalize } from "../util/canonical.js";
 
 /** Domain separator — a profile digest can never collide with another digest. */
 export const MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1";
+
+/** A committed measurement-profile digest: `0x` + 64 lowercase hex (SHA-256). */
+export type MeasurementProfileDigest = `0x${string}`;
+
+/** The only accepted committed-digest form. */
+export const MEASUREMENT_PROFILE_DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
 
 /**
  * Which of the memo's three result levels this profile accepts as the proven
@@ -311,25 +326,32 @@ export class InvalidMeasurementProfileError extends Error {
   }
 }
 
+function digestProfile(profile: MeasurementProfileV1): MeasurementProfileDigest {
+  const hex = createHash("sha256")
+    .update(canonicalize({ domain: MEASUREMENT_PROFILE_DOMAIN, profile }))
+    .digest("hex");
+  return `0x${hex}`;
+}
+
 /**
  * The committed digest of a measurement profile:
- *   sha256(canonicalize({ domain, profile }))
+ *   "0x" + hex(sha256(canonicalize({ domain, profile })))
  * using the PRODUCTION canonicalizer, so the digest a producer computes and the
  * digest a verifier recomputes share one preimage. Refuses invalid profiles.
  */
-export async function computeMeasurementProfileDigest(
+export function computeMeasurementProfileDigest(
   profile: MeasurementProfileV1,
-): Promise<SHA256> {
+): MeasurementProfileDigest {
   const violations = validateMeasurementProfile(profile);
   if (violations.length > 0) throw new InvalidMeasurementProfileError(violations);
-  return sha256(canonicalize({ domain: MEASUREMENT_PROFILE_DOMAIN, profile }));
+  return digestProfile(profile);
 }
 
 /** The outcome of checking a presented profile against a committed digest. */
 export interface ProfileGovernanceResult {
   governs: boolean;
   /** Digest recomputed from the presented profile. */
-  presentedDigest: SHA256 | null;
+  presentedDigest: MeasurementProfileDigest | null;
   reasons: string[];
 }
 
@@ -338,13 +360,23 @@ export interface ProfileGovernanceResult {
  *
  * This is the mutation gate the memo asks for: change a sampling rate or a
  * tolerance after acceptance and the recomputed digest differs, so the old
- * acceptance cannot authorize the changed profile. Never throws — an invalid or
- * mismatched profile returns `governs:false` with reasons.
+ * acceptance cannot authorize the changed profile. Never throws — a malformed
+ * committed digest, an invalid profile, or a mismatch returns `governs:false`
+ * with reasons.
  */
-export async function profileGoverns(
+export function profileGoverns(
   committedDigest: string,
   presentedProfile: MeasurementProfileV1,
-): Promise<ProfileGovernanceResult> {
+): ProfileGovernanceResult {
+  if (typeof committedDigest !== "string" || !MEASUREMENT_PROFILE_DIGEST_PATTERN.test(committedDigest)) {
+    return {
+      governs: false,
+      presentedDigest: null,
+      reasons: [
+        `committed digest ${JSON.stringify(committedDigest)} is not a measurement-profile commitment: expected 0x + 64 lowercase hex; a sha256:-tagged value is the evidence-event family`,
+      ],
+    };
+  }
   const violations = validateMeasurementProfile(presentedProfile);
   if (violations.length > 0) {
     return {
@@ -353,9 +385,7 @@ export async function profileGoverns(
       reasons: violations.map((x) => `${x.path || "<root>"}: ${x.message}`),
     };
   }
-  const presentedDigest = await sha256(
-    canonicalize({ domain: MEASUREMENT_PROFILE_DOMAIN, profile: presentedProfile }),
-  );
+  const presentedDigest = digestProfile(presentedProfile);
   if (presentedDigest !== committedDigest) {
     return {
       governs: false,
