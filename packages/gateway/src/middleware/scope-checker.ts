@@ -22,6 +22,9 @@
  *   - The exact money-moving routes OUTSIDE those prefixes (MONEY_EXACT_WRITES:
  *     the Story IP royalty/revenue writes) are money writes too, resolved the
  *     same way (WP-A fold F2).
+ *   - Mutating methods under /api/operator/** (the operator control surface:
+ *     e-stop, approvals, the pcc-node relay) need `operator` or `admin` — a
+ *     floor enforced in the hook, not a table row (WP-A fold F4).
  *   - All other routes remain open-by-default when no requirement matches
  *     (backwards compatibility — see the note below on why this is not yet global).
  *   - If a requirement exists and the caller lacks all required scopes → 403.
@@ -241,6 +244,42 @@ function isMoneyExactWrite(method: string, path: string): boolean {
 
 /** Methods that can move funds. Default-deny applies to these only. */
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * The operator namespace (WP-A fold F4 — operator-ux #2348, board N31).
+ *
+ * /api/operator/** carries the operator's CONTROL surface: emergency stop and
+ * resume, approval decisions, policy, the pcc-node relay (evidence, heartbeat,
+ * job status), support and diagnostics. With no rule it was open-by-default, so
+ * ANY authenticated key — a contributor-scoped quickstart key included — could
+ * mutate it. A mutating method there now needs `operator` or `admin`.
+ *
+ * This is a scope FLOOR, enforced in the hook, not a table row: the governance
+ * table replaces the defaults wholesale, so a row-only rule would vanish the
+ * moment anyone added an unrelated row. A table rule can still TIGHTEN a route
+ * here (the hook falls through to normal rule matching after the floor), never
+ * widen it. Ownership — WHICH kernel a key may stop — is the route's job
+ * (WP-C), not this layer's.
+ *
+ * Legacy `"*"`: it KEEPS this access. The wildcard is refused only as money
+ * and admin authority (A1 / MUST-CLOSE 7); /api/operator/** is neither, and
+ * every self-service key is minted `["operator"]` anyway, so excluding `"*"`
+ * here would cut the legacy keys off the pcc-node relay without narrowing who
+ * can reach these routes. A key-less SIWE session holds no scopes and is
+ * refused, exactly as on the admin namespace.
+ *
+ * The singular `/api/operator` root only — `/api/operators/**` (public operator
+ * profiles, ratings, channels) is a different namespace and is not affected.
+ */
+const OPERATOR_NAMESPACE_ROOT = "/api/operator";
+const OPERATOR_WRITE_SCOPES = ["operator", "admin"];
+
+/** True for a MUTATING method at or under /api/operator (F4). */
+export function isOperatorWriteRequest(method: string, path: string): boolean {
+  if (!MUTATING_METHODS.has(method.toUpperCase())) return false;
+  const p = path.split("?")[0];
+  return p === OPERATOR_NAMESPACE_ROOT || p.startsWith(`${OPERATOR_NAMESPACE_ROOT}/`);
+}
 
 /** Read methods a `"*"`-method money-path table rule keeps governing (A2). */
 const READ_METHODS = ["GET", "HEAD"];
@@ -569,6 +608,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // a request out of these two classes.
     const adminRoute = isAdminScopedRoute(method, reqPath);
     const isMoneyWrite = isMoneyWriteRequest(method, reqPath);
+    const operatorWrite = isOperatorWriteRequest(method, reqPath);
 
     // A principal with NO API KEY has no scopes at all. The common case is a
     // SIWE session: apiGate accepts it and sets only `req.userId`, never
@@ -596,6 +636,18 @@ async function scopeCheckerImpl(app: FastifyInstance) {
           [],
           "The admin namespace requires an API key carrying the explicit `admin` " +
             "scope. A SIWE session proves identity but grants no scopes.",
+        );
+      }
+      if (operatorWrite && !isMoneyWrite) {
+        // F4: the operator control surface (e-stop, approvals, relay) needs a
+        // key carrying `operator`/`admin`; a session holds no scopes at all.
+        return deny(
+          reply,
+          OPERATOR_WRITE_SCOPES,
+          [],
+          "Changing operator state requires an API key carrying the `operator` " +
+            "scope. A SIWE session proves identity but grants no scopes — provision " +
+            "a key with that session (POST /api/auth/provision) and call this route with it.",
         );
       }
       if (!isMoneyWrite) return;
@@ -674,6 +726,22 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // money write nor in the admin namespace, which is exactly the access an
     // old wildcard key keeps until it is revoked.
     if (callerScopes.includes("*")) return;
+
+    // OPERATOR CONTROL SURFACE — a scope FLOOR resolved here, independent of
+    // the table (F4): a mutating method under /api/operator needs `operator`
+    // or `admin`. Passing the floor is necessary, not sufficient — the request
+    // then falls through to normal rule matching, so a table rule can tighten
+    // one of these routes but can never open it. (Placed after the legacy
+    // wildcard on purpose; see OPERATOR_NAMESPACE_ROOT for why "*" keeps it.)
+    if (operatorWrite && !OPERATOR_WRITE_SCOPES.some((s) => callerScopes.includes(s))) {
+      return deny(
+        reply,
+        OPERATOR_WRITE_SCOPES,
+        callerScopes,
+        `Changing operator state requires one of the following scopes: ${OPERATOR_WRITE_SCOPES.join(", ")}. ` +
+          `Your API key has: ${callerScopes.join(", ") || "none"}.`,
+      );
+    }
 
     // FIAT-RAMP SETUP — resolved against FIAT_SETUP_REQUIREMENTS alone, never
     // the table (A4). A governance row used to replace the defaults that held
