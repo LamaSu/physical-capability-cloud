@@ -211,7 +211,18 @@ NESTED_RESULT_KEYS = ("response", "data", "body", "payload")
 
 # Keys inside a device body that POSITIVELY assert a failure.
 NESTED_ERROR_KEYS = ("error", "errors", "fault", "faultstring")
+# A success key is only a success when it holds the boolean True.  Any other
+# value present under it (False, "false", 0, None, "yes") is read as a failure:
+# an unreadable success claim is not evidence that nothing failed.
 NESTED_FALSE_SUCCESS_KEYS = ("success", "ok", "succeeded")
+# Status-like keys whose STRING value may name a failure at any depth.
+STATUS_FIELD_KEYS = ("status", "state")
+
+# The device-body scan walks nested dicts and lists (a failure is as real at
+# data.result[0].error as at the top level).  A body deeper or larger than
+# these bounds cannot be verified, and the scan says so as a failure.
+DEVICE_BODY_MAX_DEPTH = 8
+DEVICE_BODY_MAX_NODES = 5000
 
 # XML/SOAP fault ELEMENT markers, matched case-insensitively against a non-JSON
 # (string) body.  Anchored to structured fault vocabulary rather than free text
@@ -316,31 +327,70 @@ def _normalized_status(container: Any) -> Optional[str]:
 def _extract_device_error(body: Any) -> Optional[str]:
     """The device's own failure message from a response body, or None.
 
-    Reads POSITIVE failure signals only.  An unrecognised body yields None, so
-    this never invents a failure -- and, being the only reader of a device
-    body, it is the single place a new failure envelope has to be taught.
+    Reads failure signals at ANY depth: a failure nested in ``data``,
+    ``result``, a list item or a deeper envelope is still the device saying it
+    failed.  A body it cannot finish reading (too deep, too large) counts as a
+    failure.  Otherwise an unrecognised body yields None -- this never turns an
+    unknown shape into a failure, and it never turns anything into a success.
+    Being the only reader of a device body, it is the single place a new
+    failure envelope has to be taught.
     """
-    if isinstance(body, str):
-        lowered = body.lower()
+    budget = [DEVICE_BODY_MAX_NODES]
+    return _scan_device_body(body, "", 0, budget)
+
+
+def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Optional[str]:
+    """Depth-first failure scan behind :func:`_extract_device_error`."""
+    budget[0] -= 1
+    if budget[0] < 0:
+        return "device body too large to verify"
+    where = f" (at {path})" if path else ""
+
+    if isinstance(node, str):
+        # Only a whole body (or a whole nested value) is an XML/SOAP document.
+        lowered = node.lower()
         for marker in FAULT_BODY_MARKERS:
             if marker in lowered:
-                return f"device returned a fault body (matched {marker!r})"
+                return f"device returned a fault body (matched {marker!r}){where}"
         return None
 
-    if not isinstance(body, dict):
+    if isinstance(node, (list, tuple)):
+        if depth >= DEVICE_BODY_MAX_DEPTH:
+            return "device body too deeply nested to verify"
+        for index, item in enumerate(node):
+            message = _scan_device_body(item, f"{path}[{index}]", depth + 1, budget)
+            if message:
+                return message
         return None
+
+    if not isinstance(node, dict):
+        return None
+    if depth >= DEVICE_BODY_MAX_DEPTH:
+        return "device body too deeply nested to verify"
 
     for key in NESTED_ERROR_KEYS:
-        value = body.get(key)
+        value = node.get(key)
         if value:
-            return value if isinstance(value, str) else f"{key}={_short(value)}"
+            text = value if isinstance(value, str) else f"{key}={_short(value)}"
+            return f"{text}{where}"
 
     for key in NESTED_FALSE_SUCCESS_KEYS:
-        if body.get(key) is False:
-            return f"device reported {key}=False"
+        if key in node and node[key] is not True:
+            return f"device reported {key}={node[key]!r}{where}"
 
-    if _normalized_status(body) in FAILURE_STATUS_VALUES:
-        return f"device reported status={body.get('status')!r}"
+    for key in STATUS_FIELD_KEYS:
+        value = node.get(key)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, str) and item.strip().lower() in FAILURE_STATUS_VALUES:
+                return f"device reported {key}={value!r}{where}"
+
+    for key, value in node.items():
+        if isinstance(value, (dict, list, tuple)) or (isinstance(value, str) and "<" in value):
+            child = f"{path}.{key}" if path else str(key)
+            message = _scan_device_body(value, child, depth + 1, budget)
+            if message:
+                return message
 
     return None
 
@@ -442,9 +492,11 @@ def classify_execution_result(result: Any) -> str:
     5.  ``status`` in :data:`FAILURE_STATUS_VALUES`       -> failure
     6.  ANY flag in :data:`ALL_FLAG_KEYS` present and not
         ``True``                                          -> failure
+    4c. ``status_code`` present but not a genuine HTTP
+        status integer (checked after rule 6)             -> unclassifiable
     7.  ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
-    8.  ``status`` present but unrecognised, or present
-        and not a string                                  -> unclassifiable
+    8.  ``status`` present but unrecognised, not a string,
+        or null                                           -> unclassifiable
     9.  a :data:`COMPLETION_FLAG_KEYS` flag is present
         (and every flag passed rule 6)                     -> success
     10. an :data:`ACCEPTANCE_FLAG_KEYS` flag is ``True``,
@@ -519,6 +571,13 @@ def classify_execution_result(result: Any) -> str:
     if any(result[key] is not True for key in ALL_FLAG_KEYS if key in result):
         return RESULT_FAILURE
 
+    # A status_code that is PRESENT but is not a genuine HTTP status number
+    # ("202", "0", "500", False, None) cannot be read, so rules 4 and 10 could
+    # not have seen it.  An unreadable outcome field is not evidence that
+    # nothing failed: it never reaches a success (rule 4c).
+    if "status_code" in result and _readable_status_code(result) is None:
+        return RESULT_UNCLASSIFIABLE
+
     # A 202 is the device saying the work has NOT finished, so it turns any
     # success claim below (a success status, a completion flag) into accepted.
     accepted_by_transport = result.get("status_code") == HTTP_ACCEPTED
@@ -526,9 +585,10 @@ def classify_execution_result(result: Any) -> str:
     if status in SUCCESS_STATUS_VALUES:
         return RESULT_ACCEPTED if accepted_by_transport else RESULT_SUCCESS
 
-    # A status that is present but not a string ({"status": ["failed"]}) is as
-    # unreadable as an unknown string, and may be a failure in another shape.
-    if status is not None or result.get("status") is not None:
+    # A status that is present but not a readable success -- an unknown string,
+    # a non-string ({"status": ["failed"]}) or an explicit null -- may be a
+    # failure in another shape, so it is never read as "no status" (rule 8).
+    if "status" in result:
         return RESULT_UNCLASSIFIABLE
 
     if any(key in result for key in COMPLETION_FLAG_KEYS):

@@ -399,6 +399,8 @@ from pcc_node.job_executor import (  # noqa: E402
     UNCLASSIFIABLE_REASON,
     COMPLETION_FLAG_KEYS,
     ACCEPTANCE_FLAG_KEYS,
+    _is_transport_failure,
+    _extract_device_error,
 )
 
 
@@ -1454,8 +1456,15 @@ class TestTransportFailureSentinel:
 
     def test_boolean_status_code_is_not_read_as_the_sentinel(self):
         """`False == 0` in Python -- a bool there is a malformed result, not a
-        transport report, so the remaining rules classify it."""
-        assert classify_execution_result({"printed": True, "status_code": False}) == RESULT_SUCCESS
+        transport report, so it is not the sentinel (not a failure by rule 4).
+
+        CHANGED (r31 astra verdict item 3): this used to assert RESULT_SUCCESS.
+        A present-but-malformed status_code is unreadable, and an unreadable
+        outcome field is not evidence that nothing failed, so it now
+        classifies as unclassifiable (rule 4c) -- never a success."""
+        result = {"printed": True, "status_code": False}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert not _is_transport_failure(result)
 
     def test_failure_reason_names_the_transport_failure(self):
         reason = describe_execution_failure(GH_TRANSPORT_PRE_FIX)
@@ -2373,7 +2382,16 @@ class TestAcceptedStatusAndShapeGaps:
         assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
 
     def test_an_absent_status_is_not_a_non_string_status(self):
-        assert classify_execution_result({"executed": True, "status": None}) == RESULT_SUCCESS
+        """Positive control: with no status key at all, a completion flag is
+        still a success."""
+        assert classify_execution_result({"executed": True}) == RESULT_SUCCESS
+
+    def test_an_explicit_null_status_is_unreadable_not_absent(self):
+        """CHANGED (r31 astra verdict item 3): `{"executed": True, "status":
+        None}` used to be asserted RESULT_SUCCESS here, reading an explicit null
+        as "no status".  A present status that cannot be read may be a failure
+        in another shape, so it is now unclassifiable (rule 8)."""
+        assert classify_execution_result({"executed": True, "status": None}) == RESULT_UNCLASSIFIABLE
 
     def test_a_202_bundle_never_carries_execution_completed(self):
         bundle = build_evidence_bundle(
@@ -2448,3 +2466,69 @@ class TestClaimBeforeSideEffect:
             assert client.poll_for_jobs() == []
             client.forget_job("job-claim")
             assert [j["id"] for j in client.poll_for_jobs()] == ["job-claim"]
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict (bus #2476), items 1 and 3: the device-body scan must read
+# nested and list-shaped failures, a success key must hold the boolean True,
+# and a PRESENT but malformed outcome field must never reach a success.
+# ---------------------------------------------------------------------------
+
+
+class TestR31MalformedFieldsAndDeepBodies:
+    @pytest.mark.parametrize("status_code", [
+        pytest.param("202", id="string-202"),
+        pytest.param("0", id="string-0"),
+        pytest.param("500", id="string-500"),
+        pytest.param(False, id="bool-false"),
+        pytest.param(None, id="null"),
+        pytest.param(200.0, id="float"),
+    ])
+    @pytest.mark.parametrize("flag", ["executed", "printed"])
+    def test_a_malformed_status_code_never_classifies_as_success(self, flag, status_code):
+        result = {flag: True, "status_code": status_code}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("body", [
+        pytest.param({"data": {"error": "jam"}}, id="nested-error"),
+        pytest.param({"result": {"success": False}}, id="nested-success-false"),
+        pytest.param([{"error": "jam"}], id="error-in-list"),
+        pytest.param({"success": "false"}, id="string-false-success"),
+        pytest.param({"ok": 0}, id="zero-ok"),
+        pytest.param({"succeeded": None}, id="null-succeeded"),
+        pytest.param({"status": ["failed"]}, id="status-list"),
+        pytest.param({"a": {"b": {"c": {"state": "ABORTED"}}}}, id="deep-state"),
+        pytest.param({"jobs": [{"id": 1}, {"id": 2, "status": "error"}]}, id="failure-in-second-item"),
+        pytest.param({"raw": "<soap:Envelope><soap:Fault>x</soap:Fault></soap:Envelope>"}, id="nested-soap-fault"),
+    ])
+    def test_a_2xx_carrying_a_nested_or_malformed_failure_is_a_failure(self, body):
+        result = {"executed": True, "status_code": 200, "response": body}
+        assert _extract_device_error(body) is not None
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_a_body_too_deep_to_verify_is_a_failure(self):
+        body = {"leaf": "ok"}
+        for _ in range(20):
+            body = {"next": body}
+        assert "too deeply nested" in (_extract_device_error(body) or "")
+        assert classify_execution_result({"executed": True, "status_code": 200, "response": body}) == RESULT_FAILURE
+
+    def test_a_body_too_large_to_verify_is_a_failure(self):
+        body = {"items": [{"n": i} for i in range(6000)]}
+        assert "too large" in (_extract_device_error(body) or "")
+
+    @pytest.mark.parametrize("body", [
+        pytest.param({"data": {"status": "completed", "errors": []}}, id="empty-errors-list"),
+        pytest.param({"data": {"items": [{"name": "x"}], "error": None}}, id="null-error"),
+        pytest.param({"ok": True, "state": "done"}, id="true-ok"),
+    ])
+    def test_benign_nested_bodies_are_not_failures(self, body):
+        """Negative control: the deeper scan does not invent failures."""
+        assert _extract_device_error(body) is None
+        assert classify_execution_result({"executed": True, "status_code": 200, "response": body}) == RESULT_SUCCESS
+
+    def test_existing_top_level_messages_are_unchanged(self):
+        """Adapters lift the device's own message verbatim; nested hits add a location."""
+        assert _extract_device_error({"error": "E_JAM: carriage jam"}) == "E_JAM: carriage jam"
+        assert _extract_device_error({"success": False}) == "device reported success=False"
+        assert _extract_device_error({"data": {"error": "jam"}}) == "jam (at data)"
