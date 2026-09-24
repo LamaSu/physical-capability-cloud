@@ -40,12 +40,6 @@ export const ALLOWLIST: Readonly<Record<string, Allowance>> = Object.freeze({
   "registry.ts": { mockData: 1, random: 0, owner: "readmodels", why: `${DEMO} (attestations)` },
   "rewards.ts": { mockData: 5, random: 0, owner: "readmodels", why: DEMO },
   "spaces.ts": { mockData: 1, random: 1, owner: "readmodels", why: `${DEMO}; the random match score is drawn only in demo mode` },
-  "swf.ts": {
-    mockData: 0,
-    random: 4,
-    owner: "economics",
-    why: "random contribution scores drawn only in demo mode; outside it, epoch distribution answers 501 before any read or write (N34). #360 replaces the handler",
-  },
 });
 
 const DATA_DECL = /\b(?:const|let|var)\s+(mock[A-Z]\w*|MOCK_[A-Z0-9_]+|fake[A-Z]\w*|FAKE_[A-Z0-9_]+)\b\s*(?::[^=;]+)?=\s*(?:\[|\{|new Map\(|new Set\()/g;

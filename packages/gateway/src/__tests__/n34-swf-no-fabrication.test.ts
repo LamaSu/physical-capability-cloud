@@ -4,10 +4,10 @@
  * POST /api/swf/epochs/:epochId/distribute scored every active participant with
  * Math.random() (job count, reputation, uptime, votes), then DISTRIBUTED the epoch on those
  * scores: dividend claims with real-looking amounts, and the epoch marked completed. It is
- * the only route in swf.ts that draws random values or reads a fixture, so it is the only
- * one gated (per route, no plugin hook): unless PCC_DEMO_ROUTES=true, it answers 501
- * not_available BEFORE anything is read, scored or written, and the epoch stays exactly as
- * it was. With the flag, the old distribution runs, marked mock/demo.
+ * the only route in swf.ts that drew random values, so it is the only one changed: it
+ * answers 501 not_available BEFORE anything is read, scored or written, and the epoch stays
+ * exactly as it was. There is no demo path (boards N34 and N46; the steward's ruling on the
+ * SWF, operator item 69, economics #3315): PCC_DEMO_ROUTES does not turn it on.
  *
  * Every other route is REAL (it reads and writes the SWF service's own records, which hold
  * only what callers put there) and must behave the same with the flag on or off.
@@ -22,7 +22,7 @@ const MESSAGE =
   "are not computed on this gateway, " +
   "so the epoch was not scored or distributed: without them, every participant's share would come " +
   "from random numbers.";
-const REFUSAL = { error: "not_available", message: MESSAGE, see: ["GET /api/swf/epochs/:epochId"] };
+const REFUSAL = { error: "not_available", message: MESSAGE, see: ["GET /api/swf/epochs/:epochId", "GET /api/swf/accruals"] };
 
 /** What a distribution produces. None may appear in a refusal. */
 const DISTRIBUTION = /"epoch":|"scores":|shareOfEpoch|totalScore|jobVolume|swf_claim_|"totalDistributed"|"(calculating|distributing|completed)"/;
@@ -82,7 +82,7 @@ async function fundedEpoch(): Promise<string> {
   return epochId;
 }
 
-describe("NEGATIVE: without PCC_DEMO_ROUTES the distribution refuses (501) before any read, score or write", () => {
+describe("NEGATIVE: the distribution refuses (501) before any read, score or write", () => {
   it("501 not_available, and the epoch, its scores and its claims are untouched; no random draw", async () => {
     const epochId = await fundedEpoch();
     const before = (await get(`/api/swf/epochs/${epochId}`)).json().epoch;
@@ -105,7 +105,7 @@ describe("NEGATIVE: without PCC_DEMO_ROUTES the distribution refuses (501) befor
     expect(swfService.getClaimsForEpoch(epochId)).toEqual([]);
   });
 
-  it("the `see` pointer names a route this gateway registers", () => {
+  it("each `see` pointer names a route this gateway registers", () => {
     for (const p of REFUSAL.see) {
       const [method, url] = p.split(" ");
       expect(app.hasRoute({ method: method as "GET", url }), p).toBe(true);
@@ -118,9 +118,9 @@ describe("NEGATIVE: without PCC_DEMO_ROUTES the distribution refuses (501) befor
     expect(res.json()).toEqual(REFUSAL);
   });
 
-  it("only the literal \"true\" turns demo on", async () => {
+  it("no value of PCC_DEMO_ROUTES turns distribution on, \"true\" included", async () => {
     const epochId = await fundedEpoch();
-    for (const v of ["false", "1", "TRUE", "yes", ""]) {
+    for (const v of ["true", "false", "1", "TRUE", "yes", ""]) {
       process.env.PCC_DEMO_ROUTES = v;
       const res = await post(`/api/swf/epochs/${epochId}/distribute`);
       expect(res.statusCode, `PCC_DEMO_ROUTES=${JSON.stringify(v)}`).toBe(501);
@@ -141,45 +141,33 @@ describe("NEGATIVE: without PCC_DEMO_ROUTES the distribution refuses (501) befor
   });
 });
 
-describe("PCC_DEMO_ROUTES=true: the old random distribution, marked mock/demo", () => {
+describe("NEGATIVE: PCC_DEMO_ROUTES=true has no demo distribution (operator item 69, N46)", () => {
   beforeEach(() => {
     process.env.PCC_DEMO_ROUTES = "true";
   });
 
-  it("200: scores drawn at random, the epoch distributed, claims created; the answer says mock/demo", async () => {
+  it("501 with the same refusal: no random draw, no score, no claim, the epoch unchanged", async () => {
     const epochId = await fundedEpoch();
-    const active = (await get("/api/swf/participants?status=active")).json().participants as Array<{ id: string }>;
-    expect(active.length).toBeGreaterThanOrEqual(2);
-
-    // A fixed draw keeps the shares deterministic; the spy still proves the scores are drawn.
-    const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const before = (await get(`/api/swf/epochs/${epochId}`)).json().epoch;
+    const random = vi.spyOn(Math, "random");
     try {
       const res = await post(`/api/swf/epochs/${epochId}/distribute`);
-      expect(res.statusCode, res.body).toBe(200);
-      const body = res.json();
-      expect(body).toMatchObject({ mock: true, demo: true, epoch: { id: epochId, status: "completed", totalDistributed: "600" } });
-      expect(body.epoch.scores).toHaveLength(active.length);
-      expect(random).toHaveBeenCalled();
+      expect(res.statusCode, res.body).toBe(501);
+      expect(res.json()).toEqual(REFUSAL);
+      expect(res.body).not.toMatch(DISTRIBUTION);
+      expect(res.body).not.toMatch(/"mock"|"demo"/);
+      expect(random).not.toHaveBeenCalled();
     } finally {
       random.mockRestore();
     }
-
-    // The old behavior wrote real-looking pending claims: 600 shared equally.
-    const claims = swfService.getClaimsForEpoch(epochId);
-    expect(claims).toHaveLength(active.length);
-    expect(claims.reduce((s, c) => s + Number(c.amount), 0)).toBeCloseTo(600, 6);
-    expect(claims.every((c) => c.status === "pending")).toBe(true);
+    expect((await get(`/api/swf/epochs/${epochId}`)).json().epoch).toEqual(before);
+    expect(swfService.getClaimsForEpoch(epochId)).toEqual([]);
   });
 
-  it("an epoch that cannot be distributed keeps the old 409 conflict, marked demo", async () => {
+  it("an unknown epoch is refused the same way, not the old 409", async () => {
     const res = await post("/api/swf/epochs/swf_epoch_none/distribute");
-    expect(res.statusCode).toBe(409);
-    expect(res.json()).toEqual({
-      error: "conflict",
-      message: "Epoch swf_epoch_none not found",
-      mock: true,
-      demo: true,
-    });
+    expect(res.statusCode).toBe(501);
+    expect(res.json()).toEqual(REFUSAL);
   });
 });
 

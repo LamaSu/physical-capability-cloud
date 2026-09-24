@@ -204,7 +204,7 @@ A provider that is not **fully** configured on the gateway answers **503 `not_co
 |--------|----------|-------------|
 | GET | `/api/rewards/*` | DePIN epochs, kernel rewards and claims, with `/api/certificates*` and `/api/treasury/summary`. **501 `not_available` outside demo mode**: their data was fixtures (N34). |
 | GET/POST | `/api/ip/*` | Story Protocol IP registration, royalties, lineage, revenue splits. |
-| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. Epoch distribution (`POST /api/swf/epochs/:epochId/distribute`) answers 501 `not_available` outside demo mode: per-epoch contribution scores are not computed, so a distribution would share the fund out on random numbers. |
+| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. Epoch distribution (`POST /api/swf/epochs/:epochId/distribute`) always answers 501 `not_available`, with no demo path: per-epoch contribution scores are not computed, so a distribution would share the fund out on random numbers, and the SWF's money routes stay disabled (operator item 69). |
 | GET/POST | `/api/csd/*` | Capability StructureDefinition CRUD (FHIR-inspired schemas). |
 | GET/POST | `/api/bounty/*` | Demand signals, bounties, leaderboard. |
 | GET/POST | `/api/pool/*` | Investment pools, staking, earnings. |
