@@ -29,13 +29,20 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     commitSource,
   });
 
-  // Health check
-  app.get("/api/health", async () => healthPayload());
+  // Health check. no-store: a cache in front of the gateway must never serve the
+  // commit of a previous deploy.
+  app.get("/api/health", async (_req, reply) => {
+    reply.header("cache-control", "no-store");
+    return healthPayload();
+  });
 
   // Bare /health alias — monitors and curl-based healthchecks commonly hit
   // /health directly (not /api/health). Without this, SERVE_DASHBOARD=true's
   // SPA fallback (setNotFoundHandler in server.ts) would catch bare /health and
   // return index.html — a false-positive 200 for anything watching for a
   // real healthcheck. Same payload as /api/health.
-  app.get("/health", async () => healthPayload());
+  app.get("/health", async (_req, reply) => {
+    reply.header("cache-control", "no-store");
+    return healthPayload();
+  });
 }

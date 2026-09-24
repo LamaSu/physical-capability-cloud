@@ -217,7 +217,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Gateway healthcheck. |
+| GET | `/health` | Gateway healthcheck (same payload as `/api/health`). Also reports the served build: `commit` (git SHA or `null`) and `commitSource` (`image_build`, `railway_deploy` or `unknown`). |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
 | GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { healthRoutes } from "../routes/health.js";
 
@@ -156,5 +156,34 @@ describe("healthRoutes plugin: parent hooks still apply", () => {
       expect(res.statusCode, url).toBe(200);
     }
     expect(seen).toEqual([...PATHS]);
+  });
+});
+
+describe("healthRoutes: per-request freshness and caching", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("the timestamp is taken per request, not at registration", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2031-01-01T00:00:00.000Z"));
+    app = Fastify({ logger: false });
+    await app.register(healthRoutes);
+    await app.ready();
+    vi.setSystemTime(new Date("2031-01-01T00:05:00.000Z"));
+    for (const url of PATHS) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.json().timestamp, url).toBe("2031-01-01T00:05:00.000Z");
+    }
+  });
+
+  it("answers with cache-control: no-store on both paths", async () => {
+    app = Fastify({ logger: false });
+    await app.register(healthRoutes);
+    await app.ready();
+    for (const url of PATHS) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.headers["cache-control"], url).toBe("no-store");
+    }
   });
 });
