@@ -75,7 +75,8 @@ describe("snippetRoutes", () => {
       expect(json.version).toBe(SNIPPET_VERSION);
       expect(json.gateway).toBe("https://capability.network");
       expect(json.body).toBe(SNIPPET_BODY);
-      expect(json.npx).toBe("npx @pcc/onboard");
+      // N26: @pcc/onboard is not published, so the envelope advertises no npx command.
+      expect(json.npx).toBeNull();
     });
 
     it("sets CORS to *", async () => {
