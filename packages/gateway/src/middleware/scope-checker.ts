@@ -19,6 +19,9 @@
  *     added, rather than silently open until someone remembers a rule.
  *     Money-path READS stay open — the dashboard does GET /api/escrow and no GET
  *     requirement covers it; the exposure closed here is funds MOVEMENT.
+ *   - The exact money-moving routes OUTSIDE those prefixes (MONEY_EXACT_WRITES:
+ *     the Story IP royalty/revenue writes) are money writes too, resolved the
+ *     same way (WP-A fold F2).
  *   - All other routes remain open-by-default when no requirement matches
  *     (backwards compatibility — see the note below on why this is not yet global).
  *   - If a requirement exists and the caller lacks all required scopes → 403.
@@ -203,6 +206,39 @@ const FIAT_SETUP_REQUIREMENTS: ScopeRequirement[] = [
 /** Paths of the setup routes above (used to keep table rules for them). */
 const MONEY_PATH_EXCEPTIONS = new Set(FIAT_SETUP_REQUIREMENTS.map((r) => r.pattern));
 
+/**
+ * Money-moving routes that live OUTSIDE the money prefixes (WP-A fold F2 —
+ * economics #2353, steward #2450 N10a). The Story IP routes that move royalty
+ * or revenue value. They are money writes exactly like a write under
+ * MONEY_PATH_PREFIXES: they resolve against MONEY_PATH_FLOOR alone, need an
+ * EXPLICIT `settlement`/`admin` scope (a legacy `"*"` does not count), a
+ * key-less SIWE session is refused, and no rule-table row can widen them.
+ *
+ *   POST /api/ip/distribute-royalties  — sets/distributes an IP revenue split
+ *   POST /api/ip/settle-royalties      — triggers royalty settlement for a job
+ *   POST /api/ip/:ipId/pay             — pays royalty into an IP vault
+ *   POST /api/ip/:ipId/claim           — claims revenue out of an IP vault
+ *
+ * EXACT method + path, deliberately NOT the /api/ip prefix: registering IP,
+ * setting licensing terms, raising a dispute and every READ under /api/ip are
+ * not funds movement and keep their current rules. `*` is ONE path segment, so
+ * a param route matches the matched template (`/api/ip/:ipId/pay`), a concrete
+ * path and the `{ipId}` form agent introspection uses.
+ */
+const MONEY_EXACT_WRITES: ReadonlyArray<{ method: string; pattern: string }> = [
+  { method: "POST", pattern: "/api/ip/distribute-royalties" },
+  { method: "POST", pattern: "/api/ip/settle-royalties" },
+  { method: "POST", pattern: "/api/ip/*/pay" },
+  { method: "POST", pattern: "/api/ip/*/claim" },
+];
+
+function isMoneyExactWrite(method: string, path: string): boolean {
+  const m = method.toUpperCase();
+  return MONEY_EXACT_WRITES.some(
+    (r) => r.method === m && patternToRegex(r.pattern).test(path.split("?")[0]),
+  );
+}
+
 /** Methods that can move funds. Default-deny applies to these only. */
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -228,14 +264,16 @@ function fiatSetupRequirement(method: string, path: string): ScopeRequirement | 
 
 /**
  * True when this request is a money WRITE: a mutating method under a money
- * prefix, other than a fiat-ramp SETUP route for its own setup method. Money
- * writes resolve against MONEY_PATH_FLOOR alone and require an EXPLICIT money
- * scope — never `"*"`. Exported so agent introspection reports the same thing
- * this hook enforces.
+ * prefix, other than a fiat-ramp SETUP route for its own setup method, or one
+ * of the exact money-moving routes outside the prefixes (MONEY_EXACT_WRITES,
+ * F2). Money writes resolve against MONEY_PATH_FLOOR alone and require an
+ * EXPLICIT money scope — never `"*"`. Exported so agent introspection reports
+ * the same thing this hook enforces.
  */
 export function isMoneyWriteRequest(method: string, path: string): boolean {
   const m = method.toUpperCase();
   if (!MUTATING_METHODS.has(m)) return false;
+  if (isMoneyExactWrite(m, path)) return true;
   if (fiatSetupRequirement(m, path)) return false;
   return isUnderMoneyPrefix(path);
 }
@@ -262,15 +300,24 @@ export function moneyWriteScopes(method: string): string[] {
  * incapable of drifting apart, which is what the old "keep this in sync"
  * comment was asking a human to guarantee.
  */
-const MONEY_PATH_FLOOR: ScopeRequirement[] = MONEY_PATH_PREFIXES.flatMap((prefix) => {
-  const root = prefix.slice(0, -1);          // "/api/escrow"
-  return [root, `${prefix}**`].flatMap((pattern) => [
-    { method: "POST", pattern, scopes: MONEY_SCOPES },
-    { method: "PUT", pattern, scopes: MONEY_SCOPES },
-    { method: "PATCH", pattern, scopes: MONEY_SCOPES },
-    { method: "DELETE", pattern, scopes: MONEY_DELETE_SCOPES },
-  ]);
-});
+const MONEY_PATH_FLOOR: ScopeRequirement[] = [
+  ...MONEY_PATH_PREFIXES.flatMap((prefix) => {
+    const root = prefix.slice(0, -1);          // "/api/escrow"
+    return [root, `${prefix}**`].flatMap((pattern) => [
+      { method: "POST", pattern, scopes: MONEY_SCOPES },
+      { method: "PUT", pattern, scopes: MONEY_SCOPES },
+      { method: "PATCH", pattern, scopes: MONEY_SCOPES },
+      { method: "DELETE", pattern, scopes: MONEY_DELETE_SCOPES },
+    ]);
+  }),
+  // The exact money-moving routes outside the prefixes (F2), each for its own
+  // method only — so isMoneyWriteRequest and the floor can never disagree.
+  ...MONEY_EXACT_WRITES.map((r) => ({
+    method: r.method,
+    pattern: r.pattern,
+    scopes: r.method === "DELETE" ? MONEY_DELETE_SCOPES : MONEY_SCOPES,
+  })),
+];
 
 /**
  * Rules that are NON-NEGOTIABLE regardless of what the governance table says.
