@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import {
   resetSettlementService,
   getSettlementService,
@@ -162,7 +162,7 @@ const VALID_CSD = {
   constraints: [],
   pricing: { basePrice: "5.00", currency: "USDC" },
   // Extra fields for Story registration (not part of CSD schema — stripped during parse)
-  designerAddress: "0xDESIGNER",
+  designerAddress: "0x00000000000000000000000000000000000de510",
   designerName: "Test Designer",
   commercialRevShare: 5,
 };
@@ -185,6 +185,26 @@ function makeBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
     events: [],
     ...overrides,
   };
+}
+
+// ---------------------------------------------------------------------------
+// A SIWE-proven caller (N10a): the CSD's IP is minted to the signed-in wallet only
+// ---------------------------------------------------------------------------
+
+const DESIGNER = "0x00000000000000000000000000000000000de510";
+let sessionSeq = 0;
+function sessionHeaders(wallet: string): Record<string, string> {
+  const now = new Date();
+  const token = `story-pipeline-session-${++sessionSeq}`;
+  getRepos().sessions.insert({
+    id: `sp-sess-${sessionSeq}`,
+    walletAddress: wallet,
+    token,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+    lastActiveAt: now.toISOString(),
+  });
+  return { authorization: `Bearer ${token}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +253,11 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     expect(body.url).toBe("pcc://capabilities/story-test/v1");
   });
 
-  it("POST /api/csd calls getStoryIPService and registerCapabilityAsIP", async () => {
+  it("POST /api/csd calls getStoryIPService and registerCapabilityAsIP, minting to the signed-in designer", async () => {
     await app.inject({
       method: "POST",
       url: "/api/csd",
+      headers: sessionHeaders(DESIGNER),
       payload: VALID_CSD,
     });
 
@@ -244,7 +265,7 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     expect(mockRegisterCapabilityAsIP).toHaveBeenCalledOnce();
     const [capability, options] = mockRegisterCapabilityAsIP.mock.calls[0];
     expect(capability.name).toBe("Story Test Capability");
-    expect(options.designerAddress).toBe("0xDESIGNER");
+    expect(options.designerAddress).toBe(DESIGNER);
     expect(options.designerName).toBe("Test Designer");
     expect(options.commercialRevShare).toBe(5);
   });
@@ -253,6 +274,7 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/csd",
+      headers: sessionHeaders(DESIGNER),
       payload: VALID_CSD,
     });
 
@@ -268,6 +290,7 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/csd",
+      headers: sessionHeaders(DESIGNER),
       payload: VALID_CSD,
     });
 
@@ -291,7 +314,7 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
   });
 
-  it("POST /api/csd uses default designerAddress when not provided", async () => {
+  it("POST /api/csd without designerAddress mints the IP to the signed-in wallet, never a default", async () => {
     const csdWithoutDesigner = { ...VALID_CSD };
     // Remove designer fields - they come through req.body not the CSD schema
     delete (csdWithoutDesigner as Record<string, unknown>).designerAddress;
@@ -303,17 +326,37 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/csd",
+      headers: sessionHeaders(DESIGNER),
       payload: csdWithoutDesigner,
     });
 
     expect(res.statusCode).toBe(200);
     expect(mockRegisterCapabilityAsIP).toHaveBeenCalledOnce();
     const [, options] = mockRegisterCapabilityAsIP.mock.calls[0];
-    // Default address should be used
-    expect(options.designerAddress).toBe(
-      "0x0000000000000000000000000000000000000000",
-    );
+    expect(options.designerAddress).toBe(DESIGNER);
     expect(options.designerName).toBe("Unknown Designer");
+  });
+
+  it("POST /api/csd without a signed-in wallet registers the CSD but no IP, and says why (never the zero address)", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/csd", payload: VALID_CSD });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ registered: boolean; storyIpId?: string; storyIpSkipped?: string }>();
+    expect(body.registered).toBe(true);
+    expect(body.storyIpId).toBeUndefined();
+    expect(body.storyIpSkipped).toBe("verified_wallet_required");
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/csd naming someone else's address as designer registers no IP", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/csd",
+      headers: sessionHeaders("0x00000000000000000000000000000000000a77ac"),
+      payload: VALID_CSD,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ storyIpSkipped?: string }>().storyIpSkipped).toBe("designer_must_be_caller");
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
   });
 });
 
@@ -365,6 +408,8 @@ describe("processEvidence → Auto Story Derivative IP", () => {
     const [parentIpId, evidence] = mockRegisterJobAsDerivative.mock.calls[0];
     expect(parentIpId).toBe("0xmock_parent_ip");
     expect(evidence.jobId).toBe("job-004");
+    // N10a: the derivative names the job's kernel operator (seeded kernel-nyc), never the zero address.
+    expect(evidence.operatorAddress).toBe("0x1111111111111111111111111111111111111111");
   });
 
   it("does NOT call registerJobAsDerivative when job has no Story IP registration", async () => {

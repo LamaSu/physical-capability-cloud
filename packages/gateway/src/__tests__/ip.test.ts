@@ -18,7 +18,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ipRoutes } from "../routes/ip.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { resetStoryIPService } from "@pcc/contracts";
 
 // Ensure mock mode for all tests
@@ -39,18 +39,42 @@ async function buildApp(): Promise<FastifyInstance> {
 }
 
 // ---------------------------------------------------------------------------
+// Callers (N10a): mutations need a SIWE-proven wallet
+// ---------------------------------------------------------------------------
+
+/** The seeded operator of kernel-nyc, which runs the seeded capability cap-nyc-fdm and job job-001. */
+const OWNER = "0x1111111111111111111111111111111111111111";
+
+let sessionSeq = 0;
+/** A live SIWE session for `wallet` in the current store, as request headers. */
+function sessionHeaders(wallet: string): Record<string, string> {
+  const now = new Date();
+  const token = `test-session-${++sessionSeq}-${wallet.slice(2, 10)}`;
+  getRepos().sessions.insert({
+    id: `sess-${sessionSeq}`,
+    walletAddress: wallet,
+    token,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+    lastActiveAt: now.toISOString(),
+  });
+  return { authorization: `Bearer ${token}` };
+}
+const ownerHeaders = () => sessionHeaders(OWNER);
+
+// ---------------------------------------------------------------------------
 // Shared fixture
 // ---------------------------------------------------------------------------
 
 const CAPABILITY_BODY = {
   capability: {
-    id: "cap-test-001",
+    id: "cap-nyc-fdm",
     name: "Test CNC Milling",
     type: "cnc-3axis",
     kernelId: "kernel-nyc",
     description: "Test capability",
   },
-  designerAddress: "0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+  designerAddress: OWNER,
   designerName: "Alice",
 };
 
@@ -75,6 +99,7 @@ describe("POST /api/ip/register-capability", () => {
   it("returns 200 with a valid StoryIPRegistration", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -83,13 +108,14 @@ describe("POST /api/ip/register-capability", () => {
     const body = res.json<{ registration: Record<string, unknown> }>();
     expect(body.registration).toBeDefined();
     expect(body.registration.ipId).toMatch(/^0x[0-9a-f]+$/i);
-    expect(body.registration.capabilityId).toBe("cap-test-001");
+    expect(body.registration.capabilityId).toBe("cap-nyc-fdm");
     expect(body.registration.txHash).toMatch(/^0x[0-9a-f]+$/i);
   });
 
   it("returns 400 when capability fields are missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: {
         capability: { name: "Missing id" },
@@ -106,6 +132,7 @@ describe("POST /api/ip/register-capability", () => {
   it("returns 400 when designerAddress is missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: {
         capability: CAPABILITY_BODY.capability,
@@ -119,6 +146,7 @@ describe("POST /api/ip/register-capability", () => {
   it("uses ipfsCid in csdUrl when provided", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: {
         ...CAPABILITY_BODY,
@@ -147,6 +175,7 @@ describe("POST /api/ip/register-job-evidence", () => {
     // Register a capability first to get a parentIpId
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -162,12 +191,13 @@ describe("POST /api/ip/register-job-evidence", () => {
   it("returns 200 with a valid StoryDerivativeLink", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-job-evidence",
       payload: {
         parentIpId,
-        jobId: "job-test-001",
+        jobId: "job-001",
         evidenceBundleHash: "sha256:testevidence123",
-        operatorAddress: "0xCAFEBABE",
+        operatorAddress: OWNER,
         operatorName: "Bob",
       },
     });
@@ -177,12 +207,13 @@ describe("POST /api/ip/register-job-evidence", () => {
     expect(body.link).toBeDefined();
     expect(body.link.parentIpId).toBe(parentIpId);
     expect(body.link.childIpId).toMatch(/^0x[0-9a-f]+$/i);
-    expect(body.link.jobId).toBe("job-test-001");
+    expect(body.link.jobId).toBe("job-001");
   });
 
   it("returns 400 when required fields are missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-job-evidence",
       payload: {
         parentIpId,
@@ -208,6 +239,7 @@ describe("POST /api/ip/distribute-royalties", () => {
 
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -223,6 +255,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("returns 200 with txHash and distributed count", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         ipId,
@@ -244,6 +277,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("returns 400 when splits do not sum to 100", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         ipId,
@@ -263,6 +297,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("returns 400 when splits array is empty", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: { ipId, splits: [] },
     });
@@ -273,6 +308,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("returns 400 when ipId is missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         splits: [{ address: "0xAAAA", role: "designer", percentage: 100, label: "All" }],
@@ -296,6 +332,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("accepts the ADR-12 contributor-economics-with-ai split (6 new-taxonomy roles)", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         ipId,
@@ -318,6 +355,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("backward compat: legacy `designer` role still decodes", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         ipId,
@@ -344,6 +382,7 @@ describe("POST /api/ip/distribute-royalties", () => {
     // membership.
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         ipId,
@@ -362,6 +401,7 @@ describe("POST /api/ip/distribute-royalties", () => {
   it("accepts insurer and dataset-contributor roles introduced by ADR-12", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: {
         ipId,
@@ -395,6 +435,7 @@ describe("POST /api/ip/:ipId/pay", () => {
 
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -410,8 +451,9 @@ describe("POST /api/ip/:ipId/pay", () => {
   it("returns 200 with txHash", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/pay`,
-      payload: { amount: "500", payerAddress: "0xPAYER" },
+      payload: { amount: "500", payerAddress: OWNER },
     });
 
     expect(res.statusCode).toBe(200);
@@ -422,21 +464,23 @@ describe("POST /api/ip/:ipId/pay", () => {
   it("returns 400 when amount is missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/pay`,
-      payload: { payerAddress: "0xPAYER" },
+      payload: { payerAddress: OWNER },
     });
 
     expect(res.statusCode).toBe(400);
   });
 
-  it("returns 400 when payerAddress is missing", async () => {
+  it("pays as the caller when payerAddress is omitted (the payer is never taken from the body)", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/pay`,
       payload: { amount: "500" },
     });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
   });
 });
 
@@ -454,6 +498,7 @@ describe("POST /api/ip/:ipId/claim", () => {
 
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -470,12 +515,14 @@ describe("POST /api/ip/:ipId/claim", () => {
     // Pay first so there is something to claim
     await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/pay`,
-      payload: { amount: "1000", payerAddress: "0xPAYER" },
+      payload: { amount: "1000", payerAddress: OWNER },
     });
 
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/claim`,
       payload: {},
     });
@@ -489,6 +536,7 @@ describe("POST /api/ip/:ipId/claim", () => {
   it("returns claimed=0 when vault is empty", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/claim`,
       payload: {},
     });
@@ -501,6 +549,7 @@ describe("POST /api/ip/:ipId/claim", () => {
   it("accepts optional tokenIds", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/claim`,
       payload: { tokenIds: ["tok1", "tok2"] },
     });
@@ -523,6 +572,7 @@ describe("GET /api/ip/:ipId/revenue", () => {
 
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -559,8 +609,9 @@ describe("GET /api/ip/:ipId/revenue", () => {
   it("reflects payments in revenue snapshot", async () => {
     await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/pay`,
-      payload: { amount: "250", payerAddress: "0xPAYER" },
+      payload: { amount: "250", payerAddress: OWNER },
     });
 
     const res = await app.inject({
@@ -588,6 +639,7 @@ describe("GET /api/ip/:ipId/lineage", () => {
 
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -616,12 +668,13 @@ describe("GET /api/ip/:ipId/lineage", () => {
   it("shows descendants after registering a job derivative", async () => {
     const derivRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-job-evidence",
       payload: {
         parentIpId: ipId,
-        jobId: "job-lineage-001",
+        jobId: "job-001",
         evidenceBundleHash: "sha256:lineage123",
-        operatorAddress: "0xOP",
+        operatorAddress: OWNER,
         operatorName: "Operator",
       },
     });
@@ -670,6 +723,7 @@ describe("GET /api/ip/capability/:capabilityId", () => {
   it("returns 200 with registration after registering", async () => {
     await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -699,6 +753,7 @@ describe("POST /api/ip/:ipId/dispute", () => {
 
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: CAPABILITY_BODY,
     });
@@ -714,6 +769,7 @@ describe("POST /api/ip/:ipId/dispute", () => {
   it("returns 200 with a valid StoryDispute", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/dispute`,
       payload: {
         evidenceHash: "sha256:dispute-evidence-001",
@@ -733,6 +789,7 @@ describe("POST /api/ip/:ipId/dispute", () => {
   it("returns 400 when evidenceHash is missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/dispute`,
       payload: { reason: "Missing evidence hash" },
     });
@@ -743,6 +800,7 @@ describe("POST /api/ip/:ipId/dispute", () => {
   it("returns 400 when reason is missing", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/dispute`,
       payload: { evidenceHash: "sha256:test" },
     });
@@ -765,7 +823,7 @@ const SEEDED_CAPABILITY_BODY = {
     kernelId: "kernel-nyc",  // seeded kernel
     description: "Seeded capability for DB persistence tests",
   },
-  designerAddress: "0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+  designerAddress: OWNER,
   designerName: "Alice",
 };
 
@@ -786,6 +844,7 @@ describe("IP routes — DB persistence", () => {
   it("register-capability persists to DB (findIpByCapabilityId)", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: SEEDED_CAPABILITY_BODY,
     });
@@ -802,6 +861,7 @@ describe("IP routes — DB persistence", () => {
   it("distribute-royalties persists splits to DB", async () => {
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: SEEDED_CAPABILITY_BODY,
     });
@@ -814,6 +874,7 @@ describe("IP routes — DB persistence", () => {
 
     const res = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/distribute-royalties",
       payload: { ipId, splits },
     });
@@ -831,6 +892,7 @@ describe("IP routes — DB persistence", () => {
   it("register-job-evidence persists derivative link to DB", async () => {
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: SEEDED_CAPABILITY_BODY,
     });
@@ -839,12 +901,13 @@ describe("IP routes — DB persistence", () => {
     // Use a seeded job ID so the FK constraint is satisfied
     const derivRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-job-evidence",
       payload: {
         parentIpId: ipId,
         jobId: "job-001",  // seeded job ID
         evidenceBundleHash: "sha256:dbpersist",
-        operatorAddress: "0xOP",
+        operatorAddress: OWNER,
         operatorName: "Operator",
       },
     });
@@ -861,6 +924,7 @@ describe("IP routes — DB persistence", () => {
   it("claim persists to DB revenue claims", async () => {
     const regRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: "/api/ip/register-capability",
       payload: SEEDED_CAPABILITY_BODY,
     });
@@ -868,12 +932,14 @@ describe("IP routes — DB persistence", () => {
 
     await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/pay`,
-      payload: { amount: "100", payerAddress: "0xPAYER" },
+      payload: { amount: "100", payerAddress: OWNER },
     });
 
     const claimRes = await app.inject({
       method: "POST",
+      headers: ownerHeaders(),
       url: `/api/ip/${encodeURIComponent(ipId)}/claim`,
       payload: {},
     });

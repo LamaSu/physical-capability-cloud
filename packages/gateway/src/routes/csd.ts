@@ -12,6 +12,7 @@
 import type { FastifyInstance } from "fastify";
 import { loadBuiltinCsds, CsdRegistry, CsdSchema, dashboardV1Csd, type CsdUsageRepository } from "@pcc/spec";
 import { getRepos } from "../db.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
@@ -169,41 +170,59 @@ export async function csdRoutes(app: FastifyInstance) {
     }
 
     // ── Best-effort: Auto-register as Story Protocol IP Asset ──────
+    // The IP is minted to the caller's own SIWE-proven wallet, never to a body-supplied address and
+    // never to the zero address (N10a). Without a proven wallet the CSD is still registered, and the
+    // response says why no IP was.
     let storyIpId: string | undefined;
+    let storyIpSkipped: "verified_wallet_required" | "designer_must_be_caller" | undefined;
+    let wallet: string | null = null;
     try {
-      const { getStoryIPService } = await import("@pcc/contracts");
-      const storyIPService = getStoryIPService();
+      const session = resolveSession(req);
+      wallet = session ? session.address.toLowerCase() : null;
+    } catch {
+      wallet = null; // no session store: no wallet can be proven, so no IP is minted
+    }
+    if (wallet === null) {
+      storyIpSkipped = "verified_wallet_required";
+    } else if (req.body.designerAddress !== undefined && String(req.body.designerAddress).toLowerCase() !== wallet) {
+      storyIpSkipped = "designer_must_be_caller";
+    }
+    if (storyIpSkipped === undefined && wallet !== null) {
+      try {
+        const { getStoryIPService } = await import("@pcc/contracts");
+        const storyIPService = getStoryIPService();
 
-      const designerAddress = req.body.designerAddress ?? "0x0000000000000000000000000000000000000000";
-      const designerName = req.body.designerName ?? "Unknown Designer";
-      const commercialRevShare = typeof req.body.commercialRevShare === "number" ? req.body.commercialRevShare : 5;
+        const designerAddress = wallet;
+        const designerName = req.body.designerName ?? "Unknown Designer";
+        const commercialRevShare = typeof req.body.commercialRevShare === "number" ? req.body.commercialRevShare : 5;
 
-      const csd = parsed.data;
-      const capabilityId = csd.url;
+        const csd = parsed.data;
+        const capabilityId = csd.url;
 
-      const registration = await storyIPService.registerCapabilityAsIP(
-        {
-          id: capabilityId,
-          name: csd.name,
-          type: csd.kind,
-          kernelId: "unknown",
-          description: csd.description,
-        },
-        {
-          designerAddress,
-          designerName,
-          commercialRevShare,
-        },
-      );
+        const registration = await storyIPService.registerCapabilityAsIP(
+          {
+            id: capabilityId,
+            name: csd.name,
+            type: csd.kind,
+            kernelId: "unknown",
+            description: csd.description,
+          },
+          {
+            designerAddress,
+            designerName,
+            commercialRevShare,
+          },
+        );
 
-      storyIpId = registration.ipId;
+        storyIpId = registration.ipId;
 
-      // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
-    } catch (storyErr) {
-      console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
+        // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
+      } catch (storyErr) {
+        console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
+      }
     }
 
-    return { registered: true, url: parsed.data.url, storyIpId };
+    return { registered: true, url: parsed.data.url, storyIpId, ...(storyIpSkipped ? { storyIpSkipped } : {}) };
   });
 
   // ── GET /api/csd/:url ───────────────────────────────────────────

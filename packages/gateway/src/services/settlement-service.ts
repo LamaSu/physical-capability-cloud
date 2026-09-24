@@ -293,14 +293,16 @@ export class SettlementService {
             });
             if (job?.capabilityId) {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
-              if (ipReg) {
+              // The derivative is the job's kernel operator's work (N10a: never the zero address).
+              const kernel = repos.kernels.findById(job.kernelId);
+              if (ipReg && kernel) {
                 const { getStoryIPService } = await import("@pcc/contracts");
                 const storyIPService = getStoryIPService();
                 const link = await storyIPService.registerJobAsDerivative(ipReg.ipId, {
                   jobId,
                   evidenceBundleHash: bundle.bundleHash,
-                  operatorAddress: "0x0000000000000000000000000000000000000000",
-                  operatorName: "operator",
+                  operatorAddress: kernel.operatorAddress,
+                  operatorName: kernel.name,
                   ipfsCid: result.cid,
                 });
                 // Persist derivative link to DB
