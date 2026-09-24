@@ -17,8 +17,9 @@
  *
  * CONTRACT FOR READ-MODEL OWNERS (readmodels, composition, vcr): return `asOf` (ISO-8601
  * UTC, the moment the SOURCE observed the state) on every read model, and register the
- * route in the IR bind registry with its class, schema id and freshness budget. `asOf`
- * powers the stale marker and the no-regression guarantee: an update carrying an OLDER
+ * route in the IR bind registry with its class, schema id and freshness budget. `asOf` is
+ * READ time, not last-change time (see ProvenancedReadModel). It powers the stale marker
+ * and the no-regression guarantee: an update carrying an OLDER
  * `asOf` never overwrites a newer one (reconnect / out-of-order safety). Without `asOf`
  * the renderer can only order by arrival time.
  *
@@ -46,6 +47,13 @@ export interface RenderDatum<T = unknown> {
 
 /** What a read model returns so the renderer can mark freshness and refuse regressions. */
 export interface ProvenancedReadModel {
-  /** ISO-8601 UTC; the source's own observation time. */
+  /**
+   * ISO-8601 UTC; the time the source READ this state, not the time it last CHANGED. A
+   * quiet, unchanged state read just now is current, not stale. A source that tracks the
+   * last change (e.g. the time of the event at a cursor) serves that separately as
+   * `changedAt`; it is display-only and does not drive freshness.
+   */
   readonly asOf?: string;
+  /** ISO-8601 UTC; when the state last changed. Optional, display-only. */
+  readonly changedAt?: string;
 }
