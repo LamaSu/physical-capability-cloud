@@ -191,6 +191,13 @@ describe("live data", () => {
     expect(text()).not.toMatch(/of 6 integrations|Couldn't load/);
   });
 
+  it("an answer that isn't an object is not left loading forever", async () => {
+    stubFetch({ [ROUTE]: { status: 200, body: null } });
+    const { text } = await renderPage();
+    expect(text()).toContain("No integrations reported");
+    expect(text()).not.toMatch(/Refreshing|of 6 integrations/);
+  });
+
   it("a failed refresh keeps the last answer and labels it stale", async () => {
     stubFetch({ [ROUTE]: { status: 200, body: LIVE_BODY } });
     const { text, client } = await renderPage();

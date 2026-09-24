@@ -459,6 +459,8 @@ export function SponsorTelemetryPage() {
     retry: 2,
   });
 
+  // react-query never stores undefined, so any stored data means the gateway answered.
+  const answered = query.data !== undefined;
   const data = isRecord(query.data) ? (query.data as IntegrationsPayload) : undefined;
   const anyReported = data !== undefined && INTEGRATIONS.some((key) => isRecord(data[key]));
   const retry = () => void query.refetch();
@@ -495,31 +497,29 @@ export function SponsorTelemetryPage() {
       </div>
 
       {/* A failed refresh keeps the last answer on screen, labelled with its time */}
-      {data && query.isError && (
+      {answered && query.isError && (
         <StaleNotice what="integration status" updatedAt={query.dataUpdatedAt} onRetry={retry} />
       )}
 
-      {data ? (
-        anyReported ? (
-          <>
-            <SummaryStats data={data} />
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <StorachaCard data={data.storacha} />
-              <StarknetCard data={data.starknet} />
-              <LitProtocolCard data={data.litProtocol} />
-              <FlowCard data={data.flow} />
-              <NearCard data={data.near} />
-              <ProtocolCard data={data.protocol} />
-            </div>
-          </>
-        ) : (
-          <GlassPanel padding="lg">
-            <EmptyState
-              title="No integrations reported"
-              description="The gateway answered, but its response named none of the six integrations."
-            />
-          </GlassPanel>
-        )
+      {data && anyReported ? (
+        <>
+          <SummaryStats data={data} />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <StorachaCard data={data.storacha} />
+            <StarknetCard data={data.starknet} />
+            <LitProtocolCard data={data.litProtocol} />
+            <FlowCard data={data.flow} />
+            <NearCard data={data.near} />
+            <ProtocolCard data={data.protocol} />
+          </div>
+        </>
+      ) : answered ? (
+        <GlassPanel padding="lg">
+          <EmptyState
+            title="No integrations reported"
+            description="The gateway answered, but its response named none of the six integrations."
+          />
+        </GlassPanel>
       ) : query.isError ? (
         <GlassPanel padding="lg">
           <UnavailableState what="integration status" error={query.error} onRetry={retry} />
