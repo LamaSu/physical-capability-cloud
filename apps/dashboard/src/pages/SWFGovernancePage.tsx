@@ -248,14 +248,20 @@ function ProposalView({ proposal, votes, current, eligible, fundNotice, note }: 
           <div className="flex justify-between text-xs text-zinc-500">
             <span>{turnoutText}</span>
             <span>
-              Quorum {quorumPercent}%:{" "}
-              {eligible === undefined ? (
-                <span className="text-zinc-500">unknown</span>
-              ) : (
-                <span className={quorumMet ? "text-emerald-400" : "text-amber-400"}>
-                  {quorumMet ? "Met" : "Not met"}
-                </span>
-              )}
+              Quorum {quorumPercent}%
+              {/* Met/Not met is computed from today's participant count, so it is shown only while
+                  the vote is open. A closed proposal's outcome is its status. */}
+              {proposal.status === "active" &&
+                (eligible === undefined ? (
+                  <>
+                    : <span className="text-zinc-500">unknown</span>
+                  </>
+                ) : (
+                  <>
+                    :{" "}
+                    <span className={quorumMet ? "text-emerald-400" : "text-amber-400"}>{quorumMet ? "Met" : "Not met"}</span>
+                  </>
+                ))}
             </span>
           </div>
           <div className="text-xs text-zinc-600">

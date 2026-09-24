@@ -218,11 +218,13 @@ afterEach(() => {
 });
 
 async function settle(client: QueryClient) {
-  for (let i = 0; i < 20; i++) {
+  // Two idle ticks in a row, within 2 s: a query can read as idle for one tick between retries.
+  let idleTicks = 0;
+  for (let i = 0; i < 200 && idleTicks < 2; i++) {
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 10));
     });
-    if (i >= 2 && client.isFetching() === 0) break;
+    idleTicks = client.isFetching() === 0 ? idleTicks + 1 : 0;
   }
 }
 
@@ -324,6 +326,31 @@ describe("gateway answering", () => {
     expectNoFixtures(t);
     // The page only reads.
     for (const [, init] of fetchMock.mock.calls) expect(init?.method ?? "GET").toBe("GET");
+  });
+
+  it("while a new log filter loads, the previous filter's entries are not listed as its own", async () => {
+    const fetchMock = stubFetch(LIVE);
+    const { text } = await renderPage();
+    expect(text()).toContain("Telemetry event emitted: escrow_fund → completed");
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const answer = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/api/telemetry/logs?") && url.includes("level=error")) await gate;
+      return answer(input, init);
+    });
+    const errorChip = [...container.querySelectorAll("button")].find((b) => b.textContent === "ERROR")!;
+    await act(async () => {
+      errorChip.click();
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(text()).not.toContain("Telemetry event emitted: escrow_fund → completed");
+    expect(text()).toContain("Loading entries for this filter…");
+    await act(async () => {
+      release();
+      await new Promise((r) => setTimeout(r, 30));
+    });
   });
 
   it("an empty gateway shows real empty states, not a sample timeline or an invented success rate", async () => {

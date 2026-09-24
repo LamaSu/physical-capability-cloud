@@ -707,7 +707,8 @@ function TelemetryLive() {
     queryKey: ["telemetry", "logs", levelFilter, sourceFilter, logSearch],
     queryFn: () =>
       fetchLogs({ level: levelFilter, source: sourceFilter, search: logSearch, limit: 150 }),
-    // While a new filter loads, keep listing the last answer instead of blanking the list.
+    // While a new filter loads, keep the last answer's source list for the filter
+    // controls. Its entries are not listed as the new filter's (see logEntries).
     placeholderData: keepPreviousData,
     refetchInterval: 5_000,
     staleTime: 3_000,
@@ -771,16 +772,19 @@ function TelemetryLive() {
     return [...server, ...extras];
   }, [timelineQuery.data, liveTelemetryEvents, selectedJobId]);
 
-  // The logs read, plus streamed entries it doesn't already include.
+  // The logs read, plus streamed entries it doesn't already include. While a
+  // new filter loads, keepPreviousData still holds the previous filter's
+  // entries; they are not shown as this filter's (only its sources are kept).
+  const logsForAnotherFilter = logsQuery.isPlaceholderData;
   const logEntries = React.useMemo(() => {
-    const server = logsQuery.data?.entries;
+    const server = logsForAnotherFilter ? undefined : logsQuery.data?.entries;
     if (!server) return null;
     const seen = new Set(server.map(logKey));
     const live = liveLogEntries.filter(
       (e) => passesLogFilters(e, levelFilter, sourceFilter, logSearch) && !seen.has(logKey(e)),
     );
     return [...server, ...live];
-  }, [logsQuery.data, liveLogEntries, levelFilter, sourceFilter, logSearch]);
+  }, [logsQuery.data, logsForAnotherFilter, liveLogEntries, levelFilter, sourceFilter, logSearch]);
 
   // ── Sections ─────────────────────────────────────────────────────────────
 
@@ -873,9 +877,9 @@ function TelemetryLive() {
   }
 
   const logsPlaceholder = logsQuery.isError ? (
-    <UnavailableState what="logs" error={logsQuery.error} onRetry={retryLogs} />
+    <UnavailableState what={logsForAnotherFilter ? "logs for this filter" : "logs"} error={logsQuery.error} onRetry={retryLogs} />
   ) : (
-    <SectionLoading what="logs" />
+    <SectionLoading what={logsForAnotherFilter ? "entries for this filter" : "logs"} />
   );
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -918,7 +922,7 @@ function TelemetryLive() {
           </div>
         }
       >
-        {logsQuery.isError && logsQuery.data && (
+        {logsQuery.isError && logsQuery.data && !logsForAnotherFilter && (
           <StaleNotice what="logs" updatedAt={logsQuery.dataUpdatedAt} onRetry={retryLogs} />
         )}
         <LogViewer

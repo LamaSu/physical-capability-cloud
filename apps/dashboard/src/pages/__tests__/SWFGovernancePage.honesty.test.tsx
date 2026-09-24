@@ -224,6 +224,17 @@ describe("live data", () => {
     expect(requests(stub).every((r) => r.startsWith("GET "))).toBe(true);
   });
 
+  it("a closed proposal shows no Met/Not met from today's participant count", async () => {
+    stubFetch({
+      "/api/swf/proposals/swf_prop_0001": { status: 200, body: { proposal: { ...PROPOSAL, status: "rejected" }, votes: VOTES, voteCount: 2 } },
+      "/api/swf/summary": SUMMARY,
+    });
+    const t = await renderPage();
+    expect(t).toContain("rejected");
+    expect(t).toContain("Quorum 30%");
+    expect(t).not.toMatch(/Quorum 30%:\s*(Met|Not met)/);
+  });
+
   it("a proposal with no votes shows an empty vote list and an empty bar", async () => {
     stubFetch({
       "/api/swf/proposals/swf_prop_0001": {
