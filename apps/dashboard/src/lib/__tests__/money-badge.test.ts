@@ -3,10 +3,11 @@ import { classifyMoneyStatus } from "@pcc/spec";
 import { moneyBadgeColor, DASHBOARD_ESCROW_STATUSES } from "../money-badge.js";
 
 describe("moneyBadgeColor (dashboard escrow badge)", () => {
-  it("is green ONLY for a documented final release to the operator", () => {
-    expect(moneyBadgeColor("released")).toBe("green");
-    expect(moneyBadgeColor("completed")).toBe("green");
-    expect(moneyBadgeColor("SETTLED_RELEASED")).toBe("green");
+  it("a BARE escrow status is never green: settlement tone needs a settlement read model", () => {
+    for (const s of ["released", "completed", "SETTLED_RELEASED", "RELEASED?", "releaſed"]) {
+      expect(moneyBadgeColor(s), s).not.toBe("green");
+    }
+    expect(moneyBadgeColor("released")).toBe("gray");
   });
 
   it("never renders a refund, an allocation, a dispute or an unknown state green", () => {
