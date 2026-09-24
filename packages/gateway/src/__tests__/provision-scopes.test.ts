@@ -2,12 +2,12 @@
  * Provisioning scope-default tests (retire-the-wildcard #1099, piece 2).
  *
  * routes/provision.ts used to mint every self-service key with scopes:["*"],
- * which the scope-checker wildcard short-circuit (middleware/scope-checker.ts,
- * `if (callerScopes.includes("*")) return;`) then let bypass every scope
- * requirement, including the money path (see scope-checker-money-path.test.ts
- * "KNOWN GAP"). That test's gap is about EXISTING wildcard keys, which this
- * change deliberately does not touch (see routes/admin-key-audit.ts). This
- * file pins the other half: NEW keys are no longer minted with "*".
+ * which the scope-checker wildcard short-circuit then let bypass every scope
+ * requirement, including the money path. Both halves are now closed: NEW keys
+ * are never minted with "*" (this file; and auth/api-key-auth.ts refuses "*"
+ * outright — see api-key-mint-scopes.test.ts), and EXISTING wildcard keys are no
+ * longer money or admin authority (scope-checker-money-path.test.ts, "legacy
+ * wildcard is NOT money/admin authority").
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
@@ -59,8 +59,9 @@ describe("POST /api/auth/provision — scope defaults (retire the wildcard)", ()
   it("the minted scope is real enough to satisfy the operator-gated money path", async () => {
     // Cross-check against the ApiScope union in packages/spec, not a guess:
     // DEFAULT_SCOPE_REQUIREMENTS in middleware/scope-checker.ts accepts
-    // "operator" for /api/kernels/*, /api/evidence/*, and /api/escrow/**
-    // writes — the actual self-service flow documented in CLAUDE.md.
+    // "operator" for /api/kernels/* and /api/evidence/* — the self-service
+    // onboarding flow. (Money writes need `settlement`, not `operator`; see
+    // settlement-scope.test.ts.)
     const res = await app.inject({
       method: "POST",
       url: "/api/auth/provision",

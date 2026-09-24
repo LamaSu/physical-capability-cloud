@@ -56,7 +56,9 @@ async function buildApp(prefix: string, template: string): Promise<TestApp> {
   const { rawKey } = provisionApiKey({
     operatorId: "test-operator@example.com",
     name: "test key",
-    scopes: ["*"],
+    // Explicit narrow scope: minting "*" is refused (MUST-CLOSE 6). This suite
+    // mounts apiGate + tenantContext only, so the scope value is not exercised.
+    scopes: ["operator"],
   });
 
   const app = Fastify({ logger: false });

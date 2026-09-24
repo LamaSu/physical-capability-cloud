@@ -115,11 +115,53 @@ export interface ProvisionResult {
   ed25519?: Ed25519Keypair;
 }
 
+/**
+ * Refuse any scope set that is not an explicit, narrow list (MUST-CLOSE 6).
+ *
+ * `provisionApiKey` used to default an omitted `scopes` to `["*"]`, so ANY
+ * caller that forgot the field minted a key that — at the time — bypassed the
+ * whole scope layer, money path included. Scopes are now REQUIRED, and a
+ * wildcard is refused outright: no code path can mint `"*"` any more. Any scope
+ * containing `*` is refused (a family wildcard like `operator.*` is advertised
+ * as satisfying a whole family by agent introspection), as is anything that is
+ * not a non-empty, trimmed string. An explicit EMPTY array is allowed — it is
+ * narrow by definition (it holds no scope).
+ *
+ * Throws an Error carrying a `code` (`scopes_required` | `invalid_scopes` |
+ * `wildcard_scope_refused`); nothing is persisted.
+ */
+export function assertMintableScopes(scopes: unknown): asserts scopes is string[] {
+  if (!Array.isArray(scopes)) {
+    throw Object.assign(
+      new Error("provisionApiKey: `scopes` is required — pass an explicit array of narrow scopes"),
+      { code: "scopes_required" },
+    );
+  }
+  for (const scope of scopes) {
+    if (typeof scope !== "string" || scope.length === 0 || scope.trim() !== scope) {
+      throw Object.assign(
+        new Error("provisionApiKey: every scope must be a non-empty string without surrounding whitespace"),
+        { code: "invalid_scopes" },
+      );
+    }
+    if (scope.includes("*")) {
+      throw Object.assign(
+        new Error("provisionApiKey: wildcard scopes are never minted — grant explicit narrow scopes"),
+        { code: "wildcard_scope_refused" },
+      );
+    }
+  }
+}
+
 export function provisionApiKey(opts: {
   operatorId: string;
   name?: string;
   description?: string;
-  scopes?: string[];
+  /**
+   * REQUIRED, explicit and narrow. `"*"` (or any scope containing `*`) throws —
+   * see assertMintableScopes. There is no default.
+   */
+  scopes: string[];
   rateLimit?: string;
   expiresInDays?: number;
   metadata?: Record<string, unknown>;
@@ -138,6 +180,10 @@ export function provisionApiKey(opts: {
    */
   publicKey?: string;
 }): ProvisionResult {
+  // Validate BEFORE taking the lock or touching the DB: a refused scope set
+  // must leave no trace.
+  assertMintableScopes(opts.scopes);
+
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
   if (provisioningLocks.has(opts.operatorId)) {
     throw new Error("Key provisioning in progress — try again in a moment");
@@ -180,7 +226,7 @@ export function provisionApiKey(opts: {
       operatorId: opts.operatorId,
       name: opts.name ?? null,
       description: opts.description ?? null,
-      scopes: JSON.stringify(opts.scopes ?? ["*"]),
+      scopes: JSON.stringify(opts.scopes),
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),

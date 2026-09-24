@@ -5,8 +5,33 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { adminKeyAuditRoutes } from "../routes/admin-key-audit.js";
-import { provisionApiKey } from "../auth/api-key-auth.js";
-import { initStore, closeStore } from "../db.js";
+import { provisionApiKey, generateApiKey } from "../auth/api-key-auth.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+
+/**
+ * Seed a LEGACY wildcard key straight into the table, the way pre-#1099
+ * provisioning left it. provisionApiKey refuses to mint "*" (MUST-CLOSE 6), so
+ * this is now the only way such a row comes into existence — which is exactly
+ * the population this audit endpoint exists to find.
+ */
+function seedLegacyWildcardKey(operatorId: string): void {
+  const { keyHash, keyPrefix } = generateApiKey();
+  getRepos().apiKeys.insert({
+    id: `legacy-${operatorId}`,
+    keyHash,
+    keyPrefix,
+    operatorId,
+    name: "legacy wildcard",
+    description: null,
+    scopes: JSON.stringify(["*"]),
+    rateLimit: "1000/hour",
+    usageCount: "0",
+    createdAt: new Date().toISOString(),
+    expiresAt: null,
+    metadata: null,
+    publicKey: null,
+  } as never);
+}
 
 describe("GET /api/admin/keys/wildcard-audit", () => {
   let app: FastifyInstance;
@@ -65,7 +90,7 @@ describe("GET /api/admin/keys/wildcard-audit", () => {
   });
 
   it("reports wildcard vs narrow-scoped counts for an allowlisted admin", async () => {
-    provisionApiKey({ operatorId: `wc-${Date.now()}@example.com`, scopes: ["*"] });
+    seedLegacyWildcardKey(`wc-${Date.now()}@example.com`);
     provisionApiKey({ operatorId: `narrow-${Date.now()}@example.com`, scopes: ["operator"] });
 
     const res = await app.inject({
