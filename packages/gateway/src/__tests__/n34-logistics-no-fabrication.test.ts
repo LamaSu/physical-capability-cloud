@@ -67,7 +67,8 @@ const CASES: Case[] = [
     see: [],
     old: (b) => expect(b.step).toMatchObject({ id: "inst-002-s3", status: "in_progress", startedAt: expect.any(String) }),
   },
-  { method: "GET", url: "/api/logistics/timeline", see: [], old: (b) => expect(b.events[0].id).toBe("tle-05") },
+  // A carrier shipment's tracking events are the only logistics events the gateway records.
+  { method: "GET", url: "/api/logistics/timeline", see: CARRIER, old: (b) => expect(b.events[0].id).toBe("tle-05") },
   {
     method: "GET",
     url: "/api/logistics/summary",

@@ -328,19 +328,16 @@ const DEMO_HEADER = "x-pcc-demo";
 const exampleOnly = (what: string) =>
   `${what} is not recorded on this gateway, so nothing is returned rather than an example.`;
 
+// A carrier shipment (a label bought for a job, with its tracking events) is the only
+// shipment, and its tracking events the only logistics events, this gateway records.
+const CARRIER_SHIPMENT = "GET /api/carrier/shipments/:jobId";
+
 /** The refusal for each route pattern. `see` lists real routes that exist on this gateway. */
 const REFUSALS: Record<string, { message: string; see: string[] }> = {
   "/api/logistics/providers": { message: exampleOnly("Logistics provider data"), see: [] },
   "/api/logistics/providers/:id": { message: exampleOnly("Logistics provider data"), see: [] },
-  // Carrier shipments (a label bought for a job) are the only shipments this gateway records.
-  "/api/logistics/shipments": {
-    message: exampleOnly("Logistics shipment data"),
-    see: ["GET /api/carrier/shipments/:jobId"],
-  },
-  "/api/logistics/shipments/:id": {
-    message: exampleOnly("Logistics shipment data"),
-    see: ["GET /api/carrier/shipments/:jobId"],
-  },
+  "/api/logistics/shipments": { message: exampleOnly("Logistics shipment data"), see: [CARRIER_SHIPMENT] },
+  "/api/logistics/shipments/:id": { message: exampleOnly("Logistics shipment data"), see: [CARRIER_SHIPMENT] },
   "/api/logistics/shipments/quote": { message: exampleOnly("Freight pricing"), see: [] },
   "/api/logistics/bookings": { message: exampleOnly("Space booking data"), see: [] },
   "/api/logistics/bookings/:id": { message: exampleOnly("Space booking data"), see: [] },
@@ -352,7 +349,7 @@ const REFUSALS: Record<string, { message: string; see: string[] }> = {
       "nothing is returned rather than an example.",
     see: [],
   },
-  "/api/logistics/timeline": { message: exampleOnly("Logistics timeline data"), see: [] },
+  "/api/logistics/timeline": { message: exampleOnly("Logistics timeline data"), see: [CARRIER_SHIPMENT] },
   "/api/logistics/summary": { message: exampleOnly("Logistics activity"), see: [] },
 };
 const FALLBACK_REFUSAL = { message: exampleOnly("Logistics data"), see: [] as string[] };
