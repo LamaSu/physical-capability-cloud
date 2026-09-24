@@ -104,12 +104,14 @@ describe("emergencyStop: stopped only when the gateway confirms it for this mach
   });
 });
 
-describe("stopAndConfirm: the POST's answer and a read-back of the recorded policy must agree", () => {
-  const stopped = { status: 200, body: { stopped: true, kernelId: "k1", timestamp: "t" } } as Reply;
-  it("stopped only when the read-back says stopped", async () => {
+describe("stopAndConfirm: the POST's answer and a fresh read-back of the recorded policy must agree", () => {
+  const T = "2026-09-24T21:00:00.000Z";
+  const EARLIER = "2026-09-24T20:00:00.000Z";
+  const stopped = { status: 200, body: { stopped: true, kernelId: "k1", timestamp: T } } as Reply;
+  it("stopped only when the read-back says stopped, as written by this stop", async () => {
     const f = fakeFetch({
       "POST /api/operator/emergency-stop": stopped,
-      "GET /api/operator/policy/k1": { status: 200, body: { policy: { emergencyStop: true }, updatedAt: "t" } },
+      "GET /api/operator/policy/k1": { status: 200, body: { policy: { emergencyStop: true }, updatedAt: T } },
     });
     expect((await stopAndConfirm("k1", f.impl)).state).toBe("stopped");
     expect(f.calls.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/operator/emergency-stop", "GET /api/operator/policy/k1"]);
@@ -117,6 +119,8 @@ describe("stopAndConfirm: the POST's answer and a read-back of the recorded poli
 
   it.each([
     ["read-back says not stopped", { status: 200, body: { policy: { emergencyStop: false }, source: "default" } } as Reply, "does not show this machine stopped"],
+    ["read-back predates this stop (it was already stopped)", { status: 200, body: { policy: { emergencyStop: true }, updatedAt: EARLIER } } as Reply, "not written by this stop"],
+    ["read-back has no updatedAt", { status: 200, body: { policy: { emergencyStop: true } } } as Reply, "not written by this stop"],
     ["read-back fails", { status: 503, body: { error: "read_failed" } } as Reply, "could not be read back"],
     ["read-back unreachable", "network-error" as Reply, "could not be read back"],
   ])("%s -> NOT stopped", async (_n, readBack, why) => {
@@ -131,14 +135,25 @@ describe("stopAndConfirm: the POST's answer and a read-back of the recorded poli
     expect(f.calls).toHaveLength(1);
   });
 
-  it("confirmStop without a read-back is NOT stopped", () => {
-    expect(confirmStop({ kernelId: "k1", state: "stopped", at: null }, undefined).state).toBe("not_stopped");
+  it("confirmStop without a read-back, or without the answer's timestamp, is NOT stopped", () => {
+    expect(confirmStop({ kernelId: "k1", state: "stopped", at: T }, undefined).state).toBe("not_stopped");
+    expect(confirmStop({ kernelId: "k1", state: "stopped", at: null }, { ok: true, data: { stopped: true, recorded: true, updatedAt: T } }).state).toBe("not_stopped");
+    expect(confirmStop({ kernelId: "k1", state: "stopped", at: "not a time" }, { ok: true, data: { stopped: true, recorded: true, updatedAt: T } }).state).toBe("not_stopped");
   });
 
-  it("resumeAndConfirm: resumed only when the read-back no longer says stopped", async () => {
-    const resumed = { status: 200, body: { resumed: true, kernelId: "k1" } } as Reply;
-    expect((await resumeAndConfirm("k1", fakeFetch({ "POST /api/operator/emergency-resume": resumed, "GET /api/operator/policy/k1": { status: 200, body: { policy: { emergencyStop: false }, updatedAt: "t" } } }).impl)).state).toBe("resumed");
-    expect((await resumeAndConfirm("k1", fakeFetch({ "POST /api/operator/emergency-resume": resumed, "GET /api/operator/policy/k1": { status: 200, body: { policy: { emergencyStop: true }, updatedAt: "t" } } }).impl)).state).toBe("not_resumed");
+  it("every operator request opts out of caches", async () => {
+    const f = fakeFetch({ "POST /api/operator/emergency-stop": stopped, "GET /api/operator/policy/k1": { status: 200, body: { policy: { emergencyStop: true }, updatedAt: T } } });
+    await stopAndConfirm("k1", f.impl);
+    const inits = (f.impl as unknown as { mock: { calls: Array<[unknown, RequestInit]> } }).mock.calls.map((c) => c[1]);
+    expect(inits.every((i) => i.cache === "no-store")).toBe(true);
+  });
+
+  it("resumeAndConfirm: resumed only when the read-back no longer says stopped, as written by this resume", async () => {
+    const resumed = { status: 200, body: { resumed: true, kernelId: "k1", timestamp: T } } as Reply;
+    const policy = (emergencyStop: boolean, updatedAt: string) => ({ status: 200, body: { policy: { emergencyStop }, updatedAt } }) as Reply;
+    expect((await resumeAndConfirm("k1", fakeFetch({ "POST /api/operator/emergency-resume": resumed, "GET /api/operator/policy/k1": policy(false, T) }).impl)).state).toBe("resumed");
+    expect((await resumeAndConfirm("k1", fakeFetch({ "POST /api/operator/emergency-resume": resumed, "GET /api/operator/policy/k1": policy(true, T) }).impl)).state).toBe("not_resumed");
+    expect((await resumeAndConfirm("k1", fakeFetch({ "POST /api/operator/emergency-resume": resumed, "GET /api/operator/policy/k1": policy(false, EARLIER) }).impl)).state).toBe("not_resumed");
     expect((await resumeAndConfirm("k1", fakeFetch({ "POST /api/operator/emergency-resume": resumed }).impl)).state).toBe("not_resumed");
   });
 });

@@ -52,6 +52,8 @@ async function call(path: string, init: RequestInit | undefined, fetchImpl: Fetc
   let res: Response;
   try {
     res = await fetchImpl(`${API_ROOT}${path}`, {
+      // Operator state must never come from a browser or intermediary cache.
+      cache: "no-store",
       ...init,
       headers: {
         ...(init?.body !== undefined ? { "Content-Type": "application/json" } : {}),
@@ -107,7 +109,7 @@ export async function emergencyStop(kernelId: string, reason?: string, fetchImpl
 }
 
 export type ResumeOutcome =
-  | { kernelId: string; state: "resumed" }
+  | { kernelId: string; state: "resumed"; at: string | null }
   | { kernelId: string; state: "not_resumed"; reason: string; status?: number };
 
 /** POST /api/operator/emergency-resume. Resumed only on `{ resumed: true, kernelId }`. */
@@ -117,7 +119,7 @@ export async function emergencyResume(kernelId: string, fetchImpl: Fetch = fetch
   if (reply.body.resumed !== true || reply.body.kernelId !== kernelId) {
     return { kernelId, state: "not_resumed", reason: "The gateway did not confirm the resume for this machine.", status: reply.status };
   }
-  return { kernelId, state: "resumed" };
+  return { kernelId, state: "resumed", at: typeof reply.body.timestamp === "string" ? reply.body.timestamp : null };
 }
 
 export interface StopState {
@@ -145,9 +147,23 @@ export async function readStopState(kernelId: string, fetchImpl: Fetch = fetch):
 }
 
 /**
+ * True when the recorded policy was written at or after the action's own
+ * timestamp. The gateway stamps the policy row's updatedAt and the answer's
+ * timestamp with the same instant, so a read-back that predates the answer is
+ * not this action's write (for example, a machine that was already stopped).
+ */
+function writtenBy(actionAt: string | null, updatedAt: string | null): boolean {
+  if (!actionAt || !updatedAt) return false;
+  const a = Date.parse(actionAt);
+  const u = Date.parse(updatedAt);
+  return Number.isFinite(a) && Number.isFinite(u) && u >= a;
+}
+
+/**
  * A stop counts only when the POST answered `{ stopped: true }` for the kernel
- * AND a read-back of the kernel's recorded policy afterwards says it is
- * stopped. Anything else is NOT STOPPED, with the reason.
+ * AND a fresh read-back of that kernel's recorded policy says it is stopped,
+ * as written by this stop (updatedAt at or after the answer's timestamp).
+ * Anything else is NOT STOPPED, with the reason.
  */
 export function confirmStop(outcome: StopOutcome, readBack: Result<StopState> | undefined): StopOutcome {
   if (outcome.state !== "stopped") return outcome;
@@ -155,6 +171,9 @@ export function confirmStop(outcome: StopOutcome, readBack: Result<StopState> | 
   if (!readBack) return notStopped("PCC answered the stop, but its recorded state was not read back.");
   if (!readBack.ok) return notStopped(`PCC answered the stop, but its recorded state could not be read back (${readBack.reason})`);
   if (!readBack.data.stopped) return notStopped("PCC answered the stop, but its recorded state does not show this machine stopped.");
+  if (!writtenBy(outcome.at, readBack.data.updatedAt)) {
+    return notStopped("PCC answered the stop, but its recorded state was not written by this stop (no matching timestamp).");
+  }
   return outcome;
 }
 
@@ -175,6 +194,9 @@ export async function resumeAndConfirm(kernelId: string, fetchImpl: Fetch = fetc
   }
   if (readBack.data.stopped) {
     return { kernelId, state: "not_resumed", reason: "PCC answered the resume, but its recorded state still shows this machine stopped." };
+  }
+  if (!writtenBy(outcome.at, readBack.data.updatedAt)) {
+    return { kernelId, state: "not_resumed", reason: "PCC answered the resume, but its recorded state was not written by this resume (no matching timestamp)." };
   }
   return outcome;
 }
