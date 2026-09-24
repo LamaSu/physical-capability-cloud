@@ -305,11 +305,17 @@
   // for key (same keys, same tone, same label). Edit both, or CI fails.
   // <status-map v2> -- extracted verbatim by money-status.conformance.test.ts; keep the markers.
   function normStatus(s) {
-    return String(s == null ? '' : s).trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    // Only a plain status word is classified: a non-string, or punctuation / control / non-ASCII
+    // characters ("released!", ["released"]) normalize to '' -> unknown, never green.
+    if (typeof s !== 'string') return '';
+    var t = s.trim();
+    if (!/^[A-Za-z0-9 _-]+$/.test(t)) return '';
+    return t.toUpperCase().replace(/[ _-]+/g, '_').replace(/^_+|_+$/g, '');
   }
   // key -> [pillClass, honest label]. NEVER map a non-release money state to st-settled (green).
   // SETTLED is deliberately absent: it means operator-paid in SettlementResultDTO but BOTH released
   // and refunded in the V-next phase vocabulary -- a word that can mean "refunded" is never green.
+  // COMPLETED is not green either: it ends many NON-money DTOs, so it proves no payment.
   var MONEY_STATUS = {
     // V-next UnitState / finalState (the 10-state settlement machine, contract sec-A)
     AWAITING_FUNDING:  ['st-waiting',  'awaiting funding'],
@@ -327,7 +333,7 @@
     FUNDED:     ['st-waiting',  'funds held - not released'],
     ACTIVE:     ['st-running',  'active'],
     COMPLETING: ['st-waiting',  'completing - not yet final'],
-    COMPLETED:  ['st-settled',  'released'],
+    COMPLETED:  ['st-waiting',  'completed - settlement not confirmed'],
     DISPUTED:   ['st-failed',   'disputed'],
     REFUNDED:   ['st-refunded', 'payer refunded - operator NOT paid'],
     // EscrowStatus (spec types/common.ts)
@@ -348,13 +354,14 @@
     RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
     PENDING: 'st-waiting', QUEUED: 'st-waiting', WAITING: 'st-waiting', PAUSED: 'st-waiting', REVIEW: 'st-waiting', CONFIRM: 'st-waiting', NEEDS_INPUT: 'st-waiting', NEEDS_YOU: 'st-waiting',
     ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
-    DONE: 'st-settled', COMPLETE: 'st-settled', OK: 'st-settled', SUCCESS: 'st-settled', SUCCEEDED: 'st-settled', RESOLVED: 'st-settled', READY: 'st-settled'
+    DONE: 'st-settled', COMPLETE: 'st-settled', COMPLETED: 'st-settled', OK: 'st-settled', SUCCESS: 'st-settled', SUCCEEDED: 'st-settled', RESOLVED: 'st-settled', READY: 'st-settled'
   };
-  // Generic surfaces (run / list rows): the money table first, then generic run/action states.
+  // NON-money data only (a job, a kernel): generic run/action states first, then the money table
+  // (so a refund word is still never green). Callers route money data to moneyStatusClass.
   function statusClass(s) {
     var k = normStatus(s);
-    if (Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return MONEY_STATUS[k][0];
     if (Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return GENERIC_STATES[k];
+    if (Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return MONEY_STATUS[k][0];
     return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
   }
   // MONEY surfaces (receipt / settlement): the money table ONLY. A generic success word ("done",
@@ -368,6 +375,24 @@
   function settlementLabel(s) {
     var k = normStatus(s);
     return Object.prototype.hasOwnProperty.call(MONEY_STATUS, k) ? MONEY_STATUS[k][1] : null;
+  }
+  // Which table a DATA surface (list rows, run status) uses is decided by the DATA, not the window
+  // kind. Data is money unless its binding is a known NON-money read AND it carries no money field:
+  // fail closed, so an escrow row's "success" or "completed" is never shown as paid.
+  var NON_MONEY_READS = /^\/api\/(jobs|kernels|capabilities|agents|artifacts|csd|sensors|devices|skills)(\/|$)/;
+  var MONEY_FIELDS = ['amount', 'totalAmount', 'price', 'fee', 'payout', 'payer', 'payee', 'escrow', 'escrowId', 'escrowAddress', 'settlement', 'txHash'];
+  function isMoneyData(bindingPath, row) {
+    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    if (!NON_MONEY_READS.test(p)) return true;
+    if (row && typeof row === 'object') {
+      for (var i = 0; i < MONEY_FIELDS.length; i++) {
+        if (Object.prototype.hasOwnProperty.call(row, MONEY_FIELDS[i]) && row[MONEY_FIELDS[i]] != null) return true;
+      }
+    }
+    return false;
+  }
+  function dataStatusClass(bindingPath, row, s) {
+    return isMoneyData(bindingPath, row) ? moneyStatusClass(s) : statusClass(s);
   }
   // </status-map v2>
 
@@ -720,7 +745,7 @@
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + statusClass(st), String(st)));
+          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st), String(st)));
         }
         listNode.appendChild(li);
       }
@@ -851,8 +876,8 @@
       elapsed.textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed';
     }, 1000);
 
-    function apply(statusVal, latestVal) {
-      if (statusVal != null) { pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + statusClass(statusVal); }
+    function apply(statusVal, latestVal, data) {
+      if (statusVal != null) { pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, data, statusVal); }
       if (latestVal != null && latestVal !== '') latest.textContent = String(latestVal);
     }
     function feedLine(txt) {
@@ -863,7 +888,7 @@
 
     if (ctx.mode === 'snapshot') {
       var snap = ctx.snapshot[w.binding.path];
-      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom));
+      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap);
       var stat = dot(snap, w.statusFrom);
       pill.textContent = String(stat != null ? stat : 'snapshot');
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
@@ -881,7 +906,7 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        apply(dot(d, w.statusFrom), dot(d, w.latestFrom));
+        apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d);
         // timeline feed if the response carries one
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
         if (Array.isArray(tl)) { clear(feed); for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' · ' : '') + (tl[i].type || JSON.stringify(tl[i]))); }
@@ -897,7 +922,7 @@
     if (w.binding.sse) {
       ctx.tx.streamSSE(w.binding.sse, function (ev) {
         apply(dot(ev, w.statusFrom) != null ? dot(ev, w.statusFrom) : ev.status,
-              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type));
+              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev);
         feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' · ' : '') + (ev.type || ev.status || JSON.stringify(ev)));
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll

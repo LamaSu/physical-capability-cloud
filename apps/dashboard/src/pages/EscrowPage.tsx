@@ -72,7 +72,7 @@ export function EscrowPage() {
                     <div key={i} className="flex items-center justify-between text-xs">
                       <span className="text-white/50">{m.name ?? `Milestone ${i + 1}`}</span>
                       <div className="flex items-center gap-2">
-                        <GlowBadge color={m.status === "fulfilled" ? "green" : m.status === "funded" ? "gold" : "gray"}>
+                        <GlowBadge color={moneyBadgeColor(m.status)}>
                           {m.status}
                         </GlowBadge>
                         {/* T2.8 — file dispute (open per-milestone modal) */}

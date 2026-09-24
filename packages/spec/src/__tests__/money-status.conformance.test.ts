@@ -32,6 +32,8 @@ type KitRegion = {
   statusClass: (s: unknown) => string;
   moneyStatusClass: (s: unknown) => string;
   settlementLabel: (s: unknown) => string | null;
+  isMoneyData: (bindingPath: unknown, row: unknown) => boolean;
+  dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown) => string;
 };
 
 function extractRegion(): KitRegion {
@@ -42,7 +44,7 @@ function extractRegion(): KitRegion {
     m[1] +
       "\nthis.MONEY_STATUS = MONEY_STATUS; this.GENERIC_STATES = GENERIC_STATES;" +
       " this.statusClass = statusClass; this.moneyStatusClass = moneyStatusClass;" +
-      " this.settlementLabel = settlementLabel;",
+      " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;",
     ctx,
   );
   return ctx as unknown as KitRegion;
@@ -57,6 +59,8 @@ const ADVERSARIAL: unknown[] = [
   "done", "success", "ok", "ready", "resolved", "succeeded", "complete",
   "Settled Released", " settled-released ", "refund_allocated",
   "", "   ", null, undefined, 0, 42, true, {}, [], "__proto__", "constructor", "toString",
+  "completed", "COMPLETED", "released!", "*released*", "released\u0000", "released\u200b", "RELEASED\u0130",
+  ["released"], [["released"]], { toString: () => "released" },
 ];
 
 describe("shipped kit money table == canonical @pcc/spec map", () => {
@@ -95,6 +99,33 @@ describe("shipped kit money table == canonical @pcc/spec map", () => {
     }
   });
 
+  it("a data surface picks its table from the DATA: money unless a known non-money read with no money field", () => {
+    // money bindings: the money table only, so off-schema success words and "completed" are never green
+    for (const w of ["success", "done", "ok", "completed", "resolved"]) {
+      expect(kit.dataStatusClass("/api/escrow", { status: w }, w), w).not.toBe("st-settled");
+      expect(kit.dataStatusClass("/api/settlement/units", { status: w }, w), w).not.toBe("st-settled");
+      expect(kit.dataStatusClass("/api/some/unlisted/read", { status: w }, w), w).not.toBe("st-settled"); // fail closed
+    }
+    // a non-money read without money fields keeps generic tones (a completed JOB is done)
+    expect(kit.dataStatusClass("/api/jobs", { status: "completed" }, "completed")).toBe("st-settled");
+    expect(kit.dataStatusClass("/api/jobs/j1", { status: "done" }, "done")).toBe("st-settled");
+    // ...but a job row that carries money is money data
+    expect(kit.dataStatusClass("/api/jobs", { status: "completed", amount: "5" }, "completed")).toBe("st-waiting");
+    expect(kit.dataStatusClass("/api/jobs", { status: "success", escrowAddress: "0xabc" }, "success")).toBe("st-unknown");
+    // lookalike or odd binding paths are money (fail closed)
+    for (const b of ["/API/jobs", "/api/jobsX", "/api/jobs%2F..%2Fescrow", null, undefined, 42]) {
+      expect(kit.isMoneyData(b, {}), String(b)).toBe(true);
+    }
+    // a refund word is never green even on a generic surface
+    expect(kit.statusClass("refunded")).toBe("st-refunded");
+  });
+
+  it("each classifier is defined exactly once in the shipped kit (no later shadowing definition)", () => {
+    for (const fn of ["normStatus", "statusClass", "moneyStatusClass", "settlementLabel", "isMoneyData", "dataStatusClass"]) {
+      expect(kitSrc.split("function " + fn + "(").length - 1, fn).toBe(1);
+    }
+  });
+
   it("the greedy substring regex is gone from the shipped kit", () => {
     expect(kitSrc).not.toMatch(/settl\|releas\|complet\|done\|paid\|funded\|success\|approved\|active/);
     expect(kitSrc).not.toMatch(/<status-map v1>/);
@@ -110,7 +141,7 @@ const receiptManifest = JSON.stringify({
   sections: [{ windows: [{ kind: "receipt", binding: { path: ESC } }] }],
 });
 
-function boot(escrow: Record<string, unknown>) {
+function boot(escrow: Record<string, unknown>, manifest: string = receiptManifest, snapshot?: Record<string, unknown>) {
   document.documentElement.removeAttribute("data-theme");
   document.head.innerHTML = "";
   document.body.innerHTML = "";
@@ -121,12 +152,12 @@ function boot(escrow: Record<string, unknown>) {
   const mNode = document.createElement("script");
   mNode.type = "application/json";
   mNode.id = "pcc-manifest";
-  mNode.textContent = receiptManifest;
+  mNode.textContent = manifest;
   document.body.appendChild(mNode);
   const sNode = document.createElement("script");
   sNode.type = "application/json";
   sNode.id = "pcc-snapshot";
-  sNode.textContent = JSON.stringify({ _ts: "2026-09-24T00:00:00Z", [ESC]: escrow });
+  sNode.textContent = JSON.stringify(snapshot ?? { _ts: "2026-09-24T00:00:00Z", [ESC]: escrow });
   document.body.appendChild(sNode);
   // eslint-disable-next-line no-eval
   (0, eval)(kitSrc);
@@ -175,5 +206,46 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
   it("the pill text is the raw server value (never rewritten to look final)", async () => {
     const r = await renderedPill({ status: "REFUND_ALLOCATED" });
     expect(r.text).toBe("REFUND_ALLOCATED");
+  });
+});
+
+describe("reviewer-bravo F3/F4: 'completed' and generic success words never green money data (full boot)", () => {
+  it("a receipt bound to a completed JOB is not a green payment", async () => {
+    const r = await renderedPill({ status: "completed" });
+    expect(r.cls).toContain("st-waiting");
+    expect(r.cls).not.toContain("st-settled");
+    expect(r.rail).toContain("settlement not confirmed");
+  });
+
+  it("a receipt with a decorated or non-string status is unknown, never green", async () => {
+    for (const status of ["released!", ["released"], "released\u0000"]) {
+      const r = await renderedPill({ status });
+      expect(r.cls, JSON.stringify(status)).toContain("st-unknown");
+    }
+  });
+
+  const listManifest = (p: string) => JSON.stringify({
+    csd: "pcc://artifacts/dashboard/v1", title: "L",
+    sections: [{ windows: [{ kind: "list", binding: { path: p }, item: { title: "id", statusFrom: "status" } }] }],
+  });
+  async function listPills(p: string, rows: unknown[]) {
+    boot({}, listManifest(p), { _ts: "2026-09-24T00:00:00Z", [p]: rows });
+    await flush();
+    return Array.from(document.querySelectorAll(".pcc-list-row .pcc-pill")).map((e) => (e as HTMLElement).className);
+  }
+
+  it("an ESCROW list never greens 'success' / 'done' / 'completed'", async () => {
+    const pills = await listPills("/api/escrow", [
+      { id: "a", status: "success" }, { id: "b", status: "done" }, { id: "c", status: "completed" }, { id: "d", status: "released" },
+    ]);
+    expect(pills.length).toBe(4);
+    expect(pills.slice(0, 3).some((c) => c.includes("st-settled"))).toBe(false);
+    expect(pills[3]).toContain("st-settled"); // a documented final release still reads as one
+  });
+
+  it("a JOB list keeps generic tones for non-money rows (completed job = done)", async () => {
+    const pills = await listPills("/api/jobs", [{ id: "j1", status: "completed" }, { id: "j2", status: "completed", amount: "5" }]);
+    expect(pills[0]).toContain("st-settled");
+    expect(pills[1]).toContain("st-waiting"); // a paid job row is money data
   });
 });

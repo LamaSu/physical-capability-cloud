@@ -38,7 +38,7 @@ describe("canonical money-status map", () => {
 
   it("the ONLY settled (green) states are documented final releases to the operator", () => {
     const green = Object.keys(MONEY_STATUS_MAP).filter((k) => MONEY_STATUS_MAP[k]!.tone === "settled").sort();
-    expect(green).toEqual(["COMPLETED", "RELEASED", "SETTLED_RELEASED"]);
+    expect(green).toEqual(["RELEASED", "SETTLED_RELEASED"]);
   });
 
   // THE load-bearing invariant: nothing that is not a discharged RELEASE may render green.
@@ -53,6 +53,11 @@ describe("canonical money-status map", () => {
     // generic success words are NOT money states
     "done", "success", "ok", "ready", "resolved", "succeeded", "complete",
     "wat", "", null, undefined, "zzz_unknown_state", 42, {}, [],
+    // "completed" ends many NON-money DTOs (jobs, steps, batch claims where paid != completed)
+    "COMPLETED", "completed",
+    // decorated / non-string forms of a green word must not normalize into it
+    "released!", "*released*", "(released)", "released\u0000", "released\u200b", "RELEASED\u0130",
+    ["released"], [["released"]], { toString: () => "released" }, "settled_released!",
   ];
   it("nothing but a documented final release renders settled", () => {
     for (const s of NEVER_GREEN) {
@@ -72,6 +77,19 @@ describe("canonical money-status map", () => {
       expect(c.tone, JSON.stringify(s)).toBe("unknown");
       expect(c.known, JSON.stringify(s)).toBe(false);
       expect(c.label, JSON.stringify(s)).toBeNull();
+    }
+  });
+
+  it("'completed' is known but never green: settlement not confirmed", () => {
+    const c = classifyMoneyStatus("completed");
+    expect(c.known).toBe(true);
+    expect(c.tone).toBe("waiting");
+    expect(String(c.label)).toContain("settlement not confirmed");
+  });
+
+  it("only plain status words normalize; anything else is '' (unknown)", () => {
+    for (const s of ["released!", "(released)", "released\u0000", "released\u200b", "RELEASED\u0130", "re/leased", "released.", 7, true, null, ["released"], { toString: () => "released" }]) {
+      expect(normalizeMoneyStatus(s), JSON.stringify(String(s))).toBe("");
     }
   });
 

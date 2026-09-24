@@ -21,7 +21,13 @@
  *    uses it for operator-paid, but the V-next phase vocabulary uses "settled"
  *    for BOTH state 8 (released) and state 9 (refunded). A word that can mean
  *    "refunded" must never render as paid. Surfaces holding a SettlementResultDTO
- *    should render `finalState` / `unitState`, not the bare word.
+ *    should render `finalState` / `unitState`, not the bare word. `COMPLETED` is
+ *    NOT green for the same reason: it is the terminal state of many NON-money
+ *    DTOs (jobs, skills, steps, executions, and batch claims, where `paid` and
+ *    `completed` are different states), so a bare "completed" proves no payment.
+ *  - Only a plain status word is classified. A non-string, or a string with
+ *    punctuation, control or non-ASCII characters ("released!", ["released"]),
+ *    normalizes to "" and is unknown.
  *
  * MIRROR. `apps/dashboard/public/ui-kit/v1/pcc-ui.js` is a vanilla browser
  * asset with no bundler, so it cannot import this module. It embeds a verbatim
@@ -44,13 +50,16 @@ export interface MoneyStatusEntry {
   readonly label: string;
 }
 
-/** Normalize any status value to its exact map key: trim, uppercase, non-alphanumerics -> `_`. */
+/**
+ * Normalize a status to its exact map key: trim, uppercase, separators (space, '-', '_') -> `_`.
+ * Anything that is not a plain status word (a non-string, or punctuation, control or non-ASCII
+ * characters) normalizes to "" and so classifies as unknown: "released!" or ["released"] is never paid.
+ */
 export function normalizeMoneyStatus(s: unknown): string {
-  return String(s == null ? "" : s)
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
+  if (typeof s !== "string") return "";
+  const t = s.trim();
+  if (!/^[A-Za-z0-9 _-]+$/.test(t)) return "";
+  return t.toUpperCase().replace(/[ _-]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
 function entry(tone: MoneyStatusEntry["tone"], label: string): MoneyStatusEntry {
@@ -80,7 +89,7 @@ export const MONEY_STATUS_MAP: Readonly<Record<string, MoneyStatusEntry>> = Obje
   FUNDED: entry("waiting", "funds held - not released"),
   ACTIVE: entry("running", "active"),
   COMPLETING: entry("waiting", "completing - not yet final"),
-  COMPLETED: entry("settled", "released"),
+  COMPLETED: entry("waiting", "completed - settlement not confirmed"), // ambiguous across DTOs: never green
   DISPUTED: entry("failed", "disputed"),
   REFUNDED: entry("refunded", "payer refunded - operator NOT paid"),
 
