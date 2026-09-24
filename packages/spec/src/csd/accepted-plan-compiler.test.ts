@@ -349,6 +349,7 @@ describe("identity helpers", () => {
     expect(tierFromKey("tier4")).toBeNull();
     expect(tierFromKey("TIER2")).toBeNull();
     expect(tierFromKey("2")).toBeNull();
+    expect(tierFromKey(["tier2"])).toBeNull(); // no RegExp coercion of non-strings
   });
 });
 
@@ -421,6 +422,51 @@ describe("cross-family review of #351 (sol + astra): every settlement term is se
     const r2 = compileAcceptedPlan(plan({ nodes: [...bad].reverse(), edges: [] }));
     expect(r1.ok).toBe(false);
     expect(r1).toEqual(r2);
+  });
+
+  it("DUPLICATES (astra's confirmation counterexample): the diagnostics do not depend on which duplicate comes first", () => {
+    const bad = node({ nodeId: "x", grossBaseUnits: 4n });
+    const good = node({ nodeId: "x", grossBaseUnits: 10n * USDC });
+    const r1 = compileAcceptedPlan(plan({ nodes: [bad, good], edges: [] }));
+    const r2 = compileAcceptedPlan(plan({ nodes: [good, bad], edges: [] }));
+    expect(r1).toEqual(r2);
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(codes(r1)).toEqual(["duplicate-node", "gross-out-of-range"]);
+    const three = compileAcceptedPlan(plan({ nodes: [good, good, good], edges: [] }));
+    expect(three.ok).toBe(false);
+    if (!three.ok) expect(codes(three)).toEqual(["duplicate-node"]); // once per id, not per extra copy
+  });
+
+  it("malformed runtime input gets a typed rejection, never a throw", () => {
+    const junk: AcceptedPlanInput[] = [
+      plan({ nodes: [node({ nodeId: "p", operator: 42 as unknown as `0x${string}` })], edges: [] }),
+      plan({ nodes: [Object.create(null) as AcceptedPlanNode], edges: [] }),
+      plan({ nodes: [{ ...node({ nodeId: "p" }), nodeId: Object.create(null) as string }], edges: [] }), // String() of it throws
+      plan({ edges: [{ from: Object.create(null) as string, to: "mail" }] }),
+      plan({ nodes: null as unknown as AcceptedPlanNode[] }),
+      plan({ reservation: null as unknown as AcceptedPlanInput["reservation"] }),
+    ];
+    for (const p of junk) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = compileAcceptedPlan(p);
+      }).not.toThrow();
+      expect(r?.ok).toBe(false);
+    }
+  });
+
+  it("pattern checks do not coerce: an array that stringifies to a valid id, currency or tier is refused", () => {
+    const cases: Array<[AcceptedPlanInput, string]> = [
+      [plan({ planId: ["plan-1"] as unknown as string }), "invalid-plan-field"],
+      [plan({ currency: ["USDC"] as unknown as string }), "invalid-plan-field"],
+      [plan({ nodes: [node({ nodeId: ["p"] as unknown as string })], edges: [] }), "invalid-node-id"],
+      [plan({ nodes: [node({ nodeId: "p", tierKey: ["tier0"] as unknown as string })], edges: [] }), "invalid-tier"],
+    ];
+    for (const [p, code] of cases) {
+      const r = compileAcceptedPlan(p);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(codes(r)).toContain(code);
+    }
   });
 
   it("the deal digest is a pure function of the compiled deal (recomputable by any holder)", () => {

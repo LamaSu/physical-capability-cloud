@@ -36,6 +36,10 @@
  *  - SERVER-RESOLVED DECIMALS. Token decimals come from `SETTLEMENT_TOKEN_DECIMALS`, never from the
  *    caller: a wrong decimals value would make the committed cost disagree with the gross actually
  *    pulled (e.g. g = 10^7 at "6" vs "18" decimals). An unknown currency is refused.
+ *  - TYPED REJECTION. Malformed runtime input (a non-string id, an array that stringifies to a valid
+ *    one, a non-bigint amount) is refused with a typed violation — never a throw, never a coercion.
+ *    Every node occurrence is validated, duplicates included, and the violations are sorted, so the
+ *    diagnostics depend neither on input order nor on which duplicate came first.
  *  - FROZEN-ABI LIMITS. At most 16 units per job, 1–16 payout legs per unit, 256 legs per job;
  *    `5 <= g <= 2^128−1`; `feeBps <= 1000`; `n > 0`; operator ≠ payer; no zero addresses.
  *    (Recipient rules that need chain context — not the escrow, token or factory — and the calldata
@@ -255,7 +259,8 @@ function toHex(b: Uint8Array): `0x${string}` {
 }
 
 /** Tier number from a CSD tier key: "tier0".."tier3" -> 0..3; null for anything else. */
-export function tierFromKey(tierKey: string): number | null {
+export function tierFromKey(tierKey: unknown): number | null {
+  if (typeof tierKey !== "string") return null; // RegExp.exec would coerce ["tier2"] to "tier2"
   const m = /^tier([0-3])$/.exec(tierKey);
   return m ? Number(m[1]) : null;
 }
@@ -334,6 +339,29 @@ function isNonZeroAddress(a: unknown): a is Address {
   return isAddress(a) && a.toLowerCase() !== ZERO_ADDRESS;
 }
 
+// Pattern checks demand a real string first: RegExp.test coerces, so ["plan-1"] would pass as "plan-1".
+function isId(x: unknown): x is string {
+  return typeof x === "string" && ID_PATTERN.test(x);
+}
+
+function isCurrency(x: unknown): x is string {
+  return typeof x === "string" && CURRENCY_PATTERN.test(x);
+}
+
+function isDigest(x: unknown): x is string {
+  return typeof x === "string" && DIGEST_PATTERN.test(x);
+}
+
+/** A diagnostic's string form. Never throws, even on a value with no string conversion. */
+function show(x: unknown): string {
+  if (typeof x === "string") return x;
+  try {
+    return String(x);
+  } catch {
+    return `<${typeof x}>`;
+  }
+}
+
 // ── The compiler ─────────────────────────────────────────────────────────────────────────────────
 
 /** Compile an accepted, server-validated plan into V-next jobs. Fail closed on any violation. */
@@ -341,14 +369,15 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
   const v: CompileViolation[] = [];
 
   // Plan-level fields.
-  if (!ID_PATTERN.test(input.planId ?? "")) v.push({ code: "invalid-plan-field", field: "planId" });
-  if (!ID_PATTERN.test(input.requestId ?? "")) v.push({ code: "invalid-plan-field", field: "requestId" });
+  if (!isId(input.planId)) v.push({ code: "invalid-plan-field", field: "planId" });
+  if (!isId(input.requestId)) v.push({ code: "invalid-plan-field", field: "requestId" });
   if (!isNonZeroAddress(input.payer)) v.push({ code: "invalid-plan-field", field: "payer" });
-  if (!CURRENCY_PATTERN.test(input.currency ?? "")) v.push({ code: "invalid-plan-field", field: "currency" });
-  const currencyDecimals = Object.prototype.hasOwnProperty.call(SETTLEMENT_TOKEN_DECIMALS, input.currency)
-    ? SETTLEMENT_TOKEN_DECIMALS[input.currency]!
-    : undefined;
-  if (CURRENCY_PATTERN.test(input.currency ?? "") && currencyDecimals === undefined) {
+  if (!isCurrency(input.currency)) v.push({ code: "invalid-plan-field", field: "currency" });
+  const currencyDecimals =
+    isCurrency(input.currency) && Object.prototype.hasOwnProperty.call(SETTLEMENT_TOKEN_DECIMALS, input.currency)
+      ? SETTLEMENT_TOKEN_DECIMALS[input.currency]!
+      : undefined;
+  if (isCurrency(input.currency) && currencyDecimals === undefined) {
     v.push({ code: "currency-not-settleable", currency: input.currency });
   }
   if (typeof input.reclaimAt !== "bigint" || input.reclaimAt <= 0n) {
@@ -364,44 +393,42 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
     v.push({ code: "fee-recipient-missing" });
   }
   const r = input.reservation;
-  if (!r || !ID_PATTERN.test(r.reservationId ?? "") || typeof r.maxAmountBaseUnits !== "bigint") {
+  if (!r || !isId(r.reservationId) || typeof r.maxAmountBaseUnits !== "bigint") {
     v.push({ code: "invalid-plan-field", field: "reservation" });
   } else {
     if (r.requestId !== input.requestId) v.push({ code: "reservation-request-mismatch" });
     if (r.currency !== input.currency) v.push({ code: "currency-mismatch" });
   }
 
-  // Nodes.
+  // Nodes. EVERY occurrence is validated, duplicates included, so the diagnostics are a function of
+  // the set of nodes and never of which duplicate came first (cross-family review, #351).
   const nodes = Array.isArray(input.nodes) ? input.nodes : [];
+  const nodeStageStart = v.length;
   if (nodes.length === 0) v.push({ code: "empty-plan" });
-  const byId = new Map<string, AcceptedPlanNode>();
-  const tierOf = new Map<string, number>();
+  const occurrences = new Map<string, number>();
+  for (const n of nodes) {
+    if (isId(n?.nodeId)) occurrences.set(n.nodeId, (occurrences.get(n.nodeId) ?? 0) + 1);
+  }
+  for (const [id, count] of occurrences) if (count > 1) v.push({ code: "duplicate-node", nodeId: id });
   for (const n of nodes) {
     const id = n?.nodeId;
-    if (!ID_PATTERN.test(id ?? "")) {
-      v.push({ code: "invalid-node-id", nodeId: String(id) });
+    if (!isId(id)) {
+      v.push({ code: "invalid-node-id", nodeId: show(id) });
       continue;
     }
-    if (byId.has(id)) {
-      v.push({ code: "duplicate-node", nodeId: id });
-      continue;
-    }
-    byId.set(id, n);
-    if (!ID_PATTERN.test(n.capabilityId ?? "")) v.push({ code: "invalid-node-field", nodeId: id, field: "capabilityId" });
-    if (!ID_PATTERN.test(n.capabilityType ?? "")) v.push({ code: "invalid-node-field", nodeId: id, field: "capabilityType" });
-    if (!ID_PATTERN.test(n.csd ?? "")) v.push({ code: "invalid-node-field", nodeId: id, field: "csd" });
-    const tier = tierFromKey(n.tierKey ?? "");
-    if (tier === null) v.push({ code: "invalid-tier", nodeId: id, tierKey: String(n.tierKey) });
-    else tierOf.set(id, tier);
+    if (!isId(n.capabilityId)) v.push({ code: "invalid-node-field", nodeId: id, field: "capabilityId" });
+    if (!isId(n.capabilityType)) v.push({ code: "invalid-node-field", nodeId: id, field: "capabilityType" });
+    if (!isId(n.csd)) v.push({ code: "invalid-node-field", nodeId: id, field: "csd" });
+    if (tierFromKey(n.tierKey) === null) v.push({ code: "invalid-tier", nodeId: id, tierKey: show(n.tierKey) });
     if (!isNonZeroAddress(n.operator)) v.push({ code: "invalid-node-field", nodeId: id, field: "operator" });
     else if (isAddress(input.payer) && n.operator.toLowerCase() === input.payer.toLowerCase()) {
       v.push({ code: "operator-is-payer", nodeId: id });
     }
     if (!isNonZeroAddress(n.payoutAddress)) v.push({ code: "invalid-node-field", nodeId: id, field: "payoutAddress" });
-    if (!DIGEST_PATTERN.test(n.matchedCapabilityDigest ?? "")) {
+    if (!isDigest(n.matchedCapabilityDigest)) {
       v.push({ code: "invalid-node-field", nodeId: id, field: "matchedCapabilityDigest" });
     }
-    if (n.committedProgramHash !== null && !DIGEST_PATTERN.test(n.committedProgramHash ?? "")) {
+    if (n.committedProgramHash !== null && !isDigest(n.committedProgramHash)) {
       v.push({ code: "invalid-node-field", nodeId: id, field: "committedProgramHash" });
     }
     if (!Array.isArray(n.evidenceRequirements)) {
@@ -413,6 +440,11 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
       if (unitEconomics(n.grossBaseUnits, input.feeBps).n <= 0n) v.push({ code: "net-not-positive", nodeId: id });
     }
   }
+  // Every later stage assumes unique, well-formed nodes (it reads operators, tiers and grosses without
+  // re-checking them). A malformed node set is refused here, with a typed violation and no throw.
+  if (v.length > nodeStageStart) return { ok: false, violations: sortViolations(v) };
+  const byId = new Map<string, AcceptedPlanNode>(nodes.map((n) => [n.nodeId, n]));
+  const tierOf = new Map<string, number>(nodes.map((n) => [n.nodeId, tierFromKey(n.tierKey)!]));
 
   // Edges and order.
   const edges = Array.isArray(input.edges) ? input.edges : [];
@@ -420,7 +452,7 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
   let edgesOk = true;
   for (const e of edges) {
     if (!byId.has(e?.from) || !byId.has(e?.to)) {
-      v.push({ code: "edge-unknown-node", from: String(e?.from), to: String(e?.to) });
+      v.push({ code: "edge-unknown-node", from: show(e?.from), to: show(e?.to) });
       edgesOk = false;
       continue;
     }
