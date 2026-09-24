@@ -168,42 +168,15 @@ export async function csdRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: message });
     }
 
-    // ── Best-effort: Auto-register as Story Protocol IP Asset ──────
-    let storyIpId: string | undefined;
-    try {
-      const { getStoryIPService } = await import("@pcc/contracts");
-      const storyIPService = getStoryIPService();
+    // ── No automatic Story IP registration (N10a, coord-watch #2974) ──────
+    // A CSD is a design, not a recorded capability on a kernel, so an IP minted here would have no
+    // durable owner record: nobody could ever manage, claim or dispute it. IP registration goes through
+    // POST /api/ip/register-capability, by the operator of a recorded capability, which records
+    // ownership. The CSD itself is registered as before.
+    const storyIpId: string | undefined = undefined;
+    const storyIpSkipped = "register_via_capability" as const;
 
-      const designerAddress = req.body.designerAddress ?? "0x0000000000000000000000000000000000000000";
-      const designerName = req.body.designerName ?? "Unknown Designer";
-      const commercialRevShare = typeof req.body.commercialRevShare === "number" ? req.body.commercialRevShare : 5;
-
-      const csd = parsed.data;
-      const capabilityId = csd.url;
-
-      const registration = await storyIPService.registerCapabilityAsIP(
-        {
-          id: capabilityId,
-          name: csd.name,
-          type: csd.kind,
-          kernelId: "unknown",
-          description: csd.description,
-        },
-        {
-          designerAddress,
-          designerName,
-          commercialRevShare,
-        },
-      );
-
-      storyIpId = registration.ipId;
-
-      // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
-    } catch (storyErr) {
-      console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
-    }
-
-    return { registered: true, url: parsed.data.url, storyIpId };
+    return { registered: true, url: parsed.data.url, storyIpId, ...(storyIpSkipped ? { storyIpSkipped } : {}) };
   });
 
   // ── GET /api/csd/:url ───────────────────────────────────────────

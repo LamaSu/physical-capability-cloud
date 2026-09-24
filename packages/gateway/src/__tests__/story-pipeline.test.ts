@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import {
   resetSettlementService,
   getSettlementService,
@@ -162,7 +162,7 @@ const VALID_CSD = {
   constraints: [],
   pricing: { basePrice: "5.00", currency: "USDC" },
   // Extra fields for Story registration (not part of CSD schema — stripped during parse)
-  designerAddress: "0xDESIGNER",
+  designerAddress: "0x00000000000000000000000000000000000de510",
   designerName: "Test Designer",
   commercialRevShare: 5,
 };
@@ -185,6 +185,26 @@ function makeBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
     events: [],
     ...overrides,
   };
+}
+
+// ---------------------------------------------------------------------------
+// A SIWE-proven caller (N10a): the CSD's IP is minted to the signed-in wallet only
+// ---------------------------------------------------------------------------
+
+const DESIGNER = "0x00000000000000000000000000000000000de510";
+let sessionSeq = 0;
+function sessionHeaders(wallet: string): Record<string, string> {
+  const now = new Date();
+  const token = `story-pipeline-session-${++sessionSeq}`;
+  getRepos().sessions.insert({
+    id: `sp-sess-${sessionSeq}`,
+    walletAddress: wallet,
+    token,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+    lastActiveAt: now.toISOString(),
+  });
+  return { authorization: `Bearer ${token}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,63 +240,31 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     resetCsdRegistry();
   });
 
-  it("POST /api/csd succeeds even when Story registration is not mocked to fail", async () => {
+  it("POST /api/csd registers the CSD and mints no Story IP, with or without a signed-in wallet", async () => {
+    for (const headers of [{}, sessionHeaders(DESIGNER)]) {
+      resetCsdRegistry();
+      const res = await app.inject({ method: "POST", url: "/api/csd", headers, payload: VALID_CSD });
+      expect(res.statusCode).toBe(200);
+      const body = res.json<{ registered: boolean; url: string; storyIpId?: string; storyIpSkipped?: string }>();
+      expect(body.registered).toBe(true);
+      expect(body.url).toBe("pcc://capabilities/story-test/v1");
+      // N10a (coord-watch #2974): a CSD IP would have no durable owner record. IPs are registered
+      // through POST /api/ip/register-capability by the operator of a recorded capability.
+      expect(body.storyIpId).toBeUndefined();
+      expect(body.storyIpSkipped).toBe("register_via_capability");
+    }
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/csd never mints to a body-supplied designer or the zero address", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/csd",
-      payload: VALID_CSD,
+      headers: sessionHeaders("0x00000000000000000000000000000000000a77ac"),
+      payload: { ...VALID_CSD, designerAddress: "0x0000000000000000000000000000000000000000" },
     });
-
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ registered: boolean; url: string; storyIpId?: string }>();
-    expect(body.registered).toBe(true);
-    expect(body.url).toBe("pcc://capabilities/story-test/v1");
-  });
-
-  it("POST /api/csd calls getStoryIPService and registerCapabilityAsIP", async () => {
-    await app.inject({
-      method: "POST",
-      url: "/api/csd",
-      payload: VALID_CSD,
-    });
-
-    expect(mockGetStoryIPService).toHaveBeenCalled();
-    expect(mockRegisterCapabilityAsIP).toHaveBeenCalledOnce();
-    const [capability, options] = mockRegisterCapabilityAsIP.mock.calls[0];
-    expect(capability.name).toBe("Story Test Capability");
-    expect(options.designerAddress).toBe("0xDESIGNER");
-    expect(options.designerName).toBe("Test Designer");
-    expect(options.commercialRevShare).toBe(5);
-  });
-
-  it("POST /api/csd returns storyIpId in response", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/csd",
-      payload: VALID_CSD,
-    });
-
-    const body = res.json<{ storyIpId?: string }>();
-    expect(body.storyIpId).toBe("0xmock_ip_id_csd_001");
-  });
-
-  it("POST /api/csd succeeds even when Story registration throws (best-effort)", async () => {
-    mockRegisterCapabilityAsIP.mockRejectedValueOnce(
-      new Error("Story network unavailable"),
-    );
-
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/csd",
-      payload: VALID_CSD,
-    });
-
-    // Primary flow must succeed
-    expect(res.statusCode).toBe(200);
-    const body = res.json<{ registered: boolean; storyIpId?: string }>();
-    expect(body.registered).toBe(true);
-    // storyIpId is absent when registration fails
-    expect(body.storyIpId).toBeUndefined();
+    expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
   });
 
   it("POST /api/csd returns 400 for invalid CSD regardless of Story service", async () => {
@@ -287,38 +275,12 @@ describe("CSD Publish → Auto Story IP Registration", () => {
     });
 
     expect(res.statusCode).toBe(400);
-    // Story service should not have been called for an invalid CSD
     expect(mockRegisterCapabilityAsIP).not.toHaveBeenCalled();
-  });
-
-  it("POST /api/csd uses default designerAddress when not provided", async () => {
-    const csdWithoutDesigner = { ...VALID_CSD };
-    // Remove designer fields - they come through req.body not the CSD schema
-    delete (csdWithoutDesigner as Record<string, unknown>).designerAddress;
-    delete (csdWithoutDesigner as Record<string, unknown>).designerName;
-    // Use a slightly different url to avoid duplicate error
-    (csdWithoutDesigner as Record<string, unknown>).url =
-      "pcc://capabilities/story-test-no-designer/v1";
-
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/csd",
-      payload: csdWithoutDesigner,
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(mockRegisterCapabilityAsIP).toHaveBeenCalledOnce();
-    const [, options] = mockRegisterCapabilityAsIP.mock.calls[0];
-    // Default address should be used
-    expect(options.designerAddress).toBe(
-      "0x0000000000000000000000000000000000000000",
-    );
-    expect(options.designerName).toBe("Unknown Designer");
   });
 });
 
 // ---------------------------------------------------------------------------
-// processEvidence → Auto Derivative IP Registration
+// processEvidence → Auto Story Derivative IP
 // ---------------------------------------------------------------------------
 
 describe("processEvidence → Auto Story Derivative IP", () => {
@@ -365,6 +327,8 @@ describe("processEvidence → Auto Story Derivative IP", () => {
     const [parentIpId, evidence] = mockRegisterJobAsDerivative.mock.calls[0];
     expect(parentIpId).toBe("0xmock_parent_ip");
     expect(evidence.jobId).toBe("job-004");
+    // N10a: the derivative names the job's kernel operator (seeded kernel-nyc), never the zero address.
+    expect(evidence.operatorAddress).toBe("0x1111111111111111111111111111111111111111");
   });
 
   it("does NOT call registerJobAsDerivative when job has no Story IP registration", async () => {
@@ -446,7 +410,7 @@ describe("processEvidence → Auto Story Derivative IP", () => {
 // releaseMilestone → Auto Story Royalty Payment
 // ---------------------------------------------------------------------------
 
-describe("releaseMilestone → Auto Story Royalty Payment", () => {
+describe("releaseMilestone pays no Story royalty from a guessed amount (N10a)", () => {
   beforeEach(() => {
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: true });
@@ -457,16 +421,13 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
   afterEach(() => {
     closeStore();
     resetSettlementService();
+    delete process.env.STORY_ROYALTY_PERCENT;
+    delete process.env.STORY_MILESTONE_AMOUNT;
   });
 
-  it("calls payJobRoyalty when job has a derivative IP link", async () => {
-    const escrowMod = await import("../contracts/escrow-client.js");
-    vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
-
+  async function seedDerivative() {
     const { getRepos } = await import("../db.js");
     const repos = getRepos();
-
-    // Seed a Story IP registration
     repos.story.insertIpRegistration({
       ipId: "0xparent_ip_royalty",
       nftTokenId: "4",
@@ -477,8 +438,6 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
       chain: "story-aeneid",
       registeredAt: new Date().toISOString(),
     });
-
-    // Seed a derivative link for job-001
     repos.story.insertDerivativeLink({
       id: "dl_job001_royalty",
       parentIpId: "0xparent_ip_royalty",
@@ -489,156 +448,32 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
       txHash: "0xtx_deriv_royalty",
       linkedAt: new Date().toISOString(),
     });
+  }
 
-    const service = getSettlementService();
-    const result = await service.releaseMilestone(
-      "job-001",
-      0,
-      mkAttestation(),
-      "0xDeAdBeEf00000000000000000000000000000001",
-    );
+  it("a job with a derivative IP is released, and no royalty is paid from STORY_MILESTONE_AMOUNT x STORY_ROYALTY_PERCENT", async () => {
+    const escrowMod = await import("../contracts/escrow-client.js");
+    vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+    await seedDerivative();
+    process.env.STORY_ROYALTY_PERCENT = "10";
+    process.env.STORY_MILESTONE_AMOUNT = "2000000";
+
+    const result = await getSettlementService().releaseMilestone("job-001", 0, mkAttestation(), "0xDeAdBeEf00000000000000000000000000000001");
 
     expect(result.status).toBe("released");
     expect(result.txHash).toBe("0xrelease_tx");
-
-    // Story royalty payment should have been triggered
-    expect(mockPayJobRoyalty).toHaveBeenCalledOnce();
-    const [ipId, royaltyAmount] = mockPayJobRoyalty.mock.calls[0];
-    expect(ipId).toBe("0xchild_ip_royalty");
-    // royaltyAmount should be 5% of default milestone amount
-    const expectedAmount = String(Math.floor(1_000_000 * 5 / 100)); // 50000
-    expect(royaltyAmount).toBe(expectedAmount);
-  });
-
-  it("does NOT call payJobRoyalty when no derivative IP link exists", async () => {
-    const escrowMod = await import("../contracts/escrow-client.js");
-    vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
-
-    const service = getSettlementService();
-    const result = await service.releaseMilestone(
-      "job-001",
-      0,
-      mkAttestation(),
-      "0xDeAdBeEf00000000000000000000000000000001",
-    );
-
-    expect(result.status).toBe("released");
+    // Royalties are inside each unit's payouts, or settled explicitly by a job party from the
+    // released milestone (POST /api/ip/settle-royalties). Never from an environment guess.
     expect(mockPayJobRoyalty).not.toHaveBeenCalled();
-  });
-
-  it("releaseMilestone succeeds even when payJobRoyalty throws (best-effort)", async () => {
-    const escrowMod = await import("../contracts/escrow-client.js");
-    vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
-
-    const { getRepos } = await import("../db.js");
-    const repos = getRepos();
-
-    // Must insert parent IP registration first due to FK constraint
-    repos.story.insertIpRegistration({
-      ipId: "0xparent_fail",
-      nftTokenId: "10",
-      licenseTermsId: "10",
-      txHash: "0xtx_parent_fail",
-      capabilityId: null,
-      csdUrl: null,
-      chain: "story-aeneid",
-      registeredAt: new Date().toISOString(),
-    });
-
-    repos.story.insertDerivativeLink({
-      id: "dl_job001_royalty_fail",
-      parentIpId: "0xparent_fail",
-      childIpId: "0xchild_fail",
-      licenseTokenId: "99",
-      jobId: "job-001",
-      evidenceBundleHash: "sha256:royalty_fail",
-      txHash: "0xtx_fail",
-      linkedAt: new Date().toISOString(),
-    });
-
-    mockPayJobRoyalty.mockRejectedValueOnce(
-      new Error("Royalty vault not found"),
-    );
-
-    const service = getSettlementService();
-    const result = await service.releaseMilestone(
-      "job-001",
-      0,
-      mkAttestation(),
-      "0xDeAdBeEf00000000000000000000000000000001",
-    );
-
-    // Escrow release must succeed despite Story royalty failure
-    expect(result.status).toBe("released");
-    expect(result.txHash).toBe("0xrelease_tx");
-    expect(result.error).toBeUndefined();
   });
 
   it("releaseMilestone still fails when write is disabled (unrelated to Story)", async () => {
     const escrowMod = await import("../contracts/escrow-client.js");
     vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(false);
 
-    const service = getSettlementService();
-    const result = await service.releaseMilestone(
-      "job-001",
-      0,
-      mkAttestation(),
-      "0xDeAdBeEf00000000000000000000000000000001",
-    );
+    const result = await getSettlementService().releaseMilestone("job-001", 0, mkAttestation(), "0xDeAdBeEf00000000000000000000000000000001");
 
     expect(result.status).toBe("failed");
     expect(result.error).toBe("write_disabled");
-    // Story royalty should never be called when the release itself failed
     expect(mockPayJobRoyalty).not.toHaveBeenCalled();
-  });
-
-  it("respects STORY_ROYALTY_PERCENT env variable", async () => {
-    const escrowMod = await import("../contracts/escrow-client.js");
-    vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
-
-    const { getRepos } = await import("../db.js");
-    const repos = getRepos();
-
-    // Must insert parent IP registration first due to FK constraint
-    repos.story.insertIpRegistration({
-      ipId: "0xparent_pct",
-      nftTokenId: "11",
-      licenseTermsId: "11",
-      txHash: "0xtx_parent_pct",
-      capabilityId: null,
-      csdUrl: null,
-      chain: "story-aeneid",
-      registeredAt: new Date().toISOString(),
-    });
-
-    repos.story.insertDerivativeLink({
-      id: "dl_job001_royalty_pct",
-      parentIpId: "0xparent_pct",
-      childIpId: "0xchild_pct",
-      licenseTokenId: "100",
-      jobId: "job-001",
-      evidenceBundleHash: "sha256:pct_test",
-      txHash: "0xtx_pct",
-      linkedAt: new Date().toISOString(),
-    });
-
-    process.env.STORY_ROYALTY_PERCENT = "10";
-    process.env.STORY_MILESTONE_AMOUNT = "2000000";
-
-    const service = getSettlementService();
-    await service.releaseMilestone(
-      "job-001",
-      0,
-      mkAttestation(),
-      "0xDeAdBeEf00000000000000000000000000000001",
-    );
-
-    const [, royaltyAmount] = mockPayJobRoyalty.mock.calls[0];
-    // 10% of 2000000 = 200000
-    expect(royaltyAmount).toBe("200000");
-
-    // Cleanup env vars
-    delete process.env.STORY_ROYALTY_PERCENT;
-    delete process.env.STORY_MILESTONE_AMOUNT;
   });
 });
