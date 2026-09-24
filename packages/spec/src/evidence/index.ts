@@ -37,6 +37,9 @@ export * from "./measurement-profile.js";
 // profileAdmitsBundle — does authenticated, bound evidence satisfy the committed
 // MeasurementProfile (level, device, version, window, samples, simulation)?
 export * from "./profile-admission.js";
+// checkProfileRegistration — may a MeasurementProfile be registered for a
+// (capability, device)? Run by the gateway registration route.
+export * from "./profile-registration.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
