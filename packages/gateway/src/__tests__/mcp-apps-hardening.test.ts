@@ -76,12 +76,23 @@ interface KitFns {
 }
 
 const kit: KitFns = (() => {
+  // describeRealRequest is the display projection of the kit's ONE canonical request descriptor
+  // (requestDescriptor), so the bundle carries the descriptor and the pure helpers it closes over.
+  const nonMoneyWrites = /var NON_MONEY_WRITES = \[[\s\S]*?\];/.exec(PCC_UI_SRC);
+  if (!nonMoneyWrites) throw new Error("kit var not found: NON_MONEY_WRITES");
   const bundle = [
     `var API_DEFAULT = ${JSON.stringify(PCC_ORIGIN)};`,
     `var API_ORIGIN = new URL(API_DEFAULT).origin;`,
+    nonMoneyWrites[0],
     extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
     extractFn(PCC_UI_SRC, "safeApiPath"),
     extractFn(PCC_UI_SRC, "resolveApiBase"),
+    extractFn(PCC_UI_SRC, "pinnedUrl"),
+    extractFn(PCC_UI_SRC, "actionMethod"),
+    extractFn(PCC_UI_SRC, "canonicalPath"),
+    extractFn(PCC_UI_SRC, "matchesWriteTemplate"),
+    extractFn(PCC_UI_SRC, "isNonMoneyWrite"),
+    extractFn(PCC_UI_SRC, "requestDescriptor"),
     extractFn(PCC_UI_SRC, "describeRealRequest"),
     "return { isAbsoluteOrSchemeUrl:isAbsoluteOrSchemeUrl, safeApiPath:safeApiPath, resolveApiBase:resolveApiBase, describeRealRequest:describeRealRequest };",
   ].join("\n");

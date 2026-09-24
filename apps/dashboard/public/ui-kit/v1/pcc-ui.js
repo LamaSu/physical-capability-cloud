@@ -16,8 +16,10 @@
  * Security invariants (kit-owned; On-Ramp spec §6.2 + §4.2):
  *   1. textContent ONLY. No innerHTML, no eval, no new Function, no outerHTML=.
  *   2. No action fires on load, EVER. Render is passive; execution is a click.
- *   3. Money verbs (fund/release/dispute/commit/approve) go through the kit's
- *      Approval surface; only its Approve button POSTs.
+ *   3. Every write passes the kit's Approval surface unless it is on the kit-owned
+ *      NON_MONEY_WRITES allowlist (fail closed). One validated request descriptor
+ *      drives the gate, the "This will send" display and the transport; only a
+ *      kit-labelled Approve sends it, exactly as displayed.
  *   4. `idempotencyKey` on every offer-posting action (a button can be
  *      double-clicked; the pack teaches the fix).
  *   5. The person's key lives in sessionStorage only — stripped from the URL
@@ -65,13 +67,20 @@
     'POST /api/feedback',              // product feedback
     'POST /api/feedback/agent-report'  // an agent's feedback report
   ];
-  // Kit-owned per-action state (idempotency instance, in-flight flag, open gate). It lives in a
-  // WeakMap keyed by the action object, never ON the action: an action is untrusted manifest JSON,
-  // and a manifest must not be able to pre-seed a key, strip the header, or make an action inert.
+  // Kit-owned per-action EXECUTION state (ruling 5). It lives in a WeakMap keyed by the action
+  // object, never ON the action: an action is untrusted manifest JSON, and a manifest must not be
+  // able to pre-seed a key, strip the header, mark itself done, or make an action inert.
+  //   keys    body fingerprint -> Idempotency-Key, only for attempts whose outcome is UNRESOLVED
+  //   posting a request (or hosted typed operation) for this action is in flight
+  //   done    a MONEY write for this action was accepted (2xx): one-shot for this render
+  //   gate    the identity of the ONE open Approval gate for this action (null when none)
   var ACTION_STATE = new WeakMap();
   function actionState(action) {
     var st = ACTION_STATE.get(action);
-    if (!st) { st = { idem: null, posting: false, gateOpen: false }; ACTION_STATE.set(action, st); }
+    if (!st) {
+      st = { keys: Object.create(null), posting: false, done: false, gate: null };
+      ACTION_STATE.set(action, st);
+    }
     return st;
   }
 
@@ -242,13 +251,17 @@
   function safeApiPath(path, isHost) {
     if (typeof path !== 'string' || !path) return null;
     // The URL parser silently strips TAB/LF/CR anywhere, trims edge spaces and control characters,
-    // and drops a '#fragment', so "/api/comp\tose" would be SENT as /api/compose. Refuse them: the
-    // path we classify must be the path we send.
-    if (/[\s#\u0000-\u001f\u007f]/.test(path)) return null;
+    // and drops a '#fragment', so "/api/comp\tose" would be SENT as /api/compose. Refuse them (and
+    // the C1 controls): the path we classify must be the path we send.
+    if (/[\s#\u0000-\u001f\u007f-\u009f]/.test(path)) return null;
     if (isAbsoluteOrSchemeUrl(path)) return null;   // no absolute / scheme / //host
     if (path.charAt(0) !== '/') return null;         // must be root-relative
     if (path.indexOf('\\') !== -1) return null;      // backslash escape
     var pathPart = path.split('?')[0];
+    // Ambiguous encodings have no single meaning, so they are refused outright (fail closed, no
+    // request): %25 decodes to ANOTHER escape (double encoding: %252F -> %2F -> '/'), and an encoded
+    // / \ ? # splits the path differently at each layer (URL parser, edge, gateway router).
+    if (/%(25|2f|5c|3f|23)/i.test(pathPart)) return null;
     var decoded;
     try { decoded = decodeURIComponent(pathPart); } catch (e) { return null; } // malformed %-escape
     if (decoded.indexOf('\\') !== -1) return null;
@@ -261,24 +274,89 @@
     return path; // original path (query preserved) — safe against the fixed base
   }
 
-  // The kit-derived TRUTH about the request an action will actually send —
-  // method, resolved destination, amount/asset, and job/escrow ref — computed
-  // from the REAL request (never manifest-supplied confirmation text, which can
-  // differ from what is sent). `destination === null` means the path was refused.
-  function describeRealRequest(apiBase, action, body, isHost) {
-    var method = (action && action.kind === 'patch') ? 'PATCH' : 'POST';
-    var safe = safeApiPath(action ? action.path : '', isHost);
-    var destination = safe === null ? null : ((apiBase || '') + safe);
-    var b = body || {};
+  // ═══════════════════════════════════════════════════════════════════════
+  // The ONE canonical request descriptor (ruling 3). A write is validated ONCE,
+  // here, into the exact request the wire will carry, and that same object
+  // drives everything downstream: the money decision (the Approval gate), button
+  // styling, the "This will send" display, rebindApproval, the idempotency
+  // intent, and the transport (Transport.send fetches desc.url with desc.method
+  // and re-derives neither). A refusal fails closed: ok:false, nothing can be
+  // sent, money stays true, and `reason` says why.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // Only the two write kinds the schema defines, matched EXACTLY: "post" -> POST, "patch" -> PATCH.
+  // Anything else ("PATCH", "put", "delete", "get", missing) is refused; it never becomes a POST.
+  function actionMethod(action) {
+    var k = action ? action.kind : null;
+    return k === 'post' ? 'POST' : (k === 'patch' ? 'PATCH' : null);
+  }
+  // The canonical form of the pathname the wire carries, %-decoded the way the gateway routes it.
+  // An ambiguous escape has no single canonical form: null (fail closed; safeApiPath refuses them
+  // first, this keeps the classifier closed on its own).
+  function canonicalPath(pathname) {
+    var p = String(pathname == null ? '' : pathname);
+    if (/%(25|2f|5c|3f|23)/i.test(p)) return null;
+    try { return decodeURIComponent(p); } catch (e) { return null; }
+  }
+  function matchesWriteTemplate(template, method, path) {
+    var sp = template.indexOf(' ');
+    if (template.slice(0, sp) !== method) return false;
+    var t = template.slice(sp + 1).split('/'), p = path.split('/');
+    if (t.length !== p.length) return false;
+    for (var i = 0; i < t.length; i++) {
+      if (t[i] === ':') { if (!/^[A-Za-z0-9_.~-]+$/.test(p[i])) return false; }
+      else if (t[i] !== p[i]) return false;
+    }
+    return true;
+  }
+  // True only for an EXACT allowlisted (method, route) carrying no query string; every other write
+  // is money (the Approval gate) until the kit's allowlist says otherwise.
+  function isNonMoneyWrite(method, canonical, search) {
+    if (search) return false;
+    for (var i = 0; i < NON_MONEY_WRITES.length; i++) {
+      if (matchesWriteTemplate(NON_MONEY_WRITES[i], method, canonical)) return true;
+    }
+    return false;
+  }
+  // -> { ok, method, path (the request-target the wire carries), canonical (decoded pathname),
+  //      url (the pinned absolute URL string fetch receives), money, destination (display === url),
+  //      reason (why refused), body (the kit's copy of the request body), amount, asset, refId }
+  function requestDescriptor(action, body, isHost, base) {
+    var b = Object.assign({}, (body && typeof body === 'object') ? body : {});
     var amount = b.amount != null ? b.amount
       : (b.totalAmount != null ? b.totalAmount
       : (b.value != null ? b.value
       : (b.priceUSD != null ? b.priceUSD
       : (b.budgetUSD != null ? b.budgetUSD : null))));
-    var asset = b.currency || b.asset || (amount != null ? 'USDC' : null);
-    var refId = b.jobId || b.escrowId || b.escrowAddress || b.offerId
-      || b.compositionId || b.id || null;
-    return { method: method, destination: destination, amount: amount, asset: asset, refId: refId };
+    var d = {
+      ok: false, method: actionMethod(action), path: null, canonical: null, url: null,
+      money: true, destination: null, reason: null, body: b, amount: amount,
+      asset: b.currency || b.asset || (amount != null ? 'USDC' : null),
+      refId: b.jobId || b.escrowId || b.escrowAddress || b.offerId || b.compositionId || b.id || null
+    };
+    if (!d.method) { d.reason = 'unsupported action kind (only "post" and "patch" can write)'; return d; }
+    var safe = safeApiPath(action.path, isHost);
+    if (safe === null) { d.reason = 'unsafe or ambiguous request path'; return d; }
+    var u = pinnedUrl(base, safe);
+    if (u === null) { d.reason = 'request resolves outside the PCC API origin'; return d; }
+    var canon = canonicalPath(u.pathname);
+    if (canon === null) { d.reason = 'ambiguous path encoding'; return d; }
+    d.ok = true;
+    d.url = u.toString();
+    d.path = u.pathname + u.search;
+    d.canonical = canon;
+    d.destination = d.url;
+    d.money = action.confirm === 'approval' || !isNonMoneyWrite(d.method, canon, u.search);
+    return d;
+  }
+
+  // The display facts of that descriptor -- exactly the fields realRequestNode renders in "This will
+  // send": method, the exact destination URL, amount/asset and job/escrow ref. The REAL request, never
+  // manifest confirmation text (directive 10); `destination === null` means it was refused. Kept as
+  // the pure surface the gateway's directive-10 tests pin.
+  function describeRealRequest(apiBase, action, body, isHost) {
+    var d = requestDescriptor(action, body, isHost, apiBase);
+    return { method: d.method, destination: d.destination, amount: d.amount, asset: d.asset, refId: d.refId };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -363,6 +441,16 @@
     this.isHost = !!isHost;
     this.lastTrace = null;
   }
+  // sol#1 (#288) origin pin, ONE implementation: resolve against the transport base and REFUSE (null)
+  // anything outside the fixed PCC API origin or carrying embedded credentials. Parsed-origin compare
+  // subsumes the https pin. Reads/SSE reach it through Transport._pin; writes through
+  // requestDescriptor, whose url Transport.send re-CHECKS here before any Bearer is attached.
+  function pinnedUrl(base, target) {
+    var u;
+    try { u = new URL(target, base || location.origin); } catch (e) { return null; }
+    if (u.origin !== API_ORIGIN || u.username || u.password) return null;
+    return u;
+  }
   Transport.prototype._headers = function (extra) {
     var h = extra || {};
     var k = getKey();
@@ -377,12 +465,8 @@
   // streamSSE reject; send returns a structured {ok:false} refusal).
   Transport.prototype._pin = function (safe, query) {
     var u;
-    try {
-      var base = this.base || location.origin;
-      u = new URL(safe + this.qs(query), base);
-    } catch (e) { return null; }
-    if (u.origin !== API_ORIGIN || u.username || u.password) return null;
-    return u.toString();
+    try { u = pinnedUrl(this.base, safe + this.qs(query)); } catch (e) { return null; }
+    return u === null ? null : u.toString();
   };
   Transport.prototype._trace = function (res) {
     try { var t = res.headers.get('x-pcc-trace-id'); if (t) this.lastTrace = t; } catch (e) {}
@@ -411,18 +495,25 @@
         return r.json();
       });
   };
-  Transport.prototype.send = function (method, path, body, idempotencyKey) {
+  // A write sends EXACTLY its validated request descriptor (ruling 3): desc.url with desc.method.
+  // Nothing here re-derives the destination or the method. The #288 pin is re-CHECKED on that exact
+  // string before any Bearer is attached: a descriptor that is not ok, not POST/PATCH, or not already
+  // a pinned PCC URL in canonical serialization is refused ({refused:true}: nothing was sent).
+  Transport.prototype.send = function (desc, body, idempotencyKey) {
     var self = this;
-    var safe = safeApiPath(path, this.isHost);
-    if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
-    var url = this._pin(safe);
-    if (url === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: request resolves outside the PCC API origin.' } });
+    function refuse(msg) { return Promise.resolve({ ok: false, status: 0, refused: true, body: { message: msg } }); }
+    if (!desc || desc.ok !== true || typeof desc.url !== 'string') {
+      return refuse('Refused: ' + ((desc && desc.reason) || 'no validated request') + ' - nothing was sent.');
+    }
+    if (desc.method !== 'POST' && desc.method !== 'PATCH') return refuse('Refused: unsupported method - nothing was sent.');
+    var pinned = pinnedUrl(this.base, desc.url);
+    if (pinned === null || pinned.toString() !== desc.url) return refuse('Refused: request resolves outside the PCC API origin.');
     var headers = this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' });
     // A real Idempotency-Key HEADER: the gateway's idempotency middleware and the escrow money
     // routes read the header, never a body field. The caller owns key stability (see doPost).
     if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey);
-    return fetch(url, {
-      method: method,
+    return fetch(desc.url, {
+      method: desc.method,
       headers: headers,
       body: body != null ? JSON.stringify(body) : undefined,
       credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'
@@ -505,15 +596,15 @@
       return r.json;
     });
   };
-  HostTransport.prototype.send = function (method, path, body) {
+  HostTransport.prototype.send = function (desc, body, idempotencyKey) {
     // R4 PR1 lockdown (D10): manifest-authored writes are DISABLED in MCP-App/
     // host mode. No mutating request is ever issued from a hosted view — write
     // controls render disabled and the action layer refuses; this transport-level
     // backstop holds even if a caller reaches send() directly (e.g. a compose
     // POST from renderChain). PR2 reintroduces writes via a typed, server-
-    // authorized operation allowlist. (method/path/body intentionally unused.)
-    void method; void path; void body;
-    return Promise.resolve({ ok: false, status: 0, body: { message: 'Actions are unavailable in this host view.' } });
+    // authorized operation allowlist. (desc/body/key intentionally unused.)
+    void desc; void body; void idempotencyKey;
+    return Promise.resolve({ ok: false, status: 0, refused: true, body: { message: 'Actions are unavailable in this host view.' } });
   };
   // No defined host-bridge equivalent for streaming yet; always use the
   // direct fetch-SSE reader (same Bearer-header contract as every live mode).
@@ -593,6 +684,46 @@
     var p = el('p', 'pcc-err');
     p.appendChild(el('span', 'pcc-err-msg', msg || 'Could not load this data.'));
     p.appendChild(el('span', 'pcc-err-honest', ' Nothing was fabricated.'));
+    return p;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Kit-owned labels (ruling 4). A manifest label is UNTRUSTED text: it can say
+  // "Deny" or "Cancel" on a control that writes. One rule, everywhere:
+  //  1. A control that EXECUTES a gated write (the approval window's Approve, the
+  //     Approval gate's Approve) and every control that declines or closes
+  //     (Deny, Cancel) carries KIT text only. The manifest's own label is shown
+  //     beside them as quoted, attributed text -- never as a control's label.
+  //  2. A manifest-labelled control that STARTS a write (actions bar, form
+  //     submit, chain Plan/execute) keeps the manifest label (it names the task)
+  //     but always ends in a kit-owned tag saying what the click really does:
+  //     "needs approval" (opens the gate; this click sends nothing), "asks to
+  //     confirm", "sends now" (an allowlisted non-money write, or a registered
+  //     host operation), "blocked" (refused: nothing can be sent), "unavailable"
+  //     (host lockdown) or "via assistant" (snapshot). So a manifest can never
+  //     present a write as a harmless "Deny"/"Cancel": the kit's words follow it.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  function writeTag(ctx, action, desc) {
+    if (ctx.mode === 'snapshot') return 'via assistant';
+    if (ctx.mode === 'host') return hostActionEnabled(action) ? 'sends now' : 'unavailable';
+    if (!desc.ok) return 'blocked';
+    if (desc.money) return 'needs approval';
+    return action.confirm === 'inline' ? 'asks to confirm' : 'sends now';
+  }
+  // Styling comes from the SAME descriptor the gate uses: a money write can never look non-money.
+  function writeButton(ctx, action, desc, fallbackLabel) {
+    var b = el('button', 'pcc-btn ' + (desc.money ? 'pcc-btn-primary' : 'pcc-btn-quiet'));
+    b.type = 'button';
+    b.appendChild(el('span', 'pcc-btn-label', String((action && action.label) || fallbackLabel)));
+    b.appendChild(el('span', 'pcc-btn-tag', ' · ' + writeTag(ctx, action, desc)));
+    return b;
+  }
+  // A manifest label shown as what it is: quoted, attributed, untrusted text.
+  function untrustedLabel(label) {
+    var p = el('p', 'pcc-untrusted-label');
+    p.appendChild(el('span', 'pcc-untrusted-k', 'The dashboard calls this: '));
+    p.appendChild(el('span', 'pcc-untrusted-v', '“' + String(label) + '”'));
     return p;
   }
 
@@ -779,14 +910,15 @@
     var form = buildForm(w.schema || {});
     wrap._body.appendChild(form.node);
     var foot = el('div', 'pcc-win-foot pcc-actionbar');
-    var submit = el('button', 'pcc-btn pcc-btn-primary', (w.submit && w.submit.label) || 'Submit');
-    submit.type = 'button';
+    // Styling + tag from the descriptor policy (classification never depends on the form values;
+    // the click builds the descriptor that is actually sent, from the collected values).
+    var submit = writeButton(ctx, w.submit, requestDescriptor(w.submit, (w.submit && w.submit.body) || {}, ctx.mode === 'host', ctx.apiBase), 'Submit');
     var status = el('span', 'pcc-action-status');
     submit.onclick = function () {
       var values;
       try { values = collectForm(form); }
       catch (e) { status.className = 'pcc-action-status st-failed'; status.textContent = e.message; return; }
-      dispatchAction(ctx, w.submit, { formValues: values, status: status, rebind: null });
+      dispatchAction(ctx, w.submit, { formValues: values, status: status });
     };
     foot.appendChild(submit);
     foot.appendChild(status);
@@ -871,7 +1003,9 @@
     return wrap;
   }
 
-  // approval — the what/who/cost block; only Approve fires the POST.
+  // approval — the what/who/cost block. Its Approve and Deny are KIT-owned (ruling 4): the manifest's
+  // approve label is shown only as quoted, untrusted text. Only Approve sends, and it sends exactly
+  // the descriptor displayed in "This will send".
   function renderApproval(ctx, w) {
     var wrap = winShell('Approval', 'needs you', 'st-waiting');
     wrap._body.appendChild(loadingLine());
@@ -879,38 +1013,45 @@
       clear(wrap._body);
       var info = r.data || {};
       wrap._body.appendChild(approvalDetails(info));
-      // Kit-derived TRUTH about the request the Approve button actually sends
-      // (directive 10) — computed from w.approve, never manifest confirmation text.
-      var realBody = Object.assign({}, (w.approve && w.approve.body) || {});
-      var desc = describeRealRequest(ctx.apiBase, w.approve, realBody, ctx.mode === 'host');
+      if (w.approve && w.approve.label) wrap._body.appendChild(untrustedLabel(w.approve.label));
+      // The ONE descriptor for this approval (directive 10, ruling 3): displayed here, and exactly
+      // what Approve sends -- never manifest confirmation text.
+      var desc = requestDescriptor(w.approve, (w.approve && w.approve.body) || {}, ctx.mode === 'host', ctx.apiBase);
       wrap._body.appendChild(realRequestNode(desc));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
-      var approve = el('button', 'pcc-btn pcc-btn-primary', (w.approve && w.approve.label) || 'Approve');
+      var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve'); // kit text, never w.approve.label
       approve.type = 'button';
       var deny = null;
+      var submitted = false; // a request may have left: Deny must never again say "nothing was sent"
       approve.onclick = function () {
-        if (desc.destination === null) {
-          status.className = 'pcc-action-status st-failed';
-          status.textContent = 'Refused: unsafe or non-PCC destination.';
-          return;
-        }
-        // The approval WINDOW is itself the confirmation surface: fire directly.
-        dispatchAction(ctx, w.approve, { status: status, viaApproval: true, rebind: function () {
-          // The approval is consumed: one effect per approval; a later click cannot re-fire it.
-          approve.disabled = true; if (deny) deny.disabled = true;
-          rebindApproval(ctx, w, wrap);
-        } });
+        if (!desc.ok) { refuseStatus(status, desc); return; }
+        if (ctx.mode === 'snapshot') { dispatchAction(ctx, w.approve, { status: status }); return; } // intent chip only
+        // Submission starts: lock BOTH controls at once, so Deny can never report "nothing was sent"
+        // while this request is in flight. The approval WINDOW is itself the confirmation surface.
+        submitted = true;
+        approve.disabled = true; if (deny) deny.disabled = true;
+        var sent = dispatchAction(ctx, w.approve, { status: status, viaApproval: true, desc: desc,
+          onSuccess: function () { rebindApproval(wrap, desc); } });
+        if (!sent || typeof sent.then !== 'function') return;
+        sent.then(function (outcome) {
+          if (outcome && outcome.ok) return; // consumed: one effect per approval, controls stay locked
+          // Failed or unknown: Approve may retry (the same body resends the same Idempotency-Key).
+          // Deny stays locked because a request was sent -- unless the kit refused before sending.
+          approve.disabled = false;
+          if (outcome && outcome.sent === false) { submitted = false; if (deny) deny.disabled = false; }
+        });
       };
       foot.appendChild(approve);
       if (w.deny) {
-        deny = el('button', 'pcc-btn pcc-btn-quiet', w.deny.label || 'Deny');
+        deny = el('button', 'pcc-btn pcc-btn-quiet', 'Deny'); // kit text, never w.deny.label
         deny.type = 'button';
         // Deny is UI-ONLY: it never dispatches a manifest-authored action. A hostile manifest could
         // set w.deny to a money POST, and dispatching it with viaApproval would SKIP the money gate,
         // turning "Deny" into a one-click unapproved payment. Deny closes the surface; nothing is
         // sent. (A real server-side deny needs a separately registered typed deny operation.)
         deny.onclick = function () {
+          if (submitted) return; // a request already left: there is nothing to "deny" here
           status.className = 'pcc-action-status';
           status.textContent = 'Closed here - nothing was sent. This does not decline it on the network.';
           approve.disabled = true; deny.disabled = true;
@@ -927,13 +1068,13 @@
     });
     return wrap;
   }
-  function rebindApproval(ctx, w, wrap) {
+  function rebindApproval(wrap, desc) {
     var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
     if (!pill) return;
-    // A 2xx means the gateway ACCEPTED the request, not that money moved: a money approval reads
-    // "submitted" (waiting), never settled-green. Settlement state comes from a read model.
-    if (isMoneyAction(w.approve)) { pill.textContent = 'submitted'; pill.className = 'pcc-pill st-waiting'; }
-    else { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-settled'; }
+    // A 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2): a money approval reads "submitted"
+    // (waiting); anything else a NEUTRAL "resolved". Settled-green comes only from a read model.
+    if (desc.money) { pill.textContent = 'submitted'; pill.className = 'pcc-pill st-waiting'; }
+    else { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-ack'; }
   }
   function approvalDetails(info) {
     var box = el('div', 'pcc-approval');
@@ -1011,7 +1152,10 @@
     return wrap;
   }
 
-  // chain — the pinned re-plannable ComposeRequest; Plan re-POSTs it.
+  // chain — the pinned re-plannable ComposeRequest. Plan is a WRITE (POST /api/compose) and takes the
+  // SAME path as every other write (r1 finding 4): a kit-synthesized action (kit-owned label) through
+  // dispatchAction, so it gets the descriptor, the Approval gate (an unlisted write is money), an
+  // Idempotency-Key and the busy guard. It is created ONCE per window, so its kit state is stable.
   function renderChain(ctx, w) {
     var wrap = winShell('Value chain', null, null);
     var cr = w.composeRef || {};
@@ -1032,33 +1176,30 @@
 
     var foot = el('div', 'pcc-win-foot pcc-actionbar');
     var status = el('span', 'pcc-action-status');
-    var plan = el('button', 'pcc-btn pcc-btn-primary', 'Plan');
-    plan.type = 'button';
+    var planAction = { id: 'pcc-chain-plan', label: 'Plan', kind: 'post', path: '/api/compose', body: cr,
+      intentText: 'pcc: plan ' + (cr.outcomeType || 'chain') };
+    var plan = writeButton(ctx, planAction, requestDescriptor(planAction, cr, ctx.mode === 'host', ctx.apiBase), 'Plan');
+    function showPlan(body) {
+      clear(result);
+      var steps = body.steps || [];
+      var box = el('ol', 'pcc-plan');
+      for (var i = 0; i < steps.length; i++) {
+        var s = steps[i];
+        var li = el('li', 'pcc-plan-row');
+        li.appendChild(el('span', 'pcc-plan-type', String(s.capabilityType || s.outcomeType || ('step ' + (i + 1)))));
+        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsd(s.estimatedPriceUSD) + ' USDC'));
+        box.appendChild(li);
+      }
+      result.appendChild(box);
+      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', 'total ' + fmtUsd(body.totalPriceUSD) + ' USDC'));
+      if (w.execute) {
+        var execBtn = writeButton(ctx, w.execute, requestDescriptor(w.execute, w.execute.body || {}, ctx.mode === 'host', ctx.apiBase), 'Execute');
+        execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
+        result.appendChild(execBtn);
+      }
+    }
     plan.onclick = function () {
-      if (ctx.mode === 'snapshot') { intentChip(status, 'pcc: plan ' + (cr.outcomeType || 'chain')); return; }
-      status.className = 'pcc-action-status'; status.textContent = 'Planning…';
-      ctx.tx.send('POST', '/api/compose', cr).then(function (res) {
-        clear(result);
-        if (!res.ok) { status.className = 'pcc-action-status st-failed'; status.textContent = 'Plan failed (HTTP ' + res.status + ')'; return; }
-        status.textContent = '';
-        var steps = res.body.steps || [];
-        var box = el('ol', 'pcc-plan');
-        for (var i = 0; i < steps.length; i++) {
-          var s = steps[i];
-          var li = el('li', 'pcc-plan-row');
-          li.appendChild(el('span', 'pcc-plan-type', String(s.capabilityType || s.outcomeType || ('step ' + (i + 1)))));
-          if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsd(s.estimatedPriceUSD) + ' USDC'));
-          box.appendChild(li);
-        }
-        result.appendChild(box);
-        if (res.body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', 'total ' + fmtUsd(res.body.totalPriceUSD) + ' USDC'));
-        if (w.execute) {
-          var execBtn = el('button', 'pcc-btn pcc-btn-primary', w.execute.label || 'Execute');
-          execBtn.type = 'button';
-          execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
-          result.appendChild(execBtn);
-        }
-      }, function (err) { status.className = 'pcc-action-status st-failed'; status.textContent = String(err && err.message || 'Plan failed'); });
+      dispatchAction(ctx, planAction, { status: status, onSuccess: function (res) { showPlan((res && res.body) || {}); } });
     };
     foot.appendChild(plan);
     foot.appendChild(status);
@@ -1073,16 +1214,15 @@
     var bar = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     (w.actions || []).forEach(function (a) {
-      // Button styling uses the SAME predicate as the dispatch gate, so a money action can never
-      // look non-money (or vice versa). isMoneyAction tolerates a projected MCP-App action with no
-      // `path` (it acts only via operation_id; money intent is read from label/id).
-      var isMoney = isMoneyAction(a);
-      var btn = el('button', 'pcc-btn ' + (isMoney ? 'pcc-btn-primary' : 'pcc-btn-quiet'), a.label);
-      btn.type = 'button';
+      // An actions-bar body is static, so ONE descriptor serves the button's styling + kit tag and
+      // the click itself (the gate displays it and the transport sends it). A projected MCP-App
+      // action with no `path` has no raw request: refused, styled as money, and host-routed.
+      var desc = requestDescriptor(a, (a && a.body) || {}, ctx.mode === 'host', ctx.apiBase);
+      var btn = writeButton(ctx, a, desc, 'Action');
       // PR2: a button wired to a registered typed operation stays live under the
       // host lockdown (hostLockActionBar skips the pcc-host-op-enabled class).
       if (hostActionEnabled(a)) btn.className += ' pcc-host-op-enabled';
-      btn.onclick = function () { dispatchAction(ctx, a, { status: status }); };
+      btn.onclick = function () { dispatchAction(ctx, a, { status: status, desc: desc }); };
       bar.appendChild(btn);
     });
     hostLockActionBar(bar); // host lockdown: disable non-typed action buttons + note
@@ -1092,44 +1232,12 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Action layer — NOTHING fires on load; execution is a click. Money verbs go
-  // through the Approval surface; snapshot mode emits copyable intent chips.
+  // Action layer — NOTHING fires on load; execution is a click. Every write is
+  // validated into ONE request descriptor (requestDescriptor); every write that
+  // is not on the kit's non-money allowlist passes the Approval surface; snapshot
+  // mode emits copyable intent chips; host mode runs registered typed operations.
   // ═══════════════════════════════════════════════════════════════════════
 
-  // The ONE canonical form of a manifest path: the pathname the wire will carry (WHATWG URL parsing
-  // against the fixed API origin), %-decoded the way the gateway routes it. An encoded '/', '?',
-  // '#' or '\\' would split differently at the server, so it has no canonical form (null).
-  function canonicalPath(path) {
-    try {
-      var p = new URL(String(path == null ? '' : path), API_ORIGIN).pathname;
-      if (/%(2f|3f|23|5c)/i.test(p)) return null;
-      return decodeURIComponent(p);
-    } catch (e) { return null; }
-  }
-  function matchesWriteTemplate(template, method, path) {
-    var sp = template.indexOf(' ');
-    if (template.slice(0, sp) !== method) return false;
-    var t = template.slice(sp + 1).split('/'), p = path.split('/');
-    if (t.length !== p.length) return false;
-    for (var i = 0; i < t.length; i++) {
-      if (t[i] === ':') { if (!/^[A-Za-z0-9_.~-]+$/.test(p[i])) return false; }
-      else if (t[i] !== p[i]) return false;
-    }
-    return true;
-  }
-  function isMoneyAction(action) {
-    if (!action) return false;
-    if (action.confirm === 'approval') return true;
-    // A projected MCP-App action has no raw path (a typed operation, host mode): no raw write.
-    if (!action.path) return true;
-    var canon = canonicalPath(action.path);
-    if (canon === null) return true; // no canonical form: fail closed
-    var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
-    for (var i = 0; i < NON_MONEY_WRITES.length; i++) {
-      if (matchesWriteTemplate(NON_MONEY_WRITES[i], method, canon)) return false;
-    }
-    return true; // unlisted write: money until proven otherwise
-  }
   // 53-bit string hash (cyrb53) for a deterministic idempotency key. Not a security primitive.
   function hash53(str) {
     var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
@@ -1164,72 +1272,109 @@
   // Unregistered/unknown ops (or no bridge) stay inert (the PR1 read-only state).
   function dispatchHostOperation(ctx, action, status) {
     if (!hostActionEnabled(action)) { markWriteUnavailable(status); return; }
+    var st = actionState(action);
+    // One in-flight call per action (r1 finding 4): a double-click never runs a typed operation twice.
+    // (Money approval / dedupe for a typed operation is the trusted server operation's job.)
+    if (st.posting) { alreadySubmitted(status, st); return; }
+    st.posting = true;
     status.className = 'pcc-action-status'; status.textContent = 'Working…';
-    window.__PCC_HOST_BRIDGE__.callOperation(action.operation_id, action.arguments || {}).then(function (result) {
+    function fail(err) {
+      st.posting = false;
+      status.className = 'pcc-action-status st-failed';
+      status.textContent = String((err && err.message) || 'Operation failed');
+    }
+    var call;
+    try { call = window.__PCC_HOST_BRIDGE__.callOperation(action.operation_id, action.arguments || {}); }
+    catch (e) { fail(e); return; }
+    Promise.resolve(call).then(function (result) {
+      st.posting = false;
       if (result && result.isError) {
         status.className = 'pcc-action-status st-failed';
         status.textContent = hostOpErrorText(result) || 'Operation failed';
       } else {
-        status.className = 'pcc-action-status st-settled';
+        // An acknowledgement, never settlement (ruling 2): NEUTRAL, not green.
+        status.className = 'pcc-action-status st-ack';
         status.textContent = 'Done' + (ctx && ctx.tx && ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
       }
-    }, function (err) {
-      status.className = 'pcc-action-status st-failed';
-      status.textContent = String((err && err.message) || 'Operation failed');
-    });
+    }, fail);
   }
 
+  // Returns the write's settle promise ({ ok, sent }) when a request starts, else null.
   function dispatchAction(ctx, action, opts) {
     opts = opts || {};
     var status = opts.status || el('span', 'pcc-action-status');
-    if (!action) return;
+    if (!action) return null;
 
     // Snapshot: never POST. Hand the LLM a copyable intent chip.
-    if (ctx.mode === 'snapshot') { intentChip(status, action.intentText || ('pcc: ' + action.label)); return; }
+    if (ctx.mode === 'snapshot') { intentChip(status, action.intentText || ('pcc: ' + action.label)); return null; }
 
     // R4 PR2: in MCP-App/host mode a manifest still cannot author a RAW write,
     // but it MAY name a REGISTERED typed operation, executed via the host bridge
     // (a server-authorized tools/call). An unregistered/unknown operation, or no
     // bridge, stays inert exactly as PR1 shipped.
-    if (ctx.mode === 'host') { dispatchHostOperation(ctx, action, status); return; }
+    if (ctx.mode === 'host') { dispatchHostOperation(ctx, action, status); return null; }
 
-    // Money verbs MUST pass through the Approval gate (unless we ARE that gate).
-    if (isMoneyAction(action) && !opts.viaApproval) {
-      openApprovalGate(ctx, action, opts);
-      return;
-    }
+    // One effect per intent: while a request is in flight, or once a MONEY write was accepted in
+    // this render (one-shot; a new intent needs a reload), a click says so and sends nothing.
+    var st = actionState(action);
+    if (st.posting || st.done) { alreadySubmitted(status, st); return null; }
 
-    // Ordinary write with inline confirm: two-step, in place. (Not for money.)
+    // Validate ONCE into the canonical descriptor; every step below uses this same object.
+    var desc = opts.desc || requestDescriptor(action, Object.assign({}, action.body || {}, opts.formValues || {}), false, ctx.apiBase);
+    if (!desc.ok) { refuseStatus(status, desc); return null; }
+
+    // Every write the kit's allowlist does not know is money: it passes the Approval gate first
+    // (unless we ARE that gate -- the approval window, or the gate's own Approve).
+    if (desc.money && !opts.viaApproval) { openApprovalGate(ctx, action, desc, opts); return null; }
+
+    // An allowlisted non-money write with inline confirm: two-step, in place.
     if (action.confirm === 'inline' && !opts.viaApproval && !opts.confirmed) {
       inlineConfirm(status, action, function () {
-        dispatchAction(ctx, action, Object.assign({}, opts, { confirmed: true }));
+        dispatchAction(ctx, action, Object.assign({}, opts, { confirmed: true, desc: desc }));
       });
-      return;
+      return null;
     }
 
-    doPost(ctx, action, opts, status);
+    return doPost(ctx, action, desc, opts, status);
   }
 
-  function doPost(ctx, action, opts, status) {
+  // Honest status for a write the kit REFUSED at validation: nothing was sent, and why.
+  function refuseStatus(status, desc) {
+    if (!status) return;
+    status.className = 'pcc-action-status st-failed';
+    status.textContent = 'Refused: ' + ((desc && desc.reason) || 'no valid request') + ' - nothing was sent.';
+  }
+  function alreadySubmitted(status, st) {
+    if (!status) return;
+    status.className = 'pcc-action-status st-waiting';
+    status.textContent = st.posting
+      ? 'Already submitted - waiting for the response.'
+      : 'Already submitted - it was accepted. Reload the page to make a new request.';
+  }
+
+  function doPost(ctx, action, desc, opts, status) {
     var st = actionState(action);
-    // One effect per click: a re-entrant dispatch of the SAME action while its request is in
-    // flight is ignored (a money button must not fire twice).
-    if (st.posting) return null;
-    var body = Object.assign({}, action.body || {}, opts.formValues || {});
-    // Idempotency key, stable per action INSTANCE = (action, request body): a double-click or a
-    // retry after a failure / unknown outcome resends the SAME key, so the server dedupes instead
-    // of double-charging. A different body is a different intent (new key); a 2xx consumes the
-    // instance (the key rotates). A form may name a reference field (idempotencyFrom): the key is
-    // then DERIVED from (reference, body), so the same reference + body dedupes even across a reload,
-    // and a changed body can never be replayed under an earlier request's key.
-    var fp = JSON.stringify(body);
-    var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
-    if (!st.idem || st.idem.fp !== fp) {
-      st.idem = { key: (ref != null && ref !== '') ? 'idem-' + hash53(String(ref) + '|' + fp) : 'idem-' + uuid(), fp: fp };
+    // Belt and braces: the busy guard and the money one-shot hold even for a direct caller.
+    if (st.posting || st.done) { alreadySubmitted(status, st); return null; }
+    if (!desc || !desc.ok) { refuseStatus(status, desc); return null; }
+    // Idempotency INTENTS (r1 finding 5), kit-owned: one key per body fingerprint while that
+    // attempt's outcome is UNRESOLVED, so A (unknown outcome) -> B -> retry A resends A's key and the
+    // server dedupes instead of double-charging. A 2xx consumes that fingerprint's key (a non-money
+    // write may then re-send under a new key; an accepted MONEY write is one-shot, st.done). A form
+    // reference (idempotencyFrom) DERIVES the key from (method, canonical route, reference, body): the
+    // same logical intent dedupes even across a reload, and never shares a key with another route
+    // or another body.
+    var fp = JSON.stringify(desc.body);
+    var key = st.keys[fp];
+    if (!key) {
+      var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
+      key = (ref != null && ref !== '')
+        ? 'idem-' + hash53(desc.method + ' ' + desc.canonical + '|' + String(ref) + '|' + fp)
+        : 'idem-' + uuid();
+      st.keys[fp] = key;
     }
-    var idem = st.idem.key;
-    if (action.kind === 'post') body.idempotencyKey = idem; // legacy body field, preserved
-    var money = isMoneyAction(action);
+    var sendBody = Object.assign({}, desc.body);
+    if (desc.method === 'POST') sendBody.idempotencyKey = key; // legacy body field (kind "post"), preserved
     function show(cls, text) {
       status.className = cls; status.textContent = text;
       // The approval GATE closes after a moment; mirror the final outcome to the caller's status
@@ -1238,32 +1383,34 @@
     }
     st.posting = true;
     show('pcc-action-status', 'Working…');
-    var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
-    return ctx.tx.send(method, action.path, body, idem).then(function (res) {
+    return ctx.tx.send(desc, sendBody, key).then(function (res) {
       st.posting = false;
       if (res.ok) {
-        st.idem = null; // this intent is consumed
+        delete st.keys[fp]; // this intent is resolved
         var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
-        // Accepted is not settled: a money write never renders green here. Its settlement state
-        // comes from a read model (a receipt window), not from this HTTP status.
-        if (money) show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace);
-        else show('pcc-action-status st-settled', 'Done' + trace);
-        if (typeof opts.rebind === 'function') opts.rebind();
+        // An HTTP 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2). A money write reads
+        // "submitted" (waiting) and is one-shot for this render; anything else a NEUTRAL "Done".
+        // Settled-green comes only from a read model (a receipt window).
+        if (desc.money) { st.done = true; show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace); }
+        else show('pcc-action-status st-ack', 'Done' + trace);
+        if (typeof opts.onSuccess === 'function') opts.onSuccess(res, desc);
       } else {
-        show('pcc-action-status st-failed', postErrorText(res, action));
+        show('pcc-action-status st-failed', postErrorText(res, desc));
       }
+      return { ok: !!res.ok, sent: !res.refused };
     }, function (err) {
       st.posting = false;
       show('pcc-action-status st-failed', String(err && err.message || 'Request failed'));
+      return { ok: false, sent: true };
     });
   }
 
   // Honest message for a failed write. Prefers the server's own message; otherwise explains the
   // C-03 endpoint changes instead of a bare status code.
-  function postErrorText(res, action) {
+  function postErrorText(res, desc) {
     var msg = res.body && (res.body.message || res.body.error);
     if (msg) return typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 300);
-    var canon = canonicalPath(action && action.path) || '';
+    var canon = (desc && desc.canonical) || '';
     if (res.status === 410) return 'This action is no longer available - the endpoint was removed. Nothing was executed.';
     if (res.status === 404 && /^\/api\/escrow\/chain\/[^\/]+\/fund$/.test(canon)) return 'Funding was refused: this escrow is not recognised by the protocol.';
     // A 5xx can come from the edge AFTER the gateway executed the write. The kit cannot know the
@@ -1286,15 +1433,16 @@
   }
 
   // Kit-derived, textContent-only "This will send" block — the honest summary of
-  // the REAL request (method + resolved destination + amount/asset + job/escrow
-  // ref) that the money action fires. Rendered ALONGSIDE the manifest label so a
-  // misleading label can never hide the true destination/amount (directive 10).
+  // the REAL request (method + the exact destination URL + amount/asset +
+  // job/escrow ref) the action fires, rendered from the SAME descriptor the
+  // transport sends. Shown ALONGSIDE the manifest label so a misleading label can
+  // never hide the true destination/amount (directive 10).
   function realRequestNode(desc) {
     var box = el('div', 'pcc-realreq');
     box.appendChild(el('div', 'pcc-realreq-title', 'This will send'));
     var line = el('div', 'pcc-realreq-line');
-    if (desc.destination === null) {
-      line.appendChild(el('span', 'pcc-realreq-blocked', 'BLOCKED — unsafe or non-PCC destination'));
+    if (!desc.ok || desc.destination === null) {
+      line.appendChild(el('span', 'pcc-realreq-blocked', 'BLOCKED — ' + (desc.reason || 'unsafe or non-PCC destination')));
     } else {
       line.appendChild(el('span', 'pcc-realreq-method', desc.method));
       line.appendChild(el('span', 'pcc-realreq-dest pcc-mono', desc.destination));
@@ -1309,50 +1457,46 @@
     return box;
   }
 
-  // The kit's Approval window as a floating modal — only Approve POSTs.
-  function openApprovalGate(ctx, action, opts) {
+  // The kit's Approval window as a floating modal — only its kit-labelled Approve sends, and it sends
+  // exactly the descriptor it displays.
+  function openApprovalGate(ctx, action, desc, opts) {
     // Host lockdown: writes are disabled in a hosted view — never open the gate.
     // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
     if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
     var st = actionState(action);
-    // An intent already in flight: say so, never open a second gate whose Approve would be inert.
-    if (st.posting) {
-      if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; opts.status.textContent = 'Already submitted - waiting for the response.'; }
-      return;
-    }
+    // An intent in flight or already accepted: say so, never open a gate whose Approve would be inert.
+    if (st.posting || st.done) { alreadySubmitted(opts && opts.status, st); return; }
     // One approval modal per action: a rapid second click must not stack a second gate.
-    if (st.gateOpen) return;
-    st.gateOpen = true;
+    if (st.gate) return;
+    var gate = {}; // THIS opening's identity: only it may release the one-gate guard
+    st.gate = gate;
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
     head.appendChild(el('span', 'pcc-win-title', 'Approve'));
     head.appendChild(el('span', 'pcc-pill st-waiting', 'confirm'));
     card.appendChild(head);
-    // Manifest-supplied label (may mislead) — shown, but NOT authoritative.
-    card.appendChild(el('p', 'pcc-approval-what', action.label));
-    // Kit-derived TRUTH about the request that will actually be sent.
-    var realBody = Object.assign({}, action.body || {}, opts.formValues || {});
-    var desc = describeRealRequest(ctx.apiBase, action, realBody, ctx.mode === 'host');
+    // The manifest's label is untrusted: quoted text only. The gate's controls are kit-owned.
+    if (action.label) card.appendChild(untrustedLabel(action.label));
+    // The ONE descriptor the Approve below sends, displayed verbatim (method + exact URL + body).
     card.appendChild(realRequestNode(desc));
-    var info = { args: realBody };
-    card.appendChild(approvalDetails(info));
+    card.appendChild(approvalDetails({ args: desc.body }));
     var foot = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve');
     approve.type = 'button';
     var cancel = el('button', 'pcc-btn pcc-btn-quiet', 'Cancel');
     cancel.type = 'button';
-    function close() { st.gateOpen = false; if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    // Instance-specific cleanup (r1 finding 5): a stale close() -- e.g. this gate's delayed
+    // auto-close firing after it was cancelled and a NEWER gate opened -- removes only its own
+    // overlay and never releases the newer gate's guard.
+    function close() {
+      if (st.gate === gate) st.gate = null;
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
     approve.onclick = function () {
-      if (desc.destination === null) {
-        status.className = 'pcc-action-status st-failed';
-        status.textContent = 'Refused: unsafe or non-PCC destination.';
-        if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
-        return;
-      }
       approve.disabled = true; // one Approve per gate opening
-      var sent = doPost(ctx, action, Object.assign({}, opts, { viaApproval: true, mirror: opts.status }), status);
+      var sent = doPost(ctx, action, desc, Object.assign({}, opts, { viaApproval: true, mirror: opts.status }), status);
       // Keep the gate (and its one-gate guard) until the request settles, then show the outcome briefly.
       var later = function () { setTimeout(close, 1200); };
       if (sent && typeof sent.then === 'function') sent.then(later, later); else later();
@@ -1576,6 +1720,8 @@
       '.pcc-pill.st-waiting{background:var(--wait-dim);color:var(--wait);}',
       '.pcc-pill.st-failed{background:var(--deny-dim);color:var(--deny);}',
       '.pcc-pill.st-running{background:var(--info-dim);color:var(--info);}',
+      /* neutral acknowledgement: an HTTP 2xx is never settlement (ruling 2) -- no hue */
+      '.pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}',
       /* type helpers */
       '.pcc-muted{color:var(--ink-3);font:400 13px/18px var(--font);}',
       '.pcc-mono{font-family:var(--mono);font-size:12px;color:var(--ink-3);}',
@@ -1629,6 +1775,11 @@
       '.pcc-action-status{font:400 13px/18px var(--font);color:var(--ink-2);display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;}',
       '.pcc-action-status.st-settled{color:var(--signal);}',
       '.pcc-action-status.st-failed{color:var(--deny);}',
+      '.pcc-action-status.st-ack{color:var(--ink-2);}',
+      /* kit-owned labels (ruling 4): the tag after a manifest label, and quoted untrusted text */
+      '.pcc-btn-tag{font-weight:400;opacity:.72;}',
+      '.pcc-untrusted-label{margin:0;font:400 13px/18px var(--font);color:var(--ink-3);}',
+      '.pcc-untrusted-v{color:var(--ink-2);}',
       '.pcc-confirm-q{color:var(--ink-2);}',
       /* run */
       '.pcc-run-latest{font:450 15px/22px var(--font);color:var(--ink);}',

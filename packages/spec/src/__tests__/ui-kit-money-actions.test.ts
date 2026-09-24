@@ -13,8 +13,18 @@
  *  - one effect per click (re-entrancy, one gate per action, one Approve per gate opening);
  *  - the approval action bar can no longer be deleted by footer rendering;
  *  - accepted != settled: a money write never renders green; the gate mirrors its outcome.
+ *
+ * Steward ruling on #342 + cross-family review r1 (px2-342-moneyactions-astra), pinned below
+ * (sections A-G + the r1 bypass list):
+ *  - A: Approve/Deny are kit-owned; a manifest label never labels an executing control; Deny
+ *    locks the moment a submission starts;
+ *  - B: ONE validated canonical request descriptor drives the gate, the display and the wire;
+ *    ambiguous encodings are refused at validation;
+ *  - C: only kind "post"/"patch" can write; D: chain Plan + hosted operations take the same policy;
+ *  - E: idempotency intents per body fingerprint, money one-shot; F: gate cleanup per instance;
+ *  - G: an HTTP acknowledgement is neutral, never settled-green.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -23,7 +33,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const kitSrc = readFileSync(path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js"), "utf8");
 const PCC = "https://capability.network";
 
-function boot(manifest: unknown) {
+function boot(manifest: unknown, snapshot?: unknown) {
   document.documentElement.removeAttribute("data-theme");
   document.head.innerHTML = "";
   document.body.innerHTML = "";
@@ -36,6 +46,13 @@ function boot(manifest: unknown) {
   m.id = "pcc-manifest";
   m.textContent = JSON.stringify(manifest);
   document.body.appendChild(m);
+  if (snapshot !== undefined) {
+    const s = document.createElement("script");
+    s.type = "application/json";
+    s.id = "pcc-snapshot";
+    s.textContent = JSON.stringify(snapshot);
+    document.body.appendChild(s);
+  }
   // eslint-disable-next-line no-eval
   (0, eval)(kitSrc); // no snapshot node -> LIVE mode
 }
@@ -181,12 +198,15 @@ describe("money gate (actions bar, live)", () => {
     expect(posts(calls).length).toBe(0);
   });
 
-  it("a malformed %-escape fails closed to the gate", () => {
+  it("a malformed %-escape fails closed: refused at validation (no inert gate, no request)", () => {
+    // Ruling 3: a request the kit cannot validate is not a request -- there is nothing to approve,
+    // so it is refused at the click with the reason instead of opening a gate whose Approve is dead.
     const calls = installFetch(() => ({ status: 200 }));
     boot(action({ path: "/api/x%E0%A4%A" }));
     btn("Go").click();
-    expect(document.querySelector(".pcc-overlay")).not.toBeNull();
+    expect(document.querySelector(".pcc-overlay")).toBeNull();
     expect(posts(calls).length).toBe(0);
+    expect(document.body.textContent).toContain("Refused: unsafe or ambiguous request path - nothing was sent.");
   });
 
   it("button styling uses the same predicate as the gate (an unlisted write looks like money)", () => {
@@ -368,7 +388,7 @@ describe("F2: money detection is fail-closed by construction (unlisted writes ar
     expect(document.body.textContent).toContain("Done");
   });
 
-  for (const [kind, p] of [["patch", "/api/artifacts"], ["post", "/API/artifacts"], ["post", "/api/artifacts/a1/fork/x"], ["post", "/api/artifacts/a%2Fb/fork"], ["post", "/api/artifactsX"]] as Array<[string, string]>) {
+  for (const [kind, p] of [["patch", "/api/artifacts"], ["post", "/API/artifacts"], ["post", "/api/artifacts/a1/fork/x"], ["post", "/api/artifactsX"], ["post", "/api/artifacts?x=1"], ["post", "/api/artifacts/"]] as Array<[string, string]>) {
     it(`a near-miss of the allowlist (${kind.toUpperCase()} ${p}) is still money`, () => {
       const calls = installFetch(() => ({ status: 200 }));
       boot(act({ kind, path: p }));
@@ -378,15 +398,18 @@ describe("F2: money detection is fail-closed by construction (unlisted writes ar
     });
   }
 
-  for (const p of ["/api%2Ffeedback", "/api/feedback%2Fagent-report", "/api/artifacts%2Fa1%2Ffork", "/api%2fartifacts"]) {
-    it(`an encoded separator has no canonical form and fails closed (${p})`, () => {
+  for (const p of ["/api%2Ffeedback", "/api/feedback%2Fagent-report", "/api/artifacts%2Fa1%2Ffork", "/api%2fartifacts", "/api/artifacts/a%2Fb/fork"]) {
+    it(`an encoded separator has no canonical form: refused at validation, never sent (${p})`, () => {
       // Decoding would turn these into allowlisted routes, but the gateway does not split on
-      // %2F, so the kit cannot know what they route to: money until proven otherwise.
+      // %2F, so the kit cannot know what they route to. Ruling 3 rejects such ambiguous encodings
+      // at validation: no gate, no request, an honest reason (previously an inert gate opened).
       const calls = installFetch(() => ({ status: 200 }));
       boot(act({ path: p }));
+      expect(btn("Go").textContent).toBe("Go · blocked");
       btn("Go").click();
-      expect(document.querySelector(".pcc-overlay")).not.toBeNull();
+      expect(document.querySelector(".pcc-overlay")).toBeNull();
       expect(posts(calls).length).toBe(0);
+      expect(document.body.textContent).toContain("Refused: unsafe or ambiguous request path");
     });
   }
 
@@ -547,5 +570,616 @@ describe("F10 + gate lifecycle", () => {
     release();
     await flush();
     expect(calls.filter((c) => c.startsWith("POST")).length).toBe(1);
+  });
+});
+
+// ── steward ruling on #342 + cross-family review r1 (px2-342-moneyactions-astra) ──────────────────
+const gateBtn = (label: string) =>
+  Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).find((b) => b.textContent === label) as HTMLButtonElement | undefined;
+const overlays = () => document.querySelectorAll(".pcc-overlay").length;
+const barStatus = () => document.querySelector(".pcc-win .pcc-action-status") as HTMLElement;
+const text = (sel: string) => (document.querySelector(sel) as HTMLElement | null)?.textContent ?? null;
+const winButtons = () => Array.from(document.querySelectorAll(".pcc-win .pcc-actionbar .pcc-btn")) as HTMLButtonElement[];
+// A fetch whose writes stay in flight until release(); reads answer at once.
+function pendingFetch(getBody: unknown = {}) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const calls: Call[] = [];
+  (window as unknown as { fetch: unknown }).fetch = (url: unknown, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+    const c: Call = { url: String(url), method: init?.method || "GET", headers: { ...(init?.headers || {}) }, body: init?.body ? JSON.parse(init.body) : null };
+    calls.push(c);
+    const resp = (body: unknown) => ({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve(body) });
+    return c.method === "GET" ? Promise.resolve(resp(getBody)) : gate.then(() => resp({}));
+  };
+  return { calls, release: () => release() };
+}
+
+describe("A (ruling 4): Approve/Deny are kit-owned; a manifest label never labels an executing control", () => {
+  const hostile = { ...approvalWin, approve: { ...approvalWin.approve, label: "Deny" }, deny: { ...approvalWin.deny, label: "Approve" } };
+
+  it("approval window: the controls read the KIT's 'Approve' / 'Deny' whatever the manifest labels say", async () => {
+    installFetch(okGetsAnd({ status: 200 }));
+    boot(man([hostile]));
+    await flush();
+    expect(winButtons().map((b) => b.textContent)).toEqual(["Approve", "Deny"]);
+    // The manifest's approve label survives only as quoted, attributed text, outside every control.
+    const quoted = Array.from(document.querySelectorAll(".pcc-win .pcc-untrusted-label")).map((n) => n.textContent);
+    expect(quoted).toEqual(["The dashboard calls this: “Deny”"]);
+    expect(winButtons().some((b) => b.querySelector(".pcc-untrusted-label") !== null)).toBe(false);
+  });
+
+  it("approval window: the control that READS 'Deny' sends nothing; only the kit's 'Approve' sends", async () => {
+    const calls = installFetch(okGetsAnd({ status: 200 }));
+    boot(man([hostile]));
+    await flush();
+    winButtons().find((b) => b.textContent === "Deny")!.click();
+    await flush();
+    expect(posts(calls).length).toBe(0);
+
+    const calls2 = installFetch(okGetsAnd({ status: 200 }));
+    boot(man([hostile]));
+    await flush();
+    winButtons().find((b) => b.textContent === "Approve")!.click();
+    await flush();
+    expect(posts(calls2, "/api/escrow/chain/0xabc/fund").length).toBe(1);
+  });
+
+  for (const label of ["Deny", "Cancel", "Close"]) {
+    it(`actions bar: a write labelled "${label}" always ends in the kit's tag, and its click only opens the gate`, () => {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(act({ label, path: "/api/pool/stake" }));
+      const b = btn(label);
+      expect(b.textContent).toBe(`${label} · needs approval`);
+      expect((b.lastChild as HTMLElement).className).toBe("pcc-btn-tag");
+      b.click();
+      expect(overlays()).toBe(1);
+      expect(posts(calls).length).toBe(0);
+    });
+  }
+
+  it("actions bar: an allowlisted non-money write labelled 'Cancel' still says that it sends now", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ label: "Cancel", path: "/api/feedback" }));
+    expect(btn("Cancel").textContent).toBe("Cancel · sends now");
+  });
+
+  it("form submit and inline-confirm writes carry the kit tag too", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(man([
+      { kind: "form", schema: { properties: {} }, submit: { id: "s", label: "Deny", kind: "post", path: "/api/escrow/chain/0xabc/fund" } },
+      { kind: "actions", actions: [{ id: "f", label: "Close", kind: "post", path: "/api/feedback", confirm: "inline" }] },
+    ]));
+    expect(btn("Deny").textContent).toBe("Deny · needs approval");
+    expect(btn("Close").textContent).toBe("Close · asks to confirm");
+  });
+
+  it("the Approval gate's controls are kit-owned; the manifest label is quoted text, never a button", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ label: "Deny", path: "/api/escrow/chain/0xabc/fund" }));
+    btn("Deny").click();
+    expect(Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).map((b) => b.textContent)).toEqual(["Approve", "Cancel"]);
+    expect(text(".pcc-overlay .pcc-untrusted-label")).toBe("The dashboard calls this: “Deny”");
+  });
+
+  it("Deny locks the moment a submission starts: it can never claim 'nothing was sent' while a request is in flight", async () => {
+    const f = pendingFetch({ summary: "Pizza" });
+    boot(man([approvalWin]));
+    await flush();
+    btn("Approve").click();
+    expect(btn("Approve").disabled).toBe(true);
+    expect(btn("Deny").disabled).toBe(true);
+    // Even invoking Deny's handler directly (bypassing the disabled attribute) claims nothing.
+    (btn("Deny") as unknown as { onclick: () => void }).onclick();
+    expect(document.body.textContent).not.toContain("nothing was sent");
+    f.release();
+    await flush();
+    expect(f.calls.filter((c) => c.method === "POST").length).toBe(1);
+    expect(btn("Deny").disabled).toBe(true);
+    expect(document.body.textContent).not.toContain("nothing was sent");
+  });
+
+  it("after a FAILED approval, Approve may retry with the SAME key but Deny stays locked (a request was sent)", async () => {
+    let fail = true;
+    const calls = installFetch((c) => (c.method === "GET" ? { status: 200, body: { summary: "Pizza" } } : fail ? { status: 503 } : { status: 200 }));
+    boot(man([approvalWin]));
+    await flush();
+    btn("Approve").click();
+    await flush();
+    expect(btn("Approve").disabled).toBe(false);
+    expect(btn("Deny").disabled).toBe(true);
+    fail = false;
+    btn("Approve").click();
+    await flush();
+    const ps = posts(calls, "/api/escrow/chain/0xabc/fund");
+    expect(ps.length).toBe(2);
+    expect(ps[1]!.headers["Idempotency-Key"]).toBe(ps[0]!.headers["Idempotency-Key"]);
+    expect(btn("Approve").disabled).toBe(true); // accepted: the approval is consumed
+  });
+});
+
+describe("B (ruling 3): ONE canonical request descriptor drives the gate, the display and the wire", () => {
+  // r1 finding 2's probes that have no single meaning: refused at validation, nothing sent, no gate.
+  const refused = [
+    "/api%252Fcompose/plan", "/api%2Fcompose/plan", "/api%2fcompose/plan", "/api/fiat-\tramp/session",
+    "/api/compose#x", "/api/compose%23x", "/api/compose%3Fq=1", "/api/compose%5Cplan", "/api/x%25",
+    "/api/%2e%2e/compose", "/api/compose\u0085",
+  ];
+  for (const p of refused) {
+    it(`refused at validation (no gate, nothing sent, honest reason): ${JSON.stringify(p)}`, async () => {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(act({ path: p, body: { amount: 1 } }));
+      expect(btn("Go").textContent).toBe("Go · blocked");
+      btn("Go").click();
+      await flush();
+      expect(overlays()).toBe(0);
+      expect(calls.length).toBe(0);
+      expect(barStatus().className).toContain("st-failed");
+      expect(barStatus().textContent).toMatch(/^Refused: .+ - nothing was sent\.$/);
+    });
+  }
+
+  // Unambiguous requests: gated (unlisted = money), and the wire carries EXACTLY the URL and method
+  // the gate displayed -- the transport sends desc.url and never re-derives it.
+  const gated: Array<[string, string, string]> = [
+    ["post", "/api/x/fund/", `${PCC}/api/x/fund/`],
+    ["post", "/api/x/fund", `${PCC}/api/x/fund`],
+    ["post", "/api/fiat%2Dramp/session", `${PCC}/api/fiat%2Dramp/session`],
+    ["post", "/API/COMPOSE/plan/", `${PCC}/API/COMPOSE/plan/`],
+    ["post", "/api/compose/plan?q=x", `${PCC}/api/compose/plan?q=x`],
+    ["post", "/api/café/fund", `${PCC}/api/caf%C3%A9/fund`],
+    ["post", "/api/feedback?x=1", `${PCC}/api/feedback?x=1`], // allowlisted route + a query: not an exact match
+    ["post", "/api/feedback\uFF0Fagent-report", `${PCC}/api/feedback%EF%BC%8Fagent-report`], // fullwidth-solidus lookalike
+    ["patch", "/api/jobs/j1/status", `${PCC}/api/jobs/j1/status`],
+  ];
+  for (const [kind, p, wire] of gated) {
+    it(`${kind.toUpperCase()} ${JSON.stringify(p)} is gated, and the wire gets exactly the displayed ${wire}`, async () => {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(act({ kind, path: p, body: { amount: 3 } }));
+      btn("Go").click();
+      expect(posts(calls).length).toBe(0);
+      const shownUrl = text(".pcc-overlay .pcc-realreq-dest");
+      const shownMethod = text(".pcc-overlay .pcc-realreq-method");
+      expect(shownUrl).toBe(wire);
+      expect(shownMethod).toBe(kind.toUpperCase());
+      gateApproveBtn()!.click();
+      await flush();
+      const ps = posts(calls);
+      expect(ps.length).toBe(1);
+      expect(ps[0]!.url).toBe(shownUrl);
+      expect(ps[0]!.method).toBe(shownMethod);
+    });
+  }
+
+  it("the approval window sends exactly the URL its 'This will send' block displays", async () => {
+    const calls = installFetch(okGetsAnd({ status: 200 }));
+    boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, path: "/api/escrow/chain/0x%41bc/fund" } }]));
+    await flush();
+    const shown = text(".pcc-win .pcc-realreq-dest");
+    expect(shown).toBe(`${PCC}/api/escrow/chain/0x%41bc/fund`);
+    btn("Approve").click();
+    await flush();
+    expect(posts(calls).map((c) => c.url)).toEqual([shown]);
+  });
+
+  it("an approval window whose approve path is ambiguous shows BLOCKED and sends nothing", async () => {
+    const calls = installFetch(okGetsAnd({ status: 200 }));
+    boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, path: "/api%252Fescrow/chain/0xabc/fund" } }]));
+    await flush();
+    expect(text(".pcc-win .pcc-realreq-blocked")).toContain("BLOCKED");
+    btn("Approve").click();
+    await flush();
+    expect(posts(calls).length).toBe(0);
+    expect(document.body.textContent).toContain("Refused");
+  });
+
+  for (const p of ["/api%2Fjobs", "/api%252Fjobs", "/api/jobs%3Fx"]) {
+    it(`a READ binding with an ambiguous encoding is refused too, no fetch (${p})`, async () => {
+      const calls = installFetch(() => ({ status: 200, body: { n: 1 } }));
+      boot(man([{ kind: "metric", label: "M", binding: { path: p }, format: "int" }]));
+      await flush();
+      expect(calls.length).toBe(0);
+      expect(document.body.textContent).toContain("refused unsafe request path");
+    });
+  }
+});
+
+describe("r1 finding 3: the nine listed money routes are all gated (neutral label and id, no confirm)", () => {
+  const nine = [
+    "/api/settlement/flush", "/api/pool/stake", "/api/rewards/claims", "/api/swf/claims", "/api/bounty/claim",
+    "/api/bounty/verify", "/api/bounty/demand", "/api/tool-catalog/bounty", "/api/onboard/redeem",
+  ];
+  for (const p of nine) {
+    it(`POST ${p}: "Continue" opens the gate and sends nothing; Approve sends exactly one POST`, async () => {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(man([{ kind: "actions", actions: [{ id: "x", label: "Continue", kind: "post", path: p, body: {} }] }]));
+      const b = btn("Continue");
+      expect(b.className).toContain("pcc-btn-primary");
+      expect(b.textContent).toBe("Continue · needs approval");
+      b.click();
+      expect(overlays()).toBe(1);
+      expect(posts(calls).length).toBe(0);
+      gateApproveBtn()!.click();
+      await flush();
+      expect(posts(calls).map((c) => c.url)).toEqual([`${PCC}${p}`]);
+    });
+  }
+});
+
+describe("r1 findings 2 + 4: only the path decides; labels, ids and confirm:'inline' never steer the policy", () => {
+  it("a money-sounding label/id on an allowlisted route still sends now; a neutral one on a money route is gated", () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "actions", actions: [
+      { id: "fund", label: "Fund escrow", kind: "post", path: "/api/feedback", body: {} },
+      { id: "view", label: "View", kind: "post", path: "/api/bounty/claim", body: {} },
+    ] }]));
+    expect(btn("Fund escrow").textContent).toBe("Fund escrow · sends now");
+    expect(btn("View").textContent).toBe("View · needs approval");
+    btn("View").click();
+    expect(overlays()).toBe(1);
+    expect(posts(calls).length).toBe(0);
+  });
+
+  it("confirm:'inline' cannot downgrade a money write: the Approval gate opens, not an inline confirm", () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ path: "/api/pool/stake", confirm: "inline" }));
+    btn("Go").click();
+    expect(overlays()).toBe(1);
+    expect(document.querySelector(".pcc-confirm-q")).toBeNull();
+    expect(posts(calls).length).toBe(0);
+  });
+});
+
+describe("B: Transport.send sends only a validated, pinned descriptor (#288 re-checked, never re-derived)", () => {
+  type Tx = { send(desc: unknown, body: unknown, key?: string): Promise<{ ok: boolean; refused?: boolean }> };
+  // The shipped Transport region, evaluated as the gateway host-integration suite does.
+  function kitTransport(fetchImpl: (u: string, init?: Record<string, unknown>) => Promise<unknown>): Tx {
+    const startMarker = "function Transport(apiBase, isHost) {";
+    const endMarker = "HostTransport.prototype.streamSSE = Transport.prototype.streamSSE;";
+    const start = kitSrc.indexOf(startMarker);
+    const end = kitSrc.indexOf(endMarker, start) + endMarker.length;
+    const bundle = [
+      `var API_ORIGIN = ${JSON.stringify(PCC)};`,
+      "function getKey(){ return 'pcc_live_viewer'; }",
+      kitSrc.slice(start, end),
+      "return new Transport(API_ORIGIN, false);",
+    ].join("\n");
+    // eslint-disable-next-line no-new-func, @typescript-eslint/no-implied-eval
+    return new Function("fetch", "window", bundle)(fetchImpl, {}) as Tx;
+  }
+  const ok = () => Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve({}) });
+  const forged: Array<[string, Record<string, unknown>]> = [
+    ["not ok", { ok: false, method: "POST", url: `${PCC}/api/x`, reason: "r" }],
+    ["off-origin url", { ok: true, method: "POST", url: "https://evil.example/api/x" }],
+    ["url not in canonical serialization", { ok: true, method: "POST", url: `${PCC}/api/x/../escrow/fund` }],
+    ["credentials in the url", { ok: true, method: "POST", url: "https://user:pw@capability.network/api/x" }],
+    ["unsupported method", { ok: true, method: "PUT", url: `${PCC}/api/x` }],
+    ["no url", { ok: true, method: "POST", path: "/api/x" }],
+  ];
+  for (const [name, desc] of forged) {
+    it(`refuses a forged descriptor (${name}): no fetch, so no Bearer leaves`, async () => {
+      const urls: string[] = [];
+      const tx = kitTransport((u) => { urls.push(u); return ok(); });
+      const res = await tx.send(desc, {}, "k1");
+      expect(res.ok).toBe(false);
+      expect(res.refused).toBe(true);
+      expect(urls.length).toBe(0);
+    });
+  }
+
+  it("a valid descriptor is fetched at exactly desc.url with desc.method (+ the pinned fetch options)", async () => {
+    const seen: Array<{ u: string; init?: Record<string, unknown> }> = [];
+    const tx = kitTransport((u, init) => { seen.push({ u, init }); return ok(); });
+    await tx.send({ ok: true, method: "PATCH", url: `${PCC}/api/jobs/j%31/status` }, { a: 1 }, "k2");
+    expect(seen.length).toBe(1);
+    expect(seen[0]!.u).toBe(`${PCC}/api/jobs/j%31/status`);
+    expect(seen[0]!.init).toMatchObject({ method: "PATCH", credentials: "omit", redirect: "error", referrerPolicy: "no-referrer", cache: "no-store" });
+    expect((seen[0]!.init!.headers as Record<string, string>)["Idempotency-Key"]).toBe("k2");
+  });
+});
+
+describe("C: only kind 'post' -> POST and 'patch' -> PATCH; any other kind sends nothing", () => {
+  const badKinds: Array<[string, unknown]> = [
+    ["put", "put"], ["delete", "delete"], ["PATCH", "PATCH"], ["POST", "POST"], ["get", "get"], ["missing", undefined], ["a number", 1],
+  ];
+  for (const [name, kind] of badKinds) {
+    it(`kind ${name}: refused with an honest status; no gate, no request`, async () => {
+      const calls = installFetch(() => ({ status: 200 }));
+      const a: Record<string, unknown> = { id: "x", label: "Go", path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 } };
+      if (kind !== undefined) a.kind = kind;
+      boot(man([{ kind: "actions", actions: [a] }]));
+      expect(btn("Go").textContent).toBe("Go · blocked");
+      btn("Go").click();
+      await flush();
+      expect(overlays()).toBe(0);
+      expect(calls.length).toBe(0);
+      expect(barStatus().textContent).toContain('unsupported action kind (only "post" and "patch" can write)');
+    });
+  }
+
+  it("the allowlist never widens the kinds: PUT /api/feedback is refused", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ kind: "put", path: "/api/feedback" }));
+    btn("Go").click();
+    await flush();
+    expect(calls.length).toBe(0);
+  });
+
+  it("approval window: approve.kind 'delete' is BLOCKED in 'This will send' and Approve sends nothing", async () => {
+    const calls = installFetch(okGetsAnd({ status: 200 }));
+    boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, kind: "delete" } }]));
+    await flush();
+    expect(text(".pcc-win .pcc-realreq-blocked")).toContain("unsupported action kind");
+    btn("Approve").click();
+    await flush();
+    expect(posts(calls).length).toBe(0);
+  });
+
+  it("form submit with kind 'PATCH' (wrong case) sends nothing", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "form", schema: { properties: {} }, submit: { id: "s", label: "Send", kind: "PATCH", path: "/api/feedback" } }]));
+    btn("Send").click();
+    await flush();
+    expect(calls.length).toBe(0);
+    expect(document.body.textContent).toContain("unsupported action kind");
+  });
+});
+
+describe("D: every write entry point goes through the same policy (chain Plan)", () => {
+  const chainWin = {
+    kind: "chain",
+    composeRef: { outcomeType: "pizza", budgetUSD: 25, minAssuranceTier: 0 },
+    execute: { id: "exec", label: "Execute", kind: "post", path: "/api/compose/c1/execute", body: {} },
+  };
+  const planned = { steps: [{ capabilityType: "oven", estimatedPriceUSD: 12 }], totalPriceUSD: 12 };
+
+  it("chain Plan is a gated write: its click opens ONE Approval gate and sends nothing", () => {
+    const calls = installFetch(() => ({ status: 201, body: planned }));
+    boot(man([chainWin]));
+    expect(btn("Plan").textContent).toBe("Plan · needs approval");
+    btn("Plan").click();
+    btn("Plan").click();
+    expect(overlays()).toBe(1);
+    expect(posts(calls).length).toBe(0);
+  });
+
+  it("after Approve, Plan sends exactly ONE POST /api/compose (the displayed URL, an Idempotency-Key) and renders the plan", async () => {
+    const calls = installFetch(() => ({ status: 201, body: planned }));
+    boot(man([chainWin]));
+    btn("Plan").click();
+    const shown = text(".pcc-overlay .pcc-realreq-dest");
+    gateApproveBtn()!.click();
+    gateApproveBtn()!.click();
+    await flush();
+    const ps = posts(calls);
+    expect(ps.length).toBe(1);
+    expect(ps[0]!.url).toBe(`${PCC}/api/compose`);
+    expect(ps[0]!.url).toBe(shown);
+    expect(ps[0]!.headers["Idempotency-Key"]).toMatch(/^idem-/);
+    expect(ps[0]!.body).toMatchObject({ outcomeType: "pizza", budgetUSD: 25, minAssuranceTier: 0 });
+    expect(document.body.textContent).toContain("oven");
+    expect(document.body.textContent).toContain("total 12.00 USDC");
+  });
+
+  it("Plan is busy-guarded and one-shot: in flight -> 'Already submitted'; once accepted nothing more is sent", async () => {
+    const f = pendingFetch();
+    boot(man([chainWin]));
+    btn("Plan").click();
+    gateApproveBtn()!.click();
+    gateBtn("Cancel")!.click();
+    btn("Plan").click(); // while the request is in flight
+    expect(overlays()).toBe(0);
+    expect(document.body.textContent).toContain("Already submitted");
+    f.release();
+    await flush();
+    btn("Plan").click(); // an accepted money write is one-shot
+    await flush();
+    expect(overlays()).toBe(0);
+    expect(f.calls.filter((c) => c.method === "POST").length).toBe(1);
+  });
+
+  it("in snapshot mode Plan hands back the intent chip, never a request", () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([chainWin]), { _ts: "2026-09-24T00:00:00Z" });
+    btn("Plan").click();
+    expect(calls.length).toBe(0);
+    expect(overlays()).toBe(0);
+    expect(text(".pcc-chip")).toBe("pcc: plan pizza");
+  });
+});
+
+describe("D: a hosted typed operation has a per-action re-entrancy guard", () => {
+  const w = window as unknown as { __PCC_HOST__?: boolean; __PCC_HOST_OPERATIONS__?: string[]; __PCC_HOST_BRIDGE__?: unknown };
+  afterEach(() => { delete w.__PCC_HOST__; delete w.__PCC_HOST_OPERATIONS__; delete w.__PCC_HOST_BRIDGE__; });
+  const hostBoot = (callOperation: unknown) => {
+    w.__PCC_HOST__ = true;
+    w.__PCC_HOST_OPERATIONS__ = ["job.cancel"];
+    w.__PCC_HOST_BRIDGE__ = { callOperation };
+    boot(man([{ kind: "actions", actions: [
+      { id: "c", label: "Cancel job", kind: "post", path: "/api/jobs/j1/cancel", operation_id: "job.cancel", arguments: { jobId: "j1" } },
+    ] }]));
+  };
+
+  it("one in-flight call per action: a triple-click runs the operation ONCE; once settled it may run again", async () => {
+    let release!: (v: unknown) => void;
+    const callOperation = vi.fn(() => new Promise((r) => { release = r; }));
+    installFetch(() => ({ status: 200 }));
+    hostBoot(callOperation);
+    const b = btn("Cancel job");
+    expect(b.disabled).toBe(false);
+    b.click(); b.click(); b.click();
+    expect(callOperation).toHaveBeenCalledTimes(1);
+    expect(barStatus().textContent).toContain("Already submitted");
+    release({ structuredContent: {} });
+    await flush();
+    expect(barStatus().textContent).toBe("Done");
+    expect(barStatus().className).toBe("pcc-action-status st-ack"); // G: a neutral acknowledgement
+    expect(document.body.innerHTML).not.toContain("st-settled");
+    b.click();
+    expect(callOperation).toHaveBeenCalledTimes(2);
+  });
+
+  it("a bridge that throws synchronously releases the guard (never stuck at 'Working')", () => {
+    const callOperation = vi.fn(() => { throw new Error("bridge down"); });
+    installFetch(() => ({ status: 200 }));
+    hostBoot(callOperation);
+    btn("Cancel job").click();
+    expect(barStatus().textContent).toBe("bridge down");
+    btn("Cancel job").click();
+    expect(callOperation).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("E: idempotency intents (kit-owned, per body fingerprint) and money one-shot", () => {
+  const noteForm = (p: string) => man([{
+    kind: "form",
+    schema: { properties: { note: { type: "string" } } },
+    submit: { id: "req", label: "Send", kind: "post", path: p },
+  }]);
+  const setNote = (v: string) => { (document.querySelector(".pcc-form-fields input") as HTMLInputElement).value = v; };
+
+  it("A (unknown outcome) -> B -> retry A reuses A's key; retry B reuses B's", async () => {
+    const calls = installFetch(() => ({ status: 503 }));
+    boot(noteForm("/api/feedback"));
+    for (const v of ["A", "B", "A", "B"]) { setNote(v); btn("Send").click(); await flush(); }
+    const k = posts(calls, "/api/feedback").map((c) => c.headers["Idempotency-Key"]);
+    expect(k.length).toBe(4);
+    expect(k[1]).not.toBe(k[0]);
+    expect(k[2]).toBe(k[0]);
+    expect(k[3]).toBe(k[1]);
+  });
+
+  it("A/B/A through the Approval gate (a money form) reuses A's key as well", async () => {
+    const calls = installFetch(() => ({ status: 503 }));
+    boot(noteForm("/api/escrow/chain/0xabc/fund"));
+    for (const v of ["A", "B", "A"]) {
+      setNote(v);
+      btn("Send").click();
+      gateApproveBtn()!.click();
+      await flush();
+      gateBtn("Cancel")!.click();
+    }
+    const k = posts(calls).map((c) => c.headers["Idempotency-Key"]);
+    expect(k.length).toBe(3);
+    expect(k[1]).not.toBe(k[0]);
+    expect(k[2]).toBe(k[0]);
+  });
+
+  it("a 2xx consumes only THAT fingerprint's key: B keeps its key; A re-sends under a NEW key (non-money)", async () => {
+    let okFor = "";
+    const calls = installFetch((c) => (c.body && c.body["note"] === okFor ? { status: 200 } : { status: 503 }));
+    boot(noteForm("/api/feedback"));
+    setNote("A"); btn("Send").click(); await flush(); // A unresolved
+    setNote("B"); btn("Send").click(); await flush(); // B unresolved
+    okFor = "A";
+    setNote("A"); btn("Send").click(); await flush(); // A retried under A's key -> 2xx: consumed
+    setNote("B"); btn("Send").click(); await flush(); // B retried: still B's key
+    setNote("A"); btn("Send").click(); await flush(); // A after its success: a new intent, a new key
+    const k = posts(calls, "/api/feedback").map((c) => c.headers["Idempotency-Key"]);
+    expect(k.length).toBe(5);
+    expect(k[2]).toBe(k[0]);
+    expect(k[3]).toBe(k[1]);
+    expect(k[4]).not.toBe(k[0]);
+    expect(k[4]).not.toBe(k[1]);
+  });
+
+  it("an idempotencyFrom key is bound to its route: the same reference + body on two routes never share a key", async () => {
+    const calls = installFetch(() => ({ status: 503 }));
+    const refSubmit = (id: string, p: string) => ({
+      kind: "form",
+      schema: { properties: { note: { type: "string", default: "order-7" } } },
+      submit: { id, label: id, kind: "post", path: p, idempotencyFrom: "note" },
+    });
+    boot(man([refSubmit("One", "/api/feedback"), refSubmit("Two", "/api/feedback/agent-report")]));
+    btn("One").click(); await flush();
+    btn("Two").click(); await flush();
+    const ps = posts(calls);
+    expect(ps.length).toBe(2);
+    expect(ps[0]!.body).toMatchObject({ note: "order-7" });
+    expect(ps[1]!.body).toMatchObject({ note: "order-7" });
+    expect(ps[1]!.headers["Idempotency-Key"]).not.toBe(ps[0]!.headers["Idempotency-Key"]);
+  });
+
+  it("a MONEY action that was accepted is one-shot: another click says 'Already submitted' and sends nothing", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 } }));
+    btn("Go").click();
+    gateApproveBtn()!.click();
+    await flush();
+    expect(posts(calls).length).toBe(1);
+    gateBtn("Cancel")!.click();
+    btn("Go").click();
+    btn("Go").click();
+    await flush();
+    expect(overlays()).toBe(0);
+    expect(posts(calls).length).toBe(1);
+    expect(barStatus().textContent).toContain("Already submitted");
+  });
+
+  it("a money FORM is one-shot even with a different body: a new intent needs a reload", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(noteForm("/api/escrow/chain/0xabc/fund"));
+    setNote("A"); btn("Send").click(); gateApproveBtn()!.click(); await flush();
+    gateBtn("Cancel")!.click();
+    setNote("B"); btn("Send").click(); await flush();
+    expect(overlays()).toBe(0);
+    expect(posts(calls).length).toBe(1);
+    expect(document.body.textContent).toContain("Already submitted");
+  });
+});
+
+describe("F: Approval-gate cleanup is instance-specific", () => {
+  it("approve, cancel, reopen, then the OLD gate's delayed close fires: the newer gate's guard survives", async () => {
+    const calls = installFetch(() => ({ status: 503 })); // a failed attempt keeps the action re-openable
+    boot(act({ path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 } }));
+    btn("Go").click();
+    gateApproveBtn()!.click();
+    await flush(); // settled: gate 1 schedules its own close in 1.2 s
+    gateBtn("Cancel")!.click(); // ...but is closed by hand first
+    expect(overlays()).toBe(0);
+    btn("Go").click(); // gate 2
+    expect(overlays()).toBe(1);
+    await new Promise((r) => setTimeout(r, 1300)); // gate 1's stale timer fires now
+    btn("Go").click(); // must NOT stack a third gate on gate 2
+    expect(overlays()).toBe(1);
+    // gate 2 still works, and retries the unresolved body under the SAME key
+    gateApproveBtn()!.click();
+    await flush();
+    const ps = posts(calls);
+    expect(ps.length).toBe(2);
+    expect(ps[1]!.headers["Idempotency-Key"]).toBe(ps[0]!.headers["Idempotency-Key"]);
+  });
+});
+
+describe("G (ruling 2): acknowledgements are neutral; settled-green only comes from a read model", () => {
+  it("a non-money 2xx reads 'Done' in the neutral st-ack class", async () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ path: "/api/artifacts", body: { title: "t" } }));
+    btn("Go").click();
+    await flush();
+    expect(barStatus().textContent).toBe("Done");
+    expect(barStatus().className).toBe("pcc-action-status st-ack");
+    expect(document.body.innerHTML).not.toContain("st-settled");
+  });
+
+  it("a NON-money approval window acknowledges with a neutral 'resolved' pill", async () => {
+    installFetch(okGetsAnd({ status: 200 }));
+    boot(man([{ kind: "approval", binding: { path: "/api/csd/doc-1" },
+      approve: { id: "v", label: "Validate", kind: "post", path: "/api/csd/validate", body: { doc: "d" } } }]));
+    await flush();
+    btn("Approve").click();
+    await flush();
+    const pill = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(pill.textContent).toBe("resolved");
+    expect(pill.className).toBe("pcc-pill st-ack");
+    expect(document.body.innerHTML).not.toContain("st-settled");
+  });
+
+  it("the kit stylesheet renders st-ack without a hue (never the signal green)", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ path: "/api/artifacts" }));
+    const css = document.getElementById("pcc-ui-styles")!.textContent!;
+    expect(css).toContain(".pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}");
+    expect(css).toContain(".pcc-action-status.st-ack{color:var(--ink-2);}");
+    expect(css).not.toMatch(/st-ack\{[^}]*--signal/);
   });
 });
