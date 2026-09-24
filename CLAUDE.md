@@ -394,7 +394,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/api/fiat-ramp/cdp/wallet/:address/balance` | USDC balance of a CDP smart wallet. |
 | GET | `/api/fiat-ramp/sessions` | YOUR ramp sessions (matched to your wallet address); all sessions with `X-Admin-Key`. |
 
-A provider that is not configured on the gateway answers **503 `not_configured`**; nothing is created or quoted. With `PCC_DEMO_ROUTES=true` (demo deployments only) it answers with simulated data instead, and every such response carries `mock: true, demo: true`.
+A provider that is not **fully** configured on the gateway answers **503 `not_configured`**; nothing is created or quoted. A partial configuration counts as not configured: Stripe needs both keys, Yellowcard both keys, Wise the token and the profile, and CDP the key id, secret and wallet secret. The configuration is read once per process, so the answer and the client that produced it always agree. A live answer carries `environment` (`production` or `sandbox`, with `sandbox: true`; a sandbox moves no real money). With `PCC_DEMO_ROUTES=true` (demo deployments only; **ignored under `NODE_ENV=production`**) it answers with simulated data instead, and every such response carries `mock: true, demo: true`. Demo mode never builds a real Coinbase checkout URL. `GET /api/fiat-ramp/sessions` lists the sessions you created or that pay into or out of your wallet (all of them with a valid `X-Admin-Key`). The testnet faucet reports a submitted transaction as `submitted: true, confirmed: false`, never as a confirmed mint.
 
 ### DePIN, IP & Governance
 
