@@ -144,6 +144,41 @@ export async function readStopState(kernelId: string, fetchImpl: Fetch = fetch):
   };
 }
 
+/**
+ * A stop counts only when the POST answered `{ stopped: true }` for the kernel
+ * AND a read-back of the kernel's recorded policy afterwards says it is
+ * stopped. Anything else is NOT STOPPED, with the reason.
+ */
+export function confirmStop(outcome: StopOutcome, readBack: Result<StopState> | undefined): StopOutcome {
+  if (outcome.state !== "stopped") return outcome;
+  const notStopped = (reason: string): StopOutcome => ({ kernelId: outcome.kernelId, state: "not_stopped", reason });
+  if (!readBack) return notStopped("PCC answered the stop, but its recorded state was not read back.");
+  if (!readBack.ok) return notStopped(`PCC answered the stop, but its recorded state could not be read back (${readBack.reason})`);
+  if (!readBack.data.stopped) return notStopped("PCC answered the stop, but its recorded state does not show this machine stopped.");
+  return outcome;
+}
+
+/** Stop one kernel, then read its recorded policy back; see confirmStop. */
+export async function stopAndConfirm(kernelId: string, fetchImpl: Fetch = fetch): Promise<StopOutcome> {
+  const outcome = await emergencyStop(kernelId, undefined, fetchImpl);
+  if (outcome.state !== "stopped") return outcome;
+  return confirmStop(outcome, await readStopState(kernelId, fetchImpl));
+}
+
+/** Resume one kernel, then read back that its recorded policy no longer says stopped. */
+export async function resumeAndConfirm(kernelId: string, fetchImpl: Fetch = fetch): Promise<ResumeOutcome> {
+  const outcome = await emergencyResume(kernelId, fetchImpl);
+  if (outcome.state !== "resumed") return outcome;
+  const readBack = await readStopState(kernelId, fetchImpl);
+  if (!readBack.ok) {
+    return { kernelId, state: "not_resumed", reason: `PCC answered the resume, but its recorded state could not be read back (${readBack.reason})` };
+  }
+  if (readBack.data.stopped) {
+    return { kernelId, state: "not_resumed", reason: "PCC answered the resume, but its recorded state still shows this machine stopped." };
+  }
+  return outcome;
+}
+
 // ── Approvals ───────────────────────────────────────────────────────────────
 
 /** One pending approval, as the gateway stores it (routes/operator.ts pendingApprovals). */

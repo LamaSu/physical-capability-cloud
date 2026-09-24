@@ -9,11 +9,11 @@ import { UnavailableState } from "../components/LiveState.js";
 import { NotRecordedState } from "../components/operator/NotRecordedState.js";
 import {
   decideApproval,
-  emergencyResume,
-  emergencyStop,
   kernelsOf,
   listPendingApprovals,
   readStopState,
+  resumeAndConfirm,
+  stopAndConfirm,
   type PendingApproval,
   type ResumeOutcome,
   type StopOutcome,
@@ -70,7 +70,8 @@ function EmergencyStopPanel({ kernels }: { kernels: Kernel[] }) {
       "and does not cut power. Use each machine's own emergency stop for that.\n\nContinue?",
     )) return;
     setBusy(true);
-    const results = await Promise.all(target.map((k) => emergencyStop(k.id)));
+    // Each stop counts only when the POST confirms it AND the recorded policy reads back stopped.
+    const results = await Promise.all(target.map((k) => stopAndConfirm(k.id)));
     setOutcomes((prev) => ({ ...prev, ...Object.fromEntries(results.map((r) => [r.kernelId, r])) }));
     setBusy(false);
     void states.refetch();
@@ -79,7 +80,7 @@ function EmergencyStopPanel({ kernels }: { kernels: Kernel[] }) {
   async function resume(k: Kernel) {
     if (!window.confirm(`Let PCC send new work to ${kernelLabel(k)} again?`)) return;
     setBusy(true);
-    const r = await emergencyResume(k.id);
+    const r = await resumeAndConfirm(k.id);
     setOutcomes((prev) => ({ ...prev, [r.kernelId]: r }));
     setBusy(false);
     void states.refetch();
@@ -117,19 +118,23 @@ function EmergencyStopPanel({ kernels }: { kernels: Kernel[] }) {
 
       <div className="space-y-2">
         {kernels.map((k) => {
+          // The machine's state is always the latest recorded read. "Confirmed" is added only when this
+          // page's own stop was confirmed (POST + read-back) and the latest read still says stopped.
           const recorded = states.data?.[k.id];
           const outcome = outcomes[k.id];
           let stateText: React.ReactNode = <span className="text-white/30">stop state unknown</span>;
-          if (outcome?.state === "stopped") {
-            stateText = <span className="text-red-300 font-semibold">Stopped for new work (confirmed by PCC)</span>;
-          } else if (recorded?.ok && recorded.data.stopped) {
-            stateText = <span className="text-red-300 font-semibold">Stopped for new work</span>;
+          if (recorded?.ok && recorded.data.stopped) {
+            stateText = (
+              <span className="text-red-300 font-semibold">
+                {outcome?.state === "stopped" ? "Stopped for new work (confirmed by PCC)" : "Stopped for new work"}
+              </span>
+            );
           } else if (recorded?.ok) {
             stateText = <span className="text-white/45">{recorded.data.recorded ? "Taking work" : "No stop recorded"}</span>;
           } else if (recorded && !recorded.ok) {
             stateText = <span className="text-amber-300/80">Stop state unavailable</span>;
           }
-          const stopped = outcome?.state === "stopped" || (recorded?.ok === true && recorded.data.stopped);
+          const stopped = recorded?.ok === true && recorded.data.stopped;
           return (
             <GlassPanel key={k.id} padding="sm" className="flex items-center justify-between gap-3">
               <div className="min-w-0">

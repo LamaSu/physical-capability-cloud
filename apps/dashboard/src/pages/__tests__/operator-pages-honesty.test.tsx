@@ -277,10 +277,18 @@ describe("dashboard with a real account", () => {
     expect(t).not.toMatch(INVENTED);
   });
 
-  it("E-STOP shows a machine stopped only when the gateway confirms it for that machine", async () => {
+  it("E-STOP shows a machine stopped only when the gateway confirms it and the recorded state reads back stopped", async () => {
+    let stoppedK1 = false;
     stubFetch({
       ...SIGNED_IN,
-      "POST /api/operator/emergency-stop": (b) => ({ status: 200, body: { stopped: true, kernelId: b?.kernelId, timestamp: NOW } }),
+      "GET /api/operator/policy/k1": () => ({
+        status: 200,
+        body: stoppedK1 ? { policy: { emergencyStop: true }, updatedAt: NOW } : { policy: { emergencyStop: false }, source: "default" },
+      }),
+      "POST /api/operator/emergency-stop": (b) => {
+        if (b?.kernelId === "k1") stoppedK1 = true;
+        return { status: 200, body: { stopped: true, kernelId: b?.kernelId, timestamp: NOW } };
+      },
     });
     await render(<OperatorDashboardPage />);
     const panel = container.querySelector('[data-testid="estop-panel"]')!;
@@ -289,6 +297,18 @@ describe("dashboard with a real account", () => {
     expect(t).toContain("Stopped for new work (confirmed by PCC)");
     expect(t).not.toContain("NOT STOPPED");
     expect(posted.filter((p) => p.key === "POST /api/operator/emergency-stop").map((p) => p.body?.kernelId)).toEqual(["k1"]);
+  });
+
+  it("a stop the gateway answered but whose recorded state does not read back stopped is NOT STOPPED", async () => {
+    stubFetch({
+      ...SIGNED_IN,
+      "POST /api/operator/emergency-stop": (b) => ({ status: 200, body: { stopped: true, kernelId: b?.kernelId, timestamp: NOW } }),
+    });
+    await render(<OperatorDashboardPage />);
+    await click(button("Stop", container.querySelector('[data-testid="estop-panel"]')!));
+    const t = await waitForText(/NOT STOPPED/);
+    expect(t).toContain("its recorded state does not show this machine stopped");
+    expect(t).not.toContain("confirmed by PCC");
   });
 
   it("a rejected E-STOP is NOT STOPPED, loudly, with the physical-stop instruction", async () => {
