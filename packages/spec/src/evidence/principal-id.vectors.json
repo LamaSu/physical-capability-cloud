@@ -1,0 +1,64 @@
+{
+  "description": "Pinned principal-id tuple words (pcc.evidence.principal-id.v1): word = keccak256(UTF-8 of the pinned id). principal-id.test.ts reproduces every entry; the oracle mirrors them by value.",
+  "words": [
+    {
+      "kind": "operator",
+      "id": "eip155:84532:0x52908400098527886e0f7030069857d2e4169ee7",
+      "word": "0x2fa5f5f749ef1aab4d70881be50c7d2ad6178dce8f7509b5cd83e9418d9d72d6"
+    },
+    {
+      "kind": "operator",
+      "id": "eip155:8453:0x52908400098527886e0f7030069857d2e4169ee7",
+      "word": "0xdc7954c1ee9b97624ec9dccca2cf11e4d7400a46ac34bf7d87b47f5bc187e3ea"
+    },
+    {
+      "kind": "kernel",
+      "id": "kernel-reference-1",
+      "word": "0xaf045b1515f7ae686df8a5861900daa466277aaa617d5409af5661e98aaf8844"
+    },
+    {
+      "kind": "kernel",
+      "id": "a",
+      "word": "0x3ac225168df54212a25c1c01fd35bebfea408fdac2e31ddd6f80a4bbf9a5f1cb"
+    },
+    {
+      "kind": "device",
+      "id": "ed25519:0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+      "word": "0x3b84c9da7f56e65012dee902619bfbb0a8d1806291ef8a8e7886006687d9a1fb"
+    }
+  ],
+  "tuples": [
+    {
+      "operatorPrincipalId": "eip155:84532:0x52908400098527886e0f7030069857d2e4169ee7",
+      "kernelId": "kernel-reference-1",
+      "devicePrincipalId": "ed25519:0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+      "words": [
+        "0x2fa5f5f749ef1aab4d70881be50c7d2ad6178dce8f7509b5cd83e9418d9d72d6",
+        "0xaf045b1515f7ae686df8a5861900daa466277aaa617d5409af5661e98aaf8844",
+        "0x3b84c9da7f56e65012dee902619bfbb0a8d1806291ef8a8e7886006687d9a1fb"
+      ]
+    }
+  ],
+  "refused": [
+    {
+      "kind": "operator",
+      "id": "eip155:84532:0x52908400098527886E0F7030069857D2E4169EE7",
+      "why": "checksum case"
+    },
+    {
+      "kind": "operator",
+      "id": "eip155:084532:0x52908400098527886e0f7030069857d2e4169ee7",
+      "why": "leading-zero chain"
+    },
+    {
+      "kind": "device",
+      "id": "ed25519:7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+      "why": "missing 0x"
+    },
+    {
+      "kind": "kernel",
+      "id": "",
+      "why": "empty kernel id"
+    }
+  ]
+}
