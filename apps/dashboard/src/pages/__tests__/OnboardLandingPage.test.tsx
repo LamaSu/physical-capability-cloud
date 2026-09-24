@@ -36,12 +36,14 @@ describe("OnboardLandingPage — embedded snippet", () => {
     expect(source.toLowerCase()).toMatch(/buy|offer|connect|register/);
   });
 
-  it("includes the npx command", () => {
-    expect(source).toContain("npx @pcc/onboard");
+  it("does not offer an npx command for a package that is not on npm", () => {
+    // @pcc/onboard is not published, so `npx @pcc/onboard` fails for every
+    // visitor. Restore the terminal card when the package ships.
+    expect(source).not.toContain("npx @pcc/onboard");
   });
 });
 
-describe("OnboardLandingPage — three-card hero", () => {
+describe("OnboardLandingPage — two-card hero", () => {
   it("renders the 'Chat right now' card", () => {
     expect(source).toContain("Chat right now");
   });
@@ -50,9 +52,6 @@ describe("OnboardLandingPage — three-card hero", () => {
     expect(source).toMatch(/Paste into|paste/i);
   });
 
-  it("renders the npx install card", () => {
-    expect(source).toMatch(/Install via npx|npx/i);
-  });
 
   it("keeps secondary pathways for power users", () => {
     expect(source).toContain("Add a Machine");
@@ -65,8 +64,8 @@ describe("OnboardLandingPage — three-card hero", () => {
     expect(source).toContain("clipboard");
   });
 
-  it("links the npm page", () => {
-    expect(source).toContain("npmjs.com/package/@pcc/onboard");
+  it("does not link an npm page that does not exist", () => {
+    expect(source).not.toContain("npmjs.com/package/@pcc/onboard");
   });
 
   it("mentions the curl snippet.md path", () => {

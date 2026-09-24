@@ -127,8 +127,9 @@ const { kernelAgent, stop } = await quickStart({
 });
 // Your machine is now discoverable on the network`;
 
-const SCAFFOLD_CODE = `# Generate a complete kernel project from config
-npx pcc-onboard scaffold \\
+const SCAFFOLD_CODE = `# pcc-onboard ships in packages/onboard-kit of the PCC monorepo (not on npm yet)
+# Generate a complete kernel project from config
+pcc-onboard scaffold \\
   --config my-shop.json \\
   --output ./my-kernel
 
@@ -204,17 +205,11 @@ export function OnboardKitPage() {
       {/* ── Install ──────────────────────────────────────────── */}
       <GlassPanel padding="md" className="space-y-3">
         <h3 className="text-sm font-semibold text-white/70">Install</h3>
-        <div className="flex items-center gap-2">
-          <code className="flex-1 bg-black/40 border border-white/[0.06] rounded px-3 py-2 text-xs text-cyan-300/70 font-mono">
-            pnpm add @pcc/spec @pcc/kernel @pcc/a2a @pcc/agent-runtime @pcc/agent-kernel @pcc/onboard-kit
-          </code>
-          <button
-            onClick={() => copyToClipboard("pnpm add @pcc/spec @pcc/kernel @pcc/a2a @pcc/agent-runtime @pcc/agent-kernel @pcc/onboard-kit", "install")}
-            className="shrink-0 px-2 py-2 text-[10px] rounded bg-white/[0.06] border border-white/[0.08] text-white/40 hover:text-white/70 transition-colors"
-          >
-            {copiedSnippet === "install" ? "Copied" : "Copy"}
-          </button>
-        </div>
+        <p className="text-xs text-white/50 leading-relaxed">
+          These packages are not published to npm yet. Use them from a clone of the PCC
+          monorepo: <code className="font-mono text-cyan-300/70">packages/onboard-kit</code> and
+          the packages it depends on.
+        </p>
       </GlassPanel>
 
       {/* ── Scaffolder ───────────────────────────────────────── */}
@@ -309,7 +304,10 @@ export function OnboardKitPage() {
 
       {/* ── Capability Types ──────────────────────────────────── */}
       <div className="space-y-3">
-        <h2 className="text-lg font-semibold text-white/85">44 Capability Types</h2>
+        <h2 className="text-lg font-semibold text-white/85">Example capability types</h2>
+        <p className="text-xs text-white/40">
+          Capability types are open-ended. These are starting points, not a fixed list.
+        </p>
         <div className="flex gap-2 mb-3">
           {Object.keys(CAPABILITY_TYPES).map((cat) => (
             <button
@@ -411,7 +409,7 @@ export function OnboardKitPage() {
         </p>
         <div className="flex items-center justify-center gap-3">
           <a
-            href="https://capability.network/tree/main/packages/onboard-kit"
+            href="https://github.com/LamaSu/physical-capability-cloud/tree/master/packages/onboard-kit"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-cyan-500/15 border border-cyan-500/25 text-cyan-400 hover:bg-cyan-500/25 transition-colors"
@@ -422,7 +420,7 @@ export function OnboardKitPage() {
             View on GitHub
           </a>
           <button
-            onClick={() => copyToClipboard("npx pcc-onboard scaffold --config my-shop.json --output ./my-kernel", "cta")}
+            onClick={() => copyToClipboard("pcc-onboard scaffold --config my-shop.json --output ./my-kernel", "cta")}
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-white/[0.06] border border-white/[0.08] text-white/60 hover:text-white/80 hover:bg-white/[0.1] transition-colors"
           >
             {copiedSnippet === "cta" ? "Copied" : "Copy scaffold command"}

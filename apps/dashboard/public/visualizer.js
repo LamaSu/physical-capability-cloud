@@ -19,7 +19,7 @@
  *       the eye doesn't twitch from numerical jitter.
  *
  * Aesthetic targets (defended in /docs/VISUALIZER.md):
- *   – Substrate-as-moat thesis legible at a glance: nodes ON a layer.
+ *   – Substrate thesis legible at a glance: nodes ON a layer.
  *   – Generative-design portfolio quality. Hand-drawn frame loop, no D3.
  *   – Zero new npm deps. Vanilla DOM + Canvas 2D.
  *
