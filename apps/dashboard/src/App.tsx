@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
@@ -76,7 +76,7 @@ const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m =
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
 const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m => ({ default: m.SWFDashboardPage })));
 const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
-const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
+const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
@@ -263,7 +263,9 @@ function DashboardShell() {
               <Route path="/negotiate/session" element={<NegotiationSessionPage />} />
               <Route path="/batch-board" element={<BatchBoardPage />} />
               <Route path="/agent-package" element={<AgentPackagePage />} />
-              <Route path="/ip" element={<IPRevenuePage />} />
+              <Route path="/economics" element={<EconomicAgreementsPage />} />
+              {/* The IP revenue page showed fabricated revenue beside a live Claim button (PX-12, N10). */}
+              <Route path="/ip" element={<Navigate to="/economics" replace />} />
               <Route path="/sponsors" element={<SponsorTelemetryPage />} />
               <Route path="/system" element={<SystemDashboardPage />} />
               <Route path="/analytics" element={<AnalyticsDashboardPage />} />

@@ -203,10 +203,10 @@ export const panelRegistry: Record<string, PanelRegistryEntry> = {
     keywords: ["swf", "wealth fund", "sovereign", "treasury"],
   },
   ip: {
-    title: "IP Revenue",
+    title: "Agreements",
     component: () =>
-      import("../../pages/IPRevenuePage.js").then((m) => ({ default: m.IPRevenuePage })),
-    keywords: ["ip", "intellectual property", "ip revenue", "royalties"],
+      import("../../pages/EconomicAgreementsPage.js").then((m) => ({ default: m.EconomicAgreementsPage })),
+    keywords: ["ip", "agreements", "royalties", "licenses", "who gets paid", "economics"],
   },
   telemetry: {
     title: "Telemetry",

@@ -9,8 +9,8 @@
  * locally so users can poke at individual moments without round-tripping
  * to the gateway's POST /evaluate endpoint.
  *
- * Layout closely mirrors IPDetailPage.tsx (the closest cousin in this
- * dashboard): GlassPanel header with back-link + hash + meta, then a
+ * Layout: a GlassPanel header with back-link + hash + meta (the IP detail page
+ * it once mirrored is retired): GlassPanel header with back-link + hash + meta, then a
  * stack of GlassPanels for each section.
  */
 import React from "react";
@@ -267,7 +267,7 @@ export function RateScheduleViewPage() {
       setError(null);
       try {
         const res = await apiGet<ScheduleResponse>(
-          `/api/contributors/schedules/${hash}`,
+          `/contributors/schedules/${hash}`,
         );
         if (!cancelled) setData(res);
       } catch (err) {

@@ -121,7 +121,7 @@ export const navGroups: NavGroup[] = [
       { label: "Oracles", path: "/subnet", icon: <SubnetIcon /> },
       { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
       { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
-      { label: "IP Revenue", path: "/ip", icon: <IPRevenueIcon /> },
+      { label: "Agreements", path: "/economics", icon: <IPRevenueIcon /> },
       { label: "Publish RateSchedule", path: "/contributors/schedules/publish", icon: <RateScheduleIcon /> },
     ],
   },
