@@ -91,7 +91,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/escrow/chain/:address/attestation/:milestoneIndex | Submit attestation |
 | GET | /api/settlement/status | Settlement pipeline status |
 | GET | /api/settlement/epochs | Settlement epochs |
-| GET | /api/settlement/:jobId | Job settlement details |
+| GET | /api/settlement/:jobId | Job settlement status from the job's own escrow records (settled only when a settlement read confirms it; a recorded release is reported_released; mock escrows are simulated) |
 | POST | /api/settlement/flush | Flush pending settlements |
 
 ### Evidence & Verification
