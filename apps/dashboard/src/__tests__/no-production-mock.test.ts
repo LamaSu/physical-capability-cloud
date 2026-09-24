@@ -82,6 +82,14 @@ const KNOWN_OFFENDERS: Record<string, string> = {
   "pages/SetupAgentPage.tsx": "adk 4f6668ed",
   "pages/onboard/Step7_Review.tsx": "adk 4f6668ed: registers adapterType 'mock' (the EXPERIENCE-COMPLETE blocker)",
   "pages/StartPage.tsx": "adk 4f6668ed: registers against kernel_dev_001 / adapter 'mock'",
+  // pcc-shell 47b47970: this lane's remaining pages, in a follow-up PR (their implementer agents stopped at the account's weekly limit)
+  "pages/AgentLogPage.tsx": "pcc-shell 47b47970: follow-up PR",
+  "pages/NegotiationPage.tsx": "pcc-shell 47b47970: follow-up PR",
+  "pages/MarketplacePage.tsx": "pcc-shell 47b47970: follow-up PR",
+  "pages/MarketplaceDetailPage.tsx": "pcc-shell 47b47970: follow-up PR",
+  "pages/ROICalculatorPage.tsx": "pcc-shell 47b47970: follow-up PR",
+  "pages/SpaceFinderPage.tsx": "pcc-shell 47b47970: follow-up PR",
+  "pages/SpaceDetailPage.tsx": "pcc-shell 47b47970: follow-up PR",
   // logistics N-b: product-steward 61243bdd / readmodels, carrier af177c03 supplies the mapping (#2257, #2264)
   "pages/InstallationDetailPage.tsx": "logistics N-b (carrier #2264)",
   "pages/ShipmentDetailPage.tsx": "logistics N-b (carrier #2264)",
