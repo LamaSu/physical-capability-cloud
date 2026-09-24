@@ -49,7 +49,11 @@
               "rawContent": "IPP job 1042 accepted: document=lose3-golden.pdf pages=1",
               "source": "dev-hp-3301-0D253A",
               "capturedAt": "2026-09-09T20:00:01.000Z",
-              "kernelSignature": "8c413ae152f15af6442a0d0b9b4d1fca65cbaefced8a601a691a8115831a302110cfd96608ee46747495c91821618a7328f3e6ccce689d2ff9858356dd7c1007"
+              "kernelSignature": {
+                "signer": "0xc5bf93302d2423cfb0979068a7ac1b32e212cd04",
+                "algorithm": "ed25519",
+                "value": "8c413ae152f15af6442a0d0b9b4d1fca65cbaefced8a601a691a8115831a302110cfd96608ee46747495c91821618a7328f3e6ccce689d2ff9858356dd7c1007"
+              }
             },
             {
               "entryId": "log-1",
@@ -58,7 +62,11 @@
               "rawContent": "IPP job 1042 state=processing",
               "source": "dev-hp-3301-0D253A",
               "capturedAt": "2026-09-09T20:00:01.500Z",
-              "kernelSignature": "12bebd4d5809b3d1743cf43b7630447859c5cd79056117d1ddf80b19c722dd0173fc17463a8f202112be61e200d0207c8bc7d4f5710d171e0ebfdb169c9e2809"
+              "kernelSignature": {
+                "signer": "0xc5bf93302d2423cfb0979068a7ac1b32e212cd04",
+                "algorithm": "ed25519",
+                "value": "12bebd4d5809b3d1743cf43b7630447859c5cd79056117d1ddf80b19c722dd0173fc17463a8f202112be61e200d0207c8bc7d4f5710d171e0ebfdb169c9e2809"
+              }
             },
             {
               "entryId": "log-2",
@@ -67,20 +75,32 @@
               "rawContent": "IPP job 1042 state=completed impressions=1",
               "source": "dev-hp-3301-0D253A",
               "capturedAt": "2026-09-09T20:00:02.000Z",
-              "kernelSignature": "2329e691c40c1b024a00783887c945f76e58e0d74332f227193162ab892f05c6d62529963e72ce7684a9d3cf89ea3c9f8a77e61978ca07e840fa6fdbed061803"
+              "kernelSignature": {
+                "signer": "0xc5bf93302d2423cfb0979068a7ac1b32e212cd04",
+                "algorithm": "ed25519",
+                "value": "2329e691c40c1b024a00783887c945f76e58e0d74332f227193162ab892f05c6d62529963e72ce7684a9d3cf89ea3c9f8a77e61978ca07e840fa6fdbed061803"
+              }
             }
           ]
         },
         "id": "job-lose3-consumer-run-001-printer_job_verified",
-        "hash": "sha256:b8b645b39424171f2d4cb84e3a02c32cfded0af1e0620c9d79654ed2dfc9cde0"
+        "hash": "sha256:937a4a8c6cf48e6697c19b93a836fb6155efbebb47fed588f37379f9fbf6f286"
       }
     ],
-    "bundleHash": "sha256:5baa7c6c321698cdf8e7c199334b1b1d7972624943b4c9f31aec70067439b01d",
-    "kernelSignature": "c0636f7e87232c43e8d41078a9b4ec6e5c761d70a94f6f75604fb43d948de66be726d6710ef96fcc4bd2f7feeca071dfdd91a81d8c43ef39fb3cf9dc68f53007",
-    "finalizedAt": "2026-09-09T20:00:04.000Z"
+    "bundleHash": "sha256:b80f569ccce19141e60e853217068477c8654e8b2052caf6214aca8c4d6e466c",
+    "kernelSignature": {
+      "signer": "0xc5bf93302d2423cfb0979068a7ac1b32e212cd04",
+      "algorithm": "ed25519",
+      "value": "b043d289c30664da565559485d868b63c746d77c2b5bd823aa553392b541442cc63b7bcb465b5d8e20257642c11ac32dbae22e058f974e7993a01ccc433b3901"
+    },
+    "createdAt": "2026-09-09T20:00:04.000Z"
   },
   "negatives": {
-    "raw32KernelSignature": "61c008e214250a83bb9667ad4c75e100434177521f5fa302e9eff5fd78634e2b43b5e33cffea5eb8baebe8c9a93feb2ed1fbe1ebaac61c07ec22f71ec081420a",
+    "raw32KernelSignature": {
+      "signer": "0xc5bf93302d2423cfb0979068a7ac1b32e212cd04",
+      "algorithm": "ed25519",
+      "value": "9f50a4e12436670af7b6e1fd09a647a50d59369b86b26b5507f25350eee6b662e3ebf4e8410867295e00f131421f3090563d4950b62a3fcb35280d94b8040707"
+    },
     "raw32Note": "ed25519 over the raw 32 digest bytes — the superseded 2026-09-09 form; must NOT verify under signingPreimage"
   },
   "expectations": {

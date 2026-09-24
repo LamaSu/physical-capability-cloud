@@ -35,7 +35,16 @@ interface FixtureEvent {
 
 const fixturePath = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 const vector = JSON.parse(readFileSync(fixturePath("./fixtures/lose3-execution-log-bundle.json"), "utf8"));
-const bundle = vector.bundle as { bundleHash: string; kernelSignature: string; events: FixtureEvent[] };
+interface SignatureObject {
+  signer: string;
+  algorithm: string;
+  value: string;
+}
+const bundle = vector.bundle as {
+  bundleHash: string;
+  kernelSignature: SignatureObject;
+  events: FixtureEvent[];
+};
 
 const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const publicKeyFromHex = (hex: unknown) =>
@@ -45,8 +54,14 @@ const publicKeyFromHex = (hex: unknown) =>
     type: "spki",
   });
 const kernelKey = publicKeyFromHex(vector.kernelPublicKeyHex);
-const verifyKernel = (message: Uint8Array, signatureHex: unknown) =>
-  verify(null, message, kernelKey, parseEd25519SignatureHex(signatureHex));
+/** Verifies a Signature object; anything else (e.g. a bare hex string) is refused. */
+const verifyKernel = (message: Uint8Array, signature: unknown) => {
+  const s = signature as Partial<SignatureObject> | null;
+  if (typeof s !== "object" || s === null || s.algorithm !== "ed25519") {
+    throw new TypeError("expected an ed25519 Signature object {signer, algorithm, value}");
+  }
+  return verify(null, message, kernelKey, parseEd25519SignatureHex(s.value));
+};
 
 const logEvent = bundle.events.find((e) => e.type === "printer_job_verified")!;
 const logEntries = logEvent.payload.entries as LogChainEntryView[];
@@ -57,12 +72,48 @@ describe("LO-SE-3 vector — hashes recompute from the production canonicalizer"
   it("every event hash recomputes", async () => {
     for (const e of bundle.events) {
       const { type, timestamp, source, payload } = e;
-      expect(await hashEvent({ type, timestamp, source, payload } as Omit<EvidenceEvent, "hash" | "id">)).toBe(e.hash);
+      // Untyped fixture JSON: hashEvent reads exactly these four fields.
+      const unsigned = { type, timestamp, source, payload } as unknown as Omit<EvidenceEvent, "hash" | "id">;
+      expect(await hashEvent(unsigned)).toBe(e.hash);
     }
   });
 
   it("the bundle digest recomputes", async () => {
     expect(await hashBundle(bundle.events as unknown as EvidenceEvent[])).toBe(bundle.bundleHash);
+  });
+});
+
+describe("LO-SE-3 vector — one shape: the public EvidenceBundle and the incumbent Signature object", () => {
+  const expectedSigner = `0x${String(vector.kernelPublicKeyHex).slice(0, 40)}`;
+  const isIncumbentSignature = (s: unknown) => {
+    const o = s as Partial<SignatureObject> | null;
+    return (
+      typeof o === "object" &&
+      o !== null &&
+      o.algorithm === "ed25519" &&
+      o.signer === expectedSigner &&
+      typeof o.value === "string" &&
+      /^[0-9a-f]{128}$/.test(o.value)
+    );
+  };
+
+  it("the bundle has exactly the public EvidenceBundle fields", () => {
+    expect(Object.keys(vector.bundle).sort()).toEqual(
+      ["assuranceTier", "bundleHash", "createdAt", "events", "id", "jobId", "kernelId", "kernelSignature", "stepId"],
+    );
+  });
+
+  it("the bundle signature is the incumbent Signature object (signer = 0x + first 40 hex of the key)", () => {
+    expect(isIncumbentSignature(bundle.kernelSignature)).toBe(true);
+  });
+
+  it("every log entry's signature is the same Signature object", () => {
+    expect(logEntries.length).toBeGreaterThan(0);
+    for (const e of logEntries) expect(isIncumbentSignature(e.kernelSignature)).toBe(true);
+  });
+
+  it("a bare hex string in place of the Signature object is refused", () => {
+    expect(() => verifyKernel(signingPreimage(bundle.bundleHash), bundle.kernelSignature.value)).toThrow(TypeError);
   });
 });
 
@@ -100,9 +151,8 @@ describe("LO-SE-3 vector — negative controls", () => {
   });
 
   it("a malformed signature is rejected before any verification", () => {
-    expect(() => verifyKernel(signingPreimage(bundle.bundleHash), bundle.kernelSignature.slice(0, 126))).toThrow(
-      SigningPreimageError,
-    );
+    const truncated = { ...bundle.kernelSignature, value: bundle.kernelSignature.value.slice(0, 126) };
+    expect(() => verifyKernel(signingPreimage(bundle.bundleHash), truncated)).toThrow(SigningPreimageError);
   });
 
   it("a raw or 0x digest cannot be turned into a signing preimage", () => {

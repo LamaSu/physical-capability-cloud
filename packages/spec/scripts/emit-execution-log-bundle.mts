@@ -63,6 +63,17 @@ async function main() {
   const out = process.argv[2] ?? DEFAULT_OUT;
   const { privateKey, rawPub } = kernelKeypair();
 
+  // The Signature object every incumbent producer emits, for bundles (kernel-sdk
+  // job-handler, the digital kernels) and for log entries (the kernel's
+  // LogCaptureService, pcc-node log_capture.py): signer = "0x" + the first 40
+  // hex chars of the public key. The gateway relay captures only this object;
+  // a bare hex string is stored as UNSIGNED.
+  const ed25519Signature = (message: Uint8Array) => ({
+    signer: `0x${rawPub.toString("hex").slice(0, 40)}`,
+    algorithm: "ed25519" as const,
+    value: edSign(null, message, privateKey).toString("hex"),
+  });
+
   // ── the machine's own execution record: a kernel-signed hash chain ──
   const rawLines = [
     "IPP job 1042 accepted: document=lose3-golden.pdf pages=1",
@@ -73,7 +84,7 @@ async function main() {
   for (let i = 0; i < rawLines.length; i++) {
     const capturedAt = iso(1000 + i * 500);
     const entryHash = await computeLogEntryHash(rawLines[i]!, DEVICE_ID, capturedAt);
-    const sig = edSign(null, signingPreimage(entryHash), privateKey).toString("hex");
+    const sig = ed25519Signature(signingPreimage(entryHash));
     chain.push({
       entryId: `log-${i}`,
       entryHash,
@@ -111,12 +122,14 @@ async function main() {
   for (const e of rawEvents) events.push({ ...e, id: `${JOB_ID}-${e.type}`, hash: await hashEvent(e as never) });
 
   const bundleHash = await hashBundle(events as never);
-  const kernelSignature = edSign(null, signingPreimage(bundleHash), privateKey).toString("hex");
+
+  const kernelSignature = ed25519Signature(signingPreimage(bundleHash));
 
   // The superseded 2026-09-09 form, kept only as a negative for the test.
   const raw32 = Buffer.from(bundleHash.slice("sha256:".length), "hex");
-  const raw32KernelSignature = edSign(null, raw32, privateKey).toString("hex");
+  const raw32KernelSignature = ed25519Signature(raw32);
 
+  // Exactly the public EvidenceBundle fields (types/evidence.ts).
   const bundle = {
     id: `bundle-${JOB_ID}`,
     jobId: JOB_ID,
@@ -126,7 +139,7 @@ async function main() {
     events,
     bundleHash,
     kernelSignature,
-    finalizedAt: iso(4000),
+    createdAt: iso(4000),
   };
 
   const envelope = {
@@ -153,7 +166,7 @@ async function main() {
   writeFileSync(out, JSON.stringify(envelope, null, 2) + "\n");
   console.log("bundleHash      =", bundleHash);
   console.log("kernelPublicKey =", rawPub.toString("hex"));
-  console.log("kernelSignature =", kernelSignature.slice(0, 32) + "...");
+  console.log("kernelSignature =", kernelSignature.value.slice(0, 32) + "...");
   console.log("wrote", out);
 }
 

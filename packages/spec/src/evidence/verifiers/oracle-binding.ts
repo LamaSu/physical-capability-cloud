@@ -58,18 +58,37 @@ export interface ExecutionLogVerifierDeps {
   minEntries?: number;
 }
 
-function isEntryView(x: unknown): x is LogChainEntryView {
-  if (typeof x !== "object" || x === null) return false;
+const SIGNATURE_ALGORITHMS = new Set(["ed25519", "secp256k1"]);
+
+/**
+ * Why `x` is not a verifiable log-chain entry, or null if it is.
+ *
+ * `kernelSignature` must be the common `Signature` object
+ * `{signer, algorithm, value}` — the shape the kernel's LogCaptureService and
+ * pcc-node's log_capture.py both emit. A bare string is not accepted: no
+ * producer emits one, and the gateway relay stores a bare-string bundle
+ * signature as unsigned.
+ */
+function entryViewProblem(x: unknown): string | null {
+  if (typeof x !== "object" || x === null) return "not an object";
   const e = x as Record<string, unknown>;
-  return (
-    typeof e.entryId === "string" &&
-    typeof e.entryHash === "string" &&
-    typeof e.previousHash === "string" &&
-    typeof e.rawContent === "string" &&
-    typeof e.source === "string" &&
-    typeof e.capturedAt === "string" &&
-    typeof e.kernelSignature === "string"
-  );
+  for (const field of ["entryId", "entryHash", "previousHash", "source", "capturedAt"] as const) {
+    if (typeof e[field] !== "string") return `${field} missing or not a string`;
+  }
+  if (typeof e.rawContent !== "string") {
+    return "rawContent absent (a redacted entry): its entryHash cannot be recomputed, so it cannot be verified here";
+  }
+  const s = e.kernelSignature;
+  if (typeof s !== "object" || s === null) {
+    return "kernelSignature must be a Signature object {signer, algorithm, value}, not a bare value";
+  }
+  const sig = s as Record<string, unknown>;
+  if (typeof sig.signer !== "string" || sig.signer.length === 0) return "kernelSignature.signer missing";
+  if (typeof sig.algorithm !== "string" || !SIGNATURE_ALGORITHMS.has(sig.algorithm)) {
+    return `kernelSignature.algorithm must be ed25519 or secp256k1`;
+  }
+  if (typeof sig.value !== "string" || sig.value.length === 0) return "kernelSignature.value missing";
+  return null;
 }
 
 function fail(detail: string[]): PrimitiveVerifyResult {
@@ -80,9 +99,10 @@ function fail(detail: string[]): PrimitiveVerifyResult {
  * Real PrimitiveVerifier for #52 machine.execution_log.
  *
  * `instance` contract: the captured chain as `readonly LogChainEntryView[]`
- * (the kernel's `LogEntry[]` is assignable). `instance == null` means the data
- * is not yet available → `met:"pending"` per the verifier-interface contract;
- * anything present-but-malformed fails CLOSED.
+ * (the kernel's `LogEntry[]` is assignable), each `kernelSignature` a
+ * `Signature` object. `instance == null` means the data is not yet available
+ * → `met:"pending"` per the verifier-interface contract; anything
+ * present-but-malformed fails CLOSED with the first bad entry's defect.
  *
  * Param semantics (schema in `primitives.ts` #52):
  *   - `logKind` (required): must be one of the declared kinds, else fail.
@@ -91,8 +111,10 @@ function fail(detail: string[]): PrimitiveVerifyResult {
  *   - `alarmPolicy` (optional): NOT generically enforceable by this binding
  *     (needs log-content interpretation) → its presence fails CLOSED rather
  *     than being silently ignored. Nobody weakens a check to pass it.
- *   - `disclosure` (optional): capture-side, verification-neutral — ignored
- *     with a detail note.
+ *   - `disclosure` (optional): not checked here, but NOT neutral — a
+ *     "redacted-commit" entry carries no rawContent, so its entryHash cannot
+ *     be recomputed and the entry fails closed. This binding verifies only
+ *     full-disclosure chains.
  */
 export function makeExecutionLogVerifier(deps: ExecutionLogVerifierDeps): PrimitiveVerifier {
   const minEntries = deps.minEntries ?? 1;
@@ -102,9 +124,14 @@ export function makeExecutionLogVerifier(deps: ExecutionLogVerifierDeps): Primit
       if (instance === null || instance === undefined) {
         return { met: "pending", detail: ["execution log not yet available"] };
       }
-      if (!Array.isArray(instance) || !instance.every(isEntryView)) {
-        return fail(["instance is not a LogChainEntryView[] — fails closed"]);
+      if (!Array.isArray(instance)) {
+        return fail(["instance is not an array of log-chain entries — fails closed"]);
       }
+      for (let i = 0; i < instance.length; i++) {
+        const problem = entryViewProblem(instance[i]);
+        if (problem !== null) return fail([`entry ${i}: ${problem} — fails closed`]);
+      }
+      const entries = instance as LogChainEntryView[];
 
       const p = (params ?? {}) as Record<string, unknown>;
       const detail: string[] = [];
@@ -115,17 +142,17 @@ export function makeExecutionLogVerifier(deps: ExecutionLogVerifierDeps): Primit
         return fail(["params.alarmPolicy declared but not enforceable by this binding — fails closed rather than silently ignored"]);
       }
       if (p.disclosure !== undefined) {
-        detail.push(`params.disclosure=${String(p.disclosure)} is capture-side; not checked here`);
+        detail.push(`params.disclosure=${String(p.disclosure)} noted; only entries carrying rawContent can be verified`);
       }
 
-      if (instance.length < minEntries) {
-        return fail([`chain has ${instance.length} entries; minimum is ${minEntries} — an empty/short chain is vacuous, never met`]);
+      if (entries.length < minEntries) {
+        return fail([`chain has ${entries.length} entries; minimum is ${minEntries} — an empty/short chain is vacuous, never met`]);
       }
 
-      if (typeof p.minCadenceMs === "number" && instance.length > 1) {
-        for (let i = 1; i < instance.length; i++) {
-          const prev = Date.parse(instance[i - 1]!.capturedAt);
-          const cur = Date.parse(instance[i]!.capturedAt);
+      if (typeof p.minCadenceMs === "number" && entries.length > 1) {
+        for (let i = 1; i < entries.length; i++) {
+          const prev = Date.parse(entries[i - 1]!.capturedAt);
+          const cur = Date.parse(entries[i]!.capturedAt);
           if (!Number.isFinite(prev) || !Number.isFinite(cur)) {
             return fail([`entry ${i - 1} or ${i} has an unparseable capturedAt — cadence unverifiable, fails closed`]);
           }
@@ -136,7 +163,7 @@ export function makeExecutionLogVerifier(deps: ExecutionLogVerifierDeps): Primit
         }
       }
 
-      const chain = await verifyLogChain(instance, deps.verifyKernelSignature);
+      const chain = await verifyLogChain(entries, deps.verifyKernelSignature);
       if (!chain.valid) {
         return fail([
           `log chain invalid (first break at index ${chain.brokenAt})`,
