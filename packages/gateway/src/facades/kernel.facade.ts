@@ -339,9 +339,19 @@ export class KernelFacade extends BaseFacade {
         // Authorization only — authentication is apiGate's job (POST /api/kernels
         // is Bearer-gated → 401 without a key), so a real request always carries
         // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
-        // not mutate someone else's kernel. When actorId is absent (a facade-level
-        // unit test with no apiGate wired) there is no owner to check against; the
-        // SET-ONCE signer bind still fail-closes via the CAS below.
+        // not mutate someone else's kernel.
+        // Steward rule 7 (WP-C): an owner check fails CLOSED when the actor is
+        // missing. With no actorId there is nobody to authorize, so an EXISTING
+        // kernel is not touched at all (403, before any write). Before, a
+        // missing actor skipped both owner checks below: the profile, claimed
+        // tier and status were written, and only a signer swap was then stopped
+        // (409) by the SET-ONCE CAS, after those writes.
+        if (!actorId) {
+          throw Object.assign(
+            new Error(`Updating kernel '${id}' requires an authenticated actor`),
+            { name: "ForbiddenError" },
+          );
+        }
         if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
@@ -524,7 +534,7 @@ export class KernelFacade extends BaseFacade {
    * OWNER-ONLY (WP-C). A heartbeat marks a kernel online and can insert
    * catalog rows, so it is authorized like any other mutation of the kernel.
    * The CALLER authorizes: both routes (POST /api/kernels/:kernelId/heartbeat
-   * and POST /api/operator/heartbeat) run `requireKernelOwner`
+   * and POST /api/operator/heartbeat) run the owner check
    * (auth/kernel-owner-guard.ts, over the shared auth/kernel-operator.ts
    * predicate) before calling this, so only the kernel's recorded operator gets
    * here. A legacy placeholder owner ("" / zero address) must first be claimed
@@ -533,6 +543,11 @@ export class KernelFacade extends BaseFacade {
    * Here, fail closed regardless of the caller:
    *   - the kernel must exist (404 otherwise); a heartbeat never creates
    *     capability rows for an unknown kernel id;
+   *   - `actorId` must own the row loaded here (defence in depth; WP-C C1 says
+   *     the facade itself requires actor === operatorAddress). It is the same
+   *     comparison as the route check (ownsKernel: a placeholder owns nothing,
+   *     then isSamePrincipal). A missing actor or a different principal is 403
+   *     before anything is written;
    *   - inserted capability `assuranceTiers` are CLAMPED to the kernel's
    *     authorized ceiling: each value must be an integer 0..3 and <= the
    *     ceiling, others are dropped, and an empty result becomes [0];
@@ -544,6 +559,7 @@ export class KernelFacade extends BaseFacade {
   async heartbeat(
     kernelId: string,
     body: HeartbeatInput,
+    actorId: string | undefined,
   ): Promise<Result<HeartbeatResult>> {
     return this.execute("heartbeat", async () => {
       const { status = "online", capabilities } = body ?? {};
@@ -555,6 +571,16 @@ export class KernelFacade extends BaseFacade {
       const kernel = repos.kernels.findById(kernelId) as any;
       if (!kernel) {
         throw new NotFoundError("kernel", kernelId);
+      }
+      // Defence in depth: the caller's owner check is repeated against the
+      // row just loaded. Imported lazily: auth/ imports the facades, so a
+      // static import here would be a module cycle.
+      const { ownsKernel } = await import("../auth/kernel-owner-guard.js");
+      if (!ownsKernel(kernel.operatorAddress, actorId)) {
+        throw Object.assign(
+          new Error(`Only the recorded operator of kernel '${kernelId}' may heartbeat it`),
+          { name: "ForbiddenError" },
+        );
       }
       // The authorized ceiling bounds every tier this heartbeat may insert.
       const ceiling = authorizedAssuranceCeiling(kernel);

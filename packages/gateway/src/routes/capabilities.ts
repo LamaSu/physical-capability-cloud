@@ -4,7 +4,7 @@ import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
-import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
+import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 
 // ── WoT Thing Description helpers ────────────────────────────────────────────
 //
@@ -720,11 +720,15 @@ export async function capabilityRoutes(app: FastifyInstance) {
    * id that another kernel's row already holds is 409 `capability_id_taken`.
    */
   app.post<{ Body: CreateCapabilityInput }>("/api/capabilities", async (req, reply) => {
+    // Steward rule 7: a PRESENT actor first (401), before body validation or
+    // any lookup.
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { kernelId, type } = req.body ?? ({} as Partial<CreateCapabilityInput>);
     if (typeof kernelId !== "string" || !kernelId || !type) {
       return reply.code(400).send({ error: "kernelId and type required" });
     }
-    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
     const result = await facade.create(req.body);
     if (!result.success) {
       const status = result.error.code === "capability_id_taken" ? 409 : result.error.httpStatus;

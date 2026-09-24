@@ -10,6 +10,7 @@ import {
   ownsKernel,
   requireActor,
   requireKernelOwner,
+  requireOwnerOf,
 } from "../auth/kernel-owner-guard.js";
 
 const { operatorPolicies, pendingApprovals } = schema;
@@ -96,17 +97,20 @@ export async function operatorRoutes(app: FastifyInstance) {
    * PUT /api/operator/policy/:kernelId — Update full policy
    *
    * OWNER-ONLY (WP-C, N31): the policy carries `emergencyStop`, so writing it
-   * is the same authority as the e-stop routes below. requireKernelOwner runs
-   * before any write (401 / 404 / 403 not_kernel_owner).
+   * is the same authority as the e-stop routes below. The owner check runs
+   * before any write (401 / 404 / 403 not_kernel_owner); a missing actor is a
+   * 401 before the body is validated (steward rule 7).
    */
   app.put<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
       const policy = req.body as OperatorPolicy;
       if (!policy || policy.version !== 1) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
-      if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
+      if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
 
       try {
         const { db } = getStore();
@@ -186,13 +190,17 @@ export async function operatorRoutes(app: FastifyInstance) {
   // unknown kernel, 403 not_kernel_owner for anyone else. The check runs BEFORE
   // any write, so a refusal leaves the e-stop state and the approvals untouched.
   // (Before: kernelId came from the body with no identity or ownership check, so
-  // any key could stop or resume any kernel.)
+  // any key could stop or resume any kernel.) Steward rule 7: the actor is
+  // resolved first, so a request without one is 401 even before its body is
+  // validated.
 
   /** POST /api/operator/emergency-stop — Activate emergency stop */
   app.post("/api/operator/emergency-stop", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { kernelId, reason } = (req.body ?? {}) as { kernelId?: unknown; reason?: string };
     if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
-    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
     try {
       const { db } = getStore();
@@ -233,9 +241,11 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-resume — Deactivate emergency stop */
   app.post("/api/operator/emergency-resume", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { kernelId } = (req.body ?? {}) as { kernelId?: unknown };
     if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
-    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
     try {
       const { db } = getStore();

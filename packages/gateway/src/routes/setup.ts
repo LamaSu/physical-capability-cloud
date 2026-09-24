@@ -558,6 +558,16 @@ export async function setupRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterDeviceBody }>(
     "/api/setup/register-device",
     async (req, reply) => {
+      // Imported here (not in the file header) to keep this work package's
+      // change inside the register-device handler.
+      const { checkKernelOwner, requireActor, requireOwnerOf } = await import(
+        "../auth/kernel-owner-guard.js"
+      );
+      // Steward rule 7: a PRESENT actor first (401), before body validation
+      // or any lookup.
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
+
       const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits } =
         req.body ?? ({} as Partial<RegisterDeviceBody>);
 
@@ -592,12 +602,8 @@ export async function setupRoutes(app: FastifyInstance) {
         validatedEmits = parsed.data;
       }
 
-      // Imported here (not in the file header) to keep this work package's
-      // change inside the register-device handler.
-      const { checkKernelOwner, requireKernelOwner } = await import("../auth/kernel-owner-guard.js");
-      // Ownership BEFORE any write (401 / 404 / 403 / 502 are sent by the guard).
-      const actor = await requireKernelOwner(req, reply, kernelId);
-      if (!actor) return reply;
+      // Ownership BEFORE any write (404 / 403 / 502 are sent by the guard).
+      if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
       try {
         const repos = getRepos();

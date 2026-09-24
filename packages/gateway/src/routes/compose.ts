@@ -55,7 +55,7 @@ import {
   servedAssuranceTier,
 } from "../services/assurance-ceiling.js";
 import { requireDevOrAdmin } from "../auth/dev-endpoint-gate.js";
-import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
+import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 
 // ---------------------------------------------------------------------------
 // Store access — getStore() is booted by server.ts in production; tests lazily
@@ -949,6 +949,9 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
     "/api/compose/_dev/register-candidate",
     async (req, reply) => {
       if (!requireDevOrAdmin(req, reply)) return reply;
+      // Steward rule 7: a PRESENT actor before body validation or any lookup.
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
       const parsed = RegisterCandidateRequestSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({
@@ -957,8 +960,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
           details: parsed.error.format(),
         });
       }
-      const actor = await requireKernelOwner(req, reply, parsed.data.kernelId);
-      if (!actor) return reply;
+      if (!(await requireOwnerOf(actor, reply, parsed.data.kernelId))) return reply;
       const cap = { ...parsed.data, operatorAddress: actor };
       saveCandidate(cap);
       return reply.code(201).send({ ok: true, capabilityId: cap.capabilityId, operatorAddress: actor });

@@ -15,7 +15,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
-import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
+import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
 import { v4 as uuidv4 } from "uuid";
@@ -205,14 +205,18 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * Body: { kernelId, status?, capabilities?, timestamp? }
    */
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
+    // Steward rule 7: a PRESENT actor first (401), before body validation or
+    // any lookup.
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { kernelId, status = "online", capabilities, timestamp } = req.body ?? {};
 
     if (typeof kernelId !== "string" || !kernelId) {
       return reply.code(400).send({ error: "kernelId required" });
     }
 
-    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
-    const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
+    const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp }, actor);
     return sendResult(reply, result);
   });
 

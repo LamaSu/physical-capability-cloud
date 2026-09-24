@@ -76,7 +76,7 @@ import {
   servedAssuranceTier,
 } from "../services/assurance-ceiling.js";
 import { requireDevOrAdmin } from "../auth/dev-endpoint-gate.js";
-import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
+import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 
 // ---------------------------------------------------------------------------
 // Store access — see compose.ts for the lazy-init rationale.
@@ -737,6 +737,9 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
   // The claimed tier is stored as given; searches serve it clamped.
   app.post("/api/capabilities/graph/_dev/register-node", async (req, reply) => {
     if (!requireDevOrAdmin(req, reply)) return reply;
+    // Steward rule 7: a PRESENT actor before body validation or any lookup.
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const parsed = RegisterGraphNodeSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -745,8 +748,7 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
-    const actor = await requireKernelOwner(req, reply, parsed.data.kernelId);
-    if (!actor) return reply;
+    if (!(await requireOwnerOf(actor, reply, parsed.data.kernelId))) return reply;
     const node = upsertNode({ ...parsed.data, operatorAddress: actor });
     return reply.status(201).send({ ok: true, node });
   });

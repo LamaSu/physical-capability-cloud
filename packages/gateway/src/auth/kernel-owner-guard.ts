@@ -14,6 +14,10 @@
  *      coord-watch #2608), the same resolvers apiGate uses (API key, then SIWE
  *      session) run here instead. No identity means 401. A write handler never
  *      treats a missing actor as "anyone" and never relies on apiGate having run.
+ *      Steward rule 7: every owner-guarded handler resolves the actor FIRST
+ *      (requireActor, then requireOwnerOf), so a request without one is a 401
+ *      before any body validation or lookup, and no lookup is ever keyed on a
+ *      missing actor.
  *   2. WP-C's error codes: 401 `api_key_required`, 404 `kernel_not_found`,
  *      403 `not_kernel_owner` (for a legacy unowned placeholder AND for a
  *      different principal), 502 `kernel_lookup_failed`.
@@ -142,7 +146,23 @@ export async function requireKernelOwner(
   reply: FastifyReply,
   kernelId: string,
 ): Promise<string | null> {
-  const verdict = await checkKernelOwner(resolveRequestActor(req), kernelId);
+  return requireOwnerOf(resolveRequestActor(req), reply, kernelId);
+}
+
+/**
+ * Route helper for handlers that resolved the actor FIRST (requireActor, so a
+ * missing actor is a 401 before any body validation or lookup: steward rule 7)
+ * and check ownership once the body names a kernel. Same verdicts and reply
+ * shape as requireKernelOwner, without resolving the identity a second time
+ * (resolving an API key also counts its usage). Returns the actor when
+ * authorized; otherwise the refusal has been sent and it returns null.
+ */
+export async function requireOwnerOf(
+  actor: string | undefined,
+  reply: FastifyReply,
+  kernelId: string,
+): Promise<string | null> {
+  const verdict = await checkKernelOwner(actor, kernelId);
   if (verdict.ok) return verdict.actor;
   void reply.code(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId });
   return null;

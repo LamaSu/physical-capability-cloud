@@ -279,14 +279,25 @@ describe("Operator Relay Routes", () => {
 
   describe("POST /api/operator/heartbeat", () => {
     it("requires kernelId", async () => {
+      // WP-C steward rule 7: the actor is resolved before the body is
+      // validated, so this sends an identity to reach the 400. (Old: sent with
+      // no identity and got the 400; with no identity it is now a 401.)
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/heartbeat",
+        headers: { "x-test-operator": "0x1111111111111111111111111111111111111111" },
         payload: { status: "online" },
       });
       expect(res.statusCode).toBe(400);
       const body = res.json();
       expect(body.error).toBe("kernelId required");
+
+      const anonymous = await app.inject({
+        method: "POST",
+        url: "/api/operator/heartbeat",
+        payload: { status: "online" },
+      });
+      expect(anonymous.statusCode).toBe(401);
     });
 
     it("acknowledges heartbeat for known kernel (sent by its owner)", async () => {

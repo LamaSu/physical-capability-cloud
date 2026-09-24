@@ -2,7 +2,12 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
-import { checkKernelOwner, requireKernelOwner, resolveRequestActor } from "../auth/kernel-owner-guard.js";
+import {
+  checkKernelOwner,
+  requireActor,
+  requireKernelOwner,
+  resolveRequestActor,
+} from "../auth/kernel-owner-guard.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -131,7 +136,13 @@ export async function kernelRoutes(app: FastifyInstance) {
   app.post<{ Body: CreateKernelInput }>("/api/kernels", async (req, reply) => {
     // apiGate authenticates this mutation. Ownership is the stable operator
     // identity, never the replaceable API-key record id.
-    const actorId = (req as any).operatorId ?? (req as any).userId;
+    //
+    // Steward rule 7 (WP-C): the handler does not rely on apiGate having run.
+    // The actor is apiGate's identity (operatorId ?? userId), else the same
+    // resolvers apiGate uses (resolveRequestActor). Without an actor,
+    // KernelFacade.register refuses to touch an EXISTING kernel (403): an
+    // owner check fails closed, never "no actor, so skip it".
+    const actorId = resolveRequestActor(req);
     const result = await facade.register(
       req.body,
       actorId,
@@ -168,8 +179,10 @@ export async function kernelRoutes(app: FastifyInstance) {
     Params: { kernelId: string };
     Body: HeartbeatInput;
   }>("/api/kernels/:kernelId/heartbeat", async (req, reply) => {
-    if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
-    const result = await facade.heartbeat(req.params.kernelId, req.body ?? {});
+    const actor = await requireKernelOwner(req, reply, req.params.kernelId);
+    if (!actor) return reply;
+    // The facade re-checks ownership against the row it loads (defence in depth).
+    const result = await facade.heartbeat(req.params.kernelId, req.body ?? {}, actor);
     return sendResult(reply, result);
   });
 
@@ -214,6 +227,9 @@ export async function kernelRoutes(app: FastifyInstance) {
     Params: { capId: string };
     Body: { signature?: string };
   }>("/api/capabilities/:capId/heartbeat", async (req, reply) => {
+    // Steward rule 7: a PRESENT actor first (401), before any lookup.
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { getRepos } = await import("../db.js");
     const { computeValidUntilIso, emitKernelLifecycleEvent } = await import(
       "../facades/kernel.facade.js"
@@ -223,7 +239,11 @@ export async function kernelRoutes(app: FastifyInstance) {
     if (!cap) {
       return reply.status(404).send({ error: "capability_not_found" });
     }
-    const verdict = await checkKernelOwner(resolveRequestActor(req), cap.kernelId);
+    // A row that names no kernel has no owner: refuse without a lookup.
+    const verdict =
+      typeof cap.kernelId === "string" && cap.kernelId.length > 0
+        ? await checkKernelOwner(actor, cap.kernelId)
+        : ({ ok: false, status: 404, error: "kernel_not_found", message: "" } as const);
     if (!verdict.ok) {
       // The capability exists, so a missing kernel row is "nobody owns it": 403.
       const orphan = verdict.status === 404;

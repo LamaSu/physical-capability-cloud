@@ -33,6 +33,7 @@ import { kernelSigningProofMessage } from "@pcc/kernel";
 import { generateEd25519Keypair, signWithPrivateKeyHex } from "../auth/ed25519.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 
 type Signer =
   | { algorithm: "ed25519"; publicKey: string }
@@ -61,10 +62,17 @@ function ed25519Proof(privateKeyHex: string, kernelId: string): string {
 
 describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primitive #52, Option C)", () => {
   let app: FastifyInstance;
+  /** Key of the operator the set-once kernels are registered to (WP-C rule 7). */
+  let operatorKey: string;
+  const asOperator = () => ({ authorization: `Bearer ${operatorKey}` });
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
+    operatorKey = provisionApiKey({
+      operatorId: "0xOperatorWallet12345678901234567890123456",
+      scopes: ["operator"],
+    }).rawKey;
     app = Fastify({ logger: false });
     await app.register(kernelRoutes);
     await app.ready();
@@ -304,17 +312,26 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
 
     // Attacker re-registers (upsert) the same id, proving THEIR OWN key B.
     const proofB = ed25519Proof(KP_B.privateKeyHex, id);
-    const second = await app.inject({
-      method: "POST",
-      url: "/api/kernels",
-      payload: {
-        id,
-        name: "Hijack Attempt",
-        signingKeyAlgorithm: "ed25519",
-        signingPublicKey: `0x${KP_B.publicKeyHex}`,
-        signingProof: proofB,
-      },
-    });
+    const hijack = {
+      id,
+      name: "Hijack Attempt",
+      signingKeyAlgorithm: "ed25519",
+      signingPublicKey: `0x${KP_B.publicKeyHex}`,
+      signingProof: proofB,
+    };
+    // WP-C steward rule 7: with NO authenticated actor the upsert of an
+    // existing kernel is refused (403) before any write. (Old: it reached the
+    // SET-ONCE CAS and got 409, but only after the name had been overwritten.)
+    const anonymous = await app.inject({ method: "POST", url: "/api/kernels", payload: hijack });
+    expect(anonymous.statusCode).toBe(403);
+    const afterAnon = (await app.inject({ method: "GET", url: `/api/kernels/${id}` })).json() as {
+      kernel: { name: string };
+    };
+    expect(afterAnon.kernel.name).toBe("Set-Once Ed Kernel");
+
+    // The SET-ONCE CAS still stops even the kernel's OWN operator from
+    // swapping in a different proven signer.
+    const second = await app.inject({ method: "POST", url: "/api/kernels", headers: asOperator(), payload: hijack });
     expect(second.statusCode).toBe(409);
 
     // The original proven signer (A) must be untouched.
@@ -346,16 +363,18 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
       "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
     );
     const secpProof = await attacker.signMessage({ message: kernelSigningProofMessage(id) });
-    const second = await app.inject({
-      method: "POST",
-      url: "/api/kernels",
-      payload: {
-        id,
-        name: "Cross Hijack",
-        signingAddress: attacker.address,
-        signingProof: secpProof,
-      },
-    });
+    const hijack = {
+      id,
+      name: "Cross Hijack",
+      signingAddress: attacker.address,
+      signingProof: secpProof,
+    };
+    // WP-C steward rule 7: no authenticated actor -> 403 before any write
+    // (old: 409 from the CAS, after the name was overwritten).
+    const anonymous = await app.inject({ method: "POST", url: "/api/kernels", payload: hijack });
+    expect(anonymous.statusCode).toBe(403);
+    // The CAS still refuses the cross-family swap from the kernel's OWN operator.
+    const second = await app.inject({ method: "POST", url: "/api/kernels", headers: asOperator(), payload: hijack });
     expect(second.statusCode).toBe(409);
 
     // The original ed25519 signer must be untouched; no secp256k1 address leaks in.
@@ -367,13 +386,18 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
 
   it("atomically allows only one of two concurrent SET-ONCE binds", async () => {
     const id = `kernel_ed_cas_${Date.now()}`;
+    // WP-C steward rule 7: an update of an existing kernel needs an
+    // authenticated actor, so the kernel is registered, and both binds are
+    // sent, by its operator. (Old: all three requests were anonymous.) The CAS
+    // under test is unchanged: exactly one of two concurrent binds wins.
     expect((await app.inject({
-      method: "POST", url: "/api/kernels", payload: { id, name: "CAS Kernel" },
+      method: "POST", url: "/api/kernels", headers: asOperator(), payload: { id, name: "CAS Kernel" },
     })).statusCode).toBe(201);
 
     const bind = (kp: typeof KP_A) => app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: asOperator(),
       payload: {
         id,
         signingKeyAlgorithm: "ed25519",
