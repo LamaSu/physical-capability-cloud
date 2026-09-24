@@ -28,6 +28,10 @@ export * from "./signing-preimage.js";
 // verifyEvidenceSubjectBinding — LO-EV-9: a signed bundle digest must open to
 // events that commit the job, the accepting kernel and (when known) the output.
 export * from "./subject-binding.js";
+// evidenceLevelOf / evidenceLevelOfBundle — submitted / device_reported /
+// inspected_output, the one classification of how strongly evidence shows the
+// work was done (must-close 5).
+export * from "./evidence-level.js";
 export * from "./eligibility.js";
 export * from "./measurement-profile.js";
 export * from "./verifier-interface.js";
