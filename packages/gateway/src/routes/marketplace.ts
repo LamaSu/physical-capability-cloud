@@ -2,6 +2,26 @@ import type { FastifyInstance } from "fastify";
 import type { EquipmentClass, MarketSnapshot, ROIProjection, MarketplaceListing, MarketplaceOrder, MarketplaceCategory } from "@pcc/spec";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { randomUUID } from "node:crypto";
+import { requireActor } from "../auth/kernel-owner-guard.js";
+import { isSamePrincipal } from "../auth/kernel-operator.js";
+
+/**
+ * WP-C (coord-watch #2608, refvertical #2586). apiGate's "/api/marketplace/"
+ * public prefix is not method-aware, so the listing and order WRITES below
+ * reached their handlers with no identity, and the audit log fell back to the
+ * body's sellerId / buyerId (an anonymous edit was logged AS the seller). Every
+ * write now resolves its own actor (requireActor: apiGate's identity, else the
+ * same API-key / SIWE resolvers) and refuses without one (401). The seller of
+ * a listing and the buyer of an order ARE that actor; a body field naming
+ * anyone else is refused (403), never trusted. Only a listing's seller may
+ * change or delete it. The audit actor is always the authenticated principal.
+ */
+
+/** True iff a body identity field is absent, or names the actor itself. */
+function claimsOnlyActor(field: unknown, actor: string): boolean {
+  return field === undefined || (typeof field === "string" && isSamePrincipal(field, actor));
+}
 
 const mockClasses: EquipmentClass[] = [
   {
@@ -321,16 +341,25 @@ export async function marketplaceRoutes(app: FastifyInstance) {
     return { listing };
   });
 
-  // POST /api/marketplace/listings — create listing (seller)
+  // POST /api/marketplace/listings — create listing (seller = the authenticated actor)
   app.post("/api/marketplace/listings", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const body = req.body as Partial<MarketplaceListing> | undefined;
     if (!body?.name || !body?.category || !body?.pricePerUnit || !body?.unit) {
       return reply.status(400).send({ error: "name, category, pricePerUnit, and unit are required" });
     }
+    if (!claimsOnlyActor(body.sellerId, actor)) {
+      return reply.status(403).send({
+        error: "seller_mismatch",
+        message: "A listing's seller is the authenticated actor; sellerId cannot name anyone else.",
+      });
+    }
     const ts = new Date().toISOString();
     const listing: MarketplaceListing = {
-      id: `lst-${Date.now()}`,
-      sellerId: body.sellerId ?? "unknown",
+      // Unique even within one millisecond: PUT/DELETE address a listing by id.
+      id: `lst-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      sellerId: actor,
       category: body.category,
       name: body.name,
       description: body.description ?? "",
@@ -352,10 +381,10 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       category: listing.category,
       pricePerUnit: listing.pricePerUnit,
       currency: listing.currency,
-    }, (req as any).operatorId);
+    }, actor);
     auditService.log({
       eventType: "marketplace.listing_created",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? listing.sellerId,
+      actor,
       resourceType: "listing",
       resourceId: listing.id,
       action: "create",
@@ -366,37 +395,71 @@ export async function marketplaceRoutes(app: FastifyInstance) {
     return reply.status(201).send({ listing });
   });
 
-  // PUT /api/marketplace/listings/:id — update listing
+  // PUT /api/marketplace/listings/:id — update listing (its seller only)
   app.put<{ Params: { id: string } }>("/api/marketplace/listings/:id", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const idx = mockListings.findIndex((l) => l.id === req.params.id);
     if (idx === -1) {
       return reply.status(404).send({ error: "listing_not_found" });
     }
+    const existing = mockListings[idx];
+    if (!isSamePrincipal(existing.sellerId, actor)) {
+      return reply.status(403).send({
+        error: "not_listing_seller",
+        message: "Only the listing's seller may change it.",
+      });
+    }
     const body = req.body as Partial<MarketplaceListing> | undefined;
+    if (!claimsOnlyActor(body?.sellerId, actor)) {
+      return reply.status(403).send({
+        error: "seller_mismatch",
+        message: "A listing cannot be reassigned to another seller.",
+      });
+    }
     mockListings[idx] = {
-      ...mockListings[idx],
+      ...existing,
       ...(body ?? {}),
       id: req.params.id,
+      // Identity and provenance are not editable through the body.
+      sellerId: existing.sellerId,
+      createdAt: existing.createdAt,
       updatedAt: new Date().toISOString(),
     };
     return { listing: mockListings[idx] };
   });
 
-  // DELETE /api/marketplace/listings/:id — remove listing
+  // DELETE /api/marketplace/listings/:id — remove listing (its seller only)
   app.delete<{ Params: { id: string } }>("/api/marketplace/listings/:id", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const idx = mockListings.findIndex((l) => l.id === req.params.id);
     if (idx === -1) {
       return reply.status(404).send({ error: "listing_not_found" });
+    }
+    if (!isSamePrincipal(mockListings[idx].sellerId, actor)) {
+      return reply.status(403).send({
+        error: "not_listing_seller",
+        message: "Only the listing's seller may delete it.",
+      });
     }
     mockListings.splice(idx, 1);
     return { deleted: true, id: req.params.id };
   });
 
-  // POST /api/marketplace/orders — place order
+  // POST /api/marketplace/orders — place order (buyer = the authenticated actor)
   app.post("/api/marketplace/orders", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const body = req.body as Partial<MarketplaceOrder> & { listingId?: string; quantity?: number } | undefined;
     if (!body?.listingId || !body?.quantity) {
       return reply.status(400).send({ error: "listingId and quantity are required" });
+    }
+    if (!claimsOnlyActor(body.buyerId, actor)) {
+      return reply.status(403).send({
+        error: "buyer_mismatch",
+        message: "An order's buyer is the authenticated actor; buyerId cannot name anyone else.",
+      });
     }
     const listing = mockListings.find((l) => l.id === body.listingId);
     if (!listing) {
@@ -407,9 +470,9 @@ export async function marketplaceRoutes(app: FastifyInstance) {
     }
     const ts = new Date().toISOString();
     const order: MarketplaceOrder = {
-      id: `ord-${Date.now()}`,
+      id: `ord-${Date.now()}-${randomUUID().slice(0, 8)}`,
       listingId: body.listingId,
-      buyerId: body.buyerId ?? "unknown",
+      buyerId: actor,
       sellerId: listing.sellerId,
       quantity: body.quantity,
       totalPrice: listing.pricePerUnit * body.quantity,
@@ -424,10 +487,10 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       listingId: order.listingId,
       quantity: order.quantity,
       totalPrice: order.totalPrice,
-    }, (req as any).operatorId);
+    }, actor);
     auditService.log({
       eventType: "marketplace.order_placed",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? order.buyerId,
+      actor,
       resourceType: "order",
       resourceId: order.id,
       action: "create",

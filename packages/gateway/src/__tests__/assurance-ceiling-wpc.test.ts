@@ -400,6 +400,59 @@ describe("WP-C (extra) capability publish: owner-only", () => {
   });
 });
 
+// coord-watch #2608: the handler itself requires a PRESENT actor and ownership;
+// it must not rely on apiGate. A bare app (no apiGate) proves it.
+describe("WP-C (extra) capability publish: the handler does not rely on apiGate", () => {
+  let bare: FastifyInstance;
+
+  beforeAll(async () => {
+    bare = Fastify({ logger: false });
+    await bare.register(capabilityRoutes);
+    await bare.ready();
+  });
+
+  afterAll(async () => {
+    await bare.close();
+  });
+
+  it("[neg] no credentials at all -> 401, nothing inserted", async () => {
+    const id = uid("wpc-bare-victim");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const res = await bare.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      payload: { kernelId: id, type: "wpc-bare", id: `cap-${id}-bare`, assuranceTiers: [3] },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(getRepos().capabilities.findById(`cap-${id}-bare`)).toBeFalsy();
+  });
+
+  it("[neg] a non-owner's key, resolved by the handler itself -> 403, nothing inserted", async () => {
+    const id = uid("wpc-bare-victim2");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const res = await bare.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asAttacker(),
+      payload: { kernelId: id, type: "wpc-bare", id: `cap-${id}-bare`, assuranceTiers: [3] },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(getRepos().capabilities.findById(`cap-${id}-bare`)).toBeFalsy();
+  });
+
+  it("the owner's key, resolved by the handler itself -> 201 (positive control)", async () => {
+    const id = uid("wpc-bare-owner");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const res = await bare.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: id, type: "wpc-bare", id: `cap-${id}-bare` },
+    });
+    expect(res.statusCode).toBe(201);
+  });
+});
+
 // ── C2: reads / search / selection use the clamped tiers ────────────────────
 
 describe("WP-C reads: tiers are served clamped to the owning kernel's ceiling", () => {
