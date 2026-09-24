@@ -30,15 +30,36 @@
  *
  * Manifest:
  *   GET  /api/relay/:kernelId/manifest              -- Get tool manifest for this kernel
+ *
+ * Access (N4b-gw item 4): default-deny, per kernel. Every route is listed in
+ * RELAY_ROUTE_ACCESS below and a preHandler enforces it; a route missing from
+ * the table is refused. The caller is the authenticated principal (req.userId,
+ * set by apiGate for an API key or a SIWE session); with none the answer is
+ * 401, never an "anonymous" pass.
+ *   - kernel_operator: the device side (claim pending calls, report results,
+ *     push camera frames, read and answer chat) and minting scopes. Only the
+ *     principal recorded as the kernel's operatorAddress.
+ *   - operator_or_grant: the operator, or a principal holding an active,
+ *     unexpired execution scope on this kernel.
+ *   - object_owner: routes addressing one scope or one call. The handler
+ *     allows the kernel operator or the scope's creator, and the object must
+ *     belong to the :kernelId in the path.
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
-import { getStore } from "../db.js";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { getStore, getRepos } from "../db.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
-const { toolCallRelay, executionScopes, ot2CameraFrames, ot2ChatMessages, shopKernels } = schema;
+const {
+  toolCallRelay,
+  executionScopes,
+  ot2CameraFrames,
+  ot2ChatMessages,
+  shopKernels,
+  negotiationSessions,
+} = schema;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -104,72 +125,163 @@ function validateToolCall(
   return { allowed: true, reason: "scope_approved" };
 }
 
-/** Check if a caller has camera access for a kernel */
-function hasCameraAccess(
-  callerId: string,
-  kernelId: string,
-): boolean {
-  if (!callerId || callerId === "anonymous") return false;
+// ── Access control (N4b-gw item 4) ──────────────────────────────────────────
 
+export type RelayAccess = "kernel_operator" | "operator_or_grant" | "object_owner";
+
+/**
+ * The complete access table for this plugin, keyed "METHOD /route/pattern".
+ * The preHandler refuses any route of this plugin that is not listed here, so
+ * a new relay route stays closed until someone decides who may call it.
+ */
+export const RELAY_ROUTE_ACCESS: Readonly<Record<string, RelayAccess>> = {
+  "GET /api/relay/:kernelId/manifest": "operator_or_grant",
+  "POST /api/relay/:kernelId/tool-call": "operator_or_grant",
+  "GET /api/relay/:kernelId/tool-call/pending": "kernel_operator",
+  "POST /api/relay/:kernelId/tool-result": "kernel_operator",
+  "GET /api/relay/:kernelId/tool-result/:id": "object_owner",
+  "POST /api/relay/:kernelId/scope": "kernel_operator",
+  "GET /api/relay/:kernelId/scope/:scopeId": "object_owner",
+  "POST /api/relay/:kernelId/scope/:scopeId/revoke": "object_owner",
+  "GET /api/relay/:kernelId/scope/:scopeId/audit": "object_owner",
+  "POST /api/relay/:kernelId/camera/frame": "kernel_operator",
+  "GET /api/relay/:kernelId/camera/latest": "operator_or_grant",
+  "GET /api/relay/:kernelId/camera/snapshot": "operator_or_grant",
+  "GET /api/relay/:kernelId/camera/stream": "operator_or_grant",
+  "POST /api/relay/:kernelId/chat": "operator_or_grant",
+  "GET /api/relay/:kernelId/chat/messages": "operator_or_grant",
+  "GET /api/relay/:kernelId/chat/pending": "kernel_operator",
+  "POST /api/relay/:kernelId/chat/respond": "kernel_operator",
+};
+
+/** operatorAddress values that record no owner (same set as kernel.facade.ts). */
+const UNOWNED_OPERATOR_ADDRESSES = new Set([
+  "",
+  "0x0000000000000000000000000000000000000000",
+]);
+
+/** The authenticated principal apiGate resolved (API key or SIWE), or null. */
+function relayPrincipal(req: FastifyRequest): string | null {
+  const id = req.userId ?? req.operatorId ?? null;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/** True only when `principal` is the recorded operator of `kernelId`. */
+function isKernelOperator(kernelId: string, principal: string): boolean {
   const { db } = getStore();
-
-  // Check if caller is the kernel operator
   const kernel = db.select().from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
-  if (kernel && kernel.operatorAddress === callerId) return true;
+  if (!kernel || UNOWNED_OPERATOR_ADDRESSES.has(kernel.operatorAddress)) return false;
+  return kernel.operatorAddress === principal;
+}
 
-  // Check if caller has an active scope for this kernel
-  const scope = db
+/** True when `principal` created an active, unexpired scope on `kernelId`. */
+function holdsActiveScope(kernelId: string, principal: string): boolean {
+  const { db } = getStore();
+  const now = new Date();
+  return db
     .select()
     .from(executionScopes)
     .where(
       and(
         eq(executionScopes.kernelId, kernelId),
-        eq(executionScopes.createdBy, callerId),
+        eq(executionScopes.createdBy, principal),
         eq(executionScopes.status, "active"),
       ),
     )
-    .limit(1)
-    .get();
+    .all()
+    .some((scope) => new Date(scope.expiresAt) > now);
+}
 
-  return !!scope;
+/** Operator of the kernel, or the creator of this scope. */
+function ownsScope(
+  scope: typeof executionScopes.$inferSelect,
+  kernelId: string,
+  principal: string,
+): boolean {
+  return scope.createdBy === principal || isKernelOperator(kernelId, principal);
 }
 
 /**
- * Whether `callerId` is authorized to report a result for a relay tool call.
- * Authorized = the operator of the call's kernel (the on-device executor runs
- * under the operator), or the creator of the call's execution scope. Mirrors
- * the ownership gate enforced on POST /tool-call. The caller resolves and
- * allows the anonymous (unauthenticated relay) case before invoking this.
- *
- * Authorization is checked against the call's OWN kernel (`call.kernelId`) —
- * the resource whose circuit breaker the result mutates — not the URL param,
- * so a callId cannot be replayed against an unrelated kernel's operator.
+ * Load the scope a scope/:scopeId route addresses. Replies 404 unless the
+ * scope is on :kernelId, and 403 unless the caller is the kernel operator or
+ * the scope's creator.
  */
-function callerOwnsCall(
-  call: typeof toolCallRelay.$inferSelect,
-  callerId: string,
-): boolean {
+function ownedScopeOrReply(
+  req: FastifyRequest<{ Params: { kernelId: string; scopeId: string } }>,
+  reply: FastifyReply,
+): typeof executionScopes.$inferSelect | null {
+  const { kernelId, scopeId } = req.params;
   const { db } = getStore();
+  const scope = db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
+  if (!scope || scope.kernelId !== kernelId) {
+    reply.status(404).send({ error: "Scope not found", id: scopeId });
+    return null;
+  }
+  if (!ownsScope(scope, kernelId, relayPrincipal(req)!)) {
+    reply.status(403).send({
+      error: "scope_not_yours",
+      message: "Only the kernel operator or the scope's creator may use this scope.",
+    });
+    return null;
+  }
+  return scope;
+}
 
-  // Kernel operator may always report outcomes for their own kernel.
-  const kernel = db
-    .select()
-    .from(shopKernels)
-    .where(eq(shopKernels.id, call.kernelId))
-    .get();
-  if (kernel && kernel.operatorAddress === callerId) return true;
-
-  // Otherwise the creator of the call's execution scope may report it.
-  if (call.scopeId) {
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, call.scopeId))
-      .get();
-    if (scope && scope.createdBy === callerId) return true;
+/** preHandler for every relay route: default-deny, per kernel. */
+async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
+  const principal = relayPrincipal(req);
+  if (!principal) {
+    return reply.status(401).send({
+      error: "authentication_required",
+      message: "The device relay requires the kernel operator's key or an execution scope holder's key.",
+    });
   }
 
-  return false;
+  const routeKey = `${req.method} ${req.routeOptions.url}`;
+  const access = RELAY_ROUTE_ACCESS[routeKey];
+  if (!access) {
+    return reply.status(403).send({ error: "relay_route_not_allowed", route: routeKey });
+  }
+  if (access === "object_owner") return; // the handler checks the addressed object
+
+  const { kernelId } = req.params as { kernelId: string };
+  if (isKernelOperator(kernelId, principal)) return;
+  if (access === "operator_or_grant" && holdsActiveScope(kernelId, principal)) return;
+
+  return reply.status(403).send({
+    error: "relay_access_denied",
+    required: access === "kernel_operator" ? "kernel_operator" : "kernel_operator_or_active_scope",
+    message:
+      access === "kernel_operator"
+        ? "Only this kernel's operator may use this relay route."
+        : "Requires this kernel's operator or an active execution scope on this kernel.",
+  });
+}
+
+/**
+ * Parity with the retired /api/ot2/tool-call: a scoped write under a scope
+ * bound to a job is refused while that job's escrow exists and is not funded.
+ * Unlike the legacy route, a lookup error refuses the call instead of
+ * letting it through. N4b-gw item 5 (gateway, R30) replaces this with the
+ * accepted, funded job and committed-protocol check.
+ */
+function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | null {
+  if (!scope.jobId) return null;
+  const repos = getRepos();
+  const job = repos.jobs.findById(scope.jobId);
+  if (!job) return null;
+  const { db } = getStore();
+  const session = db
+    .select()
+    .from(negotiationSessions)
+    .where(eq(negotiationSessions.jobId, scope.jobId))
+    .get();
+  if (!session?.cwmId) return null;
+  const escrow = repos.escrows.findByCwm(session.cwmId);
+  if (escrow && escrow.status !== "funded" && escrow.status !== "active" && escrow.status !== "completed") {
+    return escrow.status;
+  }
+  return null;
 }
 
 // ── Active SSE clients for camera streams (per kernel) ──────────────────────
@@ -194,7 +306,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   // Pre-warm manifest cache so sync lookups work
   await warmManifestCache();
 
-  // Ensure tables exist (idempotent — same DDL as OT-2 routes)
+  // Default-deny, per kernel, for every route below (see RELAY_ROUTE_ACCESS).
+  app.addHook("preHandler", relayAccessGuard);
+
+  // Ensure tables exist (idempotent; packages/db/src/migrate.ts creates them too)
   const { db } = getStore();
 
   db.run(sql`CREATE TABLE IF NOT EXISTS tool_call_relay (
@@ -283,14 +398,19 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     }
 
     const { db } = getStore();
-    const callerId = (req as any).operatorId ?? "anonymous";
+    // The guard admitted this caller as the operator or an active scope holder.
+    const callerId = relayPrincipal(req)!;
+    const isOperator = isKernelOperator(kernelId, callerId);
     const deviceType = resolveDeviceType(kernelId);
 
-    // Non-safe tools require a scope
-    if (!isToolSafe(deviceType, toolName) && !scopeId) {
+    // Non-safe tools require a scope, and anyone but the operator must name
+    // their own scope for every call.
+    if (!scopeId && (!isOperator || !isToolSafe(deviceType, toolName))) {
       return reply.status(403).send({
         error: "scope_required",
-        message: `Write operations require an execution scope. Create one via POST /api/relay/${kernelId}/scope`,
+        message: isOperator
+          ? `Write operations require an execution scope. Create one via POST /api/relay/${kernelId}/scope`
+          : "Name the execution scope you were granted on this kernel (scopeId).",
       });
     }
 
@@ -315,15 +435,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
 
       // Verify caller owns this scope (or is the kernel operator)
-      if (scope.createdBy !== callerId && callerId !== "anonymous") {
-        const kernel = db.select().from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
-        const isOperator = kernel && kernel.operatorAddress === callerId;
-        if (!isOperator) {
-          return reply.status(403).send({
-            error: "scope_not_yours",
-            message: "This scope belongs to a different agent.",
-          });
-        }
+      if (scope.createdBy !== callerId && !isOperator) {
+        return reply.status(403).send({
+          error: "scope_not_yours",
+          message: "This scope belongs to a different agent.",
+        });
       }
 
       const validation = validateToolCall(scope, toolName, deviceType);
@@ -351,8 +467,40 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         });
       }
 
-      // Increment command count for non-safe tools
       if (!isToolSafe(deviceType, toolName)) {
+        // Escrow gate carried over from the retired /api/ot2/tool-call.
+        let unfundedStatus: string | null;
+        try {
+          unfundedStatus = escrowRefusal(scope);
+        } catch (err) {
+          return reply.status(503).send({
+            error: "escrow_check_unavailable",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (unfundedStatus) {
+          const id = generateId("tc");
+          db.insert(toolCallRelay).values({
+            id,
+            scopeId,
+            kernelId,
+            toolName,
+            toolArgs: args ?? {},
+            status: "rejected",
+            error: "escrow_not_funded",
+            createdAt: new Date().toISOString(),
+          }).run();
+          return reply.status(402).send({
+            error: "Escrow not funded",
+            reason: "escrow_not_funded",
+            escrowStatus: unfundedStatus,
+            callId: id,
+            toolName,
+            scopeId,
+          });
+        }
+
+        // Increment command count for non-safe tools
         db.update(executionScopes)
           .set({ commandCount: scope.commandCount + 1 })
           .where(eq(executionScopes.id, scopeId))
@@ -521,21 +669,17 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Tool call not found", callId });
     }
 
-    // ── Caller-ownership check (safety review S3, finding F2) ────────────────
+    // ── Caller-ownership check (safety review S3 F2; N4b-gw) ────────────────
     // Reporting a result mutates the safety circuit breaker for call.kernelId
-    // (recordDeviceFailure/Success below). Only the kernel operator (whose
-    // executor produced this outcome) or the creator of the call's execution
-    // scope may report it. Without this gate, any authenticated caller who
-    // learns a callId could force-trip a kernel's breaker (DoS) or force-reset
-    // it (masking real device failures). Mirrors the ownership gate on POST
-    // /tool-call. Anonymous callers (unauthenticated relay mode) are preserved
-    // for backward-compat, exactly as /tool-call allows.
-    const callerId = (req as any).operatorId ?? "anonymous";
-    if (callerId !== "anonymous" && !callerOwnsCall(call, callerId)) {
+    // (recordDeviceFailure/Success below) and is the device's own outcome.
+    // The guard admitted only the operator of :kernelId (the on-device
+    // executor runs under the operator). The call must also belong to that
+    // kernel, so an operator cannot report, trip or reset another kernel's
+    // calls by naming their callId. A scope holder commands; it never reports.
+    if (call.kernelId !== req.params.kernelId) {
       return reply.status(403).send({
         error: "tool_result_not_yours",
-        message:
-          "Only the kernel operator or the owning execution scope may report this result.",
+        message: "This tool call belongs to a different kernel.",
       });
     }
 
@@ -621,7 +765,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.get<{
     Params: { kernelId: string; id: string };
   }>("/api/relay/:kernelId/tool-result/:id", async (req, reply) => {
-    const { id } = req.params;
+    const { kernelId, id } = req.params;
 
     const { db } = getStore();
     const call = db
@@ -630,8 +774,23 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       .where(eq(toolCallRelay.id, id))
       .get();
 
-    if (!call) {
+    if (!call || call.kernelId !== kernelId) {
       return reply.status(404).send({ error: "Tool call not found", id });
+    }
+
+    // Object owner: the kernel operator, or the creator of the call's scope.
+    const principal = relayPrincipal(req)!;
+    const scope = call.scopeId
+      ? db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get()
+      : undefined;
+    const allowed = scope
+      ? ownsScope(scope, kernelId, principal)
+      : isKernelOperator(kernelId, principal);
+    if (!allowed) {
+      return reply.status(403).send({
+        error: "tool_result_not_yours",
+        message: "Only the kernel operator or the owning execution scope may read this result.",
+      });
     }
 
     let parsedResult = null;
@@ -688,9 +847,9 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       expiresInMinutes,
     } = req.body ?? {};
 
-    if (!createdBy || !allowedTools) {
+    if (!allowedTools) {
       return reply.status(400).send({
-        error: "createdBy and allowedTools are required",
+        error: "allowedTools is required",
       });
     }
 
@@ -698,6 +857,22 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return reply.status(400).send({
         error: "allowedTools must be a non-empty array of tool names",
       });
+    }
+
+    // Only the kernel operator reaches this handler (guard). The scope is the
+    // operator's own unless the operator names the principal it delegates to.
+    const holder = createdBy ?? relayPrincipal(req)!;
+
+    // A scope may only be bound to a job on this kernel: its tool calls are
+    // counted into that job's completion record.
+    if (jobId) {
+      const job = getRepos().jobs.findById(jobId);
+      if (!job || job.kernelId !== kernelId) {
+        return reply.status(400).send({
+          error: "job_not_on_kernel",
+          message: "jobId must name a job on this kernel.",
+        });
+      }
     }
 
     const id = generateId("scope");
@@ -709,7 +884,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       id,
       kernelId,
       jobId: jobId ?? null,
-      createdBy,
+      createdBy: holder,
       status: "active",
       allowedTools,
       allowedPipettes: allowedPipettes ?? null,
@@ -726,7 +901,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       id,
       kernelId,
       jobId: jobId ?? null,
-      createdBy,
+      createdBy: holder,
       status: "active",
       allowedTools,
       allowedPipettes: allowedPipettes ?? null,
@@ -747,15 +922,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { scopeId } = req.params;
 
     const { db } = getStore();
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, scopeId))
-      .get();
-
-    if (!scope) {
-      return reply.status(404).send({ error: "Scope not found", id: scopeId });
-    }
+    const scope = ownedScopeOrReply(req, reply);
+    if (!scope) return reply;
 
     // Check if expired and auto-update status
     if (scope.status === "active" && new Date(scope.expiresAt) < new Date()) {
@@ -780,15 +948,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { scopeId } = req.params;
 
     const { db } = getStore();
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, scopeId))
-      .get();
-
-    if (!scope) {
-      return reply.status(404).send({ error: "Scope not found", id: scopeId });
-    }
+    const scope = ownedScopeOrReply(req, reply);
+    if (!scope) return reply;
 
     if (scope.status === "revoked") {
       return reply.status(409).send({ error: "Scope already revoked", id: scopeId });
@@ -839,15 +1000,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     const { db } = getStore();
 
-    const scope = db
-      .select()
-      .from(executionScopes)
-      .where(eq(executionScopes.id, scopeId))
-      .get();
-
-    if (!scope) {
-      return reply.status(404).send({ error: "Scope not found", id: scopeId });
-    }
+    const scope = ownedScopeOrReply(req, reply);
+    if (!scope) return reply;
 
     const calls = db
       .select()
@@ -971,16 +1125,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.get<{
     Params: { kernelId: string };
   }>("/api/relay/:kernelId/camera/latest", async (req, reply) => {
+    // Camera auth (operator or active scope holder) is the relay guard's.
     const { kernelId } = req.params;
-    const callerId = (req as any).operatorId ?? "anonymous";
-
-    // Camera auth: only operator or active scope holder
-    if (!hasCameraAccess(callerId, kernelId)) {
-      return reply.status(403).send({
-        error: "camera_access_denied",
-        message: "Camera access requires operator privileges or an active execution scope.",
-      });
-    }
 
     const { db } = getStore();
     const latest = db
@@ -1007,16 +1153,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.get<{
     Params: { kernelId: string };
   }>("/api/relay/:kernelId/camera/snapshot", async (req, reply) => {
+    // Camera auth (operator or active scope holder) is the relay guard's.
     const { kernelId } = req.params;
-    const callerId = (req as any).operatorId ?? "anonymous";
-
-    // Camera auth: only operator or active scope holder
-    if (!hasCameraAccess(callerId, kernelId)) {
-      return reply.status(403).send({
-        error: "camera_access_denied",
-        message: "Camera access requires operator privileges or an active execution scope.",
-      });
-    }
 
     const { db } = getStore();
     const latest = db
@@ -1199,11 +1337,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     const { db } = getStore();
 
-    // Mark original message as completed if provided
+    // Mark original message as completed if provided (only this kernel's)
     if (messageId) {
       db.update(ot2ChatMessages)
         .set({ status: "completed" })
-        .where(eq(ot2ChatMessages.id, messageId))
+        .where(and(eq(ot2ChatMessages.id, messageId), eq(ot2ChatMessages.kernelId, kernelId)))
         .run();
     }
 

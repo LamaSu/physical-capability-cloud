@@ -284,6 +284,5 @@ export const BODY_LIMIT_OPTIONS = {
 /** Routes that need larger body limits (file uploads, etc.) */
 export const LARGE_BODY_ROUTES = new Set([
   "/api/relay/*/camera/frame",
-  "/api/ot2/camera/frame",
   "/api/evidence/upload",
 ]);

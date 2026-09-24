@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { initStore, closeStore, getStore } from "../db.js";
-import { deviceRelayRoutes } from "../routes/device-relay.js";
+import { deviceRelayRoutes, RELAY_ROUTE_ACCESS } from "../routes/device-relay.js";
 import { getSafetyGateway } from "@pcc/kernel";
 import { schema, sql, eq } from "@pcc/store";
 
@@ -10,27 +10,22 @@ const { shopKernels, kernelDevices, toolCallRelay, executionScopes, ot2CameraFra
 
 let app: FastifyInstance;
 
-beforeAll(async () => {
-  // In-memory DB for tests
-  process.env.DATABASE_URL = ":memory:";
-  initStore({ seed: false });
+// ── Principals ──────────────────────────────────────────────────────────────
+// apiGate resolves the caller before any route runs: an API key sets both
+// req.operatorId and req.userId, a SIWE session sets req.userId only. The test
+// app stands in for it with two headers. No header = no principal.
+const OPERATOR = "operator-1"; // operator of kernel-test-1
+const OPERATOR_2 = "operator-2"; // operator of kernel-test-2
+const SIWE_OPERATOR = "0xabc0000000000000000000000000000000000001"; // operator of kernel-siwe
+const asKey = (id: string) => ({ "x-test-key": id });
+const asSiwe = (address: string) => ({ "x-test-siwe": address });
+const op = asKey(OPERATOR);
 
-  app = Fastify({ logger: false });
-
-  // Mock auth: decorate request with operatorId
-  app.decorateRequest("operatorId", null);
-  app.decorateRequest("userId", null);
-  app.decorateRequest("apiKeyId", null);
-
-  await app.register(deviceRelayRoutes);
-  await app.ready();
-
-  // Seed a test kernel + device
-  const { db } = getStore();
-  db.insert(shopKernels).values({
-    id: "kernel-test-1",
-    name: "Test Kernel",
-    operatorAddress: "operator-1",
+function seedKernel(id: string, operatorAddress: string) {
+  getStore().db.insert(shopKernels).values({
+    id,
+    name: `Kernel ${id}`,
+    operatorAddress,
     location: { lat: 37.7, lng: -122.4 },
     physicalAddress: "123 Test St",
     maxAssuranceTier: 2,
@@ -42,8 +37,38 @@ beforeAll(async () => {
     lastHeartbeat: new Date().toISOString(),
     version: "1.0.0",
   }).run();
+}
 
-  db.insert(kernelDevices).values({
+beforeAll(async () => {
+  // In-memory DB for tests
+  process.env.DATABASE_URL = ":memory:";
+  initStore({ seed: false });
+
+  app = Fastify({ logger: false });
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    const siwe = req.headers["x-test-siwe"];
+    if (typeof key === "string") {
+      req.operatorId = key;
+      req.userId = key as `0x${string}`;
+    } else if (typeof siwe === "string") {
+      req.userId = siwe as `0x${string}`;
+    }
+  });
+
+  await app.register(deviceRelayRoutes);
+  await app.ready();
+
+  // Seed the kernels + an OT-2 device
+  seedKernel("kernel-test-1", OPERATOR);
+  seedKernel("kernel-test-2", OPERATOR_2);
+  seedKernel("kernel-siwe", SIWE_OPERATOR);
+  seedKernel("kernel-unowned", "0x0000000000000000000000000000000000000000");
+
+  getStore().db.insert(kernelDevices).values({
     id: "device-ot2",
     kernelId: "kernel-test-1",
     type: "machine",
@@ -70,6 +95,36 @@ beforeEach(() => {
   db.run(sql`DELETE FROM ot2_chat_messages`);
 });
 
+/** The operator of kernel-test-1 mints a scope held by `holder`. */
+async function mintScope(holder: string, allowedTools: string[] = ["run_create"], kernelId = "kernel-test-1") {
+  const headers = kernelId === "kernel-test-2" ? asKey(OPERATOR_2) : op;
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/relay/${kernelId}/scope`,
+    headers,
+    payload: { createdBy: holder, allowedTools },
+  });
+  expect(res.statusCode).toBe(201);
+  return res.json().id as string;
+}
+
+/** The operator posts a safe tool call and its executor claims it. */
+async function createAndClaim(toolName = "health"): Promise<string> {
+  const createRes = await app.inject({
+    method: "POST",
+    url: "/api/relay/kernel-test-1/tool-call",
+    headers: op,
+    payload: { toolName },
+  });
+  const callId = createRes.json().id;
+  await app.inject({
+    method: "GET",
+    url: "/api/relay/kernel-test-1/tool-call/pending",
+    headers: op,
+  });
+  return callId;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL MANIFEST
 // ═══════════════════════════════════════════════════════════════════════════
@@ -79,6 +134,7 @@ describe("GET /api/relay/:kernelId/manifest", () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/manifest",
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -89,14 +145,24 @@ describe("GET /api/relay/:kernelId/manifest", () => {
     expect(body.manifest.safeTools).toContain("health");
   });
 
-  it("returns generic manifest for unknown kernel", async () => {
+  it("returns the generic manifest for a kernel without a known device", async () => {
     const res = await app.inject({
       method: "GET",
-      url: "/api/relay/kernel-unknown/manifest",
+      url: "/api/relay/kernel-test-2/manifest",
+      headers: asKey(OPERATOR_2),
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.deviceType).toBe("generic");
+  });
+
+  it("is refused for a kernel nobody operates", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-unknown/manifest",
+      headers: op,
+    });
+    expect(res.statusCode).toBe(403);
   });
 });
 
@@ -105,10 +171,11 @@ describe("GET /api/relay/:kernelId/manifest", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("POST /api/relay/:kernelId/tool-call", () => {
-  it("accepts a safe tool without scope", async () => {
+  it("accepts a safe tool without scope from the kernel operator", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "health" },
     });
     expect(res.statusCode).toBe(201);
@@ -123,6 +190,7 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "protocol_upload" },
     });
     expect(res.statusCode).toBe(403);
@@ -134,29 +202,21 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
   });
 
-  it("accepts a scoped write tool with valid scope", async () => {
-    // Create a scope first
-    const scopeRes = await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/scope",
-      payload: {
-        createdBy: "agent-1",
-        allowedTools: ["protocol_upload", "run_create"],
-      },
-    });
-    const scope = scopeRes.json();
+  it("accepts a scoped write tool from the scope's holder", async () => {
+    const scopeId = await mintScope("agent-1", ["protocol_upload", "run_create"]);
 
-    // Use the scope for a write tool
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
       payload: {
-        scopeId: scope.id,
+        scopeId,
         toolName: "protocol_upload",
         args: { filename: "test.py", content: "print('hello')" },
       },
@@ -166,21 +226,14 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
   });
 
   it("rejects a tool not in scope's allowedTools", async () => {
-    const scopeRes = await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/scope",
-      payload: {
-        createdBy: "agent-1",
-        allowedTools: ["run_create"],
-      },
-    });
-    const scope = scopeRes.json();
+    const scopeId = await mintScope("agent-1", ["run_create"]);
 
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
       payload: {
-        scopeId: scope.id,
+        scopeId,
         toolName: "shell",
       },
     });
@@ -192,6 +245,7 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: {
         scopeId: "scope_nonexistent",
         toolName: "protocol_upload",
@@ -207,12 +261,14 @@ describe("GET /api/relay/:kernelId/tool-call/pending", () => {
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "health" },
     });
 
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -223,6 +279,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending", () => {
     const res2 = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
     });
     expect(res2.json().count).toBe(0);
   });
@@ -233,6 +290,7 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "health" },
     });
     const callId = createRes.json().id;
@@ -240,6 +298,7 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, result: { status: "ok" } },
     });
     expect(res.statusCode).toBe(200);
@@ -250,6 +309,7 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "health" },
     });
     const callId = createRes.json().id;
@@ -257,6 +317,7 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, error: "device_unreachable" },
     });
     expect(res.statusCode).toBe(200);
@@ -267,6 +328,7 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -276,35 +338,6 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL RESULT — SAFETY (breaker idempotency + caller ownership, finding F2)
 // ═══════════════════════════════════════════════════════════════════════════
-
-/** Build a Fastify app whose requests are authenticated as `operatorId`. */
-async function makeAuthedApp(operatorId: string): Promise<FastifyInstance> {
-  const authed = Fastify({ logger: false });
-  authed.decorateRequest("operatorId", null);
-  authed.decorateRequest("userId", null);
-  authed.decorateRequest("apiKeyId", null);
-  authed.addHook("onRequest", async (req) => {
-    (req as any).operatorId = operatorId;
-  });
-  await authed.register(deviceRelayRoutes);
-  await authed.ready();
-  return authed;
-}
-
-/** Create a tool call and claim it (status -> 'claimed'), returning its id. */
-async function createAndClaim(toolName = "health"): Promise<string> {
-  const createRes = await app.inject({
-    method: "POST",
-    url: "/api/relay/kernel-test-1/tool-call",
-    payload: { toolName },
-  });
-  const callId = createRes.json().id;
-  await app.inject({
-    method: "GET",
-    url: "/api/relay/kernel-test-1/tool-call/pending",
-  });
-  return callId;
-}
 
 describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", () => {
   it("records a re-POSTed (dropped-200 retry) result only once to the breaker", async () => {
@@ -319,6 +352,7 @@ describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", (
     const res1 = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, error: "device_unreachable" },
     });
     expect(res1.statusCode).toBe(200);
@@ -328,6 +362,7 @@ describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", (
     const res2 = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, error: "device_unreachable" },
     });
     expect(res2.statusCode).toBe(200);
@@ -356,6 +391,7 @@ describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", (
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, result: { ok: true } },
     });
     // Replay a *failure* against the already-completed call — must be a no-op
@@ -363,6 +399,7 @@ describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", (
     const replay = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, error: "late_failure" },
     });
     expect(replay.statusCode).toBe(200);
@@ -390,15 +427,15 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
       .mockImplementation(() => {});
 
     // "mallory" is neither the kernel operator nor the scope owner.
-    const malloryApp = await makeAuthedApp("mallory");
-    const res = await malloryApp.inject({
+    const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: asKey("mallory"),
       payload: { callId, error: "spoofed_failure" },
     });
 
     expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("tool_result_not_yours");
+    expect(res.json().error).toBe("relay_access_denied");
     // No breaker mutation — cannot force-trip or force-reset the kernel.
     expect(failSpy).not.toHaveBeenCalled();
     expect(okSpy).not.toHaveBeenCalled();
@@ -407,12 +444,12 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
     const check = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/tool-result/${callId}`,
+      headers: op,
     });
     expect(check.json().status).toBe("claimed");
 
     failSpy.mockRestore();
     okSpy.mockRestore();
-    await malloryApp.close();
   });
 
   it("still records the first result from the kernel operator (legit path works)", async () => {
@@ -423,10 +460,10 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
       .spyOn(getSafetyGateway(), "recordDeviceSuccess")
       .mockImplementation(() => {});
 
-    const operatorApp = await makeAuthedApp("operator-1");
-    const res = await operatorApp.inject({
+    const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, result: { ok: true } },
     });
 
@@ -436,10 +473,9 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
     expect(okSpy).toHaveBeenCalledWith("kernel-test-1");
 
     okSpy.mockRestore();
-    await operatorApp.close();
   });
 
-  it("allows anonymous (unauthenticated relay mode) to report — backward compat", async () => {
+  it("refuses an unauthenticated report (no anonymous relay mode) and records nothing", async () => {
     getSafetyGateway().resetCircuit("kernel-test-1");
     const callId = await createAndClaim();
 
@@ -447,15 +483,13 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
       .spyOn(getSafetyGateway(), "recordDeviceSuccess")
       .mockImplementation(() => {});
 
-    // Default `app` has no auth hook -> operatorId null -> "anonymous".
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
       payload: { callId, result: { ok: true } },
     });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().status).toBe("completed");
-    expect(okSpy).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(401);
+    expect(okSpy).not.toHaveBeenCalled();
 
     okSpy.mockRestore();
   });
@@ -466,6 +500,7 @@ describe("GET /api/relay/:kernelId/tool-result/:id", () => {
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "health" },
     });
     const callId = createRes.json().id;
@@ -473,12 +508,14 @@ describe("GET /api/relay/:kernelId/tool-result/:id", () => {
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
       payload: { callId, result: { healthy: true } },
     });
 
     const res = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/tool-result/${callId}`,
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -490,6 +527,7 @@ describe("GET /api/relay/:kernelId/tool-result/:id", () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-result/tc_nonexistent",
+      headers: op,
     });
     expect(res.statusCode).toBe(404);
   });
@@ -504,6 +542,7 @@ describe("POST /api/relay/:kernelId/scope", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
+      headers: op,
       payload: {
         createdBy: "agent-1",
         allowedTools: ["run_create", "run_action"],
@@ -521,10 +560,11 @@ describe("POST /api/relay/:kernelId/scope", () => {
     expect(body.id).toMatch(/^scope_/);
   });
 
-  it("requires createdBy and allowedTools", async () => {
+  it("requires allowedTools", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
+      headers: op,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -534,9 +574,32 @@ describe("POST /api/relay/:kernelId/scope", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
+      headers: op,
       payload: { createdBy: "agent-1", allowedTools: [] },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("is held by the operator itself when no createdBy is named", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/scope",
+      headers: op,
+      payload: { allowedTools: ["run_create"] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().createdBy).toBe(OPERATOR);
+  });
+
+  it("refuses a jobId that names no job on this kernel", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/scope",
+      headers: op,
+      payload: { createdBy: OPERATOR, allowedTools: ["run_create"], jobId: "job-does-not-exist" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("job_not_on_kernel");
   });
 });
 
@@ -545,6 +608,7 @@ describe("GET /api/relay/:kernelId/scope/:scopeId", () => {
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
+      headers: op,
       payload: {
         createdBy: "agent-1",
         allowedTools: ["run_create"],
@@ -553,9 +617,11 @@ describe("GET /api/relay/:kernelId/scope/:scopeId", () => {
     });
     const scopeId = createRes.json().id;
 
+    // The holder reads its own scope.
     const res = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/scope/${scopeId}`,
+      headers: asKey("agent-1"),
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -567,6 +633,7 @@ describe("GET /api/relay/:kernelId/scope/:scopeId", () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/scope/scope_nonexistent",
+      headers: op,
     });
     expect(res.statusCode).toBe(404);
   });
@@ -574,21 +641,13 @@ describe("GET /api/relay/:kernelId/scope/:scopeId", () => {
 
 describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
   it("revokes a scope and rejects pending calls", async () => {
-    // Create scope
-    const scopeRes = await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/scope",
-      payload: {
-        createdBy: "agent-1",
-        allowedTools: ["run_create"],
-      },
-    });
-    const scopeId = scopeRes.json().id;
+    const scopeId = await mintScope("agent-1", ["run_create"]);
 
     // Create a pending tool call under this scope
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
       payload: {
         scopeId,
         toolName: "run_create",
@@ -596,10 +655,11 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
       },
     });
 
-    // Revoke
+    // Revoke (the operator's emergency stop)
     const res = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("revoked");
@@ -607,24 +667,18 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
   });
 
   it("returns 409 for already revoked scope", async () => {
-    const scopeRes = await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/scope",
-      payload: {
-        createdBy: "agent-1",
-        allowedTools: ["run_create"],
-      },
-    });
-    const scopeId = scopeRes.json().id;
+    const scopeId = await mintScope("agent-1", ["run_create"]);
 
-    // Revoke twice
+    // Revoke twice (the holder may give up its own scope)
     await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
+      headers: asKey("agent-1"),
     });
     const res2 = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
+      headers: asKey("agent-1"),
     });
     expect(res2.statusCode).toBe(409);
   });
@@ -632,21 +686,13 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
 
 describe("GET /api/relay/:kernelId/scope/:scopeId/audit", () => {
   it("returns tool call audit trail for a scope", async () => {
-    // Create scope
-    const scopeRes = await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/scope",
-      payload: {
-        createdBy: "agent-1",
-        allowedTools: ["run_create"],
-      },
-    });
-    const scopeId = scopeRes.json().id;
+    const scopeId = await mintScope("agent-1", ["run_create"]);
 
     // Make a tool call
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
       payload: {
         scopeId,
         toolName: "run_create",
@@ -657,6 +703,7 @@ describe("GET /api/relay/:kernelId/scope/:scopeId/audit", () => {
     const res = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/audit`,
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -669,16 +716,20 @@ describe("GET /api/relay/:kernelId/scope/:scopeId/audit", () => {
 // CAMERA RELAY
 // ═══════════════════════════════════════════════════════════════════════════
 
+async function pushFrame(data = "jpeg-data") {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/relay/kernel-test-1/camera/frame",
+    headers: op,
+    payload: { frame: Buffer.from(data).toString("base64") },
+  });
+  expect(res.statusCode).toBe(201);
+  return res;
+}
+
 describe("POST /api/relay/:kernelId/camera/frame", () => {
   it("accepts a camera frame", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/camera/frame",
-      payload: {
-        frame: Buffer.from("fake-jpeg-data").toString("base64"),
-      },
-    });
-    expect(res.statusCode).toBe(201);
+    const res = await pushFrame("fake-jpeg-data");
     const body = res.json();
     expect(body.kernelId).toBe("kernel-test-1");
     expect(body.id).toMatch(/^frame_/);
@@ -688,6 +739,7 @@ describe("POST /api/relay/:kernelId/camera/frame", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/camera/frame",
+      headers: op,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -695,13 +747,7 @@ describe("POST /api/relay/:kernelId/camera/frame", () => {
 
   it("keeps only 5 frames per kernel", async () => {
     for (let i = 0; i < 7; i++) {
-      await app.inject({
-        method: "POST",
-        url: "/api/relay/kernel-test-1/camera/frame",
-        payload: {
-          frame: Buffer.from(`frame-${i}`).toString("base64"),
-        },
-      });
+      await pushFrame(`frame-${i}`);
     }
 
     const { db } = getStore();
@@ -716,114 +762,62 @@ describe("POST /api/relay/:kernelId/camera/frame", () => {
 
 describe("GET /api/relay/:kernelId/camera/latest", () => {
   it("denies access to anonymous users", async () => {
-    // Push a frame first
-    await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/camera/frame",
-      payload: {
-        frame: Buffer.from("test-data").toString("base64"),
-      },
-    });
+    await pushFrame("test-data");
 
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
     });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("denies access to an authenticated stranger", async () => {
+    await pushFrame("test-data");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/camera/latest",
+      headers: asKey("mallory"),
+    });
     expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("camera_access_denied");
+    expect(res.json().error).toBe("relay_access_denied");
   });
 
   it("returns 404 when no frames exist", async () => {
-    // Use a custom header to set operatorId via a hook (simulate auth)
-    const customApp = Fastify({ logger: false });
-    customApp.decorateRequest("operatorId", null);
-    customApp.decorateRequest("userId", null);
-    customApp.decorateRequest("apiKeyId", null);
-    customApp.addHook("onRequest", async (req) => {
-      (req as any).operatorId = "operator-1";
-    });
-    await customApp.register(deviceRelayRoutes);
-    await customApp.ready();
-
-    const res = await customApp.inject({
+    const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
+      headers: op,
     });
     expect(res.statusCode).toBe(404);
-    await customApp.close();
   });
 });
 
 describe("camera auth: operator access", () => {
   it("allows kernel operator to view camera", async () => {
-    // Push a frame
-    await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/camera/frame",
-      payload: {
-        frame: Buffer.from("jpeg-data").toString("base64"),
-      },
-    });
+    await pushFrame();
 
-    // Create app with operator auth
-    const operatorApp = Fastify({ logger: false });
-    operatorApp.decorateRequest("operatorId", null);
-    operatorApp.decorateRequest("userId", null);
-    operatorApp.decorateRequest("apiKeyId", null);
-    operatorApp.addHook("onRequest", async (req) => {
-      (req as any).operatorId = "operator-1";
-    });
-    await operatorApp.register(deviceRelayRoutes);
-    await operatorApp.ready();
-
-    const res = await operatorApp.inject({
+    const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toBe("image/jpeg");
-    await operatorApp.close();
   });
 });
 
 describe("camera auth: scope-holder access", () => {
   it("allows user with active scope to view camera", async () => {
-    // Push a frame
-    await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/camera/frame",
-      payload: {
-        frame: Buffer.from("jpeg-data").toString("base64"),
-      },
-    });
+    await pushFrame();
+    await mintScope("agent-viewer", ["run_create"]);
 
-    // Create scope for agent-viewer
-    await app.inject({
-      method: "POST",
-      url: "/api/relay/kernel-test-1/scope",
-      payload: {
-        createdBy: "agent-viewer",
-        allowedTools: ["run_create"],
-      },
-    });
-
-    // Create app with agent-viewer auth
-    const viewerApp = Fastify({ logger: false });
-    viewerApp.decorateRequest("operatorId", null);
-    viewerApp.decorateRequest("userId", null);
-    viewerApp.decorateRequest("apiKeyId", null);
-    viewerApp.addHook("onRequest", async (req) => {
-      (req as any).operatorId = "agent-viewer";
-    });
-    await viewerApp.register(deviceRelayRoutes);
-    await viewerApp.ready();
-
-    const res = await viewerApp.inject({
+    const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
+      headers: asKey("agent-viewer"),
     });
     expect(res.statusCode).toBe(200);
-    await viewerApp.close();
   });
 });
 
@@ -836,6 +830,7 @@ describe("POST /api/relay/:kernelId/chat", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: op,
       payload: { message: "Hello, robot!" },
     });
     expect(res.statusCode).toBe(201);
@@ -850,6 +845,7 @@ describe("POST /api/relay/:kernelId/chat", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: op,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -859,6 +855,7 @@ describe("POST /api/relay/:kernelId/chat", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: op,
       payload: { message: "x".repeat(10_001) },
     });
     expect(res.statusCode).toBe(400);
@@ -867,20 +864,24 @@ describe("POST /api/relay/:kernelId/chat", () => {
 
 describe("GET /api/relay/:kernelId/chat/messages", () => {
   it("returns conversation history", async () => {
+    await mintScope("agent-1");
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: asKey("agent-1"),
       payload: { message: "msg 1" },
     });
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: asKey("agent-1"),
       payload: { message: "msg 2" },
     });
 
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/chat/messages",
+      headers: asKey("agent-1"),
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().count).toBe(2);
@@ -892,12 +893,14 @@ describe("GET /api/relay/:kernelId/chat/pending", () => {
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: op,
       payload: { message: "pending msg" },
     });
 
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/chat/pending",
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().count).toBe(1);
@@ -906,6 +909,7 @@ describe("GET /api/relay/:kernelId/chat/pending", () => {
     const res2 = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/chat/pending",
+      headers: op,
     });
     expect(res2.json().count).toBe(0);
   });
@@ -916,6 +920,7 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
     const msgRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
+      headers: op,
       payload: { message: "Hello?" },
     });
     const messageId = msgRes.json().id;
@@ -923,6 +928,7 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat/respond",
+      headers: op,
       payload: {
         messageId,
         response: "Hello! I am the OT-2 agent.",
@@ -938,6 +944,7 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat/respond",
+      headers: op,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -950,6 +957,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
       payload: { toolName: "health" },
     });
     const callId = createRes.json().id;
@@ -958,6 +966,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
     const poll1 = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
     });
     expect(poll1.json().count).toBe(1);
 
@@ -965,6 +974,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
     const poll2 = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
     });
     expect(poll2.json().count).toBe(0);
 
@@ -980,6 +990,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
     const poll3 = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
     });
     expect(poll3.json().count).toBe(1);
     expect(poll3.json().calls[0].id).toBe(callId);
@@ -987,64 +998,332 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TOOL MANIFEST SERVICE
+// N4b-gw ITEM 4 — /api/relay/** IS DEFAULT-DENY, PER KERNEL OPERATOR
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("tool-manifest-service", () => {
-  it("isToolSafe returns true for safe opentrons tools", async () => {
-    const { isToolSafe } = await import("../services/tool-manifest-service.js");
-    expect(isToolSafe("opentrons", "health")).toBe(true);
-    expect(isToolSafe("opentrons", "home")).toBe(true);
-    expect(isToolSafe("opentrons", "lights")).toBe(true);
+/** Concrete URL for a route pattern, with real ids where the test has them. */
+function urlFor(pattern: string, ids: { callId?: string; scopeId?: string } = {}) {
+  return pattern
+    .replace(":kernelId", "kernel-test-1")
+    .replace(":id", ids.callId ?? "tc_none")
+    .replace(":scopeId", ids.scopeId ?? "scope_none");
+}
+
+/** A body that passes each route's own validation, so only access decides. */
+function bodyFor(method: string, pattern: string, ids: { callId?: string } = {}) {
+  if (method !== "POST") return undefined;
+  if (pattern.endsWith("/tool-call")) return { toolName: "health" };
+  if (pattern.endsWith("/tool-result")) return { callId: ids.callId ?? "tc_none", result: { ok: true } };
+  if (pattern.endsWith("/scope")) return { createdBy: "mallory", allowedTools: ["shell"] };
+  if (pattern.endsWith("/camera/frame")) return { frame: Buffer.from("x").toString("base64") };
+  if (pattern.endsWith("/chat")) return { message: "hi" };
+  if (pattern.endsWith("/chat/respond")) return { response: "hi" };
+  return {};
+}
+
+const ROUTES = Object.entries(RELAY_ROUTE_ACCESS).map(([key, access]) => {
+  const [method, pattern] = key.split(" ");
+  return { key, method: method as "GET" | "POST", pattern, access };
+});
+
+describe("N4b-gw: the access table covers the plugin exactly", () => {
+  it("lists every route deviceRelayRoutes registers, and nothing else", async () => {
+    const probe = Fastify({ logger: false });
+    const registered: string[] = [];
+    probe.addHook("onRoute", (route) => {
+      const methods = Array.isArray(route.method) ? route.method : [route.method];
+      for (const m of methods) if (m !== "HEAD") registered.push(`${m} ${route.url}`);
+    });
+    await probe.register(deviceRelayRoutes);
+    await probe.ready();
+    await probe.close();
+
+    expect(registered.sort()).toEqual(Object.keys(RELAY_ROUTE_ACCESS).sort());
+    expect(registered).toHaveLength(17);
   });
 
-  it("isToolSafe returns false for scoped/privileged tools", async () => {
-    const { isToolSafe } = await import("../services/tool-manifest-service.js");
-    expect(isToolSafe("opentrons", "protocol_upload")).toBe(false);
-    expect(isToolSafe("opentrons", "shell")).toBe(false);
+  it("refuses a registered route that has no table entry (default-deny), even for the operator", async () => {
+    // Fastify auto-registers HEAD for every GET; none is in the table.
+    const res = await app.inject({
+      method: "HEAD",
+      url: "/api/relay/kernel-test-1/manifest",
+      headers: op,
+    });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("N4b-gw: no principal, no relay", () => {
+  it.each(ROUTES)("$key answers 401 without a principal", async ({ method, pattern }) => {
+    const res = await app.inject({ method, url: urlFor(pattern), payload: bodyFor(method, pattern) });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("authentication_required");
+  });
+});
+
+describe("N4b-gw: an authenticated stranger is refused on every route", () => {
+  it.each(ROUTES)("$key answers 403 to a key that is neither operator nor grant holder", async ({ method, pattern }) => {
+    // Real objects on kernel-test-1, so object-addressed routes reach their owner check.
+    const scopeId = await mintScope("agent-1", ["run_create"]);
+    const callRes = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
+      payload: { scopeId, toolName: "run_create", args: {} },
+    });
+    const callId = callRes.json().id as string;
+
+    const res = await app.inject({
+      method,
+      url: urlFor(pattern, { callId, scopeId }),
+      headers: asKey("mallory"),
+      payload: bodyFor(method, pattern, { callId }),
+    });
+    expect(res.statusCode).toBe(403);
+
+    // Nothing moved: the scope is active, the call is still pending, no frame, no chat.
+    const { db } = getStore();
+    expect(db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.status).toBe("active");
+    expect(db.select().from(toolCallRelay).where(eq(toolCallRelay.id, callId)).get()!.status).toBe("pending");
+    expect(db.select().from(executionScopes).where(eq(executionScopes.createdBy, "mallory")).all()).toHaveLength(0);
+    expect(db.select().from(ot2CameraFrames).all()).toHaveLength(0);
+    expect(db.select().from(ot2ChatMessages).all()).toHaveLength(0);
   });
 
-  it("getSafeTools returns safe tools for known types", async () => {
-    const { getSafeTools } = await import("../services/tool-manifest-service.js");
-    const safe = getSafeTools("opentrons");
-    expect(safe).toContain("health");
-    expect(safe).toContain("evidence_snapshot");
-    expect(safe).not.toContain("shell");
+  it("treats a SIWE session as a principal, not as anonymous", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+    const okSpy = vi.spyOn(getSafetyGateway(), "recordDeviceSuccess").mockImplementation(() => {});
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      headers: asSiwe("0xdef0000000000000000000000000000000000002"),
+      payload: { callId, result: { forged: true } },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(okSpy).not.toHaveBeenCalled();
+    okSpy.mockRestore();
   });
 
-  it("falls back to generic for unknown device type", async () => {
-    const { getManifest } = await import("../services/tool-manifest-service.js");
-    const manifest = await getManifest("unknown_device");
-    expect(manifest).toBeDefined();
-    expect(manifest!.deviceType).toBe("generic");
+  it("lets a SIWE session that operates the kernel act as its operator", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-siwe/tool-call/pending",
+      headers: asSiwe(SIWE_OPERATOR),
+    });
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("N4b-gw: the device side is the kernel operator's alone", () => {
+  const DEVICE_SIDE = ROUTES.filter((r) => r.access === "kernel_operator" && !r.pattern.endsWith("/scope"));
+
+  it.each(DEVICE_SIDE)("$key refuses a grant holder (scope holders command, never act as the device)", async ({ method, pattern }) => {
+    const scopeId = await mintScope("agent-1", ["run_create"]);
+    const callRes = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
+      payload: { scopeId, toolName: "run_create", args: {} },
+    });
+    const callId = callRes.json().id as string;
+
+    const res = await app.inject({
+      method,
+      url: urlFor(pattern, { callId }),
+      headers: asKey("agent-1"),
+      payload: bodyFor(method, pattern, { callId }),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().required).toBe("kernel_operator");
   });
 
-  it("resolves IPP printer manifest with printer tools", async () => {
-    const { getManifest, clearManifestCache } = await import("../services/tool-manifest-service.js");
-    clearManifestCache();
-    const manifest = await getManifest("ipp");
-    expect(manifest).toBeDefined();
-    expect(manifest!.deviceType).toBe("ipp");
-    const toolNames = manifest!.tools.map((t: any) => t.name);
-    expect(toolNames).toContain("printer_print_text");
-    expect(toolNames).toContain("printer_print_url");
-    expect(toolNames).toContain("printer_print_file");
-    expect(toolNames).toContain("print");
-    expect(toolNames).toContain("printer_status");
-    expect(manifest!.safeTools).toContain("printer_status");
-    expect(manifest!.safeTools).toContain("printer_queue");
-    expect(manifest!.safeTools).not.toContain("printer_print_text");
+  it("refuses a cross-kernel claim: operator-2 cannot claim kernel-test-1's calls", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: op,
+      payload: { toolName: "health" },
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: asKey(OPERATOR_2),
+    });
+    expect(res.statusCode).toBe(403);
+
+    // The call is still there for its own operator.
+    const own = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
+    });
+    expect(own.json().count).toBe(1);
   });
 
-  it("isToolSafe returns true for safe IPP tools and false for print tools", async () => {
-    const { isToolSafe, clearManifestCache } = await import("../services/tool-manifest-service.js");
-    clearManifestCache();
-    // Load IPP manifest first
-    const { getManifest } = await import("../services/tool-manifest-service.js");
-    await getManifest("ipp");
-    expect(isToolSafe("ipp", "printer_status")).toBe(true);
-    expect(isToolSafe("ipp", "printer_queue")).toBe(true);
-    expect(isToolSafe("ipp", "printer_print_text")).toBe(false);
-    expect(isToolSafe("ipp", "print")).toBe(false);
+  it("refuses a cross-kernel result: operator-2 cannot report kernel-test-1's call through its own kernel's path", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+    const failSpy = vi.spyOn(getSafetyGateway(), "recordDeviceFailure").mockImplementation(() => {});
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-2/tool-result",
+      headers: asKey(OPERATOR_2),
+      payload: { callId, error: "forged_failure" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("tool_result_not_yours");
+    expect(failSpy).not.toHaveBeenCalled();
+
+    const check = await app.inject({
+      method: "GET",
+      url: `/api/relay/kernel-test-1/tool-result/${callId}`,
+      headers: op,
+    });
+    expect(check.json().status).toBe("claimed");
+    failSpy.mockRestore();
+  });
+
+  it("refuses a cross-kernel camera post: operator-2 cannot push frames to kernel-test-1", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/camera/frame",
+      headers: asKey(OPERATOR_2),
+      payload: { frame: Buffer.from("forged").toString("base64") },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(getStore().db.select().from(ot2CameraFrames).all()).toHaveLength(0);
+  });
+
+  it("gives a kernel whose operatorAddress is the zero placeholder no operator at all", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-unowned/tool-call/pending",
+      headers: asSiwe("0x0000000000000000000000000000000000000000"),
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("answers chat only for this kernel's messages", async () => {
+    const other = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-2/chat",
+      headers: asKey(OPERATOR_2),
+      payload: { message: "for kernel 2" },
+    });
+    const otherId = other.json().id as string;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/chat/respond",
+      headers: op,
+      payload: { messageId: otherId, response: "not yours" },
+    });
+    const row = getStore().db.select().from(ot2ChatMessages).where(eq(ot2ChatMessages.id, otherId)).get();
+    expect(row!.status).toBe("pending");
+  });
+});
+
+describe("N4b-gw: scopes are the operator's to grant", () => {
+  it("refuses a free key that self-mints a shell scope", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/scope",
+      headers: asKey("free-key"),
+      payload: { createdBy: "free-key", allowedTools: ["shell"], maxCommands: 1000 },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(getStore().db.select().from(executionScopes).all()).toHaveLength(0);
+  });
+
+  it("refuses a grant holder that tries to mint more scopes", async () => {
+    await mintScope("agent-1", ["run_create"]);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/scope",
+      headers: asKey("agent-1"),
+      payload: { allowedTools: ["shell"] },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("keeps grant holders inside their own scope", async () => {
+    const scope1 = await mintScope("agent-1", ["run_create"]);
+    await mintScope("agent-2", ["run_create"]);
+
+    const callRes = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
+      payload: { scopeId: scope1, toolName: "run_create", args: {} },
+    });
+    const callId = callRes.json().id as string;
+
+    const cases = [
+      { method: "POST" as const, url: "/api/relay/kernel-test-1/tool-call", payload: { scopeId: scope1, toolName: "run_create" } },
+      { method: "GET" as const, url: `/api/relay/kernel-test-1/tool-result/${callId}` },
+      { method: "GET" as const, url: `/api/relay/kernel-test-1/scope/${scope1}` },
+      { method: "GET" as const, url: `/api/relay/kernel-test-1/scope/${scope1}/audit` },
+      { method: "POST" as const, url: `/api/relay/kernel-test-1/scope/${scope1}/revoke` },
+    ];
+    for (const c of cases) {
+      const res = await app.inject({ ...c, headers: asKey("agent-2") });
+      expect(res.statusCode, `${c.method} ${c.url}`).toBe(403);
+    }
+    const row = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scope1)).get();
+    expect(row!.status).toBe("active");
+  });
+
+  it("does not find another kernel's scope or call through this kernel's path", async () => {
+    const scope1 = await mintScope("agent-1", ["run_create"]);
+    const callId = await createAndClaim();
+    for (const url of [
+      `/api/relay/kernel-test-2/scope/${scope1}`,
+      `/api/relay/kernel-test-2/scope/${scope1}/audit`,
+      `/api/relay/kernel-test-2/tool-result/${callId}`,
+    ]) {
+      const res = await app.inject({ method: "GET", url, headers: asKey(OPERATOR_2) });
+      expect(res.statusCode, url).toBe(404);
+    }
+    const revoke = await app.inject({
+      method: "POST",
+      url: `/api/relay/kernel-test-2/scope/${scope1}/revoke`,
+      headers: asKey(OPERATOR_2),
+    });
+    expect(revoke.statusCode).toBe(404);
+  });
+
+  it("makes a grant holder name its scope, even for a safe tool", async () => {
+    await mintScope("agent-1", ["run_create"]);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asKey("agent-1"),
+      payload: { toolName: "health" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("scope_required");
+  });
+
+  it("grants nothing once the scope has expired or been revoked", async () => {
+    await pushFrame();
+    const scopeId = await mintScope("agent-1", ["run_create"]);
+    const { db } = getStore();
+
+    db.update(executionScopes)
+      .set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+      .where(eq(executionScopes.id, scopeId))
+      .run();
+    for (const url of ["/api/relay/kernel-test-1/camera/latest", "/api/relay/kernel-test-1/manifest"]) {
+      const res = await app.inject({ method: "GET", url, headers: asKey("agent-1") });
+      expect(res.statusCode, url).toBe(403);
+    }
+
+    const scope2 = await mintScope("agent-1", ["run_create"]);
+    await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope2}/revoke`, headers: op });
+    const res = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/camera/latest", headers: asKey("agent-1") });
+    expect(res.statusCode).toBe(403);
   });
 });

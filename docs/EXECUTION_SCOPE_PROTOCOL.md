@@ -17,7 +17,9 @@ When a user's agent talks to a machine's agent, we need to:
 ## Operation Classes
 
 ### Class 1: READ (always allowed)
-No scope needed. Any authenticated agent can read robot state.
+No scope needed for the kernel's operator. Any other agent reads robot state
+only while it holds an active scope on that kernel, and names that scope on
+every call (see "Who may call the relay" below).
 
 | Tool | What |
 |------|------|
@@ -136,13 +138,30 @@ When a tool call fails within a scope:
 - **Action**: Immediate halt, scope revoked, all pending calls rejected
 - **Recovery**: Operator must create a new scope to resume
 
+## Who may call the relay
+
+The relay is `/api/relay/:kernelId/...` (`packages/gateway/src/routes/device-relay.ts`).
+It is default-deny and scoped to one kernel. Every route is listed in
+`RELAY_ROUTE_ACCESS`, and a route missing from that table is refused. A caller
+with no API key or SIWE session gets 401.
+
+| Who | May |
+|-----|-----|
+| The kernel's operator (its recorded `operatorAddress`) | Everything on that kernel, including the device side: claim pending calls, report results, push camera frames, read and answer chat, mint scopes |
+| An agent holding an active, unexpired scope on that kernel | Post tool calls under its own scope, read those calls' results, read and revoke its own scope and its audit, view the camera and chat |
+| Anyone else | Nothing |
+
+A scope holder commands. It never acts as the device: claiming calls,
+reporting results and pushing frames are the operator's alone. The legacy
+`/api/ot2/*` routes are retired and answer 410 Gone with the replacement path.
+
 ## Validation Flow
 
 ```
 Brain posts tool call
     │
     ▼
-PCC receives POST /api/ot2/tool-call
+PCC receives POST /api/relay/:kernelId/tool-call
     │
     ├── Is tool Class 1 (READ)? → ALLOW (no scope needed)
     ├── Is tool Class 2 (SAFE)? → ALLOW (no scope needed)
@@ -195,7 +214,7 @@ Every tool call is logged with:
 - Timestamp
 - Who requested it (brain agent ID)
 
-Query via: `GET /api/ot2/scope/:id/audit`
+Query via: `GET /api/relay/:kernelId/scope/:scopeId/audit`
 
 ## Emergency Stop Integration
 

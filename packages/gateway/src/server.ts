@@ -122,10 +122,7 @@ import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
 import { nearRoutes } from "./routes/near.js";
 import { litProvisionRoutes } from "./routes/lit-provision.js";
-import { ot2ChatRoutes } from "./routes/ot2-chat.js";
-import { ot2CameraRoutes } from "./routes/ot2-camera.js";
-import { ot2RelayRoutes } from "./routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "./routes/ot2-scope.js";
+import { ot2LegacyGoneRoutes } from "./routes/ot2-legacy-gone.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
@@ -769,13 +766,13 @@ export async function createGateway(port = 3200) {
   // Lit Protocol key provisioning
   await app.register(litProvisionRoutes);
 
-  // OT-2 remote agent relay (chat + camera + tool-call relay + execution scopes)
-  await app.register(ot2ChatRoutes);
-  await app.register(ot2CameraRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay (/api/ot2/{tool-call,tool-result,scope,chat,camera})
+  // is retired (N4b-gw item 1): every /api/ot2/* request answers 410 Gone with
+  // the /api/relay/:kernelId/... route that replaces it.
+  await app.register(ot2LegacyGoneRoutes);
 
-  // Generic device relay -- works for any device type, namespaced by kernelId
+  // Generic device relay -- works for any device type, namespaced by kernelId.
+  // Default-deny, per kernel (N4b-gw item 4; see RELAY_ROUTE_ACCESS).
   await app.register(deviceRelayRoutes);
 
   // Wizard sessions + compliance

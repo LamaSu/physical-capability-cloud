@@ -19,6 +19,7 @@ import json
 import logging
 import subprocess
 import time
+from urllib.parse import quote
 
 from .http_util import http, pcc_request
 
@@ -219,13 +220,21 @@ def create_adapter(device):
 # Job polling + execution
 # ---------------------------------------------------------------------------
 
+def relay_path(kernel_id, suffix):
+    """/api/relay/<kernel>/<suffix>, with the kernel id encoded as one path segment."""
+    return f"/api/relay/{quote(str(kernel_id), safe='')}{suffix}"
+
+
 def poll_pending_jobs(pcc_base, api_key, kernel_id):
     """Poll PCC for pending tool calls for this kernel.
+
+    Uses the device relay (/api/relay/:kernelId); the legacy /api/ot2 relay is
+    retired (N4b-gw). The key must be the kernel operator's.
 
     Returns a list of call dicts.
     """
     status, data = pcc_request(
-        "GET", f"/api/ot2/tool-call/pending?kernelId={kernel_id}",
+        "GET", relay_path(kernel_id, "/tool-call/pending"),
         base_url=pcc_base,
         api_key=api_key,
     )
@@ -235,23 +244,39 @@ def poll_pending_jobs(pcc_base, api_key, kernel_id):
     return calls if isinstance(calls, list) else []
 
 
-def execute_and_report(call, adapters, pcc_base, api_key):
+def execute_and_report(call, adapters, pcc_base, api_key, kernel_id=None):
     """Execute a tool call using the appropriate adapter, report result to PCC.
 
     Parameters
     ----------
     call : dict
-        Tool call dict with id, toolName, toolArgs.
+        Tool call dict with id, kernelId, toolName and args, as the device
+        relay's pending list returns it.
     adapters : list
         List of adapter instances.
     pcc_base : str
         PCC gateway base URL.
     api_key : str
-        Bearer token.
+        Bearer token (the kernel operator's).
+    kernel_id : str, optional
+        The kernel this node polled. It wins over ``call["kernelId"]``, and a
+        call that names a different kernel is refused.
     """
     call_id = call.get("id", "unknown")
     tool_name = call.get("toolName", "")
-    tool_args = call.get("toolArgs", {})
+    # The relay names the arguments "args"; older payloads used "toolArgs".
+    tool_args = call.get("args", call.get("toolArgs", {}))
+
+    # Decide where the result goes BEFORE touching the device: a call whose
+    # result cannot be reported must not run.
+    stated = call.get("kernelId")
+    if kernel_id and stated and stated != kernel_id:
+        log.error(f"Call {call_id} names kernel {stated!r}, not the polled {kernel_id!r}; refusing it")
+        return
+    kernel = kernel_id or stated
+    if not kernel:
+        log.error(f"No kernel id for call {call_id}; refusing to execute what cannot be reported")
+        return
 
     log.info(f"Executing {tool_name}({json.dumps(tool_args)[:100]}) [call={call_id}]")
 
@@ -272,7 +297,7 @@ def execute_and_report(call, adapters, pcc_base, api_key):
 
     # Post result back to PCC
     status, _data = pcc_request(
-        "POST", "/api/ot2/tool-result",
+        "POST", relay_path(kernel, "/tool-result"),
         body={"callId": call_id, "result": result},
         base_url=pcc_base,
         api_key=api_key,
