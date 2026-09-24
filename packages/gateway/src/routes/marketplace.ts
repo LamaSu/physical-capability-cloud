@@ -1,7 +1,8 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import type { EquipmentClass, MarketSnapshot, ROIProjection, MarketplaceListing, MarketplaceOrder, MarketplaceCategory } from "@pcc/spec";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 const mockClasses: EquipmentClass[] = [
   {
@@ -221,42 +222,81 @@ const ALL_CATEGORIES: MarketplaceCategory[] = [
   "calibration", "safety", "other",
 ];
 
-// ── Equipment Marketplace Mock Data ─────────────────────────────────────────
+// ── No fixture in production (board N34, the server side of PX-3) ───────────
+//
+// Everything above is fixture data: invented equipment classes and market numbers,
+// supplier listings and orders. A route that answers from it serves it only with
+// PCC_DEMO_ROUTES=true, and then every answer says so (mock: true, demo: true).
+// Otherwise it refuses with 501 not_available BEFORE any fixture is read or changed,
+// and `see` names the real routes, if any, that hold the real thing. POST /roi is a
+// calculator over the caller's own inputs and stays as it is. The category taxonomy is
+// the spec's; only the listing count per category comes from the fixture, so outside
+// demo those counts are null and named in `unavailable`.
+
+function notAvailable(reply: FastifyReply, message: string, see: string[] = []) {
+  return reply.status(501).send({ error: "not_available", message, see });
+}
+
+const LISTINGS_NOT_RECORDED =
+  "Marketplace supply listings are not recorded on this gateway, so nothing is returned rather than an example.";
+const ORDERS_NOT_RECORDED =
+  "Marketplace supply orders are not recorded on this gateway, so nothing is returned rather than an example.";
 
 export async function marketplaceRoutes(app: FastifyInstance) {
   // List equipment classes with market snapshots
-  app.get("/api/marketplace/classes", async () => {
-    return {
+  app.get("/api/marketplace/classes", async (_req, reply) => {
+    if (!isDemoRoutesOn()) {
+      return notAvailable(
+        reply,
+        "Equipment classes and their market snapshots are not recorded on this gateway, so nothing is returned rather than an example.",
+        ["/api/capabilities/types", "/api/capabilities/templates", "/api/kernels/marketplace"],
+      );
+    }
+    return markDemo("demo", {
       classes: mockClasses.map((c) => ({
         ...c,
         snapshot: mockSnapshots.find((s) => s.equipmentClassId === c.id),
       })),
-    };
+    });
   });
 
   // Equipment class detail
-  app.get<{ Params: { id: string } }>("/api/marketplace/classes/:id", async (req) => {
+  app.get<{ Params: { id: string } }>("/api/marketplace/classes/:id", async (req, reply) => {
+    if (!isDemoRoutesOn()) {
+      return notAvailable(
+        reply,
+        "Equipment class details, market snapshots and price history are not recorded on this gateway, so nothing is returned rather than an example.",
+        ["/api/capabilities/templates", "/api/capabilities/by-type/:type", "/api/kernels/marketplace"],
+      );
+    }
     const cls = mockClasses.find((c) => c.id === req.params.id);
-    if (!cls) return { error: "not_found" };
-    return {
+    if (!cls) return markDemo("demo", { error: "not_found" });
+    return markDemo("demo", {
       class: cls,
       snapshot: mockSnapshots.find((s) => s.equipmentClassId === cls.id),
       priceHistory: Array.from({ length: 30 }, (_, i) => ({
         date: `2026-03-${String(i + 1).padStart(2, "0")}`,
         price: 28.5 + Math.sin(i * 0.3) * 5,
       })),
-    };
+    });
   });
 
   // Network demand/supply timeline
-  app.get("/api/marketplace/demand-supply", async () => {
-    return {
+  app.get("/api/marketplace/demand-supply", async (_req, reply) => {
+    if (!isDemoRoutesOn()) {
+      return notAvailable(
+        reply,
+        "A network demand and supply timeline is not recorded on this gateway, so nothing is returned rather than an example.",
+        ["/api/jobs", "/api/kernels"],
+      );
+    }
+    return markDemo("demo", {
       timeline: Array.from({ length: 12 }, (_, i) => ({
         month: i + 1,
         demand: 100 + Math.round(Math.sin(i * 0.5) * 30 + i * 8),
         supply: 80 + Math.round(i * 6),
       })),
-    };
+    });
   });
 
   // Calculate ROI projection
@@ -278,15 +318,23 @@ export async function marketplaceRoutes(app: FastifyInstance) {
 
   // GET /api/marketplace/categories — list all categories with listing counts
   app.get("/api/marketplace/categories", async () => {
+    if (!isDemoRoutesOn()) {
+      // The taxonomy is real; the counts would come from the fixture listings.
+      return {
+        categories: ALL_CATEGORIES.map((cat) => ({ category: cat, count: null })),
+        unavailable: ["categories[].count"],
+      };
+    }
     const counts = ALL_CATEGORIES.map((cat) => ({
       category: cat,
       count: mockListings.filter((l) => l.category === cat).length,
     }));
-    return { categories: counts };
+    return markDemo("demo", { categories: counts });
   });
 
   // GET /api/marketplace/listings — list/search listings
-  app.get("/api/marketplace/listings", async (req) => {
+  app.get("/api/marketplace/listings", async (req, reply) => {
+    if (!isDemoRoutesOn()) return notAvailable(reply, LISTINGS_NOT_RECORDED);
     const q = req.query as Record<string, string>;
     let results = [...mockListings];
 
@@ -309,23 +357,28 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       );
     }
 
-    return { listings: results, count: results.length };
+    return markDemo("demo", { listings: results, count: results.length });
   });
 
   // GET /api/marketplace/listings/:id — listing details
   app.get<{ Params: { id: string } }>("/api/marketplace/listings/:id", async (req, reply) => {
+    if (!isDemoRoutesOn()) return notAvailable(reply, LISTINGS_NOT_RECORDED);
     const listing = mockListings.find((l) => l.id === req.params.id);
     if (!listing) {
-      return reply.status(404).send({ error: "listing_not_found" });
+      return reply.status(404).send(markDemo("demo", { error: "listing_not_found" }));
     }
-    return { listing };
+    return markDemo("demo", { listing });
   });
 
   // POST /api/marketplace/listings — create listing (seller)
   app.post("/api/marketplace/listings", async (req, reply) => {
+    // Refused before validation, the fixture push, telemetry and the audit entry.
+    if (!isDemoRoutesOn()) {
+      return notAvailable(reply, "Marketplace supply listings are not recorded on this gateway, so nothing was created.");
+    }
     const body = req.body as Partial<MarketplaceListing> | undefined;
     if (!body?.name || !body?.category || !body?.pricePerUnit || !body?.unit) {
-      return reply.status(400).send({ error: "name, category, pricePerUnit, and unit are required" });
+      return reply.status(400).send(markDemo("demo", { error: "name, category, pricePerUnit, and unit are required" }));
     }
     const ts = new Date().toISOString();
     const listing: MarketplaceListing = {
@@ -363,14 +416,17 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return reply.status(201).send({ listing });
+    return reply.status(201).send(markDemo("demo", { listing }));
   });
 
   // PUT /api/marketplace/listings/:id — update listing
   app.put<{ Params: { id: string } }>("/api/marketplace/listings/:id", async (req, reply) => {
+    if (!isDemoRoutesOn()) {
+      return notAvailable(reply, "Marketplace supply listings are not recorded on this gateway, so nothing was changed.");
+    }
     const idx = mockListings.findIndex((l) => l.id === req.params.id);
     if (idx === -1) {
-      return reply.status(404).send({ error: "listing_not_found" });
+      return reply.status(404).send(markDemo("demo", { error: "listing_not_found" }));
     }
     const body = req.body as Partial<MarketplaceListing> | undefined;
     mockListings[idx] = {
@@ -379,31 +435,38 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       id: req.params.id,
       updatedAt: new Date().toISOString(),
     };
-    return { listing: mockListings[idx] };
+    return markDemo("demo", { listing: mockListings[idx] });
   });
 
   // DELETE /api/marketplace/listings/:id — remove listing
   app.delete<{ Params: { id: string } }>("/api/marketplace/listings/:id", async (req, reply) => {
+    if (!isDemoRoutesOn()) {
+      return notAvailable(reply, "Marketplace supply listings are not recorded on this gateway, so nothing was deleted.");
+    }
     const idx = mockListings.findIndex((l) => l.id === req.params.id);
     if (idx === -1) {
-      return reply.status(404).send({ error: "listing_not_found" });
+      return reply.status(404).send(markDemo("demo", { error: "listing_not_found" }));
     }
     mockListings.splice(idx, 1);
-    return { deleted: true, id: req.params.id };
+    return markDemo("demo", { deleted: true, id: req.params.id });
   });
 
   // POST /api/marketplace/orders — place order
   app.post("/api/marketplace/orders", async (req, reply) => {
+    // Refused before validation, the fixture push, telemetry and the audit entry.
+    if (!isDemoRoutesOn()) {
+      return notAvailable(reply, "Marketplace supply orders are not recorded on this gateway, so no order was placed.");
+    }
     const body = req.body as Partial<MarketplaceOrder> & { listingId?: string; quantity?: number } | undefined;
     if (!body?.listingId || !body?.quantity) {
-      return reply.status(400).send({ error: "listingId and quantity are required" });
+      return reply.status(400).send(markDemo("demo", { error: "listingId and quantity are required" }));
     }
     const listing = mockListings.find((l) => l.id === body.listingId);
     if (!listing) {
-      return reply.status(404).send({ error: "listing_not_found" });
+      return reply.status(404).send(markDemo("demo", { error: "listing_not_found" }));
     }
     if (!listing.inStock) {
-      return reply.status(409).send({ error: "listing_out_of_stock" });
+      return reply.status(409).send(markDemo("demo", { error: "listing_out_of_stock" }));
     }
     const ts = new Date().toISOString();
     const order: MarketplaceOrder = {
@@ -435,26 +498,28 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return reply.status(201).send({ order });
+    return reply.status(201).send(markDemo("demo", { order }));
   });
 
   // GET /api/marketplace/orders — list orders (by buyerId or sellerId query param)
-  app.get("/api/marketplace/orders", async (req) => {
+  app.get("/api/marketplace/orders", async (req, reply) => {
+    if (!isDemoRoutesOn()) return notAvailable(reply, ORDERS_NOT_RECORDED);
     const q = req.query as Record<string, string>;
     let results = [...mockOrders];
     if (q.buyerId) results = results.filter((o) => o.buyerId === q.buyerId);
     if (q.sellerId) results = results.filter((o) => o.sellerId === q.sellerId);
     if (q.status) results = results.filter((o) => o.status === q.status);
-    return { orders: results, count: results.length };
+    return markDemo("demo", { orders: results, count: results.length });
   });
 
   // GET /api/marketplace/orders/:id — order details
   app.get<{ Params: { id: string } }>("/api/marketplace/orders/:id", async (req, reply) => {
+    if (!isDemoRoutesOn()) return notAvailable(reply, ORDERS_NOT_RECORDED);
     const order = mockOrders.find((o) => o.id === req.params.id);
     if (!order) {
-      return reply.status(404).send({ error: "order_not_found" });
+      return reply.status(404).send(markDemo("demo", { error: "order_not_found" }));
     }
     const listing = mockListings.find((l) => l.id === order.listingId);
-    return { order, listing };
+    return markDemo("demo", { order, listing });
   });
 }
