@@ -5,6 +5,7 @@ import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
 import type { TransferGraph, TransferNode, Sample, InstrumentWorkflow, ResourceClaim } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOrchestratorStore } from "../stores/orchestrator-store.js";
+import { stepSegmentNote, workflowStepSegments } from "./orchestrator-logic.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
 
 const GATEWAY = "/api";
@@ -251,11 +252,9 @@ export function OrchestratorPage() {
           <h3 className="text-sm font-medium text-white/60 mb-3">Instrument Workflows</h3>
           <div className="space-y-2">
             {workflows.map((wf) => {
-              const completedSteps = wf.steps.filter((s) =>
-                // Steps with no unfinished dependsOn are "done" in running workflows
-                // For simplicity show count based on workflow progress
-                false
-              ).length;
+              // PX-3: steps carry no status, so each segment comes from the workflow
+              // status alone. No invented per-step progress.
+              const segments = workflowStepSegments(wf.status, wf.steps.length);
               return (
                 <div
                   key={wf.id}
@@ -285,13 +284,11 @@ export function OrchestratorPage() {
                       <div
                         key={step.id}
                         className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden"
-                        title={`${step.action} @ ${allNodes.find((n) => n.id === step.nodeId)?.label ?? step.nodeId}`}
+                        title={`${step.action} @ ${allNodes.find((n) => n.id === step.nodeId)?.label ?? step.nodeId}: ${stepSegmentNote(segments[i])}`}
                       >
                         <div
-                          className={`h-full rounded-full ${
-                            i === 0 ? "bg-green-400" : i === 1 ? "bg-amber-400 animate-pulse" : "bg-white/10"
-                          }`}
-                          style={{ width: i === 0 ? "100%" : i === 1 ? "60%" : "0%" }}
+                          className={`h-full rounded-full ${segments[i] === "done" ? "bg-green-400" : "bg-white/10"}`}
+                          style={{ width: segments[i] === "done" ? "100%" : "0%" }}
                         />
                       </div>
                     ))}
