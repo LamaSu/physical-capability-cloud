@@ -36,6 +36,14 @@ import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, b
 import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
+  authenticatedPrincipal,
+  computeUnmet,
+  defaultSupplyReads,
+  intentActor,
+  isUnmetCaptureEnabled,
+  withUnmet,
+} from "../services/unmet-capture.js";
+import {
   getCapabilityDescriptor,
   checkKernelOffersCapability,
 } from "../services/ad-hoc-pricing.js";
@@ -283,7 +291,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           [body.capabilityType],
           [],
         );
-        const envelope: DemandEnvelope = {
+        let envelope: DemandEnvelope = {
           id: `intent-${sessionId}`,
           source: "negotiate_api",
           compositionSignature,
@@ -294,11 +302,17 @@ export async function negotiationRoutes(app: FastifyInstance) {
           originAgentId: body.userAgentId,
           createdAt: now.toISOString(),
         };
+        // R44 D2 (flag-gated, default OFF): server-computed unmet types and
+        // the authenticated principal instead of the body's userAgentId.
+        if (isUnmetCaptureEnabled()) {
+          envelope = withUnmet(envelope, await computeUnmet([body.capabilityType], { reads: defaultSupplyReads() }));
+        }
+        const actor = intentActor(authenticatedPrincipal(req), { actorId: body.userAgentId, actorType: "agent" });
         getEventBus().publish({
           eventType: "intent.atomic_session",
           category: "intent",
-          actorId: body.userAgentId,
-          actorType: "agent",
+          actorId: actor.actorId,
+          actorType: actor.actorType,
           resourceType: "intent",
           resourceId: envelope.id,
           payload: envelope as unknown as Record<string, unknown>,

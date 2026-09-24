@@ -35,8 +35,12 @@ export interface AnalyticsEvent {
   timestamp: Timestamp;
   /** Actor who caused the event */
   actorId: string;
-  /** Actor type */
-  actorType: "operator" | "requestor" | "verifier" | "agent" | "system";
+  /**
+   * Actor type. "authenticated_operator" marks an intent event whose actorId
+   * the server took from the authenticated API key (R44); only first-party
+   * capture points set it, and @pcc/demand-intel counts only it as verified.
+   */
+  actorType: "operator" | "requestor" | "verifier" | "agent" | "system" | "authenticated_operator";
   /** Resource affected */
   resourceType: string;
   resourceId: Id;
