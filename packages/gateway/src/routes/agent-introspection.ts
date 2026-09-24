@@ -21,10 +21,13 @@
  * just expose actions, it exposes its own REFUSALS. Telling an agent "no" by
  * failing a request is not an interface. `needs_scope:operator.write` is.
  *
- * These endpoints are also the honest precondition for narrowing API-key scopes.
- * Today `provisionApiKey` hands out `scopes: ["*"]` (routes/provision.ts) and
- * nothing enforces it, so a narrow key would simply break callers with no way to
- * discover why. Once a key can ask what it may do, it can safely be given less.
+ * These endpoints are also the honest precondition for narrowing API-key scopes:
+ * once a key can ask what it may do, it can safely be given less. Self-service
+ * keys are now minted narrow (never `"*"` — auth/api-key-auth.ts refuses it), and
+ * the enforced scope layer (middleware/scope-checker.ts) treats a legacy `"*"` as
+ * NEITHER money NOR admin authority. This endpoint must report exactly that, so
+ * reachability for money writes and the admin namespace is computed with the
+ * SAME predicates the scope-checker enforces (see operationReachable).
  *
  * Read-only. No settlement path. No writes.
  */
@@ -33,6 +36,11 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
+import {
+  isAdminScopedRoute,
+  isMoneyWriteRequest,
+  moneyWriteScopes,
+} from "../middleware/scope-checker.js";
 
 // ── Scope registry ──────────────────────────────────────────────────
 //
@@ -100,12 +108,15 @@ export const AGENT_OPERATIONS: AgentOperation[] = [
 ];
 
 /**
- * Does `held` satisfy `required`?
+ * Does `held` satisfy `required`, for an operation that is NEITHER a money
+ * write NOR in the admin namespace? (Those two are decided by
+ * operationReachable with the enforcement predicates — `"*"` does not count
+ * there.)
  *
- * `*` is the wildcard every key currently carries. It is honoured here so this
- * endpoint reports the truth about today's keys rather than an aspiration —
- * but `wildcard: true` is reported alongside, because a key that can do
- * everything is a finding, not a feature.
+ * `*` is the legacy wildcard older keys carry. For everything else it is still
+ * honoured by the scope-checker, so it is honoured here too: this endpoint
+ * reports the truth about those keys rather than an aspiration — with
+ * `wildcard: true` alongside, because such a key is a finding, not a feature.
  */
 export function scopeSatisfied(held: string[], required: string | null): boolean {
   if (required === null) return true;
@@ -134,6 +145,32 @@ export function scopeSatisfied(held: string[], required: string | null): boolean
   // The two vocabularies should be reconciled properly (one set of names, in
   // one place); this bridges them truthfully in the meantime.
   return held.includes(family);
+}
+
+/**
+ * Can a key holding `held` reach `op`, as middleware/scope-checker.ts ENFORCES it?
+ *
+ * Money writes and the admin namespace are decided by the same predicates the
+ * scope-checker uses, and there only an EXPLICIT scope counts — a legacy `"*"`
+ * is not money or admin authority. Everything else falls back to the advertised
+ * scope via scopeSatisfied. Returns the scope to ask for when unreachable.
+ */
+export function operationReachable(
+  held: string[],
+  op: Pick<AgentOperation, "method" | "path" | "scope">,
+): { reachable: true } | { reachable: false; needs: string } {
+  if (isAdminScopedRoute(op.method, op.path)) {
+    return held.includes("admin") ? { reachable: true } : { reachable: false, needs: "admin" };
+  }
+  if (isMoneyWriteRequest(op.method, op.path)) {
+    const need = moneyWriteScopes(op.method);
+    return need.some((s) => held.includes(s))
+      ? { reachable: true }
+      : { reachable: false, needs: need[0] };
+  }
+  return scopeSatisfied(held, op.scope)
+    ? { reachable: true }
+    : { reachable: false, needs: op.scope ?? "unknown" };
 }
 
 function heldScopes(record: { scopes?: string | null }): string[] {
@@ -191,18 +228,19 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
     const held = heldScopes(key);
     const wildcard = held.includes("*");
 
-    const tools = AGENT_OPERATIONS.map((op) => ({
-      id: op.id,
-      method: op.method,
-      path: op.path,
-      summary: op.summary,
-      required_scope: op.scope,
-      consequential: op.consequential === true,
-      // The whole point of the endpoint: never just "no".
-      reachability: scopeSatisfied(held, op.scope)
-        ? "reachable"
-        : `needs_scope:${op.scope}`,
-    }));
+    const tools = AGENT_OPERATIONS.map((op) => {
+      const r = operationReachable(held, op);
+      return {
+        id: op.id,
+        method: op.method,
+        path: op.path,
+        summary: op.summary,
+        required_scope: op.scope,
+        consequential: op.consequential === true,
+        // The whole point of the endpoint: never just "no".
+        reachability: r.reachable ? "reachable" : `needs_scope:${r.needs}`,
+      };
+    });
 
     return reply.send({
       ok: true,
@@ -214,7 +252,12 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
         // Say the quiet part in the response rather than in a changelog.
         wildcard,
         wildcard_note: wildcard
-          ? "This key holds ['*'] and can reach every operation. Scopes are recorded but not yet enforced; narrow keys become meaningful once they are."
+          ? "This key holds the legacy wildcard ['*']. It still reaches non-money, " +
+            "non-admin operations, but it is NOT money or admin authority: a money " +
+            "write needs an explicit `settlement` scope (DELETE: `admin`) and " +
+            "/api/admin/** needs an explicit `admin` scope. Ask the operator for a " +
+            "re-issued, explicitly-scoped key; wildcard keys are being retired " +
+            "(docs/security/WILDCARD_KEY_ROTATION.md)."
           : undefined,
       },
       tools,
