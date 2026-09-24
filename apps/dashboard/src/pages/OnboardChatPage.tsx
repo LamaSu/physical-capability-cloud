@@ -6,16 +6,29 @@
  * (#154); we just render the back-and-forth and let the LLM make every
  * decision about what to call. No API key required to reach this page.
  *
- * Route: /onboard/chat (mounted as a public path in App.tsx)
+ * Routes (App.tsx):
+ *   /onboard/chat  public, variant "onboard": an anonymous conversation.
+ *   /agent         the dashboard's Agent workspace, variant "agent": the same
+ *                  live conversation, run as the signed-in user. It replaced
+ *                  the AgentChatPage mock showcase.
  *
- * Why we don't reuse `AgentChatPage`: that file is a dashboard mock, not a
- * connected chat. This component is the actual user-facing chat.
+ * Held actions (gateway WP-D, #381): the gateway runs reads directly, but
+ * every write the model asks for (above all anything that mints a
+ * credential) comes back as a pending action. It runs only when the person
+ * presses Confirm, which re-POSTs its confirmActionId on the same
+ * conversation, once. The model cannot confirm. What ran, and how it ended,
+ * is what the gateway reports in confirmedAction, never a local guess.
+ *
+ * Revealed secrets: a credential minted by a confirmed call comes back once,
+ * in that reply's revealedSecrets. It is shown next to whose it is (boundTo),
+ * kept only in this component's memory, and never written to storage. The
+ * gateway never replays it.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-
-const API = (import.meta as any).env?.VITE_PCC_URL ?? "";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { gatewayUrl } from "../lib/gateway-base.js";
 
 interface ToolCallTrace {
   name: string;
@@ -23,6 +36,39 @@ interface ToolCallTrace {
   status: number;
   result: unknown;
   durationMs: number;
+  /** Set when the gateway held this call for confirmation instead of running it. */
+  pendingActionId?: string;
+  /** Set when this call ran because the person confirmed it. */
+  confirmedActionId?: string;
+}
+
+/** A write the gateway is holding until the person confirms it. */
+interface PendingAction {
+  actionId: string;
+  tool: string;
+  method: string;
+  target: string;
+  args: Record<string, unknown>;
+  /** Written by the gateway, never by the model. */
+  summary: string;
+  /** For a credential-minting call: whose credential it will be. */
+  bindsTo?: string;
+  expiresAt: string;
+}
+
+interface ConfirmedAction {
+  actionId: string;
+  tool: string;
+  /** HTTP status of the call that ran. */
+  status: number;
+}
+
+/** A credential minted by this reply's confirmed call: shown once, never stored. */
+interface RevealedSecret {
+  tool: string;
+  path: string;
+  value: string;
+  boundTo?: string;
 }
 
 interface ChatResponse {
@@ -33,13 +79,35 @@ interface ChatResponse {
   doneReason?: string;
   turns?: number;
   needsApiKey?: boolean;
+  pendingActions?: PendingAction[];
+  confirmedAction?: ConfirmedAction;
+  revealedSecrets?: RevealedSecret[];
 }
 
 interface Message {
   role: "user" | "assistant" | "system";
   text: string;
   toolCalls?: ToolCallTrace[];
+  /** Actions this reply held for confirmation. */
+  held?: PendingAction[];
+  /** Credentials this reply revealed. In memory only. */
+  revealed?: RevealedSecret[];
   ts: string;
+}
+
+/** Where a held action stands, as far as the gateway has said. */
+type ActionState =
+  | { kind: "pending" }
+  | { kind: "confirming" }
+  | { kind: "ran"; status: number; tool: string }
+  | { kind: "refused"; reason: string }
+  | { kind: "unknown"; reason: string };
+
+function errorText(body: unknown, status: number): string {
+  const b = body as { message?: unknown; error?: unknown } | null;
+  if (b && typeof b.message === "string" && b.message) return b.message;
+  if (b && typeof b.error === "string" && b.error) return b.error;
+  return `HTTP ${status}`;
 }
 
 interface HealthInfo {
@@ -57,8 +125,20 @@ const STARTER_LINES = [
   "I want to order a custom 12-inch pepperoni pizza delivered to 200 5th Ave by 7pm tonight.",
 ];
 
-export function OnboardChatPage() {
+export type ChatVariant = "onboard" | "agent";
+
+export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant } = {}) {
+  const isAgent = variant === "agent";
   const navigate = useNavigate();
+  // The agent workspace acts as the signed-in user (the key goes only to the
+  // configured gateway); public onboarding is anonymous and sends no key.
+  const chatFetch = useCallback(
+    (init: RequestInit) => (isAgent ? authorizedFetch("/api/onboard/chat", init) : fetch(gatewayUrl("/api/onboard/chat"), init)),
+    [isAgent],
+  );
+  const [actionStates, setActionStates] = useState<Record<string, ActionState>>({});
+  // Synchronous guard: a second click in the same tick cannot send a second confirm.
+  const inFlight = useRef(new Set<string>());
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -71,7 +151,7 @@ export function OnboardChatPage() {
   // Health probe — informs the user before they type if the gateway can't drive the LLM.
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API}/api/onboard/chat/health`)
+    fetch(gatewayUrl("/api/onboard/chat/health"))
       .then((r) => (r.ok ? r.json() : null))
       .then((h) => {
         if (!cancelled && h) setHealth(h);
@@ -89,6 +169,18 @@ export function OnboardChatPage() {
     }
   }, [messages, busy]);
 
+  const appendReply = useCallback((ok: ChatResponse) => {
+    const assistantMsg: Message = {
+      role: "assistant",
+      text: ok.assistant,
+      toolCalls: ok.toolCalls,
+      held: ok.pendingActions && ok.pendingActions.length > 0 ? ok.pendingActions : undefined,
+      revealed: ok.revealedSecrets && ok.revealedSecrets.length > 0 ? ok.revealedSecrets : undefined,
+      ts: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, assistantMsg]);
+  }, []);
+
   const sendMessage = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
@@ -101,26 +193,28 @@ export function OnboardChatPage() {
       setInput("");
 
       try {
-        const res = await fetch(`${API}/api/onboard/chat`, {
+        const res = await chatFetch({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ conversationId, message: trimmed }),
+          // A new conversation omits conversationId: the gateway (#381) treats any
+          // conversationId it is sent, null included, as one to look up (404 if unknown).
+          body: JSON.stringify(conversationId ? { conversationId, message: trimmed } : { message: trimmed }),
         });
-        const body = (await res.json()) as ChatResponse | { error: string; message?: string };
+        const body: unknown = await res.json().catch(() => null);
         if (!res.ok) {
-          const errBody = body as { error: string; message?: string };
-          setError(errBody.message ?? errBody.error ?? `HTTP ${res.status}`);
+          if (res.status === 404 && conversationId) {
+            setConversationId(null);
+            setError("This conversation is no longer available. Your next message starts a new one.");
+          } else if (res.status === 401) {
+            setError("Your API key was not accepted. Sign in again to use the agent.");
+          } else {
+            setError(errorText(body, res.status));
+          }
           return;
         }
         const ok = body as ChatResponse;
         if (!conversationId && ok.conversationId) setConversationId(ok.conversationId);
-        const assistantMsg: Message = {
-          role: "assistant",
-          text: ok.assistant,
-          toolCalls: ok.toolCalls,
-          ts: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
+        appendReply(ok);
 
         if (ok.needsApiKey) {
           setError(
@@ -133,7 +227,52 @@ export function OnboardChatPage() {
         setBusy(false);
       }
     },
-    [busy, conversationId],
+    [busy, conversationId, chatFetch, appendReply],
+  );
+
+  // Confirm one held action: a single request, and the button stays disabled
+  // until the gateway answers. The outcome shown is the gateway's.
+  const confirmAction = useCallback(
+    async (actionId: string) => {
+      if (!conversationId || inFlight.current.has(actionId)) return;
+      const current = actionStates[actionId];
+      if (current && current.kind !== "pending" && current.kind !== "unknown") return;
+      inFlight.current.add(actionId);
+      setActionStates((prev) => ({ ...prev, [actionId]: { kind: "confirming" } }));
+      try {
+        const res = await chatFetch({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ conversationId, confirmActionId: actionId }),
+        });
+        const body: unknown = await res.json().catch(() => null);
+        if (!res.ok) {
+          setActionStates((prev) => ({ ...prev, [actionId]: { kind: "refused", reason: errorText(body, res.status) } }));
+          return;
+        }
+        const ok = body as ChatResponse;
+        const confirmed = ok.confirmedAction;
+        setActionStates((prev) => ({
+          ...prev,
+          [actionId]:
+            confirmed && confirmed.actionId === actionId
+              ? { kind: "ran", status: confirmed.status, tool: confirmed.tool }
+              : { kind: "unknown", reason: "The gateway answered without saying whether it ran. Check before confirming again." },
+        }));
+        appendReply(ok);
+      } catch (e) {
+        setActionStates((prev) => ({
+          ...prev,
+          [actionId]: {
+            kind: "unknown",
+            reason: `Network error: ${(e as Error).message}. It may or may not have run; the gateway runs a held action at most once.`,
+          },
+        }));
+      } finally {
+        inFlight.current.delete(actionId);
+      }
+    },
+    [conversationId, actionStates, chatFetch, appendReply],
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -210,6 +349,91 @@ export function OnboardChatPage() {
     );
   };
 
+  const renderHeld = (held?: PendingAction[]) => {
+    if (!held || held.length === 0) return null;
+    return (
+      <div className="mt-3 space-y-2">
+        {held.map((a) => {
+          const st = actionStates[a.actionId] ?? { kind: "pending" as const };
+          const expired = st.kind === "pending" && Date.parse(a.expiresAt) <= Date.now();
+          const confirmButton = (label: string) => (
+            <button
+              type="button"
+              onClick={() => void confirmAction(a.actionId)}
+              className="px-4 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/50 hover:bg-amber-500/30 text-sm font-medium text-amber-200 transition-all"
+            >
+              {label}
+            </button>
+          );
+          return (
+            <div key={a.actionId} data-held-action={a.actionId} className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-3 space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-amber-300/80">Waiting for your confirmation</div>
+              <p className="text-sm text-white/85">{a.summary}</p>
+              {a.bindsTo && <p className="text-sm font-semibold text-amber-200">This creates a credential for {a.bindsTo}.</p>}
+              <p className="text-[11px] font-mono text-white/40">
+                {a.method} {a.target}
+              </p>
+              {st.kind === "pending" && !expired && (
+                <div className="flex flex-wrap items-center gap-3">
+                  {confirmButton("Confirm")}
+                  <span className="text-[11px] text-white/40">
+                    Nothing runs unless you confirm. Expires {new Date(a.expiresAt).toLocaleTimeString()}.
+                  </span>
+                </div>
+              )}
+              {st.kind === "pending" && expired && (
+                <p className="text-[11px] text-white/50">Expired without running. Ask the agent again if you still want it.</p>
+              )}
+              {st.kind === "confirming" && (
+                <button type="button" disabled className="px-4 py-1.5 rounded-lg border border-white/10 text-sm text-white/50">
+                  Confirming…
+                </button>
+              )}
+              {st.kind === "ran" && (
+                <p className={`text-xs ${st.status >= 200 && st.status < 300 ? "text-emerald-300" : "text-red-300"}`}>
+                  {st.status >= 200 && st.status < 300
+                    ? `Done: the gateway ran ${st.tool} and it answered ${st.status}.`
+                    : `The gateway ran ${st.tool} and it failed with ${st.status}.`}
+                </p>
+              )}
+              {st.kind === "refused" && <p className="text-xs text-red-300">Not run: {st.reason}</p>}
+              {st.kind === "unknown" && (
+                <div className="space-y-2">
+                  <p className="text-xs text-amber-300">{st.reason}</p>
+                  {confirmButton("Confirm again")}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderRevealed = (revealed?: RevealedSecret[]) => {
+    if (!revealed || revealed.length === 0) return null;
+    return (
+      <div className="mt-3 space-y-2" role="alert">
+        {revealed.map((r, i) => (
+          <div key={i} data-revealed-secret className="rounded-lg border border-emerald-500/40 bg-emerald-500/[0.08] p-3 space-y-2">
+            <p className="text-sm font-semibold text-emerald-200">
+              New credential{r.boundTo ? ` for ${r.boundTo}` : ""} ({r.path}). Save it now: it is shown once, and PCC can't show it
+              again.
+            </p>
+            <code className="block break-all text-xs font-mono text-white/90 bg-black/40 rounded px-2 py-1">{r.value}</code>
+            <button
+              type="button"
+              onClick={() => void navigator.clipboard?.writeText(r.value)}
+              className="text-[11px] text-emerald-300/80 hover:text-emerald-200"
+            >
+              Copy
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const isReady =
     health === null || (health.hasApiKey && health.hasSdk && health.agentPackageStatus?.loaded);
 
@@ -251,21 +475,28 @@ export function OnboardChatPage() {
   ];
 
   return (
-    <div className="flex flex-col h-screen bg-gradient-to-b from-black via-zinc-950 to-black text-white/90">
+    <div
+      className={`flex flex-col ${isAgent ? "h-full min-h-0" : "h-screen"} bg-gradient-to-b from-black via-zinc-950 to-black text-white/90`}
+      data-chat-variant={variant}
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06] bg-black/40 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => navigate("/onboard")}
-            className="text-xs text-white/40 hover:text-white/70 transition-colors"
-            aria-label="Back to onboard landing"
-          >
-            ←
-          </button>
+          {!isAgent && (
+            <button
+              onClick={() => navigate("/onboard")}
+              className="text-xs text-white/40 hover:text-white/70 transition-colors"
+              aria-label="Back to onboard landing"
+            >
+              ←
+            </button>
+          )}
           <div>
-            <h1 className="text-sm font-semibold text-white/90">No-Code Onboarding</h1>
+            <h1 className="text-sm font-semibold text-white/90">{isAgent ? "PCC agent" : "No-Code Onboarding"}</h1>
             <p className="text-[11px] text-white/40">
-              Tell me what you do and I'll register it. No CLI, no API key.
+              {isAgent
+                ? "Ask for an outcome, offer a capability, or check on work."
+                : "Tell me what you do and I'll set it up. No CLI, no API key. You confirm every change."}
             </p>
           </div>
         </div>
@@ -295,7 +526,8 @@ export function OnboardChatPage() {
         </div>
       </div>
 
-      {/* 4-step unified flow progress */}
+      {/* 4-step unified flow progress (onboarding only) */}
+      {!isAgent && (
       <div className="px-6 py-2 bg-black/30 border-b border-white/[0.04]">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-2">
           {steps.map((s, i) => {
@@ -332,6 +564,7 @@ export function OnboardChatPage() {
           })}
         </div>
       </div>
+      )}
 
       {/* Message list */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6">
@@ -339,10 +572,14 @@ export function OnboardChatPage() {
           {messages.length === 0 && (
             <div className="space-y-6">
               <div className="text-center space-y-2">
-                <h2 className="text-xl font-semibold text-white/80">What do you want to register?</h2>
+                <h2 className="text-xl font-semibold text-white/80">
+                  {isAgent ? "What do you need?" : "What do you want to register?"}
+                </h2>
                 <p className="text-sm text-white/40 max-w-xl mx-auto">
                   Plain English works — a service you sell, a machine you own, or a job you want done.
-                  I'll ask questions, then create the capability for you.
+                  {isAgent
+                    ? " The agent acts as you: it reads what your API key can see, and anything that would change something waits for your Confirm."
+                    : " I'll ask questions, then set it up for you. Nothing is created until you confirm it."}
                 </p>
               </div>
               <div className="grid gap-2 max-w-2xl mx-auto">
@@ -374,6 +611,8 @@ export function OnboardChatPage() {
               >
                 <div className="text-sm whitespace-pre-wrap leading-relaxed">{m.text}</div>
                 {m.role === "assistant" && renderToolCalls(m.toolCalls)}
+                {m.role === "assistant" && renderHeld(m.held)}
+                {m.role === "assistant" && renderRevealed(m.revealed)}
               </div>
             </div>
           ))}
@@ -423,8 +662,7 @@ export function OnboardChatPage() {
           </button>
         </form>
         <div className="max-w-3xl mx-auto mt-2 text-[11px] text-white/30 text-center">
-          Conversation history is saved on the gateway and survives a page reload.
-          {conversationId && <span className="ml-1 font-mono opacity-60">#{conversationId.slice(0, 12)}</span>}
+          The gateway keeps this conversation, but this page doesn't reopen it: reloading starts a new one.
         </div>
       </div>
     </div>

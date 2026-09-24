@@ -45,7 +45,7 @@ export const navGroups: NavGroup[] = [
   {
     title: "Command Center",
     items: [
-      { label: "Dashboard", path: "/", icon: <DashboardIcon /> },
+      { label: "Dashboard", path: "/dashboard", icon: <DashboardIcon /> },
     ],
   },
   {
