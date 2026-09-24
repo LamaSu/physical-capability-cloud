@@ -59,7 +59,8 @@ export async function snippetRoutes(app: FastifyInstance): Promise<void> {
       version: SNIPPET_VERSION,
       gateway: "https://capability.network",
       body: SNIPPET_BODY,
-      npx: "npx @pcc/onboard",
+      // @pcc/onboard is not on npm, so no install command is advertised (N26).
+      npx: null,
       docs: "https://capability.network",
     };
   });
