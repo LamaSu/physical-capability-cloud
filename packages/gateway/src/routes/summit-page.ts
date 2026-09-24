@@ -131,7 +131,7 @@ a{color:var(--grn);text-decoration:none}
   // Fire-and-forget progressive save — always sends the full accumulated record.
   function save(){
     if(!data.email)return;
-    try{fetch("/api/waitlist",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data),keepalive:true}).catch(function(){});}catch(e){}
+    try{fetch("/api/waitlist",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data),keepalive:true}).then(function(r){return r.json();}).then(function(d){if(d&&typeof d.leadToken==="string")data.leadToken=d.leadToken;}).catch(function(){});}catch(e){}
   }
   // Capture even if they navigate away or background the tab mid-flow.
   window.addEventListener("pagehide",function(){collect();save();});

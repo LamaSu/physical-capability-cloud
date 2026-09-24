@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import { SUMMIT_HTML } from "./summit-page.js";
 import { adminTokenMatches } from "../auth/admin-key.js";
 
@@ -14,17 +15,52 @@ const BETA_FILE = `${DATA_DIR}/beta-applications.jsonl`;
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 // Per-IP sliding-window limit. Generous: the summit signup is progressive (one POST
-// per step) and a packed room shares NAT'd IPs. Updates to a lead we've already
-// accepted are exempt — only NEW leads count toward the window.
+// per step) and a packed room shares NAT'd IPs.
+//
+// WP-A round 5 (coord-watch #2883): a known leadId used to BYPASS this limit
+// entirely, and anyone who knew a lead's id could rewrite its merged record. Now:
+//   - a lead's record is keyed by leadId PLUS a server-issued leadToken
+//     (leadKey = leadId~sha256(token)[:16]), so another caller's leadId without its
+//     token lands in a record of its own. This is stateless: it survives restarts.
+//   - updates carrying a token this process issued draw on a per-lead budget
+//     (LEAD_UPDATE_MAX per window). Every other request counts against the per-IP
+//     window, including invented tokens and the first save.
+//   - both maps are bounded.
+const MAX_TRACKED = 50_000;
 const hits = new Map<string, number[]>();
-const seenLeads = new Map<string, number>();
-function rateLimited(ip: string, leadId: string | null = null, max = 80, windowMs = 60_000): boolean {
-  if (leadId && seenLeads.has(leadId)) return false; // progressive update — always allow
+function rateLimited(ip: string, max = 80, windowMs = 60_000): boolean {
   const now = Date.now();
   const arr = (hits.get(ip) ?? []).filter((t) => now - t < windowMs);
   arr.push(now);
+  hits.delete(ip); // re-insert: Map order is insertion order, oldest first
   hits.set(ip, arr);
+  if (hits.size > MAX_TRACKED) hits.delete(hits.keys().next().value as string);
   return arr.length > max;
+}
+
+const LEAD_UPDATE_MAX = 20;
+const LEAD_WINDOW_MS = 10 * 60_000;
+/** leadKey -> update timestamps, only for leads THIS process issued a token to. */
+const issuedLeads = new Map<string, number[]>();
+
+function leadKeyOf(leadId: string, token: string): string {
+  return `${leadId}~${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+}
+
+/** True when this update must be refused: over its lead's budget, or (unknown lead) over the IP window. */
+function leadRateLimited(ip: string, leadKey: string | null): boolean {
+  const known = leadKey !== null ? issuedLeads.get(leadKey) : undefined;
+  if (known === undefined) return rateLimited(ip);
+  const now = Date.now();
+  const arr = known.filter((t) => now - t < LEAD_WINDOW_MS);
+  arr.push(now);
+  issuedLeads.set(leadKey as string, arr);
+  return arr.length > LEAD_UPDATE_MAX;
+}
+
+function trackIssuedLead(leadKey: string): void {
+  if (!issuedLeads.has(leadKey)) issuedLeads.set(leadKey, [Date.now()]);
+  if (issuedLeads.size > MAX_TRACKED) issuedLeads.delete(issuedLeads.keys().next().value as string);
 }
 
 function append(file: string, rec: unknown): void {
@@ -55,7 +91,8 @@ function readCoalesced(file: string): Record<string, any>[] {
   let anon = 0;
   for (const raw of readAll(file)) {
     const row = raw as Record<string, any>;
-    const key = String(row.leadId ?? row.id ?? row.email ?? `anon-${anon++}`);
+    // leadKey binds a lead to its token (WP-A round 5); rows written before it keep leadId.
+    const key = String(row.leadKey ?? row.leadId ?? row.id ?? row.email ?? `anon-${anon++}`);
     if (!byKey.has(key)) {
       byKey.set(key, {});
       order.push(key);
@@ -67,6 +104,16 @@ function readCoalesced(file: string): Record<string, any>[] {
     }
   }
   return order.map((k) => byKey.get(k)!);
+}
+
+const COUNT_CACHE_MS = 30_000;
+let countCache: { at: number; count: number; beta: number } | null = null;
+
+/** Test-only: forget limiter state and the count cache. */
+export function _resetWaitlistStateForTests(): void {
+  hits.clear();
+  issuedLeads.clear();
+  countCache = null;
 }
 
 function rid(prefix: string): string {
@@ -98,7 +145,11 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     const b = (req.body ?? {}) as Record<string, any>;
     if (b.website || b.hp) return { status: "ok" }; // honeypot — accept silently, drop
     const leadId = b.leadId ? String(b.leadId).trim().slice(0, 64) : null;
-    if (rateLimited(req.ip, leadId)) {
+    // A lead continues only with ITS token; without one it starts a record of its own.
+    const presented = typeof b.leadToken === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(b.leadToken) ? b.leadToken : null;
+    const leadToken = leadId ? (presented ?? randomBytes(18).toString("base64url")) : null;
+    const leadKey = leadId && leadToken ? leadKeyOf(leadId, leadToken) : null;
+    if (leadRateLimited(req.ip, presented ? leadKey : null)) {
       return reply.code(429).send({ error: "rate_limited", message: "Too many submissions — try again shortly." });
     }
     const email = String(b.email ?? "").trim().toLowerCase();
@@ -108,6 +159,7 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     const rec = {
       id: rid("wl"),
       leadId,
+      leadKey,
       kind: "waitlist",
       email,
       name: b.name ?? null,
@@ -124,8 +176,9 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       ip: req.ip,
     };
     append(WAITLIST_FILE, rec);
-    if (leadId) seenLeads.set(leadId, Date.now());
-    return { status: "ok", id: rec.id, leadId, message: "You're on the waitlist — we'll be in touch." };
+    countCache = null;
+    if (leadKey && !presented) trackIssuedLead(leadKey);
+    return { status: "ok", id: rec.id, leadId, leadToken, message: "You're on the waitlist — we'll be in touch." };
   });
 
   // Full beta-tester application (PUBLIC). Required: email, name, company.
@@ -178,6 +231,7 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       ip: req.ip,
     };
     append(BETA_FILE, rec);
+    countCache = null;
     return {
       status: "ok",
       id: rec.id,
@@ -190,10 +244,17 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Public live counter for the signup page (#N social proof + open-mic read-out). No auth.
+  // Cached (#2883): it used to re-read and coalesce both files on every request.
   app.get("/api/waitlist/count", async () => {
-    const count = readCoalesced(WAITLIST_FILE).length; // distinct leads, not raw rows
-    const beta = readAll(BETA_FILE).length;
-    return { count, beta };
+    const now = Date.now();
+    if (countCache === null || now - countCache.at > COUNT_CACHE_MS) {
+      countCache = {
+        at: now,
+        count: readCoalesced(WAITLIST_FILE).length, // distinct leads, not raw rows
+        beta: readAll(BETA_FILE).length,
+      };
+    }
+    return { count: countCache.count, beta: countCache.beta };
   });
 
   // Admin review / export (gated by X-Admin-Token).
