@@ -4,13 +4,18 @@
  * evidence into verification.
  */
 import { describe, it, expect } from "vitest";
-import type { EvidenceAxis, ExecutionPhase, PayoutState, SettlementAxis } from "@pcc/spec";
+import type { EvidenceAxis, ExecutionPhase, MoneyStateView, PayoutState, SettlementAxis } from "@pcc/spec";
+import { MONEY_STATUS_MAP } from "@pcc/spec";
 import {
+  JOB_EXECUTION_REFRESH_MS,
+  JOB_EXECUTION_TERMINAL_REFRESH_MS,
   NOTICE_TEXT,
   PAYOUT_VIEW,
   PHASE_VIEW,
   evidenceSummaryText,
+  freshness,
   payoutBasisText,
+  recordStatusBadge,
   settlementLinkText,
 } from "../job-execution-view.js";
 
@@ -34,6 +39,12 @@ describe("phase view", () => {
   it("NEGATIVE: an unknown phase never shows a success pulse", () => {
     expect(PHASE_VIEW.unknown.pulse).toBe("offline");
   });
+
+  it("NEGATIVE (design #2510): no work phase uses a success or animated-online color", () => {
+    for (const p of PHASES) {
+      expect(["completed", "online"], p).not.toContain(PHASE_VIEW[p].pulse);
+    }
+  });
 });
 
 describe("payout view", () => {
@@ -53,19 +64,92 @@ describe("payout view", () => {
 const settlement = (over: Partial<SettlementAxis>): SettlementAxis => ({
   link: "not_linked",
   linkBasis: null,
+  linkMatches: [],
   source: "gateway_escrow_record",
   record: null,
   payout: "unknown",
   payoutBasis: null,
+  payoutConfirmation: null,
   error: null,
   ...over,
+});
+
+const view = (sourceStatus: string, tone: MoneyStateView["tone"], label: string | null): MoneyStateView => ({
+  sourceStatus,
+  vocabulary: "escrow_milestone",
+  tone,
+  label,
+  known: label !== null,
+});
+
+describe("record badges (review P1-4)", () => {
+  it("NEGATIVE: every recorded status renders neutral, whatever its tone, simulated or not", () => {
+    for (const [key, e] of Object.entries(MONEY_STATUS_MAP)) {
+      for (const simulated of [false, true]) {
+        expect(recordStatusBadge(view(key.toLowerCase(), e.tone, e.label), simulated).color, `${key}/${simulated}`).toBe("gray");
+      }
+    }
+    expect(recordStatusBadge(view("weird", "unknown", null), false)).toEqual({ color: "gray", label: 'unrecognized status "weird"' });
+  });
+
+  it("labels a simulated escrow's statuses as simulated", () => {
+    expect(recordStatusBadge(view("released", "settled", "payment sent to operator"), true).label).toBe(
+      "Simulated: payment sent to operator",
+    );
+  });
+});
+
+describe("freshness (review P2)", () => {
+  const t0 = Date.parse("2026-09-24T12:00:00.000Z");
+  it("a failed refresh is stale", () => {
+    expect(freshness("2026-09-24T12:00:00.000Z", t0, false, true)).toEqual({ stale: true, reason: "refresh_failed" });
+  });
+  it("a read older than two intervals is stale, for finished jobs too", () => {
+    expect(freshness("2026-09-24T12:00:00.000Z", t0 + 2 * JOB_EXECUTION_REFRESH_MS + 1, false, false).reason).toBe("too_old");
+    expect(freshness("2026-09-24T12:00:00.000Z", t0 + 2 * JOB_EXECUTION_TERMINAL_REFRESH_MS + 1, true, false).reason).toBe("too_old");
+    expect(freshness("2026-09-24T12:00:00.000Z", t0 + JOB_EXECUTION_REFRESH_MS, false, false)).toEqual({ stale: false, reason: null });
+  });
+  it("an unparseable read time is stale", () => {
+    expect(freshness("not a date", t0, false, false).stale).toBe(true);
+  });
 });
 
 describe("settlement wording", () => {
   it("names each unusable-link state as what it is", () => {
     expect(settlementLinkText(settlement({ link: "not_linked" }))).toMatch(/No settlement record/);
     expect(settlementLinkText(settlement({ link: "ambiguous" }))).toMatch(/More than one/);
+    expect(settlementLinkText(settlement({ link: "conflicting" }))).toMatch(/disagree/);
     expect(settlementLinkText(settlement({ link: "unavailable" }))).toMatch(/could not be read/);
+  });
+
+  const linkedRecord = (over: Record<string, unknown>) =>
+    settlement({
+      link: "linked",
+      record: {
+        kind: "gateway_escrow_record",
+        escrowId: "e",
+        contractAddress: "0x1",
+        contractVersion: null,
+        simulated: false,
+        escrow: { sourceStatus: "active", vocabulary: "escrow_record", tone: "running", label: "active", known: true },
+        milestoneMatch: "exact",
+        milestone: null,
+        escrowTotal: { amount: "1", currency: "USDC" },
+        createdAt: "2026-09-01T00:00:00Z",
+        deadline: "2026-09-02T00:00:00Z",
+        statusObservedAt: null,
+      },
+      ...over,
+    } as any);
+
+  it("qualifies a paid record claim as not confirmed on chain", () => {
+    expect(payoutBasisText(linkedRecord({ payout: "paid", payoutBasis: "milestone_record", payoutConfirmation: "record_only" }))).toMatch(
+      /Not confirmed on chain/,
+    );
+  });
+
+  it("says when the milestone and escrow records disagree", () => {
+    expect(payoutBasisText(linkedRecord({ payout: "unknown", payoutBasis: "milestone_record" }))).toMatch(/disagree/);
   });
 
   it("explains a step missing from the escrow instead of guessing", () => {
@@ -84,6 +168,7 @@ describe("settlement wording", () => {
           escrowTotal: { amount: "1", currency: "USDC" },
           createdAt: "2026-09-01T00:00:00Z",
           deadline: "2026-09-02T00:00:00Z",
+          statusObservedAt: null,
         },
       }),
     );
@@ -124,6 +209,8 @@ describe("notices", () => {
       "fabricated_evidence",
       "simulated_settlement",
       "unknown_execution_status",
+      "settlement_records_conflict",
+      "settlement_link_conflict",
     ] as const) {
       expect(NOTICE_TEXT[code], code).toBeTruthy();
     }

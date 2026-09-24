@@ -43,4 +43,18 @@ describe("JobDetailPage reads the gateway read model", () => {
   it("marks a failed refresh as stale instead of hiding it", () => {
     expect(detail).toMatch(/last successful read/);
   });
+
+  it("NEGATIVE (review P1-4): never re-classifies raw money strings; record statuses go through the neutral badge", () => {
+    expect(detail).not.toMatch(/moneyBadgeColor|classifyMoneyStatus|moneyStatusColor/);
+    expect(detail).toContain("recordStatusBadge");
+    // The only computed color on the page is the payout summary's.
+    expect(detail.match(/<GlowBadge color=\{/g) ?? []).toHaveLength(2); // payout.color + RecordBadge's neutral color
+  });
+
+  it("NEGATIVE (review P2): a finished job keeps refreshing (polling never turns off)", () => {
+    const hooks = read("../api/hooks/use-pcc-data.ts");
+    const block = hooks.slice(hooks.indexOf("export function useJobExecution"), hooks.indexOf("export function useDriftAlerts"));
+    expect(block).toContain("JOB_EXECUTION_TERMINAL_REFRESH_MS");
+    expect(block).not.toMatch(/:\s*false/);
+  });
 });

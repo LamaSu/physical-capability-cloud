@@ -18,6 +18,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { JobExecutionDTO } from "@pcc/spec";
 import { api, ApiError } from "../gateway.js";
+import { JOB_EXECUTION_REFRESH_MS, JOB_EXECUTION_TERMINAL_REFRESH_MS } from "../../lib/job-execution-view.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -107,22 +108,22 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
   });
 }
 
-/** Re-read a job that is still moving this often (ms). A terminal job is not polled. */
-export const JOB_EXECUTION_REFRESH_MS = 15_000;
-
 /**
  * Product read model for one job (PX-6). Route: GET /api/jobs/:jobId/execution.
- * Polls while the execution phase is not terminal. A 404 is final (no retry); any other
- * failure is retried once and then surfaces as an error. It never falls back to fixtures.
+ * Always polls: every 15s while the work is in motion, every 60s once it is finished,
+ * because finishing the work never makes the money final. A 404 or 401 is final (no
+ * retry); any other failure is retried once and then surfaces as an error. It never
+ * falls back to fixtures.
  */
 export function useJobExecution(jobId: string | undefined) {
   return useQuery<JobExecutionDTO>({
     queryKey: ["jobExecution", jobId],
     queryFn: () => api.getJobExecution(jobId!),
     enabled: !!jobId,
-    retry: (failureCount, error) => !(error instanceof ApiError && error.status === 404) && failureCount < 1,
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 404 || error.status === 401)) && failureCount < 1,
     refetchInterval: (query) =>
-      query.state.data && !query.state.data.execution.terminal ? JOB_EXECUTION_REFRESH_MS : false,
+      query.state.data?.execution.terminal ? JOB_EXECUTION_TERMINAL_REFRESH_MS : JOB_EXECUTION_REFRESH_MS,
   });
 }
 

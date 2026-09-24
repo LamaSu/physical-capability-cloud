@@ -5,31 +5,40 @@
  * Rules this module keeps:
  *  - Green is reserved for a payout the gateway classified as `paid`. Work completing is
  *    not green money; a refund, a simulated escrow or an unknown state is never green.
+ *    The raw escrow and milestone statuses are shown as neutral record text: they are
+ *    the inputs the gateway reconciled, not a second verdict.
  *  - Every axis says where its state came from, in plain words.
  *  - "Not linked", "unavailable" and "unknown" read as what they are. They never read as
  *    "none" or "$0".
+ *  - Work-phase chips never use a success color, so a finished job never looks paid.
  */
 import type {
   EvidenceAxis,
   ExecutionPhase,
   JobExecutionDTO,
   JobExecutionNoticeCode,
+  MoneyStateView,
   PayoutState,
   SettlementAxis,
 } from "@pcc/spec";
-import { moneyBadgeColor, type MoneyBadgeColor } from "./money-badge.js";
+import type { MoneyBadgeColor } from "./money-badge.js";
 
 export type PhasePulse = "online" | "executing" | "completed" | "failed" | "offline";
 
-/** Execution phase -> label and StatusChip pulse. Exhaustive over the spec union. */
+/**
+ * Execution phase -> label and StatusChip pulse. Exhaustive over the spec union. Only
+ * "executing" (amber, work in motion) and "failed" (red) carry color; waiting, paused,
+ * finished and unknown phases use the neutral "offline" dot, so no work phase is ever
+ * painted in a success color (green means money released, and only on the payout badge).
+ */
 export const PHASE_VIEW: Readonly<Record<ExecutionPhase, { label: string; pulse: PhasePulse }>> = Object.freeze({
-  pending: { label: "Pending", pulse: "online" },
-  queued: { label: "Queued", pulse: "online" },
-  dispatched: { label: "Sent to executor", pulse: "online" },
+  pending: { label: "Pending", pulse: "offline" },
+  queued: { label: "Queued", pulse: "offline" },
+  dispatched: { label: "Sent to executor", pulse: "offline" },
   running: { label: "In progress", pulse: "executing" },
   awaiting_handoff: { label: "Awaiting handoff", pulse: "executing" },
   paused: { label: "Paused", pulse: "offline" },
-  completed: { label: "Work reported complete", pulse: "completed" },
+  completed: { label: "Work reported complete", pulse: "offline" },
   failed: { label: "Failed", pulse: "failed" },
   timed_out: { label: "Timed out", pulse: "failed" },
   cancelled: { label: "Cancelled", pulse: "offline" },
@@ -59,6 +68,10 @@ export const NOTICE_TEXT: Readonly<Record<JobExecutionNoticeCode, string>> = Obj
   fabricated_evidence: "Some evidence came from a simulated or mock source. It is not a physical reading.",
   simulated_settlement: "This job's escrow is simulated. No money moved.",
   unknown_execution_status: "This job has a status this view does not recognize, so it is shown as-is.",
+  settlement_records_conflict:
+    "This job's milestone record and its escrow record disagree about the money, so the payment is shown as unknown.",
+  settlement_link_conflict:
+    "The records that tie this job to an escrow point at different escrows, so no payment record is shown.",
 });
 
 /** One sentence for the settlement axis when there is no usable record. */
@@ -68,6 +81,8 @@ export function settlementLinkText(s: SettlementAxis): string | null {
       return "No settlement record is linked to this job.";
     case "ambiguous":
       return "More than one settlement record matches this job, so none is shown.";
+    case "conflicting":
+      return "The records that tie this job to an escrow disagree, so none is shown.";
     case "unavailable":
       return "The settlement record could not be read.";
     default:
@@ -79,9 +94,16 @@ export function settlementLinkText(s: SettlementAxis): string | null {
 export function payoutBasisText(s: SettlementAxis): string | null {
   if (s.link !== "linked" || !s.record) return null;
   if (s.record.simulated) return "Simulated escrow.";
-  if (s.payoutBasis === "milestone_record") return "From this job's milestone in the escrow record.";
-  if (s.payoutBasis === "escrow_record") return "From the escrow record (it has no milestones).";
+  if (s.payoutBasis === "milestone_record") {
+    if (s.payout === "unknown") return "This job's milestone and the escrow record disagree, so the payment is unknown.";
+    if (s.payoutConfirmation === "record_only") {
+      return "From this job's milestone in the gateway's escrow record. Not confirmed on chain.";
+    }
+    return "From this job's milestone in the gateway's escrow record.";
+  }
   switch (s.record.milestoneMatch) {
+    case "no_milestones":
+      return "The escrow records no milestones, so this job's payment cannot be read from it.";
     case "step_not_in_escrow":
       return "The escrow has no milestone for this job's step.";
     case "ambiguous":
@@ -91,9 +113,38 @@ export function payoutBasisText(s: SettlementAxis): string | null {
   }
 }
 
-/** The color of a recorded money status (escrow or milestone), from the canonical map. */
-export function moneyStatusColor(sourceStatus: string): MoneyBadgeColor {
-  return moneyBadgeColor(sourceStatus);
+/**
+ * A recorded escrow or milestone status, shown as neutral record text. Always gray: the
+ * statuses are the inputs the gateway reconciled into the payout, not a verdict of their
+ * own, and on a simulated escrow they describe no money at all. Uses the DTO's own
+ * classification label; it never re-reads the raw string.
+ */
+export function recordStatusBadge(view: MoneyStateView, simulated: boolean): { color: MoneyBadgeColor; label: string } {
+  const label = view.label ?? `unrecognized status "${view.sourceStatus}"`;
+  return { color: "gray", label: simulated ? `Simulated: ${label}` : label };
+}
+
+/** How often the page re-reads a job (ms): in motion vs finished. Never zero. */
+export const JOB_EXECUTION_REFRESH_MS = 15_000;
+export const JOB_EXECUTION_TERMINAL_REFRESH_MS = 60_000;
+
+/**
+ * Freshness of the shown read. Stale when the last refresh failed, or when the read is
+ * older than two refresh intervals (the page stopped refreshing, the tab slept, the
+ * clock moved). Execution finishing never makes money final, so a finished job is still
+ * refreshed and can still go stale.
+ */
+export function freshness(
+  asOfIso: string,
+  nowMs: number,
+  terminal: boolean,
+  refreshFailed: boolean,
+): { stale: boolean; reason: "refresh_failed" | "too_old" | null } {
+  if (refreshFailed) return { stale: true, reason: "refresh_failed" };
+  const asOf = Date.parse(asOfIso);
+  const budget = 2 * (terminal ? JOB_EXECUTION_TERMINAL_REFRESH_MS : JOB_EXECUTION_REFRESH_MS);
+  if (!Number.isFinite(asOf) || nowMs - asOf > budget) return { stale: true, reason: "too_old" };
+  return { stale: false, reason: null };
 }
 
 /** One sentence for the evidence axis. Received evidence is never called verified. */

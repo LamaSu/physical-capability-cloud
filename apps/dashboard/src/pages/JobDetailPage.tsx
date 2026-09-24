@@ -12,7 +12,8 @@ import {
   NOTICE_TEXT,
   settlementLinkText,
   payoutBasisText,
-  moneyStatusColor,
+  recordStatusBadge,
+  freshness,
   evidenceSummaryText,
   jobTitle,
 } from "../lib/job-execution-view.js";
@@ -21,9 +22,10 @@ import {
  * Job detail: a projection of the gateway's JobExecutionDTO (GET /api/jobs/:jobId/execution).
  *
  * Every value on this page comes from that read model. There are no fixtures and no
- * fallbacks. A job that cannot be read says so, and a refresh that fails keeps the last
- * read visibly marked as stale. The four panels are independent: work reported complete
- * is not payment, and evidence received is not verification.
+ * fallbacks. A job that cannot be read says so, and a read that is too old, or whose
+ * refresh failed, is visibly marked stale. The four panels are independent: work
+ * reported complete is not payment, and evidence received is not verification. Only the
+ * payout badge can be green; the recorded escrow and milestone statuses are neutral text.
  */
 export function JobDetailPage() {
   const { jobId } = useParams();
@@ -47,18 +49,24 @@ export function JobDetailPage() {
   if (isLoading) return <LoadingShell rows={6} />;
 
   if (!data) {
-    const notFound = error instanceof ApiError && error.status === 404;
+    const status = error instanceof ApiError ? error.status : null;
+    const notFound = status === 404;
+    const signedOut = status === 401;
     return (
       <GlassPanel padding="lg">
         {back}
         <div role="alert" className="text-center py-8">
-          <div className="text-white/70">{notFound ? "Job not found" : "Job details are unavailable right now"}</div>
+          <div className="text-white/70">
+            {notFound ? "Job not found" : signedOut ? "Sign in to see this job" : "Job details are unavailable right now"}
+          </div>
           <p className="text-xs text-white/40 mt-2">
             {notFound
               ? `No job with id ${jobId} exists, or it is not visible to you.`
-              : "The gateway could not be read. Nothing is shown until it can be."}
+              : signedOut
+                ? "Only the job's buyer, its operator, or an admin can read it."
+                : "The gateway could not be read. Nothing is shown until it can be."}
           </p>
-          {!notFound && (
+          {!notFound && !signedOut && (
             <button onClick={() => refetch()} className="mt-3 text-xs text-teal-300/80 hover:text-teal-300">
               Try again
             </button>
@@ -87,7 +95,7 @@ export function JobDetailPage() {
         <StatusChip status={phase.pulse} label={phase.label} />
       </div>
 
-      <Freshness asOf={data.asOf} stale={!!error} refreshing={isFetching} />
+      <Freshness asOf={data.asOf} terminal={data.execution.terminal} refreshFailed={!!error} refreshing={isFetching} />
 
       {data.notices.length > 0 && (
         <GlassPanel padding="md">
@@ -115,12 +123,32 @@ function when(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "not recorded";
 }
 
-function Freshness({ asOf, stale, refreshing }: { asOf: string; stale: boolean; refreshing: boolean }) {
+function Freshness({
+  asOf,
+  terminal,
+  refreshFailed,
+  refreshing,
+}: {
+  asOf: string;
+  terminal: boolean;
+  refreshFailed: boolean;
+  refreshing: boolean;
+}) {
+  // Re-evaluate the age every few seconds, so a read that stops refreshing goes stale on
+  // screen even when nothing else re-renders the page.
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+  const f = freshness(asOf, now, terminal, refreshFailed);
   return (
     <div className="text-[11px] text-white/35">
       Read {new Date(asOf).toLocaleString()}
-      {stale ? (
+      {f.reason === "refresh_failed" ? (
         <span className="text-gold-300"> · The latest refresh failed; this is the last successful read.</span>
+      ) : f.reason === "too_old" ? (
+        <span className="text-gold-300"> · This read is out of date; it has not been refreshed recently.</span>
       ) : refreshing ? (
         <span> · Refreshing…</span>
       ) : null}
@@ -175,22 +203,14 @@ function SettlementPanel({ data }: { data: JobExecutionDTO }) {
         <div className="grid grid-cols-2 gap-4 mt-2">
           {r.milestone && (
             <DataCell
-              label="This job's milestone"
-              value={
-                <GlowBadge color={moneyStatusColor(r.milestone.status.sourceStatus)}>
-                  {r.milestone.status.label ?? `unrecognized: ${r.milestone.status.sourceStatus}`}
-                </GlowBadge>
-              }
+              label="This job's milestone (record)"
+              value={<RecordBadge {...recordStatusBadge(r.milestone.status, r.simulated)} />}
               sub={`${r.milestone.amount} ${r.escrowTotal.currency} (recorded, not paid)`}
             />
           )}
           <DataCell
-            label="Escrow"
-            value={
-              <GlowBadge color={moneyStatusColor(r.escrow.sourceStatus)}>
-                {r.escrow.label ?? `unrecognized: ${r.escrow.sourceStatus}`}
-              </GlowBadge>
-            }
+            label="Escrow (record)"
+            value={<RecordBadge {...recordStatusBadge(r.escrow, r.simulated)} />}
             sub={`${r.escrowTotal.amount} ${r.escrowTotal.currency} total (recorded)`}
           />
           {r.milestone?.challengeWindowEnd && (
@@ -201,6 +221,11 @@ function SettlementPanel({ data }: { data: JobExecutionDTO }) {
       )}
     </GlassPanel>
   );
+}
+
+/** A recorded status: always neutral (see recordStatusBadge). */
+function RecordBadge({ color, label }: { color: "green" | "gold" | "red" | "gray"; label: string }) {
+  return <GlowBadge color={color}>{label}</GlowBadge>;
 }
 
 function EvidencePanel({ data }: { data: JobExecutionDTO }) {
