@@ -181,7 +181,6 @@ class TestExecuteTool(unittest.TestCase):
 class TestPollToolCalls(unittest.TestCase):
     @patch.object(printer_executor, "pcc")
     def test_generic_relay_success(self, mock_pcc):
-        printer_executor._use_relay = True
         mock_pcc.return_value = (200, {
             "calls": [
                 {"id": "tc_1", "toolName": "printer_status", "args": {}},
@@ -195,19 +194,18 @@ class TestPollToolCalls(unittest.TestCase):
         mock_pcc.assert_called_with("GET", "/api/relay/kernel-hp-printer/tool-call/pending")
 
     @patch.object(printer_executor, "pcc")
-    def test_fallback_to_ot2_on_404(self, mock_pcc):
-        printer_executor._use_relay = True
-        mock_pcc.side_effect = [
-            (404, {"error": "Not found"}),  # generic relay 404
-            (200, {"calls": [{"id": "tc_2", "toolName": "printer_queue", "args": {}}]}),  # ot2 relay
-        ]
-        calls = printer_executor.poll_tool_calls()
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(printer_executor._use_relay)  # switched to ot2
+    def test_no_fallback_to_the_retired_ot2_relay(self, mock_pcc):
+        # N4b-gw: /api/ot2 is retired (410). A relay 404 or 403 is not retried
+        # through another route.
+        for status in (404, 403):
+            mock_pcc.reset_mock()
+            mock_pcc.return_value = (status, {"error": "refused"})
+            calls = printer_executor.poll_tool_calls()
+            self.assertEqual(calls, [])
+            mock_pcc.assert_called_once_with("GET", "/api/relay/kernel-hp-printer/tool-call/pending")
 
     @patch.object(printer_executor, "pcc")
     def test_empty_poll(self, mock_pcc):
-        printer_executor._use_relay = True
         mock_pcc.return_value = (200, {"calls": [], "count": 0})
         calls = printer_executor.poll_tool_calls()
         self.assertEqual(len(calls), 0)
@@ -261,7 +259,6 @@ class TestExecuteAndReport(unittest.TestCase):
 class TestPostResult(unittest.TestCase):
     @patch.object(printer_executor, "pcc")
     def test_posts_to_relay(self, mock_pcc):
-        printer_executor._use_relay = True
         mock_pcc.return_value = (200, {"ok": True})
         s, r = printer_executor.post_result("tc_1", '{"done": true}')
         self.assertEqual(s, 200)
@@ -272,8 +269,18 @@ class TestPostResult(unittest.TestCase):
         )
 
     @patch.object(printer_executor, "pcc")
+    def test_refused_result_is_not_retried_elsewhere(self, mock_pcc):
+        mock_pcc.return_value = (403, {"error": "relay_access_denied"})
+        s, r = printer_executor.post_result("tc_1", '{"done": true}')
+        self.assertEqual(s, 403)
+        mock_pcc.assert_called_once_with(
+            "POST",
+            "/api/relay/kernel-hp-printer/tool-result",
+            {"callId": "tc_1", "result": '{"done": true}'},
+        )
+
+    @patch.object(printer_executor, "pcc")
     def test_posts_with_error(self, mock_pcc):
-        printer_executor._use_relay = True
         mock_pcc.return_value = (200, {"ok": True})
         s, r = printer_executor.post_result("tc_1", '{}', error="something broke")
         call_body = mock_pcc.call_args[0][2]
