@@ -16,6 +16,7 @@ import {
   exampleSparePrinter,
   PRINTER_KIT_SCHEDULE,
 } from "../economics/examples.js";
+import { MAX_INPUT_NODES, snapshotJson } from "../economics/input.js";
 import { evaluateScheduleExact, exactFraction, isqrt, valueInCents } from "../economics/rates.js";
 import { simulateEconomics } from "../economics/simulate.js";
 import type { Clause, EconomicAgreement } from "../economics/types.js";
@@ -331,6 +332,12 @@ describe("M1: a once-per-agreement payment is spread over every unit that runs t
     const ag = kitAgreement();
     ag.clauses.find((c) => c.clauseId === "kit-fee")!.rule = { kind: "percent", bps: 100, of: "gross", min: null, max: null, rateSource: null };
     expect(refusals(compileEconomics(ag))).toEqual([["SCHEMA_INVALID", []]]);
+  });
+
+  it("clean-room round 3 (P78): when every weight is 0, every share is 0 and each unit is refused for its gross, never thrown", () => {
+    const ag = kitAgreement();
+    for (const u of ag.units) u.gross = "0";
+    expect(refusals(compileEconomics(ag))).toEqual(ag.units.map((u) => ["GROSS_OUT_OF_RANGE", ["unit", u.unitRef]]));
   });
 });
 
@@ -682,5 +689,85 @@ describe("coord-watch #360 P1-3: every payout-bearing pinned rate must verify, l
     const ag = exampleSparePrinter();
     ag.clauses.push({ ...freeClause(`0x${"cd".repeat(32)}`), appliesTo: { usingComponent: "kit:never-used" } });
     expect(compileEconomics(ag, WITH_SCHEDULES).ok).toBe(true);
+  });
+});
+
+// ── Clean-room round 3 (spec at 0ab9cdbf) ────────────────────────────────────
+
+describe("clean-room round 3: schedule bodies, unit selection, the verified flag and input size", () => {
+  const pinned = (clauseId: string, scheduleHash: string, appliesTo: Clause["appliesTo"], bps = 10): Clause => ({
+    clauseId,
+    label: "A royalty nobody required",
+    role: "integrator",
+    to: { party: "priya" },
+    subject: null,
+    appliesTo,
+    underLicense: null,
+    rule: { kind: "percent", bps, of: "gross", min: null, max: null, rateSource: { scheduleHash, evaluatedAt: 1_790_000_000, context: { jobValueCents: 0, jobsPerDay: 0, captureClass: null } } },
+  });
+
+  it("P84: an unknown key inside a segment is dropped before hashing, as the registry does when it publishes", () => {
+    const clean = schedule([{ kind: "constant", startTime: 0, endTime: null, bps: 100 }]);
+    const noted = { ...clean, segments: [{ ...clean.segments[0]!, note: "x" }] } as unknown as RateSchedule;
+    const r = ok(compileEconomics(printerOn(clean, 100), { schedules: [noted] }));
+    expect(r.rates).toEqual([{ clauseId: "kit-royalty", scheduleHash: clean.scheduleHash, bps: 100, verified: true }]);
+    // A label computed over the key is a body that does not hash to its own label.
+    const relabelled = { ...noted, scheduleHash: computeScheduleHash({ version: 1, segments: noted.segments }) };
+    expect(relabelled.scheduleHash).not.toBe(clean.scheduleHash);
+    expect(refusals(compileEconomics(printerOn(relabelled, 100), { schedules: [relabelled] }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+  });
+
+  it("a capture-class-indexed segment's byClass is the one closed object in a schedule body", () => {
+    const body = { version: 1, segments: [{ kind: "capture-class-indexed", startTime: 0, endTime: null, byClass: { CC3: 120, CC9: 5 }, default: 60 }], publishedAt: "2026-06-01T00:00:00Z" };
+    const bad = { ...body, scheduleHash: computeScheduleHash(body as unknown as RateSchedule) } as unknown as RateSchedule;
+    expect(refusals(compileEconomics(printerOn(bad, 60), { schedules: [bad] }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+  });
+
+  it("P89: a clause that names only unknown units pays in no unit, so its missing body is not a refusal", () => {
+    const ag = exampleSparePrinter();
+    ag.clauses.push(pinned("ghost", `0x${"cd".repeat(32)}`, { units: ["nope"] }));
+    expect(codes(compileEconomics(ag, WITH_SCHEDULES))).toEqual(["UNKNOWN_REFERENCE"]);
+  });
+
+  it("P81: the pin of a clause that pays in no unit is never compared, so it is not verified, body or not", () => {
+    const matching = schedule([{ kind: "constant", startTime: 0, endTime: null, bps: 10 }]);
+    const contradicting = schedule([{ kind: "constant", startTime: 0, endTime: null, bps: 100 }]);
+    for (const [s, supplied] of [
+      [`0x${"cd".repeat(32)}`, []],
+      [matching.scheduleHash, [matching]],
+      [contradicting.scheduleHash, [contradicting]],
+    ] as const) {
+      const ag = exampleSparePrinter();
+      ag.clauses.push(pinned("tip", s, { usingComponent: "kit:never-used" }));
+      const r = ok(compileEconomics(ag, { schedules: [PRINTER_KIT_SCHEDULE, ...supplied] }));
+      expect(r.rates.find((x) => x.clauseId === "tip")).toEqual({ clauseId: "tip", scheduleHash: s, bps: 10, verified: false });
+      expect(r.rates.find((x) => x.clauseId === "kit-royalty")!.verified).toBe(true);
+      expect(r.notEligible).toContainEqual({ clauseId: "tip", reason: "component-not-used" });
+    }
+  });
+
+  it("input depth: containers may sit at depths 0..63, and a scalar at depth 64", () => {
+    const nest = (containers: number): unknown => {
+      let v: unknown = 1;
+      for (let i = 0; i < containers; i++) v = [v];
+      return v;
+    };
+    expect(snapshotJson(nest(64)).ok).toBe(true);
+    expect(snapshotJson(nest(65))).toEqual({ ok: false, reason: expect.stringContaining("nests deeper than 64") });
+  });
+
+  it("input size: every value counts once, containers and the input itself included", () => {
+    // 1 outer array + 16 inner arrays + scalars = exactly MAX_INPUT_NODES values; one more scalar is refused.
+    const scalars = MAX_INPUT_NODES - 17;
+    const build = (extra: number) =>
+      Array.from({ length: 16 }, (_, i) => new Array<number>(Math.floor(scalars / 16) + (i < scalars % 16 ? 1 : 0) + (i === 0 ? extra : 0)).fill(0));
+    expect(snapshotJson(build(0)).ok).toBe(true);
+    expect(snapshotJson(build(1))).toEqual({ ok: false, reason: `more than ${MAX_INPUT_NODES} values` });
+  });
+
+  it("only own enumerable properties are read, as JSON.stringify does", () => {
+    const o = { x: 1 };
+    Object.defineProperty(o, "hidden", { value: 2, enumerable: false });
+    expect(snapshotJson(o)).toEqual({ ok: true, value: { x: 1 } });
   });
 });
