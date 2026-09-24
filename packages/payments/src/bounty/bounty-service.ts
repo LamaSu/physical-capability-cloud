@@ -1,6 +1,12 @@
 // ---------------------------------------------------------------------------
 // Capability Bounty Service — In-memory mock implementation
+//
+// Nothing here is funded: no treasury exists and no escrow is called, so every
+// bounty carries fundingStatus "unfunded". Auto-creating "treasury" bounties
+// from demand signals is OFF unless a caller opts in explicitly (tests/demos).
 // ---------------------------------------------------------------------------
+
+import { randomUUID } from "node:crypto";
 
 import type {
   DemandSignal,
@@ -32,15 +38,14 @@ const MIN_VERIFICATION_SCORE = 0.7;
 // Helpers
 // ---------------------------------------------------------------------------
 
-let nextDemandId = 1;
-let nextBountyId = 1;
-
+// Random ids: a process-local counter restarts at 0001 and collides with ids
+// handed out before a restart.
 function generateDemandId(): string {
-  return `demand-${String(nextDemandId++).padStart(4, "0")}`;
+  return `demand-${randomUUID()}`;
 }
 
 function generateBountyId(): string {
-  return `bounty-${String(nextBountyId++).padStart(4, "0")}`;
+  return `bounty-${randomUUID()}`;
 }
 
 /** Map frequency to estimated annual multiplier */
@@ -63,10 +68,24 @@ function frequencyToAnnualMultiplier(
 // BountyService
 // ---------------------------------------------------------------------------
 
+export interface BountyServiceOptions {
+  /**
+   * Auto-create "treasury" bounties when demand crosses a threshold. Off by
+   * default: no treasury exists, so an auto-created bounty would advertise a
+   * reward nobody funded.
+   */
+  autoCreateTreasuryBounties?: boolean;
+}
+
 export class BountyService {
   private demandSignals = new Map<string, DemandSignal>();
   private bounties = new Map<string, CapabilityBounty>();
   private hunters = new Map<string, BountyHunter>();
+  private readonly autoCreateTreasuryBounties: boolean;
+
+  constructor(options: BountyServiceOptions = {}) {
+    this.autoCreateTreasuryBounties = options.autoCreateTreasuryBounties === true;
+  }
 
   // ── Demand Signals ──────────────────────────────────────────────
 
@@ -149,6 +168,7 @@ export class BountyService {
       bountyReward: params.bountyReward,
       currency: params.currency,
       fundedBy: params.fundedBy ?? "treasury",
+      fundingStatus: "unfunded",
       requirements: params.requirements,
       status: "open",
       createdAt: now.toISOString(),
@@ -270,6 +290,8 @@ export class BountyService {
   // ── Auto-Bounty Creation ────────────────────────────────────────
 
   checkAndCreateBounties(): CapabilityBounty[] {
+    if (!this.autoCreateTreasuryBounties) return [];
+
     const topDemand = this.getTopDemand(100);
     const created: CapabilityBounty[] = [];
 

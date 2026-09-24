@@ -27,11 +27,17 @@ export interface CapabilityBounty {
   demandCount: number;
   /** Total estimated annual value (sum of all demand signals) */
   estimatedAnnualValue: number;
-  /** Bounty reward amount (funded by treasury or requesters) */
+  /** Proposed reward amount. Nothing is escrowed for it: see `fundingStatus`. */
   bountyReward: number;
   currency: "USDC" | "CREDITS";
-  /** Who funded it */
+  /** The INTENDED funding source. No treasury or requester escrow backs it. */
   fundedBy: "treasury" | "requesters" | "mixed";
+  /**
+   * Whether real funds back the reward. This in-memory service has no escrow
+   * binding, so every bounty it creates is "unfunded". A durable, escrow-backed
+   * kit-build offer replaces it (ledger R7/R45).
+   */
+  fundingStatus: "unfunded";
   /** Requirements to claim */
   requirements: BountyRequirements;
   status: "open" | "claimed" | "verified" | "paid" | "expired";
