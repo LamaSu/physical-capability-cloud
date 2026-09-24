@@ -152,7 +152,7 @@ describe("adapter default manifests", () => {
   });
 
   it("every digital adapter is eligible-by-default at tier 1", () => {
-    for (const t of ["octoprint", "ipp", "opcua", "sila", "modbus", "opentrons", "hamilton", "generic-http"]) {
+    for (const t of ["octoprint", "ipp", "opcua", "sila", "modbus", "hamilton", "generic-http"]) {
       const { evidence, structured } = buildAdapterEvidence(t);
       expect(structured).toBe(true);
       const report = computeCsdEligibility({ url: `pcc://adapter/${t}`, evidence });
@@ -171,6 +171,14 @@ describe("adapter default manifests", () => {
     const ids = evidence.tier1?.primitives?.map((p) => p.id) ?? [];
     expect(ids).toContain("capture.photo_nonced");
     expect(computeCsdEligibility({ url: "pcc://cam", evidence }).eligibleTier).toBe(1);
+  });
+
+  it("opentrons claims only the tier-0 floor until its events map to the vocabulary", () => {
+    // Its real run path emits protocol_uploaded / run_action / run_* and no
+    // real completion event (evidence review of #418).
+    const { evidence, structured } = buildAdapterEvidence("opentrons");
+    expect(structured).toBe(true);
+    expect(computeCsdEligibility({ url: "pcc://opentrons", evidence }).eligibleTier).toBe(0);
   });
 
   it("mock is honestly capped at tier 0 (cannot attest a real execution)", () => {

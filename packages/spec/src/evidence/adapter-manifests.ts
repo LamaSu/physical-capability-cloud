@@ -93,19 +93,20 @@ export const ADAPTER_DEFAULT_MANIFESTS: Readonly<Record<string, EvidenceEmitterM
   // PLC / fieldbus via Modbus.
   modbus: adapterManifest("modbus", [...DIGITAL_RECEIPT_CORE]),
 
-  // Liquid handlers. Both run inside the kernel's job pipeline, so they carry
-  // the receipt core like every kernel-signed connector: the kernel's
-  // EvidenceEmitter signs each job-step bundle (kernel/src/evidence-emitter.ts,
-  // finalize + signFn) and marks mock/simulated events fabricated so they never
-  // satisfy a real tier (same file, the isFabricated handling). Nothing more is
-  // claimed: neither adapter feeds LogCaptureService (only printer-log-adapter
-  // does), so there is no machine.execution_log, and neither emits telemetry.
-  //   - opentrons (kernel/src/opentrons/adapter.ts): real runs emit
-  //     protocol_uploaded and run_action; mock mode reports simulated:true.
-  //   - hamilton (kernel/src/adapters/hamilton-adapter.ts): real runs emit
-  //     execution_started / execution_completed / execution_failed.
-  opentrons: adapterManifest("opentrons", [...DIGITAL_RECEIPT_CORE]),
+  // Liquid handlers (evidence review of #418, #3251). Neither adapter feeds
+  // LogCaptureService (only printer-log-adapter does), so no
+  // machine.execution_log, and neither emits telemetry.
+  //   - hamilton (kernel/src/adapters/hamilton-adapter.ts): real runs emit the
+  //     vocabulary's execution_started / execution_completed /
+  //     execution_failed, inside the kernel job pipeline whose EvidenceEmitter
+  //     signs each job-step bundle and marks mock/simulated events fabricated
+  //     (kernel/src/evidence-emitter.ts). It carries the receipt core.
+  //   - opentrons (kernel/src/opentrons/adapter.ts): real runs emit only
+  //     non-vocabulary types (protocol_uploaded, run_action, run_*) and no
+  //     real completion event, so it claims the tier-0 floor only, until its
+  //     events are mapped to the vocabulary (evidence offered the mapping).
   hamilton: adapterManifest("hamilton", [...DIGITAL_RECEIPT_CORE]),
+  opentrons: adapterManifest("opentrons", [{ id: "decl.self_attested" }]),
 
   // Arbitrary external HTTP capability. Adds target-system confirmation via the
   // upstream's own channel (api) — a natural fit for HTTP-backed work.
