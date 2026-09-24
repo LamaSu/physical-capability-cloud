@@ -17,7 +17,8 @@ BRANCH="digital-verifier/foundation"
 GW="https://capability.network"
 ORACLE_TUNNEL="https://refer-proxy-joint-cleaning.trycloudflare.com"
 ORACLE_DIRECT="${ORACLE_DIRECT:-http://localhost:4100}"
-ORACLE_KEY="pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa"
+# N44: from the environment only; never commit a key literal (CI secret scan).
+ORACLE_KEY="${PCC_ORACLE_KEY:-}"
 REPORT_FILE="ai/supervisor/smoke-test-report.json"
 
 # ── State ───────────────────────────────────────────────────────────────────
@@ -269,19 +270,24 @@ else
     pass "Oracle healthy via $ORACLE_URL_USED: $ORACLE_HEALTH"
     add_check "oracle-responds" "PASS" "Oracle ok via $ORACLE_URL_USED" "$DURATION"
 
-    # Smoke verify request
-    info "Sending smoke verify request..."
-    VERIFY_RESP=$(curl -sS --max-time 15 -X POST "$ORACLE_URL_USED/verify" \
-      -H "Content-Type: application/json" \
-      -H "x-oracle-key: $ORACLE_KEY" \
-      -d '{
-        "escrowAddress": "0x0000000000000000000000000000000000000000",
-        "jobId": "smoke-test-'"$(date +%s)"'",
-        "kernelId": "kernel-hp-printer",
-        "evidenceHash": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        "assuranceTier": 0,
-        "chainId": 84532
-      }' 2>/dev/null || echo "")
+    # Smoke verify request (needs PCC_ORACLE_KEY; skipped without it)
+    if [ -z "$ORACLE_KEY" ]; then
+      info "PCC_ORACLE_KEY not set: skipping the smoke verify request"
+      VERIFY_RESP=""
+    else
+      info "Sending smoke verify request..."
+      VERIFY_RESP=$(curl -sS --max-time 15 -X POST "$ORACLE_URL_USED/verify" \
+        -H "Content-Type: application/json" \
+        -H "x-oracle-key: $ORACLE_KEY" \
+        -d '{
+          "escrowAddress": "0x0000000000000000000000000000000000000000",
+          "jobId": "smoke-test-'"$(date +%s)"'",
+          "kernelId": "kernel-hp-printer",
+          "evidenceHash": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+          "assuranceTier": 0,
+          "chainId": 84532
+        }' 2>/dev/null || echo "")
+    fi
     if [ -n "$VERIFY_RESP" ]; then
       VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
       REASON=$(echo "$VERIFY_RESP" | jq -r .result.reason 2>/dev/null || echo "")
