@@ -976,104 +976,110 @@ export async function onboardRoutes(app: FastifyInstance) {
           const photoCid = stagedPhoto?.cid ?? null;
           let photoPlacedNew = false;
 
-          // B4 — the canonical evidence record, kept in the description column.
-          const submittedAt = new Date().toISOString();
-          const record = buildEvidenceRecord({
-            registrationId: reg.id,
-            submitterOperatorId: actor,
-            submittedAt,
-            evidence,
-            photo,
-            photoCid,
-            evidenceTierClaim: summary.evidenceTierClaim,
-          });
-          const evidenceDigest = evidenceRecordDigest(record);
-          const description = PROOF_RECORD_PREFIX + JSON.stringify({
-            submittedAt,
-            autoApproved: false,
-            proofs: summary.proofs,
-            evidenceBundleHash: record.bundleHash,
-            evidenceIpfsCid: record.ipfsCid,
-            evidenceTierClaim: summary.evidenceTierClaim,
-            evidenceDigest,
-            evidence: record,
-          });
+          try {
+            // B4 — the canonical evidence record, kept in the description column.
+            const submittedAt = new Date().toISOString();
+            const record = buildEvidenceRecord({
+              registrationId: reg.id,
+              submitterOperatorId: actor,
+              submittedAt,
+              evidence,
+              photo,
+              photoCid,
+              evidenceTierClaim: summary.evidenceTierClaim,
+            });
+            const evidenceDigest = evidenceRecordDigest(record);
+            const description = PROOF_RECORD_PREFIX + JSON.stringify({
+              submittedAt,
+              autoApproved: false,
+              proofs: summary.proofs,
+              evidenceBundleHash: record.bundleHash,
+              evidenceIpfsCid: record.ipfsCid,
+              evidenceTierClaim: summary.evidenceTierClaim,
+              evidenceDigest,
+              evidence: record,
+            });
 
-          // B3 — CAS to "reviewing" from exactly the status checked above, with
-          // the audit record in the same transaction. Nothing here approves,
-          // activates, or sets approvedAt.
-          const outcome = commitTransition({
-            id: reg.id,
-            expectedFrom: reg.status,
-            to: "reviewing",
-            extra: { description },
-            // M4 — the cap again, exact: no other proof can commit inside this transaction.
-            guard: () => {
-              const recent = recentProofs(getRepos(), reg.id, Date.now());
-              return recent.count >= PROOFS_PER_REGISTRATION_PER_WINDOW
-                ? { ok: false, kind: "too_many_proofs", retryAfterSeconds: recent.retryAfterSeconds }
-                : null;
-            },
-            // M4 — place the staged photo last: if it cannot be placed, the
-            // transition and its audit record roll back.
-            beforeCommit: stagedPhoto
-              ? () => {
-                  photoPlacedNew = stagedPhoto.commit();
-                }
-              : undefined,
-            audit: (ctx) => ({
-              eventType: PROOF_SUBMITTED_EVENT,
-              actor,
-              resourceType: "registration",
-              resourceId: ctx.pre.id,
-              action: "prove",
-              metadata: {
-                ...transitionAuditFields(ctx, submittedAt),
-                evidenceDigest,
-                // The proof this one replaces, from the audit log (M1).
-                previousEvidenceDigest: ctx.proof.evidenceDigest,
-                previousProofAuditId: ctx.proof.auditId,
-                evidenceTierClaim: summary.evidenceTierClaim,
-                proofCount: summary.proofs.length,
-                proofs: summary.proofs,
-                autoApproved: false,
-                evidence: record,
+            // B3 — CAS to "reviewing" from exactly the status checked above, with
+            // the audit record in the same transaction. Nothing here approves,
+            // activates, or sets approvedAt.
+            const outcome = commitTransition({
+              id: reg.id,
+              expectedFrom: reg.status,
+              to: "reviewing",
+              extra: { description },
+              // M4 — the cap again, exact: no other proof can commit inside this transaction.
+              guard: () => {
+                const recent = recentProofs(getRepos(), reg.id, Date.now());
+                return recent.count >= PROOFS_PER_REGISTRATION_PER_WINDOW
+                  ? { ok: false, kind: "too_many_proofs", retryAfterSeconds: recent.retryAfterSeconds }
+                  : null;
               },
-              ip: req.ip,
-              userAgent: req.headers["user-agent"],
-            }),
-          });
-          if (!outcome.ok) {
-            // Nothing was placed unless the database failed after the photo
-            // was (the commit itself): that blob is left in place, since the
-            // shared store is never deleted from, and reported.
-            stagedPhoto?.discard();
-            if (photoPlacedNew) {
-              req.log.error({ cid: photoCid, registrationId: reg.id }, "[onboard] evidence photo placed but the proof did not commit (unreferenced blob)");
-              Sentry.captureMessage("onboard.prove: unreferenced evidence blob after a failed commit", { extra: { cid: photoCid, registrationId: reg.id } });
+              // M4 — place the staged photo last: if it cannot be placed, the
+              // transition and its audit record roll back.
+              beforeCommit: stagedPhoto
+                ? () => {
+                    photoPlacedNew = stagedPhoto.commit();
+                  }
+                : undefined,
+              audit: (ctx) => ({
+                eventType: PROOF_SUBMITTED_EVENT,
+                actor,
+                resourceType: "registration",
+                resourceId: ctx.pre.id,
+                action: "prove",
+                metadata: {
+                  ...transitionAuditFields(ctx, submittedAt),
+                  evidenceDigest,
+                  // The proof this one replaces, from the audit log (M1).
+                  previousEvidenceDigest: ctx.proof.evidenceDigest,
+                  previousProofAuditId: ctx.proof.auditId,
+                  evidenceTierClaim: summary.evidenceTierClaim,
+                  proofCount: summary.proofs.length,
+                  proofs: summary.proofs,
+                  autoApproved: false,
+                  evidence: record,
+                },
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+              }),
+            });
+            if (!outcome.ok) {
+              // Nothing was placed unless the database failed after the photo
+              // was (the commit itself): that blob is left in place, since the
+              // shared store is never deleted from, and reported.
+              if (photoPlacedNew) {
+                req.log.error({ cid: photoCid, registrationId: reg.id }, "[onboard] evidence photo placed but the proof did not commit (unreferenced blob)");
+                Sentry.captureMessage("onboard.prove: unreferenced evidence blob after a failed commit", { extra: { cid: photoCid, registrationId: reg.id } });
+              }
+              return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
             }
-            return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
-          }
 
-          pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
-            metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },
-          });
-          trackServerEvent("operator_proved", { proofCount: summary.proofs.length, evidenceTierClaim: summary.evidenceTierClaim, pendingReview: true });
-          return {
-            registration: outcome.row,
-            autoApproved: false,
-            activated: false,
-            pendingReview: true,
-            proofs: summary.proofs,
-            // A claim about which self-asserted evidence was submitted. It grants
-            // no assurance tier; the served tier comes from the kernel ceiling.
-            evidenceTierClaim: summary.evidenceTierClaim,
-            evidenceDigest,
-            evidence: record,
-            warning: summary.tierWarning,
-            warnings: summary.warnings.length > 0 ? summary.warnings : undefined,
-            message: "Evidence recorded. The registration is pending review; an onboarding admin approves and activates it.",
-          };
+            pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
+              metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },
+            });
+            trackServerEvent("operator_proved", { proofCount: summary.proofs.length, evidenceTierClaim: summary.evidenceTierClaim, pendingReview: true });
+            return {
+              registration: outcome.row,
+              autoApproved: false,
+              activated: false,
+              pendingReview: true,
+              proofs: summary.proofs,
+              // A claim about which self-asserted evidence was submitted. It grants
+              // no assurance tier; the served tier comes from the kernel ceiling.
+              evidenceTierClaim: summary.evidenceTierClaim,
+              evidenceDigest,
+              evidence: record,
+              warning: summary.tierWarning,
+              warnings: summary.warnings.length > 0 ? summary.warnings : undefined,
+              message: "Evidence recorded. The registration is pending review; an onboarding admin approves and activates it.",
+            };
+          } finally {
+            // The staging file is private and uniquely named, so dropping it is
+            // always safe: after a placement it is already gone, and on any
+            // failure (or an unexpected throw) nothing is left behind.
+            stagedPhoto?.discard();
+          }
         },
       );
     },
