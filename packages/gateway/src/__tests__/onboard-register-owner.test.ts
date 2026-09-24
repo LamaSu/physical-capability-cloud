@@ -175,11 +175,13 @@ describe("/register ids and persistence (L4)", () => {
     expect(b.statusCode).toBe(200);
     const idA: string = a.json().registration.id;
     const idB: string = b.json().registration.id;
-    expect(idA).toMatch(/^reg-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // Before the fix the second caller got a 200 carrying the first caller's id,
+    // and its own row was never written.
     expect(idB).not.toBe(idA);
-    // Before the fix the second caller got a 200 carrying the first caller's id.
+    expect(getRepos().registrations.findById(idB)!.name).toBe("Printer");
     expect(getRepos().registrations.findById(idA)!.operator).toMatchObject({ walletAddress: OWNER, displayName: "A" });
     expect(getRepos().registrations.findById(idB)!.operator).toMatchObject({ walletAddress: ATTACKER, displayName: "B" });
+    expect(idA).toMatch(/^reg-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("a failed insert is 500 with no registration in the response, and nothing is recorded", async () => {
