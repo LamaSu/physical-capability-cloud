@@ -5,10 +5,11 @@
 // was armed and the public catalog had no available listing. Each phrase below
 // makes a promise about what PCC does today. A published surface may carry one
 // only when its status is `live`; the steward sets `live` when the gate named
-// in `requires` is armed. `forbidden` claims break a standing rule (an
-// architectural invariant or an operator rule), so no gate can switch them on.
-// src/lib/__tests__/public-claims.test.ts fails CI when a published surface
-// uses a claim that is not `live`.
+// in `requires` is armed. A `forbidden` claim either breaks a standing rule (an
+// architectural invariant or an operator rule; `requires` starts "Never:") or
+// names a defence that is off until the steward records it armed (`requires`
+// starts "Until armed:"). src/lib/__tests__/public-claims.test.ts fails CI when
+// a published surface uses a claim that is not `live`.
 
 export type ClaimStatus = "live" | "testnet" | "preview" | "demo" | "roadmap" | "forbidden";
 
@@ -110,6 +111,29 @@ export const GUARDED_CLAIMS: readonly GuardedClaim[] = [
     requires: "Never: operator rule, no moat framing in public copy",
     example: "The substrate is the moat.",
   },
+  {
+    id: "x402-mpp-payment-gate",
+    pattern:
+      /via x402|x402 (and|\+) (Solana )?USDC|x402 ·|accepts? HTTP 402 micropayments|handles per-request micropayments|supports x402 micropayments|(pay|settle)(s|ment|ments)? (via|with|through) MPP/i,
+    status: "forbidden",
+    requires: "Until armed: the x402/MPP payment gate runs on application routes (N45)",
+    example: "Some endpoints accept HTTP 402 micropayments.",
+  },
+  {
+    id: "aegis-content-scanning",
+    pattern: /\bAEGIS\b[^.\n]{0,40}\b(scan|screen|filter|protect|block)/i,
+    status: "forbidden",
+    requires: "Until armed: AEGIS content scanning runs on application routes (N45)",
+    example: "AEGIS content scanning protects every request.",
+  },
+  {
+    id: "security-monitor-blocking",
+    pattern:
+      /security monitor[^.\n]{0,40}\b(block|ban|stop)|blocks? (malicious|suspicious|abusive) (requests|traffic|clients|IPs)/i,
+    status: "forbidden",
+    requires: "Until armed: the security monitor's blocking runs on application routes (N45)",
+    example: "The security monitor blocks malicious requests.",
+  },
 ];
 
 /** Repo-relative files that are served publicly or read by external agents. */
@@ -143,7 +167,6 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "packages/gateway/src/routes/docs.ts",
   "packages/gateway/src/routes/context-pack.ts",
   "packages/gateway/src/routes/well-known-aeo.ts",
-  "packages/gateway/src/routes/well-known.ts",
   "packages/gateway/src/server.ts",
   "docs/quickstart/README.md",
   "docs/quickstart/claude-code.md",
@@ -166,7 +189,23 @@ export const UNCHECKED_SURFACES: Readonly<Record<string, string>> = {
     "adk (R3): served as /docs/agent-guide and docs://pcc/agent-guide; the rewrite replaces the fixed taxonomy and 'broker compiles'",
   "PCC-NETWORK.md":
     "Managed by LamaSu/pcc-network-kit; fix the template there (operator decision #2284)",
+  "packages/gateway/src/routes/well-known.ts":
+    "gateway (N45) with aeo: the A2A card's x402 security scheme and pcc-settle skill name x402/MPP payments as active",
 };
+
+/**
+ * The text a surface actually publishes. Files under packages/ and
+ * apps/dashboard/src/ are compiled before they ship, so their full-line
+ * comments never reach a reader and are dropped here; files served as-is
+ * (apps/dashboard/public/, docs/, README.md) are checked whole.
+ */
+export function publishedText(path: string, source: string): string {
+  if (!/^(packages\/|apps\/dashboard\/src\/)/.test(path)) return source;
+  return source
+    .split("\n")
+    .filter((line) => !/^\s*(\/\/|\/\*)|^\s+\*( |\/|$)/.test(line))
+    .join("\n");
+}
 
 export interface ClaimViolation {
   id: string;

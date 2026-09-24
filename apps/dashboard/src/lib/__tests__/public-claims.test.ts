@@ -9,6 +9,7 @@ import {
   PUBLISHED_SURFACES,
   UNCHECKED_SURFACES,
   findClaimViolations,
+  publishedText,
   type GuardedClaim,
 } from "../public-claims.js";
 
@@ -22,9 +23,22 @@ describe("public claims gate", () => {
   it.each(PUBLISHED_SURFACES.map((path) => [path]))(
     "%s makes no claim that is not live yet",
     (path) => {
-      expect(findClaimViolations(read(path))).toEqual([]);
+      expect(findClaimViolations(publishedText(path, read(path)))).toEqual([]);
     },
   );
+
+  it("ignores full-line comments in compiled source but checks served files whole", () => {
+    const source = "  // AEGIS content scanning gate\nconst x = 1;\n";
+    expect(findClaimViolations(publishedText("packages/gateway/src/server.ts", source))).toEqual([]);
+    expect(findClaimViolations(publishedText("apps/dashboard/public/visualizer.js", source))).toHaveLength(1);
+  });
+
+  it("still checks string content in compiled source", () => {
+    const source = 'const card = { description: "Supports x402 micropayments on Base Sepolia." };\n';
+    expect(
+      findClaimViolations(publishedText("packages/gateway/src/routes/well-known.ts", source)).map((v) => v.id),
+    ).toEqual(["x402-mpp-payment-gate"]);
+  });
 
   it("lists only files that exist, so a rename cannot drop a surface silently", () => {
     const listed = [...PUBLISHED_SURFACES, ...Object.keys(UNCHECKED_SURFACES)];
@@ -54,10 +68,10 @@ describe("public claims gate", () => {
     expect(findClaimViolations(escrow.example, [armed])).toEqual([]);
   });
 
-  it("gives every claim a reason, and keeps forbidden claims tied to a standing rule", () => {
+  it("gives every claim a reason, and says whether a forbidden claim can ever be armed", () => {
     for (const claim of GUARDED_CLAIMS) {
       expect(claim.requires.length).toBeGreaterThan(0);
-      if (claim.status === "forbidden") expect(claim.requires).toMatch(/^Never:/);
+      if (claim.status === "forbidden") expect(claim.requires).toMatch(/^(Never|Until armed):/);
     }
   });
 });
