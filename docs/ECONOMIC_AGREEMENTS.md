@@ -19,7 +19,7 @@ The reference implementation runs on the server (Node). Product surfaces show re
 - **Address:** `0x` followed by 40 hex digits, in either case. It is normalized to lowercase before anything else. The zero address is never a valid payee.
 - **Hash:** `0x` followed by 64 hex digits, in either case. It is normalized to lowercase before anything else (§6).
 - **Integer:** a JSON number with no fractional part (`1.0` parses as `1` and is accepted). Unless a narrower range is stated, integer fields are within `0 .. 2^53 − 1`; `version` fields are `1 .. 10^9`.
-- **Label:** human text shown to people. 1 to 200 characters, Unicode NFC, with no control characters (U+0000–U+001F, U+007F–U+009F) and no unpaired surrogates. Labels are hashed, so a relabelled agreement is a different agreement.
+- **Label:** human text shown to people. 1 to 200 Unicode code points, in NFC, with no control characters (U+0000–U+001F, U+007F–U+009F) and no unpaired surrogates. Labels are hashed, so a relabelled agreement is a different agreement.
 - **Time:** an integer count of unix seconds, `0 .. 2^53 − 1`.
 - **Unknown fields are rejected.** Every object is closed. A field this document does not define is a schema error, never ignored.
 - **Order-free input.** Input arrays are sets. The compiler sorts them canonically (§6), so the order an agent happened to emit never changes a hash or a payout.
@@ -135,7 +135,9 @@ The clause's `bps` **is** the accepted rate. The schedule is where the offer cam
 - the unit's value in cents, `floor(gross(u) × 100 / 10^decimals)`;
 - `jobsPerDay` and `captureClass` from the server's option `rateFacts` (each `null` when not supplied).
 
-The pinned `bps` must equal every such evaluation, or the refusal is `RATE_PIN_MISMATCH`. One clause can therefore pin one rate only for units that share it. Units in different value bands of a value-dependent schedule need separate clauses.
+The pinned `bps` must equal every such evaluation, or the refusal is `RATE_PIN_MISMATCH`. One clause can therefore pin one rate only for units that share it.
+
+**v1 limitation.** A license's `percent_by_schedule` requirement is met only by a clause that applies to every unit using the subject (§4.1 step 5). So when those units fall in different bands of a value-dependent schedule, no clause can meet it, and the agreement is refused rather than underpaid. The refusal is `RATE_PIN_MISMATCH` for one clause, or `LICENSE_PAYMENT_MISSING` and `LICENSE_PAYMENT_UNMATCHED` for per-band clauses. Such deals need one agreement per band.
 
 **Exact evaluation.** Evaluation picks the first segment whose `[startTime, endTime)` contains `now` (`endTime: null` runs forever). With no such segment the rate is 0 bps. Rounding is round-half-up, as `Math.round` does for non-negative values, computed exactly in integers:
 
@@ -220,11 +222,11 @@ A `toJSON` method is never called, and a `__proto__` key is an ordinary key, whi
 |---|---|
 | `forbiddenRecipients: Address[] (0..64)` | The escrow clone, the settlement token and the factory. The zero address is always forbidden. |
 | `authorityFloor: Authority` | The weakest license authority accepted; the default is `counterparty-accepted`. |
-| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash` and be well formed (segments in order, none overlapping, none after an open-ended one). A body is trusted only for the hash it actually has, so listing order never matters. |
-| `fee: { feeBps, feeRecipient: Address \| null }` | The fee the server charges (§2). |
-| `rateFacts: { jobsPerDay: integer >= 0 \| null, captureClass: "CC0".."CC5" \| null }` | Facts some schedules depend on (§2.4). |
+| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Fields other than `version` and `segments` do not enter the hash, and unknown fields are ignored. Each must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`. |
+| `fee: { feeBps, feeRecipient: Address \| null }` | The fee the server charges. It obeys §2's own rule: a recipient exactly when `feeBps > 0`. |
+| `rateFacts: { jobsPerDay?: integer >= 0 \| null, captureClass?: "CC0".."CC5" \| null }` | Facts some schedules depend on (§2.4). Each field may be omitted, which means `null`. |
 
-Options that break these rules, including an unknown field or a misspelled authority, are refused as `SCHEMA_INVALID` with path `["options"]`. They are never ignored.
+The options are one object, and `null` is not an object. Options that break these rules, including an unknown field or a misspelled authority, are refused as `SCHEMA_INVALID` with path `["options"]`. They are never ignored. `forbiddenRecipients` is a set: a repeat changes nothing.
 
 A compile returns exactly one of:
 
@@ -250,14 +252,14 @@ There is no partial result.
 | `DUPLICATE_LICENSE_SUBJECT` | structure | `["license-subject", subject]` |
 | `UNKNOWN_REFERENCE` | structure | `["payer", id]`; `["clause", clauseId, "to", payeeKey]`; `["clause", clauseId, "appliesTo", unitRef]`; `["clause", clauseId, "underLicense", L]`; `["license", L, "licensor", partyId]`; `["license", L, "requirement", requirementId, "party", partyId]`; `["split", splitId, "member", payeeKey]`; `["use", "modifies", ref]` |
 | `DUPLICATE_SPLIT_MEMBER` | structure | `["split", splitId, payeeKey]` |
-| `SPLIT_CYCLE` | structure | `["split", splitId]` for **every** split that can reach itself through its members |
-| `SPLIT_TOO_DEEP` | structure | `["split", splitId]` for every split deeper than 8 (§2.3); checked only when no split is in a cycle |
+| `SPLIT_CYCLE` | structure | `["split", splitId]` for **every** split that can reach itself through its members; checked only when no id is duplicated |
+| `SPLIT_TOO_DEEP` | structure | `["split", splitId]` for every split deeper than 8 (§2.3); checked only when no id is duplicated and no split is in a cycle |
 | `FEE_INVALID` | structure | At most one, the first that applies:<br>1. `feeBps > 0` with no recipient gives `["fee"]`.<br>2. `feeBps == 0` with a recipient gives `["fee"]`.<br>3. A recipient that is the zero address or a forbidden recipient gives `["fee", "forbidden-recipient"]`.<br>4. A fee other than the server's (option `fee`) gives `["fee", "server-fee"]`. |
 | `OFFER_EXPIRED` | structure | `["terms", "acceptBy"]` |
 | `ECONOMICS_UNDECIDED_OD4` | structure | `["clause", clauseId]` |
 | `INVALID_BOUNDS` | structure | `["clause", clauseId]`, `["license", L, "requirement", requirementId]` |
-| `RATE_PIN_MISMATCH` | structure | `["clause", clauseId, "rateSource"]`: one per clause, whichever units disagree |
-| `TOO_MANY_ALLOCATIONS` | structure | `[]` (the agreement as a whole); checked only when no split is in a cycle |
+| `RATE_PIN_MISMATCH` | structure | `["clause", clauseId, "rateSource"]`: one per clause, whichever units disagree; checked only when no id is duplicated |
+| `TOO_MANY_ALLOCATIONS` | structure | `[]` (the agreement as a whole); checked only when no id is duplicated and no split is in a cycle |
 | `RIGHTS_UNKNOWN` | rights | `["component", ref]` |
 | `LICENSE_NOT_IN_FORCE`, `AUTHORITY_BELOW_FLOOR` | rights | `["component", ref, L]` |
 | `RIGHTS_INCOMPATIBLE` | rights | `["component", ref, L, condition]` |
@@ -269,7 +271,7 @@ There is no partial result.
 | `MULTIPLE_RESIDUALS`, `UNALLOCATED_REMAINDER`, `TOO_MANY_LEGS` | money | `["unit", unitRef]` |
 | `UNRESOLVED_PARTY`, `FORBIDDEN_RECIPIENT` | money | `["unit", unitRef, "party", partyId]` |
 
-**Structure checks** (all run):
+**Structure checks** (all run, except as follows). When any `DUPLICATE_ID` is reported, the checks that resolve ids are skipped: `SPLIT_CYCLE`, `SPLIT_TOO_DEEP`, `TOO_MANY_ALLOCATIONS` and `RATE_PIN_MISMATCH`. Which object a duplicated id means is undefined, and their result would otherwise depend on the input's order.
 - `DUPLICATE_ID`, `DUPLICATE_LICENSE_SUBJECT` (two licenses for one subject).
 - `UNKNOWN_REFERENCE` for every id that points at nothing.
 - `DUPLICATE_SPLIT_MEMBER`, `SPLIT_CYCLE`, `SPLIT_TOO_DEEP`.
@@ -413,7 +415,7 @@ CompiledEconomicsV1 {
 
 `payouts` is exactly what the escrow's V-next compiler places in each unit's `UnitConfig.payouts`, with `g = gross`, `feeBps` and `feeRecipient` from `fee`, so `f` and `n` follow. Composition supplies each unit's `milestoneIndex`, `stepId`, tier, `reclaimAt` and composition fields, and fixes the unit order.
 
-**Orders in the result** (all byte order; paths element by element as in §3):
+**Orders in the result.** Strings compare in byte order and version numbers numerically; paths compare element by element as in §3:
 - `units` by `unitRef`, and legs as §4.6.
 - A leg's `partyIds`, `roles` and `subjects` sorted and without repeats.
 - A leg's `attribution` by `clauseId`, then path, then `partyId`.
@@ -422,6 +424,12 @@ CompiledEconomicsV1 {
 - `notEligible` and `rates` by `clauseId`.
 - `rights` by `(licenseId, version)`.
 - `totals.byParty` by `partyId`.
+
+**Membership:**
+- A leg's `attribution` lists its positive allocations. Zero allocations appear only in `zeroLegs`.
+- `rights` lists the licenses of the components some unit uses.
+- `totals.byParty` lists the parties paid a positive total.
+- A pin whose body was supplied and that applies to no unit is `verified: true`: there is no unit for it to disagree with.
 
 ## 6. Canonical form and hashes
 
@@ -523,4 +531,5 @@ On success it returns each unit's payouts in plan order, with `agreementHash` an
 - Cross-job metering and downstream revenue participation (refused, OD-4).
 - Currency conversion and tax.
 - Any rule an agent writes as code.
-- An exact rate for an `exponential-decay` segment below its starting rate (unverifiable, §2.4). New rule kinds are added to this document and to the compiler together, with golden vectors, under a new domain version.
+- An exact rate for an `exponential-decay` segment below its starting rate (unverifiable, §2.4).
+- A required scheduled royalty over units in different value bands (§2.4). New rule kinds are added to this document and to the compiler together, with golden vectors, under a new domain version.

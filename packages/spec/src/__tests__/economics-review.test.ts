@@ -597,3 +597,56 @@ describe("L8: the CompositionManifest adapter emits only valid ids and real memb
     expect(r.clauses[0]!.to).toEqual({ party: "alice" });
   });
 });
+
+// ── Clean-room round 2 (spec at bad29552) ────────────────────────────────────
+
+describe("clean-room round 2: ids, options and value bands", () => {
+  it("P28: a duplicated split id gives the same refusals in any order (id-resolving checks are skipped)", () => {
+    const loop = { splitId: "s", label: "Loop", members: [{ to: { split: "s" }, weight: 1, role: null, subject: null }] };
+    const plain = { splitId: "s", label: "Plain", members: [{ to: { party: "seller" }, weight: 1, role: null, subject: null }] };
+    const run = (splits: EconomicAgreement["splits"]) => refusals(compileEconomics(baseAgreement({ splits, clauses: [{ ...baseAgreement().clauses[0]!, to: { split: "s" } }] })));
+    expect(run([loop, plain])).toEqual([["DUPLICATE_ID", ["split", "s"]]]);
+    expect(run([plain, loop])).toEqual(run([loop, plain]));
+  });
+
+  it("P62: rateFacts fields may each be omitted, meaning null", () => {
+    const byClass = schedule([{ kind: "capture-class-indexed", startTime: 0, endTime: null, byClass: { CC3: 120 }, default: 60 }]);
+    expect(compileEconomics(printerOn(byClass, 120), { schedules: [byClass], rateFacts: { captureClass: "CC3" } }).ok).toBe(true);
+    expect(compileEconomics(printerOn(byClass, 60), { schedules: [byClass], rateFacts: {} }).ok).toBe(true);
+  });
+
+  it("the server's fee option obeys the fee rules of §2 itself", () => {
+    const bad = { fee: { feeBps: 0, feeRecipient: "0xfee0000000000000000000000000000000000fee" } };
+    expect(refusals(compileEconomics(exampleSparePrinter(), { ...WITH_SCHEDULES, ...bad }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+  });
+
+  it("P73/P74: a zero-span linear decay or a segment ending before it starts is a malformed schedule option", () => {
+    for (const segments of [
+      [{ kind: "linear-decay" as const, startTime: 10, endTime: 10, startBps: 100, endBps: 50 }],
+      [{ kind: "constant" as const, startTime: 10, endTime: 5, bps: 40 }],
+    ]) {
+      const body = { version: 1, segments, publishedAt: "2026-06-01T00:00:00Z" };
+      const bad: RateSchedule = { ...body, scheduleHash: computeScheduleHash(body) };
+      expect(refusals(compileEconomics(exampleSparePrinter(), { schedules: [bad] }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+    }
+  });
+
+  it("v1 limitation, specified: a required scheduled royalty whose units fall in different value bands is refused, never under-paid", () => {
+    const byValue = schedule([{ kind: "piecewise-value", startTime: 0, endTime: null, thresholdCents: 10000, bpsLow: 50, bpsHigh: 400 }]);
+    const ag = printerOn(byValue, 400, "25000000000");
+    ag.units.push({ unitRef: "small", label: "A $25 job", gross: "25000000", components: [{ ref: "kit:octoprint-fdm@2", uses: "1" }], measures: [] });
+    ag.clauses.find((c) => c.clauseId === "printer-owner")!.appliesTo = { allUnits: true };
+    // One clause over both units cannot match both bands; per-band clauses have no requirement key.
+    expect(codes(compileEconomics(ag, { schedules: [byValue] }))).toEqual(["RATE_PIN_MISMATCH"]);
+    const perBand = clone(ag);
+    const royalty = perBand.clauses.find((c) => c.clauseId === "kit-royalty")!;
+    perBand.clauses = perBand.clauses.filter((c) => c.clauseId !== "kit-royalty");
+    perBand.clauses.push({ ...clone(royalty), clauseId: "kit-royalty-big", appliesTo: { units: ["print"] } });
+    perBand.clauses.push({ ...clone(royalty), clauseId: "kit-royalty-small", appliesTo: { units: ["small"] }, rule: { ...(royalty.rule as Extract<Clause["rule"], { kind: "percent" }>), bps: 50 } });
+    expect(codes(compileEconomics(perBand, { schedules: [byValue] }))).toEqual([
+      "LICENSE_PAYMENT_MISSING",
+      "LICENSE_PAYMENT_UNMATCHED",
+      "LICENSE_PAYMENT_UNMATCHED",
+    ]);
+  });
+});

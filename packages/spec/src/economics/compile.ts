@@ -60,7 +60,7 @@ export interface CompileOptions {
   /** The protocol fee the server charges. When given, the agreement's fee must be exactly this. */
   fee?: { feeBps: number; feeRecipient: string | null };
   /** Facts some rate schedules depend on, which only the server knows (§2.4, "Pinned rates"). */
-  rateFacts?: { jobsPerDay: number | null; captureClass: CaptureClassId | null };
+  rateFacts?: { jobsPerDay?: number | null; captureClass?: CaptureClassId | null };
 }
 
 export const CompileOptionsSchema = z
@@ -68,11 +68,15 @@ export const CompileOptionsSchema = z
     forbiddenRecipients: z.array(AddressSchema).max(64).optional(),
     authorityFloor: AuthoritySchema.optional(),
     schedules: z.array(RateScheduleSchema).max(64).optional(),
-    fee: z.object({ feeBps: z.number().int().min(0).max(MAX_FEE_BPS), feeRecipient: AddressSchema.nullable() }).strict().optional(),
+    fee: z
+      .object({ feeBps: z.number().int().min(0).max(MAX_FEE_BPS), feeRecipient: AddressSchema.nullable() })
+      .strict()
+      .refine((f) => (f.feeBps > 0) === (f.feeRecipient !== null), "a nonzero fee has a recipient, and a zero fee has none")
+      .optional(),
     rateFacts: z
       .object({
-        jobsPerDay: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable(),
-        captureClass: z.enum(CAPTURE_CLASS_IDS).nullable(),
+        jobsPerDay: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+        captureClass: z.enum(CAPTURE_CLASS_IDS).nullable().optional(),
       })
       .strict()
       .optional(),
@@ -385,8 +389,12 @@ function checkStructure(
   selected: ReadonlyMap<string, Unit[]>,
 ): { refusals: Refusal[]; pins: Map<string, PinStatus> } {
   const out: Refusal[] = [];
+  let anyDuplicate = false;
   const dup = (kind: string, values: readonly string[]) => {
-    for (const d of duplicates(values)) out.push(refusal("DUPLICATE_ID", `duplicate ${kind} id "${d}"`, [kind, d]));
+    for (const d of duplicates(values)) {
+      anyDuplicate = true;
+      out.push(refusal("DUPLICATE_ID", `duplicate ${kind} id "${d}"`, [kind, d]));
+    }
   };
   dup("party", n.parties.map((p) => p.partyId));
   dup("unit", n.units.map((u) => u.unitRef));
@@ -395,9 +403,11 @@ function checkStructure(
   dup("license", n.licenses.map(licenseKey));
   for (const u of n.units) {
     for (const d of duplicates(u.components.map((c) => c.ref))) {
+      anyDuplicate = true;
       out.push(refusal("DUPLICATE_ID", `unit "${u.unitRef}" lists component "${d}" twice`, ["unit", u.unitRef, "component", d]));
     }
     for (const d of duplicates(u.measures.map((m) => m.key))) {
+      anyDuplicate = true;
       out.push(refusal("DUPLICATE_ID", `unit "${u.unitRef}" lists measure "${d}" twice`, ["unit", u.unitRef, "measure", d]));
     }
   }
@@ -508,14 +518,19 @@ function checkStructure(
     }
     return false;
   };
+  // Which object a duplicated id means is undefined, so the checks that resolve ids through the split
+  // graph or the clause selection (cycles, depth, allocation count, pinned rates) run only when every
+  // id is unique. Otherwise their result would depend on the order of the input (§3).
   let cyclic = false;
-  for (const s of n.splits) {
-    if (reaches(s.splitId, s.splitId)) {
-      cyclic = true;
-      out.push(refusal("SPLIT_CYCLE", `split "${s.splitId}" pays into itself`, ["split", s.splitId]));
+  if (!anyDuplicate) {
+    for (const s of n.splits) {
+      if (reaches(s.splitId, s.splitId)) {
+        cyclic = true;
+        out.push(refusal("SPLIT_CYCLE", `split "${s.splitId}" pays into itself`, ["split", s.splitId]));
+      }
     }
   }
-  if (!cyclic) {
+  if (!anyDuplicate && !cyclic) {
     const depth = new Map<string, number>();
     const depthOf = (id: string): number => {
       const known = depth.get(id);
@@ -561,6 +576,7 @@ function checkStructure(
     out.push(refusal("OFFER_EXPIRED", `the offer expired at ${n.terms.acceptBy}, before asOf ${n.asOf}`, ["terms", "acceptBy"]));
   }
 
+  if (anyDuplicate) return { refusals: out, pins: new Map() };
   const pins = checkPins(n, o, selected);
   out.push(...pins.refusals);
   return { refusals: out, pins: pins.status };

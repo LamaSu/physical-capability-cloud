@@ -92,7 +92,7 @@ export interface ServerEconomicsFacts {
   /** Sealed rate-schedule bodies (the `rate_schedules` table), so pinned royalty rates are verified. */
   schedules: readonly RateSchedule[];
   /** Facts some rate schedules depend on (adoption, capture class). */
-  rateFacts?: { jobsPerDay: number | null; captureClass: CaptureClassId | null };
+  rateFacts?: { jobsPerDay?: number | null; captureClass?: CaptureClassId | null };
   /** The escrow clone, the settlement token and the factory. */
   forbiddenRecipients: readonly string[];
   authorityFloor?: Authority;
