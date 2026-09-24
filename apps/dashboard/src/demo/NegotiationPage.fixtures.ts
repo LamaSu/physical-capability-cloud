@@ -4,15 +4,18 @@
  *
  * Rendered only in demo mode (lib/demo-mode.ts), under a DemoBanner. No
  * gateway route serves any of this:
- *   - proposals: nothing lists proposals sent to an operator's kernels, and
- *     nothing accepts, counters or rejects one. packages/gateway/src/routes/
- *     negotiation.ts serves buyer-side sessions by ID only, and the session
- *     state machine (quoted -> reviewing -> committed) has no counter-offer
- *     step;
+ *   - proposals: nothing lists priced proposals sent to an operator's
+ *     kernels, and nothing accepts, counters or rejects one.
+ *     packages/gateway/src/routes/negotiation.ts serves buyer-side sessions
+ *     by ID only, and the session state machine (quoted -> reviewing ->
+ *     committed) has no counter-offer step. /api/operator/approvals
+ *     (routes/operator.ts) holds approval requests with no price, and
+ *     /api/job-offers/open (routes/job-offers.ts) is a public feed of open
+ *     offers that operators claim rather than negotiate;
  *   - price floors: OperatorPolicy (packages/spec/src/types/operator-policy.ts)
  *     has no minimum price, discount cap, surge multiplier or auto-reject
- *     setting; /api/operator/policy/:kernelId stores discount and surcharge
- *     rules only;
+ *     setting; the pricing settings /api/operator/policy/:kernelId stores
+ *     are discount and surcharge rules;
  *   - history: negotiation sessions are stored with their transitions, but
  *     every gateway read of them is by session ID or job ID; nothing lists
  *     them;

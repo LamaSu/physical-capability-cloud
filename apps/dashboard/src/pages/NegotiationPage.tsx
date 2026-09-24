@@ -20,13 +20,16 @@ import {
  * Negotiations.
  *
  * Not live. No gateway route serves any section of this page:
- *   - Proposals: nothing lists proposals sent to an operator's kernels, or
- *     accepts, counters or rejects one. routes/negotiation.ts serves
- *     buyer-side sessions by ID, and its state machine has no counter-offer
- *     step.
+ *   - Proposals: nothing lists priced proposals sent to an operator's
+ *     kernels, or accepts, counters or rejects one. routes/negotiation.ts
+ *     serves buyer-side sessions by ID, and its state machine has no
+ *     counter-offer step. Two routes nearby serve something else:
+ *     /api/operator/approvals holds approval requests with no price (the
+ *     Operator page shows them), and /api/job-offers/open is a public feed
+ *     of open offers that operators claim rather than negotiate.
  *   - Revenue Splits: nothing stores a default split for new contracts.
- *   - Pricing Floors: OperatorPolicy has no floor settings; the policy route
- *     stores discount and surcharge rules only.
+ *   - Pricing Floors: OperatorPolicy has no floor settings; its pricing
+ *     settings are discount and surcharge rules.
  *   - History: sessions are stored with their timelines, but every read of
  *     them is by session ID or job ID; nothing lists them.
  * The prototype showed invented proposals, floors and timelines as the
@@ -105,9 +108,9 @@ const NOT_LIVE: Record<Tab, { what: string; detail: string }> = {
   proposals: {
     what: "The proposal inbox",
     detail:
-      "No gateway route lists proposals sent to your kernels, or accepts, counters or rejects one. " +
-      "Negotiation sessions go from quote to commit with no counter-offer step. " +
-      "Nothing is shown here and no action is offered.",
+      "No gateway route lists priced proposals sent to your kernels, or accepts, counters or rejects one: " +
+      "negotiation sessions go from quote to commit with no counter-offer step. " +
+      "Approval requests, which carry no price, are listed by GET /api/operator/approvals.",
   },
   splits: {
     what: "Your default revenue split",
@@ -204,6 +207,8 @@ const EVENT_ICONS: Record<string, string> = {
 
 const DISABLED_ACTION =
   "px-3 py-1 rounded text-[10px] bg-white/[0.02] border border-white/[0.06] text-white/25 cursor-not-allowed";
+
+const NO_SPLIT_ROUTE = "No gateway route stores a default revenue split";
 
 function DemoNote({ children }: { children: React.ReactNode }) {
   return <p className="text-[11px] text-violet-200/60">{children}</p>;
@@ -337,7 +342,7 @@ function NegotiationDemo() {
         <div className="space-y-3">
           <DemoNote>
             Demo: Accept and Reject are disabled, and Send Counter sends nothing. No gateway route
-            accepts, counters or rejects a proposal.
+            accepts, counters or rejects a priced proposal.
           </DemoNote>
           {proposals.length === 0 && (
             <GlassPanel padding="lg">
@@ -433,13 +438,13 @@ function NegotiationDemo() {
           <GlassPanel padding="md">
             <div className="text-[10px] text-white/30 uppercase tracking-wider mb-3">Quick Apply</div>
             <div className="flex gap-2 flex-wrap">
-              <button type="button" disabled className={DISABLED_ACTION}>
+              <button type="button" disabled title={NO_SPLIT_ROUTE} className={DISABLED_ACTION}>
                 Single-Step (10/70/10/10)
               </button>
-              <button type="button" disabled className={DISABLED_ACTION}>
+              <button type="button" disabled title={NO_SPLIT_ROUTE} className={DISABLED_ACTION}>
                 Multi-Step (5/75/10/10)
               </button>
-              <button type="button" disabled className={DISABLED_ACTION}>
+              <button type="button" disabled title={NO_SPLIT_ROUTE} className={DISABLED_ACTION}>
                 Community (20/60/5/5/10)
               </button>
             </div>
@@ -453,7 +458,7 @@ function NegotiationDemo() {
           <DemoNote>Demo: floors can't be changed here. No gateway route stores price floors.</DemoNote>
           <GlassPanel padding="md">
             <div className="text-[10px] text-white/30 mb-3 leading-relaxed">
-              Set minimum prices per capability. Jobs below the floor are auto-rejected (when enabled) or flagged for review.
+              Minimum prices per capability. Jobs below a floor would be auto-rejected (when enabled) or flagged for review.
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
