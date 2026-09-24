@@ -18,3 +18,11 @@ export type { CMSSerialized, TopKEntry } from "./sketches/count-min-sketch.js";
 
 export { DemandAggregator } from "./aggregator.js";
 export type { AggregatorState, IngestSummary } from "./aggregator.js";
+
+export {
+  UnmetDemandLens,
+  resolveCapabilityKey,
+  VERIFIED_ACTOR_TYPE,
+  SERVER_CAPTURE_EVENT_CLASSES,
+} from "./unmet-lens.js";
+export type { UnmetLensOptions, UnmetLensDiagnostics, UnmetLensResult } from "./unmet-lens.js";
