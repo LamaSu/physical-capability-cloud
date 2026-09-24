@@ -226,7 +226,18 @@ NESTED_RESULT_KEYS = ("response", "data", "body", "payload")
 
 # Keys inside a device body that POSITIVELY assert a failure.
 NESTED_ERROR_KEYS = ("error", "errors", "fault", "faultstring")
+# A success key is only a success when it holds the boolean True.  Any other
+# value present under it (False, "false", 0, None, "yes") is read as a failure:
+# an unreadable success claim is not evidence that nothing failed.
 NESTED_FALSE_SUCCESS_KEYS = ("success", "ok", "succeeded")
+# Status-like keys whose STRING value may name a failure at any depth.
+STATUS_FIELD_KEYS = ("status", "state")
+
+# The device-body scan walks nested dicts and lists (a failure is as real at
+# data.result[0].error as at the top level).  A body deeper or larger than
+# these bounds cannot be verified, and the scan says so as a failure.
+DEVICE_BODY_MAX_DEPTH = 8
+DEVICE_BODY_MAX_NODES = 5000
 
 # XML/SOAP fault ELEMENT markers, matched case-insensitively against a non-JSON
 # (string) body.  Anchored to structured fault vocabulary rather than free text
@@ -255,6 +266,39 @@ HTTP_ACCEPTED = 202
 
 OCTOPRINT_SUCCESS_STATUSES = (200, 201, 204)
 
+# Generic HTTP completion contract (r31 astra verdict item 1, bus #2476).  A 2xx
+# is only the TRANSPORT's answer; "2xx and no recognized error" is not the
+# device saying the work finished.  _execute_generic_http therefore claims
+# `executed` only on the device's POSITIVE completion statement:
+#   * a per-device contract, when configured -- ``device["completionField"]``
+#     (a dot path into the JSON body, e.g. "result.phase") and
+#     ``device["completionValues"]`` (the values meaning finished; default
+#     [True]).  With a contract, the default vocabulary below is not used; or
+#   * by default, a completion word in ``status``/``state``, or a completion
+#     boolean set to True, at the body's top level or in one of
+#     GENERIC_OUTCOME_ENVELOPES.
+# A recognised queueing/running statement is acceptance (``submitted``).
+# Anything else -- {}, null, {"ok": true}, an unknown status word, a malformed
+# value, or completion and acceptance stated at once -- carries no flag at
+# all and classifies as unclassifiable, which fails the job closed.
+# "ok" and "success" are deliberately NOT completion words: many APIs use them
+# for "your REQUEST succeeded", which says nothing about the work.
+GENERIC_COMPLETION_STATUS_VALUES = frozenset({
+    "completed", "complete", "succeeded", "finished", "done",
+})
+GENERIC_ACCEPTANCE_STATUS_VALUES = frozenset({
+    "accepted", "queued", "pending", "submitted", "scheduled", "created",
+    "started", "running", "in_progress", "in-progress", "processing", "busy",
+    "printing", "waiting",
+})
+GENERIC_COMPLETION_BOOL_KEYS = ("completed", "complete", "done", "finished")
+GENERIC_ACCEPTANCE_BOOL_KEYS = ("submitted", "accepted", "queued")
+GENERIC_OUTCOME_ENVELOPES = ("result", "data", "response", "body", "payload")
+
+OUTCOME_COMPLETED = "completed"
+OUTCOME_ACCEPTED = "accepted"
+OUTCOME_UNKNOWN = "unknown"
+
 # Opentrons run lifecycle.  `POST /runs/<id>/actions {play}` only STARTS the
 # protocol; the run's own status is the only report that it finished, so a
 # protocol that starts and then fails at step 40 is invisible without polling.
@@ -272,6 +316,8 @@ OPENTRONS_TERMINAL_FAILURE = frozenset({"failed", "stopped"})
 # run-completion watcher is the fix; releasing on "the run was accepted" is not.
 OPENTRONS_RUN_POLL_TIMEOUT_S = 120.0
 OPENTRONS_RUN_POLL_INTERVAL_S = 2.0
+# Upper bound for a single poll request; the remaining budget can lower it.
+POLL_REQUEST_TIMEOUT_MAX_S = 30.0
 
 UNCLASSIFIABLE_REASON = "unclassifiable_result"
 
@@ -331,31 +377,70 @@ def _normalized_status(container: Any) -> Optional[str]:
 def _extract_device_error(body: Any) -> Optional[str]:
     """The device's own failure message from a response body, or None.
 
-    Reads POSITIVE failure signals only.  An unrecognised body yields None, so
-    this never invents a failure -- and, being the only reader of a device
-    body, it is the single place a new failure envelope has to be taught.
+    Reads failure signals at ANY depth: a failure nested in ``data``,
+    ``result``, a list item or a deeper envelope is still the device saying it
+    failed.  A body it cannot finish reading (too deep, too large) counts as a
+    failure.  Otherwise an unrecognised body yields None -- this never turns an
+    unknown shape into a failure, and it never turns anything into a success.
+    Being the only reader of a device body, it is the single place a new
+    failure envelope has to be taught.
     """
-    if isinstance(body, str):
-        lowered = body.lower()
+    budget = [DEVICE_BODY_MAX_NODES]
+    return _scan_device_body(body, "", 0, budget)
+
+
+def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Optional[str]:
+    """Depth-first failure scan behind :func:`_extract_device_error`."""
+    budget[0] -= 1
+    if budget[0] < 0:
+        return "device body too large to verify"
+    where = f" (at {path})" if path else ""
+
+    if isinstance(node, str):
+        # Only a whole body (or a whole nested value) is an XML/SOAP document.
+        lowered = node.lower()
         for marker in FAULT_BODY_MARKERS:
             if marker in lowered:
-                return f"device returned a fault body (matched {marker!r})"
+                return f"device returned a fault body (matched {marker!r}){where}"
         return None
 
-    if not isinstance(body, dict):
+    if isinstance(node, (list, tuple)):
+        if depth >= DEVICE_BODY_MAX_DEPTH:
+            return "device body too deeply nested to verify"
+        for index, item in enumerate(node):
+            message = _scan_device_body(item, f"{path}[{index}]", depth + 1, budget)
+            if message:
+                return message
         return None
+
+    if not isinstance(node, dict):
+        return None
+    if depth >= DEVICE_BODY_MAX_DEPTH:
+        return "device body too deeply nested to verify"
 
     for key in NESTED_ERROR_KEYS:
-        value = body.get(key)
+        value = node.get(key)
         if value:
-            return value if isinstance(value, str) else f"{key}={_short(value)}"
+            text = value if isinstance(value, str) else f"{key}={_short(value)}"
+            return f"{text}{where}"
 
     for key in NESTED_FALSE_SUCCESS_KEYS:
-        if body.get(key) is False:
-            return f"device reported {key}=False"
+        if key in node and node[key] is not True:
+            return f"device reported {key}={node[key]!r}{where}"
 
-    if _normalized_status(body) in FAILURE_STATUS_VALUES:
-        return f"device reported status={body.get('status')!r}"
+    for key in STATUS_FIELD_KEYS:
+        value = node.get(key)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, str) and item.strip().lower() in FAILURE_STATUS_VALUES:
+                return f"device reported {key}={value!r}{where}"
+
+    for key, value in node.items():
+        if isinstance(value, (dict, list, tuple)) or (isinstance(value, str) and "<" in value):
+            child = f"{path}.{key}" if path else str(key)
+            message = _scan_device_body(value, child, depth + 1, budget)
+            if message:
+                return message
 
     return None
 
@@ -377,6 +462,87 @@ def _nested_device_error(result: Dict) -> Optional[str]:
     return None
 
 
+def _contract_outcome(data: Any, field: Any, values: Any) -> Tuple[str, str]:
+    """Outcome under a device's own completion contract (see the constants)."""
+    if not isinstance(field, str) or not field.strip():
+        return OUTCOME_UNKNOWN, "completionField is not a usable path"
+    node: Any = data
+    for part in field.strip().split("."):
+        if not isinstance(node, dict) or part not in node:
+            return OUTCOME_UNKNOWN, f"completionField {field!r} is absent from the body"
+        node = node[part]
+    wanted = values if isinstance(values, list) and values else [True]
+    for want in wanted:
+        if isinstance(want, bool):
+            matched = node is want
+        elif isinstance(want, int):
+            matched = isinstance(node, int) and not isinstance(node, bool) and node == want
+        elif isinstance(want, str):
+            matched = isinstance(node, str) and node.strip().lower() == want.strip().lower()
+        else:
+            matched = False
+        if matched:
+            return OUTCOME_COMPLETED, f"completionField {field!r} = {_short(node)}"
+    if isinstance(node, str) and node.strip().lower() in GENERIC_ACCEPTANCE_STATUS_VALUES:
+        return OUTCOME_ACCEPTED, f"completionField {field!r} = {_short(node)}"
+    return OUTCOME_UNKNOWN, f"completionField {field!r} = {_short(node)} is not a completion value"
+
+
+def _generic_http_outcome(data: Any, device: Dict) -> Tuple[str, str]:
+    """What a 2xx device body positively states: completed, accepted or unknown.
+
+    Called only after the failure scan found nothing, and never for a 202.
+    Returns ``(outcome, reason)``.  Only an explicit, well-formed statement
+    counts; everything else is unknown.
+    """
+    if "completionField" in device:
+        return _contract_outcome(data, device.get("completionField"), device.get("completionValues"))
+
+    if not isinstance(data, dict):
+        return OUTCOME_UNKNOWN, "the device body states no outcome"
+    containers = [data] + [
+        data[key] for key in GENERIC_OUTCOME_ENVELOPES if isinstance(data.get(key), dict)
+    ]
+
+    completed = accepted = unreadable = False
+    for container in containers:
+        for key in STATUS_FIELD_KEYS:
+            if key not in container:
+                continue
+            value = container[key]
+            if isinstance(value, dict):
+                continue  # an object under "state" is a container, not a statement
+            word = value.strip().lower() if isinstance(value, str) else None
+            if word in GENERIC_COMPLETION_STATUS_VALUES:
+                completed = True
+            elif word in GENERIC_ACCEPTANCE_STATUS_VALUES:
+                accepted = True
+            else:
+                unreadable = True  # unknown word, number, list, null
+        for key in GENERIC_COMPLETION_BOOL_KEYS:
+            if key in container:
+                if container[key] is True:
+                    completed = True
+                else:
+                    unreadable = True
+        for key in GENERIC_ACCEPTANCE_BOOL_KEYS:
+            if key in container:
+                if container[key] is True:
+                    accepted = True
+                else:
+                    unreadable = True
+
+    if unreadable:
+        return OUTCOME_UNKNOWN, "the device body carries an outcome field this node cannot read"
+    if completed and accepted:
+        return OUTCOME_UNKNOWN, "the device body states both completion and acceptance"
+    if completed:
+        return OUTCOME_COMPLETED, "the device body states completion"
+    if accepted:
+        return OUTCOME_ACCEPTED, "the device body states acceptance"
+    return OUTCOME_UNKNOWN, "the device body states no outcome"
+
+
 def _describe_transport_status(status: int, data: Any) -> str:
     """Failure text for an HTTP exchange that did not land in the 2xx band."""
     if status <= TRANSPORT_FAILURE_MAX_STATUS:
@@ -386,10 +552,15 @@ def _describe_transport_status(status: int, data: Any) -> str:
 
 
 def _as_float(value: Any, default: float) -> float:
-    """Read a numeric device-config override; fall back on anything unusable."""
+    """Read a numeric device-config override; fall back on anything unusable.
+
+    Infinity and NaN are unusable (r31 astra verdict item 4): an infinite poll
+    budget never ends, and NaN compares false against every deadline.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    return float(value)
+    number = float(value)
+    return number if math.isfinite(number) else default
 
 
 def _readable_status_code(result: Dict) -> Optional[int]:
@@ -457,9 +628,11 @@ def classify_execution_result(result: Any) -> str:
     5.  ``status`` in :data:`FAILURE_STATUS_VALUES`       -> failure
     6.  ANY flag in :data:`ALL_FLAG_KEYS` present and not
         ``True``                                          -> failure
+    4c. ``status_code`` present but not a genuine HTTP
+        status integer (checked after rule 6)             -> unclassifiable
     7.  ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
-    8.  ``status`` present but unrecognised, or present
-        and not a string                                  -> unclassifiable
+    8.  ``status`` present but unrecognised, not a string,
+        or null                                           -> unclassifiable
     9.  a :data:`COMPLETION_FLAG_KEYS` flag is present
         (and every flag passed rule 6)                     -> success
     10. an :data:`ACCEPTANCE_FLAG_KEYS` flag is ``True``,
@@ -534,6 +707,13 @@ def classify_execution_result(result: Any) -> str:
     if any(result[key] is not True for key in ALL_FLAG_KEYS if key in result):
         return RESULT_FAILURE
 
+    # A status_code that is PRESENT but is not a genuine HTTP status number
+    # ("202", "0", "500", False, None) cannot be read, so rules 4 and 10 could
+    # not have seen it.  An unreadable outcome field is not evidence that
+    # nothing failed: it never reaches a success (rule 4c).
+    if "status_code" in result and _readable_status_code(result) is None:
+        return RESULT_UNCLASSIFIABLE
+
     # A 202 is the device saying the work has NOT finished, so it turns any
     # success claim below (a success status, a completion flag) into accepted.
     accepted_by_transport = result.get("status_code") == HTTP_ACCEPTED
@@ -541,9 +721,10 @@ def classify_execution_result(result: Any) -> str:
     if status in SUCCESS_STATUS_VALUES:
         return RESULT_ACCEPTED if accepted_by_transport else RESULT_SUCCESS
 
-    # A status that is present but not a string ({"status": ["failed"]}) is as
-    # unreadable as an unknown string, and may be a failure in another shape.
-    if status is not None or result.get("status") is not None:
+    # A status that is present but not a readable success -- an unknown string,
+    # a non-string ({"status": ["failed"]}) or an explicit null -- may be a
+    # failure in another shape, so it is never read as "no status" (rule 8).
+    if "status" in result:
         return RESULT_UNCLASSIFIABLE
 
     if any(key in result for key in COMPLETION_FLAG_KEYS):
@@ -592,11 +773,10 @@ def build_evidence_bundle(
     job_id: str,
     device: Dict,
     result: Dict,
-    events: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """Construct an evidence bundle from execution result.
 
-    The synthesized event trail branches on :func:`classify_execution_result`
+    The event trail ALWAYS comes from :func:`classify_execution_result`
     (evidence contract sec-10):
 
     * success        -> ``execution_completed``
@@ -607,8 +787,10 @@ def build_evidence_bundle(
     * unclassifiable -> no outcome event at all; the raw result is kept in
       ``bundle["result"]``
 
-    Passing ``events`` explicitly bypasses the branch entirely; that caller
-    escape hatch is unchanged.
+    There is deliberately no caller-supplied ``events`` override any more (r31
+    astra verdict item 6): it let any caller put ``execution_completed`` next
+    to a failed result, emit both terminal events, or emit types outside the
+    closed EVIDENCE_EVENT_TYPES enum.
     """
     now = datetime.now(tz=timezone.utc).isoformat()
     return {
@@ -617,7 +799,7 @@ def build_evidence_bundle(
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": events or _synthesize_events(device, result, now),
+        "events": _synthesize_events(device, result, now),
     }
 
 
@@ -1779,14 +1961,19 @@ class JobExecutor:
         }
 
         run_errors = _opentrons_run_errors(run_body)
+        # r31 astra verdict item 2: a "succeeded" data.status is not enough when
+        # the same polled body also carries a failure marker anywhere
+        # ({"error": "run failed", "data": {"status": "succeeded"}}).  A
+        # conflict is a failure, never a success.
+        body_error = _extract_device_error(run_body)
 
-        if run_status in OPENTRONS_TERMINAL_FAILURE or run_errors:
-            reason = (
-                f"run reported {len(run_errors)} protocol error(s): "
-                f"{_short(run_errors)}"
-                if run_errors
-                else f"run finished with status {run_status!r}"
-            )
+        if run_status in OPENTRONS_TERMINAL_FAILURE or run_errors or body_error:
+            if run_errors:
+                reason = f"run reported {len(run_errors)} protocol error(s): {_short(run_errors)}"
+            elif run_status in OPENTRONS_TERMINAL_FAILURE:
+                reason = f"run finished with status {run_status!r}"
+            else:
+                reason = f"run status {run_status!r} conflicts with a failure in the run body: {body_error}"
             return {
                 **base_result,
                 "status": "failed",
@@ -1800,6 +1987,9 @@ class JobExecutor:
                 **base_result,
                 "status": "completed",
                 "runStatus": run_status,
+                # Keep the polled evidence: the classifier re-reads it (rule 3b)
+                # and the bundle carries what the success was decided on.
+                "response": run_body,
             }
 
         # Started, outcome unknown.  An explicit non-terminal status keeps this
@@ -1839,8 +2029,14 @@ class JobExecutor:
         deadline = time.monotonic() + timeout_s
         last_body: Any = None
         while True:
+            # Each request gets at most the remaining budget (r31 item 4): a
+            # device that stops answering cannot hold the poll past its deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, last_body
             status, body = http(
-                "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False
+                "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False,
+                timeout=max(1.0, min(POLL_REQUEST_TIMEOUT_MAX_S, remaining)),
             )
             last_body = body
             if status in (200, 201):
@@ -1931,8 +2127,16 @@ class JobExecutor:
         * 202 Accepted is ACCEPTANCE, not completion (:data:`HTTP_ACCEPTED`):
           the device took the request and has not finished it.  A 202 reports
           the acceptance flag ``submitted`` instead of ``executed``, derived
-          the same way.  Every other 2xx is a synchronous API's own answer and
-          keeps ``executed``.
+          the same way.
+        * any other clean 2xx claims ``executed`` ONLY when the body positively
+          states completion (the device's contract, or the default completion
+          vocabulary -- see GENERIC_COMPLETION_STATUS_VALUES).  A recognised
+          queueing/running statement reports ``submitted``.  Anything else
+          (``{}``, ``null``, ``{"ok": true}``, an unknown status word, a
+          malformed value) carries NO flag, so it classifies as unclassifiable
+          and the job fails closed: "2xx and no recognised error" is the
+          transport answering, not the device saying the work finished (r31
+          astra verdict item 1).
         """
         from .http_util import http
 
@@ -1953,14 +2157,18 @@ class JobExecutor:
         # A 202 only acknowledges the request, so it may never claim `executed`.
         flag = "submitted" if status == HTTP_ACCEPTED else "executed"
 
-        result: Dict[str, Any] = {
-            flag: transport_ok and device_error is None,
-            "status_code": status,
-            "response": data,
-            "device": base_url,
-        }
+        result: Dict[str, Any] = {"status_code": status, "response": data, "device": base_url}
         if device_error is not None:
-            result["error"] = device_error
-        elif not transport_ok:
-            result["error"] = _describe_transport_status(status, data)
-        return result
+            return {flag: False, **result, "error": device_error}
+        if not transport_ok:
+            return {flag: False, **result, "error": _describe_transport_status(status, data)}
+        if status == HTTP_ACCEPTED:
+            return {"submitted": True, **result}
+
+        outcome, reason = _generic_http_outcome(data, device)
+        if outcome == OUTCOME_COMPLETED:
+            return {"executed": True, **result}
+        if outcome == OUTCOME_ACCEPTED:
+            return {"submitted": True, **result}
+        # No flag: the classifier reads this as unclassifiable (fail closed).
+        return {**result, "outcome": "unrecognized", "note": reason}
