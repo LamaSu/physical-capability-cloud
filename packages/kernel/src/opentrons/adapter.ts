@@ -6,9 +6,21 @@
  * start/pause/stop runs, and poll status.
  *
  * Mock mode provides full simulation without hardware.
+ *
+ * Evidence uses the closed vocabulary (EVIDENCE_EVENT_TYPES):
+ *   protocol upload        -> method_loaded       {opentronsProtocolId, name, protocolHash}
+ *   first play of a run    -> execution_started   {opentronsRunId}
+ *   pause / resume         -> execution_progress  {opentronsRunId, action}
+ *   stop                   -> execution_failed    {opentronsRunId, reason}
+ *   the robot reports the run succeeded / failed / stopped (read when the
+ *   runner polls progress) -> execution_completed / execution_failed, once per run
+ * Robot-local ids take their own names (opentronsRunId, opentronsProtocolId):
+ * payload.jobId and the unit fields are reserved for the PCC binding, which the
+ * kernel's EvidenceEmitter stamps on every event.
  */
 
-import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import { createHash } from "node:crypto";
+import type { EvidenceEvent, EvidenceEventType, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "../adapters/types.js";
 import type {
   OpentronAdapterConfig,
@@ -31,6 +43,8 @@ export class OpentronsMachineAdapter implements MachineAdapter {
   private config: OpentronAdapterConfig;
   private evidenceCallbacks: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private currentRunId: string | null = null;
+  /** Runs that have had their first play (so a later play is a resume). */
+  private startedRuns = new Set<string>();
   private mockProgress = 0;
   private mockInterval: ReturnType<typeof setInterval> | null = null;
   private mockStatus: MachineStatus = "idle";
@@ -119,6 +133,7 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       if (!res.ok) return 0;
       const data = await res.json() as { data: OTRun };
       const run = data.data;
+      this.observeRun(this.currentRunId, run);
 
       if (run.status === "succeeded") return 100;
       if (run.status === "failed" || run.status === "stopped") return 0;
@@ -325,7 +340,11 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       }
 
       const data = await res.json() as { data: { id: string } };
-      this.emitEvidence("protocol_uploaded", { protocolId: data.data.id, name });
+      this.emitEvidence("method_loaded", {
+        opentronsProtocolId: data.data.id,
+        name,
+        protocolHash: protocolHashOf(source),
+      });
       return { success: true, data: { protocolId: data.data.id } };
     } catch (err) {
       return { success: false, message: `Upload error: ${err}` };
@@ -393,7 +412,7 @@ export class OpentronsMachineAdapter implements MachineAdapter {
         return { success: false, message: `Action ${action} failed: ${err}` };
       }
 
-      this.emitEvidence("run_action", { action, runId: this.currentRunId });
+      this.emitActionEvidence(this.currentRunId, action);
       return { success: true };
     } catch (err) {
       return { success: false, message: `Action error: ${err}` };
@@ -428,7 +447,12 @@ export class OpentronsMachineAdapter implements MachineAdapter {
   private mockExecute(command: MachineCommand): MachineCommandResult {
     switch (command.type) {
       case "load_gcode": {
-        this.emitEvidence("protocol_uploaded", { mock: true });
+        const source = command.payload?.protocolSource;
+        this.emitEvidence("method_loaded", {
+          opentronsProtocolId: "mock-proto-001",
+          ...(typeof source === "string" ? { protocolHash: protocolHashOf(source) } : {}),
+          mock: true,
+        });
         return { success: true, data: { protocolId: "mock-proto-001" } };
       }
 
@@ -440,8 +464,8 @@ export class OpentronsMachineAdapter implements MachineAdapter {
         // Simulate progress over ~10 seconds
         this.mockInterval = setInterval(() => {
           this.mockProgress += 10;
-          this.emitEvidence("run_progress", {
-            runId: this.currentRunId,
+          this.emitEvidence("execution_progress", {
+            opentronsRunId: this.currentRunId,
             progress: this.mockProgress,
             mock: true,
           });
@@ -450,11 +474,11 @@ export class OpentronsMachineAdapter implements MachineAdapter {
             if (this.mockInterval) clearInterval(this.mockInterval);
             this.mockInterval = null;
             this.mockStatus = "idle";
-            this.emitEvidence("run_completed", { runId: this.currentRunId, mock: true });
+            this.emitEvidence("execution_completed", { opentronsRunId: this.currentRunId, mock: true });
           }
         }, 1000);
 
-        this.emitEvidence("run_started", { runId: this.currentRunId, mock: true });
+        this.emitEvidence("execution_started", { opentronsRunId: this.currentRunId, mock: true });
         return { success: true, data: { runId: this.currentRunId } };
       }
 
@@ -467,6 +491,13 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       case "stop":
         if (this.mockInterval) clearInterval(this.mockInterval);
         this.mockInterval = null;
+        if (this.currentRunId && this.mockProgress < 100) {
+          this.emitEvidence("execution_failed", {
+            opentronsRunId: this.currentRunId,
+            reason: "stopped before completion",
+            mock: true,
+          });
+        }
         this.mockStatus = "idle";
         this.mockProgress = 0;
         this.currentRunId = null;
@@ -489,9 +520,51 @@ export class OpentronsMachineAdapter implements MachineAdapter {
 
   // ── Evidence ──────────────────────────────────────────────────
 
-  private emitEvidence(type: string, payload: Record<string, unknown>): void {
+  /** Evidence for a run action the robot accepted. */
+  private emitActionEvidence(runId: string | null, action: string): void {
+    if (!runId) return;
+    if (action === "stop") {
+      this.emitEvidence("execution_failed", { opentronsRunId: runId, reason: "stopped before completion" });
+      return;
+    }
+    if (action === "play" && !this.startedRuns.has(runId)) {
+      this.startedRuns.add(runId);
+      this.emitEvidence("execution_started", { opentronsRunId: runId });
+      return;
+    }
+    this.emitEvidence("execution_progress", { opentronsRunId: runId, action: action === "play" ? "resume" : action });
+  }
+
+  /**
+   * The robot's own report of a run's outcome, read when the runner polls
+   * progress. On a terminal status the run is released: the outcome is
+   * reported once (a released run is not polled again), and the next job
+   * creates its own run instead of replaying this one.
+   */
+  private observeRun(runId: string, run: OTRun): void {
+    const commands = run.commands ?? [];
+    if (run.status === "succeeded") {
+      this.emitEvidence("execution_completed", {
+        opentronsRunId: runId,
+        status: run.status,
+        commandsSucceeded: commands.filter((c) => c.status === "succeeded").length,
+        commandsTotal: commands.length,
+        ...(run.completedAt ? { completedAt: run.completedAt } : {}),
+      });
+      this.currentRunId = null;
+    } else if (run.status === "failed" || run.status === "stopped") {
+      this.emitEvidence("execution_failed", {
+        opentronsRunId: runId,
+        status: run.status,
+        errors: (run.errors ?? []).map((e) => e.detail),
+      });
+      this.currentRunId = null;
+    }
+  }
+
+  private emitEvidence(type: EvidenceEventType, payload: Record<string, unknown>): void {
     const event: Omit<EvidenceEvent, "id" | "hash"> = {
-      type: type as any,
+      type,
       timestamp: new Date().toISOString(),
       source: this.source,
       payload,
@@ -500,4 +573,9 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       cb(event);
     }
   }
+}
+
+/** The tagged sha256 of a protocol's source text: what the robot was told to run. */
+function protocolHashOf(source: string): string {
+  return `sha256:${createHash("sha256").update(source, "utf8").digest("hex")}`;
 }
