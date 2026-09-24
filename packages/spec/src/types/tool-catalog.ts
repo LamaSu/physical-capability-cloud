@@ -173,12 +173,24 @@ export const TypeLevelBountyRequestSchema = z.object({
 });
 
 /**
- * Server response when a type-level bounty is created.
+ * Server response to a type-level bounty request.
+ *
+ * The scaffold only computes the matching tools. It stores nothing, escrows
+ * nothing and sends no notification, and the response says so explicitly.
+ * The durable, funded replacement is the kit-build offer (ledger R7/R45).
  */
 export interface TypeLevelBountyResponse {
+  /** Ephemeral reference for this response only; nothing is stored under it. */
   bountyId: Id;
   capabilityType: string;
+  /** Maintainers actually notified. Always 0: no notification channel exists yet. */
   matchingToolsNotified: number;
   matchingTools: Array<Pick<ToolCatalogEntry, "id" | "name" | "maintainerDid">>;
   expiresAt: Timestamp;
+  /** No maintainer was contacted. */
+  notified: false;
+  /** Nothing was persisted; the bountyId cannot be looked up later. */
+  persisted: false;
+  /** No funds were escrowed for budgetUSD. */
+  funded: false;
 }

@@ -167,9 +167,10 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
 
   // POST /api/tool-catalog/bounty — type-level demand signal
   //
-  // Routes demand to all maintainers of tools implementing capabilityType.
-  // For the scaffold, returns the match set; full bounty/escrow integration
-  // happens in a follow-on PR via @pcc/payments.
+  // Computes the maintainers whose tools implement capabilityType. It persists,
+  // funds and notifies nothing, and the response states that explicitly
+  // (notified/persisted/funded: false, 200 rather than 201). The durable,
+  // escrow-backed replacement is the kit-build offer (ledger R7/R45).
   app.post("/api/tool-catalog/bounty", async (req, reply) => {
     const parsed = TypeLevelBountyRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -198,16 +199,19 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
     const response: TypeLevelBountyResponse = {
       bountyId,
       capabilityType: b.capabilityType,
-      matchingToolsNotified: matches.length,
+      matchingToolsNotified: 0,
       matchingTools: matches.map((e) => ({
         id: e.id,
         name: e.name,
         maintainerDid: e.maintainerDid,
       })),
       expiresAt,
+      notified: false,
+      persisted: false,
+      funded: false,
     };
 
-    return reply.code(201).send(response);
+    return reply.code(200).send(response);
   });
 }
 

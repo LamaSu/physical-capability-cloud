@@ -1,11 +1,40 @@
 import type { FastifyInstance } from "fastify";
-import { BountyService } from "@pcc/payments";
+import { BountyService, type DemandSignal } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
 // Shared service instance (in-memory mock)
+//
+// Nothing behind these routes is funded or durable. Treasury auto-bounties
+// stay off (the service default), every bounty reports fundingStatus
+// "unfunded", and no route can move a bounty to "paid". The durable,
+// escrow-backed replacement is the kit-build offer (ledger R7/R45).
 // ---------------------------------------------------------------------------
 
 const bountyService = new BountyService();
+
+/**
+ * The only demand-signal fields any caller may read back. Requester identity,
+ * free-text descriptions, locations and self-declared budgets are private.
+ */
+function redactSignal(s: DemandSignal) {
+  return {
+    id: s.id,
+    capabilityType: s.capabilityType,
+    estimatedFrequency: s.estimatedFrequency,
+    assuranceTier: s.assuranceTier,
+    createdAt: s.createdAt,
+    status: s.status,
+  };
+}
+
+/**
+ * Demand aggregates stay unpublished until requester identity is bound to a
+ * proven credential (gateway R29/N2): today one caller with a few free keys can
+ * fabricate "broad" demand, and a single-requester row exposes that requester's
+ * self-declared annual spend.
+ */
+const DEMAND_AGGREGATES_SUPPRESSED_REASON =
+  "demand aggregates are not published until requester identity is bound to a proven credential (ledger R29/N2)";
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -56,19 +85,20 @@ export async function bountyRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { capabilityType?: string } }>(
     "/api/bounty/demand",
     async (req) => {
-      const signals = bountyService.getDemandSignals(req.query.capabilityType);
+      const signals = bountyService
+        .getDemandSignals(req.query.capabilityType)
+        .map(redactSignal);
       return { signals, total: signals.length };
     },
   );
 
-  app.get<{ Querystring: { limit?: string } }>(
-    "/api/bounty/demand/top",
-    async (req) => {
-      const limit = parseInt(req.query.limit ?? "10", 10);
-      const top = bountyService.getTopDemand(limit);
-      return { demand: top };
-    },
-  );
+  app.get("/api/bounty/demand/top", async () => {
+    return {
+      demand: [],
+      suppressed: true,
+      reason: DEMAND_AGGREGATES_SUPPRESSED_REASON,
+    };
+  });
 
   // ── Bounties ────────────────────────────────────────────────────
 
@@ -110,31 +140,15 @@ export async function bountyRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post("/api/bounty/verify", async (req, reply) => {
-    const body = (req.body ?? {}) as {
-      bountyId?: string;
-      jobId?: string;
-      score?: number;
-    };
-
-    if (!body.bountyId || !body.jobId || body.score === undefined) {
-      return reply.code(400).send({
-        error: "bad_request",
-        message: "bountyId, jobId, and score are required",
-      });
-    }
-
-    try {
-      const bounty = bountyService.verifyBounty(
-        body.bountyId,
-        body.jobId,
-        body.score,
-      );
-      return { bounty };
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return reply.code(409).send({ error: "conflict", message });
-    }
+  // Retired: this route let any caller mark any bounty "verified" with a score
+  // of its own choosing. Verification must come from the server's own evidence
+  // (ledger R45), so the route refuses and changes no state.
+  app.post("/api/bounty/verify", async (_req, reply) => {
+    return reply.code(410).send({
+      error: "gone",
+      message:
+        "Caller-supplied bounty verification is no longer accepted. Verification must be derived by the server from real job evidence (ledger R45); this route changes no state.",
+    });
   });
 
   // ── Leaderboard ─────────────────────────────────────────────────
