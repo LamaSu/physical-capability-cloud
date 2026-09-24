@@ -19,6 +19,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { JobExecutionDTO } from "@pcc/spec";
 import { api, ApiError } from "../gateway.js";
 import { JOB_EXECUTION_REFRESH_MS, JOB_EXECUTION_TERMINAL_REFRESH_MS } from "../../lib/job-execution-view.js";
+import { parseProductHome } from "../../lib/product-home.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -263,6 +264,21 @@ export function useSettlementEpochs() {
  * `refetchInterval` lets always-visible chrome (the StatusBar) re-check
  * periodically instead of reporting the state it saw at page load.
  */
+/**
+ * The platform-wide home facts (GET /api/product/home), counted by the gateway
+ * over its own records: exact totals, not counts over one page. An answer that
+ * isn't a ProductHomeDTO is a failed read.
+ */
+export function useProductHome(options?: { refetchInterval?: number }) {
+  return useQuery({
+    queryKey: ["productHome"],
+    queryFn: async () => parseProductHome(await api.getProductHome()),
+    retry: 1,
+    staleTime: 15_000,
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
 export function useGatewayHealth(options?: { refetchInterval?: number }) {
   return useQuery({
     queryKey: ["health"],

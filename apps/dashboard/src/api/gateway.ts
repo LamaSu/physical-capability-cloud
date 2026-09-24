@@ -208,6 +208,9 @@ export const api = {
   /** Where the calling key's operator stands: identity, scopes, keys, work. */
   getAgentMe: () => fetchAPI<AgentMeDTO>("/agent/me"),
 
+  /** ProductHomeDTO (readmodels #409); checked by lib/product-home.ts. */
+  getProductHome: () => fetchAPI<unknown>("/product/home"),
+
   // ── Agents ────────────────────────────────────────────────────────────────
 
   getConversations: () => fetchAPI<{ conversations: unknown[] }>("/agents/conversations"),

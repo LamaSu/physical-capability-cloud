@@ -1,8 +1,8 @@
 import React from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { StatusBar } from "@pcc/ui";
-import { useGatewayHealth, useJobs, useKernels } from "../api/hooks/use-pcc-data.js";
-import { deriveLiveStatus } from "../lib/live-status.js";
+import { useGatewayHealth, useProductHome } from "../api/hooks/use-pcc-data.js";
+import { deriveHomeStatus } from "../lib/live-status.js";
 
 /** How often the always-visible bar re-checks gateway liveness. */
 export const STATUS_BAR_HEALTH_INTERVAL_MS = 30_000;
@@ -21,15 +21,16 @@ export function recheckHealthOnReadFailure(client: QueryClient): () => void {
 }
 
 /**
- * The dashboard shell's status bar, fed by the same queries (and cache) as
- * the Command Center page. There is no network label: no read model serves
- * the settlement network yet, so none is shown.
+ * The dashboard shell's status bar. Its counts come from ProductHomeDTO
+ * (readmodels #409), which the gateway counts over its own records, so the
+ * active-job count is exact rather than a lower bound over one page. The
+ * network label is the settlement network the gateway is configured for,
+ * labelled as such.
  */
 export function LiveStatusBar() {
   const client = useQueryClient();
   React.useEffect(() => recheckHealthOnReadFailure(client), [client]);
   const health = useGatewayHealth({ refetchInterval: STATUS_BAR_HEALTH_INTERVAL_MS });
-  const kernels = useKernels();
-  const jobs = useJobs();
-  return <StatusBar {...deriveLiveStatus({ health, kernels, jobs })} />;
+  const home = useProductHome({ refetchInterval: STATUS_BAR_HEALTH_INTERVAL_MS });
+  return <StatusBar {...deriveHomeStatus({ health, home })} />;
 }

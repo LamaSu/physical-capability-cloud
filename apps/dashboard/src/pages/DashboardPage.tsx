@@ -5,8 +5,9 @@ import {
   EmptyState, LoadingShell,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { useJobs, useKernels, useEscrows, useGatewayHealth } from "../api/hooks/use-pcc-data.js";
-import { formatCount, isActiveJob, isKernelOnline, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
+import { useJobs, useKernels, useEscrows, useGatewayHealth, useProductHome } from "../api/hooks/use-pcc-data.js";
+import { isActiveJob, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
+import { readSection, sectionReason } from "../lib/product-home.js";
 import { UnavailableState } from "../components/LiveState.js";
 
 /** Canonical job statuses (types/dto.ts StepStatus) to a pulse; the label always carries the status text. */
@@ -21,8 +22,8 @@ const jobStatusToPulse: Record<string, "online" | "executing" | "completed" | "f
 };
 
 /** A KPI value whose read failed is shown as unavailable, never as 0. */
-function Unavailable() {
-  return <span className="text-white/40" title="Couldn't load this from the gateway">—</span>;
+function Unavailable({ reason }: { reason?: string | null }) {
+  return <span className="text-white/40" title={reason ?? "Couldn't load this from the gateway"}>—</span>;
 }
 
 export function DashboardPage() {
@@ -34,23 +35,27 @@ export function DashboardPage() {
   const jobsQ = useJobs();
   const kernelsQ = useKernels();
   const escrowsQ = useEscrows();
+  // The KPI figures: counted by the gateway over its own records (readmodels #409).
+  const homeQ = useProductHome();
 
-  if (jobsQ.isLoading || kernelsQ.isLoading || escrowsQ.isLoading) return <LoadingShell rows={4} />;
+  if (jobsQ.isLoading || kernelsQ.isLoading || escrowsQ.isLoading || homeQ.isLoading) return <LoadingShell rows={4} />;
 
   // A summary shows only what its latest read returned: after a failed refresh a
   // figure is unavailable ("—"), not its last-known value presented as current.
   const jobs = jobsQ.isError ? undefined : jobsQ.data;
   const kernels = kernelsQ.isError ? undefined : kernelsQ.data;
   const escrows = escrowsQ.isError ? undefined : escrowsQ.data;
+  const home = homeQ.isError ? undefined : homeQ.data;
 
   // Nothing could be read: say so instead of rendering zeros.
-  if (!jobs && !kernels && !escrows) {
+  if (!jobs && !kernels && !escrows && !home) {
     return (
       <GlassPanel padding="lg">
         <UnavailableState
           what="the Command Center"
-          error={jobsQ.error ?? kernelsQ.error ?? escrowsQ.error}
+          error={homeQ.error ?? jobsQ.error ?? kernelsQ.error ?? escrowsQ.error}
           onRetry={() => {
+            void homeQ.refetch();
             void jobsQ.refetch();
             void kernelsQ.refetch();
             void escrowsQ.refetch();
@@ -61,11 +66,14 @@ export function DashboardPage() {
   }
 
   const gatewayDown = health.isError || (health.isSuccess && health.data?.status !== "ok");
-  const anyReadFailed = jobsQ.isError || kernelsQ.isError || escrowsQ.isError;
+  const anyReadFailed = homeQ.isError || jobsQ.isError || kernelsQ.isError || escrowsQ.isError;
 
-  const onlineKernels = kernels?.filter(isKernelOnline).length;
+  const homeJobs = readSection(home?.jobs);
+  const homeKernels = readSection(home?.kernels);
+  const homeCapabilities = readSection(home?.capabilities);
+  const held = readSection(home?.escrowHeld);
   const activeJobs = jobs?.filter(isActiveJob);
-  // /api/jobs returns one page and no total: counts over a full page are lower bounds.
+  // /api/jobs returns one page and no total: the list below may be cut short.
   const jobsTruncated = jobs ? mayBeTruncated(jobs) : false;
 
   // "Nothing yet" only when every read succeeded and came back empty.
@@ -87,36 +95,72 @@ export function DashboardPage() {
         </div>
       )}
 
-      {/* KPI Row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <GlassPanel glow={activeJobs?.length ? "green" : undefined} padding="lg" hover onClick={() => navigate("/jobs")}>
+      {/* KPI Row: ProductHomeDTO, counted by the gateway over its own records */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <GlassPanel glow={homeJobs?.active ? "green" : undefined} padding="lg" hover onClick={() => navigate("/jobs")}>
           <DataCell
             label="Active Jobs"
-            value={activeJobs ? formatCount(activeJobs.length, jobsTruncated) : <Unavailable />}
+            value={homeJobs ? homeJobs.active : <Unavailable reason={sectionReason(home?.jobs)} />}
+            sub={homeJobs ? `of ${homeJobs.total} in all` : (sectionReason(home?.jobs) ?? "unavailable")}
+            mono
+          />
+        </GlassPanel>
+        <GlassPanel glow={homeKernels?.online ? "green" : undefined} padding="lg" hover onClick={() => navigate("/kernels")}>
+          <DataCell
+            label="Kernels Online"
+            value={homeKernels ? `${homeKernels.online}/${homeKernels.total}` : <Unavailable reason={sectionReason(home?.kernels)} />}
             sub={
-              jobs
-                ? jobs.length
-                  ? `${formatCount(jobs.filter((j) => j.status === "completed").length, jobsTruncated)} completed`
-                  : "none yet"
-                : "unavailable"
+              homeKernels
+                ? homeKernels.total
+                  ? `${homeKernels.stale} with a stale heartbeat, ${homeKernels.other} not online`
+                  : "none registered"
+                : (sectionReason(home?.kernels) ?? "unavailable")
             }
             mono
           />
         </GlassPanel>
-        <GlassPanel glow={onlineKernels ? "green" : undefined} padding="lg" hover onClick={() => navigate("/kernels")}>
+        <GlassPanel padding="lg" hover onClick={() => navigate("/discover")}>
           <DataCell
-            label="Kernels Online"
-            value={kernels ? `${onlineKernels}/${kernels.length}` : <Unavailable />}
-            sub={kernels ? (kernels.length ? `${onlineKernels} with a fresh heartbeat` : "none registered") : "unavailable"}
+            label="Capabilities Listed"
+            value={homeCapabilities ? homeCapabilities.total : <Unavailable reason={sectionReason(home?.capabilities)} />}
+            sub={
+              homeCapabilities
+                ? `${homeCapabilities.onOnlineKernels} on an online kernel. A listing is not a promise of capacity.`
+                : (sectionReason(home?.capabilities) ?? "unavailable")
+            }
             mono
           />
         </GlassPanel>
         <GlassPanel padding="lg" hover onClick={() => navigate("/escrow")}>
           <DataCell
-            label="Escrows"
-            value={escrows ? escrows.length : <Unavailable />}
-            sub={escrows ? "open the list for each escrow's state" : "unavailable"}
-            mono
+            label="Held in Escrow"
+            value={
+              held ? (
+                held.byCurrency.length ? (
+                  <span className="flex flex-col gap-1">
+                    {held.byCurrency.map((h) => (
+                      <AmountDisplay key={h.currency} amount={h.amountBaseUnits} decimals={h.decimals} currency={h.currency} size="md" />
+                    ))}
+                  </span>
+                ) : (
+                  "None held"
+                )
+              ) : (
+                <Unavailable reason={sectionReason(home?.escrowHeld)} />
+              )
+            }
+            sub={
+              held
+                ? [
+                    "From escrow records; no chain read confirms it.",
+                    held.uncountedMilestones ? `${held.uncountedMilestones} held milestone(s) couldn't be counted exactly.` : "",
+                    held.unclassifiedMilestones ? `${held.unclassifiedMilestones} milestone(s) have a status this total doesn't recognise.` : "",
+                    held.excludedSimulatedEscrows ? `${held.excludedSimulatedEscrows} simulated escrow(s) left out.` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
+                : (sectionReason(home?.escrowHeld) ?? "unavailable")
+            }
           />
         </GlassPanel>
       </div>

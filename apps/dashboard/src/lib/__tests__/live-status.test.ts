@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { deriveLiveStatus, type QueryView } from "../live-status.js";
+import { deriveLiveStatus, type QueryView, deriveHomeStatus } from "../live-status.js";
 import type { JobDTO, KernelDTO } from "../../types/dto.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -144,5 +144,46 @@ describe("App.tsx status bar wiring", () => {
     expect(app).not.toMatch(/kernelsOnline=\{\s*\d/);
     expect(app).not.toMatch(/activeJobs=\{\s*\d/);
     expect(app).not.toMatch(/networkStatus="connected"/);
+  });
+});
+
+describe("deriveHomeStatus: the StatusBar from ProductHomeDTO", () => {
+  const ok = { data: { status: "ok" }, isSuccess: true, isError: false };
+  const home = (over: Record<string, unknown> = {}) => ({
+    data: {
+      schemaId: "pcc.product-home/v1",
+      asOf: "2026-09-24T12:00:00.000Z",
+      kernels: { state: "read", total: 3, online: 2, stale: 1, other: 0, rule: "r", source: "gateway_kernel_rows" },
+      capabilities: { state: "read", total: 0, onOnlineKernels: 0, byType: [], source: "gateway_capability_rows" },
+      jobs: { state: "read", total: 300, active: 120, byPhase: {}, source: "gateway_job_rows" },
+      settlementNetwork: { name: "base-sepolia", chainId: 84532, basis: "gateway_config" },
+      escrowHeld: { state: "unavailable", reason: "escrow rows could not be read" },
+      ...over,
+    } as never,
+    isSuccess: true,
+    isError: false,
+  });
+
+  it("uses the gateway's exact counts: 120 active jobs, not a lower bound over 50", () => {
+    expect(deriveHomeStatus({ health: ok, home: home() })).toEqual({
+      networkStatus: "connected",
+      kernelsOnline: 2,
+      activeJobs: 120,
+      activeJobsAtLeast: false,
+      network: "base-sepolia (configured)",
+    });
+  });
+
+  it("a section the gateway couldn't read is unknown, never 0", () => {
+    const s = deriveHomeStatus({ health: ok, home: home({ jobs: { state: "unavailable", reason: "x" } }) });
+    expect(s.activeJobs).toBeUndefined();
+    expect(s.kernelsOnline).toBe(2);
+  });
+
+  it("shows no counts unless the gateway is confirmed reachable", () => {
+    const down = { data: undefined, isSuccess: false, isError: true };
+    expect(deriveHomeStatus({ health: down, home: home() })).toMatchObject({ networkStatus: "disconnected", kernelsOnline: undefined, activeJobs: undefined, network: undefined });
+    const failed = { data: undefined, isSuccess: false, isError: true };
+    expect(deriveHomeStatus({ health: ok, home: failed })).toMatchObject({ kernelsOnline: undefined, activeJobs: undefined });
   });
 });

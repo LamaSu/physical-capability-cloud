@@ -57,8 +57,32 @@ function stubFetch(routes: Routes, fallback: Reply = "network-error") {
   return fetchMock;
 }
 
+/** A ProductHomeDTO body (readmodels #409); sections default to read and empty. */
+function home(sections: Record<string, unknown> = {}) {
+  return {
+    schemaId: "pcc.product-home/v1",
+    asOf: "2026-09-24T12:00:00.000Z",
+    kernels: { state: "read", total: 0, online: 0, stale: 0, other: 0, rule: "heartbeat within 5 min", source: "gateway_kernel_rows" },
+    capabilities: { state: "read", total: 0, onOnlineKernels: 0, byType: [], source: "gateway_capability_rows" },
+    jobs: { state: "read", total: 0, active: 0, byPhase: {}, source: "gateway_job_rows" },
+    settlementNetwork: { name: "base-sepolia", chainId: 84532, basis: "gateway_config" },
+    escrowHeld: {
+      state: "read",
+      byCurrency: [],
+      uncountedMilestones: 0,
+      unclassifiedMilestones: 0,
+      excludedSimulatedEscrows: 0,
+      heldStatuses: [],
+      source: "gateway_escrow_record",
+      confirmation: "record_only",
+    },
+    ...sections,
+  };
+}
+
 const EMPTY: Routes = {
   "/api/health": { status: 200, body: { status: "ok" } },
+  "/api/product/home": { status: 200, body: home() },
   "/api/jobs": { status: 200, body: { jobs: [] } },
   "/api/kernels": { status: 200, body: { kernels: [] } },
   "/api/escrow": { status: 200, body: { escrows: [] } },
@@ -189,6 +213,13 @@ describe("responses the pages cannot trust", () => {
   it("after a failed refresh the Command Center shows —, not the last-known figures", async () => {
     stubFetch({
       ...EMPTY,
+      "/api/product/home": {
+        status: 200,
+        body: home({
+          jobs: { state: "read", total: 2, active: 2, byPhase: {}, source: "gateway_job_rows" },
+          kernels: { state: "read", total: 1, online: 1, stale: 0, other: 0, rule: "r", source: "gateway_kernel_rows" },
+        }),
+      },
       "/api/jobs": { status: 200, body: { jobs: [{ id: "job-x", status: "in_progress" }, { id: "job-y", status: "queued" }] } },
       "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", status: "online", isStale: false }] } },
     });
@@ -211,12 +242,15 @@ describe("responses the pages cannot trust", () => {
   it("an unexpected /api/jobs shape is unavailable, not 0 active jobs", async () => {
     stubFetch({
       ...EMPTY,
+      // The KPIs come from ProductHome; fail it too so the only job figures left are the list's.
+      "/api/product/home": "network-error",
       "/api/jobs": { status: 200, body: { items: [{ id: "job-a", status: "queued" }] } },
       "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", status: "online", isStale: false }] } },
     });
     const t = await renderPage(<DashboardPage />);
     expect(t).toContain("Some live data couldn't be loaded");
     expect(t).not.toMatch(/Active Jobs\s*0/);
+    expect(t).toContain("unexpected response shape from /api/jobs");
   });
 
   it("an unexpected /api/agent/me shape is a failed read in Settings, not a crash", async () => {
@@ -228,6 +262,7 @@ describe("responses the pages cannot trust", () => {
   it("an unexpected /api/kernels shape is unavailable, not 0 kernels", async () => {
     stubFetch({
       ...EMPTY,
+      "/api/product/home": "network-error",
       "/api/jobs": { status: 200, body: { jobs: [{ id: "job-a", status: "queued" }] } },
       // collection-v1 shape instead of the { kernels } envelope this client reads
       "/api/kernels": { status: 200, body: { items: [{ id: "k1", status: "online", isStale: false }] } },
@@ -237,13 +272,17 @@ describe("responses the pages cannot trust", () => {
     expect(t).not.toMatch(/\b0\/0\b|0\/1|none registered/);
   });
 
-  it("a full page of jobs is counted as a lower bound, not an exact total", async () => {
+  it("the KPI is the gateway's exact count; only the list of one page is a lower bound", async () => {
     const jobs = Array.from({ length: 50 }, (_, i) => ({ id: `job-${i}`, status: i < 10 ? "in_progress" : "completed" }));
-    stubFetch({ ...EMPTY, "/api/jobs": { status: 200, body: { jobs } } });
+    stubFetch({
+      ...EMPTY,
+      "/api/product/home": { status: 200, body: home({ jobs: { state: "read", total: 212, active: 37, byPhase: {}, source: "gateway_job_rows" } }) },
+      "/api/jobs": { status: 200, body: { jobs } },
+    });
 
     const dash = await renderPage(<DashboardPage />);
-    expect(dash).toMatch(/Active Jobs\s*10\+/);
-    expect(dash).toContain("40+ completed");
+    expect(dash).toMatch(/Active Jobs\s*37of 212 in all/);
+    expect(dash).not.toMatch(/Active Jobs\s*10\+/);
     expect(dash).toContain("there may be more");
 
     act(() => root.unmount());
@@ -332,7 +371,70 @@ describe("live data", () => {
     expect(t).toContain("stale heartbeat");
   });
 
-  it("Command Center counts only fresh online kernels and in-flight jobs", async () => {
+  it("Command Center shows the gateway's own counts (ProductHomeDTO), not a count over one page", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/product/home": {
+        status: 200,
+        body: home({
+          kernels: { state: "read", total: 3, online: 1, stale: 1, other: 1, rule: "r", source: "gateway_kernel_rows" },
+          jobs: { state: "read", total: 4, active: 2, byPhase: {}, source: "gateway_job_rows" },
+          capabilities: { state: "read", total: 5, onOnlineKernels: 3, byType: [], source: "gateway_capability_rows" },
+        }),
+      },
+    });
+    const t = await renderPage(<DashboardPage />);
+    expect(t).toContain("1/3");
+    expect(t).toContain("1 with a stale heartbeat, 1 not online");
+    expect(t).toMatch(/Active Jobs\s*2of 4 in all/);
+    expect(t).toMatch(/Capabilities Listed\s*53 on an online kernel/);
+  });
+
+  it("a ProductHome section the gateway couldn't read shows its reason, not 0", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/product/home": { status: 200, body: home({ jobs: { state: "unavailable", reason: "job rows could not be read" } }) },
+    });
+    const t = await renderPage(<DashboardPage />);
+    expect(t).toMatch(/Active Jobs\s*—job rows could not be read/);
+    expect(t).not.toMatch(/Active Jobs\s*0/);
+  });
+
+  it("an answer that isn't a ProductHomeDTO is a failed read, not a page of zeros", async () => {
+    stubFetch({ ...EMPTY, "/api/product/home": { status: 200, body: { ...home(), schemaId: "something/else" } } });
+    const t = await renderPage(<DashboardPage />);
+    expect(t).toContain("Some live data couldn't be loaded");
+    expect(t).not.toMatch(/Active Jobs\s*0/);
+    expect(t).not.toContain("0/0");
+  });
+
+  it("escrow held is the exact base-unit amount per currency, labelled as a record", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/product/home": {
+        status: 200,
+        body: home({
+          escrowHeld: {
+            state: "read",
+            byCurrency: [{ currency: "USDC", decimals: 6, amountBaseUnits: "1234567004", milestones: 3 }],
+            uncountedMilestones: 0,
+            unclassifiedMilestones: 2,
+            excludedSimulatedEscrows: 1,
+            heldStatuses: ["FUNDED"],
+            source: "gateway_escrow_record",
+            confirmation: "record_only",
+          },
+        }),
+      },
+    });
+    const t = await renderPage(<DashboardPage />);
+    expect(t).toContain("1,234.567004");
+    expect(t).toContain("From escrow records; no chain read confirms it.");
+    expect(t).toContain("2 milestone(s) have a status this total doesn't recognise.");
+    expect(t).toContain("1 simulated escrow(s) left out.");
+  });
+
+  it("the Command Center's job list shows only in-flight jobs", async () => {
     stubFetch({
       ...EMPTY,
       "/api/jobs": {
@@ -358,8 +460,8 @@ describe("live data", () => {
       },
     });
     const t = await renderPage(<DashboardPage />);
-    expect(t).toContain("1/3");
-    expect(t).toMatch(/Active Jobs\s*2/);
+    expect(t).toContain("j1");
+    expect(t).toContain("j2");
     expect(t).not.toContain("j3");
     expect(t).not.toContain("j4");
   });

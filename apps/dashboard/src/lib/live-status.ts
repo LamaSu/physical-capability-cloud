@@ -5,6 +5,8 @@
  * never disagree, and neither may count something it cannot classify.
  */
 
+import type { ProductHomeDTO } from "@pcc/spec";
+import { configuredNetworkLabel, readSection } from "./product-home.js";
 import type { JobDTO, KernelDTO } from "../types/dto.js";
 
 /**
@@ -67,6 +69,38 @@ export interface LiveStatus {
   activeJobs: number | undefined;
   /** activeJobs came from a full, possibly truncated page: a lower bound. */
   activeJobsAtLeast: boolean;
+  /** The settlement network the gateway is configured for, labelled as configuration. */
+  network?: string;
+}
+
+/**
+ * The StatusBar from ProductHomeDTO (readmodels #409): exact counts the gateway
+ * made over its own records, not a count over one page. A section the gateway
+ * could not read, like a failed read, leaves its count undefined ("—"). The
+ * reachability rule is the same as deriveLiveStatus's.
+ */
+export function deriveHomeStatus(reads: {
+  health: QueryView<{ status: string }>;
+  home: QueryView<ProductHomeDTO>;
+}): LiveStatus {
+  const networkStatus = gatewayConnectivity(reads.health);
+  const home = networkStatus === "connected" && reads.home.isSuccess ? reads.home.data : undefined;
+  const kernels = readSection(home?.kernels);
+  const jobs = readSection(home?.jobs);
+  return {
+    networkStatus,
+    kernelsOnline: kernels ? kernels.online : undefined,
+    activeJobs: jobs ? jobs.active : undefined,
+    activeJobsAtLeast: false,
+    network: configuredNetworkLabel(home),
+  };
+}
+
+/** "connected" only after /api/health answered ok; "unknown" until it has answered. */
+export function gatewayConnectivity(health: QueryView<{ status: string }>): GatewayConnectivity {
+  if (health.isError) return "disconnected";
+  if (health.isSuccess) return health.data?.status === "ok" ? "connected" : "disconnected";
+  return "unknown";
 }
 
 /**
@@ -84,11 +118,7 @@ export function deriveLiveStatus(reads: {
   jobs: QueryView<JobDTO[]>;
 }): LiveStatus {
   const { health, kernels, jobs } = reads;
-
-  let networkStatus: GatewayConnectivity = "unknown";
-  if (health.isError) networkStatus = "disconnected";
-  else if (health.isSuccess) networkStatus = health.data?.status === "ok" ? "connected" : "disconnected";
-
+  const networkStatus = gatewayConnectivity(health);
   const reachable = networkStatus === "connected";
 
   const kernelsOnline =
