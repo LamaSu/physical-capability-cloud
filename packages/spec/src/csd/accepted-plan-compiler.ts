@@ -29,8 +29,9 @@
  *    permissive gate would approve it; with no gate injected, a non-zero tier is refused.
  *  - A SEALED DEAL. `acceptedDealDigest` = sha256 over the canonical form of the ENTIRE compiled deal:
  *    every job, every unit field (tier, fee, amounts, payees, order), the signing operators, the
- *    reservation, the currency and its decimals, both v3 roots, and economics' two terms hashes
- *    (null when no agreement applies). This is the digest the reservation
+ *    reservation, the currency and its decimals, both v3 roots, and economics' agreementHash plus its
+ *    two terms hashes (all null when no agreement applies; the agreementHash also covers the
+ *    agreement's envelope — asOf, version, deadline). This is the digest the reservation
  *    consume seals (MUST-CLOSE 8). The v3 `compositionRoot` is derived here from the same input and
  *    echoed into every unit, but it commits the PLAN (contract, providers, prices, wallets, program),
  *    NOT the settlement terms: two deals that differ only in a node's tier, the fee, or the signing
@@ -77,8 +78,8 @@ export const MAX_FEE_BPS = 1000;
 export const BPS_DENOMINATOR = 10_000n;
 /** Stored in each UnitConfig; 0 means "not composed". */
 export const COMPOSITION_SCHEMA_VERSION = 3;
-/** Domain tag inside the accepted-deal digest's canonical preimage. */
-export const ACCEPTED_DEAL_DOMAIN = "PCC:accepted-deal:v1";
+/** Domain tag inside the accepted-deal digest's canonical preimage. v2 added `agreementHash`. */
+export const ACCEPTED_DEAL_DOMAIN = "PCC:accepted-deal:v2";
 /**
  * Settlement tokens this compiler will price, with their on-chain decimals. Server-owned: decimals
  * are never taken from a caller. Add a token here only with its real decimals.
@@ -200,7 +201,12 @@ export interface CompiledAcceptedPlan {
   totalObligationBaseUnits: bigint;
   compositionRoot: Bytes32;
   capabilityContractRoot: Bytes32;
-  /** Economics' terms hashes when an agreement split the payouts (R15); null otherwise. Both sealed. */
+  /**
+   * Economics' hashes when an agreement split the payouts (R15); null otherwise. All three are sealed.
+   * `agreementHash` is the one acceptance binds: the two terms hashes do not cover the agreement's
+   * envelope (asOf, version, deadline), so sealing only them would leave `asOf` mutable after acceptance.
+   */
+  agreementHash: `0x${string}` | null;
   economicTermsHash: `0x${string}` | null;
   rightsTermsHash: `0x${string}` | null;
   jobs: CompiledJob[];
@@ -281,6 +287,8 @@ export type NetSplitResult =
         net: string;
         payouts: ReadonlyArray<{ recipient: string; amount: string }>;
       }>;
+      /** What acceptance binds (economics #2755): it covers both terms hashes AND the envelope (asOf, version, deadline). */
+      agreementHash: string;
       economicTermsHash: string;
       rightsTermsHash: string;
     }
@@ -725,12 +733,14 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
   // with this compiler's own economics and conserve EXACTLY per unit — refused, never repaired.
   const econOf = new Map(order.map((id) => [id, unitEconomics(byId.get(id)!.grossBaseUnits, input.feeBps)]));
   const payoutsOf = new Map<string, PayoutEntry[]>();
+  let agreementHash: `0x${string}` | null = null;
   let economicTermsHash: `0x${string}` | null = null;
   let rightsTermsHash: `0x${string}` | null = null;
   if (splitFn !== undefined) {
     const split = splitPayouts(order, byId, econOf, splitFn);
     if (!split.ok) return { ok: false, violations: sortViolations(split.violations) };
     for (const [id, legs] of split.payouts) payoutsOf.set(id, legs);
+    agreementHash = split.agreementHash;
     economicTermsHash = split.economicTermsHash;
     rightsTermsHash = split.rightsTermsHash;
   } else {
@@ -796,6 +806,7 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     totalObligationBaseUnits: total,
     compositionRoot,
     capabilityContractRoot: commitment.capabilityContractRoot as Bytes32,
+    agreementHash,
     economicTermsHash,
     rightsTermsHash,
     jobs,
@@ -825,7 +836,13 @@ interface UnitSnapshot {
   payouts: LegSnapshot[] | "not-array" | { tooMany: number };
 }
 type SplitSnapshot =
-  | { ok: true; economicTermsHash: unknown; rightsTermsHash: unknown; units: Array<UnitSnapshot | null> | "not-array" | "too-many" }
+  | {
+      ok: true;
+      agreementHash: unknown;
+      economicTermsHash: unknown;
+      rightsTermsHash: unknown;
+      units: Array<UnitSnapshot | null> | "not-array" | "too-many";
+    }
   | { ok: false; code: unknown }
   | "malformed";
 
@@ -849,13 +866,16 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
     const ok = r.ok;
     if (ok === false) return { ok: false, code: leaf(r.code) };
     if (ok !== true) return "malformed";
-    const economicTermsHash = leaf(r.economicTermsHash);
-    const rightsTermsHash = leaf(r.rightsTermsHash);
+    const hashes = {
+      agreementHash: leaf(r.agreementHash),
+      economicTermsHash: leaf(r.economicTermsHash),
+      rightsTermsHash: leaf(r.rightsTermsHash),
+    };
     const unitsRaw = r.units;
-    if (!Array.isArray(unitsRaw)) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
+    if (!Array.isArray(unitsRaw)) return { ok: true, ...hashes, units: "not-array" };
     const unitCount = lengthOf(unitsRaw);
-    if (unitCount === null) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
-    if (unitCount > maxUnits) return { ok: true, economicTermsHash, rightsTermsHash, units: "too-many" };
+    if (unitCount === null) return { ok: true, ...hashes, units: "not-array" };
+    if (unitCount > maxUnits) return { ok: true, ...hashes, units: "too-many" };
     const units: Array<UnitSnapshot | null> = [];
     for (let i = 0; i < unitCount; i++) {
       const u: unknown = unitsRaw[i];
@@ -888,7 +908,7 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
       }
       units.push({ unitRef, gross, fee, net, payouts });
     }
-    return { ok: true, economicTermsHash, rightsTermsHash, units };
+    return { ok: true, ...hashes, units };
   } catch {
     return "malformed";
   }
@@ -907,7 +927,13 @@ function splitPayouts(
   econOf: ReadonlyMap<string, { g: bigint; f: bigint; n: bigint }>,
   splitNet: NetSplitter,
 ):
-  | { ok: true; payouts: Map<string, PayoutEntry[]>; economicTermsHash: `0x${string}`; rightsTermsHash: `0x${string}` }
+  | {
+      ok: true;
+      payouts: Map<string, PayoutEntry[]>;
+      agreementHash: `0x${string}`;
+      economicTermsHash: `0x${string}`;
+      rightsTermsHash: `0x${string}`;
+    }
   | { ok: false; violations: CompileViolation[] } {
   const malformed = (detail: string) => ({ ok: false as const, violations: [{ code: "economics-malformed" as const, detail }] });
   const res = splitNet(
@@ -921,6 +947,7 @@ function splitPayouts(
   if (snap === "malformed") return malformed("result");
   if (!snap.ok) return { ok: false, violations: [{ code: "economics-refused", reason: show(snap.code) }] };
   if (!isDigest(snap.economicTermsHash) || !isDigest(snap.rightsTermsHash)) return malformed("terms-hash");
+  if (!isDigest(snap.agreementHash)) return malformed("agreement-hash");
   if (snap.units === "not-array") return malformed("units");
   if (snap.units === "too-many") return malformed("unit-set");
   const byRef = new Map<string, UnitSnapshot>();
@@ -965,6 +992,7 @@ function splitPayouts(
   return {
     ok: true,
     payouts,
+    agreementHash: snap.agreementHash.toLowerCase() as `0x${string}`,
     economicTermsHash: snap.economicTermsHash.toLowerCase() as `0x${string}`,
     rightsTermsHash: snap.rightsTermsHash.toLowerCase() as `0x${string}`,
   };
@@ -982,8 +1010,8 @@ function sortViolations(v: CompileViolation[]): CompileViolation[] {
 /**
  * sha256 over the canonical JSON of the whole compiled deal (bigints as decimal strings, addresses
  * and hashes lowercased — hex case carries no meaning). Any change to any settlement-significant
- * term — tier, fee, amount, payee, signing operator, unit order, reservation, currency or decimals —
- * changes this digest.
+ * term — tier, fee, amount, payee, signing operator, unit order, reservation, currency, decimals or
+ * the economic agreement (its whole hash, envelope included) — changes this digest.
  */
 export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): `0x${string}` {
   const lc = (x: string | null) => (x === null ? null : x.toLowerCase());
@@ -997,6 +1025,7 @@ export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDea
     totalObligationBaseUnits: plan.totalObligationBaseUnits.toString(),
     compositionRoot: lc(plan.compositionRoot),
     capabilityContractRoot: lc(plan.capabilityContractRoot),
+    agreementHash: lc(plan.agreementHash),
     economicTermsHash: lc(plan.economicTermsHash),
     rightsTermsHash: lc(plan.rightsTermsHash),
     jobs: plan.jobs.map((j) => ({
