@@ -799,11 +799,13 @@ export async function onboardRoutes(app: FastifyInstance) {
   // challenge), so it cannot establish that the machine is real. An onboarding
   // admin approves and activates through /approve and /activate.
   //
-  // Order: authenticated actor (401) -> owner (403) -> status -> bounded shape
-  // checks, no decode (400/413/422) -> fabrication screen (422, audited,
-  // status unchanged) -> timestamps -> bounded photo decode + header checks
-  // (422) -> retain the photo -> CAS to "reviewing" + audit record, atomically.
-  // Only `evidence` is read from the body; a `status` field anywhere is ignored.
+  // Order: authenticated actor (401) -> owner (403) -> status -> proof cap
+  // (429) -> bounded shape checks, no decode (400/413/422) -> fabrication
+  // screen (422, audited, status unchanged) -> timestamps -> bounded photo
+  // decode + header checks (422) -> stage the photo privately -> one immediate
+  // transaction: status + cap re-check, CAS to "reviewing", audit record, then
+  // the photo placed under its CID. Only `evidence` is read from the body; a
+  // `status` field anywhere is ignored.
   app.post<{ Params: { id: string } }>(
     "/api/onboard/registrations/:id/prove",
     {
