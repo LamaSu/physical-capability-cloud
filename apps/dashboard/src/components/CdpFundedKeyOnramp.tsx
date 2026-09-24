@@ -1,5 +1,5 @@
 import React from "react";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 /**
  * CdpFundedKeyOnramp — zero-friction PCC onboarding.
@@ -39,9 +39,9 @@ interface Permission {
 }
 
 async function api(path: string, method: string, body?: unknown): Promise<any> {
-  const res = await fetch(path, {
+  const res = await authorizedFetch(path, {
     method,
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {

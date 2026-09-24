@@ -30,11 +30,6 @@ const SHELL = "pcc-shell 47b47970";
 const KNOWN: Record<string, string> = {
   "agent/agent-client.ts": `${SHELL}: deleted with the old agent chat by #354`,
   "pages/AgentChatPage.tsx": `${SHELL}: deleted by #354`,
-  "components/CdpFundedKeyOnramp.tsx": `${SHELL}: no-production-mock PR (Wave 0)`,
-  "pages/SponsorTelemetryPage.tsx": `${SHELL}: no-production-mock PR (Wave 0)`,
-  "pages/SystemDashboardPage.tsx": `${SHELL}: no-production-mock PR (Wave 0)`,
-  "pages/TelemetryPage.tsx": `${SHELL}: no-production-mock PR (Wave 0)`,
-  "pages/WalletPage.tsx": `${SHELL}: no-production-mock PR (Wave 0)`,
   "pages/EvidenceExplorerPage.tsx": "readmodels c255d7dc",
   "pages/SettlementPage.tsx": "readmodels c255d7dc",
   "components/escrow/DisputeModal.tsx": "economics df42dbe5",

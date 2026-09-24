@@ -19,7 +19,7 @@
 
 import type { SWFAllocationStrategy, SWFProposal, SWFVote } from "@pcc/spec";
 import { apiGet } from "./api.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "./authorized-fetch.js";
 
 /** Shown wherever these records are rendered live. */
 export const SWF_MEMORY_NOTE =
@@ -183,9 +183,7 @@ async function errorMessage(res: Response): Promise<string> {
  */
 export async function readProposal(proposalId: string): Promise<ProposalDetail | null> {
   const route = "/api/swf/proposals/:proposalId";
-  const res = await fetch(`/api/swf/proposals/${encodeURIComponent(proposalId)}`, {
-    headers: { ...getAuthHeaders() },
-  });
+  const res = await authorizedFetch(`/api/swf/proposals/${encodeURIComponent(proposalId)}`);
   if (res.status === 404) {
     // The route's own answer for an unknown id; a 404 for a missing route is a failure, not "no such proposal".
     let body: unknown;
