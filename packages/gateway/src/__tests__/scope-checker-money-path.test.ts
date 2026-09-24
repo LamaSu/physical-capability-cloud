@@ -48,7 +48,7 @@ vi.mock("../db.js", () => ({
   }),
 }));
 
-const { scopeChecker, __resetScopeCacheForTests } = await import(
+const { scopeChecker, __resetScopeCacheForTests, parseScopeColumn } = await import(
   "../middleware/scope-checker.js"
 );
 
@@ -413,6 +413,20 @@ describe("scope-checker — money-path authorization", () => {
       expect(res.statusCode).toBe(403);
       expect(res.json().reached).toBeUndefined();
       await app.close();
+    });
+
+    // R6: parseScopeColumn is now THE parser (this hook, the DLP redactor,
+    // agent introspection, identity delegation), so its contract is pinned.
+    it("parseScopeColumn accepts ONLY a JSON array of strings", () => {
+      expect(parseScopeColumn(JSON.stringify(["operator", "settlement"]))).toEqual(["operator", "settlement"]);
+      expect(parseScopeColumn(JSON.stringify(["*"]))).toEqual(["*"]);
+      expect(parseScopeColumn("[]")).toEqual([]);
+      for (const bad of ["settlement", "operator,admin", JSON.stringify("admin"), JSON.stringify([42, "admin"]),
+        JSON.stringify({ admin: true }), "42", "null", "{not json", ""]) {
+        expect(parseScopeColumn(bad), bad).toEqual([]);
+      }
+      expect(parseScopeColumn(null)).toEqual([]);
+      expect(parseScopeColumn(undefined)).toEqual([]);
     });
   });
 

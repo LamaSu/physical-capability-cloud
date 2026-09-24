@@ -31,7 +31,7 @@ import type { FastifyRequest } from "fastify";
 import { getRepos, getStore } from "../db.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
 import { resolveApiKey } from "./api-key-auth.js";
-import { SCOPES_NOT_CARRIED_BY_WILDCARD } from "../middleware/scope-checker.js";
+import { SCOPES_NOT_CARRIED_BY_WILDCARD, parseScopeColumn } from "../middleware/scope-checker.js";
 
 /** Every env var that grants elevated access by operatorId allowlist. */
 export const ADMIN_IDENTITY_ALLOWLIST_ENV_VARS = [
@@ -320,14 +320,12 @@ export function callerMayDelegate(callerScopes: readonly string[], requested: re
   });
 }
 
-/** Parse a stored `scopes` column; anything but a JSON string array => none. */
+/**
+ * Parse a stored `scopes` column; anything but a JSON string array => none.
+ * The scope-checker's own parser, so delegation reads exactly what is enforced.
+ */
 export function parseStoredScopes(raw: string | null | undefined): string[] {
-  try {
-    const parsed: unknown = JSON.parse(raw ?? "[]");
-    return Array.isArray(parsed) && parsed.every((s) => typeof s === "string") ? (parsed as string[]) : [];
-  } catch {
-    return [];
-  }
+  return parseScopeColumn(raw);
 }
 
 /** 409 body for a claimed identity. Deliberately does NOT say what matched. */

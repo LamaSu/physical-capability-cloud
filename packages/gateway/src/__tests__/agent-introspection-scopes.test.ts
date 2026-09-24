@@ -203,6 +203,37 @@ describe("GET /api/agent/capabilities — the wildcard note is truthful", () => 
     expect(body.caller.wildcard_note).toMatch(/NOT operator-control authority/);
   });
 
+  // R6 parity: scopes are read with the scope-checker's own parser. The old
+  // local parse stringified a mixed array ([42,"operator"] -> ["42","operator"])
+  // and reported the emergency stop reachable, while the enforced layer grants
+  // such a malformed key nothing and refuses it.
+  it("a key whose scopes column is a MIXED array is reported as holding nothing", async () => {
+    const { rawKey, keyHash, keyPrefix } = generateApiKey();
+    getRepos().apiKeys.insert({
+      id: "mixed-array-introspection",
+      keyHash,
+      keyPrefix,
+      operatorId: "mixed@example.com",
+      name: "mixed",
+      description: null,
+      scopes: JSON.stringify([42, "operator"]),
+      rateLimit: "1000/hour",
+      usageCount: "0",
+      createdAt: new Date().toISOString(),
+      expiresAt: null,
+      metadata: null,
+      publicKey: null,
+    } as never);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/agent/capabilities",
+      headers: { authorization: `Bearer ${rawKey}` },
+    });
+    const body = res.json() as { caller: { scopes: string[] }; tools: Array<{ id: string; reachability: string }> };
+    expect(body.caller.scopes).toEqual([]);
+    expect(body.tools.find((t) => t.id === "operator.emergencyStop")?.reachability).toBe("needs_scope:operator");
+  });
+
   it("reports the emergency stop as needs_scope:operator for a wildcard key (R3)", async () => {
     const res = await app.inject({
       method: "GET",

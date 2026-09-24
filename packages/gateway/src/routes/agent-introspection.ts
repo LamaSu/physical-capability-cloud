@@ -43,6 +43,7 @@ import {
   isOperatorWriteRequest,
   moneyWriteScopes,
   operatorWriteScopes,
+  parseScopeColumn,
 } from "../middleware/scope-checker.js";
 
 // ── Scope registry ──────────────────────────────────────────────────
@@ -184,13 +185,14 @@ export function operationReachable(
     : { reachable: false, needs: op.scope ?? "unknown" };
 }
 
+/**
+ * What a key holds, read with the scope-checker's own parser (R6 parity). The
+ * old local parse stringified a mixed array — [42,"operator"] became
+ * ["42","operator"] — and reported reachability the enforced layer (which
+ * grants such a key NOTHING) then refused.
+ */
 function heldScopes(record: { scopes?: string | null }): string[] {
-  try {
-    const parsed = JSON.parse(record.scopes ?? "[]");
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
-  }
+  return parseScopeColumn(record.scopes);
 }
 
 function unauthenticated(reply: import("fastify").FastifyReply) {

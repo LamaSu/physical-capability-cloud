@@ -554,6 +554,43 @@ function matchRoute(
 // ── Scope Extraction ─────────────────────────────────────────────
 
 /**
+ * Parse an api_keys `scopes` column. The ONE parser for it: this hook, the DLP
+ * redactor (middleware/dlp-redactor.ts), agent introspection and the identity
+ * delegation helper all read scopes through it, so no two layers can disagree
+ * about what a key holds (review R6: the redactor had its own, looser parse).
+ *
+ * Accepts ONLY a JSON array whose EVERY element is a string — fails CLOSED to
+ * `[]` on anything else:
+ *   - an unparseable value (no CSV fallback — see below);
+ *   - valid JSON that is not an array (e.g. "settlement", 42, {"*":true});
+ *   - a mixed array like [42,"settlement"]: a malformed value grants NOTHING,
+ *     not its string subset (astra #326 re-review).
+ *
+ * The CSV fallback is gone on purpose: it turned a malformed row like
+ * `scopes = settlement` into ["settlement"] and could call POST
+ * /api/escrow/.../release — a privilege escalation that comes purely from bad
+ * serialization (cross-family review of #309, finding H3).
+ *
+ * MIGRATION NOTE: if any legacy key stored `scopes` as a bare or CSV string
+ * rather than a JSON array, it resolves to no scopes and must be re-serialized
+ * to a JSON array before it works again. This is intentional — no gate may
+ * infer authority from an unparseable value.
+ */
+export function parseScopeColumn(raw: unknown): string[] {
+  if (typeof raw !== "string") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return []; // unparseable serialization → no scopes
+  }
+  if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string")) {
+    return parsed as string[];
+  }
+  return [];
+}
+
+/**
  * Extract scopes from the API key record.
  * Fails CLOSED: a missing key, a DB error, or a scopes value that is not a JSON
  * array of strings yields NO scopes (it used to fall back to ["*"]).
@@ -564,36 +601,7 @@ function getCallerScopes(req: FastifyRequest): string[] {
   try {
     const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
     if (!keyRecord) return [];
-
-    // Accept ONLY a valid JSON array of strings — fail CLOSED on anything else.
-    //
-    // The previous code, on a JSON.parse failure, fell back to treating the raw
-    // column as comma-separated values, so a malformed row like `scopes =
-    // settlement` parsed to ["settlement"] and could call POST /api/escrow/.../
-    // release — a privilege escalation that comes purely from bad serialization
-    // (cross-family review of #309, finding H3). Missing keys already failed
-    // closed; malformed serialization did not. Now a corrupt or non-array
-    // `scopes` grants nothing.
-    //
-    // MIGRATION NOTE: if any legacy key stored `scopes` as a bare or CSV string
-    // rather than a JSON array, it now resolves to no scopes and must be
-    // re-serialized to a JSON array before it works again. This is intentional —
-    // the money gate must not infer authority from an unparseable value.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(keyRecord.scopes);
-    } catch {
-      return []; // unparseable serialization → no scopes
-    }
-    if (Array.isArray(parsed)) {
-      // EVERY element must be a string; a mixed array like [42,"settlement"] is a
-      // malformed value and grants NOTHING, not its string subset — the money gate
-      // must not extract authority from a corrupt array (astra #326 re-review).
-      if (parsed.every((s) => typeof s === "string")) return parsed as string[];
-      return [];
-    }
-    // Valid JSON but not an array (e.g. "settlement", 42, {"*":true}) → no scopes.
-    return [];
+    return parseScopeColumn(keyRecord.scopes);
   } catch {
     // Repo/DB error — a security control must not fail open.
     return [];
