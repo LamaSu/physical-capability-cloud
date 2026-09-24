@@ -82,7 +82,7 @@ const PKG = {
     tool("revoke_api_key", "DELETE", "/api/auth/keys/{keyId}"), // the real route
     tool("bump_counter", "POST", "/api/test/counter"),
     tool("boom", "POST", "/api/test/boom"),
-    tool("public_post", "POST", "/api/marketplace/test-post"),
+    tool("public_post", "POST", "/api/marketplace/roi"),
     tool("confirm_via_chat", "POST", "/api/onboard/chat"),
   ],
 };
@@ -141,7 +141,7 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     app.post("/api/test/boom", async (_req, reply) =>
       reply.code(500).send({ error: "upstream_failed", message: `upstream rejected key ${LIVE_KEY}` }),
     );
-    app.post("/api/marketplace/test-post", async () => ({ ok: true }));
+    app.post("/api/marketplace/roi", async () => ({ ok: true }));
     await app.register(onboardChatRoutes);
     await app.ready();
   });
@@ -158,7 +158,7 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     app.inject({ method: "POST", url: "/api/onboard/chat", payload, headers, remoteAddress: "198.51.100.40" });
 
   const signedIn = (operatorId: string) => {
-    const { rawKey, record } = provisionApiKey({ operatorId });
+    const { rawKey, record } = provisionApiKey({ operatorId, scopes: ["operator"] });
     return { rawKey, keyId: record!.id, headers: { authorization: `Bearer ${rawKey}` } };
   };
 

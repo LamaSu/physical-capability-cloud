@@ -95,7 +95,7 @@ const PKG = {
     tool("boom", "POST", "/api/test/boom"),
     // Public stand-ins: apiGate lets /api/marketplace/ through with no credential.
     tool("public_nested", "GET", "/api/marketplace/test-nested"),
-    tool("public_boom", "POST", "/api/marketplace/test-boom"),
+    tool("public_boom", "POST", "/api/capabilities/templates/match"),
     tool("marketplace_list_listings", "GET", "/api/marketplace/test-listings"),
     tool("huge_listing", "GET", "/api/marketplace/test-huge"),
     tool("big_page", "GET", "/api/marketplace/test-big"),
@@ -125,7 +125,7 @@ async function buildApp(): Promise<FastifyInstance> {
     reply.code(500).send({ error: "upstream_failed", message: `upstream rejected key ${LIVE_KEY}` }),
   );
   app.get("/api/marketplace/test-nested", async () => nestedBody());
-  app.post("/api/marketplace/test-boom", async (_req, reply) =>
+  app.post("/api/capabilities/templates/match", async (_req, reply) =>
     reply.code(500).send({ error: "upstream_failed", message: `upstream rejected key ${LIVE_KEY}` }),
   );
   app.get("/api/marketplace/test-listings", async () => ({
@@ -176,7 +176,7 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
     _resetAgentPackageCache();
     _setAgentPackageForTests(PKG);
     app = await buildApp();
-    userKey = provisionApiKey({ operatorId: "chat-user@example.com" }).rawKey;
+    userKey = provisionApiKey({ operatorId: "chat-user@example.com", scopes: ["operator"] }).rawKey;
   });
 
   afterEach(async () => {

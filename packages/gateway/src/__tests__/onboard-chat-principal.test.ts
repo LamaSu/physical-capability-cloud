@@ -185,7 +185,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
   });
 
   it("an API-key chat's tool call carries exactly that principal", async () => {
-    const { rawKey, record } = provisionApiKey({ operatorId: "alice@example.com" });
+    const { rawKey, record } = provisionApiKey({ operatorId: "alice@example.com", scopes: ["operator"] });
     llm.responses.push(calls(["whoami"]), endTurn);
     const post = await chat({ authorization: `Bearer ${rawKey}` });
     expect(post.statusCode).toBe(200);
@@ -226,7 +226,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
   });
 
   it("approve / reject / activate / admin tools are refused anonymously and with a key, and never offered or requested", async () => {
-    const { rawKey } = provisionApiKey({ operatorId: "bob@example.com" });
+    const { rawKey } = provisionApiKey({ operatorId: "bob@example.com", scopes: ["operator"] });
     for (const headers of [{}, { authorization: `Bearer ${rawKey}` }]) {
       llm.responses.push(
         calls(
@@ -290,7 +290,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
   });
 
   it("a path param cannot walk a template onto another route, and a non-/api endpoint is refused", async () => {
-    const { rawKey } = provisionApiKey({ operatorId: "carol@example.com" });
+    const { rawKey } = provisionApiKey({ operatorId: "carol@example.com", scopes: ["operator"] });
     llm.responses.push(calls(["item_details", { id: ".." }], ["item_details", { id: "" }], ["generate_ui"]), endTurn);
     const post = await chat({ authorization: `Bearer ${rawKey}` });
     expect(post.statusCode).toBe(200);
@@ -306,7 +306,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
   // ── WP-D R3 ─────────────────────────────────────────────────────
 
   it("prove_registration and every registration-status tool are refused by name and by route, anonymously and with a key", async () => {
-    const { rawKey } = provisionApiKey({ operatorId: "dave@example.com" });
+    const { rawKey } = provisionApiKey({ operatorId: "dave@example.com", scopes: ["operator"] });
     // The evidence the chat would have to invent: tier 0 accepts deviceHealth alone.
     const evidence = { deviceHealth: { status: "idle", model: "X" } };
     // Signed in first: that is where the pre-fix code ran prove_registration.
@@ -350,8 +350,8 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     app.inject({ method: "POST", url: "/api/onboard/chat", payload: { conversationId: id, message: "go on" }, headers });
 
   it("a signed-in conversation is bound to its principal: GET and resume by anyone else is 404", async () => {
-    const alice = provisionApiKey({ operatorId: "alice@example.com" });
-    const bob = provisionApiKey({ operatorId: "bob@example.com" });
+    const alice = provisionApiKey({ operatorId: "alice@example.com", scopes: ["operator"] });
+    const bob = provisionApiKey({ operatorId: "bob@example.com", scopes: ["operator"] });
     const asAlice = { authorization: `Bearer ${alice.rawKey}` };
     llm.responses.push(calls(["whoami"]), endTurn);
     const post = await chat(asAlice);
@@ -388,7 +388,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
       expiresAt: new Date(now + 3_600_000).toISOString(),
       lastActiveAt: new Date(now).toISOString(),
     });
-    const { rawKey } = provisionApiKey({ operatorId: WALLET });
+    const { rawKey } = provisionApiKey({ operatorId: WALLET, scopes: ["operator"] });
     llm.responses.push(endTurn);
     const post = await chat({ cookie: `pcc_session=${app.signCookie(token)}` });
     const id = post.json().conversationId as string;
@@ -399,8 +399,8 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
   });
 
   it("an anonymous conversation stays id-only until a signed-in caller continues it, which binds it to them", async () => {
-    const carol = provisionApiKey({ operatorId: "carol@example.com" });
-    const erin = provisionApiKey({ operatorId: "erin@example.com" });
+    const carol = provisionApiKey({ operatorId: "carol@example.com", scopes: ["operator"] });
+    const erin = provisionApiKey({ operatorId: "erin@example.com", scopes: ["operator"] });
     const asCarol = { authorization: `Bearer ${carol.rawKey}` };
     llm.responses.push(endTurn);
     const id = (await chat()).json().conversationId as string;
