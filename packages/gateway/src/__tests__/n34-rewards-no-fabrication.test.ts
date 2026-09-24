@@ -257,7 +257,8 @@ describe("the gate runs after the API-key gate (registered first, as in server.t
   let key: string;
 
   beforeAll(async () => {
-    key = provisionApiKey({ operatorId: "n34-rewards-probe", name: "n34 rewards probe" }).rawKey;
+    // Keys are minted with explicit narrow scopes since WP-A (#326); this probe needs none.
+    key = provisionApiKey({ operatorId: "n34-rewards-probe", name: "n34 rewards probe", scopes: [] }).rawKey;
     gated = Fastify({ logger: false });
     await gated.register(apiGate);
     await gated.register(rewardRoutes);
