@@ -798,7 +798,26 @@ describe("Summary and dashboard", () => {
     expect(summary.participantCount).toBe(0);
     expect(summary.activeProposals).toBe(0);
     expect(summary.currentEpochId).toBe("");
-    expect(summary.chainBalances).toHaveLength(1);
+    // Nothing is invented: no distribution time before a distribution, and no chain balance for a ledger
+    // that lives in memory (readmodels #3284: it used to report now, and a Base USDC balance).
+    expect(summary.lastDistributionAt).toBeNull();
+    expect(summary.chainBalances).toEqual([]);
+    expect(summary.unavailable).toEqual(["lastDistributionAt", "chainBalances"]);
+  });
+
+  it("getSummary reports the last distribution only once an epoch has completed", () => {
+    const p = reg(svc, "did:key:last1");
+    const epochId = svc.createEpoch().id;
+    svc.accrue({ sourceType: "protocol_fee", sourceId: "a1", grossAmount: 10000, epochId });
+    expect(svc.getSummary().lastDistributionAt).toBeNull();
+    svc.calculateContributionScores(epochId, [
+      { participantId: p.id, jobCount: 10, reputation: 500, uptimeOrActivity: 80, tenureDays: 100, votedThisEpoch: false },
+    ]);
+    const done = svc.distributeEpoch(epochId);
+    const summary = svc.getSummary();
+    expect(summary.lastDistributionAt).toBe(done.endTime);
+    expect(summary.unavailable).toEqual(["chainBalances"]);
+    expect(summary.chainBalances).toEqual([]);
   });
 
   it("getSummary reflects active epoch id", () => {

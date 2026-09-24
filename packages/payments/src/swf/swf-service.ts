@@ -560,6 +560,9 @@ export class SWFService {
     const activeEpoch = this.getActiveEpoch();
     const activeProposals = this.listProposals({ status: "active" }).length;
     const balance = totalAccrued - totalDistributed;
+    // Say what has no real source instead of filling it in: a distribution time exists only once an epoch
+    // has completed, and this ledger lives in memory, so it holds no balance on any chain.
+    const unavailable: Array<"lastDistributionAt" | "chainBalances"> = lastDistributionAt ? ["chainBalances"] : ["lastDistributionAt", "chainBalances"];
 
     return {
       totalBalance: String(balance),
@@ -569,10 +572,9 @@ export class SWFService {
       currentAllocationStrategy: { ...this.currentStrategy },
       participantCount: this.listParticipants({ status: "active" }).length,
       activeProposals,
-      lastDistributionAt: lastDistributionAt || new Date().toISOString(),
-      chainBalances: [
-        { chain: "base", currency: "USDC", amount: String(balance) },
-      ],
+      lastDistributionAt: lastDistributionAt || null,
+      chainBalances: [],
+      unavailable,
     };
   }
 

@@ -22,7 +22,6 @@ import {
   isEvidenceHashForm,
 } from "../services/evidence-envelope.js";
 import { getSettlementFacade } from "../facades/index.js";
-import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
 import {
   isBatchEnabled,
@@ -199,10 +198,9 @@ export async function settlementRoutes(app: FastifyInstance) {
       });
     }
 
-    // SWF accrual: 2% of released milestone value flows into the fund
-    if (result.status === "released") {
-      swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
-    }
+    // No SWF accrual here. The fund's ledger is in memory and the escrow routes no share of a release to it,
+    // so any accrual would record money that never moved (this used to accrue a constant 1000 for every
+    // release, whatever was paid). swfAccrue is for a real flow into the fund, once one exists.
 
     return {
       txHash: result.txHash,

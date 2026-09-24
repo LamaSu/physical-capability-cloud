@@ -233,10 +233,15 @@ export interface SWFSummary {
   participantCount: number;
   /** Number of active governance proposals */
   activeProposals: number;
-  /** ISO 8601 of last distribution */
-  lastDistributionAt: string;
-  /** Per-chain balances */
+  /** ISO 8601 of the last completed distribution, or null when none has happened. Never "now". */
+  lastDistributionAt: string | null;
+  /**
+   * Balances the fund actually holds on each chain. Empty while the fund's ledger is in memory, which it is
+   * today; `unavailable` then names this field.
+   */
   chainBalances: Array<{ chain: string; currency: string; amount: string }>;
+  /** Fields with no real source yet, so a reader shows "unavailable" rather than a zero, a guess or now. */
+  unavailable?: Array<"lastDistributionAt" | "chainBalances">;
 }
 
 // ── Forecast-Driven Allocation ─────────────────────────────────────
