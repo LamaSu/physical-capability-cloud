@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { netSplitterFor, type PlanSplitUnit, type ServerEconomicsFacts } from "../economics/bind.js";
+import { agreementUnitGross, netSplitterFor, type PlanSplitUnit, type ServerEconomicsFacts } from "../economics/bind.js";
 import { compileEconomics } from "../economics/compile.js";
 import { exampleIncompatibleLicense, exampleLabAssay, examplePrintAndMail, exampleSparePrinter, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
 import type { EconomicAgreement } from "../economics/types.js";
@@ -15,7 +15,7 @@ import type { EconomicAgreement } from "../economics/types.js";
  * packages/spec/src/csd/accepted-plan-compiler.ts). When both branches are on master, replace this copy
  * with the import; until then the assignment below is the conformance check.
  */
-interface ComposedSplitUnitInput { nodeId: string; operator: `0x${string}`; payoutAddress: `0x${string}`; g: bigint; f: bigint; n: bigint }
+interface ComposedSplitUnitInput { nodeId: string; operator: `0x${string}`; payoutAddress: `0x${string}`; quote: bigint; g: bigint; f: bigint; n: bigint }
 type ComposedNetSplitResult =
   | { ok: true; units: ReadonlyArray<{ unitRef: string; gross: string; fee: string; net: string; payouts: ReadonlyArray<{ recipient: string; amount: string }> }>; economicTermsHash: string; rightsTermsHash: string }
   | { ok: false; code: string };
@@ -40,13 +40,20 @@ function server(ag: EconomicAgreement, over: Partial<ServerEconomicsFacts> = {})
   };
 }
 
-/** The units the accepted-plan compiler would hand over for this agreement, in its canonical order. */
-function planUnits(ag: EconomicAgreement, order?: string[]): PlanSplitUnit[] {
+/**
+ * The units the accepted-plan compiler would hand over for this agreement, in its canonical order. By
+ * default the operator is a party that is paid in the unit and its quote is 1 (a floor that any paid
+ * operator clears); `quotes` sets real quotes and payout addresses per unit.
+ */
+function planUnits(ag: EconomicAgreement, order?: string[], quotes: Record<string, { quote: bigint; payoutAddress: string }> = {}): PlanSplitUnit[] {
   const refs = order ?? ag.units.map((u) => u.unitRef);
+  const compiled = compileEconomics(ag, { schedules: [PRINTER_KIT_SCHEDULE] });
   return refs.map((ref) => {
     const g = BigInt(ag.units.find((u) => u.unitRef === ref)!.gross);
     const f = (g * BigInt(ag.fee.feeBps)) / 10000n;
-    return { nodeId: ref, operator: "0x0000000000000000000000000000000000000abc", payoutAddress: "0x0000000000000000000000000000000000000abc", g, f, n: g - f };
+    const firstPayee = compiled.ok ? compiled.units.find((u) => u.unitRef === ref)?.payouts[0]?.recipient : undefined;
+    const q = quotes[ref] ?? { quote: 1n, payoutAddress: firstPayee ?? "0x0000000000000000000000000000000000000abc" };
+    return { nodeId: ref, operator: q.payoutAddress, payoutAddress: q.payoutAddress, quote: q.quote, g, f, n: g - f };
   });
 }
 
@@ -190,6 +197,30 @@ describe("netSplitterFor", () => {
     const unlisted = server(ag, { unitFacts: { "a-print": facts.unitFacts["a-print"]! } });
     expect(run(ag, unlisted)).toBe("economics:UNIT_FACTS_MISMATCH:b-mail");
     expect(run(ag)).toBe("ok");
+  });
+
+  it("an operator's quote is its price for its own work: add-ons are on top, never taken out of the operator (composition #2762)", () => {
+    const ag = examplePrintAndMail(); // the print shop's quote is its fixed $12.00 on a $14.00 step
+    const printshop = ag.parties.find((p) => p.partyId === "printshop")!.payTo!;
+    const courier = ag.parties.find((p) => p.partyId === "courier")!.payTo!;
+    const quotes = (printQuote: bigint) => ({
+      "a-print": { quote: printQuote, payoutAddress: printshop },
+      "b-mail": { quote: 5_000_000n, payoutAddress: courier },
+    });
+    const run = (printQuote: bigint) => refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag) })(planUnits(ag, undefined, quotes(printQuote))));
+    // $12.00 paid covers a quote whose net of the 2.35% fee is at most $12.00: a quote of $12.28 nets 11.9915.
+    expect(run(12_000_000n)).toBe("ok");
+    expect(run(12_288_000n)).toBe("ok");
+    // A quote of $12.30 nets 12.01095 > $12.00 paid: the agreement takes from the operator's own work.
+    expect(run(12_300_000n)).toBe("economics:OPERATOR_BELOW_QUOTE:a-print");
+    // A step priced below the operator's quote is not covered at all.
+    expect(run(14_000_001n)).toBe("economics:QUOTE_NOT_COVERED:a-print");
+  });
+
+  it("agreementUnitGross lets the plan reserve each unit's gross before compiling, and grants nothing", () => {
+    const g = agreementUnitGross(examplePrintAndMail());
+    expect(g).toEqual({ ok: true, gross: { "a-print": 14_000_000n, "b-mail": 8_000_000n } });
+    expect(agreementUnitGross({ schema: "nope" })).toEqual({ ok: false, code: "economics:SCHEMA_INVALID" });
   });
 
   it("the protocol fee recipient stays the fee recipient: FEE is not in the payouts", () => {

@@ -33,11 +33,18 @@ import type { CaptureClassId } from "./rates.js";
 import { EconomicAgreementSchema, ZERO_ADDRESS, type Authority, type IntendedUse, type License } from "./types.js";
 import { verifyAcceptedAgreement, type AcceptedAgreementHashes } from "./verify.js";
 
-/** One unit as the accepted-plan compiler hands it over, in canonical plan order. */
+/**
+ * One unit as the accepted-plan compiler hands it over, in canonical plan order.
+ *
+ * `quote` is the operator's live price for its own work. `g` is what the buyer funds for the unit: the
+ * agreement's unit gross, which may exceed the quote by what the agreement adds ON TOP (licenses,
+ * modules, the composer's margin). The operator is never paid less than its quote net of the fee on it.
+ */
 export interface PlanSplitUnit {
   nodeId: string;
   operator: string;
   payoutAddress: string;
+  quote: bigint;
   g: bigint;
   f: bigint;
   n: bigint;
@@ -120,8 +127,10 @@ export const BIND_REFUSAL_CODES = [
   "UNIT_SET_MISMATCH",
   "GROSS_MISMATCH",
   "UNIT_FACTS_MISMATCH",
+  "QUOTE_NOT_COVERED",
   "COMPILE_REFUSED",
   "FEE_RULE_DIVERGED",
+  "OPERATOR_BELOW_QUOTE",
 ] as const;
 export type BindRefusalCode = (typeof BIND_REFUSAL_CODES)[number];
 
@@ -140,6 +149,23 @@ function sameMultiset<T>(a: readonly T[], b: readonly T[], key: (x: T) => string
   const ka = a.map(key).sort(cmpStr);
   const kb = b.map(key).sort(cmpStr);
   return ka.every((k, i) => k === kb[i]);
+}
+
+/**
+ * The gross each unit of an (untrusted) agreement asks the buyer to fund, for the accepted-plan compiler
+ * to reserve BEFORE it compiles. The splitter re-checks every one of these against the plan
+ * (GROSS_MISMATCH, QUOTE_NOT_COVERED), so reading them early grants nothing.
+ */
+export function agreementUnitGross(agreement: unknown): { ok: true; gross: Record<string, bigint> } | { ok: false; code: string } {
+  const copy = snapshotJson(agreement);
+  const parsed = copy.ok ? EconomicAgreementSchema.safeParse(copy.value) : null;
+  if (parsed === null || !parsed.success) return { ok: false, code: "economics:SCHEMA_INVALID" };
+  const gross: Record<string, bigint> = {};
+  for (const u of parsed.data.units) {
+    if (Object.prototype.hasOwnProperty.call(gross, u.unitRef)) return { ok: false, code: `economics:UNIT_SET_MISMATCH:${u.unitRef}` };
+    gross[u.unitRef] = BigInt(u.gross);
+  }
+  return { ok: true, gross };
 }
 
 export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
@@ -207,6 +233,7 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
     for (const u of units) {
       const unit = byRef.get(u.nodeId)!;
       if (BigInt(unit.gross) !== u.g) return refuse("GROSS_MISMATCH", u.nodeId);
+      if (u.g < u.quote) return refuse("QUOTE_NOT_COVERED", u.nodeId);
       const f = facts.get(u.nodeId);
       if (
         f === undefined ||
@@ -235,6 +262,11 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
       const c = compiledByRef.get(u.nodeId)!;
       // One fee rule, the escrow's. Both sides compute it; if they ever disagree, nothing is funded.
       if (BigInt(c.fee) !== u.f || BigInt(c.net) !== u.n) return refuse("FEE_RULE_DIVERGED", u.nodeId);
+      // The operator's quote is its price for its own work: whatever the agreement adds is on top, so
+      // the operator's own legs cover at least its quote net of the fee on that quote.
+      const floor = u.quote - (u.quote * BigInt(server.feeBps)) / 10_000n;
+      const toOperator = c.payouts.filter((p) => p.recipient === lower(u.payoutAddress)).reduce((s, p) => s + BigInt(p.amount), 0n);
+      if (toOperator < floor) return refuse("OPERATOR_BELOW_QUOTE", u.nodeId);
       out.push({ unitRef: c.unitRef, gross: c.gross, fee: c.fee, net: c.net, payouts: c.payouts.map((p) => ({ ...p })) });
     }
     return {
