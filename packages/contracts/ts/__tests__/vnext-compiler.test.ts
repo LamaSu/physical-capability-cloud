@@ -26,6 +26,7 @@ import {
   VNextSettlementEscrowABI,
   VNextSettlementEscrowFactoryABI,
   buildUnitConfig,
+  checkAcceptance,
   claimId,
   cloneInitCodeHash,
   compileVNextPolicy,
@@ -272,6 +273,80 @@ describe("V-next compiler: one changed byte is a different policy", () => {
 
   it("prePolicyRoot is the root of exactly the encoded configs", () => {
     expect(prePolicyRoot(golden.configs)).toBe(G.outputs.prePolicyRoot);
+  });
+});
+
+/**
+ * Boundary PAIRS. Each limit is tested on both sides of its edge here, and the same pair is tested against
+ * the real contract in `VNextAbiFreezeTest.test_Boundary_*`, so the compiler and `fund()` accept and refuse
+ * exactly the same inputs at every edge (astra review of #367).
+ */
+describe("V-next compiler: boundary parity with fund()", () => {
+  const payee = G.inputs.units[0].payouts[0].recipient;
+  const unit = (over: Partial<UnitConfig> & { g: bigint; feeBps?: number; reclaimAt: bigint; legs?: number; milestoneIndex?: bigint }) => {
+    const feeBps = over.feeBps ?? 0;
+    const { f, n } = computeFee(over.g, feeBps);
+    const legs = over.legs ?? 1;
+    const each = n / BigInt(legs);
+    const payouts = Array.from({ length: legs }, (_, j) => ({
+      recipient: `0x${(0x1000 + j).toString(16).padStart(40, "0")}` as Address,
+      amount: j === legs - 1 ? n - each * BigInt(legs - 1) : each,
+    }));
+    return {
+      milestoneIndex: over.milestoneIndex ?? 0n,
+      stepId: k("boundary-step"),
+      requiredTier: 1,
+      requestedTier: 1,
+      g: over.g,
+      f,
+      n,
+      feeBps,
+      feeRecipient: over.feeRecipient ?? (feeBps > 0 ? payee : zeroAddress),
+      reclaimAt: over.reclaimAt,
+      compositionSchemaVersion: 0,
+      compositionRoot: zeroHash,
+      payouts,
+    } satisfies UnitConfig;
+  };
+  const at = (fundingTime: bigint, units: UnitConfig[]) =>
+    compileVNextPolicy({ ...goldenInput(units), fundingTime, expiry: fundingTime + 1n });
+
+  it("reclaimAt: 2^64-1 is accepted, 2^64 overflows uint64 (ValueOverflow), even with a valid relative window", () => {
+    const edge = (1n << 64n) - 1n;
+    expect(() => at(edge - VNEXT.MIN_RECLAIM_DELAY, [unit({ g: 5n, reclaimAt: edge })])).not.toThrow();
+    expectCode(() => at(edge + 1n - VNEXT.MIN_RECLAIM_DELAY, [unit({ g: 5n, reclaimAt: edge + 1n })]), "VALUE_OVERFLOW");
+  });
+
+  it("gross: 2^128-1 is accepted, 2^128 overflows uint128 (ValueOverflow)", () => {
+    const T = G.inputs.fundingTime;
+    expect(() => at(T, [unit({ g: (1n << 128n) - 1n, reclaimAt: T + 30n * 86_400n })])).not.toThrow();
+    expectCode(() => at(T, [unit({ g: 1n << 128n, reclaimAt: T + 30n * 86_400n })]), "VALUE_OVERFLOW");
+  });
+
+  it("positive bps with a zero fee is legal and still needs a fee recipient", () => {
+    const T = G.inputs.fundingTime;
+    const dust = unit({ g: 5n, feeBps: 1, reclaimAt: T + 30n * 86_400n });
+    expect(dust.f).toBe(0n);
+    expect(dust.n).toBe(5n);
+    expect(() => at(T, [dust])).not.toThrow();
+    expectCode(() => at(T, [{ ...dust, feeRecipient: zeroAddress }]), "FEE_RECIPIENT_MISSING");
+  });
+
+  it("16 units of 16 legs (256 legs) is accepted; 17 units or 17 legs is refused", () => {
+    const T = G.inputs.fundingTime;
+    const full = Array.from({ length: 16 }, (_, i) => unit({ g: 1_000n, legs: 16, milestoneIndex: BigInt(i), reclaimAt: T + 30n * 86_400n }));
+    const c = at(T, full);
+    expect(c.configs.reduce((s, u) => s + u.payouts.length, 0)).toBe(256);
+    expectCode(() => at(T, [...full, unit({ g: 1_000n, milestoneIndex: 16n, reclaimAt: T + 30n * 86_400n })]), "BAD_UNIT_COUNT");
+    expectCode(() => at(T, [unit({ g: 1_000n, legs: 17, reclaimAt: T + 30n * 86_400n })]), "BAD_LEG_COUNT");
+  });
+
+  it("a relayer must carry the payer's signature (OnlyPayer); the payer sending itself need not", () => {
+    const sig = `0x${"11".repeat(65)}` as Hex;
+    const acc = { expiry: G.inputs.expiry, payerSignature: "0x" as Hex, operatorSignature: sig };
+    const relayer: Address = "0x000000000000000000000000000000000000bEEF";
+    expectCode(() => checkAcceptance(acc, { sender: relayer, payer: G.inputs.payer }), "ONLY_PAYER");
+    expect(() => checkAcceptance(acc, { sender: G.inputs.payer, payer: G.inputs.payer })).not.toThrow();
   });
 });
 

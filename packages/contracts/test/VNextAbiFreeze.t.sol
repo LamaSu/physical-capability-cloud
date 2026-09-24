@@ -9,6 +9,7 @@ import {
     PayoutEntry,
     PolicyIdentity,
     UnitState,
+    ValueOverflow,
     VNextSettlementLib
 } from "../src/libraries/VNextSettlementLib.sol";
 import {MockToken, MockOracleAttester} from "./VNextSettlementEscrow.t.sol";
@@ -341,6 +342,119 @@ contract VNextAbiFreezeTest is Test {
         vm.prank(RELAYER);
         e.fund(configs, _goldenAcceptance());
         assertEq(usdc.balanceOf(address(e)), GOLDEN_TOTAL_GROSS);
+    }
+
+    // ── 4. boundary parity with the compiler (astra review of #367) ─────────────────────────────
+    // The same pairs are tested against `compileVNextPolicy` in `vnext-compiler.test.ts` ("boundary parity
+    // with fund()"). Each ACCEPTED side is funded into an escrow whose committed root does NOT match: every
+    // per-unit check in the freeze loop runs first, so reaching `PolicyRootMismatch` proves the loop accepted
+    // the value. Each REFUSED side must revert with the exact limit error. No signature is needed: the payer
+    // sends, and both outcomes are decided before the acceptance is verified.
+
+    function test_Boundary_ReclaimAtFitsUint64() public {
+        uint256 edge = type(uint64).max;
+        vm.warp(edge - VNextSettlementLib.MIN_RECLAIM_DELAY); // the relative window is valid on both sides
+        _fundExpecting(_unit(0, 5, 0, address(0), edge, 1), abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector));
+        vm.warp(edge + 1 - VNextSettlementLib.MIN_RECLAIM_DELAY);
+        _fundExpecting(_unit(0, 5, 0, address(0), edge + 1, 1), abi.encodeWithSelector(ValueOverflow.selector));
+    }
+
+    function test_Boundary_GrossFitsUint128() public {
+        uint256 reclaimAt = block.timestamp + 30 days;
+        _fundExpecting(
+            _unit(0, type(uint128).max, 0, address(0), reclaimAt, 1),
+            abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector)
+        );
+        _fundExpecting(
+            _unit(0, uint256(type(uint128).max) + 1, 0, address(0), reclaimAt, 1),
+            abi.encodeWithSelector(ValueOverflow.selector)
+        );
+    }
+
+    /// @dev Positive bps whose fee floors to zero: legal, creates no fee leg, but still needs a fee recipient.
+    function test_Boundary_PositiveBpsZeroFee() public {
+        uint256 reclaimAt = block.timestamp + 30 days;
+        _fundExpecting(_unit(0, 5, 1, FEE_DEST, reclaimAt, 1), abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector));
+        _fundExpecting(_unit(0, 5, 1, address(0), reclaimAt, 1), abi.encodeWithSignature("Error(string)", "V1: fee>0 recipient==0"));
+    }
+
+    function test_Boundary_SixteenUnitsOfSixteenLegs() public {
+        uint256 reclaimAt = block.timestamp + 30 days;
+        VNextSettlementEscrow.UnitConfig[] memory full = new VNextSettlementEscrow.UnitConfig[](16);
+        for (uint256 i; i < 16; ++i) {
+            full[i] = _unit(i, 1_000, 0, address(0), reclaimAt, 16)[0];
+        }
+        _fundExpecting(full, abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector));
+
+        VNextSettlementEscrow.UnitConfig[] memory seventeen = new VNextSettlementEscrow.UnitConfig[](17);
+        for (uint256 i; i < 17; ++i) {
+            seventeen[i] = _unit(i, 1_000, 0, address(0), reclaimAt, 1)[0];
+        }
+        _fundExpecting(seventeen, abi.encodeWithSelector(VNextSettlementEscrow.BadUnitCount.selector));
+        _fundExpecting(_unit(0, 1_000, 0, address(0), reclaimAt, 17), abi.encodeWithSelector(VNextSettlementEscrow.BadLegCount.selector));
+    }
+
+    /// @dev A relayer without the payer's signature is refused before anything else is read (`OnlyPayer`).
+    function test_Boundary_RelayerNeedsThePayersSignature() public {
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(_boundaryIdentity()));
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _goldenAcceptance();
+        acc.payerSignature = "";
+        vm.expectRevert(VNextSettlementEscrow.OnlyPayer.selector);
+        vm.prank(RELAYER);
+        e.fund(_unit(0, 5, 0, address(0), block.timestamp + 30 days, 1), acc);
+    }
+
+    /// @dev One unit: `g` split over `legs` payees; the fee is the floor rule. Payees are distinct allowed addresses.
+    function _unit(uint256 milestoneIndex, uint256 g, uint16 feeBps, address feeRecipient, uint256 reclaimAt, uint256 legs)
+        internal
+        pure
+        returns (VNextSettlementEscrow.UnitConfig[] memory c)
+    {
+        uint256 f = g * feeBps / 10_000;
+        uint256 n = g - f;
+        PayoutEntry[] memory p = new PayoutEntry[](legs);
+        uint256 each = n / legs;
+        for (uint256 j; j < legs; ++j) {
+            p[j] = PayoutEntry({recipient: address(uint160(0x1000 + j)), amount: j == legs - 1 ? n - each * (legs - 1) : each});
+        }
+        c = new VNextSettlementEscrow.UnitConfig[](1);
+        c[0] = VNextSettlementEscrow.UnitConfig({
+            milestoneIndex: milestoneIndex,
+            stepId: keccak256("boundary-step"),
+            requiredTier: 1,
+            requestedTier: 1,
+            g: g,
+            f: f,
+            n: n,
+            feeBps: feeBps,
+            feeRecipient: feeRecipient,
+            reclaimAt: reclaimAt,
+            compositionSchemaVersion: 0,
+            compositionRoot: bytes32(0),
+            payouts: p
+        });
+    }
+
+    /// @dev An escrow whose committed root matches no config, so a config the freeze loop accepts ends in
+    ///      `PolicyRootMismatch` rather than in a funded escrow.
+    function _boundaryIdentity() internal pure returns (PolicyIdentity memory id) {
+        id = _goldenIdentity();
+        id.jobIdHash = keccak256("pcc:vnext:boundary:job");
+        id.prePolicyRoot = bytes32(uint256(1));
+    }
+
+    function _fundExpecting(VNextSettlementEscrow.UnitConfig[] memory configs, bytes memory revertData) internal {
+        PolicyIdentity memory id = _boundaryIdentity();
+        address predicted = factory.predictEscrow(id);
+        VNextSettlementEscrow e = predicted.code.length == 0
+            ? VNextSettlementEscrow(factory.createEscrow(id))
+            : VNextSettlementEscrow(predicted);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _goldenAcceptance();
+        acc.expiry = type(uint256).max;
+        acc.payerSignature = ""; // the payer sends
+        vm.expectRevert(revertData);
+        vm.prank(PAYER);
+        e.fund(configs, acc);
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────────────────────────

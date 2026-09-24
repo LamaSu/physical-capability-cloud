@@ -14,8 +14,15 @@
  * The literals were computed by a third implementation that read only the doc.
  *
  * Pure: no I/O, no clock, no randomness. Integers are `bigint`, except the uint8/uint16 fields,
- * which are range-checked `number`s. Fails closed: an input that the escrow's `fund()` or
- * `initialize()` would reject throws {@link VNextCompileError} before any hash is returned.
+ * which are range-checked `number`s. Fails closed on every STATIC funding rule (doc §5.1): an input
+ * that `fund()` or `initialize()` would reject for its content alone throws {@link VNextCompileError}
+ * before any hash is returned.
+ *
+ * Compiling is NOT proof of fundability. Whether a job funds also depends on live chain state that
+ * a pure function cannot see (doc §5.2): cohorts enabled, the policy nonce not revoked or superseded,
+ * the job not already funded, the clone created and unsealed, the signatures valid for their signers,
+ * and the token pull exact. `preflightVNextFunding` (./preflight.ts) checks those against a live
+ * client and simulates the exact signed `fund()` call from the actual sender.
  */
 import {
   concat,
@@ -60,6 +67,8 @@ export const VNEXT = {
   MIN_BONDABLE_GROSS: 5n,
   /** `g` is narrowed to uint128 at funding (`toUint128`, reverts `ValueOverflow`). */
   MAX_GROSS: (1n << 128n) - 1n,
+  /** `reclaimAt` is narrowed to uint64 at funding (`toUint64`, reverts `ValueOverflow`). The ABI field stays uint256. */
+  MAX_RECLAIM_AT: (1n << 64n) - 1n,
   MAX_TIER: 3,
   MAX_SETTLEMENT_UNITS: 16,
   MAX_PAYOUT_LEGS_PER_UNIT: 16,
@@ -224,6 +233,10 @@ export interface CompiledVNextPolicy {
   chainId: bigint;
   factory: Address;
   implementation: Address;
+  /** The settlement token the compile assumed (recipient exclusion). The preflight checks it is `USDC()`. */
+  token: Address;
+  /** The funding time the compile assumed. The preflight re-checks the windows at the live block time. */
+  fundingTime: bigint;
   configs: readonly UnitConfig[];
   prePolicyRoot: Hex;
   identity: PolicyIdentity;
@@ -255,7 +268,7 @@ export type VNextCompileErrorCode =
   | "TOO_MANY_LEGS" // TooManyLegs
   | "TIER_REQUEST_MISMATCH" // TierRequestMismatch
   | "TIER_OUT_OF_RANGE" // TierOutOfRange
-  | "VALUE_OVERFLOW" // ValueOverflow (g > uint128)
+  | "VALUE_OVERFLOW" // ValueOverflow: g > 2^128-1 (toUint128) or reclaimAt > 2^64-1 (toUint64)
   | "FEE_BPS_TOO_HIGH" // "V1: feeBps>MAX"
   | "GROSS_BELOW_MIN" // "V1: G<minBondable"
   | "NET_ZERO" // "V1: N==0"
@@ -270,6 +283,7 @@ export type VNextCompileErrorCode =
   | "BAD_RECLAIM" // BadReclaim
   | "DUPLICATE_UNIT" // DuplicateUnit
   | "PARTY_COLLISION" // PartyCollision
+  | "ONLY_PAYER" // OnlyPayer: a sender other than the payer must carry the payer's signature
   | "POLICY_EXPIRED" // PolicyExpired
   | "SIGNATURE_TOO_LARGE" // SignatureTooLarge
   | "CONFIG_TOO_LARGE"; // ConfigTooLarge
@@ -750,7 +764,8 @@ export function jobIdHashOf(jobId: string): Hex {
 // ── The compiler ───────────────────────────────────────────────────────────────────────────────
 
 /**
- * Compile a V-next job end to end (doc §3), refusing every rule of doc §5 first.
+ * Compile a V-next job end to end (doc §3), refusing every STATIC rule of doc §5.1 first.
+ * A successful compile is not proof of fundability: run `preflightVNextFunding` for doc §5.2.
  *
  * Returns everything both parties need to sign and everything the funder needs to submit:
  * the escrow address, the unit ids, the digest (and the same digest as typed data), and the
@@ -790,6 +805,8 @@ export function compileVNextPolicy(input: VNextCompileInput): CompiledVNextPolic
     if (c.reclaimAt <= fundingTime || delay < VNEXT.MIN_RECLAIM_DELAY || delay > VNEXT.MAX_RECLAIM_DELAY) {
       fail("BAD_RECLAIM", `units[${i}]: reclaimAt must be fundingTime + [10 days, 365 days]`);
     }
+    // fund() then narrows it: `u.reclaimAt = toUint64(c.reclaimAt)` (VNextSettlementEscrow.sol:825).
+    if (c.reclaimAt > VNEXT.MAX_RECLAIM_AT) fail("VALUE_OVERFLOW", `units[${i}]: reclaimAt does not fit uint64`);
   });
   if (totalLegs > VNEXT.MAX_TOTAL_LEGS_PER_JOB) fail("TOO_MANY_LEGS", `${totalLegs} payout legs in the job`);
   if (fundingTime > expiry) fail("POLICY_EXPIRED", "the acceptance expires before the funding time");
@@ -844,6 +861,8 @@ export function compileVNextPolicy(input: VNextCompileInput): CompiledVNextPolic
     chainId,
     factory,
     implementation,
+    token,
+    fundingTime,
     configs,
     prePolicyRoot: root,
     identity,
@@ -876,8 +895,16 @@ export function compileVNextPolicy(input: VNextCompileInput): CompiledVNextPolic
   };
 }
 
-/** Refuse acceptance signatures the escrow would refuse (`SignatureTooLarge`) before submitting. */
-export function checkAcceptance(acceptance: PolicyAcceptance): PolicyAcceptance {
+/**
+ * Refuse an acceptance the escrow would refuse on its SHAPE: an oversized signature (`SignatureTooLarge`),
+ * or, when `ctx` names the sender, a missing payer signature from anyone other than the payer
+ * (`OnlyPayer`). Whether a signature is VALID for its signer is a live question (EOA vs ERC-1271, with
+ * the clone as the caller); `preflightVNextFunding` answers it by simulating `fund()`.
+ */
+export function checkAcceptance(
+  acceptance: PolicyAcceptance,
+  ctx?: { sender: Address; payer: Address },
+): PolicyAcceptance {
   uint(acceptance.expiry, "acceptance.expiry");
   for (const [what, sig] of [
     ["payerSignature", acceptance.payerSignature],
@@ -886,6 +913,13 @@ export function checkAcceptance(acceptance: PolicyAcceptance): PolicyAcceptance 
     if (typeof sig !== "string" || !/^0x([0-9a-fA-F]{2})*$/.test(sig)) fail("BAD_INPUT", `${what} is not hex bytes`);
     if ((sig.length - 2) / 2 > VNEXT.MAX_SIGNATURE_BYTES) {
       fail("SIGNATURE_TOO_LARGE", `${what} exceeds ${VNEXT.MAX_SIGNATURE_BYTES} bytes`);
+    }
+  }
+  if (ctx) {
+    const sender = address(ctx.sender, "sender");
+    const payer = address(ctx.payer, "payer");
+    if (!same(sender, payer) && acceptance.payerSignature.length <= 2) {
+      fail("ONLY_PAYER", "a sender other than the payer must carry the payer's signature");
     }
   }
   return acceptance;
