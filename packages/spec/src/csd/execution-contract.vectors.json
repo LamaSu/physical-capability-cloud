@@ -1,0 +1,415 @@
+{
+  "vector": "pcc.composition.accepted-deal/v2",
+  "note": "Public test data. canonicalPlan per node (N25) and acceptedDealDigest (domain PCC:accepted-deal:v2), from packages/spec/src/csd/accepted-plan-compiler.ts and canonical-plan.ts.",
+  "algorithms": {
+    "planHash": "\"sha256:\" + lowercase hex(sha256(UTF-8(canonicalize(canonicalPlan)))), canonicalize from packages/spec/src/util/canonical.ts",
+    "acceptedDealDigest": "0x + lowercase hex(sha256(UTF-8(canonicalize(preimage)))); the preimage is built by acceptedDealDigest() in accepted-plan-compiler.ts; each nodeToUnit entry carries planHash and canonicalPlanHash = planHash(canonicalPlan)"
+  },
+  "input": {
+    "planId": "plan.resv-1",
+    "requestId": "req-42",
+    "payer": "0x1111111111111111111111111111111111111111",
+    "currency": "USDC",
+    "feeBps": 235,
+    "feeRecipient": "0xfefefefefefefefefefefefefefefefefefefefe",
+    "reclaimAt": "1900604800",
+    "nodes": [
+      {
+        "capabilityId": "cap-print",
+        "capabilityType": "document-printing",
+        "csd": "document-print-and-mail",
+        "tierKey": "tier2",
+        "operator": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "payoutAddress": "0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1",
+        "grossBaseUnits": "6500000",
+        "matchedCapabilityDigest": "0x0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C",
+        "committedProgramHash": "0xD2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2",
+        "evidenceRequirements": [
+          {
+            "requirementId": "print.kernel-log",
+            "evidenceTypeId": "execution_completed",
+            "tier": 2
+          }
+        ],
+        "nodeId": "print",
+        "inputs": {
+          "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
+          "pages": 2,
+          "copies": 1,
+          "duplex": false,
+          "notes": null
+        },
+        "constraints": {
+          "deadline": "2026-09-30T00:00:00.000Z",
+          "maxRetries": 2
+        }
+      },
+      {
+        "capabilityId": "cap-mail",
+        "capabilityType": "mail.drop",
+        "csd": "courier-route",
+        "tierKey": "tier0",
+        "operator": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "payoutAddress": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "grossBaseUnits": "3250000",
+        "matchedCapabilityDigest": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "committedProgramHash": null,
+        "evidenceRequirements": [
+          {
+            "requirementId": "drop.declared",
+            "evidenceTypeId": "decl.self_attested",
+            "tier": 0
+          }
+        ],
+        "nodeId": "mail",
+        "inputs": {
+          "recipient": {
+            "name": "Clerk of Court",
+            "city": "Zürich — 東京 ✓",
+            "lines": [
+              "60 Centre St"
+            ]
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": "print",
+        "to": "mail"
+      }
+    ],
+    "reservation": {
+      "reservationId": "resv-1",
+      "requestId": "req-42",
+      "currency": "USDC",
+      "maxAmountBaseUnits": "20000000"
+    }
+  },
+  "expected": {
+    "acceptedDealDigest": "0xa466e01c743d78de550ffc3cbababe7f8e0d2bf1fccbc972ffd64f8aa557708b",
+    "nodes": [
+      {
+        "nodeId": "print",
+        "planHash": "sha256:cfb2ce9348a5ed33ba4aca35df73177f319ae3118fa53c342f7b9037515380fe",
+        "canonicalPlan": {
+          "schema": "pcc.canonical-plan/v2",
+          "planId": "plan.resv-1",
+          "planNodeId": "print",
+          "capability": {
+            "type": "document-printing",
+            "id": "cap-print",
+            "csd": "document-print-and-mail",
+            "matchedCapabilityDigest": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+          },
+          "operator": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "payTo": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "amount": {
+            "baseUnits": "6500000",
+            "currency": "USDC",
+            "decimals": 6
+          },
+          "job": {
+            "jobId": "plan.resv-1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "milestoneIndex": 0,
+            "stepId": "print"
+          },
+          "assurance": {
+            "tier": 2,
+            "tierKey": "tier2",
+            "committedProgramHash": "0xd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+            "evidence": [
+              {
+                "requirementId": "print.kernel-log",
+                "evidenceTypeId": "execution_completed",
+                "tier": 2
+              }
+            ]
+          },
+          "inputs": {
+            "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
+            "pages": 2,
+            "copies": 1,
+            "duplex": false,
+            "notes": null
+          },
+          "constraints": {
+            "deadline": "2026-09-30T00:00:00.000Z",
+            "maxRetries": 2
+          }
+        }
+      },
+      {
+        "nodeId": "mail",
+        "planHash": "sha256:fe79548261d445eb849b051552dfab5aaf818f64839367f31f223dbe6dafb805",
+        "canonicalPlan": {
+          "schema": "pcc.canonical-plan/v2",
+          "planId": "plan.resv-1",
+          "planNodeId": "mail",
+          "capability": {
+            "type": "mail.drop",
+            "id": "cap-mail",
+            "csd": "courier-route",
+            "matchedCapabilityDigest": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+          },
+          "operator": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "payTo": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          "amount": {
+            "baseUnits": "3250000",
+            "currency": "USDC",
+            "decimals": 6
+          },
+          "job": {
+            "jobId": "plan.resv-1:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "milestoneIndex": 0,
+            "stepId": "mail"
+          },
+          "assurance": {
+            "tier": 0,
+            "tierKey": "tier0",
+            "committedProgramHash": null,
+            "evidence": [
+              {
+                "requirementId": "drop.declared",
+                "evidenceTypeId": "decl.self_attested",
+                "tier": 0
+              }
+            ]
+          },
+          "inputs": {
+            "recipient": {
+              "name": "Clerk of Court",
+              "city": "Zürich — 東京 ✓",
+              "lines": [
+                "60 Centre St"
+              ]
+            }
+          },
+          "constraints": {}
+        }
+      }
+    ],
+    "compiledPlan": {
+      "planId": "plan.resv-1",
+      "requestId": "req-42",
+      "reservationId": "resv-1",
+      "currency": "USDC",
+      "currencyDecimals": 6,
+      "totalObligationBaseUnits": "9750000",
+      "compositionRoot": "0xe9dadafca56c33566b2f81533fd1c0b836fd46313714ad7d4cbe525cf5fe674b",
+      "capabilityContractRoot": "0xae4c8a8cf98495e583414815fbcd17776335d4a6f2f3695749aba1a3bdb9e358",
+      "agreementHash": null,
+      "economicTermsHash": null,
+      "rightsTermsHash": null,
+      "jobs": [
+        {
+          "jobId": "plan.resv-1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operator": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "payer": "0x1111111111111111111111111111111111111111",
+          "units": [
+            {
+              "milestoneIndex": "0",
+              "stepId": "0x6e923edb1ef64a833d131ac69c8684eccd0a01702a18fa08ddcdef24e280c86d",
+              "requiredTier": 2,
+              "requestedTier": 2,
+              "g": "6500000",
+              "f": "152750",
+              "n": "6347250",
+              "feeBps": 235,
+              "feeRecipient": "0xfefefefefefefefefefefefefefefefefefefefe",
+              "reclaimAt": "1900604800",
+              "compositionSchemaVersion": 3,
+              "compositionRoot": "0xe9dadafca56c33566b2f81533fd1c0b836fd46313714ad7d4cbe525cf5fe674b",
+              "payouts": [
+                {
+                  "recipient": "0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1",
+                  "amount": "6347250"
+                }
+              ]
+            }
+          ],
+          "nodeIds": [
+            "print"
+          ]
+        },
+        {
+          "jobId": "plan.resv-1:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "operator": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "payer": "0x1111111111111111111111111111111111111111",
+          "units": [
+            {
+              "milestoneIndex": "0",
+              "stepId": "0xb86010ddf187dd77298d922b8fb10ac86e6231db9850bab38e208e15809e355b",
+              "requiredTier": 0,
+              "requestedTier": 0,
+              "g": "3250000",
+              "f": "76375",
+              "n": "3173625",
+              "feeBps": 235,
+              "feeRecipient": "0xfefefefefefefefefefefefefefefefefefefefe",
+              "reclaimAt": "1900604800",
+              "compositionSchemaVersion": 3,
+              "compositionRoot": "0xe9dadafca56c33566b2f81533fd1c0b836fd46313714ad7d4cbe525cf5fe674b",
+              "payouts": [
+                {
+                  "recipient": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+                  "amount": "3173625"
+                }
+              ]
+            }
+          ],
+          "nodeIds": [
+            "mail"
+          ]
+        }
+      ],
+      "nodeToUnit": [
+        {
+          "nodeId": "print",
+          "jobIndex": 0,
+          "jobId": "plan.resv-1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operator": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "milestoneIndex": 0,
+          "stepId": "print",
+          "stepIdBytes32": "0x6e923edb1ef64a833d131ac69c8684eccd0a01702a18fa08ddcdef24e280c86d",
+          "tier": 2,
+          "committedProgramHash": "0xD2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2D2",
+          "canonicalPlan": {
+            "schema": "pcc.canonical-plan/v2",
+            "planId": "plan.resv-1",
+            "planNodeId": "print",
+            "capability": {
+              "type": "document-printing",
+              "id": "cap-print",
+              "csd": "document-print-and-mail",
+              "matchedCapabilityDigest": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+            },
+            "operator": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payTo": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "amount": {
+              "baseUnits": "6500000",
+              "currency": "USDC",
+              "decimals": 6
+            },
+            "job": {
+              "jobId": "plan.resv-1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "milestoneIndex": 0,
+              "stepId": "print"
+            },
+            "assurance": {
+              "tier": 2,
+              "tierKey": "tier2",
+              "committedProgramHash": "0xd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+              "evidence": [
+                {
+                  "requirementId": "print.kernel-log",
+                  "evidenceTypeId": "execution_completed",
+                  "tier": 2
+                }
+              ]
+            },
+            "inputs": {
+              "documentHash": "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3",
+              "pages": 2,
+              "copies": 1,
+              "duplex": false,
+              "notes": null
+            },
+            "constraints": {
+              "deadline": "2026-09-30T00:00:00.000Z",
+              "maxRetries": 2
+            }
+          },
+          "planHash": "sha256:cfb2ce9348a5ed33ba4aca35df73177f319ae3118fa53c342f7b9037515380fe"
+        },
+        {
+          "nodeId": "mail",
+          "jobIndex": 1,
+          "jobId": "plan.resv-1:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "operator": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "milestoneIndex": 0,
+          "stepId": "mail",
+          "stepIdBytes32": "0xb86010ddf187dd77298d922b8fb10ac86e6231db9850bab38e208e15809e355b",
+          "tier": 0,
+          "committedProgramHash": null,
+          "canonicalPlan": {
+            "schema": "pcc.canonical-plan/v2",
+            "planId": "plan.resv-1",
+            "planNodeId": "mail",
+            "capability": {
+              "type": "mail.drop",
+              "id": "cap-mail",
+              "csd": "courier-route",
+              "matchedCapabilityDigest": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+            },
+            "operator": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "payTo": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "amount": {
+              "baseUnits": "3250000",
+              "currency": "USDC",
+              "decimals": 6
+            },
+            "job": {
+              "jobId": "plan.resv-1:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "milestoneIndex": 0,
+              "stepId": "mail"
+            },
+            "assurance": {
+              "tier": 0,
+              "tierKey": "tier0",
+              "committedProgramHash": null,
+              "evidence": [
+                {
+                  "requirementId": "drop.declared",
+                  "evidenceTypeId": "decl.self_attested",
+                  "tier": 0
+                }
+              ]
+            },
+            "inputs": {
+              "recipient": {
+                "name": "Clerk of Court",
+                "city": "Zürich — 東京 ✓",
+                "lines": [
+                  "60 Centre St"
+                ]
+              }
+            },
+            "constraints": {}
+          },
+          "planHash": "sha256:fe79548261d445eb849b051552dfab5aaf818f64839367f31f223dbe6dafb805"
+        }
+      ],
+      "acceptedDealDigest": "0xa466e01c743d78de550ffc3cbababe7f8e0d2bf1fccbc972ffd64f8aa557708b"
+    }
+  },
+  "mutations": [
+    {
+      "name": "print-pages-2-to-3",
+      "node": "print",
+      "change": "print.inputs.pages: 2 -> 3",
+      "expected": {
+        "planHash": "sha256:bdfc842dab61bcedd0ef93f3fe6cf0aa18782a7924268a1a09bfec260ab00589",
+        "acceptedDealDigest": "0x89bbd97072da4da65b7a2d3c7e45ff707edc84ee661794639cbc68c9bd13ad7a"
+      }
+    },
+    {
+      "name": "mail-constraint-added",
+      "node": "mail",
+      "change": "mail.constraints: {} -> {maxRetries: 1}",
+      "expected": {
+        "planHash": "sha256:1077cd9368f5f618d32092e29872c0fc7e28a13b1b74b2c08b5beca4fcee51a9",
+        "acceptedDealDigest": "0x03a8487e3ec309cb2c365e4a129da75e7e24624bd7432eccb0e3a3b9555689cd"
+      }
+    },
+    {
+      "name": "print-payee",
+      "node": "print",
+      "change": "print payTo: 0xa1a1... -> 0xa2a2...",
+      "expected": {
+        "planHash": "sha256:dd5f7fd1bf93305766cc53c4a59a4568a232c4cd0255a3cccd6c399341f5b4a0",
+        "acceptedDealDigest": "0x06ec227378a59e6a5fd871dd74eb3e18aabd1d813f2c5329572fecad09c7ea46"
+      }
+    }
+  ]
+}

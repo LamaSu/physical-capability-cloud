@@ -28,11 +28,15 @@
 
 import { createHash } from "node:crypto";
 import {
+  canonicalize,
   compileAcceptedPlan,
+  copyPlanJson,
   type Address,
   type CompileViolation,
   type CompiledAcceptedPlan,
   type EvidenceRequirement,
+  type PlanJsonObject,
+  type PlanJsonRefusal,
   type ProgramGate,
 } from "@pcc/spec";
 import {
@@ -47,6 +51,13 @@ import {
 export interface ExternalPlanNode extends SnapshotClaim {
   /** Optional cross-check. The program itself is always resolved server-side. */
   committedProgramHash?: string | null;
+  /**
+   * N25: what the node runs ON, as plain JSON (e.g. the document hash and page count). The caller's
+   * content, never authority. It is sealed in the accepted deal through the node's `planHash`.
+   */
+  inputs?: Record<string, unknown>;
+  /** N25: execution constraints as plain JSON (e.g. a deadline). Sealed like `inputs`. */
+  constraints?: Record<string, unknown>;
 }
 
 export interface ExternalPlanSubmission {
@@ -102,8 +113,16 @@ export interface SeamContext {
   tenantId?: string | null;
 }
 
+/** One execution-JSON field the seam refused (N25), in (nodeId, field) order. */
+export interface ExecJsonProblem {
+  nodeId: string;
+  field: "inputs" | "constraints";
+  reason: PlanJsonRefusal;
+}
+
 export type SeamRefusal =
   | { stage: "submission"; reason: "malformed-submission" }
+  | { stage: "submission"; reason: "invalid-execution-json"; fields: ExecJsonProblem[] }
   | {
       stage: "reservation";
       reason: "not-found" | "not-issued" | "expired" | "wrong-principal" | "wrong-request" | "malformed-reservation";
@@ -155,12 +174,35 @@ const NODE_FIELDS = [
   "capabilityType", "csd", "matchedCapabilityDigest", "committedProgramHash",
 ] as const;
 
-/** A submission as owned plain data: every field read exactly once; non-primitives become NOT_DATA. */
+/** A node's execution JSON as read once (N25): absent, an owned plain-JSON copy, or why it was refused. */
+export type ExecJsonSnapshot =
+  | { readonly kind: "absent" }
+  | { readonly kind: "json"; readonly value: PlanJsonObject }
+  | { readonly kind: "invalid"; readonly reason: PlanJsonRefusal };
+
+export type SubmissionNodeSnapshot = Readonly<Record<(typeof NODE_FIELDS)[number], unknown>> & {
+  readonly inputs: ExecJsonSnapshot;
+  readonly constraints: ExecJsonSnapshot;
+};
+
+/**
+ * A submission as owned plain data: every field read exactly once. Non-primitives become NOT_DATA,
+ * except each node's execution JSON, which is copied as bounded plain JSON (`copyPlanJson`).
+ */
 export interface SubmissionSnapshot {
   requestId: unknown;
   reservationId: unknown;
-  nodes: ReadonlyArray<Readonly<Record<(typeof NODE_FIELDS)[number], unknown>> | null>;
+  nodes: ReadonlyArray<SubmissionNodeSnapshot | null>;
   edges: ReadonlyArray<Readonly<{ from: unknown; to: unknown }> | null>;
+}
+
+const ABSENT: ExecJsonSnapshot = Object.freeze({ kind: "absent" });
+
+/** Read one execution-JSON field (its value was read once by the caller of this function). */
+function execSnapshot(x: unknown): ExecJsonSnapshot {
+  if (x === undefined) return ABSENT;
+  const c = copyPlanJson(x);
+  return Object.freeze(c.ok ? { kind: "json" as const, value: c.value } : { kind: "invalid" as const, reason: c.reason });
 }
 
 /** Read a submission once. Null when it cannot be read as a submission at all. Never throws. */
@@ -176,8 +218,10 @@ export function snapshotSubmission(sub: unknown): SubmissionSnapshot | null {
     const nodes = nodesRaw.map((n) => {
       if (typeof n !== "object" || n === null) return null;
       const o = n as Record<string, unknown>;
-      const out = {} as Record<(typeof NODE_FIELDS)[number], unknown>;
+      const out = {} as Record<(typeof NODE_FIELDS)[number], unknown> & { inputs: ExecJsonSnapshot; constraints: ExecJsonSnapshot };
       for (const f of NODE_FIELDS) out[f] = leaf(o[f]);
+      out.inputs = execSnapshot(o.inputs);
+      out.constraints = execSnapshot(o.constraints);
       return Object.freeze(out);
     });
     const edges = edgesRaw.map((e) => {
@@ -202,13 +246,21 @@ function tag(v: unknown): unknown[] {
   return ["x"];
 }
 
-/** sha256 over a deterministic encoding of the submission AS EVALUATED (fields in a fixed order). */
+/** Execution JSON's encoding: absent, `{}` and an invalid value all differ; JSON by its canonical form. */
+function execTag(e: ExecJsonSnapshot): unknown[] {
+  return e.kind === "absent" ? ["ea"] : e.kind === "json" ? ["ej", canonicalize(e.value)] : ["ex", e.reason];
+}
+
+/**
+ * sha256 over a deterministic encoding of the submission AS EVALUATED (fields in a fixed order).
+ * v2 added each node's execution JSON (N25).
+ */
 export function submissionDigest(snap: SubmissionSnapshot): `0x${string}` {
   const pre = JSON.stringify([
-    "PCC:external-plan-submission:v1",
+    "PCC:external-plan-submission:v2",
     tag(snap.requestId),
     tag(snap.reservationId),
-    snap.nodes.map((n) => (n === null ? ["null-node"] : NODE_FIELDS.map((f) => tag(n[f])))),
+    snap.nodes.map((n) => (n === null ? ["null-node"] : [...NODE_FIELDS.map((f) => tag(n[f])), execTag(n.inputs), execTag(n.constraints)])),
     snap.edges.map((e) => (e === null ? ["null-edge"] : [tag(e.from), tag(e.to)])),
   ]);
   return `0x${createHash("sha256").update(pre, "utf8").digest("hex")}`;
@@ -312,6 +364,21 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     ...(verdicts ? { verdicts } : {}),
   });
 
+  // N25: execution JSON that is not bounded plain JSON is refused, naming EVERY bad field in a fixed
+  // order. It is content, so this reveals nothing about any reservation.
+  const badExec: ExecJsonProblem[] = [];
+  for (const n of snap.nodes) {
+    if (!n) continue;
+    for (const field of ["inputs", "constraints"] as const) {
+      const e = n[field];
+      if (e.kind === "invalid") badExec.push({ nodeId: typeof n.nodeId === "string" ? n.nodeId : "", field, reason: e.reason });
+    }
+  }
+  if (badExec.length > 0) {
+    badExec.sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : a.field < b.field ? -1 : a.field > b.field ? 1 : 0));
+    return refuse({ stage: "submission", reason: "invalid-execution-json", fields: badExec });
+  }
+
   // Authority first. The id in the submission is only a lookup key; authority is the stored record
   // plus the authenticated principal, and an empty principal matches nothing.
   let principal: unknown;
@@ -348,7 +415,14 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   }
   const resolved = verdicts.map((v) => (v as Extract<NodeVerdict, { status: "current" }>).resolved);
   const claimed = new Map<string, unknown>();
-  for (const n of snap.nodes) if (n && typeof n.nodeId === "string") claimed.set(n.nodeId, n.committedProgramHash);
+  const execOf = new Map<string, SubmissionNodeSnapshot>();
+  for (const n of snap.nodes) {
+    if (n && typeof n.nodeId === "string") {
+      claimed.set(n.nodeId, n.committedProgramHash);
+      execOf.set(n.nodeId, n);
+    }
+  }
+  const execValue = (e: ExecJsonSnapshot | undefined): PlanJsonObject | undefined => (e?.kind === "json" ? e.value : undefined);
 
   const nodes = [];
   for (const r of resolved) {
@@ -382,6 +456,9 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
       matchedCapabilityDigest: r.matchedCapabilityDigest,
       committedProgramHash: program, // null here at a non-zero tier is refused by the compiler
       evidenceRequirements: evidence, // the compiler copies it once into owned data
+      // N25: the node's own execution JSON, already an owned copy (absent means {}).
+      inputs: execValue(execOf.get(r.nodeId)?.inputs),
+      constraints: execValue(execOf.get(r.nodeId)?.constraints),
     });
   }
 

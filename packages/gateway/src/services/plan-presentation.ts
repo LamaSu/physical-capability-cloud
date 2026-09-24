@@ -25,10 +25,13 @@
 
 import {
   acceptedDealDigest,
+  copyPlanJson,
+  type CanonicalPlan,
   type CompiledAcceptedPlan,
   type CompiledJob,
   type NodeUnitBinding,
   type PayoutEntry,
+  type PlanJsonObject,
   type UnitConfigInput,
 } from "@pcc/spec";
 import { planIdForReservation, snapshotSubmission, submissionDigest, type ExternalPlanSubmission, type SeamResult, type SubmissionSnapshot } from "./external-plan-seam.js";
@@ -98,6 +101,11 @@ export interface PlanNodePresentation {
   unit?: { jobId: string; milestoneIndex: number; stepId: string; stepIdBytes32: string; tier: number; committedProgramHash: string | null };
   /** The unit's money, once compiled. */
   money?: { gross: Money; fee: Money; net: Money; payouts: Array<{ recipient: string; amount: Money }> };
+  /**
+   * What the unit runs ON, once compiled (N25): the node's execution inputs and constraints as the deal
+   * seals them, and the planHash VCR recomputes. From the intact, bound plan, never the proposal.
+   */
+  execution?: { planHash: string; inputs: PlanJsonObject; constraints: PlanJsonObject };
 }
 
 export interface PlanPresentation {
@@ -128,6 +136,7 @@ export interface PlanPresentation {
     acceptedDealDigest: string;
     compositionRoot: string;
     capabilityContractRoot: string;
+    agreementHash: string | null;
     economicTermsHash: string | null;
     rightsTermsHash: string | null;
     sealed: boolean;
@@ -287,6 +296,47 @@ function readJob(x: unknown): CompiledJob {
   return job as CompiledJob;
 }
 
+/** Execution JSON (N25), copied once as bounded plain JSON; anything else is invalid. */
+function planJson(x: unknown): PlanJsonObject {
+  const c = copyPlanJson(x);
+  need(c.ok);
+  return (c as { ok: true; value: PlanJsonObject }).value;
+}
+
+/** An owned copy of a node's canonicalPlan, field by field (its hash is re-derived in the digest). */
+function readCanonicalPlan(x: unknown): CanonicalPlan {
+  const o = obj(x);
+  const cap = obj(o.capability);
+  const amount = obj(o.amount);
+  const job = obj(o.job);
+  const assurance = obj(o.assurance);
+  const cp = {
+    schema: str(o.schema),
+    planId: str(o.planId),
+    planNodeId: str(o.planNodeId),
+    capability: { type: str(cap.type), id: str(cap.id), csd: str(cap.csd), matchedCapabilityDigest: str(cap.matchedCapabilityDigest) },
+    operator: str(o.operator),
+    payTo: str(o.payTo),
+    amount: { baseUnits: str(amount.baseUnits), currency: str(amount.currency), decimals: amount.decimals },
+    job: { jobId: str(job.jobId), milestoneIndex: job.milestoneIndex, stepId: str(job.stepId) },
+    assurance: {
+      tier: assurance.tier,
+      tierKey: str(assurance.tierKey),
+      committedProgramHash: strOrNull(assurance.committedProgramHash),
+      evidence: listOf(assurance.evidence, 64, (r) => {
+        const e = obj(r);
+        const out = { requirementId: str(e.requirementId), evidenceTypeId: str(e.evidenceTypeId), tier: e.tier };
+        need(isInt(out.tier, 0, 3));
+        return out;
+      }),
+    },
+    inputs: planJson(o.inputs),
+    constraints: planJson(o.constraints),
+  };
+  need(isInt(cp.amount.decimals, 0, 18) && isInt(cp.job.milestoneIndex, 0, 15) && isInt(cp.assurance.tier, 0, 3));
+  return cp as CanonicalPlan;
+}
+
 function readBinding(x: unknown): NodeUnitBinding {
   const o = obj(x);
   const b = {
@@ -299,6 +349,8 @@ function readBinding(x: unknown): NodeUnitBinding {
     stepIdBytes32: str(o.stepIdBytes32),
     tier: o.tier,
     committedProgramHash: strOrNull(o.committedProgramHash),
+    canonicalPlan: readCanonicalPlan(o.canonicalPlan),
+    planHash: str(o.planHash),
   };
   need(isInt(b.jobIndex, 0, 1023) && isInt(b.milestoneIndex, 0, 15) && isInt(b.tier, 0, 3));
   return b as NodeUnitBinding;
@@ -317,6 +369,7 @@ function readPlan(x: unknown): CompiledAcceptedPlan {
     totalObligationBaseUnits: o.totalObligationBaseUnits,
     compositionRoot: str(o.compositionRoot),
     capabilityContractRoot: str(o.capabilityContractRoot),
+    agreementHash: strOrNull(o.agreementHash),
     economicTermsHash: strOrNull(o.economicTermsHash),
     rightsTermsHash: strOrNull(o.rightsTermsHash),
     jobs: listOf(o.jobs, 1024, readJob),
@@ -338,6 +391,13 @@ function readRefusal(x: unknown): RefusalView {
   else {
     out.reason = str(o.reason);
     if (o.nodeId !== undefined) out.nodeId = str(o.nodeId);
+    // N25: each refused execution-JSON field, as "<field>:<reason>@<nodeId>".
+    if (stage === "submission" && out.reason === "invalid-execution-json") {
+      out.codes = listOf(o.fields, 2048, (f) => {
+        const e = obj(f);
+        return `${str(e.field)}:${str(e.reason)}@${str(e.nodeId)}`;
+      });
+    }
   }
   return out;
 }
@@ -376,7 +436,18 @@ function planIsBound(plan: CompiledAcceptedPlan, snap: SubmissionSnapshot, nodeI
   // Every binding names exactly the unit that carries its node, so identity and money cannot mix.
   return plan.nodeToUnit.every((b) => {
     const job = plan.jobs[b.jobIndex];
-    return job !== undefined && job.jobId === b.jobId && job.nodeIds[b.milestoneIndex] === b.nodeId && job.units[b.milestoneIndex] !== undefined;
+    const cp = b.canonicalPlan;
+    return (
+      job !== undefined &&
+      job.jobId === b.jobId &&
+      job.nodeIds[b.milestoneIndex] === b.nodeId &&
+      job.units[b.milestoneIndex] !== undefined &&
+      // N25: the node's execution contract names this plan, this node and this unit.
+      cp.planId === plan.planId &&
+      cp.planNodeId === b.nodeId &&
+      cp.job.jobId === b.jobId &&
+      cp.job.milestoneIndex === b.milestoneIndex
+    );
   });
 }
 
@@ -465,6 +536,7 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
             net: money(u.n, plan),
             payouts: u.payouts.map((p) => ({ recipient: p.recipient, amount: money(p.amount, plan) })),
           };
+          out.execution = { planHash: b.planHash, inputs: b.canonicalPlan.inputs, constraints: b.canonicalPlan.constraints };
         }
         return out;
       })
@@ -517,6 +589,7 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
         acceptedDealDigest: plan.acceptedDealDigest,
         compositionRoot: plan.compositionRoot,
         capabilityContractRoot: plan.capabilityContractRoot,
+        agreementHash: plan.agreementHash,
         economicTermsHash: plan.economicTermsHash,
         rightsTermsHash: plan.rightsTermsHash,
         sealed,
