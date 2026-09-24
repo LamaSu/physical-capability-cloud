@@ -28,6 +28,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** @pcc/ui's source: shell chrome such as the StatusBar lives there. Its files are keyed "ui:<path>". */
+const UI_SRC = join(SRC, "../../../packages/ui/src");
 
 /** Patterns that mark fixture data or a fallback to it. */
 const PATTERNS: Array<[name: string, rx: RegExp]> = [
@@ -37,6 +39,18 @@ const PATTERNS: Array<[name: string, rx: RegExp]> = [
   ["mock module import", /from\s+['"][./]+(?:api\/)?mock-(?:data|onboarding-data|revenue-data)(?:\.js)?['"]/g],
   ["fallback-to-mock comment", /(?:keep|fall ?back to|falls back to|fallback to|fall through to)\s+mock|(?<!\bno\s)mock\s+fallback/gi],
   ["mock/fallback flag", /\busing(?:Mock|Fallback)\b/g],
+  // Onboarding that ends in a mock device is fabricated capability (product-steward #2373 gap 1).
+  ["mock adapter registration", /\b(?:adapterType|adapterKind|adapter)\s*[:=]\s*["'`]mock["'`]/g],
+  ["dev kernel id", /\bkernel_dev_\w+/g],
+  // Authoritative values written as literals (gap 2; the StatusBar and Settings regressions #352 fixed).
+  [
+    "authoritative prop literal",
+    /\s(?:kernelsOnline|activeJobs|networkStatus|blockNumber|balance|usdcBalance|walletBalance|walletAddress|address)=(?:\{\s*(?:-?\d|["'`]|true|false)|["'])/g,
+  ],
+  ["connected default", /\bnetworkStatus\s*=\s*["'`]connected/g],
+  ["placeholder address", /0x1234567890abcdef/gi],
+  // Fixture modules outside src/demo/ (gap 3: components/viewer/fixtures.ts).
+  ["fixtures module import", /from\s+['"](?:\.{1,2}\/)+(?:(?!demo\/)[\w-]+\/)*fixtures(?:\.js)?['"]/g],
 ];
 
 /** Identifiers that match a pattern but name real API fields, not fixtures. */
@@ -66,6 +80,8 @@ const KNOWN_OFFENDERS: Record<string, string> = {
   "pages/onboard/Step5_Pricing.tsx": "adk 4f6668ed",
   "pages/onboard/Step6_Operator.tsx": "adk 4f6668ed",
   "pages/SetupAgentPage.tsx": "adk 4f6668ed",
+  "pages/onboard/Step7_Review.tsx": "adk 4f6668ed: registers adapterType 'mock' (the EXPERIENCE-COMPLETE blocker)",
+  "pages/StartPage.tsx": "adk 4f6668ed: registers against kernel_dev_001 / adapter 'mock'",
   // logistics N-b: product-steward 61243bdd / readmodels, carrier af177c03 supplies the mapping (#2257, #2264)
   "pages/InstallationDetailPage.tsx": "logistics N-b (carrier #2264)",
   "pages/ShipmentDetailPage.tsx": "logistics N-b (carrier #2264)",
@@ -96,6 +112,7 @@ function productionFiles(dir: string): string[] {
 }
 
 function relPath(full: string): string {
+  if (full.startsWith(UI_SRC)) return "ui:" + relative(UI_SRC, full).split(sep).join("/");
   return relative(SRC, full).split(sep).join("/");
 }
 
@@ -108,7 +125,7 @@ interface Hit {
 
 function scan(): Map<string, Hit[]> {
   const hits = new Map<string, Hit[]>();
-  for (const full of productionFiles(SRC)) {
+  for (const full of [...productionFiles(SRC), ...productionFiles(UI_SRC)]) {
     const file = relPath(full);
     if (/^api\/mock-(data|onboarding-data|revenue-data)\.ts$/.test(file)) continue;
     const lines = readFileSync(full, "utf-8").split("\n");
@@ -163,6 +180,11 @@ describe("no production mock (ratchet)", () => {
       'import { mockJobs } from "../api/mock-data.js";',
       ".catch(() => {}); // keep mock",
       "const [usingMock, setUsingMock] = useState(false);",
+      'adapterType: "mock",',
+      "const kernelId = \"kernel_dev_001\";",
+      "<StatusBar kernelsOnline={2} activeJobs={3} />",
+      '<AddressDisplay address="0x1234567890abcdef1234567890abcdef12345678" />',
+      'import { makeDemoPointMap3DTrace } from "../components/viewer/fixtures.js";',
     ];
     for (const line of sample) {
       expect(PATTERNS.some(([, rx]) => new RegExp(rx.source, rx.flags).test(line)), line).toBe(true);
