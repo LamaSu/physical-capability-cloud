@@ -47,6 +47,8 @@ describe("isSecretFieldName", () => {
       "operatorWalletPrivateKey", "webhookSecret", "webhook_secret", "secretAccessKey", "stripe_secret_key",
       "x-api-key", "set-cookie", "sessionToken", "x-admin-token", "signingKey", "passwordHash", "seed_phrase",
       "credentials", "jwt",
+      // WP-D R6: generic auth names and the session header/cookie
+      "auth", "llm_auth", "basicAuth", "hmac", "webhookHmac", "X-PCC-Session", "pcc_session",
     ]) {
       expect(isSecretFieldName(name), name).toBe(true);
     }
@@ -157,5 +159,145 @@ describe("redactSecretsDeep", () => {
     expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
     expect(JSON.stringify(out)).toBe(`{"__proto__":{"api_key":"${REDACTED_VALUE}"},"b":1}`);
     expect(({} as Record<string, unknown>).api_key).toBeUndefined();
+  });
+
+  it("many colliding redacted keys stay unique without quadratic renaming", () => {
+    const input: Record<string, number> = {};
+    for (let i = 0; i < 20_000; i += 1) input[`pcc_live_${String(i).padStart(8, "0")}`] = i;
+    const t0 = performance.now();
+    const out = redactSecretsDeep(input);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+    expect(Object.keys(out)).toHaveLength(20_000);
+    expect(JSON.stringify(out)).not.toContain("pcc_live_");
+  });
+});
+
+// ── WP-D R1: every deep-scan shape is linear ─────────────────────────
+
+describe("redactSecretsDeep runs in linear time (WP-D R1)", () => {
+  const SIZE = 200 * 1024;
+  const fill = (unit: string) => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE);
+  // The reviewer's probes (80 KB of '-eyJ' took 1.5 s in the old JWT regex) and the
+  // same trick aimed at every other shape and context rule.
+  const ADVERSARIAL: Record<string, string> = {
+    "-eyJ": fill("-eyJ"),
+    "-eyJaaaaaa.": fill("-eyJaaaaaa."),
+    "_eyJ two segments": fill("_eyJabcdef.ghijkl."),
+    "-sk-": fill("-sk-"),
+    "short pcc keys": fill("pcc_live_abcde."),
+    "63 hex + g": fill("a".repeat(63) + "g"),
+    "PEM with no END": `-----BEGIN PRIVATE KEY-----${fill("-----END A")}`,
+    "Bearer ": fill("Bearer "),
+    "Basic ": fill("Basic YTpi "),
+    "authorization: ": fill("authorization: "),
+    "://userinfo": fill(`://${"a".repeat(50)}:`),
+    "PKCS#8 head": fill("MC4CAQAwBQYDK2VwBCIEI+"),
+    "JSON array of -eyJ": JSON.stringify(Array.from({ length: SIZE / 7 }, () => "-eyJ")),
+  };
+
+  it("redacts each 200 KB adversarial string in under 100 ms", () => {
+    redactSecretsDeep(`warm up ${LIVE_KEY} Bearer ${JWT}`); // compile the regexes first
+    for (const [name, input] of Object.entries(ADVERSARIAL)) {
+      const t0 = performance.now();
+      redactSecretsDeep(input);
+      const ms = performance.now() - t0;
+      expect(ms, `${name}: ${ms.toFixed(1)} ms`).toBeLessThan(100);
+    }
+  });
+
+  it("still finds a real secret at the end of adversarial text", () => {
+    const { out } = collect(`${fill("-eyJ")} ${LIVE_KEY} ${JWT}`);
+    expect(out).not.toContain(LIVE_KEY);
+    expect(out).not.toContain(JWT);
+    expect(out.endsWith(`${REDACTED_VALUE} ${REDACTED_VALUE}`)).toBe(true);
+  });
+
+  it("a JWT after '-' or '_' is still caught, as the regex caught it", () => {
+    for (const prefix of ["-", "_", "x_", ".", "="]) {
+      const { out } = collect(`${prefix}${JWT} rest`);
+      expect(out, prefix).toBe(`${prefix}${REDACTED_VALUE} rest`);
+    }
+  });
+});
+
+// ── WP-D R6: duplicate keys, plural and generic names, Basic, userinfo ─
+
+describe("redactSecretsDeep closes the R6 gaps", () => {
+  it("a duplicate key in embedded JSON cannot hide a secret from the scrub", () => {
+    for (const text of [
+      `{"k":"${LIVE_KEY}","k":"x"}`, // a key-shaped value hidden by a later duplicate
+      `{"api_key":"opaque-secret-value","api_key":null}`, // an opaque secret hidden the same way
+      `[{"note":"${LIVE_KEY}","note":"fine"}]`,
+    ]) {
+      for (const value of [text, { body: text }, [text]]) {
+        const json = JSON.stringify(redactSecretsDeep(value));
+        expect(json, text).not.toContain(LIVE_KEY);
+        expect(json, text).not.toContain("opaque-secret-value");
+      }
+    }
+  });
+
+  it("an unchanged JSON string is still scrubbed for shapes the parse cannot see", () => {
+    // A 64-digit JSON number is a float once parsed; the text still holds the digits.
+    const text = `{"n":${"1".repeat(64)}}`;
+    expect(redactSecretsDeep(text)).toBe(`{"n":${REDACTED_VALUE}}`);
+  });
+
+  it("plural secret names hold collections of secrets; a number under one is a count", () => {
+    const uuid = "3f2b8c1e-9d4a-4b7e-a2c6-5e8f1d0b9a7c";
+    const { out, json } = collect({
+      api_keys: ["opaque-one"], tokens: [uuid], sessionTokens: [uuid], refresh_tokens: { a: uuid },
+      maxTokens: 4096, input_tokens: 12, total_tokens: 30,
+    });
+    expect(json).not.toContain(uuid);
+    expect(json).not.toContain("opaque-one");
+    expect(out).toMatchObject({ maxTokens: 4096, input_tokens: 12, total_tokens: 30 });
+  });
+
+  it("generic auth, hmac, session and key names are secrets; parameter keys are not", () => {
+    const uuid = "7a1c9e3b-2f4d-4c8a-b6e0-1d5f9a3c7e2b";
+    const b64 = "q8V3xZ2mR7tK9pL4wN6yB1cD5fG0hJ==";
+    const hex = "9f".repeat(20);
+    const { out, json } = collect({
+      auth: uuid, hmac: b64, "X-PCC-Session": uuid, llm_auth: "Bearer opaque", key: b64,
+      signing: { key: "short" }, wallet: { keys: ["abc"] }, hexKey: { key: hex },
+      params: [{ key: "gradient_duration_min" }, { key: "color" }], keys: { active: 2, wildcard_keys: 0 },
+    });
+    for (const secret of [uuid, b64, hex, "short", "abc", "opaque"]) expect(json, secret).not.toContain(secret);
+    expect(out.params).toEqual([{ key: "gradient_duration_min" }, { key: "color" }]);
+    expect(out.keys).toEqual({ active: 2, wildcard_keys: 0 });
+  });
+
+  it("scrubs a Basic credential, any Authorization value, and URL userinfo from text", () => {
+    const basic = Buffer.from("operator:hunter2-password").toString("base64");
+    const text = [
+      `curl -H 'Authorization: Basic ${basic}' https://api.example.com`,
+      `use Basic ${basic} to sign in`,
+      "proxy-authorization=opaque-proxy-credential",
+      "Authorization: Token 12ab34cd",
+      "clone https://bob:hunter2@github.com/x.git or postgres://svc:p4ss@db:5432/app",
+    ].join("\n");
+    const { out, seen } = collect(text);
+    for (const secret of [basic, "opaque-proxy-credential", "12ab34cd", "bob:hunter2", "svc:p4ss"]) {
+      expect(out, secret).not.toContain(secret);
+    }
+    expect(out).toContain(`Authorization: Basic ${REDACTED_VALUE}`);
+    expect(out).toContain(`https://${REDACTED_VALUE}@github.com/x.git`);
+    expect(seen.map((r) => r.value)).toEqual(expect.arrayContaining([basic, "bob:hunter2", "svc:p4ss"]));
+  });
+
+  it("leaves prose that merely mentions the scheme words alone", () => {
+    const prose = "The Basic plan includes support. Bearer bonds are paper. The authorization header is missing.";
+    expect(redactSecretsDeep(prose)).toBe(prose);
+  });
+
+  it("stays idempotent across the new rules", () => {
+    const once = redactSecretsDeep({
+      a: `Authorization: Basic ${Buffer.from("u:secret-pw").toString("base64")}`,
+      b: "https://u:p@host/x", c: `{"k":"${LIVE_KEY}","k":"x"}`, tokens: ["t"],
+    });
+    const { out, seen } = collect(once);
+    expect(out).toEqual(once);
+    expect(seen).toHaveLength(0);
   });
 });
