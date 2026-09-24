@@ -1445,6 +1445,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // Wave 4.1.x — tenant_id on evidence_bundles, capabilities, sensor_aggregates
   safeAddColumn("evidence_bundles", "tenant_id", "TEXT");
   safeAddColumn("evidence_bundles", "session_key_authorization", "TEXT");
+  // §7.1 / §8.5-4 — gateway RECEIPT time; authoritative effectiveEvidenceTime source.
+  // Nullable/additive; legacy rows fall back to created_at (the gateway-insert time).
+  safeAddColumn("evidence_bundles", "gateway_received_at", "TEXT");
   safeAddColumn("capabilities", "tenant_id", "TEXT");
   // Human-node SLA (accept/deadline windows + presence + scheduling mode) on
   // capabilities — additive JSON-as-TEXT column; null for machine capabilities.
@@ -1622,6 +1625,123 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS invocation_receipts_caller_idx ON invocation_receipts(caller_agent_id);
     CREATE INDEX IF NOT EXISTS invocation_receipts_dcc_idx ON invocation_receipts(effective_dcc_class);
     CREATE INDEX IF NOT EXISTS invocation_receipts_created_idx ON invocation_receipts(created_at);
+  `);
+
+  // v3 evidence-signing (§8.5 step 5) — per-checkpoint transactional gateway
+  // receipts. One row per durably-accepted checkpoint; the online freshness
+  // anchor of §8.3 (receipt ⟺ committed acceptance, serialized per session).
+  // NEW table → CREATE TABLE IF NOT EXISTS (idempotent). Additive: no route
+  // reads/writes it until step 6 wires the checkpoint-submission path.
+  //
+  // CHECK constraints (step-5 hardening) express the §8.3 receipt invariants the
+  // DB can enforce structurally: seq is 1-based (genesis is seq 1);
+  // session_state_version === seq (they coincide under the strict
+  // seq===lastAcceptedSeq+1 chain from genesis — see gateway-receipt-store.ts);
+  // accepted_at (= effectiveEvidenceTime, Unix seconds) is a positive point.
+  // CAVEAT: `CREATE TABLE IF NOT EXISTS` applies a CHECK only when it CREATES a
+  // FRESH table — it does NOT retro-alter an already-created table (SQLite has no
+  // ALTER TABLE ADD CONSTRAINT). That is acceptable here: step 5 is route-inert,
+  // so there are no production gateway_receipts rows yet, and every test DB is a
+  // fresh `:memory:`. A retro-migration (table rebuild: create-new → copy → drop
+  // → rename) for a pre-existing DEPLOYED table is a separate concern, out of
+  // scope for this additive step.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      gateway_key_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL CHECK (seq >= 1),
+      checkpoint_hash TEXT NOT NULL,
+      previous_accepted_hash TEXT,
+      session_state_version INTEGER NOT NULL,
+      accepted_at INTEGER NOT NULL CHECK (accepted_at > 0),
+      signature TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (session_state_version = seq)
+    );
+    CREATE INDEX IF NOT EXISTS gateway_receipts_job_idx ON gateway_receipts(job_id);
+    CREATE INDEX IF NOT EXISTS gateway_receipts_session_idx ON gateway_receipts(session_id);
+    CREATE INDEX IF NOT EXISTS gateway_receipts_checkpoint_idx ON gateway_receipts(checkpoint_hash);
+    -- UNIQUE: the DB enforces the §8.3 invariant of one accepted receipt per
+    -- (session, seq) and per (session, checkpoint_hash) directly — not left to
+    -- the deterministic receiptId PK alone (step-5 hardening). Drop the prior
+    -- non-unique (session, seq) index if a dev DB created it.
+    DROP INDEX IF EXISTS gateway_receipts_session_seq_idx;
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_session_seq_unique ON gateway_receipts(session_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_session_checkpoint_unique ON gateway_receipts(session_id, checkpoint_hash);
+  `);
+
+  // v3 evidence-signing (§8.5 step 6) — async evidence split (begin/checkpoint/
+  // finalize). Three additive tables backing the new phase-scoped endpoints; no
+  // existing route reads/writes them until step 6 wires the endpoints. Raw SQL
+  // mirrors packages/db/src/schema/{evidence-sessions,milestone-packages,
+  // checkpoint-bodies}.ts exactly (snake_case columns + indexes).
+
+  // evidence_sessions — the open execution-authority window for one
+  // (job, milestone). UNIQUE(job_id, milestone_index) fail-closes the
+  // one-session-per-(job,milestone) rule (§2.1-4).
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS evidence_sessions (
+      session_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      milestone_index INTEGER NOT NULL,
+      session_key_authorization TEXT NOT NULL,
+      not_before INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      evidence_submission_deadline INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      opened_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS evidence_sessions_job_idx ON evidence_sessions(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS evidence_sessions_job_milestone_unique ON evidence_sessions(job_id, milestone_index);
+  `);
+  // S6-8: the delegation's cryptographic session-key id, recorded distinctly from the
+  // evidence session_id (additive; populated at begin for every step-6 session).
+  safeAddColumn("evidence_sessions", "delegation_session_id", "TEXT");
+
+  // milestone_packages — the persisted claim-free FinalMilestonePackage + its
+  // PackageReceipt (§8.4-B). UNIQUE(job_id, milestone_index) makes permissionless
+  // re-finalize idempotent (§2.3-6). body/receipt_body carry the JSON round-trips.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS milestone_packages (
+      package_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      milestone_index INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      evidence_root TEXT NOT NULL,
+      package_hash TEXT NOT NULL,
+      receipt_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      receipt_body TEXT NOT NULL,
+      accepted_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS milestone_packages_job_idx ON milestone_packages(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS milestone_packages_job_milestone_unique ON milestone_packages(job_id, milestone_index);
+  `);
+
+  // checkpoint_bodies — persisted checkpoint content (payload revealed at
+  // finalize), sibling to gateway_receipts (which holds only hashes) so that
+  // table stays pure. UNIQUE(session_id, seq) mirrors the per-(session,seq) invariant.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS checkpoint_bodies (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      job_id TEXT NOT NULL,
+      checkpoint_hash TEXT NOT NULL,
+      prev_checkpoint_hash TEXT,
+      events_root TEXT NOT NULL,
+      checkpoint_type TEXT NOT NULL,
+      device_created_at INTEGER NOT NULL,
+      signature TEXT NOT NULL,
+      payload TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS checkpoint_bodies_session_idx ON checkpoint_bodies(session_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS checkpoint_bodies_session_seq_unique ON checkpoint_bodies(session_id, seq);
   `);
 
   // ══════════════════════════════════════════════════════════════════

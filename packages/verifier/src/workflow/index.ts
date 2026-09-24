@@ -13,6 +13,15 @@ export {
 } from "./completeness-checker.js";
 export { SessionKeyService } from "./ephemeral-identity.js";
 export {
+  checkSequence,
+  genesisSequenceState,
+  type SequenceEntry,
+  type SequencePriorState,
+  type SequenceCheckResult,
+  type SequenceRejectReason,
+} from "./sequence-acceptance.js";
+export { merkleRoot } from "./merkle-root.js";
+export {
   masterKeyFromSeed,
   deriveChild,
   derivePath,

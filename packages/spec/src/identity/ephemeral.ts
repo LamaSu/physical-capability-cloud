@@ -136,6 +136,46 @@ export interface SessionKey {
   derivationPath?: string;
 }
 
+/**
+ * Canonical byte representation of a SessionKey that the parent signs
+ * (EXCLUDES parentSignature) — the exact preimage of `parentSignature`.
+ *
+ * Deterministic JSON with EXPLICIT key order (stable across JS engines):
+ * sessionId, parentAgentId, publicKey (hex), issuedAt, expiresAt,
+ * scope{allowedActions sorted, contractIds sorted, maxSignatures}, and
+ * derivationPath ONLY when present (so a legacy fresh-keypair sessionKey
+ * produces byte-identical output and its parentSignature still verifies).
+ *
+ * This is the SINGLE canonical form. The verifier, the gateway off-chain
+ * builder, and kernel-sdk all import THIS function so a producer and a
+ * verifier can never disagree on the signing preimage — the divergence class
+ * the v-next commitment profile exists to prevent. Do NOT re-implement it.
+ */
+export function canonicalSessionKeyBytes(
+  sk: Omit<SessionKey, "parentSignature">,
+): Uint8Array {
+  const toHex = (bytes: Uint8Array): string =>
+    Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  const body: Record<string, unknown> = {
+    sessionId: sk.sessionId,
+    parentAgentId: sk.parentAgentId,
+    publicKey: toHex(sk.publicKey),
+    issuedAt: sk.issuedAt,
+    expiresAt: sk.expiresAt,
+    scope: {
+      allowedActions: [...sk.scope.allowedActions].sort(),
+      contractIds: [...sk.scope.contractIds].sort(),
+      maxSignatures: sk.scope.maxSignatures,
+    },
+  };
+  if (sk.derivationPath !== undefined) {
+    body.derivationPath = sk.derivationPath;
+  }
+  return new TextEncoder().encode(JSON.stringify(body));
+}
+
 // ---------------------------------------------------------------------------
 // Session Proof (links sessionKey to principalKey)
 // ---------------------------------------------------------------------------
