@@ -15,6 +15,7 @@ import {
   _clearKernelRegistry,
   _setSmokeTestFetch,
 } from "../routes/kernel-marketplace.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 
 // ---------------------------------------------------------------------------
 // App builder
@@ -22,9 +23,41 @@ import {
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  // Identity shim standing in for apiGate, which attaches `operatorId` in
+  // production (carrier.test.ts pattern). WP-C records the manifest's
+  // registrant so a manifest only borrows the ceiling of a kernel row that the
+  // same actor owns.
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(kernelMarketplaceRoutes);
   await app.ready();
   return app;
+}
+
+/**
+ * Insert a shop-kernel row with a proven signer and a strong track record, so
+ * its authorized ceiling is 3. It is owned by `owner`.
+ */
+function insertAuthorizedKernel(id: string, owner: string) {
+  getRepos().kernels.insert({
+    id,
+    name: `Authorized ${id}`,
+    operatorAddress: owner,
+    location: { lat: 0, lng: 0 },
+    physicalAddress: "",
+    maxAssuranceTier: 3,
+    publicKey: `0x${"00".repeat(32)}`,
+    signingAddress: "0x1234567890abcdef1234567890abcdef12345678",
+    signingKeyAlgorithm: "secp256k1",
+    reputation: 900,
+    totalJobsCompleted: 50,
+    status: "online",
+    registeredAt: new Date().toISOString(),
+    lastHeartbeat: new Date().toISOString(),
+    version: "0.1.0",
+  } as never);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,11 +116,14 @@ describe("Kernel Marketplace", () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
     app = await buildApp();
   });
 
   afterAll(async () => {
     await app.close();
+    closeStore();
   });
 
   beforeEach(() => {
@@ -270,30 +306,34 @@ describe("Kernel Marketplace", () => {
       expect(body.kernels[0].kernelId).toBe("k-temp");
     });
 
-    it("filters by minAssuranceTier", async () => {
-      await app.inject({
-        method: "POST",
-        url: "/api/kernels/register",
-        payload: {
-          manifest: baseManifest({ kernelId: "k-t1", maxAssuranceTier: 1 }),
-        },
-      });
-      await app.inject({
-        method: "POST",
-        url: "/api/kernels/register",
-        payload: {
-          manifest: baseManifest({ kernelId: "k-t3", maxAssuranceTier: 3 }),
-        },
-      });
+    it("filters by minAssuranceTier on the SERVED (ceiling-capped) tier", async () => {
+      // Old version: two self-declared manifests (claims 1 and 3) with no
+      // kernel rows behind them; the filter at minAssuranceTier=2 returned the
+      // tier-3 claim. That is exactly the unsafe behaviour: a verify smoke
+      // test certified a self-declared tier. WP-C: the served tier is
+      // min(claim, authorized ceiling of a kernel row owned by the
+      // registrant). k-t3 is backed by such a row (ceiling 3). k-t3-unbacked
+      // claims 3 with no authorized kernel and is served 0.
+      insertAuthorizedKernel("k-t3", "builder-op");
+      const asBuilder = { "x-test-operator": "builder-op" };
+      for (const [kernelId, tier] of [
+        ["k-t1", 1],
+        ["k-t3", 3],
+        ["k-t3-unbacked", 3],
+      ] as const) {
+        const reg = await app.inject({
+          method: "POST",
+          url: "/api/kernels/register",
+          headers: asBuilder,
+          payload: { manifest: baseManifest({ kernelId, maxAssuranceTier: tier }) },
+        });
+        expect(reg.statusCode).toBe(201);
+      }
       mockFetch(async () => new Response("{}", { status: 200 }));
-      await app.inject({
-        method: "POST",
-        url: "/api/kernels/k-t1/verify",
-      });
-      await app.inject({
-        method: "POST",
-        url: "/api/kernels/k-t3/verify",
-      });
+      for (const kernelId of ["k-t1", "k-t3", "k-t3-unbacked"]) {
+        const v = await app.inject({ method: "POST", url: `/api/kernels/${kernelId}/verify` });
+        expect(v.statusCode).toBe(200);
+      }
 
       const res = await app.inject({
         method: "GET",
@@ -303,6 +343,14 @@ describe("Kernel Marketplace", () => {
       const body = res.json();
       expect(body.count).toBe(1);
       expect(body.kernels[0].kernelId).toBe("k-t3");
+      expect(body.kernels[0].maxAssuranceTier).toBe(3);
+
+      // Every verified entry serves its capped tier, never the raw claim.
+      const all = (await app.inject({ method: "GET", url: "/api/kernels/marketplace" })).json();
+      const tierById = Object.fromEntries(
+        all.kernels.map((k: { kernelId: string; maxAssuranceTier: number }) => [k.kernelId, k.maxAssuranceTier]),
+      );
+      expect(tierById).toEqual({ "k-t1": 0, "k-t3": 3, "k-t3-unbacked": 0 });
     });
 
     it("sorts by price (ascending) when sortBy=price", async () => {
