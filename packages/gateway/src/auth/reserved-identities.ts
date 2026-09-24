@@ -30,6 +30,7 @@
 import type { FastifyRequest } from "fastify";
 import { getRepos, getStore } from "../db.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
+import { normalizeIdentity, sameIdentity } from "./identity-normalize.js";
 import { resolveApiKey } from "./api-key-auth.js";
 import { SCOPES_NOT_CARRIED_BY_WILDCARD, parseScopeColumn } from "../middleware/scope-checker.js";
 
@@ -57,9 +58,7 @@ export type AdminIdentityAllowlist = (typeof ADMIN_IDENTITY_ALLOWLIST_ENV_VARS)[
  * this very function) — so the two sides can never fold differently, and an
  * exact string always matches itself. `null`/`undefined` fold to "".
  */
-export function normalizeIdentity(id: unknown): string {
-  return String(id ?? "").trim().toLowerCase();
-}
+export { normalizeIdentity } from "./identity-normalize.js";
 
 /** Names of the allowlists that contain `operatorId` (empty = not reserved). */
 export function reservedIdentityAllowlists(operatorId: string): AdminIdentityAllowlist[] {
@@ -257,11 +256,7 @@ export function callerApiKey(req: FastifyRequest) {
   return resolveApiKey(req);
 }
 
-/** Same identity, trimmed + case-insensitive. Never true for an empty id. */
-export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
-  const x = normalizeIdentity(a);
-  return x.length > 0 && x === normalizeIdentity(b);
-}
+export { sameIdentity } from "./identity-normalize.js";
 
 type CallerKey = NonNullable<ReturnType<typeof callerApiKey>>;
 

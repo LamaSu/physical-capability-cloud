@@ -400,6 +400,31 @@ describe("R1 — non-ASCII identities fold the same way on both sides", () => {
     expect((await provision(id)).statusCode).toBe(409);
   });
 
+  // ── WP-A round 5 (astra #2829): NFKC + case folding, not just trim().toLowerCase() ──
+  it("[neg] a DECOMPOSED spelling of a claimed (composed) id is the same identity (409)", async () => {
+    const victim = `Müller.${Date.now().toString(36)}-${++seq}@example.com`.normalize("NFC");
+    expect((await provision(victim)).statusCode).toBe(201);
+    const decomposed = victim.normalize("NFD");
+    expect(decomposed).not.toBe(victim);
+    expect((await provision(decomposed)).statusCode).toBe(409);
+    expect(keysOf(victim)).toHaveLength(1);
+  });
+
+  it("[neg] a FULLWIDTH (compatibility) spelling of a claimed id is the same identity (409)", async () => {
+    const tag = `${Date.now().toString(36)}${++seq}`;
+    const victim = `victim${tag}@example.com`;
+    expect((await provision(victim)).statusCode).toBe(201);
+    const local = `victim${tag}`.replace(/[!-~]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0));
+    expect((await provision(`${local}@example.com`)).statusCode).toBe(409);
+  });
+
+  it("[neg] ß, ẞ and ss name the same identity (409)", async () => {
+    const tag = `${Date.now().toString(36)}-${++seq}`;
+    expect((await provision(`strasse.${tag}@example.com`)).statusCode).toBe(201);
+    expect((await provision(`STRAẞE.${tag}@example.com`)).statusCode).toBe(409);
+    expect((await provision(`straße.${tag}@example.com`)).statusCode).toBe(409);
+  });
+
   it("the fold does not over-match: a DIFFERENT letter is a different identity (201)", async () => {
     const victim = unicodeId("Distinct");
     expect((await provision(victim)).statusCode).toBe(201);

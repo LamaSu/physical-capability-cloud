@@ -35,6 +35,8 @@
  *   - claim/events/get are open to any authenticated caller (operator agents).
  */
 
+import { normalizeIdentity, sameIdentity } from "../auth/identity-normalize.js";
+
 // Structural type for the raw better-sqlite3 handle we get from
 // drizzle's `db.$client`. Avoiding a direct better-sqlite3 import keeps
 // the gateway's dependency surface unchanged (it pulls better-sqlite3
@@ -471,10 +473,9 @@ export class JobOffersStore {
    * unverified self-service. Read-only.
    */
   hasOfferPostedBy(operatorId: string): boolean {
-    const needle = operatorId.trim().toLowerCase();
-    if (!needle) return false;
+    if (!normalizeIdentity(operatorId)) return false;
     for (const o of this.offers.values()) {
-      if (typeof o.posterDid === "string" && o.posterDid.trim().toLowerCase() === needle) return true;
+      if (typeof o.posterDid === "string" && sameIdentity(o.posterDid, operatorId)) return true;
     }
     return false;
   }
@@ -716,7 +717,9 @@ export class JobOffersStore {
     | { ok: false; reason: "not_editable"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
+    // Owner-only, fail closed (#2883): an offer with no recorded poster matches nobody,
+    // and identities compare normalized (auth/identity-normalize.ts).
+    if (!sameIdentity(o.posterDid, poster)) return { ok: false, reason: "forbidden" };
     if (o.status !== "open") {
       return { ok: false, reason: "not_editable", currentStatus: o.status };
     }
@@ -757,7 +760,9 @@ export class JobOffersStore {
     | { ok: false; reason: "forbidden" } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
+    // Owner-only, fail closed (#2883): an offer with no recorded poster matches nobody,
+    // and identities compare normalized (auth/identity-normalize.ts).
+    if (!sameIdentity(o.posterDid, poster)) return { ok: false, reason: "forbidden" };
     o.status = "cancelled";
     o.cancelledAt = this.nowIso();
     this.persistOffer(o);
@@ -775,7 +780,9 @@ export class JobOffersStore {
     | { ok: false; reason: "forbidden" } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
+    // Owner-only, fail closed (#2883): an offer with no recorded poster matches nobody,
+    // and identities compare normalized (auth/identity-normalize.ts).
+    if (!sameIdentity(o.posterDid, poster)) return { ok: false, reason: "forbidden" };
     o.lastHeartbeatAt = this.nowIso();
     this.persistOffer(o);
     this.appendEvent(o.id, {
