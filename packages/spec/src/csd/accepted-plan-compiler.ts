@@ -409,34 +409,52 @@ function show(x: unknown): string {
 
 // ── The compiler ─────────────────────────────────────────────────────────────────────────────────
 
-/** Bounds on the input the compiler will copy: resource safety at the money-path boundary. */
+/**
+ * Bounds on the input the compiler will copy: resource safety at the money-path boundary. These are
+ * PRODUCT limits, not V-next ABI limits (the ABI's are per job: 16 units, 256 legs). A plan beyond
+ * them is refused before any element is read.
+ */
 export const MAX_PLAN_NODES = 1024;
 export const MAX_PLAN_EDGES = 4096;
 export const MAX_EVIDENCE_REQUIREMENTS_PER_NODE = 64;
 
-class OverBound extends Error {
-  constructor(readonly field: string) {
-    super(field);
-  }
+/**
+ * A compiler-owned stand-in for a structurally invalid value (a function, a non-array where a list
+ * belongs, an object where a primitive belongs). No caller reference survives the snapshot, and this
+ * value fails every check the compiler makes, so validation refuses it.
+ */
+const NOT_DATA: object = Object.freeze(Object.create(null));
+
+/** Primitives are immutable and kept; anything else becomes NOT_DATA. */
+function leaf(v: unknown): unknown {
+  return (typeof v === "object" && v !== null) || typeof v === "function" ? NOT_DATA : v;
 }
 
-/** A frozen plain copy of a list, each item copied by `item`; a non-array is returned as-is for validation. */
-function copyList(x: unknown, max: number, field: string, item: (v: unknown) => unknown): unknown {
-  if (!Array.isArray(x)) return x;
+/**
+ * A frozen plain copy of a list, each item copied by `item`, its length read once. A primitive is kept
+ * for validation to name; any other non-array becomes NOT_DATA. Over `max`, `over` is called BEFORE
+ * any element is read.
+ */
+function copyList(x: unknown, max: number, over: () => never, item: (v: unknown) => unknown): unknown {
+  if (!Array.isArray(x)) return leaf(x);
   const n = lengthOf(x);
   if (n === null) throw new TypeError("lying length");
-  if (n > max) throw new OverBound(field);
+  if (n > max) over();
   const out: unknown[] = [];
   for (let k = 0; k < n; k++) out.push(item(x[k]));
   return Object.freeze(out);
 }
 
-/** A frozen plain copy of the named fields of an object; a non-object is returned as-is for validation. */
-function copyFields(x: unknown, fields: readonly string[], extra: (o: Record<string, unknown>, out: Record<string, unknown>) => void = () => {}): unknown {
-  if (typeof x !== "object" || x === null) return x;
+/** A frozen plain copy of the named fields of a plain object; primitives kept, functions become NOT_DATA. */
+function copyFields(
+  x: unknown,
+  fields: readonly string[],
+  extra: (o: Record<string, unknown>, out: Record<string, unknown>) => void = () => {},
+): unknown {
+  if (typeof x !== "object" || x === null) return leaf(x);
   const o = x as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const f of fields) out[f] = o[f];
+  for (const f of fields) out[f] = leaf(o[f]);
   extra(o, out);
   return Object.freeze(out);
 }
@@ -448,38 +466,62 @@ const NODE_FIELDS = [
 
 /**
  * Copy the caller's input into compiler-owned, frozen plain data, reading every property and every
- * array length EXACTLY ONCE, before anything else runs (cross-family review of 4479b79a). Validation,
- * the injected program gate and economics splitter, unit construction and the digest all see only
- * this copy, so neither an input getter nor a dependency that holds a reference to the caller's input
- * can change a value between its validation and its use. Non-object values are kept as-is for
- * validation to refuse. A throw while reading, a lying array length or an over-bound list is a typed
- * refusal, never an exception.
+ * array length EXACTLY ONCE, before anything else runs (cross-family review of 4479b79a and ce18cf42).
+ * Validation, the injected program gate and economics splitter, unit construction and the digest all
+ * see only this copy. Nothing in it is a caller reference: primitives are copied, and every other
+ * value where data belongs becomes NOT_DATA. A throw while reading, or a lying length, is a typed
+ * refusal. The catch never inspects the thrown value (a hostile value could throw again): a bound is
+ * recognized by the identity of a token this function owns.
  */
 function snapshotInput(untrusted: unknown): AcceptedPlanInput | { refused: CompileViolation } {
+  const BOUND = Object.freeze({});
+  let boundField = "input";
+  const over = (field: string) => (): never => {
+    boundField = field;
+    throw BOUND;
+  };
   try {
     if (typeof untrusted !== "object" || untrusted === null) return { refused: { code: "invalid-plan-field", field: "input" } };
     const i = untrusted as Record<string, unknown>;
     const copy = {
-      planId: i.planId,
-      requestId: i.requestId,
-      payer: i.payer,
-      currency: i.currency,
-      feeBps: i.feeBps,
-      feeRecipient: i.feeRecipient,
-      reclaimAt: i.reclaimAt,
-      nodes: copyList(i.nodes, MAX_PLAN_NODES, "nodes", (n) =>
+      planId: leaf(i.planId),
+      requestId: leaf(i.requestId),
+      payer: leaf(i.payer),
+      currency: leaf(i.currency),
+      feeBps: leaf(i.feeBps),
+      feeRecipient: leaf(i.feeRecipient),
+      reclaimAt: leaf(i.reclaimAt),
+      nodes: copyList(i.nodes, MAX_PLAN_NODES, over("nodes"), (n) =>
         copyFields(n, NODE_FIELDS, (o, out) => {
-          out.evidenceRequirements = copyList(o.evidenceRequirements, MAX_EVIDENCE_REQUIREMENTS_PER_NODE, "evidenceRequirements", (r) =>
+          out.evidenceRequirements = copyList(o.evidenceRequirements, MAX_EVIDENCE_REQUIREMENTS_PER_NODE, over("evidenceRequirements"), (r) =>
             copyFields(r, ["requirementId", "evidenceTypeId", "tier"]),
           );
         }),
       ),
-      edges: copyList(i.edges, MAX_PLAN_EDGES, "edges", (e) => copyFields(e, ["from", "to"])),
+      edges: copyList(i.edges, MAX_PLAN_EDGES, over("edges"), (e) => copyFields(e, ["from", "to"])),
       reservation: copyFields(i.reservation, ["reservationId", "requestId", "currency", "maxAmountBaseUnits"]),
     };
     return Object.freeze(copy) as unknown as AcceptedPlanInput;
   } catch (e) {
-    return { refused: { code: "invalid-plan-field", field: e instanceof OverBound ? e.field : "input" } };
+    return { refused: { code: "invalid-plan-field", field: e === BOUND ? boundField : "input" } };
+  }
+}
+
+/**
+ * The program gate's ANSWER, read once and defensively. The gate itself is trusted server code (if it
+ * throws, that propagates as a server fault); a malformed answer is a refusal, never an exception.
+ */
+function readGateResult(g: unknown): { ok: true } | { ok: false; code: string } {
+  try {
+    if (typeof g !== "object" || g === null) return { ok: false, code: "malformed-gate-result" };
+    const r = g as Record<string, unknown>;
+    const ok = r.ok;
+    if (ok === true) return { ok: true };
+    if (ok !== false) return { ok: false, code: "malformed-gate-result" };
+    const code = r.code;
+    return { ok: false, code: typeof code === "string" ? code : "malformed-gate-result" };
+  } catch {
+    return { ok: false, code: "malformed-gate-result" };
   }
 }
 
@@ -612,7 +654,7 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
       v.push({ code: "program-gate-missing", nodeId: id });
       continue;
     }
-    const gate = deps.assertProgramForTier({ csd: n.csd, tierKey: n.tierKey, committedProgramHash: n.committedProgramHash });
+    const gate = readGateResult(deps.assertProgramForTier({ csd: n.csd, tierKey: n.tierKey, committedProgramHash: n.committedProgramHash }));
     if (!gate.ok) {
       v.push({ code: "program-gate-refused", nodeId: id, reason: gate.code });
       continue;

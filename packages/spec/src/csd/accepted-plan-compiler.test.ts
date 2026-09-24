@@ -789,9 +789,9 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
           return DIG("e1");
         },
       }) as ReturnType<NetSplitter>;
+    const baseline = compileAcceptedPlan(plan({ feeBps: 235, feeRecipient: ADDR("fe") }), { splitNet: tenPercent });
     const swapped = compileAcceptedPlan(p, { splitNet: mutate(() => (p.feeRecipient = LICENSOR)) });
-    expect(swapped.ok).toBe(true);
-    if (swapped.ok) expect(swapped.plan.jobs.flatMap((j) => j.units.map((u) => u.feeRecipient))).toEqual([ADDR("fe"), ADDR("fe")]);
+    expect(swapped).toEqual(baseline); // the WHOLE plan, digest included, is the untouched baseline
     const q = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
     const late = compileAcceptedPlan(q, {
       splitNet: mutate(() =>
@@ -852,8 +852,8 @@ describe("input snapshot (astra review of 4479b79a): the compiler reads the call
       return gate(a);
     };
     const r = compileAcceptedPlan(p, { assertProgramForTier: sneaky });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.plan.jobs[0]!.units[0]!.g).toBe(10n * USDC);
+    const baseline = compileAcceptedPlan(plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] }), { assertProgramForTier: gate });
+    expect(r).toEqual(baseline);
   });
 
   it("a throwing input getter, a lying length or an over-bound list is a typed refusal, never a throw", () => {
@@ -870,5 +870,127 @@ describe("input snapshot (astra review of 4479b79a): the compiler reads the call
       }).not.toThrow();
       expect(r).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field }] });
     }
+  });
+});
+
+describe("input snapshot, round 3 (astra review of ce18cf42): no caller reference survives, nothing escapes", () => {
+  /** A local splitter (one full leg per unit), so this block does not depend on another block's fixtures. */
+  const oneLeg: NetSplitter = (units) => ({
+    ok: true,
+    economicTermsHash: DIG("e1"),
+    rightsTermsHash: DIG("f1"),
+    units: units.map((u) => ({ unitRef: u.nodeId, gross: String(u.g), fee: String(u.f), net: String(u.n), payouts: [{ recipient: u.payoutAddress, amount: String(u.n) }] })),
+  });
+  /** Wrap a value so every property read is counted by path (arrays included: length and indices). */
+  function counting<T>(value: T, counts: Map<string, number>, path = "$"): T {
+    if (typeof value !== "object" || value === null) return value;
+    return new Proxy(value as object, {
+      get(target, key, receiver) {
+        const k = `${path}.${String(key)}`;
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+        return counting(Reflect.get(target, key, receiver), counts, k);
+      },
+    }) as T;
+  }
+
+  it("every property of the input — plan fields, node fields, nested evidence, edges, reservation, lengths, indices — is read at most once, and the result equals the plain compile", () => {
+    const counts = new Map<string, number>();
+    const input = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", tierKey: "tier2", committedProgramHash: PROGRAM_T2 }), node({ nodeId: "mail", capabilityType: "mail.drop" })] });
+    const viaProxy = compileAcceptedPlan(counting(input, counts), { assertProgramForTier: gate });
+    const plain = compileAcceptedPlan(input, { assertProgramForTier: gate });
+    expect(viaProxy).toEqual(plain);
+    const reread = [...counts.entries()].filter(([, n]) => n > 1);
+    expect(reread).toEqual([]);
+    expect(counts.get("$.nodes.0.evidenceRequirements.0.tier")).toBe(1);
+    expect(counts.get("$.reservation.maxAmountBaseUnits")).toBe(1);
+  });
+
+  it("a callable reservation or node is refused as data, and never becomes a live caller reference", () => {
+    const resv = Object.assign(() => {}, { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: 100n * USDC });
+    const splitterMutating: NetSplitter = (units) => {
+      (resv as { reservationId: string }).reservationId = "bad id";
+      return oneLeg(units);
+    };
+    const r = compileAcceptedPlan(plan({ reservation: resv as unknown as AcceptedPlanInput["reservation"] }), { splitNet: splitterMutating });
+    expect(r.ok === false && r.violations).toContainEqual({ code: "invalid-plan-field", field: "reservation" });
+    let touched = false;
+    const callableNode = Object.assign(() => {}, node({ nodeId: "print" }));
+    Object.defineProperty(callableNode, "capabilityId", { get: () => ((touched = true), "cap") });
+    const n = compileAcceptedPlan(plan({ nodes: [callableNode as unknown as AcceptedPlanNode], edges: [] }));
+    expect(n.ok === false && codes(n)).toContain("invalid-node-id");
+    expect(touched).toBe(false);
+  });
+
+  it("a non-array container is not retained: revoking a proxy mid-snapshot cannot throw later", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    const p = Object.defineProperty(plan({ nodes: proxy as unknown as AcceptedPlanNode[] }), "edges", {
+      enumerable: true,
+      get() {
+        revoke();
+        return [];
+      },
+    });
+    let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+    expect(() => {
+      r = compileAcceptedPlan(p);
+    }).not.toThrow();
+    expect(r?.ok === false && codes(r as { ok: false; violations: CompileViolation[] })).toContain("empty-plan");
+  });
+
+  it("a hostile thrown value (a revoked proxy) cannot make the catch itself throw", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const p = Object.defineProperty(plan(), "payer", { enumerable: true, get: () => { throw proxy; } });
+    let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+    expect(() => {
+      r = compileAcceptedPlan(p);
+    }).not.toThrow();
+    expect(r).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field: "input" }] });
+  });
+
+  it("a malformed ANSWER from the program gate is a refusal; the gate throwing is a server fault", () => {
+    const tiered = plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] });
+    const answers: unknown[] = [
+      Object.defineProperty({}, "ok", { get: () => { throw new Error("x"); } }),
+      Object.defineProperty({ ok: false }, "code", { get: () => { throw new Error("x"); } }),
+      { ok: "yes" },
+      null,
+    ];
+    for (const a of answers) {
+      const r = compileAcceptedPlan(tiered, { assertProgramForTier: () => a as ReturnType<ProgramGate> });
+      expect(r.ok === false && r.violations).toEqual([{ code: "program-gate-refused", nodeId: "x", reason: "malformed-gate-result" }]);
+    }
+    expect(() => compileAcceptedPlan(tiered, { assertProgramForTier: () => { throw new Error("gate down"); } })).toThrow("gate down");
+  });
+
+  it("each cap holds at its limit and refuses one above, before reading any element", () => {
+    const opAddr = (i: number) => `0x${"a".repeat(36)}${i.toString(16).padStart(4, "0")}` as `0x${string}`;
+    const nodesN = (count: number) => Array.from({ length: count }, (_, i) => node({ nodeId: `n${i}`, operator: opAddr(Math.floor(i / 16)), grossBaseUnits: USDC }));
+    const wide = (count: number) => plan({ nodes: nodesN(count), edges: [], reservation: { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: BigInt(count) * USDC } });
+    expect(compileAcceptedPlan(wide(1024)).ok).toBe(true);
+    let reads = 0;
+    const counted = new Proxy(nodesN(1025), { get: (t, k, r) => (typeof k === "string" && /^[0-9]+$/.test(k) && reads++, Reflect.get(t, k, r)) });
+    expect(compileAcceptedPlan(plan({ nodes: counted, edges: [] }))).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field: "nodes" }] });
+    expect(reads).toBe(0);
+    const ninetyTwo = nodesN(92);
+    const pairs: Array<{ from: string; to: string }> = [];
+    for (let a = 0; a < 92 && pairs.length < 4097; a++) for (let b = a + 1; b < 92 && pairs.length < 4097; b++) pairs.push({ from: `n${a}`, to: `n${b}` });
+    const reservation = { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: 92n * USDC };
+    expect(compileAcceptedPlan(plan({ nodes: ninetyTwo, edges: pairs.slice(0, 4096), reservation })).ok).toBe(true);
+    expect(compileAcceptedPlan(plan({ nodes: ninetyTwo, edges: pairs, reservation }))).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field: "edges" }] });
+    const reqs = (count: number) => Array.from({ length: count }, (_, i) => ({ requirementId: `r${i}`, evidenceTypeId: `ev.${i}`, tier: 0 }));
+    expect(compileAcceptedPlan(plan({ nodes: [node({ nodeId: "p", evidenceRequirements: reqs(64) })], edges: [] })).ok).toBe(true);
+    expect(compileAcceptedPlan(plan({ nodes: [node({ nodeId: "p", evidenceRequirements: reqs(65) })], edges: [] }))).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field: "evidenceRequirements" }] });
+  });
+
+  it("a splitter that mutates the caller's reservation and nested evidence directly cannot change the deal", () => {
+    const fresh = () => plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+    const p = fresh();
+    const tampering: NetSplitter = (units) => {
+      p.reservation.reservationId = "bad id";
+      p.nodes[0]!.evidenceRequirements[0]!.tier = 3;
+      return oneLeg(units);
+    };
+    expect(compileAcceptedPlan(p, { splitNet: tampering })).toEqual(compileAcceptedPlan(fresh(), { splitNet: oneLeg }));
   });
 });
