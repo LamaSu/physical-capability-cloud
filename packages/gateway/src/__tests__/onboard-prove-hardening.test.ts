@@ -26,7 +26,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
 import { canonicalize } from "@pcc/spec";
 import { onboardRoutes } from "../routes/onboard.js";
-import { setEvidencePhotoStoreForTests, type EvidencePhotoStore } from "../routes/onboard-evidence.js";
+import { setEvidencePhotoStoreForTests } from "../routes/onboard-evidence.js";
+import { memoryPhotoStore } from "./fixtures/evidence-photo-store.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { b64, makePng } from "./fixtures/onboard-images.js";
 
@@ -145,13 +146,7 @@ describe("/prove hardening (WP-B)", () => {
     process.env.NODE_ENV = "production";
     process.env.PCC_ADMIN_KEY = ADMIN_KEY;
     blobs = new Map();
-    setEvidencePhotoStoreForTests({
-      put: async (bytes) => {
-        const cid = `bafk-test-${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}`;
-        blobs.set(cid, bytes);
-        return { cid };
-      },
-    });
+    setEvidencePhotoStoreForTests(memoryPhotoStore(blobs));
     app = await buildApp();
   });
 
@@ -378,22 +373,21 @@ describe("/prove hardening (WP-B)", () => {
     expect(first.statusCode).toBe(200);
     const reviewedDigest: string = first.json().evidenceDigest;
 
-    // Hold the second prove inside its (awaited) photo retention step.
+    // Hold the second prove inside its (awaited) photo staging step.
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    let signalPut!: () => void;
-    const putCalled = new Promise<void>((r) => (signalPut = r));
-    const deferred: EvidencePhotoStore = {
-      put: async () => {
-        signalPut();
+    let signalStage!: () => void;
+    const stageCalled = new Promise<void>((r) => (signalStage = r));
+    const deferred = memoryPhotoStore(blobs, {
+      beforeStage: async () => {
+        signalStage();
         await gate;
-        return { cid: "bafk-deferred" };
       },
-    };
+    });
     setEvidencePhotoStoreForTests(deferred);
 
     const pending = prove(app, regId, { evidence: { photoBase64: PHOTO, deviceHealth: DEVICE_HEALTH, events: [completion()] } });
-    await Promise.race([putCalled, pending]);
+    await Promise.race([stageCalled, pending]);
     const approved = await admin(app, regId, "approve", { key: ADMIN_KEY, evidence: reviewedDigest });
     expect(approved.statusCode).toBe(200);
     const approvedDescription = stored(regId).description;
@@ -405,6 +399,9 @@ describe("/prove hardening (WP-B)", () => {
     expect(stored(regId).status).toBe("approved");
     expect(stored(regId).description).toBe(approvedDescription);
     expect(auditRows(regId).filter((r) => r.eventType === "operator.proof_submitted")).toHaveLength(1);
+    // M4: the losing prove's photo was staged, never placed, and then dropped.
+    expect(blobs.size).toBe(0);
+    expect(deferred.pending()).toBe(0);
   });
 
   // ── failures record nothing ───────────────────────────────────────────────
@@ -425,7 +422,7 @@ describe("/prove hardening (WP-B)", () => {
   it("an evidence-store failure is 503 and records nothing", async () => {
     const regId = await register(app);
     setEvidencePhotoStoreForTests({
-      put: async () => {
+      stage: async () => {
         throw new Error("disk full");
       },
     });
@@ -496,7 +493,7 @@ describe("owner routes fail closed and the review record cannot be forged or rew
   let app: FastifyInstance;
 
   beforeEach(async () => {
-    setEvidencePhotoStoreForTests({ put: async () => ({ cid: "bafk-unused" }) });
+    setEvidencePhotoStoreForTests(memoryPhotoStore(new Map()));
     app = await buildApp();
   });
 

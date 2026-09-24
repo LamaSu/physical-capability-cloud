@@ -172,6 +172,16 @@ export class LocalBlobBackend implements ICidBlobStorage {
     return path.join(this.rootDir, cid.slice(0, 2), cid);
   }
 
+  /** The backend's root directory. */
+  get root(): string {
+    return this.rootDir;
+  }
+
+  /** Where the blob for `cid` lives: <root>/<first 2 chars of the CID>/<cid>. */
+  pathFor(cid: string): string {
+    return this.cidPath(cid);
+  }
+
   async put(bytes: Uint8Array, opts?: PutBlobOptions): Promise<BlobMetadata> {
     const cid = computeCid(bytes);
     const filePath = this.cidPath(cid);

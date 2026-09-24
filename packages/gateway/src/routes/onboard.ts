@@ -10,7 +10,9 @@ import { Sentry } from "../sentry.js";
 import { getRepos, getStore } from "../db.js";
 import {
   PHOTO_MEDIA_TYPES,
+  PROOF_RATE_WINDOW_MS,
   PROOF_RECORD_PREFIX,
+  PROOFS_PER_REGISTRATION_PER_WINDOW,
   PROVE_BODY_LIMIT_BYTES,
   buildEvidenceRecord,
   checkEventTimestamps,
@@ -25,6 +27,7 @@ import {
   validateEvidenceShape,
   type EvidenceRejection,
   type InspectedPhoto,
+  type StagedPhoto,
 } from "./onboard-evidence.js";
 import {
   analyzeOnboardingText,
@@ -145,6 +148,12 @@ class AuditWriteError extends Error {
   }
 }
 
+class BeforeCommitError extends Error {
+  constructor(readonly original: unknown) {
+    super("pre-commit step failed");
+  }
+}
+
 type Repos = ReturnType<typeof getRepos>;
 
 // ── The evidence a transition is bound to ───────────────────────────────
@@ -178,6 +187,24 @@ function latestProof(repos: Repos, registrationId: string): LatestProof {
   return { evidenceDigest: typeof digest === "string" && EVIDENCE_DIGEST_RE.test(digest) ? digest : null, auditId: row.id };
 }
 
+/**
+ * The proof cap (M4): how many proofs this registration had accepted in the
+ * last PROOF_RATE_WINDOW_MS, counted from the audit log, and when the oldest
+ * of them leaves the window.
+ */
+function recentProofs(repos: Repos, registrationId: string, nowMs: number): { count: number; retryAfterSeconds: number } {
+  const rows = repos.auditLog.query({
+    eventType: PROOF_SUBMITTED_EVENT,
+    resourceType: "registration",
+    resourceId: registrationId,
+    since: new Date(nowMs - PROOF_RATE_WINDOW_MS).toISOString(),
+    limit: PROOFS_PER_REGISTRATION_PER_WINDOW,
+  });
+  const oldest = rows[rows.length - 1]; // newest first
+  const leavesWindowAt = oldest ? Date.parse(oldest.timestamp) + PROOF_RATE_WINDOW_MS : nowMs;
+  return { count: rows.length, retryAfterSeconds: Math.max(1, Math.ceil((leavesWindowAt - nowMs) / 1000)) };
+}
+
 /** What a transition's guard and audit record see, all read in its transaction. */
 interface TransitionContext {
   /** The registration as the transaction read it (status === expectedFrom). */
@@ -189,7 +216,8 @@ interface TransitionContext {
 type TransitionFailure =
   | { ok: false; kind: "conflict"; currentStatus: string | null }
   | { ok: false; kind: "evidence_changed"; currentEvidenceDigest: string | null }
-  | { ok: false; kind: "audit_failed" | "db_error"; error: unknown };
+  | { ok: false; kind: "too_many_proofs"; retryAfterSeconds: number }
+  | { ok: false; kind: "audit_failed" | "store_failed" | "db_error"; error: unknown };
 type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow; proof: LatestProof } | TransitionFailure;
 
 /**
@@ -197,7 +225,9 @@ type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow;
  * `expectedFrom` is the status the handler observed (and already checked
  * against its allowed set); the CAS matches only that status. `guard` runs in
  * the same transaction, after the status check and before the CAS; a failure
- * it returns aborts the transition with nothing written.
+ * it returns aborts the transition with nothing written. `beforeCommit` runs
+ * last, after the audit record; if it throws, the transition and its audit
+ * record roll back ("store_failed").
  */
 function commitTransition(args: {
   id: string;
@@ -206,6 +236,7 @@ function commitTransition(args: {
   extra?: { approvedAt?: string; description?: string };
   guard?: (ctx: TransitionContext) => TransitionFailure | null;
   audit: (ctx: TransitionContext & { post: RegistrationRow }) => AuditEntry;
+  beforeCommit?: () => void;
 }): TransitionOutcome {
   try {
     return getStore().db.transaction(
@@ -226,12 +257,20 @@ function commitTransition(args: {
         } catch (err) {
           throw new AuditWriteError(err); // rolls the CAS back
         }
+        if (args.beforeCommit) {
+          try {
+            args.beforeCommit();
+          } catch (err) {
+            throw new BeforeCommitError(err); // rolls the CAS and the audit record back
+          }
+        }
         return { ok: true, row: post, pre, proof: ctx.proof };
       },
       { behavior: "immediate" },
     );
   } catch (err) {
     if (err instanceof AuditWriteError) return { ok: false, kind: "audit_failed", error: err.original };
+    if (err instanceof BeforeCommitError) return { ok: false, kind: "store_failed", error: err.original };
     return { ok: false, kind: "db_error", error: err };
   }
 }
@@ -290,6 +329,9 @@ function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure
       currentEvidenceDigest: failure.currentEvidenceDigest,
     });
   }
+  if (failure.kind === "too_many_proofs") {
+    return sendTooManyProofs(reply, failure.retryAfterSeconds);
+  }
   req.log.error({ err: failure.error }, `[onboard] ${label.noun} rolled back (${failure.kind})`);
   Sentry.captureException(failure.error, { extra: { transition: label.noun, failure: failure.kind, url: req.url } });
   if (failure.kind === "audit_failed") {
@@ -298,7 +340,26 @@ function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure
       message: `The ${label.noun} was rolled back because its audit record could not be written.`,
     });
   }
+  if (failure.kind === "store_failed") {
+    return reply.status(503).send({
+      error: "evidence_store_unavailable",
+      message: "The evidence photo could not be stored; nothing was recorded. Try again later.",
+    });
+  }
   return reply.status(500).send({ error: "transition_failed", message: `The ${label.noun} could not be applied.` });
+}
+
+function sendTooManyProofs(reply: FastifyReply, retryAfterSeconds: number) {
+  return reply
+    .status(429)
+    .header("retry-after", String(retryAfterSeconds))
+    .send({
+      error: "too_many_proofs",
+      message:
+        `A registration accepts at most ${PROOFS_PER_REGISTRATION_PER_WINDOW} evidence submissions per hour. ` +
+        `Try again in ${retryAfterSeconds} s.`,
+      retryAfterSeconds,
+    });
 }
 
 export async function onboardRoutes(app: FastifyInstance) {
@@ -798,6 +859,11 @@ export async function onboardRoutes(app: FastifyInstance) {
             return reply.status(400).send({ error: "invalid_status", message: `Cannot submit evidence for a registration in "${reg.status}" status` });
           }
 
+          // M4 — the proof cap, before anything is read, decoded or stored.
+          // The transition checks it again inside its transaction, exactly.
+          const cap = recentProofs(repos, reg.id, Date.now());
+          if (cap.count >= PROOFS_PER_REGISTRATION_PER_WINDOW) return sendTooManyProofs(reply, cap.retryAfterSeconds);
+
           const body = req.body;
           const rawEvidence = isPlainObject(body) ? body.evidence : undefined;
           if (rawEvidence === undefined || rawEvidence === null) {
@@ -880,20 +946,25 @@ export async function onboardRoutes(app: FastifyInstance) {
             });
           }
 
-          // Retain the decoded photo, content-addressed, before the transition,
-          // so the record never references a photo that was not stored.
-          let photoCid: string | null = null;
+          // M4 — stage the decoded photo privately. It is placed under its CID
+          // inside the transition's transaction (beforeCommit below), so the
+          // record never references a photo that was not stored, and a
+          // transition that fails leaves no new blob in the shared store.
+          let staged: StagedPhoto | null = null;
           if (photo) {
             try {
-              photoCid = (await getEvidencePhotoStore().put(photo.bytes, PHOTO_MEDIA_TYPES[photo.format])).cid;
+              staged = await getEvidencePhotoStore().stage(photo.bytes, PHOTO_MEDIA_TYPES[photo.format]);
             } catch (err) {
-              req.log.error({ err }, "[onboard] evidence photo retention failed");
+              req.log.error({ err }, "[onboard] evidence photo staging failed");
               return reply.status(503).send({
                 error: "evidence_store_unavailable",
                 message: "The evidence photo could not be stored; nothing was recorded. Try again later.",
               });
             }
           }
+          const stagedPhoto = staged;
+          const photoCid = stagedPhoto?.cid ?? null;
+          let photoPlacedNew = false;
 
           // B4 — the canonical evidence record, kept in the description column.
           const submittedAt = new Date().toISOString();
@@ -926,6 +997,20 @@ export async function onboardRoutes(app: FastifyInstance) {
             expectedFrom: reg.status,
             to: "reviewing",
             extra: { description },
+            // M4 — the cap again, exact: no other proof can commit inside this transaction.
+            guard: () => {
+              const recent = recentProofs(getRepos(), reg.id, Date.now());
+              return recent.count >= PROOFS_PER_REGISTRATION_PER_WINDOW
+                ? { ok: false, kind: "too_many_proofs", retryAfterSeconds: recent.retryAfterSeconds }
+                : null;
+            },
+            // M4 — place the staged photo last: if it cannot be placed, the
+            // transition and its audit record roll back.
+            beforeCommit: stagedPhoto
+              ? () => {
+                  photoPlacedNew = stagedPhoto.commit();
+                }
+              : undefined,
             audit: (ctx) => ({
               eventType: PROOF_SUBMITTED_EVENT,
               actor,
@@ -948,7 +1033,17 @@ export async function onboardRoutes(app: FastifyInstance) {
               userAgent: req.headers["user-agent"],
             }),
           });
-          if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
+          if (!outcome.ok) {
+            // Nothing was placed unless the database failed after the photo
+            // was (the commit itself): that blob is left in place, since the
+            // shared store is never deleted from, and reported.
+            stagedPhoto?.discard();
+            if (photoPlacedNew) {
+              req.log.error({ cid: photoCid, registrationId: reg.id }, "[onboard] evidence photo placed but the proof did not commit (unreferenced blob)");
+              Sentry.captureMessage("onboard.prove: unreferenced evidence blob after a failed commit", { extra: { cid: photoCid, registrationId: reg.id } });
+            }
+            return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
+          }
 
           pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
             metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },

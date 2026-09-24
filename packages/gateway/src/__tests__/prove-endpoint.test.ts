@@ -26,6 +26,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { onboardRoutes } from "../routes/onboard.js";
 import { setEvidencePhotoStoreForTests } from "../routes/onboard-evidence.js";
+import { memoryPhotoStore } from "./fixtures/evidence-photo-store.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { b64, makePng } from "./fixtures/onboard-images.js";
 
@@ -137,14 +138,7 @@ describe("Prove Endpoint", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    const blobs = new Map<string, Uint8Array>();
-    setEvidencePhotoStoreForTests({
-      put: async (bytes) => {
-        const cid = `test-cid-${blobs.size}`;
-        blobs.set(cid, bytes);
-        return { cid };
-      },
-    });
+    setEvidencePhotoStoreForTests(memoryPhotoStore(new Map<string, Uint8Array>()));
     app = await buildApp();
   });
 

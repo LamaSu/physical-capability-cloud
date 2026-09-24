@@ -15,9 +15,11 @@
  * dimension parse. No image library is used and no pixels are decoded.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { promises as fs, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import path from "node:path";
 import { canonicalize, isFabricated, type EvidenceEvent } from "@pcc/spec";
-import { LocalBlobBackend } from "../services/cid-blob-storage.js";
+import { LocalBlobBackend, computeCid } from "../services/cid-blob-storage.js";
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -42,6 +44,13 @@ export const HASH_FIELD_MAX_CHARS = 256;
 export const EVIDENCE_MAX_DEPTH = 32;
 /** Bound on the JPEG marker scan that looks for the SOFn frame header. */
 export const JPEG_MAX_MARKERS = 1024;
+/**
+ * Accepted proofs per registration per window (WP-B round 5, M4). Each one
+ * can retain a photo of up to 5 MiB, so this bounds retained-photo growth
+ * per registration to 25 MiB an hour.
+ */
+export const PROOFS_PER_REGISTRATION_PER_WINDOW = 5;
+export const PROOF_RATE_WINDOW_MS = 60 * 60 * 1000;
 
 const EVENT_MAX_FUTURE_SKEW_MS = 5_000;
 const EVENT_MAX_AGE_MS = 60 * 60 * 1000;
@@ -637,28 +646,93 @@ export function isReservedDescription(description: unknown): boolean {
 // Raw photo retention — the existing CID blob store (local backend)
 // ---------------------------------------------------------------------------
 
+/**
+ * An evidence photo written to private staging (WP-B round 5, M4). It is not
+ * visible under its CID until commit(), which /prove calls inside its
+ * transition's transaction. So a /prove that fails before that point (a lost
+ * CAS, a failed audit write, the proof cap) leaves nothing new in the shared,
+ * content-addressed blob store, and nothing ever has to delete a blob there
+ * that another request, or an /api/storage upload of the same bytes, may
+ * already reference.
+ */
+export interface StagedPhoto {
+  /** CIDv1 (sha-256, raw codec) of the bytes: where commit() places them. */
+  readonly cid: string;
+  /**
+   * Place the staged bytes under their CID, synchronously. Returns true when
+   * this call created the blob, false when the CID was already stored (the
+   * staged copy is dropped). Throws when the blob cannot be placed; /prove
+   * then rolls its transition back.
+   */
+  commit(): boolean;
+  /** Drop the staged bytes without placing them. Best effort; never throws. */
+  discard(): void;
+}
+
 export interface EvidencePhotoStore {
-  /** Store the bytes content-addressed; returns the CIDv1 (sha-256 multihash). Must be idempotent. */
-  put(bytes: Uint8Array, mediaType: string): Promise<{ cid: string }>;
+  /** Write the bytes to private staging (see StagedPhoto). */
+  stage(bytes: Uint8Array, mediaType: string): Promise<StagedPhoto>;
+}
+
+/** Staging directory under the blob root. CID shards are 2 characters, so it never collides with one. */
+export const EVIDENCE_STAGING_DIR = ".staging";
+
+/**
+ * Staging + placement on the local backend of the gateway's CID blob store
+ * (<root>/<shard>/<cid>). Staging is a uniquely named file in
+ * <root>/.staging; placing it is a rename on the same filesystem, so a blob
+ * appears under its CID complete or not at all.
+ */
+function localEvidencePhotoStore(blobs: LocalBlobBackend): EvidencePhotoStore {
+  return {
+    async stage(bytes) {
+      const cid = computeCid(bytes);
+      const finalPath = blobs.pathFor(cid);
+      const stagingDir = path.join(blobs.root, EVIDENCE_STAGING_DIR);
+      await fs.mkdir(stagingDir, { recursive: true });
+      const stagingPath = path.join(stagingDir, `${randomUUID()}.part`);
+      const drop = () => {
+        try {
+          rmSync(stagingPath, { force: true });
+        } catch {
+          // Best effort: a leftover staging file is never visible under a CID.
+        }
+      };
+      try {
+        await fs.writeFile(stagingPath, bytes, { flag: "wx" });
+      } catch (err) {
+        drop();
+        throw err;
+      }
+      return {
+        cid,
+        commit() {
+          if (existsSync(finalPath)) {
+            drop();
+            return false;
+          }
+          mkdirSync(path.dirname(finalPath), { recursive: true });
+          renameSync(stagingPath, finalPath);
+          return true;
+        },
+        discard: drop,
+      };
+    },
+  };
 }
 
 let photoStore: EvidencePhotoStore | null = null;
 
 /**
  * The evidence-photo store: the gateway's CID blob store, local backend
- * (<PCC_BLOB_DIR | ./data/blobs>/<cid>). It is deliberately NOT routed to the
- * Storacha/Helia backends that EVIDENCE_STORAGE can select, because those
- * publish content to public IPFS and an onboarding photo is submitted for
- * private review. Retained blobs are not registered in storage_blobs, so
+ * (<PCC_BLOB_DIR | ./data/blobs>/<shard>/<cid>). It is deliberately NOT routed
+ * to the Storacha/Helia backends that EVIDENCE_STORAGE can select, because
+ * those publish content to public IPFS and an onboarding photo is submitted
+ * for private review. Retained blobs are not registered in storage_blobs, so
  * GET /api/storage/:cid does not serve them.
  */
 export function getEvidencePhotoStore(): EvidencePhotoStore {
-  if (!photoStore) {
-    const local = new LocalBlobBackend();
-    photoStore = {
-      put: async (bytes, mediaType) => ({ cid: (await local.put(bytes, { mediaType })).cid }),
-    };
-  }
+  if (!photoStore) photoStore = localEvidencePhotoStore(new LocalBlobBackend());
   return photoStore;
 }
 
