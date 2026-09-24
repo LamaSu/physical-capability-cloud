@@ -22,5 +22,6 @@ export {
 export * from "./compile.js";
 export * from "./verify.js";
 export * from "./simulate.js";
+export * from "./bind.js";
 export * from "./adapters.js";
 export * from "./examples.js";
