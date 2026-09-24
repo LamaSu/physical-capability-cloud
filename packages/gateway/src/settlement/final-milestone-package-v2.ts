@@ -305,14 +305,22 @@ export class PackageNotMintableError extends Error {
 }
 
 /**
- * The frozen signer profile: D1 = the operator's secp256k1 EIP-712 signature
- * (signer = 0x + 40-hex address, 65-byte signature), D2 = the kernel's ed25519
- * signature (signer = 0x + 64-hex public key, the registry's form; 64-byte
- * signature). Lowercase hex only.
+ * The frozen signer profile, under the self-describing scheme labels that the
+ * evidence schema §3 and the packageDigestV2 golden use. The label is inside
+ * the hashed signature entries, so producer and verifiers need one string, and
+ * a bare "secp256k1" would not say raw, EIP-191 or EIP-712:
+ *   D1 "secp256k1-eip712" = the operator's EIP-712 signature (signer = 0x +
+ *      40-hex address, 65-byte signature);
+ *   D2 "ed25519-raw32" = the kernel's ed25519 signature over the raw 32 bytes
+ *      of the package digest (signer = 0x + 64-hex public key, the registry's
+ *      form; 64-byte signature).
+ * Lowercase hex only.
  */
+const D1_SCHEME = "secp256k1-eip712";
+const D2_SCHEME = "ed25519-raw32";
 const MINT_SIGNER_PROFILE: Readonly<Record<string, { signer: RegExp; sig: RegExp; role: string }>> = {
-  secp256k1: { signer: /^0x[0-9a-f]{40}$/, sig: /^0x[0-9a-f]{130}$/, role: "D1 operator" },
-  ed25519: { signer: /^0x[0-9a-f]{64}$/, sig: /^0x[0-9a-f]{128}$/, role: "D2 kernel" },
+  [D1_SCHEME]: { signer: /^0x[0-9a-f]{40}$/, sig: /^0x[0-9a-f]{130}$/, role: "D1 operator" },
+  [D2_SCHEME]: { signer: /^0x[0-9a-f]{64}$/, sig: /^0x[0-9a-f]{128}$/, role: "D2 kernel" },
 };
 
 /**
@@ -361,7 +369,7 @@ export function assertMintablePackage(
     }
     const profile = typeof entry.scheme === "string" ? MINT_SIGNER_PROFILE[entry.scheme] : undefined;
     if (!profile) {
-      throw new PackageNotMintableError(`${path}.scheme`, 'must be "secp256k1" (D1) or "ed25519" (D2)');
+      throw new PackageNotMintableError(`${path}.scheme`, `must be "${D1_SCHEME}" (D1) or "${D2_SCHEME}" (D2)`);
     }
     if (schemes.has(entry.scheme as string)) {
       throw new PackageNotMintableError(`${path}.scheme`, `a second ${profile.role} signature`);
@@ -375,8 +383,8 @@ export function assertMintablePackage(
     }
   });
   const entries = sigs as PackageSignature[];
-  const d1 = entries.find((e) => e.scheme === "secp256k1")!;
-  const d2 = entries.find((e) => e.scheme === "ed25519")!;
+  const d1 = entries.find((e) => e.scheme === D1_SCHEME)!;
+  const d2 = entries.find((e) => e.scheme === D2_SCHEME)!;
   const chainId = Number(valid.unitBinding.chainId);
   if (!operatorPrincipalMatchesSigner(valid.producer.operatorPrincipalId, d1.signer, chainId)) {
     throw new PackageNotMintableError(

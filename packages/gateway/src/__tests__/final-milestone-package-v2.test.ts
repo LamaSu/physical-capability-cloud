@@ -292,8 +292,8 @@ describe("validatePackageBody — pinned forms", () => {
 });
 
 describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted", () => {
-  const D1 = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1", sig: `0x${"11".repeat(65)}` };
-  const D2 = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519", sig: `0x${"22".repeat(64)}` };
+  const D1 = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1-eip712", sig: `0x${"11".repeat(65)}` };
+  const D2 = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519-raw32", sig: `0x${"22".repeat(64)}` };
   // A mintable body names its principals in the pinned forms, bound to D1 and D2,
   // and the registry holds D2's key for the producing kernel.
   const MINTABLE = clone(BODY);
@@ -303,7 +303,7 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
 
   it("accepts a real D1 + D2 set and hashes exactly what the digest function would", () => {
     const minted = assertMintablePackage(MINTABLE, [D2, D1], REGISTRY);
-    expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1", "ed25519"]);
+    expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1-eip712", "ed25519-raw32"]);
     expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(MINTABLE, [D1, D2]));
   });
 
@@ -314,7 +314,7 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
   });
 
   it("refuses anything but exactly one D1 and one D2", () => {
-    for (const sigs of [[D1], [D1, D2, { ...D2, signer: `0x${"ef".repeat(32)}` }], [D1, { ...D1, signer: `0x${"cc".repeat(20)}` }], "D1,D2"]) {
+    for (const sigs of [[D1], [D1, D2, { ...D2, signer: `0x${"ef".repeat(32)}` }], [D1, { ...D1, signer: `0x${"cc".repeat(20)}` }], [{ ...D1, scheme: "secp256k1" }, D2], "D1,D2"]) {
       expect(() => assertMintablePackage(MINTABLE, sigs, REGISTRY)).toThrow(PackageNotMintableError);
     }
   });
@@ -322,7 +322,8 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
   it("refuses an extra key, a foreign scheme or a wrong-form signer or signature", () => {
     const bad: unknown[] = [
       { ...D2, note: "x" },
-      { ...D2, scheme: "ed25519-raw32" },
+      { ...D2, scheme: "ed25519" }, // a bare label says nothing about what was signed
+      { ...D2, scheme: "secp256k1-eip712" },
       { ...D2, signer: `0x${"aa".repeat(20)}` }, // an address where the kernel key belongs
       { ...D2, signer: D2.signer.toUpperCase().replace("0X", "0x") },
       { ...D2, sig: `0x${"22".repeat(65)}` },
