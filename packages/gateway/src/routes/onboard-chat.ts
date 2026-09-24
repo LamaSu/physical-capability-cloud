@@ -202,6 +202,8 @@ interface ConversationRecord {
   owner: string | null;
   messages: AnthropicMessage[];
   pendingActions: PendingActionRecord[];
+  /** Set once the stored history filled up (L1): the conversation takes no more turns. */
+  full?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -245,7 +247,19 @@ const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
 const MAX_TOOL_STRING_CHARS = 32 * 1024;
 const MAX_TOOL_BODY_CHARS = 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 64 * 1024;
+/**
+ * The stored history cap. It is checked before EACH tool result is kept (WP-D
+ * round 4, L1), so a conversation's stored history exceeds it by at most one
+ * turn's own assistant output plus short notices, never by a turn of results.
+ */
 const MAX_HISTORY_CHARS = 256 * 1024;
+/**
+ * Structure caps applied before any redaction (L1). Strings were already cut, but
+ * a body of 200K tiny items still cost the redaction walk ~80 ms per call. At
+ * most this many items are kept per array or object, and this many nodes per result.
+ */
+const MAX_TOOL_CONTAINER_ITEMS = 2_000;
+const MAX_TOOL_NODES = 20_000;
 const MAX_MESSAGES = 80;
 const MAX_TOOL_DEPTH = 64;
 
@@ -294,6 +308,12 @@ const UNTRUSTED_TOOL_RESULTS_INSTRUCTION = [
   "and you cannot confirm it for them. Creating a credential is always held.",
   "Tell the user plainly what you prepared and that it is waiting for their confirmation.",
 ].join("\n");
+
+/** What a tool result becomes once the stored history is full (L1). */
+const HISTORY_FULL_RESULT = {
+  error: "history_full",
+  message: "This conversation's stored history is full, so this result was not kept. Tell the user to start a new conversation.",
+};
 
 /** What the model is told when its write call is held. */
 const HELD_RESULT = {
@@ -455,6 +475,7 @@ function loadConversation(id: string): ConversationRecord | null {
     owner: e.owner as string | null,
     messages: e.messages as AnthropicMessage[],
     pendingActions: Array.isArray(e.pendingActions) ? e.pendingActions.filter(isPendingActionRecord) : [],
+    ...(e.full === true ? { full: true } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -474,6 +495,7 @@ function saveConversation(record: ConversationRecord): void {
   const envelope = {
     v: ENVELOPE_VERSION,
     owner: record.owner,
+    ...(record.full === true ? { full: true } : {}),
     messages: redactSecretsDeep(record.messages),
     pendingActions: retainedPendingActions(record.pendingActions).map((a) => ({
       ...a,
@@ -789,21 +811,36 @@ function truncateToolString(s: string): string {
   return `${s.slice(0, cut)}…[truncated ${s.length - cut} characters]`;
 }
 
-/** Copy a parsed tool result with every string (value or key) cut by truncateToolString. */
-function truncateToolStrings(v: unknown, depth = 0): unknown {
+const defineField = (obj: Record<string, unknown>, key: string, value: unknown) =>
+  Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+
+/**
+ * Copy a parsed tool result with every string (value or key) cut by
+ * truncateToolString, and its structure bounded (L1): at most
+ * MAX_TOOL_CONTAINER_ITEMS per array or object and MAX_TOOL_NODES in all, with an
+ * explicit marker where anything was dropped. Linear in what it keeps.
+ */
+function truncateToolStrings(v: unknown, depth = 0, budget = { nodes: MAX_TOOL_NODES }): unknown {
+  budget.nodes -= 1;
   if (typeof v === "string") return truncateToolString(v);
   if (v === null || typeof v !== "object") return v;
   if (depth >= MAX_TOOL_DEPTH) return REDACTED_VALUE; // the redaction walk would cut it here too
-  if (Array.isArray(v)) return v.map((item) => truncateToolStrings(item, depth + 1));
-  const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(v as Record<string, unknown>)) {
-    Object.defineProperty(out, truncateToolString(key), {
-      value: truncateToolStrings(item, depth + 1),
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
+  if (Array.isArray(v)) {
+    const out: unknown[] = [];
+    const keep = Math.min(v.length, MAX_TOOL_CONTAINER_ITEMS);
+    for (let i = 0; i < keep && budget.nodes > 0; i += 1) out.push(truncateToolStrings(v[i], depth + 1, budget));
+    if (out.length < v.length) out.push(`…[truncated ${v.length - out.length} more items]`);
+    return out;
   }
+  const out: Record<string, unknown> = {};
+  const keys = Object.keys(v as Record<string, unknown>);
+  let kept = 0;
+  for (const key of keys) {
+    if (kept >= MAX_TOOL_CONTAINER_ITEMS || budget.nodes <= 0) break;
+    defineField(out, truncateToolString(key), truncateToolStrings((v as Record<string, unknown>)[key], depth + 1, budget));
+    kept += 1;
+  }
+  if (kept < keys.length) defineField(out, "…truncated", `${keys.length - kept} more fields`);
   return out;
 }
 
@@ -1270,7 +1307,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       };
     }
 
-    if (record.messages.length >= MAX_MESSAGES || historyChars(record) >= MAX_HISTORY_CHARS) {
+    if (record.full === true || record.messages.length >= MAX_MESSAGES || historyChars(record) >= MAX_HISTORY_CHARS) {
       return reply.status(400).send({
         error: "conversation_too_long",
         message: "Start a new conversation — this one is too long.",
@@ -1426,9 +1463,13 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
     while (turns < MAX_TURNS_PER_MESSAGE) {
       if (turns > 0 && historyChars(record) > MAX_HISTORY_CHARS) {
         doneReason = "history_full";
+        record.full = true;
         break;
       }
       turns += 1;
+      // L1: the history budget is checked before each tool result is kept.
+      let historyUsed = historyChars(record);
+      let historyFull = false;
 
       let res;
       try {
@@ -1482,7 +1523,13 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           }
           const outcome = await runToolUse(block.name, block.input ?? {});
           toolCalls.push(outcome.trace);
-          toolResultsForNextTurn.push({ type: "tool_result", tool_use_id: block.id, content: outcome.content });
+          let content = outcome.content;
+          if (historyFull || historyUsed + content.length > MAX_HISTORY_CHARS) {
+            content = JSON.stringify(HISTORY_FULL_RESULT);
+            historyFull = true;
+          }
+          historyUsed += content.length;
+          toolResultsForNextTurn.push({ type: "tool_result", tool_use_id: block.id, content });
         }
       }
 
@@ -1500,6 +1547,11 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       // Feed tool results back as a user turn (Anthropic convention).
       record.messages.push({ role: "user", content: toolResultsForNextTurn });
 
+      if (historyFull) {
+        doneReason = "history_full";
+        record.full = true; // no further turns, even though the cap was never crossed
+        break;
+      }
       if (doneReason === "tool_call_budget") break;
 
       if (res.stop_reason === "end_turn" || res.stop_reason === "stop_sequence") {

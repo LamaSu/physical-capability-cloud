@@ -99,6 +99,7 @@ const PKG = {
     tool("marketplace_list_listings", "GET", "/api/marketplace/test-listings"),
     tool("huge_listing", "GET", "/api/marketplace/test-huge"),
     tool("big_page", "GET", "/api/marketplace/test-big"),
+    tool("many_items", "GET", "/api/marketplace/test-many"),
   ],
 };
 
@@ -137,6 +138,8 @@ async function buildApp(): Promise<FastifyInstance> {
   }));
   app.get("/api/marketplace/test-huge", async () => ({ id: "lst-huge", description: "-eyJ".repeat(50_000) }));
   app.get("/api/marketplace/test-big", async () => ({ page: "word ".repeat(12_000) }));
+  // Round-3 probe P1: ~600 KB of tiny items, each one a node for the redaction walk.
+  app.get("/api/marketplace/test-many", async () => ({ items: Array.from({ length: 200_000 }, () => []) }));
   await app.register(onboardChatRoutes);
   await app.ready();
   return app;
@@ -461,6 +464,15 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
     expect(persistedMessages(post.json().conversationId).length).toBeLessThan(2 * MAX_TOOL_STRING_CHARS);
   });
 
+  it("[neg] a tool result's structure is bounded before redaction: 200K tiny items keep 2,000 plus a marker (L1)", async () => {
+    llm.responses.push(toolTurn("many_items", "tu_many"), endTurn);
+    const post = await chat({ message: "list everything" });
+    expect(post.statusCode).toBe(200);
+    const items = post.json().toolCalls[0].result.items as unknown[];
+    expect(items).toHaveLength(2_001);
+    expect(items[2_000]).toBe("…[truncated 198000 more items]");
+  });
+
   it("the stored history is capped: once full, the turn stops and the conversation takes no more turns", async () => {
     // Ten ~32 KB results in one turn take the history past its 256 KB cap.
     const calls = Array.from({ length: 10 }, (_, i) => ({ type: "tool_use", id: `tu_big_${i}`, name: "big_page", input: {} }));
@@ -471,8 +483,10 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
     expect(body.toolCalls).toHaveLength(10);
     expect(body.doneReason).toBe("history_full");
     expect(llm.requests).toHaveLength(1); // no second model call over a full history
+    // The cap is real (WP-D round 4, L1): checked before each result is kept, not once per turn.
     const stored = persistedMessages(body.conversationId).length;
-    expect(stored).toBeLessThan(10 * (MAX_TOOL_STRING_CHARS + 1_024));
+    expect(stored).toBeLessThan(256 * 1024 + 8 * 1024);
+    expect(JSON.stringify(llm.requests)).not.toContain("history_full"); // no model call after the cap
 
     const next = await chat({ conversationId: body.conversationId, message: "and now?" });
     expect(next.statusCode).toBe(400);
