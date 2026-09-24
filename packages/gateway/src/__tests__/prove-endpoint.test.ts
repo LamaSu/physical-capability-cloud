@@ -33,6 +33,10 @@ vi.mock("../services/posthog-service.js", () => ({
 vi.mock("../services/audit-service.js", () => ({
   auditService: {
     log: vi.fn(),
+    // Review transitions write their audit record with logStrict inside the
+    // transition's DB transaction (see onboard-transitions.test.ts for the
+    // real, unmocked audit trail).
+    logStrict: vi.fn(),
     query: vi.fn().mockReturnValue([]),
     stats: vi.fn().mockReturnValue([]),
   },

@@ -1,12 +1,14 @@
-import { timingSafeEqual } from "node:crypto";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import { createHash, timingSafeEqual } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
+import type { RegistrationRow } from "@pcc/store";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
-import { auditService } from "../services/audit-service.js";
+import { auditService, type AuditEntry } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
+import { proofRecordDigest } from "./onboard-evidence.js";
 import {
   analyzeOnboardingText,
   coalesceAnalysisText,
@@ -38,6 +40,120 @@ function isOnboardAdmin(req: FastifyRequest): boolean {
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Audit identity for an admin-key action: "admin-key:" + the first 8 hex of
+ * sha256(provided key). The key itself is never recorded. "admin-key:none"
+ * only occurs where the routes are open (PCC_ADMIN_KEY unset, NODE_ENV test or
+ * development) and no key was sent.
+ */
+function adminAuditIdentity(req: FastifyRequest): { actor: string; adminAuth: "admin-key" | "open-test-dev" } {
+  const provided = req.headers["x-admin-key"];
+  const actor =
+    typeof provided === "string" && provided.length > 0
+      ? `admin-key:${createHash("sha256").update(provided).digest("hex").slice(0, 8)}`
+      : "admin-key:none";
+  return { actor, adminAuth: process.env.PCC_ADMIN_KEY ? "admin-key" : "open-test-dev" };
+}
+
+/** The authenticated caller set by the auth middleware, for audit attribution only. */
+function requestCaller(req: FastifyRequest): string | null {
+  const r = req as unknown as { operatorId?: unknown; userId?: unknown };
+  const v = r.operatorId ?? r.userId;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+// ── Review transitions ──────────────────────────────────────────────────
+// Allowed from-states per transition, as in #337 (reject: narrowed, see
+// below). A handler validates the status it observed against its set, then
+// applies the transition as a compare-and-swap pinned to exactly that status,
+// inside one immediate transaction together with its audit record. So the
+// audit's from -> to is exact, a transition that lost a race gets 409 instead
+// of overwriting the winner, and a failed audit write rolls the transition
+// back (auditService writes synchronously on the same SQLite connection).
+const PROVE_FROM: readonly string[] = ["submitted", "reviewing"];
+const APPROVE_FROM: readonly string[] = ["submitted", "reviewing"];
+const ACTIVATE_FROM: readonly string[] = ["approved"];
+// #337 allowed reject from every status except "rejected". "deleted" (and any
+// unknown status) is left out: rejecting a soft-deleted registration would
+// overwrite its GDPR deletion record and move it out of "deleted".
+const REJECT_FROM: readonly string[] = ["draft", "submitted", "reviewing", "approved", "active", "suspended"];
+const REJECT_REASON_MAX_CHARS = 2000;
+
+class AuditWriteError extends Error {
+  constructor(readonly original: unknown) {
+    super("audit write failed");
+  }
+}
+
+type TransitionFailure =
+  | { ok: false; kind: "conflict"; currentStatus: string | null }
+  | { ok: false; kind: "audit_failed" | "db_error"; error: unknown };
+type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow } | TransitionFailure;
+
+/**
+ * Apply one status transition atomically with its audit record.
+ * `expectedFrom` is the status the handler observed (and already checked
+ * against its allowed set); the CAS matches only that status.
+ */
+function commitTransition(args: {
+  id: string;
+  expectedFrom: string;
+  to: string;
+  extra?: { approvedAt?: string; description?: string };
+  audit: (pre: RegistrationRow, post: RegistrationRow) => AuditEntry;
+}): TransitionOutcome {
+  try {
+    return getStore().db.transaction(
+      (): TransitionOutcome => {
+        const repos = getRepos();
+        const pre = repos.registrations.findById(args.id);
+        const post = repos.registrations.transitionStatus(args.id, [args.expectedFrom], args.to, args.extra);
+        if (!post || !pre) return { ok: false, kind: "conflict", currentStatus: pre?.status ?? null };
+        try {
+          auditService.logStrict(args.audit(pre, post));
+        } catch (err) {
+          throw new AuditWriteError(err); // rolls the CAS back
+        }
+        return { ok: true, row: post, pre };
+      },
+      { behavior: "immediate" },
+    );
+  } catch (err) {
+    if (err instanceof AuditWriteError) return { ok: false, kind: "audit_failed", error: err.original };
+    return { ok: false, kind: "db_error", error: err };
+  }
+}
+
+/** The audit fields every transition records. */
+function transitionAuditFields(pre: RegistrationRow, post: RegistrationRow, at: string): Record<string, unknown> {
+  return {
+    registrationId: pre.id,
+    from: pre.status,
+    to: post.status,
+    evidenceDigest: proofRecordDigest(pre.description),
+    at,
+  };
+}
+
+function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure: TransitionFailure, action: string) {
+  if (failure.kind === "conflict") {
+    return reply.status(409).send({
+      error: "invalid_transition",
+      message: `Cannot ${action} this registration from its current status (${failure.currentStatus ?? "missing"}).`,
+      currentStatus: failure.currentStatus,
+    });
+  }
+  req.log.error({ err: failure.error }, `[onboard] ${action} rolled back (${failure.kind})`);
+  Sentry.captureException(failure.error, { extra: { action, failure: failure.kind, url: req.url } });
+  if (failure.kind === "audit_failed") {
+    return reply.status(500).send({
+      error: "audit_write_failed",
+      message: `The ${action} was rolled back because its audit record could not be written.`,
+    });
+  }
+  return reply.status(500).send({ error: "transition_failed", message: `The ${action} could not be applied.` });
 }
 
 export async function onboardRoutes(app: FastifyInstance) {
@@ -196,24 +312,31 @@ export async function onboardRoutes(app: FastifyInstance) {
     if (!isOnboardAdmin(req)) {
       return reply.status(403).send({ error: "forbidden", message: "Approving a registration requires the admin key" });
     }
-    const repos = getRepos();
-    const reg = repos.registrations.findById(req.params.id);
+    const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status !== "submitted" && reg.status !== "reviewing") {
-      return reply.status(400).send({ error: "invalid_status", message: `Cannot approve registration in "${reg.status}" status` });
+    if (!APPROVE_FROM.includes(reg.status)) {
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, "approve");
     }
-    repos.registrations.updateStatus(req.params.id, "approved", { approvedAt: new Date().toISOString() });
-    auditService.log({
-      eventType: "operator.approved",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId,
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "approve",
-      metadata: { name: reg.name },
-      ip: req.ip,
-      userAgent: req.headers["user-agent"],
+    const at = new Date().toISOString();
+    const admin = adminAuditIdentity(req);
+    const outcome = commitTransition({
+      id: reg.id,
+      expectedFrom: reg.status,
+      to: "approved",
+      extra: { approvedAt: at },
+      audit: (pre, post) => ({
+        eventType: "operator.approved",
+        actor: admin.actor,
+        resourceType: "registration",
+        resourceId: pre.id,
+        action: "approve",
+        metadata: { ...transitionAuditFields(pre, post, at), name: pre.name, adminAuth: admin.adminAuth, caller: requestCaller(req) },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      }),
     });
-    return { registration: reg, approved: true };
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "approve");
+    return { registration: outcome.row, approved: true };
   });
 
   // ── Reject a registration (admin key required) ──
@@ -221,26 +344,36 @@ export async function onboardRoutes(app: FastifyInstance) {
     if (!isOnboardAdmin(req)) {
       return reply.status(403).send({ error: "forbidden", message: "Rejecting a registration requires the admin key" });
     }
-    const repos = getRepos();
-    const reg = repos.registrations.findById(req.params.id);
+    const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status === "rejected") {
-      return reply.status(400).send({ error: "already_rejected" });
+    if (!REJECT_FROM.includes(reg.status)) {
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, "reject");
     }
-    const body = req.body as { reason?: string } | undefined;
-    const reason = body?.reason ?? "No reason provided";
-    repos.registrations.updateStatus(req.params.id, "rejected", { description: `REJECTED: ${reason}` });
-    auditService.log({
-      eventType: "operator.rejected",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId,
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "reject",
-      metadata: { name: reg.name, reason: body?.reason },
-      ip: req.ip,
-      userAgent: req.headers["user-agent"],
+    const rawReason = (req.body as { reason?: unknown } | undefined)?.reason;
+    if (rawReason !== undefined && rawReason !== null && (typeof rawReason !== "string" || rawReason.length > REJECT_REASON_MAX_CHARS)) {
+      return reply.status(400).send({ error: "invalid_reason", message: `reason must be a string of at most ${REJECT_REASON_MAX_CHARS} characters.` });
+    }
+    const reason = typeof rawReason === "string" && rawReason.length > 0 ? rawReason : "No reason provided";
+    const at = new Date().toISOString();
+    const admin = adminAuditIdentity(req);
+    const outcome = commitTransition({
+      id: reg.id,
+      expectedFrom: reg.status,
+      to: "rejected",
+      extra: { description: `REJECTED: ${reason}` },
+      audit: (pre, post) => ({
+        eventType: "operator.rejected",
+        actor: admin.actor,
+        resourceType: "registration",
+        resourceId: pre.id,
+        action: "reject",
+        metadata: { ...transitionAuditFields(pre, post, at), name: pre.name, reason, adminAuth: admin.adminAuth, caller: requestCaller(req) },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      }),
     });
-    return { registration: reg, rejected: true };
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "reject");
+    return { registration: outcome.row, rejected: true };
   });
 
   // ── T2.2 — Edit registration (PATCH, owner-only) ──
@@ -358,14 +491,30 @@ export async function onboardRoutes(app: FastifyInstance) {
     if (!isOnboardAdmin(req)) {
       return reply.status(403).send({ error: "forbidden", message: "Activating a registration requires the admin key" });
     }
-    const repos = getRepos();
-    const reg = repos.registrations.findById(req.params.id);
+    const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status !== "approved") {
-      return reply.status(400).send({ error: "invalid_status", message: `Must be approved before activating (current: "${reg.status}")` });
+    if (!ACTIVATE_FROM.includes(reg.status)) {
+      return sendTransitionFailure(req, reply, { ok: false, kind: "conflict", currentStatus: reg.status }, "activate");
     }
-    repos.registrations.updateStatus(req.params.id, "active");
-    return { registration: { ...reg, status: "active" }, activated: true };
+    const at = new Date().toISOString();
+    const admin = adminAuditIdentity(req);
+    const outcome = commitTransition({
+      id: reg.id,
+      expectedFrom: reg.status,
+      to: "active",
+      audit: (pre, post) => ({
+        eventType: "operator.activated",
+        actor: admin.actor,
+        resourceType: "registration",
+        resourceId: pre.id,
+        action: "activate",
+        metadata: { ...transitionAuditFields(pre, post, at), name: pre.name, adminAuth: admin.adminAuth, caller: requestCaller(req) },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      }),
+    });
+    if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "activate");
+    return { registration: outcome.row, activated: true };
   });
 
   // ── Submit proof-of-capability evidence for review ──
