@@ -31,6 +31,12 @@
  * SDK bundles use a per-job session key. This verifier authenticates the
  * principal-signed delegation, enforces expiry/action/job scope, and only then
  * verifies the bundle signature with the delegated session public key.
+ *
+ * A signature only proves who signed which digest. Before a device bundle can
+ * anchor settlement, its signed bundleHash must also open to stored events that
+ * commit this job and the kernel that accepted it (LO-EV-9,
+ * `verifyEvidenceSubjectBinding` in @pcc/spec). Otherwise a genuine bundle from
+ * another job, or another digest the same key signed, would settle this one.
  */
 
 import nacl from "tweetnacl";
@@ -41,12 +47,19 @@ import {
   parseEd25519PublicKeyHex,
   parseEd25519SignatureHex,
   signingPreimage,
+  verifyEvidenceSubjectBinding,
+  type EvidenceSubject,
   type RegisteredSigner,
   type SessionKeyAuthorization,
   type SessionKey,
   type SessionSignedEvent,
 } from "@pcc/spec";
 import { SessionKeyService } from "@pcc/verifier";
+import { createHash } from "node:crypto";
+import {
+  buildCanonicalEvidenceEnvelope,
+  type EvidenceEnvelopeEvent,
+} from "./evidence-envelope.js";
 
 // ── The signature shape stored on / carried by an evidence bundle ────────────
 
@@ -412,11 +425,25 @@ export interface SettlementEvidenceSlot {
   assuranceTier: number;
   sessionKeyAuthorization?: SessionKeyAuthorization;
   contractId?: string;
+  /** The bundle's events as stored: the preimage its signed bundleHash must
+   *  open to. A device slot without them never anchors settlement. */
+  events?: readonly unknown[];
+  /** The accepted execution unit the bundle must be evidence for: this job and
+   *  the kernel on the job record. A device slot without one never anchors. */
+  subject?: EvidenceSubject;
+  /** The stored evidence row this slot came from, so a device decision can pin
+   *  that exact row (events + delegation) as the job's settlement anchor. */
+  bundleId?: string;
 }
 
 export interface SettlementEvidenceInput {
   /** A device-signed bundle already captured for this job (path 1), if any. */
-  deviceBundle: SettlementEvidenceSlot | null;
+  deviceBundle?: SettlementEvidenceSlot | null;
+  /** Every device-signed bundle captured for this job, tried in order; the
+   *  first that verifies anchors. Takes precedence over `deviceBundle`. The
+   *  relay stores any number of rows per job, so choosing one row up front
+   *  would let a bad row hide the genuine one. */
+  deviceBundles?: readonly SettlementEvidenceSlot[];
   /** The device's registered signer (from the kernel registry). */
   registeredSigner: unknown;
   /** The gateway's own rebuilt anchor (today's behavior). */
@@ -436,9 +463,11 @@ export interface SettlementEvidenceDecision extends SettlementEvidenceSlot {
 /**
  * Decide which evidence anchors settlement. When the gate is CLOSED (default)
  * this ALWAYS returns the gateway fallback — identical to today's behavior, so
- * the money path is unchanged. When the gate is OPEN and a device bundle verifies
- * against its registered signer, it anchors on the DEVICE's real hash +
- * signature. Fails closed to the fallback on any verify failure.
+ * the money path is unchanged. When the gate is OPEN, the first device bundle
+ * whose digest opens to events committing this job and its kernel, and whose
+ * signature verifies against the registered signer, anchors settlement on the
+ * DEVICE's real hash + signature. Fails closed to the fallback otherwise,
+ * reporting the first candidate's failure.
  */
 export async function resolveSettlementEvidence(
   input: SettlementEvidenceInput,
@@ -447,26 +476,131 @@ export async function resolveSettlementEvidence(
   if (!gateOpen) {
     return { ...input.fallback, source: "gateway-fallback", reason: "gate-closed" };
   }
-  if (!input.deviceBundle) {
+  const candidates = input.deviceBundles ?? (input.deviceBundle ? [input.deviceBundle] : []);
+  if (candidates.length === 0) {
     return { ...input.fallback, source: "gateway-fallback", reason: "no-device-bundle" };
   }
+  let firstFailure: string | undefined;
+  for (const candidate of candidates) {
+    const failure = await deviceAnchorFailure(candidate, input);
+    if (failure === null) {
+      return {
+        source: "device",
+        bundleHash: candidate.bundleHash,
+        kernelSignature: candidate.kernelSignature,
+        assuranceTier: candidate.assuranceTier,
+        ...(candidate.bundleId !== undefined ? { bundleId: candidate.bundleId } : {}),
+        ...(candidate.events !== undefined ? { events: candidate.events } : {}),
+        ...(candidate.sessionKeyAuthorization
+          ? { sessionKeyAuthorization: candidate.sessionKeyAuthorization }
+          : {}),
+      };
+    }
+    if (firstFailure === undefined) firstFailure = failure;
+  }
+  return { ...input.fallback, source: "gateway-fallback", reason: firstFailure };
+}
+
+/**
+ * Why a device bundle may not anchor settlement, or null when it may. Both legs
+ * must pass: the signed digest opens to events that commit this job and the
+ * kernel that accepted it (LO-EV-9), and the signature over that digest
+ * verifies against the kernel's registered signer. The delegation scope is
+ * checked against the subject's job, never a separately supplied id.
+ */
+async function deviceAnchorFailure(
+  slot: SettlementEvidenceSlot,
+  input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519">,
+): Promise<string | null> {
+  if (!slot.subject) return "missing-subject";
+  if (slot.contractId !== undefined && slot.contractId !== slot.subject.jobId) {
+    return "contract-subject-mismatch";
+  }
+  const binding = await verifyEvidenceSubjectBinding({
+    bundleHash: slot.bundleHash,
+    events: slot.events ?? [],
+    subject: slot.subject,
+  });
+  if (!binding.ok) return binding.reason;
   const verified = await verifyDeviceSignedEvidence({
-    signature: input.deviceBundle.kernelSignature,
-    bundleHash: input.deviceBundle.bundleHash,
+    signature: slot.kernelSignature,
+    bundleHash: slot.bundleHash,
     registeredSigner: input.registeredSigner,
-    ...(input.deviceBundle.sessionKeyAuthorization
-      ? { sessionKeyAuthorization: input.deviceBundle.sessionKeyAuthorization }
+    ...(slot.sessionKeyAuthorization
+      ? { sessionKeyAuthorization: slot.sessionKeyAuthorization }
       : {}),
-    ...(input.deviceBundle.contractId ? { contractId: input.deviceBundle.contractId } : {}),
+    contractId: slot.subject.jobId,
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
-  if (!verified.ok) {
-    return { ...input.fallback, source: "gateway-fallback", reason: verified.reason ?? "verify-failed" };
+  return verified.ok ? null : (verified.reason ?? "verify-failed");
+}
+
+// ── Recovery: re-verify the pinned settlement anchor ────────────────────────
+
+/** A stored evidence row, as the evidence repository returns it. */
+export interface PinnedEvidenceRow {
+  id: string;
+  jobId: string;
+  stepId: string;
+  kernelId: string;
+  assuranceTier: number;
+  createdAt: string;
+  bundleHash: string;
+  kernelSignature: StoredSignature;
+  sessionKeyAuthorization?: SessionKeyAuthorization | null;
+}
+
+/**
+ * Before recovery (/resume-settlement) settles on the evidence /complete pinned
+ * as the job's anchor, re-verify it rather than trusting whichever row exists
+ * (review R1 on LO-EV-9):
+ *  - the pinned row must exist and belong to this job and its kernel;
+ *  - a device anchor must pass the same subject binding + registered-signer
+ *    signature check /complete ran;
+ *  - a gateway anchor's bundleHash must recompute from its stored envelope, the
+ *    exact bytes GET /api/evidence/:hash serves.
+ */
+export async function verifyPinnedSettlementEvidence(input: {
+  jobId: string;
+  kernelId: string;
+  row: PinnedEvidenceRow | null | undefined;
+  events: readonly EvidenceEnvelopeEvent[];
+  registeredSigner: unknown;
+  verifyEd25519?: VerifyEd25519;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const { row } = input;
+  if (!row) return { ok: false, reason: "no-pinned-evidence" };
+  if (row.jobId !== input.jobId) return { ok: false, reason: "pinned-evidence-job-mismatch" };
+  if (row.kernelId !== input.kernelId) return { ok: false, reason: "pinned-evidence-kernel-mismatch" };
+  if (isDeviceSignedSignature(row.kernelSignature)) {
+    const failure = await deviceAnchorFailure(
+      {
+        bundleHash: row.bundleHash,
+        kernelSignature: row.kernelSignature,
+        assuranceTier: row.assuranceTier,
+        ...(row.sessionKeyAuthorization ? { sessionKeyAuthorization: row.sessionKeyAuthorization } : {}),
+        events: input.events,
+        subject: { jobId: input.jobId, kernelId: input.kernelId },
+      },
+      {
+        registeredSigner: input.registeredSigner,
+        ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
+      },
+    );
+    return failure === null ? { ok: true } : { ok: false, reason: failure };
   }
-  return {
-    source: "device",
-    bundleHash: input.deviceBundle.bundleHash,
-    kernelSignature: input.deviceBundle.kernelSignature,
-    assuranceTier: input.deviceBundle.assuranceTier,
-  };
+  const envelope = buildCanonicalEvidenceEnvelope(
+    {
+      id: row.id,
+      jobId: row.jobId,
+      stepId: row.stepId,
+      kernelId: row.kernelId,
+      assuranceTier: row.assuranceTier,
+      createdAt: row.createdAt,
+      kernelSignature: row.kernelSignature,
+    },
+    [...input.events],
+  );
+  const recomputed = `sha256:${createHash("sha256").update(envelope).digest("hex")}`;
+  return recomputed === row.bundleHash ? { ok: true } : { ok: false, reason: "pinned-evidence-hash-mismatch" };
 }

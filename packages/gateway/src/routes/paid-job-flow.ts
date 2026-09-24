@@ -58,6 +58,7 @@ import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
   isDeviceSignedSignature,
+  verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
   naclEd25519Verify,
   type StoredSignature,
@@ -1079,41 +1080,51 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // (serve-the-flag) — the default money path is unchanged apart from the now
       // oracle-verifiable hash. When a real device has cleared #52 on deployed infra and
       // the gate is opened (NOT done here), a device-signed (#236) bundle captured by
-      // operator-relay (path 1) whose Ed25519 signature verifies against the kernel's
-      // REGISTERED signer anchors settlement on the DEVICE's own hash + signature
-      // instead of this placeholder. Fails closed to the gateway anchor on any verify
-      // failure — the money path never weakens.
+      // operator-relay (path 1) anchors settlement on the DEVICE's own hash + signature
+      // instead of this placeholder, but only when its signed bundleHash opens to the
+      // stored events, those events commit THIS job and the kernel that accepted it
+      // (LO-EV-9), and its Ed25519 signature verifies against that kernel's REGISTERED
+      // signer. Fails closed to the gateway anchor on any failure — the money path
+      // never weakens.
       const gatewaySignature: StoredSignature = {
         signer: "0x0000000000000000000000000000000000000000",
         algorithm: "ed25519",
         value: "gateway-auto-sign",
       };
       const seam2GateOpen = deviceEvidenceSettlementEnabled();
-      let seam2DeviceBundle: SettlementEvidenceSlot | null =
-        null;
+      let seam2DeviceBundles: SettlementEvidenceSlot[] = [];
       let seam2RegisteredSigner: unknown = null;
       if (seam2GateOpen) {
         // Extra lookups only when the gate is open — the closed path is unchanged.
-        const priorBundles = repos.evidence.findByJob(jobId);
-        const deviceRow = priorBundles.find((r) =>
-          isDeviceSignedSignature(r.kernelSignature as StoredSignature),
-        );
-        if (deviceRow) {
-          seam2DeviceBundle = {
-            bundleHash: deviceRow.bundleHash,
-            kernelSignature: deviceRow.kernelSignature as StoredSignature,
-            assuranceTier: deviceRow.assuranceTier,
-            ...(deviceRow.sessionKeyAuthorization
-              ? { sessionKeyAuthorization: deviceRow.sessionKeyAuthorization }
+        // Every device-signed row is a candidate: the relay accepts any number of
+        // rows per job, so the first row is not necessarily the genuine one.
+        seam2DeviceBundles = repos.evidence
+          .findByJob(jobId)
+          .filter((r) => isDeviceSignedSignature(r.kernelSignature as StoredSignature))
+          .map((r) => ({
+            bundleHash: r.bundleHash,
+            kernelSignature: r.kernelSignature as StoredSignature,
+            assuranceTier: r.assuranceTier,
+            ...(r.sessionKeyAuthorization
+              ? { sessionKeyAuthorization: r.sessionKeyAuthorization }
               : {}),
             contractId: jobId,
-          };
-        }
+            bundleId: r.id,
+            events: repos.evidence.findEventsByBundle(r.id).map((ev) => ({
+              id: ev.id,
+              type: ev.type,
+              timestamp: ev.timestamp,
+              source: ev.source,
+              payload: ev.payload,
+              hash: ev.hash,
+            })),
+            subject: { jobId, kernelId: job.kernelId },
+          }));
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
       }
       const settlementEvidence = await resolveSettlementEvidence({
-        deviceBundle: seam2DeviceBundle,
+        deviceBundles: seam2DeviceBundles,
         registeredSigner: seam2RegisteredSigner,
         fallback: {
           bundleHash: gatewayBundleHash,
@@ -1128,18 +1139,29 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // hash when the gate is closed (the default).
       const bundleHash = settlementEvidence.bundleHash;
       const settlementSignature = settlementEvidence.kernelSignature;
+      // A device anchor IS a verified relayed row: pin that row, whose events open
+      // to its digest and which keeps its delegation, instead of restating its
+      // digest over the gateway's own events (LO-EV-9 review R1). Recovery
+      // (/resume-settlement) re-verifies exactly this pinned row.
+      const deviceAnchored =
+        settlementEvidence.source === "device" && settlementEvidence.bundleId !== undefined;
+      const anchorBundleId = deviceAnchored ? (settlementEvidence.bundleId as string) : bundleId;
+      const anchorEvents = deviceAnchored
+        ? ((settlementEvidence.events ?? []) as typeof events)
+        : events;
 
       // ── 2. Store evidence bundle ───────────────────────────────────
+      // The gateway's own record of the job, always under its OWN canonical
+      // envelope hash and placeholder signature, so every stored row's digest
+      // opens to its own events.
       repos.evidence.insert({
         id: bundleId,
         jobId,
         stepId: job.stepId,
         kernelId: job.kernelId,
         assuranceTier: jobAssuranceTier,
-        bundleHash,
-        // SEAM-2: the settlement anchor's signature — the gateway placeholder when
-        // the gate is closed (default), the DEVICE's real Ed25519 signature when open.
-        kernelSignature: settlementSignature,
+        bundleHash: gatewayBundleHash,
+        kernelSignature: gatewaySignature,
         createdAt: now,
       });
 
@@ -1157,9 +1179,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         );
       }
 
-      // Update job with evidence bundle reference
+      // Pin the settlement anchor on the job (the device row when device-anchored).
       repos.jobs.update(jobId, {
-        evidenceBundleId: bundleId,
+        evidenceBundleId: anchorBundleId,
         status: "evidence_submitted",
       });
 
@@ -1168,13 +1190,13 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       try {
         const storage = await getEvidenceStorage();
         const archiveResult = await storage.archiveBundle({
-          id: bundleId,
+          id: anchorBundleId,
           jobId,
           stepId: job.stepId,
           kernelId: job.kernelId,
           assuranceTier: jobAssuranceTier,
           bundleHash,
-          events,
+          events: anchorEvents,
           // StoredSignature → the strict spec Signature (device sig or the gateway
           // placeholder; both ed25519, signer is a 0x-string).
           kernelSignature: settlementSignature as Signature,
@@ -1182,7 +1204,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         });
         ipfsCid = archiveResult.cid;
         pipelineTelemetry.emit(jobId, "evidence_archive", "completed", {
-          metadata: { cid: ipfsCid, bundleId },
+          metadata: { cid: ipfsCid, bundleId: anchorBundleId },
         });
       } catch (archiveErr) {
         console.warn("[complete] Evidence IPFS archive failed, using mock CID:", archiveErr instanceof Error ? archiveErr.message : archiveErr);
@@ -1192,8 +1214,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           const mockStorage = new StorachaStorageService({ mock: true });
           await mockStorage.init();
           const mockResult = await mockStorage.archiveBundle({
-            id: bundleId, jobId, stepId: job.stepId, kernelId: job.kernelId,
-            assuranceTier: jobAssuranceTier, bundleHash: bundleHash as `sha256:${string}`, events: events as any,
+            id: anchorBundleId, jobId, stepId: job.stepId, kernelId: job.kernelId,
+            assuranceTier: jobAssuranceTier, bundleHash: bundleHash as `sha256:${string}`, events: anchorEvents as any,
             kernelSignature: settlementSignature as Signature,
             createdAt: now,
           });
@@ -1458,7 +1480,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
       pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
         metadata: {
-          bundleId,
+          bundleId: anchorBundleId,
           bundleHash,
           escrowAddress,
           settlementStatus,
@@ -1472,7 +1494,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       return {
         jobId,
         status: settlementStatus,
-        evidenceBundleId: bundleId,
+        evidenceBundleId: anchorBundleId,
         evidenceHash: bundleHash,
         escrowAddress,
         escrowId,
@@ -1567,20 +1589,53 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       }
       reclaimed = true;
 
-      // Reuse the existing evidence bundle — never rebuild. Its absence means an
-      // inconsistent row; release the claim and refuse rather than settle blind.
-      const bundles = repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
-      if (!latestBundle) {
+      // Reuse the evidence /complete PINNED as this job's settlement anchor
+      // (job.evidenceBundleId) -- never "the latest row", which any later relay
+      // write could supply (LO-EV-9 review R1) -- and re-verify it before any
+      // settlement step: a device anchor must pass the subject binding and the
+      // registered-signer signature again; a gateway anchor must recompute from
+      // its stored envelope. Anything else releases the claim and refuses.
+      const pinnedBundle = job.evidenceBundleId ? repos.evidence.findById(job.evidenceBundleId) : undefined;
+      const pinnedEvents = pinnedBundle
+        ? repos.evidence.findEventsByBundle(pinnedBundle.id).map((ev) => ({
+            id: ev.id,
+            type: ev.type,
+            timestamp: ev.timestamp,
+            source: ev.source,
+            payload: ev.payload,
+            hash: ev.hash,
+          }))
+        : [];
+      const pinnedCheck = await verifyPinnedSettlementEvidence({
+        jobId,
+        kernelId: job.kernelId,
+        row: pinnedBundle
+          ? {
+              ...pinnedBundle,
+              kernelSignature: pinnedBundle.kernelSignature as StoredSignature,
+            }
+          : undefined,
+        events: pinnedEvents,
+        registeredSigner: registeredSignerInputFromColumns(repos.kernels.findById(job.kernelId) ?? null),
+        verifyEd25519: naclEd25519Verify,
+      });
+      if (!pinnedBundle || !pinnedCheck.ok) {
         repos.jobs.updateStatus(jobId, "evidence_submitted");
         reclaimed = false;
         return reply.status(409).send({
-          error: "No evidence bundle found to resume; cannot settle without evidence",
+          error: "The job's pinned settlement evidence is missing or fails verification; recovery settles only the evidence /complete anchored",
+          reason: pinnedCheck.ok ? "no-pinned-evidence" : pinnedCheck.reason,
           status: "evidence_submitted",
         });
       }
-      const bundleId = latestBundle.id;
-      const bundleHash = latestBundle.bundleHash;
+      const latestBundle = pinnedBundle;
+      const bundleId = pinnedBundle.id;
+      const bundleHash = pinnedBundle.bundleHash;
+      // The chain takes the pinned digest as bytes32 (the same 0x<hex> /complete's
+      // V3 path submits and the oracle attests), never the sha256:-tagged string.
+      const chainEvidenceHash = (
+        bundleHash.startsWith("sha256:") ? `0x${bundleHash.slice("sha256:".length)}` : bundleHash
+      ) as `0x${string}`;
 
       // Real negotiated tier (A-3 consistency): the on-chain milestone requiredTier.
       const tierSessionRow = db
@@ -1645,7 +1700,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (v2ChainDrive) {
         try {
           const d1 = await driveSettlement(escrowAddress as `0x${string}`, 0, {
-            evidenceBundleHash: bundleHash as `0x${string}`,
+            evidenceBundleHash: chainEvidenceHash,
           });
           onChainStepId = (d1.stepId as `0x${string}` | undefined) ?? undefined;
           chainOutcome = d1.outcome;
@@ -1745,7 +1800,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         if (easUid) {
           try {
             const d2 = await driveSettlement(escrowAddress as `0x${string}`, 0, {
-              evidenceBundleHash: bundleHash as `0x${string}`,
+              evidenceBundleHash: chainEvidenceHash,
               easUid,
             });
             chainOutcome = d2.outcome;
