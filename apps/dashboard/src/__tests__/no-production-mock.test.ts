@@ -83,8 +83,6 @@ const KNOWN_OFFENDERS: Record<string, string> = {
   "pages/onboard/Step7_Review.tsx": "adk 4f6668ed: registers adapterType 'mock' (the EXPERIENCE-COMPLETE blocker)",
   "pages/StartPage.tsx": "adk 4f6668ed: registers against kernel_dev_001 / adapter 'mock'",
   // pcc-shell 47b47970: this lane's remaining pages, in a follow-up PR (their implementer agents stopped at the account's weekly limit)
-  "pages/AgentLogPage.tsx": "pcc-shell 47b47970: follow-up PR",
-  "pages/NegotiationPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/MarketplacePage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/MarketplaceDetailPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/ROICalculatorPage.tsx": "pcc-shell 47b47970: follow-up PR",

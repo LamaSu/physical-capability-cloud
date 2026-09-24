@@ -5,6 +5,42 @@ import {
 import { useUIStore } from "../stores/ui-store.js";
 import { SplitEditor } from "../components/SplitEditor.js";
 import type { SplitEntry } from "../components/SplitEditor.js";
+import { NotLiveState, DemoBanner } from "../components/DemoState.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import {
+  DEMO_PROPOSALS,
+  DEMO_PRICE_FLOORS,
+  DEMO_NEGOTIATIONS,
+  DEMO_SPLIT_PREVIEW_PRICE,
+  type DemoProposal,
+  type DemoProposalStatus,
+} from "../demo/NegotiationPage.fixtures.js";
+
+/**
+ * Negotiations.
+ *
+ * Not live. No gateway route serves any section of this page:
+ *   - Proposals: nothing lists priced proposals sent to an operator's
+ *     kernels, or accepts, counters or rejects one. routes/negotiation.ts
+ *     serves buyer-side sessions by ID, and its state machine has no
+ *     counter-offer step. Two routes nearby serve something else:
+ *     /api/operator/approvals holds approval requests with no price (the
+ *     Operator page shows them), and /api/job-offers/open is a public feed
+ *     of open offers that operators claim rather than negotiate.
+ *   - Revenue Splits: nothing stores a default split for new contracts.
+ *   - Pricing Floors: OperatorPolicy has no floor settings; its pricing
+ *     settings are discount and surcharge rules.
+ *   - History: sessions are stored with their timelines, but every read of
+ *     them is by session ID or job ID; nothing lists them.
+ * The prototype showed invented proposals, floors and timelines as the
+ * operator's own, and its Accept, Counter, Reject, split and floor controls
+ * changed only local state, so a click looked like it had taken effect.
+ *
+ * Outside demo mode each tab says what is missing, offers no action and
+ * makes no request. In demo mode (lib/demo-mode.ts) the prototype renders its
+ * sample values under a DemoBanner, and every control that would change PCC
+ * state is disabled and says so.
+ */
 
 // ---------------------------------------------------------------------------
 // Split presets (mirrors story-defaults SPLIT_PROFILES)
@@ -54,148 +90,106 @@ const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
 };
 
 // ---------------------------------------------------------------------------
-// Mock data
+// Tabs, and what the gateway doesn't serve (shown outside demo mode)
 // ---------------------------------------------------------------------------
 
-type ProposalStatus = "pending" | "countered" | "accepted" | "rejected" | "expired";
+type Tab = "proposals" | "splits" | "floors" | "history";
 
-interface Proposal {
-  id: string;
-  capability: string;
-  capabilityType: string;
-  customerAgent: string;
-  proposedPrice: number;
-  assuranceTier: 0 | 1 | 2 | 3;
-  status: ProposalStatus;
-  receivedAt: string;
-  counterPrice?: number;
-  expiresIn: string;
+const TAB_ORDER: Tab[] = ["proposals", "splits", "floors", "history"];
+
+const TAB_LABELS: Record<Tab, string> = {
+  proposals: "Proposals",
+  splits:    "Revenue Splits",
+  floors:    "Pricing Floors",
+  history:   "History",
+};
+
+const NOT_LIVE: Record<Tab, { what: string; detail: string }> = {
+  proposals: {
+    what: "The proposal inbox",
+    detail:
+      "No gateway route lists priced proposals sent to your kernels, or accepts, counters or rejects one: " +
+      "negotiation sessions go from quote to commit with no counter-offer step. " +
+      "Approval requests, which carry no price, are listed by GET /api/operator/approvals.",
+  },
+  splits: {
+    what: "Your default revenue split",
+    detail:
+      "No gateway route stores a default revenue split for new contracts, so an edit made here " +
+      "would not apply to any contract.",
+  },
+  floors: {
+    what: "Price-floor configuration",
+    detail:
+      "No gateway route stores price floors. Your operator policy (/api/operator/policy/:kernelId) " +
+      "holds discount and surcharge rules, not minimum prices, discount caps or surge multipliers.",
+  },
+  history: {
+    what: "Negotiation history",
+    detail:
+      "Negotiation sessions are stored with their timelines, but no gateway route lists them: " +
+      "GET /api/negotiate/session/:id reads one session by its ID.",
+  },
+};
+
+function TabBar({ active, onChange, labels }: {
+  active: Tab;
+  onChange: (tab: Tab) => void;
+  labels: Record<Tab, string>;
+}) {
+  return (
+    <div className="flex gap-1 border-b border-white/[0.06] pb-1">
+      {TAB_ORDER.map((id) => (
+        <button
+          key={id}
+          onClick={() => onChange(id)}
+          className={`px-4 py-2 rounded-t-lg text-xs transition-all ${
+            active === id
+              ? "bg-white/[0.04] text-green-400 border-b-2 border-green-400/30"
+              : "text-white/30 hover:text-white/50"
+          }`}
+        >
+          {labels[id]}
+        </button>
+      ))}
+    </div>
+  );
 }
-
-interface PricingFloor {
-  id: string;
-  capability: string;
-  capabilityType: string;
-  minPrice: number;
-  maxDiscount: number;
-  surgeMultiplier: number;
-  autoReject: boolean;
-}
-
-interface NegotiationEvent {
-  type: "proposal" | "counter" | "accepted" | "rejected" | "expired";
-  actor: string;
-  price?: number;
-  splitNote?: string;
-  timestamp: string;
-}
-
-interface Negotiation {
-  id: string;
-  capability: string;
-  customerAgent: string;
-  status: ProposalStatus;
-  timeline: NegotiationEvent[];
-}
-
-const MOCK_PROPOSALS: Proposal[] = [
-  {
-    id: "prop-001",
-    capability: "FDM 3D Print — Prusa MK4",
-    capabilityType: "fdm",
-    customerAgent: "user-agent@alpha.pcc",
-    proposedPrice: 18.50,
-    assuranceTier: 1,
-    status: "pending",
-    receivedAt: "2 min ago",
-    expiresIn: "58 min",
-  },
-  {
-    id: "prop-002",
-    capability: "Laser Cut — Epilog Fusion",
-    capabilityType: "laser-cut",
-    customerAgent: "broker-agent@beta.pcc",
-    proposedPrice: 42.00,
-    assuranceTier: 2,
-    status: "pending",
-    receivedAt: "14 min ago",
-    expiresIn: "46 min",
-  },
-  {
-    id: "prop-003",
-    capability: "FDM 3D Print — Prusa MK4",
-    capabilityType: "fdm",
-    customerAgent: "user-agent@gamma.pcc",
-    proposedPrice: 12.00,
-    assuranceTier: 0,
-    status: "countered",
-    receivedAt: "1 hr ago",
-    counterPrice: 19.00,
-    expiresIn: "expired",
-  },
-];
-
-const MOCK_FLOORS: PricingFloor[] = [
-  {
-    id: "floor-001",
-    capability: "FDM 3D Print",
-    capabilityType: "fdm",
-    minPrice: 15.00,
-    maxDiscount: 10,
-    surgeMultiplier: 1.5,
-    autoReject: true,
-  },
-  {
-    id: "floor-002",
-    capability: "Laser Cut",
-    capabilityType: "laser-cut",
-    minPrice: 35.00,
-    maxDiscount: 5,
-    surgeMultiplier: 2.0,
-    autoReject: false,
-  },
-  {
-    id: "floor-003",
-    capability: "CNC 3-Axis",
-    capabilityType: "cnc-3axis",
-    minPrice: 80.00,
-    maxDiscount: 8,
-    surgeMultiplier: 1.2,
-    autoReject: true,
-  },
-];
-
-const MOCK_NEGOTIATIONS: Negotiation[] = [
-  {
-    id: "neg-001",
-    capability: "FDM 3D Print",
-    customerAgent: "user-agent@delta.pcc",
-    status: "accepted",
-    timeline: [
-      { type: "proposal", actor: "Customer", price: 16.00, timestamp: "2 hr ago" },
-      { type: "counter",  actor: "You",      price: 20.00, timestamp: "1 hr 45 min ago" },
-      { type: "counter",  actor: "Customer", price: 18.50, timestamp: "1 hr 20 min ago" },
-      { type: "accepted", actor: "You",      timestamp: "1 hr ago" },
-    ],
-  },
-  {
-    id: "neg-002",
-    capability: "Laser Cut",
-    customerAgent: "broker-agent@epsilon.pcc",
-    status: "rejected",
-    timeline: [
-      { type: "proposal", actor: "Customer", price: 20.00, timestamp: "3 hr ago" },
-      { type: "counter",  actor: "You",      price: 40.00, timestamp: "2 hr 50 min ago" },
-      { type: "rejected", actor: "Customer", timestamp: "2 hr ago" },
-    ],
-  },
-];
 
 // ---------------------------------------------------------------------------
-// Status colors
+// Main page
 // ---------------------------------------------------------------------------
 
-const STATUS_COLORS: Record<ProposalStatus, "green" | "gold" | "gray" | "red"> = {
+export function NegotiationPage() {
+  const setPageMeta = useUIStore((s) => s.setPageMeta);
+
+  React.useEffect(() => {
+    setPageMeta("Negotiations", "Manage incoming proposals, revenue splits, and pricing floors");
+  }, [setPageMeta]);
+
+  // Sample proposals, floors and timelines render only when the viewer asked
+  // for a demo (lib/demo-mode.ts).
+  return isDemoMode() ? <NegotiationDemo /> : <NegotiationNotLive />;
+}
+
+function NegotiationNotLive() {
+  const [activeTab, setActiveTab] = React.useState<Tab>("proposals");
+
+  return (
+    <div className="space-y-6">
+      <TabBar active={activeTab} onChange={setActiveTab} labels={TAB_LABELS} />
+      <GlassPanel padding="lg">
+        <NotLiveState what={NOT_LIVE[activeTab].what} detail={NOT_LIVE[activeTab].detail} hasDemo />
+      </GlassPanel>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Demo: the prototype with sample values, under a DemoBanner
+// ---------------------------------------------------------------------------
+
+const STATUS_COLORS: Record<DemoProposalStatus, "green" | "gold" | "gray" | "red"> = {
   pending:  "gold",
   countered: "gold",
   accepted: "green",
@@ -211,22 +205,27 @@ const EVENT_ICONS: Record<string, string> = {
   expired:  "⏰",
 };
 
-// ---------------------------------------------------------------------------
-// Counter modal
-// ---------------------------------------------------------------------------
+const DISABLED_ACTION =
+  "px-3 py-1 rounded text-[10px] bg-white/[0.02] border border-white/[0.06] text-white/25 cursor-not-allowed";
 
-interface CounterModalProps {
-  proposal: Proposal;
-  onClose: () => void;
-  onSubmit: (price: number, splits: SplitEntry[]) => void;
+const NO_SPLIT_ROUTE = "No gateway route stores a default revenue split";
+
+function DemoNote({ children }: { children: React.ReactNode }) {
+  return <p className="text-[11px] text-violet-200/60">{children}</p>;
 }
 
-function CounterModal({ proposal, onClose, onSubmit }: CounterModalProps) {
+// ── Counter modal ──
+// The form can be filled in; Send Counter is disabled because no gateway
+// route sends a counter-offer.
+
+interface CounterModalProps {
+  proposal: DemoProposal;
+  onClose: () => void;
+}
+
+function CounterModal({ proposal, onClose }: CounterModalProps) {
   const [price, setPrice] = React.useState<number>(proposal.proposedPrice * 1.1);
   const [splits, setSplits] = React.useState<SplitEntry[]>(SPLIT_PRESETS["Single-Step"].map((s) => ({ ...s })));
-
-  const total = splits.reduce((acc, s) => acc + s.percentage, 0);
-  const isValid = Math.round(total) === 100;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -269,96 +268,51 @@ function CounterModal({ proposal, onClose, onSubmit }: CounterModalProps) {
           />
         </div>
 
-        <div className="flex gap-3 pt-2">
-          <button
-            onClick={onClose}
-            className="flex-1 py-2 rounded-lg border border-white/[0.08] text-xs text-white/40 hover:text-white/60 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => isValid && onSubmit(price, splits)}
-            disabled={!isValid}
-            className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all ${
-              isValid
-                ? "bg-green-500/20 border border-green-500/30 text-green-400 hover:bg-green-500/30"
-                : "bg-white/[0.02] border border-white/[0.06] text-white/20 cursor-not-allowed"
-            }`}
-          >
-            Send Counter
-          </button>
+        <div className="space-y-2 pt-2">
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 py-2 rounded-lg border border-white/[0.08] text-xs text-white/40 hover:text-white/60 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled
+              title="No gateway route sends a counter-offer"
+              className="flex-1 py-2 rounded-lg text-xs font-medium bg-white/[0.02] border border-white/[0.06] text-white/20 cursor-not-allowed"
+            >
+              Send Counter
+            </button>
+          </div>
+          <DemoNote>Demo: Send Counter doesn't send anything. No gateway route sends a counter-offer.</DemoNote>
         </div>
       </GlassPanel>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main page
-// ---------------------------------------------------------------------------
-
-export function NegotiationPage() {
-  const setPageMeta = useUIStore((s) => s.setPageMeta);
-
-  const [proposals, setProposals] = React.useState<Proposal[]>(MOCK_PROPOSALS);
-  const [floors, setFloors] = React.useState<PricingFloor[]>(MOCK_FLOORS);
+function NegotiationDemo() {
+  const proposals = DEMO_PROPOSALS;
+  const floors = DEMO_PRICE_FLOORS;
+  // Shown read-only: no gateway route stores a default revenue split.
   const [globalSplits, setGlobalSplits] = React.useState<SplitEntry[]>(
     SPLIT_PRESETS["Single-Step"].map((s) => ({ ...s })),
   );
-  const [counterTarget, setCounterTarget] = React.useState<Proposal | null>(null);
-  const [activeTab, setActiveTab] = React.useState<"proposals" | "splits" | "floors" | "history">("proposals");
-
-  React.useEffect(() => {
-    setPageMeta("Negotiations", "Manage incoming proposals, revenue splits, and pricing floors");
-  }, [setPageMeta]);
-
-  function acceptProposal(id: string) {
-    setProposals((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: "accepted" } : p)),
-    );
-  }
-
-  function rejectProposal(id: string) {
-    setProposals((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: "rejected" } : p)),
-    );
-  }
-
-  function handleCounter(price: number, _splits: SplitEntry[]) {
-    if (!counterTarget) return;
-    setProposals((prev) =>
-      prev.map((p) =>
-        p.id === counterTarget.id
-          ? { ...p, status: "countered", counterPrice: price }
-          : p,
-      ),
-    );
-    setCounterTarget(null);
-  }
-
-  function toggleFloorAutoReject(id: string) {
-    setFloors((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, autoReject: !f.autoReject } : f)),
-    );
-  }
-
-  function updateFloorField(id: string, field: keyof PricingFloor, value: number) {
-    setFloors((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, [field]: value } : f)),
-    );
-  }
+  const [counterTarget, setCounterTarget] = React.useState<DemoProposal | null>(null);
+  const [activeTab, setActiveTab] = React.useState<Tab>("proposals");
 
   const pendingCount = proposals.filter((p) => p.status === "pending" || p.status === "countered").length;
 
-  const tabs = [
-    { id: "proposals", label: `Proposals${pendingCount > 0 ? ` (${pendingCount})` : ""}` },
-    { id: "splits",   label: "Revenue Splits" },
-    { id: "floors",   label: "Pricing Floors" },
-    { id: "history",  label: "History" },
-  ] as const;
+  const labels: Record<Tab, string> = {
+    ...TAB_LABELS,
+    proposals: `Proposals${pendingCount > 0 ? ` (${pendingCount})` : ""}`,
+  };
 
   return (
     <div className="space-y-6">
+      <DemoBanner what="Negotiations" />
+
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <GlassPanel padding="md" glow="gold">
@@ -381,25 +335,15 @@ export function NegotiationPage() {
       </div>
 
       {/* Tab bar */}
-      <div className="flex gap-1 border-b border-white/[0.06] pb-1">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setActiveTab(t.id)}
-            className={`px-4 py-2 rounded-t-lg text-xs transition-all ${
-              activeTab === t.id
-                ? "bg-white/[0.04] text-green-400 border-b-2 border-green-400/30"
-                : "text-white/30 hover:text-white/50"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabBar active={activeTab} onChange={setActiveTab} labels={labels} />
 
       {/* ── Pending Proposals ── */}
       {activeTab === "proposals" && (
         <div className="space-y-3">
+          <DemoNote>
+            Demo: Accept and Reject are disabled, and Send Counter sends nothing. No gateway route
+            accepts, counters or rejects a priced proposal.
+          </DemoNote>
           {proposals.length === 0 && (
             <GlassPanel padding="lg">
               <EmptyState
@@ -436,12 +380,14 @@ export function NegotiationPage() {
                   )}
                 </div>
 
-                {/* Actions */}
+                {/* Actions: nothing here reaches the gateway */}
                 {(proposal.status === "pending" || proposal.status === "countered") && (
                   <div className="flex flex-col gap-2 flex-shrink-0">
                     <button
-                      onClick={() => acceptProposal(proposal.id)}
-                      className="px-3 py-1 rounded text-[10px] bg-green-500/15 border border-green-500/25 text-green-400 hover:bg-green-500/25 transition-all"
+                      type="button"
+                      disabled
+                      title="No gateway route accepts a proposal"
+                      className={DISABLED_ACTION}
                     >
                       Accept
                     </button>
@@ -452,8 +398,10 @@ export function NegotiationPage() {
                       Counter
                     </button>
                     <button
-                      onClick={() => rejectProposal(proposal.id)}
-                      className="px-3 py-1 rounded text-[10px] bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-all"
+                      type="button"
+                      disabled
+                      title="No gateway route rejects a proposal"
+                      className={DISABLED_ACTION}
                     >
                       Reject
                     </button>
@@ -468,40 +416,35 @@ export function NegotiationPage() {
       {/* ── Revenue Splits ── */}
       {activeTab === "splits" && (
         <div className="space-y-4 max-w-2xl">
+          <DemoNote>
+            Demo: this split can't be changed here. No gateway route stores a default revenue split.
+          </DemoNote>
           <GlassPanel padding="lg">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xs font-semibold text-white/50 uppercase tracking-wider">
                 Global Revenue Split
               </h3>
-              <span className="text-[10px] text-white/25">Applies to all new contracts unless overridden</span>
+              <span className="text-[10px] text-white/25">Would apply to new contracts unless overridden</span>
             </div>
             <SplitEditor
               splits={globalSplits}
               onChange={setGlobalSplits}
               presets={SPLIT_PRESETS}
-              totalPrice={25.00}
+              readOnly
+              totalPrice={DEMO_SPLIT_PREVIEW_PRICE}
             />
           </GlassPanel>
 
           <GlassPanel padding="md">
             <div className="text-[10px] text-white/30 uppercase tracking-wider mb-3">Quick Apply</div>
             <div className="flex gap-2 flex-wrap">
-              <button
-                onClick={() => setGlobalSplits(SPLIT_PRESETS["Single-Step"].map((s) => ({ ...s })))}
-                className="px-3 py-2 rounded-lg text-xs bg-white/[0.03] border border-white/[0.08] text-white/50 hover:bg-white/[0.06] transition-all"
-              >
+              <button type="button" disabled title={NO_SPLIT_ROUTE} className={DISABLED_ACTION}>
                 Single-Step (10/70/10/10)
               </button>
-              <button
-                onClick={() => setGlobalSplits(SPLIT_PRESETS["Multi-Step"].map((s) => ({ ...s })))}
-                className="px-3 py-2 rounded-lg text-xs bg-white/[0.03] border border-white/[0.08] text-white/50 hover:bg-white/[0.06] transition-all"
-              >
+              <button type="button" disabled title={NO_SPLIT_ROUTE} className={DISABLED_ACTION}>
                 Multi-Step (5/75/10/10)
               </button>
-              <button
-                onClick={() => setGlobalSplits(SPLIT_PRESETS["Community"].map((s) => ({ ...s })))}
-                className="px-3 py-2 rounded-lg text-xs bg-white/[0.03] border border-white/[0.08] text-white/50 hover:bg-white/[0.06] transition-all"
-              >
+              <button type="button" disabled title={NO_SPLIT_ROUTE} className={DISABLED_ACTION}>
                 Community (20/60/5/5/10)
               </button>
             </div>
@@ -512,9 +455,10 @@ export function NegotiationPage() {
       {/* ── Pricing Floors ── */}
       {activeTab === "floors" && (
         <div className="space-y-3">
+          <DemoNote>Demo: floors can't be changed here. No gateway route stores price floors.</DemoNote>
           <GlassPanel padding="md">
             <div className="text-[10px] text-white/30 mb-3 leading-relaxed">
-              Set minimum prices per capability. Jobs below the floor are auto-rejected (when enabled) or flagged for review.
+              Minimum prices per capability. Jobs below a floor would be auto-rejected (when enabled) or flagged for review.
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -539,13 +483,10 @@ export function NegotiationPage() {
                           <span className="text-white/30">$</span>
                           <input
                             type="number"
-                            min={0}
-                            step={0.5}
+                            disabled
                             value={floor.minPrice}
-                            onChange={(e) =>
-                              updateFloorField(floor.id, "minPrice", parseFloat(e.target.value) || 0)
-                            }
-                            className="w-20 bg-white/[0.03] border border-white/[0.06] rounded px-2 py-1 font-mono text-white/60 text-right outline-none focus:border-white/20"
+                            readOnly
+                            className="w-20 bg-white/[0.03] border border-white/[0.06] rounded px-2 py-1 font-mono text-white/60 text-right outline-none cursor-not-allowed"
                           />
                         </div>
                       </td>
@@ -553,13 +494,10 @@ export function NegotiationPage() {
                         <div className="flex items-center justify-end gap-1">
                           <input
                             type="number"
-                            min={0}
-                            max={50}
+                            disabled
                             value={floor.maxDiscount}
-                            onChange={(e) =>
-                              updateFloorField(floor.id, "maxDiscount", parseFloat(e.target.value) || 0)
-                            }
-                            className="w-16 bg-white/[0.03] border border-white/[0.06] rounded px-2 py-1 font-mono text-white/60 text-right outline-none focus:border-white/20"
+                            readOnly
+                            className="w-16 bg-white/[0.03] border border-white/[0.06] rounded px-2 py-1 font-mono text-white/60 text-right outline-none cursor-not-allowed"
                           />
                           <span className="text-white/30">%</span>
                         </div>
@@ -567,23 +505,20 @@ export function NegotiationPage() {
                       <td className="py-3 text-right">
                         <input
                           type="number"
-                          min={1}
-                          max={5}
-                          step={0.1}
+                          disabled
                           value={floor.surgeMultiplier}
-                          onChange={(e) =>
-                            updateFloorField(floor.id, "surgeMultiplier", parseFloat(e.target.value) || 1)
-                          }
-                          className="w-16 bg-white/[0.03] border border-white/[0.06] rounded px-2 py-1 font-mono text-white/60 text-right outline-none focus:border-white/20"
+                          readOnly
+                          className="w-16 bg-white/[0.03] border border-white/[0.06] rounded px-2 py-1 font-mono text-white/60 text-right outline-none cursor-not-allowed"
                         />
                       </td>
                       <td className="py-3 text-center">
                         <button
-                          onClick={() => toggleFloorAutoReject(floor.id)}
-                          className={`w-10 h-5 rounded-full transition-all relative ${
+                          type="button"
+                          disabled
+                          className={`w-10 h-5 rounded-full transition-all relative cursor-not-allowed ${
                             floor.autoReject ? "bg-green-500/40" : "bg-white/[0.06]"
                           }`}
-                          title={floor.autoReject ? "Auto-reject enabled" : "Auto-reject disabled"}
+                          title={floor.autoReject ? "Auto-reject on (sample)" : "Auto-reject off (sample)"}
                         >
                           <span
                             className={`absolute top-0.5 w-4 h-4 rounded-full bg-white/70 transition-all ${
@@ -604,12 +539,12 @@ export function NegotiationPage() {
       {/* ── History / Active Negotiations ── */}
       {activeTab === "history" && (
         <div className="space-y-4 max-w-2xl">
-          {MOCK_NEGOTIATIONS.length === 0 && (
+          {DEMO_NEGOTIATIONS.length === 0 && (
             <GlassPanel padding="lg">
               <EmptyState title="No negotiations yet" description="Completed negotiation timelines appear here." />
             </GlassPanel>
           )}
-          {MOCK_NEGOTIATIONS.map((neg) => (
+          {DEMO_NEGOTIATIONS.map((neg) => (
             <GlassPanel key={neg.id} padding="md">
               <div className="flex items-center justify-between mb-3">
                 <div>
@@ -660,7 +595,6 @@ export function NegotiationPage() {
         <CounterModal
           proposal={counterTarget}
           onClose={() => setCounterTarget(null)}
-          onSubmit={handleCounter}
         />
       )}
     </div>
