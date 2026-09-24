@@ -85,7 +85,6 @@ const KNOWN_OFFENDERS: Record<string, string> = {
   // pcc-shell 47b47970: this lane's remaining pages, in a follow-up PR (their implementer agents stopped at the account's weekly limit)
   "pages/AgentLogPage.tsx": "pcc-shell 47b47970: follow-up PR",
   "pages/NegotiationPage.tsx": "pcc-shell 47b47970: follow-up PR",
-  "pages/SpaceDetailPage.tsx": "pcc-shell 47b47970: follow-up PR",
   // logistics N-b: product-steward 61243bdd / readmodels, carrier af177c03 supplies the mapping (#2257, #2264)
   "pages/InstallationDetailPage.tsx": "logistics N-b (carrier #2264)",
   "pages/ShipmentDetailPage.tsx": "logistics N-b (carrier #2264)",
