@@ -371,3 +371,57 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     expect(decision.reason).toBe("no-device-bundle");
   });
 });
+
+// ── LO-EV-1 signing byte contract at the real consumer ───────────────────────
+
+describe("verifyDeviceSignedEvidence — LO-EV-1 signing preimage (negative controls)", () => {
+  it("rejects a registration-challenge signature replayed as a bundle signature", async () => {
+    const dev = realDeviceEvidence();
+    const challenge = "pcc-kernel-signing-key:kernel-replay";
+    const challengeSig = toHex(nacl.sign.detached(new TextEncoder().encode(challenge), dev.keyPair.secretKey));
+    // The bare verify accepts it — the signature is genuine over those bytes —
+    // so the digest guard is what stops the cross-protocol replay.
+    expect(naclEd25519Verify(challenge, challengeSig, dev.publicKeyHex)).toBe(true);
+    const res = await verifyDeviceSignedEvidence({
+      signature: { ...dev.signature, value: challengeSig },
+      bundleHash: challenge,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+    });
+    expect(res).toMatchObject({ ok: false, reason: "malformed-bundle-hash" });
+  });
+
+  it("rejects a signature over the 32 raw digest bytes", async () => {
+    const dev = realDeviceEvidence();
+    const raw32 = Uint8Array.from(Buffer.from(BUNDLE_HASH.slice("sha256:".length), "hex"));
+    const raw32Sig = toHex(nacl.sign.detached(raw32, dev.keyPair.secretKey));
+    const res = await verifyDeviceSignedEvidence({
+      signature: { ...dev.signature, value: raw32Sig },
+      bundleHash: BUNDLE_HASH,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+    });
+    expect(res).toMatchObject({ ok: false, reason: "signature-invalid" });
+  });
+
+  it("rejects non-canonical digest forms even when the signature covers that exact string", async () => {
+    const hex = BUNDLE_HASH.slice("sha256:".length);
+    for (const form of [`0x${hex}`, hex, `sha256:${hex.toUpperCase()}`, `${BUNDLE_HASH}\n`]) {
+      const dev = realDeviceEvidence(form);
+      const res = await verifyDeviceSignedEvidence({
+        signature: dev.signature,
+        bundleHash: form,
+        registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      });
+      expect(res, form).toMatchObject({ ok: false, reason: "malformed-bundle-hash" });
+    }
+  });
+
+  it("still accepts the canonical tagged digest (positive control)", async () => {
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+    });
+    expect(res).toMatchObject({ ok: true });
+  });
+});

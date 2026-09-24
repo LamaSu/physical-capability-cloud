@@ -37,6 +37,8 @@ import nacl from "tweetnacl";
 import {
   normalizeRegisteredSigner,
   getPrimitive,
+  isTaggedDigest,
+  signingPreimage,
   type RegisteredSigner,
   type SessionKeyAuthorization,
   type SessionKey,
@@ -242,8 +244,9 @@ function stripHexPrefix(hex: string): string {
 /**
  * Reference Ed25519 verify using tweetnacl (the same primitive the node signs
  * with — kernel-sdk `verifyBundleSignature`). Message is UTF-8 bytes of the
- * bundleHash string; signature + public key are hex (optional 0x). Returns false
- * on any malformed input — never throws.
+ * bundleHash string, which for a tagged digest is exactly the LO-EV-1
+ * `signingPreimage` (callers validate the digest first); signature + public
+ * key are hex (optional 0x). Returns false on any malformed input — never throws.
  */
 export function naclEd25519Verify(
   message: string,
@@ -302,6 +305,12 @@ export async function verifyDeviceSignedEvidence(
   if (typeof input.bundleHash !== "string" || input.bundleHash.length === 0) {
     return { ok: false, reason: "missing-bundle-hash" };
   }
+  // The signature must cover a real evidence digest. Without this, a valid
+  // signature over any other string the same key signs (e.g. the registration
+  // challenge "pcc-kernel-signing-key:<id>") would pass as device evidence.
+  if (!isTaggedDigest(input.bundleHash)) {
+    return { ok: false, reason: "malformed-bundle-hash" };
+  }
   const signer = normalizeRegisteredSigner(input.registeredSigner);
   if (!signer) return { ok: false, reason: "unregistered-signer" };
   if (signer.algorithm !== "ed25519") return { ok: false, reason: "signer-not-ed25519" };
@@ -331,7 +340,7 @@ export async function verifyDeviceSignedEvidence(
         return { ok: false, reason: "contract_not_allowed" };
       }
       const event: SessionSignedEvent = {
-        eventData: new TextEncoder().encode(input.bundleHash),
+        eventData: signingPreimage(input.bundleHash),
         sessionSignature: Uint8Array.from(Buffer.from(stripHexPrefix(input.signature.value), "hex")),
         proof: {
           sessionKey,

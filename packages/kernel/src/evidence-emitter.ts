@@ -34,7 +34,11 @@ export class EvidenceEmitter {
   private kernelId: string;
   private stepEvidence: Map<string, StepEvidence> = new Map();
   private bundleListeners: Array<(bundle: EvidenceBundle) => void> = [];
-  /** Signing function — async to support HSM/TEE/wallet signers in production */
+  /**
+   * Signing function — async to support HSM/TEE/wallet signers in production.
+   * Receives the tagged bundle digest; an Ed25519 signer must sign
+   * `signingPreimage(data)` from @pcc/spec (LO-EV-1), never the raw digest bytes.
+   */
   private signFn: (data: string) => Promise<Signature>;
   /** True when a real signing function was provided; false when using the test-only default */
   private _hasRealSignFn: boolean;
