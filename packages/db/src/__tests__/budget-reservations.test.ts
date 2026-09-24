@@ -8,17 +8,21 @@
  *   - exact base units: never a float;
  *   - MC 9 child authority stays bounded.
  */
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { createStore } from "../index.js";
-import { BUDGET_RESERVATIONS_DDL, BudgetReservationStore, type IssueReservationInput } from "../repositories/budget-reservations.js";
+import { BUDGET_RESERVATIONS_DDL, BudgetReservationStore, MAX_DEAL_PREIMAGE_BYTES, type IssueReservationInput } from "../repositories/budget-reservations.js";
 
 const NOW = 1_900_000_000;
 const PAYER = `0x${"11".repeat(20)}`;
-const DIGEST = `0x${"ab".repeat(32)}`;
+/** A sealed deal's canonical preimage, and its digest: sha256(preimage) (amendment #3231, condition a). */
+const sealedPair = (preimage: string) => ({ dealPreimage: preimage, dealDigest: `0x${createHash("sha256").update(preimage, "utf8").digest("hex")}` });
+const PREIMAGE = '{"domain":"PCC:accepted-deal:v2","planId":"plan.resv-1"}';
+const DIGEST = sealedPair(PREIMAGE).dealDigest;
 const MAX_UINT256 = (1n << 256n) - 1n;
 
 function fresh(): { sqlite: Database.Database; store: BudgetReservationStore } {
@@ -51,6 +55,7 @@ const consumeInput = (over: Partial<Parameters<BudgetReservationStore["consume"]
   obligationBaseUnits: 9_750_000n,
   minUnitTier: 0,
   dealDigest: DIGEST,
+  dealPreimage: PREIMAGE,
   now: NOW,
   ...over,
 });
@@ -132,7 +137,7 @@ describe("consume: exactly once, and only by the principal, request, currency an
     const first = store.consume(consumeInput());
     expect(first.ok && first.reservation).toMatchObject({ state: "consumed", consumedDealDigest: DIGEST, consumedAt: NOW });
     expect(store.consume(consumeInput())).toEqual({ ok: false, reason: "not-issued" });
-    expect(store.consume(consumeInput({ dealDigest: `0x${"cd".repeat(32)}` }))).toEqual({ ok: false, reason: "not-issued" });
+    expect(store.consume(consumeInput(sealedPair('{"another":"deal"}')))).toEqual({ ok: false, reason: "not-issued" });
     expect(store.findById("resv-1")!.consumedDealDigest).toBe(DIGEST); // the first seal stands
   });
 
@@ -180,6 +185,41 @@ describe("consume: exactly once, and only by the principal, request, currency an
   });
 });
 
+describe("the sealed deal is stored as its digest's own preimage (amendment #3231, conditions #3235)", () => {
+  it("(a) a preimage that does not hash to the digest is refused and nothing is written; a matching one is stored", () => {
+    const { store } = fresh();
+    store.issue(issueInput());
+    expect(store.consume(consumeInput({ dealPreimage: PREIMAGE + " " }))).toEqual({ ok: false, reason: "deal-preimage-mismatch" });
+    expect(store.consume(consumeInput({ dealDigest: sealedPair("other").dealDigest }))).toEqual({ ok: false, reason: "deal-preimage-mismatch" });
+    expect(store.findById("resv-1")!.state).toBe("issued");
+    expect(store.sealedDealPreimage("resv-1")).toBeNull();
+    const upper = consumeInput({ dealDigest: DIGEST.toUpperCase().replace("0X", "0x") }); // hex case carries no meaning
+    expect(store.consume(upper).ok).toBe(true);
+    expect(store.sealedDealPreimage("resv-1")).toBe(PREIMAGE);
+    expect(createHash("sha256").update(store.sealedDealPreimage("resv-1")!, "utf8").digest("hex")).toBe(store.findById("resv-1")!.consumedDealDigest!.slice(2));
+  });
+
+  it("(b) the stored bytes are never part of the reservation object; only the server-side reader returns them", () => {
+    const { store } = fresh();
+    store.issue(issueInput());
+    store.consume(consumeInput());
+    const r = store.findById("resv-1")!;
+    expect(JSON.stringify(r, (_k, v) => (typeof v === "bigint" ? v.toString() : v))).not.toContain("PCC:accepted-deal");
+    expect(Object.keys(r)).not.toContain("consumedDealJson");
+    expect(store.sealedDealPreimage("resv-404")).toBeNull();
+  });
+
+  it("(c) the size bound holds at write, in the store and in the table", () => {
+    const { sqlite, store } = fresh();
+    store.issue(issueInput());
+    const big = "x".repeat(MAX_DEAL_PREIMAGE_BYTES + 1);
+    expect(store.consume(consumeInput(sealedPair(big)))).toEqual({ ok: false, reason: "invalid-input" });
+    const atBound = "y".repeat(MAX_DEAL_PREIMAGE_BYTES);
+    expect(store.consume(consumeInput(sealedPair(atBound))).ok).toBe(true);
+    expect(() => sqlite.prepare("UPDATE budget_reservations SET consumed_deal_json = ? WHERE id = 'resv-1'").run(big)).toThrow(/constraint/i);
+  });
+});
+
 describe("the table's own constraints refuse what the store never writes", () => {
   it("rejects a non-canonical amount, an unknown state, a consumed row without a digest, a bad tier, half a parent binding", () => {
     const { sqlite } = fresh();
@@ -187,10 +227,10 @@ describe("the table's own constraints refuse what the store never writes", () =>
       sqlite
         .prepare(
           `INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, min_tier,
-             parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, created_at)
-           VALUES (@id, 'p', 'x', 'USDC', @amount, 'purpose', 'req', @minTier, @parent, @unit, 1, @state, @digest, 0)`,
+             parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, consumed_deal_json, created_at)
+           VALUES (@id, 'p', 'x', 'USDC', @amount, 'purpose', 'req', @minTier, @parent, @unit, 1, @state, @digest, @json, 0)`,
         )
-        .run({ id: "r", amount: "10", minTier: null, parent: null, unit: null, state: "issued", digest: null, ...over });
+        .run({ id: "r", amount: "10", minTier: null, parent: null, unit: null, state: "issued", digest: null, json: null, ...over });
     for (const bad of [
       { amount: "010" },
       { amount: "1.5" },
@@ -198,8 +238,10 @@ describe("the table's own constraints refuse what the store never writes", () =>
       { amount: "1e6" },
       { amount: "1".repeat(79) },
       { state: "spent" },
-      { state: "consumed", digest: null },
+      { state: "consumed", digest: null, json: PREIMAGE },
+      { state: "consumed", digest: DIGEST, json: null },
       { state: "issued", digest: DIGEST },
+      { state: "issued", json: PREIMAGE },
       { minTier: 4 },
       { parent: "p1", unit: null },
     ]) {

@@ -115,6 +115,10 @@ describe("R13 through the accept route: the durable store seals exactly once", (
     expect(first.statusCode).toBe(200);
     const digest = first.json().plan.acceptedDealDigest;
     expect(store.findById("resv-1")).toMatchObject({ state: "consumed", consumedDealDigest: digest, consumedAt: NOW });
+    // The sealed deal is stored as the digest's own preimage (#3231): the bytes hash to exactly this digest.
+    const stored = store.sealedDealPreimage("resv-1")!;
+    expect(`0x${createHash("sha256").update(stored, "utf8").digest("hex")}`).toBe(digest);
+    expect(JSON.parse(stored).jobs).toHaveLength(2);
     const second = await accept(app, dag());
     expect(second.statusCode).toBe(409);
     expect(store.findById("resv-1")!.consumedDealDigest).toBe(digest);
