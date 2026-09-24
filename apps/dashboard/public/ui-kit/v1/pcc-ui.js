@@ -443,8 +443,10 @@
           (ownKey(o, 'phase') && o.phase !== VNEXT_PHASE[name])) {
         return ['st-unknown', DISAGREE, name];
       }
-      // A FINAL state needs every corroborating field present: absence is not corroboration.
-      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'isTerminal') && ownKey(o, 'phase'))) {
+      // A FINAL state needs unitState, finalState, isAllocated and phase present: absence is not
+      // corroboration. isTerminal is cross-checked above when present; /receipt (which gains
+      // unitState, escrow #3163) does not carry it. The 6-vs-7 direction comes from unitState.
+      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'phase'))) {
         return ['st-unknown', INCOMPLETE, name];
       }
       return [VNEXT_STATE_PRESENTATION[name][0], VNEXT_STATE_PRESENTATION[name][1], name];
