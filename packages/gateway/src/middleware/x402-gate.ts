@@ -17,6 +17,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { X402Middleware, type RoutePaymentMap, type X402Config } from "@pcc/payments";
 import { MppMiddleware } from "@pcc/payments";
+import { authPath } from "./route-path.js";
 
 // ---------------------------------------------------------------------------
 // Shared route pricing — single source of truth for both protocols
@@ -171,7 +172,11 @@ export async function paymentGate(app: FastifyInstance) {
       if (!enabled) return;
       stats.totalRequests++;
 
-      const path = req.url.split("?")[0];
+      // Price the route Fastify MATCHED, not the raw request line: find-my-way
+      // percent-decodes before matching, so `/api/capabilities/%73earch` runs the
+      // paid search handler while the raw string matched no priced route and was
+      // served FREE (MUST-CLOSE 10). authPath is the matched template.
+      const path = authPath(req);
       const check = mppMiddleware!.getRouteHandler(req.method, path);
 
       if (!check.isProtected) return; // Free route
@@ -249,7 +254,8 @@ export async function paymentGate(app: FastifyInstance) {
       stats.totalRequests++;
 
       const paymentSig = req.headers["payment-signature"] as string | undefined;
-      const result = middleware.checkPayment(req.method, req.url.split("?")[0], paymentSig);
+      // Matched route, not raw URL — see the MPP hook above (MUST-CLOSE 10).
+      const result = middleware.checkPayment(req.method, authPath(req), paymentSig);
 
       if (!result.requiresPayment) {
         if (paymentSig) {

@@ -8,6 +8,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { authPath } from "./route-path.js";
 
 // ---------------------------------------------------------------------------
 // Attack Signatures
@@ -423,9 +424,15 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
 
   // ── Full Request Fingerprinting (onResponse — captures status code + duration)
   app.addHook("onResponse", async (req, reply) => {
-    // Skip SSE streams, health checks, and static assets
-    if (req.url.startsWith("/sse/") || req.url === "/health" || req.url === "/api/health") return;
-    if (req.url.startsWith("/assets/") || req.url.endsWith(".js") || req.url.endsWith(".css")) return;
+    // Skip SSE streams, health checks, and static assets — decided on the
+    // NORMALIZED path (authPath), never the raw line (MUST-CLOSE 10). The raw
+    // test let a caller drop out of fingerprinting by appending a query such as
+    // `?x=.js` to any route, while an encoded /api/%68ealth was fingerprinted
+    // unlike /api/health. Attack DETECTION above deliberately stays on the RAW
+    // input: it must see exactly what the client sent.
+    const skipPath = authPath(req);
+    if (skipPath.startsWith("/sse/") || skipPath === "/health" || skipPath === "/api/health") return;
+    if (skipPath.startsWith("/assets/") || skipPath.endsWith(".js") || skipPath.endsWith(".css")) return;
 
     const fp = buildFingerprint(req);
     emitSecurityEvent("request_fingerprint", {
