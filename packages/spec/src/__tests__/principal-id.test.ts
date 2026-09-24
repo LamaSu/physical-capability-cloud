@@ -12,6 +12,8 @@ import {
   parseDevicePrincipalId,
   parseOperatorPrincipalId,
   principalFromRegistry,
+  principalTupleWord,
+  authorizedTuple,
 } from "../evidence/principal-id.js";
 
 const ADDR_MIXED = "0x52908400098527886E0F7030069857D2E4169EE7"; // an EIP-55 checksummed address
@@ -105,5 +107,27 @@ describe("principalFromRegistry — the one way to compare a registry signer", (
       expect(principalFromRegistry(bad, 84532)).toBeNull();
     }
     expect(principalFromRegistry({ algorithm: "secp256k1", address: ADDR }, 0)).toBeNull();
+  });
+});
+
+describe("principal ids — the bytes32 words of a funded authorizedTuples triple", () => {
+  it("each word is keccak256 of the pinned id's UTF-8 (keccak-256, not SHA3-256)", () => {
+    // keccak256("a"), the well-known vector.
+    expect(principalTupleWord("kernel", "a")).toBe("0x3ac225168df54212a25c1c01fd35bebfea408fdac2e31ddd6f80a4bbf9a5f1cb");
+    const op = formatOperatorPrincipalId(84532, ADDR_MIXED);
+    const dev = formatDevicePrincipalId(KEY);
+    const [o, k, d] = authorizedTuple(op, "kernel-x", dev);
+    expect(o).toBe(principalTupleWord("operator", op));
+    expect(k).toBe(principalTupleWord("kernel", "kernel-x"));
+    expect(d).toBe(principalTupleWord("device", dev));
+    for (const w of [o, k, d]) expect(w).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(new Set([o, k, d]).size).toBe(3);
+  });
+
+  it("refuses ids that are not the pinned forms, an empty kernel, and a leaked device key", () => {
+    expect(() => principalTupleWord("operator", `eip155:84532:${ADDR_MIXED}`)).toThrow(PrincipalIdError);
+    expect(() => principalTupleWord("device", KEY)).toThrow(PrincipalIdError);
+    expect(() => principalTupleWord("kernel", "")).toThrow(PrincipalIdError);
+    expect(() => principalTupleWord("device", `ed25519:${LEAKED}`)).toThrow(PrincipalIdError);
   });
 });
