@@ -34,6 +34,9 @@ export * from "./subject-binding.js";
 export * from "./evidence-level.js";
 export * from "./eligibility.js";
 export * from "./measurement-profile.js";
+// profileAdmitsBundle — does authenticated, bound evidence satisfy the committed
+// MeasurementProfile (level, device, version, window, samples, simulation)?
+export * from "./profile-admission.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
