@@ -1,135 +1,53 @@
+/**
+ * Equipment Marketplace: one live section, and a market overview that isn't live.
+ *
+ * Live: TemplateMatchFinder ranks the onboarding templates against what the
+ * viewer types, through POST /api/capabilities/templates/match (a keyword
+ * matcher over the template directory in routes/orchestrator-templates.ts).
+ *
+ * Not live: equipment classes, demand and supply, the demand map, capability
+ * trends and price history. The page used to take all of them from
+ * api/mock-onboarding-data.ts, whose exports are empty, so it showed a market
+ * with nothing in it ("Equipment Classes (0)"): a claim about the network,
+ * not a fact. No gateway route serves real market data. GET
+ * /api/marketplace/classes returns six classes and snapshots written as
+ * literals in routes/marketplace.ts, GET /api/marketplace/demand-supply returns
+ * a curve generated from Math.sin, and nothing serves a demand map or
+ * capability trends. That section now says so and requests nothing. There
+ * are no sample values to show, so it has no demo version.
+ */
+
 import React from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  GlassPanel, GlowBadge, PCCRunButton,
-  DemandSupplyChart, GeoDemandMap, CapabilityTrendBars, PriceHistoryChart,
-} from "@pcc/ui";
+import { GlassPanel } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { useMarketplaceStore } from "../stores/marketplace-store.js";
-import {
-  mockEquipmentClasses, mockMarketSnapshots,
-  mockDemandSupplyTimeline, mockGeoMarkers,
-  mockCapabilityTrends, mockPriceHistory,
-} from "../api/mock-onboarding-data.js";
+import { NotLiveState } from "../components/DemoState.js";
 import { TemplateMatchFinder } from "../components/marketplace/TemplateMatchFinder.js";
 
-const demandColors = { high: "green" as const, medium: "gold" as const, low: "gray" as const };
+const MARKET_NOT_LIVE_DETAIL =
+  "No gateway route serves real equipment classes, demand, supply or prices yet. " +
+  "GET /api/marketplace/classes and /api/marketplace/demand-supply return fixed sample records " +
+  "and a generated curve, not network state, so nothing is shown here.";
 
 export function MarketplacePage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const { selectedCategory, demandFilter, setCategory, setDemandFilter } = useMarketplaceStore();
 
   React.useEffect(() => {
     setPageMeta("Equipment Marketplace", "Demand, supply, and pricing insights");
   }, [setPageMeta]);
 
-  const filtered = mockEquipmentClasses.filter((ec) => {
-    if (selectedCategory !== "all" && ec.category !== selectedCategory) return false;
-    if (demandFilter !== "all") {
-      const snap = mockMarketSnapshots.find((s) => s.equipmentClassId === ec.id);
-      if (snap && snap.demandLevel !== demandFilter) return false;
-    }
-    return true;
-  });
-
-  const categories = ["all", ...new Set(mockEquipmentClasses.map((ec) => ec.category))];
-
   return (
     <div className="space-y-6">
-      {/* T2.1 — live template matcher (real API, replaces mock for this section) */}
+      {/* Live: ranks the onboarding templates against the viewer's description */}
       <TemplateMatchFinder />
 
-      {/* Filters */}
-      <div className="flex items-center gap-3 flex-wrap">
-        {categories.map((c) => (
-          <button
-            key={c}
-            onClick={() => setCategory(c as typeof selectedCategory)}
-            className={`px-3 py-1 rounded-lg text-xs transition-all ${
-              selectedCategory === c
-                ? "bg-green-500/15 border border-green-500/20 text-green-400"
-                : "text-white/30 hover:text-white/50"
-            }`}
-          >
-            {c === "all" ? "All" : c}
-          </button>
-        ))}
-        <div className="ml-auto flex gap-1">
-          {(["all", "high", "medium", "low"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setDemandFilter(f)}
-              className={`px-2 py-0.5 rounded text-[10px] font-mono ${
-                demandFilter === f ? "bg-white/[0.06] text-white/50" : "text-white/20"
-              }`}
-            >
-              {f}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Not live: equipment classes, demand, supply, trends and prices */}
+      <GlassPanel padding="lg">
+        <NotLiveState what="The equipment market overview" detail={MARKET_NOT_LIVE_DETAIL} />
+      </GlassPanel>
 
-      {/* Charts row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <DemandSupplyChart data={mockDemandSupplyTimeline} />
-        <GeoDemandMap markers={mockGeoMarkers} />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <CapabilityTrendBars trends={mockCapabilityTrends} />
-        <PriceHistoryChart data={mockPriceHistory} currentPrice={28.5} />
-      </div>
-
-      {/* Equipment class cards */}
-      <div className="space-y-2">
-        <span className="text-xs text-white/30">Equipment Classes ({filtered.length})</span>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filtered.map((ec) => {
-            const snap = mockMarketSnapshots.find((s) => s.equipmentClassId === ec.id);
-            return (
-              <GlassPanel
-                key={ec.id}
-                hover
-                padding="md"
-                className="space-y-2 cursor-pointer"
-                onClick={() => navigate(`/marketplace/${ec.id}`)}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-white/70">{ec.name}</span>
-                  {snap && <GlowBadge color={(demandColors as any)[snap.demandLevel] ?? "gray"}>{snap.demandLevel}</GlowBadge>}
-                </div>
-                <p className="text-xs text-white/30">{ec.description}</p>
-                {snap && (
-                  <div className="grid grid-cols-3 gap-2 pt-1 text-center">
-                    <div>
-                      <div className="text-[10px] text-white/20">Machines</div>
-                      <div className="text-xs font-mono text-white/50">{snap.networkMachineCount}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-white/20">Util.</div>
-                      <div className="text-xs font-mono text-white/50">{snap.averageUtilization}%</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-white/20">Avg Job</div>
-                      <div className="text-xs font-mono text-green-400">${snap.averageJobValue}</div>
-                    </div>
-                  </div>
-                )}
-                <div className="pt-2 border-t border-white/[0.06]">
-                  <PCCRunButton
-                    command={`pcc negotiate --capability ${ec.category}`}
-                    size="sm"
-                    variant="outline"
-                  />
-                </div>
-              </GlassPanel>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ROI link */}
+      {/* ROI link: a planning tool over the viewer's own numbers */}
       <div className="text-center">
         <button
           onClick={() => navigate("/marketplace/roi")}
