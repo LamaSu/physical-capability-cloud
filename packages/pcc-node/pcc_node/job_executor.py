@@ -621,6 +621,39 @@ def build_evidence_bundle(
     }
 
 
+def build_device_reported_bundle(
+    job_id: str,
+    device: Dict,
+    result: Dict,
+    *,
+    completed: bool,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Evidence for an outcome the DEVICE reported after it accepted the work.
+
+    Used by the completion pollers (IPP job-state, OctoPrint /api/job).  It is
+    closed by construction: exactly one terminal event, whose type is chosen by
+    ``completed is True`` (anything else is a failure) and whose level is fixed
+    to device-reported.  No caller can supply event types, add a second
+    terminal event, or mark an accepted-only result complete.
+    """
+    now = datetime.now(tz=timezone.utc).isoformat()
+    payload: Dict[str, Any] = {"level": EVIDENCE_LEVEL_DEVICE_REPORTED, **result}
+    if completed is True:
+        event_type = EVENT_EXECUTION_COMPLETED
+    else:
+        event_type = EVENT_EXECUTION_FAILED
+        payload["error"] = error or "device reported a failure"
+    return {
+        "jobId": job_id,
+        "deviceId": device.get("id", device.get("host", "unknown")),
+        "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
+        "executedAt": now,
+        "result": result,
+        "events": [{"type": event_type, "timestamp": now, "payload": payload}],
+    }
+
+
 def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
     """Default event trail: ``execution_started`` plus at most one more event --
     an outcome (completed / failed), or a submitted-level progress record."""
@@ -1549,15 +1582,14 @@ class JobExecutor:
             "handle": dict(entry["handle"]),
             **observation,
         }
-        payload = {"level": EVIDENCE_LEVEL_DEVICE_REPORTED, **result}
-        if verdict == POLL_COMPLETED:
-            event_type = EVENT_EXECUTION_COMPLETED
-        else:
-            event_type = EVENT_EXECUTION_FAILED
-            payload["error"] = observation.get("reason") or "device reported a failure"
-        event = {"type": event_type, "timestamp": None, "payload": payload}
-        evidence = build_evidence_bundle(job_id, entry["device"], result, events=[event])
-        event["timestamp"] = evidence["executedAt"]
+        evidence = build_device_reported_bundle(
+            job_id,
+            entry["device"],
+            result,
+            completed=verdict == POLL_COMPLETED,
+            error=observation.get("reason") or "device reported a failure",
+        )
+        payload = evidence["events"][0]["payload"]
 
         pushed = self.gateway.push_evidence(job_id, evidence)
         if verdict == POLL_COMPLETED:

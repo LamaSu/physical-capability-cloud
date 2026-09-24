@@ -1316,3 +1316,38 @@ class TestPollerEvidenceVocabulary:
         )
         vocabulary = self._vocabulary()
         assert emitted <= vocabulary, f"not in EVIDENCE_EVENT_TYPES: {sorted(emitted - vocabulary)}"
+
+
+# ---------------------------------------------------------------------------
+# The pollers' evidence comes from a CLOSED builder (r31 astra verdict item 6):
+# one terminal event, type chosen only by `completed is True`, level fixed.
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceReportedBundleIsClosed:
+    DEVICE = {"id": "p1", "protocol": "ipp"}
+
+    def _types(self, bundle):
+        return [e["type"] for e in bundle["events"]]
+
+    def test_completed_true_is_one_completion_event(self):
+        from pcc_node.job_executor import (
+            build_device_reported_bundle, EVENT_EXECUTION_COMPLETED, EVIDENCE_LEVEL_DEVICE_REPORTED,
+        )
+        bundle = build_device_reported_bundle("j", self.DEVICE, {"kind": "ipp"}, completed=True)
+        assert self._types(bundle) == [EVENT_EXECUTION_COMPLETED]
+        assert bundle["events"][0]["payload"]["level"] == EVIDENCE_LEVEL_DEVICE_REPORTED
+
+    @pytest.mark.parametrize("completed", [False, None, "yes", 1, "True"])
+    def test_anything_but_true_is_one_failure_event(self, completed):
+        from pcc_node.job_executor import build_device_reported_bundle, EVENT_EXECUTION_FAILED
+        bundle = build_device_reported_bundle("j", self.DEVICE, {"kind": "ipp"}, completed=completed,
+                                              error="jammed")
+        assert self._types(bundle) == [EVENT_EXECUTION_FAILED]
+        assert bundle["events"][0]["payload"]["error"] == "jammed"
+
+    def test_callers_cannot_supply_events(self):
+        from pcc_node.job_executor import build_device_reported_bundle
+        with pytest.raises(TypeError):
+            build_device_reported_bundle("j", self.DEVICE, {}, completed=True,
+                                         events=[{"type": "custom_event"}])
