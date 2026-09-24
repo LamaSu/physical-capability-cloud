@@ -308,5 +308,26 @@ describe("REAL: POST /api/marketplace/roi (a calculator over the caller's inputs
     // 14 jobs a month at 30 against 600 up front and 200 a month: net positive in month 3.
     expect(off.json().projection).toHaveLength(25);
     expect(off.json().breakEvenMonth).toBe(3);
+    expect(off.json().inputs).toEqual(INPUT);
+    expect(off.json().defaulted).toEqual([]);
+  });
+
+  it("NEGATIVE: an input the caller left out is named in `defaulted`, never passed off as the caller's", async () => {
+    const empty = (await req("POST", "/api/marketplace/roi", {})).json();
+    expect(empty.defaulted).toEqual(["monthlyCost", "avgJobValue", "utilization"]);
+    expect(empty.inputs).toEqual({ monthlyCost: 200, avgJobValue: 30, utilization: 65 });
+    expect(empty.assumptions).toEqual({ daysPerMonth: 30, bookableShareOfDays: 0.7, upFrontCostMonths: 3, horizonMonths: 24 });
+    // A numeric string is used, as the route always coerced it.
+    const partial = (await req("POST", "/api/marketplace/roi", { monthlyCost: 500, utilization: "80" })).json();
+    expect(partial.defaulted).toEqual(["avgJobValue"]);
+    expect(partial.inputs).toEqual({ monthlyCost: 500, avgJobValue: 30, utilization: 80 });
+  });
+
+  it("NEGATIVE: an input that is not a number is refused (400), not projected as NaN or swapped for an example", async () => {
+    for (const bad of [{ monthlyCost: "abc" }, { utilization: {} }, { avgJobValue: "1e999" }]) {
+      const res = await req("POST", "/api/marketplace/roi", bad);
+      expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+      expect(res.json().error).toBe("invalid_input");
+    }
   });
 });

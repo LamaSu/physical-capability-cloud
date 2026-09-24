@@ -300,18 +300,45 @@ export async function marketplaceRoutes(app: FastifyInstance) {
   });
 
   // Calculate ROI projection
-  app.post("/api/marketplace/roi", async (req) => {
-    const { monthlyCost = 200, avgJobValue = 30, utilization = 65 } = (req.body ?? {}) as Record<string, number>;
+  // A calculator over the caller's inputs. An input the caller leaves out takes an example
+  // value, and the answer says which ones did (`defaulted`) and what the model assumes, so an
+  // empty body never reads as a projection of the caller's own numbers (reviewer-n34-b).
+  app.post("/api/marketplace/roi", async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const EXAMPLE = { monthlyCost: 200, avgJobValue: 30, utilization: 65 } as const;
+    const inputs: Record<keyof typeof EXAMPLE, number> = { ...EXAMPLE };
+    const defaulted: Array<keyof typeof EXAMPLE> = [];
+    for (const k of Object.keys(EXAMPLE) as Array<keyof typeof EXAMPLE>) {
+      const v = body[k];
+      if (v === undefined || v === null) {
+        defaulted.push(k);
+        continue;
+      }
+      // A number, or a numeric string (the route always coerced those).
+      const n = typeof v === "number" ? v : typeof v === "string" && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN;
+      if (!Number.isFinite(n)) {
+        return reply.code(400).send({ error: "invalid_input", message: `${k} must be a number.` });
+      }
+      inputs[k] = n;
+    }
+    const { monthlyCost, avgJobValue, utilization } = inputs;
+    const ASSUMPTIONS = { daysPerMonth: 30, bookableShareOfDays: 0.7, upFrontCostMonths: 3, horizonMonths: 24 } as const;
     const points: ROIProjection[] = [];
     let cumRev = 0;
     let cumCost = 0;
-    for (let m = 0; m <= 24; m++) {
-      const jobsPerMonth = Math.round((utilization / 100) * 30 * 0.7);
+    for (let m = 0; m <= ASSUMPTIONS.horizonMonths; m++) {
+      const jobsPerMonth = Math.round((utilization / 100) * ASSUMPTIONS.daysPerMonth * ASSUMPTIONS.bookableShareOfDays);
       cumRev += m === 0 ? 0 : jobsPerMonth * avgJobValue;
-      cumCost += m === 0 ? monthlyCost * 3 : monthlyCost;
+      cumCost += m === 0 ? monthlyCost * ASSUMPTIONS.upFrontCostMonths : monthlyCost;
       points.push({ month: m, cumulativeRevenue: cumRev, cumulativeCost: cumCost, netPosition: cumRev - cumCost, utilization });
     }
-    return { projection: points, breakEvenMonth: points.find((p) => p.netPosition >= 0)?.month };
+    return {
+      projection: points,
+      breakEvenMonth: points.find((p) => p.netPosition >= 0)?.month,
+      inputs,
+      defaulted,
+      assumptions: ASSUMPTIONS,
+    };
   });
 
   // ── Supplies & Materials Marketplace Routes ──────────────────────────────
