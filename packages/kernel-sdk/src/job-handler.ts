@@ -68,6 +68,15 @@ export interface KernelJobRequest {
   jobId: string;
   /** Payload forwarded to the builder's execute() */
   input: Record<string, unknown>;
+  /**
+   * The escrow settlement unit (milestone) this execution is for, and the
+   * gateway's challenge nonce for that unit: `0x` + 64 lowercase hex each.
+   * When present they are committed in the kernel-signed execution_started
+   * and execution_completed payloads, so the evidence binds that unit (LO-EV-9)
+   * and cannot settle another milestone of the same job.
+   */
+  settlementUnitId?: string;
+  challengeNonce?: string;
   /** Optional client-side session-signed event authorising the call */
   auth?: {
     /** Hex-encoded canonical event body the caller signed */
@@ -149,6 +158,17 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     if (!request.input || typeof request.input !== "object") {
       throw new KernelAuthError("input must be an object", 400);
     }
+    for (const field of ["settlementUnitId", "challengeNonce"] as const) {
+      const value: unknown = request[field];
+      if (value !== undefined && !(typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value))) {
+        throw new KernelAuthError(`${field} must be 0x + 64 lowercase hex`, 400);
+      }
+    }
+    // Committed only when the caller names a unit, so unit-less jobs keep their bytes.
+    const unitFields = {
+      ...(request.settlementUnitId !== undefined ? { settlementUnitId: request.settlementUnitId } : {}),
+      ...(request.challengeNonce !== undefined ? { challengeNonce: request.challengeNonce } : {}),
+    };
 
     // ── Optional inbound auth check ─────────────────────────────────────
     // Kernels may be advertised as open (no auth required) or locked to
@@ -264,6 +284,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         jobId: request.jobId,
         kernelId: manifest.kernelId,
         stepCount: manifest.workflowSteps.length,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -315,6 +336,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         jobId: request.jobId,
         kernelId: manifest.kernelId,
         outputHash,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };

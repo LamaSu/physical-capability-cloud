@@ -436,3 +436,81 @@ describe("LO-EV-9 evaluates only what it hashed (coord-watch cross-cutting rule)
     expect(r.ok).toBe(false);
   });
 });
+
+describe("LO-EV-9 settlement-unit and challenge binding (oracle's milestone replay)", () => {
+  const U3 = "0x" + "03".repeat(32);
+  const U4 = "0x" + "04".repeat(32);
+  const NONCE_3 = "0x" + "a3".repeat(32);
+  const NONCE_4 = "0x" + "a4".repeat(32);
+
+  /** kernel-sdk-shaped events for one milestone: started and completed commit the unit and nonce. */
+  async function milestoneBundle(unit: string | undefined, nonce: string | undefined) {
+    const source = { deviceId: NODE_A, deviceType: "digital_agent" as const, kernelId: NODE_A };
+    const unitFields = { ...(unit ? { settlementUnitId: unit } : {}), ...(nonce ? { challengeNonce: nonce } : {}) };
+    const events = await seal([
+      { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A, ...unitFields } },
+      { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A, outputHash: OUTPUT, ...unitFields } },
+    ]);
+    return { events, bundleHash: await hashBundle(events) };
+  }
+  const unitSubject = (settlementUnitId?: string, challengeNonce?: string): EvidenceSubject => ({
+    jobId: JOB_A,
+    kernelId: NODE_A,
+    ...(settlementUnitId ? { settlementUnitId } : {}),
+    ...(challengeNonce ? { challengeNonce } : {}),
+  });
+
+  it("evidence for milestone 3 binds milestone 3", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U3, NONCE_3) })).toMatchObject({ ok: true });
+  });
+
+  it("evidence signed for milestone 3 cannot settle milestone 4 of the same job", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U4) })).toEqual({
+      ok: false,
+      reason: "unit-mismatch",
+      eventIndex: 0,
+    });
+  });
+
+  it("the unit's challenge must match too: a nonce from another unit is refused", async () => {
+    const b = await milestoneBundle(U4, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U4, NONCE_4) })).toEqual({
+      ok: false,
+      reason: "challenge-mismatch",
+      eventIndex: 0,
+    });
+  });
+
+  it("a unit-bound subject refuses evidence that commits no unit or no nonce (fails closed for old producers)", async () => {
+    const none = await milestoneBundle(undefined, undefined);
+    expect(await verifyEvidenceSubjectBinding({ ...none, subject: unitSubject(U3) })).toEqual({
+      ok: false,
+      reason: "unit-not-committed",
+    });
+    const unitOnly = await milestoneBundle(U3, undefined);
+    expect(await verifyEvidenceSubjectBinding({ ...unitOnly, subject: unitSubject(U3, NONCE_3) })).toEqual({
+      ok: false,
+      reason: "challenge-not-committed",
+    });
+  });
+
+  it("a subject that names no unit is unchanged: unit fields in the evidence are ignored", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject() })).toMatchObject({ ok: true });
+  });
+
+  it("the subject's unit fields must be 0x + 64 lowercase hex", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    for (const bad of ["0x" + "AB".repeat(32), U3.slice(2), U3 + "00", ""]) {
+      expect(await verifyEvidenceSubjectBinding({ ...b, subject: { ...unitSubject(), settlementUnitId: bad } })).toEqual({
+        ok: false,
+        reason: "malformed-subject",
+      });
+    }
+    expect(
+      await verifyEvidenceSubjectBinding({ ...b, subject: { ...unitSubject(U3), challengeNonce: "nonce-3" } }),
+    ).toEqual({ ok: false, reason: "malformed-subject" });
+  });
+});

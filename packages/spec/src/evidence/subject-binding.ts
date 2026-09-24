@@ -23,7 +23,17 @@
  *   6. node: every event's `source.kernelId`, and every `payload.kernelId`,
  *      equals the kernel that accepted the job;
  *   7. output, only when the subject names one: at least one event commits
- *      `payload.outputHash`, and every `payload.outputHash` equals it.
+ *      `payload.outputHash`, and every `payload.outputHash` equals it;
+ *   8. settlement unit, only when the subject names one: likewise for
+ *      `payload.settlementUnitId`, the escrow unit being settled. A job settles
+ *      unit by unit (milestones), and `jobId` alone would let evidence signed
+ *      for milestone 3 settle milestone 4 of the same job;
+ *   9. challenge, only when the subject names one: likewise for
+ *      `payload.challengeNonce`, the gateway-issued per-unit nonce the package
+ *      carries as `challengeBinding.nonce`. Evidence made before the nonce was
+ *      issued cannot contain it.
+ * Both unit fields are `0x` + 64 lowercase hex, byte-equal to the settlement
+ * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`.
  *
  * EVALUATE ONLY WHAT YOU HASHED. Steps 5-7 read the canonical snapshot of each
  * event's hashed content (the JSON text `hashEvent` hashes, parsed back), with
@@ -60,7 +70,15 @@ export interface EvidenceSubject {
   kernelId: string;
   /** Digest of the delivered output, when the consumer holds one. */
   outputHash?: string;
+  /** The escrow settlement unit (milestone) being settled: `0x` + 64 lowercase
+   *  hex, from the unit record, never from the evidence. */
+  settlementUnitId?: string;
+  /** The gateway-issued challenge nonce for that unit: `0x` + 64 lowercase hex. */
+  challengeNonce?: string;
 }
+
+/** The unit fields' form: `0x` + 64 lowercase hex (a bytes32). */
+export const SUBJECT_UNIT_FIELD_PATTERN = /^0x[0-9a-f]{64}$/;
 
 export type EvidenceSubjectBindingErrorCode =
   | "malformed-subject"
@@ -73,7 +91,11 @@ export type EvidenceSubjectBindingErrorCode =
   | "job-mismatch"
   | "kernel-mismatch"
   | "output-not-committed"
-  | "output-mismatch";
+  | "output-mismatch"
+  | "unit-not-committed"
+  | "unit-mismatch"
+  | "challenge-not-committed"
+  | "challenge-mismatch";
 
 export type EvidenceSubjectBindingResult =
   /** `events`: the verified canonical snapshots, in input order (see the header). */
@@ -113,7 +135,11 @@ export async function verifyEvidenceSubjectBinding(
     !isPlainObject(subject) ||
     !isNonEmptyString(subject.jobId) ||
     !isNonEmptyString(subject.kernelId) ||
-    (subject.outputHash !== undefined && !isNonEmptyString(subject.outputHash))
+    (subject.outputHash !== undefined && !isNonEmptyString(subject.outputHash)) ||
+    (subject.settlementUnitId !== undefined &&
+      !(typeof subject.settlementUnitId === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.settlementUnitId))) ||
+    (subject.challengeNonce !== undefined &&
+      !(typeof subject.challengeNonce === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.challengeNonce)))
   ) {
     return { ok: false, reason: "malformed-subject" };
   }
@@ -184,17 +210,23 @@ export async function verifyEvidenceSubjectBinding(
     }
   }
 
-  if (subject.outputHash !== undefined) {
-    let outputCommitted = false;
+  // Optional commitments: when the subject names one, some event must commit it
+  // and every event that carries it must agree.
+  const optional = [
+    ["outputHash", subject.outputHash, "output-not-committed", "output-mismatch"],
+    ["settlementUnitId", subject.settlementUnitId, "unit-not-committed", "unit-mismatch"],
+    ["challengeNonce", subject.challengeNonce, "challenge-not-committed", "challenge-mismatch"],
+  ] as const;
+  for (const [field, expected, notCommitted, mismatch] of optional) {
+    if (expected === undefined) continue;
+    let committedOnce = false;
     for (let i = 0; i < events.length; i++) {
-      const committed = own(payloadOf(i), "outputHash");
+      const committed = own(payloadOf(i), field);
       if (committed === undefined) continue;
-      if (committed !== subject.outputHash) {
-        return { ok: false, reason: "output-mismatch", eventIndex: i };
-      }
-      outputCommitted = true;
+      if (committed !== expected) return { ok: false, reason: mismatch, eventIndex: i };
+      committedOnce = true;
     }
-    if (!outputCommitted) return { ok: false, reason: "output-not-committed" };
+    if (!committedOnce) return { ok: false, reason: notCommitted };
   }
 
   return { ok: true, events };
