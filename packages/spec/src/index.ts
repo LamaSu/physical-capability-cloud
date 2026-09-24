@@ -17,3 +17,5 @@ export * from "./evidence/index.js";
 // ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
 // (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
 export * from "./payouts.js";
+// WorkspaceLayoutV1 — Layer D user presentation (types + pure validator; runs in browser and gateway)
+export * from "./workspace/workspace-layout.js";
