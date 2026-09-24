@@ -20,6 +20,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
+import { LIST_ROW_CAP } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -233,7 +234,8 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
   const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
-  const limit = typeof node.props?.limit === "number" ? node.props!.limit : rows.length;
+  // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
+  const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
   let shown = 0;
   for (const row of rows) {
     if (shown >= limit) break;

@@ -476,7 +476,10 @@ export const READONLY_APP_PROXY_TOOLS: ReadonlySet<string> = new Set([
  *      bounded projection (5000 nodes / depth 20) that fails closed on request-bearing or
  *      credential action fields. No DB, network, token consumption, persistence or
  *      trigger; returns the projected manifest + the B-mode ui:// URI. Stricter than (1).
- *      Data is read client-side by the closed-IR binder (GET-only, fixed origin).
+ *      Data is read client-side by the closed-IR binder (GET-only, fixed origin). GET-only is
+ *      not by itself effect-free, so every route the binder can reach carries its own effect
+ *      review in dashboard-ir.ts EFFECT_REVIEWED_READS (handler read at source; the only effect
+ *      is an env-gated funnel audit line), pinned to BIND_POLICY by a test.
  *   2. a REGISTERED typed operation with `stateChanging === false` (today only
  *      pcc.op.capability.request_quote; an unregistered id → null → denied, and a
  *      state-changing op such as job.cancel → denied even once it registers).

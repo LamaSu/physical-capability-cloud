@@ -41,6 +41,59 @@ const LIM = {
   pollMinMs: 5000, pollMaxMs: 3_600_000, boundWindowsTotal: 64, // poll-amplification cap (sol R5)
   cleanNodes: 50_000, // deepClean traversal budget — >> any legit manifest/IR, kills wide-object DoS (sol R6)
 } as const;
+
+/** The row cap for a list, whatever the manifest's `limit` (DOM-node budget). */
+export const LIST_ROW_CAP = LIM.listRows;
+
+// ── Manifest prose may not present money (PX-5 review #2504) ─────────────────────────────
+// Prose (the title, section headings, notes, action and field labels) renders as agent-authored
+// text, but text-only rendering does not establish provenance: "Payment received - verified" or
+// "1,000,000 USDC" in a note would still read as a financial fact. Money facts come ONLY from
+// PCC-owned schema cards, so prose that states an amount or a money / verification status is
+// replaced by this fixed PCC notice (adapter), and a prose node carrying such text is invalid
+// (validator). Detection folds width variants, zero-width characters and common Cyrillic/Greek
+// look-alikes before matching; it is a backstop to the visible agent-authored marking, not the
+// only line.
+export const WITHHELD_PROSE =
+  "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+const LOOKALIKE: Readonly<Record<string, string>> = {
+  "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
+  "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "һ": "h", "Α": "A", "Β": "B",
+  "Ε": "E", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O",
+  "Ρ": "P", "Τ": "T", "Χ": "X", "Υ": "Y", "ο": "o", "α": "a", "ρ": "p",
+};
+function foldForClaims(text: string): string {
+  let t = text.normalize("NFKC").replace(/[​-‏⁠﻿­]/g, "");
+  t = t.replace(/[Ͱ-ϿЀ-ӿԀ-ԯ]/g, (c) => LOOKALIKE[c] ?? c);
+  return t;
+}
+const AMOUNT_RE = /[$€£¥₿]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
+const CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
+export function isMoneyClaim(text: string): boolean {
+  const t = foldForClaims(text);
+  return AMOUNT_RE.test(t) || CLAIM_RE.test(t);
+}
+function proseText(text: string): string { return isMoneyClaim(text) ? WITHHELD_PROSE : text; }
+
+// ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
+// A list may show ONLY these fields of each allowlisted collection route; a selector is never
+// "safe because it parses". Money amounts, prices and payment state are not listable: they
+// appear only in schema cards. Escrow is not a list route at all.
+const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
+  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
+  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
+  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
+};
+function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
+  const prof = LIST_PROFILES[path];
+  if (!prof) return `no list field profile for ${path}`;
+  if (typeof props.rowTitle !== "string" || !prof.title.includes(props.rowTitle)) return `list title field not in the ${path} profile`;
+  const meta = Array.isArray(props.rowMeta) ? props.rowMeta : [];
+  for (const m of meta) if (typeof m !== "string" || !prof.meta.includes(m)) return `list meta field not in the ${path} profile`;
+  if (props.statusFrom !== undefined && (typeof props.statusFrom !== "string" || !prof.status.includes(props.statusFrom))) return `list status field not in the ${path} profile`;
+  return null;
+}
+
 // The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
 const APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
 
@@ -83,9 +136,13 @@ const RESERVED_EXACT: ReadonlySet<string> = new Set([
 export type BindSchema = "capability-summary-v1" | "run-summary-v1";
 interface BindPolicy {
   routes: RegExp[];
+  // Query parameters a manifest may pass, per exact route path. Anything else (including any
+  // credential-like name) is refused: a binding URL never carries a token (review #2504).
+  queryByRoute?: Readonly<Record<string, readonly string[]>>;
   needsSelect?: boolean;
   sse?: RegExp[];
   correlate?: { pathRe: RegExp; sseRe: RegExp };
+
   schema?: BindSchema;
 }
 const BIND_POLICY: Record<string, BindPolicy> = {
@@ -111,7 +168,16 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
   // assert a settlement that never occurred. The authoritative receipt is the out-of-band
   // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
-  list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+  // list: collection reads whose rows are listable ONLY through a PCC-owned field profile
+  // (LIST_PROFILES). Escrow is NOT listable: money state appears only in schema cards.
+  list: {
+    routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities")],
+    queryByRoute: {
+      "/api/jobs": ["kernelId", "status", "offset", "limit"],
+      "/api/kernels": ["status"],
+      "/api/capabilities": ["type", "offset", "limit"],
+    },
+  },
   // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
   // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
   // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
@@ -262,6 +328,33 @@ function isOpDescriptor(v: unknown): boolean {
 }
 
 // ── Shared bind gate — the ONE policy check both adapter and validator call ────────
+// ── Effect review of every bindable read (PX-5 review #2504: GET-only is not effect-free) ─────
+// Each route a manifest can bind was read at its handler (2026-09-24, master ac86a404): it only
+// reads through a facade list/get and changes no PCC state. One cross-cutting effect exists: with
+// PCC_FUNNEL_ENABLED=true the funnel tracker (services/funnel-tracker.ts, registered in server.ts)
+// writes one "discover" audit line per request trace for a 2xx GET under /api/capabilities, so a
+// polling dashboard adds audit lines (observability only; no entity changes). The SSE job stream is
+// authenticated and never opened by the browser kit (credentials:"omit", no SSE transport).
+// A test pins this list to BIND_POLICY: a new bindable route needs a new entry, i.e. a new review.
+export const EFFECT_REVIEWED_READS: ReadonlyArray<{ route: string; handler: string; effect: string }> = [
+  { route: "/api/jobs", handler: "routes/jobs.ts GET /api/jobs -> JobFacade.list", effect: "read only" },
+  { route: "/api/jobs/:", handler: "routes/jobs.ts GET /api/jobs/:jobId -> JobFacade.getById", effect: "read only" },
+  { route: "/api/jobs/:/status", handler: "routes/job-submit.ts GET /api/jobs/:jobId/status -> JobFacade.getStatus", effect: "read only" },
+  { route: "/api/kernels", handler: "routes/kernels.ts GET /api/kernels -> KernelFacade.list", effect: "read only" },
+  { route: "/api/kernels/:", handler: "routes/kernels.ts GET /api/kernels/:kernelId -> KernelFacade.getById", effect: "read only" },
+  { route: "/api/capabilities", handler: "routes/capabilities.ts GET /api/capabilities -> CapabilityFacade list", effect: "read only; funnel 'discover' audit line when PCC_FUNNEL_ENABLED" },
+  { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: "read only; funnel 'discover' audit line when PCC_FUNNEL_ENABLED" },
+  { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "read only; per-IP connection counter" },
+];
+/** Regex sources of every route (and SSE route) BIND_POLICY lets a manifest bind. */
+export function bindPolicyRouteSources(): string[] {
+  const out = new Set<string>();
+  for (const p of Object.values(BIND_POLICY)) { for (const re of p.routes) out.add(re.source); for (const re of p.sse ?? []) out.add(re.source); }
+  return [...out].sort();
+}
+/** The regex source a reviewed template compiles to (same compiler as BIND_POLICY). */
+export function reviewedRouteSource(template: string): string { return route(template).source; }
+
 function bindMatchesPolicy(bind: IrBind, key: string): string | null {
   const policy = BIND_POLICY[key];
   if (!policy) return `no bind policy for ${key}`;
@@ -273,8 +366,10 @@ function bindMatchesPolicy(bind: IrBind, key: string): string | null {
   if (!policy.needsSelect && bind.select !== undefined) return `${key} may not select`;
   if (bind.query !== undefined) {
     if (!isPlain(bind.query) || Object.keys(bind.query).length > LIM.queryKeys) return "bind.query shape";
+    const allowedQuery = policy.queryByRoute?.[bind.path] ?? [];
     for (const [k, v] of Object.entries(bind.query)) {
       if (!isSelector(k)) return "query key grammar";
+      if (isCredentialName(k) || !allowedQuery.includes(k)) return `query key "${k}" not allowed for ${bind.path}`;
       const t = typeof v;
       if (!(t === "string" && (v as string).length <= LIM.str) && t !== "boolean" && !(t === "number" && Number.isFinite(v))) return "query value type";
     }
@@ -300,8 +395,9 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
   if (!deepClean(m)) return { ok: false, reason: "prototype/nonfinite/symbol in manifest" };
   const mm = m as Record<string, unknown>;
   if (!onlyKeys(mm, ["csd", "title", "description", "theme", "sections"])) return { ok: false, reason: "unexpected top-level key" };
-  const title = strictStr(mm.title, LIM.title);
-  if (title === null) return { ok: false, reason: "title invalid" };
+  const rawTitle = strictStr(mm.title, LIM.title);
+  if (rawTitle === null) return { ok: false, reason: "title invalid" };
+  const title = proseText(rawTitle);
   if (!Array.isArray(mm.sections)) return { ok: false, reason: "sections not array" };
   if (mm.sections.length > LIM.sections) return { ok: false, reason: "too many sections" };
 
@@ -321,7 +417,7 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
       const h = strictStr(secRaw.heading, LIM.title);
       if (h === null) return { ok: false, reason: "section.heading invalid" };
       if (!budget()) return { ok: false, reason: "node budget" };
-      children.push({ type: "heading", id: nextId(), props: { level: 2, text: h }, untrusted: true });
+      children.push({ type: "heading", id: nextId(), props: { level: 2, text: proseText(h) }, untrusted: true });
     }
     for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
     if (!budget()) return { ok: false, reason: "node budget" };
@@ -346,7 +442,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
     case "note":
       if (!onlyKeys(w, ["kind", "text"])) return { ok: false, reason: "note extra key" };
       { const text = strictStr(w.text); if (text === null) return { ok: false, reason: "note.text" };
-        return { ok: true, node: { type: "text", id, props: { text }, untrusted: true } }; }
+        return { ok: true, node: { type: "text", id, props: { text: proseText(text) }, untrusted: true } }; }
     case "metric":
       // `format` intentionally NOT accepted (see file header). select is top-level + required.
       if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
@@ -389,6 +485,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         }
         const props: IrNode["props"] = { rowTitle: item.title, rowMeta };
         if (item.statusFrom !== undefined) { if (!isSelector(item.statusFrom)) return { ok: false, reason: "list.statusFrom selector" }; props.statusFrom = item.statusFrom; }
+        const offProfile = listProfileViolation(b.bind.path, props); if (offProfile) return { ok: false, reason: offProfile };
         if (w.limit !== undefined) { if (typeof w.limit !== "number" || !Number.isInteger(w.limit) || w.limit <= 0 || w.limit > LIM.listRows) return { ok: false, reason: "list.limit" }; props.limit = w.limit; }
         return { ok: true, node: { type: "list", id, bind: b.bind, props } }; }
     case "run":
@@ -425,7 +522,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
           if (!budget()) return { ok: false, reason: "node budget" };
           if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
           const label = strictStr((a as Record<string, unknown>).label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
-          children.push({ type: "badge", id: nextId(), props: { text: label, tone: "neutral" }, untrusted: true });
+          children.push({ type: "badge", id: nextId(), props: { text: proseText(label), tone: "neutral" }, untrusted: true });
         }
         return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } }; }
     default:
@@ -467,11 +564,11 @@ function fieldLabels(schema: unknown): { ok: true; labels: string[] } | { ok: fa
     if (PROTO_KEYS.has(key) || isCredentialName(key)) return { ok: false, reason: "credential/proto field" };
     const def = (props as Record<string, unknown>)[key];
     if (!isPlain(def) || !onlyKeys(def, ["type", "title", "description", "enum", "format", "minimum", "maximum", "minLength", "maxLength"])) return { ok: false, reason: "form field-def shape" };
-    if (def.type !== undefined && !["string", "number", "integer", "boolean"].includes(String(def.type))) return { ok: false, reason: "form field type" };
+    if (def.type !== undefined && (typeof def.type !== "string" || !["string", "number", "integer", "boolean"].includes(def.type))) return { ok: false, reason: "form field type" };
     if (def.title !== undefined && strictStr(def.title, LIM.title) === null) return { ok: false, reason: "form field title" };
     const rawLabel = typeof def.title === "string" ? def.title : key;
     const s = strictStr(rawLabel, LIM.title); if (s === null) return { ok: false, reason: "field label" };
-    labels.push(s);
+    labels.push(proseText(s));
   }
   return { ok: true, labels };
 }
@@ -561,6 +658,18 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
       if (expected === null) return "stat (route, source) not an allowlisted metric field";
       if ((n.props as { label?: unknown } | undefined)?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+    }
+    // lists show only their route's PCC-owned field profile (never money fields)
+    if (n.type === "list") {
+      const bp = (n.bind as { path?: unknown } | undefined)?.path;
+      const off = typeof bp === "string" ? listProfileViolation(bp, (n.props ?? {}) as Record<string, unknown>) : "list without a bound path";
+      if (off) return off;
+    }
+    // prose may not state an amount or a money / verification status (review #2504)
+    if (spec.prose) {
+      const p = (n.props ?? {}) as { text?: unknown; label?: unknown };
+      const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
+      if (t !== WITHHELD_PROSE && isMoneyClaim(t)) return `prose ${n.type} states an amount or a money/verification status`;
     }
     // prose provenance
     if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
