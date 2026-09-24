@@ -338,6 +338,15 @@ export function reconcilePayout(
   return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "not_paid", conflict: false };
 }
 
+/**
+ * The settlement axis alone, for read models that need only this job's money (operator
+ * work and income). Same resolver output, same payout rule, same notices basis.
+ */
+export function buildSettlementAxis(job: JobRow, read: SourceRead<SettlementSource>): SettlementAxis {
+  const { recordsConflict: _recordsConflict, ...axis } = buildSettlement(job, read);
+  return axis;
+}
+
 function buildSettlement(
   job: JobRow,
   read: SourceRead<SettlementSource>,
