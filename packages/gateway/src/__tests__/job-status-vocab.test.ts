@@ -12,12 +12,15 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore } from "../db.js";
 import { JOB_STATUSES } from "../config/job-status.js";
+import { actAsJobParty, SEED_OPERATORS } from "./helpers/job-read-party.js";
 
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app, null); // job reads are object-authorized (F3); the GET below names its caller
   await app.register(jobRoutes);
   await app.ready();
   return app;
@@ -82,7 +85,8 @@ describe("PATCH /api/jobs/:jobId/status — status vocabulary", () => {
 
   it("persists the normalised status (visible on subsequent GET)", async () => {
     await patchStatus(app, "job-002", "running");
-    const res = await app.inject({ method: "GET", url: "/api/jobs/job-002" });
+    // job-002 runs on kernel-sf; its operator reads it.
+    const res = await app.inject({ method: "GET", url: "/api/jobs/job-002", headers: { "x-test-principal": SEED_OPERATORS["kernel-sf"] } });
     expect(res.statusCode).toBe(200);
     expect(res.json().job.status).toBe("in_progress");
   });
