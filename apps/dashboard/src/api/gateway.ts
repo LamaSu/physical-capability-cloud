@@ -1,4 +1,4 @@
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -19,11 +19,10 @@ let sessionId: string | undefined;
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...getAuthHeaders(),
     ...(sessionId ? { "x-pcc-session": sessionId } : {}),
   };
 
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await authorizedFetch(`${BASE_URL}${path}`, {
     ...options,
     headers: { ...headers, ...options?.headers },
   });
@@ -206,11 +205,10 @@ export const api = {
     max_tokens?: number;
     stream?: boolean;
   }): Promise<Response> =>
-    fetch(`${BASE_URL}/agent/chat`, {
+    authorizedFetch(`${BASE_URL}/agent/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...getAuthHeaders(),
         ...(sessionId ? { "x-pcc-session": sessionId } : {}),
       },
       body: JSON.stringify(body),

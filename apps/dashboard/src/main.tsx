@@ -2,7 +2,13 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App.js";
 import { initTelemetry, Sentry } from "./lib/telemetry.js";
+import { installKeyEgressGuard } from "./lib/gateway-base.js";
+import { useAuthStore } from "./stores/auth-store.js";
 import "./index.css";
+
+// No request may carry an API key to any origin but the configured gateway
+// (N50). Installed before telemetry and the app can send anything.
+installKeyEgressGuard(() => useAuthStore.getState().apiKey);
 
 // Initialize PostHog, GA4, and Sentry before the React tree mounts.
 initTelemetry();
