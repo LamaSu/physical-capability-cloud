@@ -70,13 +70,18 @@ describe("EconomicAgreementsPage and the retired IP pages", () => {
     expect(page).not.toContain("compileEconomics");
   });
 
-  it("the fabricated IP revenue pages are retired and /ip redirects to the agreements page", () => {
-    for (const retired of ["IPDashboardPage.tsx", "IPDetailPage.tsx", "RevenueClaimsPage.tsx", "IPRevenuePage.tsx"]) {
+  it("the fabricated IP, DePIN and SWF pages are retired and their routes redirect to the agreements page", () => {
+    for (const retired of ["IPDashboardPage.tsx", "IPDetailPage.tsx", "RevenueClaimsPage.tsx", "IPRevenuePage.tsx", "DePINDashboardPage.tsx", "SWFDashboardPage.tsx", "SWFGovernancePage.tsx"]) {
       expect(existsSync(resolve(here, "..", retired)), retired).toBe(false);
     }
     const app = src("../App.tsx");
     expect(app).toContain('<Route path="/economics" element={<EconomicAgreementsPage />} />');
-    expect(app).toContain('<Route path="/ip" element={<Navigate to="/economics" replace />} />');
+    for (const path of ["/ip", "/depin", "/swf/*"]) {
+      expect(app).toContain(`<Route path="${path}" element={<Navigate to="/economics" replace />} />`);
+    }
+    const nav = src("../components/nav-config.tsx");
+    expect(nav).not.toContain('path: "/depin"');
+    expect(nav).not.toContain('path: "/swf"');
   });
 
   it("the rate schedule pages call the gateway once-prefixed (readmodels #2697)", () => {

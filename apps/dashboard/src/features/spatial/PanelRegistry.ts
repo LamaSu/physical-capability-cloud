@@ -188,20 +188,6 @@ export const panelRegistry: Record<string, PanelRegistryEntry> = {
       import("../../pages/SubnetStatusPage.js").then((m) => ({ default: m.SubnetStatusPage })),
     keywords: ["subnet", "oracle", "oracles", "bittensor"],
   },
-  depin: {
-    title: "DePIN",
-    component: () =>
-      import("../../pages/DePINDashboardPage.js").then((m) => ({
-        default: m.DePINDashboardPage,
-      })),
-    keywords: ["depin", "decentralized", "nft", "certificates"],
-  },
-  swf: {
-    title: "Sovereign Wealth Fund",
-    component: () =>
-      import("../../pages/SWFDashboardPage.js").then((m) => ({ default: m.SWFDashboardPage })),
-    keywords: ["swf", "wealth fund", "sovereign", "treasury"],
-  },
   ip: {
     title: "Agreements",
     component: () =>

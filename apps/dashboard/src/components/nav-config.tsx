@@ -26,8 +26,6 @@ import {
   ProtocolBuilderIcon,
   ProtocolRunIcon,
   SubnetIcon,
-  DePINIcon,
-  SWFIcon,
   TelemetryIcon,
   TracesIcon,
   NegotiationIcon,
@@ -119,8 +117,6 @@ export const navGroups: NavGroup[] = [
     title: "Sovereign",
     items: [
       { label: "Oracles", path: "/subnet", icon: <SubnetIcon /> },
-      { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
-      { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
       { label: "Agreements", path: "/economics", icon: <IPRevenueIcon /> },
       { label: "Publish RateSchedule", path: "/contributors/schedules/publish", icon: <RateScheduleIcon /> },
     ],
