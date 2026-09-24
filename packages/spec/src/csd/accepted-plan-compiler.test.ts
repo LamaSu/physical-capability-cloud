@@ -555,7 +555,12 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   it("economics that disagrees with the compiler's gross/fee/net is refused, never adopted", () => {
     const r = withSplit(fee235, tweak((u) => ({ fee: (BigInt(u.fee) + 1n).toString() })));
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(codes(r)).toEqual(["economics-mismatch", "economics-mismatch"]); // one per unit
+    if (!r.ok) {
+      expect(r.violations).toEqual([
+        { code: "economics-mismatch", nodeId: "mail", field: "fee" },
+        { code: "economics-mismatch", nodeId: "print", field: "fee" },
+      ]); // one per unit, each named
+    }
     const g = withSplit(fee235, tweak((u) => ({ gross: `${u.gross}0` })));
     expect(g.ok === false && g.violations.every((v) => v.code === "economics-mismatch")).toBe(true);
   });
@@ -699,11 +704,23 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     };
     for (const s of [rightsOnly, recipientOnly, amountOnly, orderOnly]) expect(digestOf(s)).not.toBe(base.plan.acceptedDealDigest);
     expect(digestOf(unitsReversed)).toBe(base.plan.acceptedDealDigest);
+    // with UNEQUAL units, a positional (not by-reference) match would put print's legs on mail
+    const uneven = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print" }), node({ nodeId: "mail", capabilityType: "mail.drop", grossBaseUnits: 3n * USDC })] });
+    const inOrder = withSplit(uneven, tenPercent);
+    const reversed = withSplit(uneven, unitsReversed);
+    expect(inOrder.ok && reversed.ok).toBe(true);
+    if (inOrder.ok && reversed.ok) {
+      expect(reversed.plan.acceptedDealDigest).toBe(inOrder.plan.acceptedDealDigest);
+      expect(reversed.plan.jobs[0]!.units.map((u) => u.g)).toEqual([10n * USDC, 3n * USDC]);
+    }
   });
 
   it("net-only drift, a substituted unit, and opposite per-unit errors that would cancel globally are each refused", () => {
     const n = withSplit(fee235, tweak((u) => ({ net: (BigInt(u.net) + 1n).toString() })));
-    expect(n.ok === false && codes(n)).toEqual(["economics-mismatch", "economics-mismatch"]);
+    expect(n.ok === false && n.violations).toEqual([
+      { code: "economics-mismatch", nodeId: "mail", field: "net" },
+      { code: "economics-mismatch", nodeId: "print", field: "net" },
+    ]);
     const swap: NetSplitter = (units) => {
       const r = tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
       return { ...r, units: [r.units[0]!, { ...r.units[1]!, unitRef: "ghost" }] };
@@ -724,6 +741,68 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
       expect(r.ok).toBe(false);
       if (!r.ok) expect(codes(r)).toContain("invalid-payout-leg");
     }
+  });
+
+  it("astra: empty payouts, a single full leg, sparse legs, revoked proxies, lying lengths and throwing leg getters", () => {
+    expect(codes(withSplit(fee235, tweak(() => ({ payouts: [] }))) as { ok: false; violations: CompileViolation[] })).toEqual(["payout-sum-mismatch", "payout-sum-mismatch"]);
+    expect(withSplit(fee235, tweak((u) => ({ payouts: [{ recipient: ADDR("a1"), amount: u.net }] }))).ok).toBe(true);
+    const sparse = withSplit(fee235, tweak((u) => {
+      const legs = new Array(2);
+      legs[0] = u.payouts[0];
+      return { payouts: legs };
+    }));
+    expect(sparse.ok === false && sparse.violations.filter((x) => x.code === "invalid-payout-leg").map((x) => (x as { index: number }).index)).toEqual([1, 1]);
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const boomLeg = { get recipient(): string { throw new Error("late"); }, amount: "1" };
+    const answers: Array<[NetSplitter, string]> = [
+      [() => proxy as ReturnType<NetSplitter>, "result"],
+      [tweak(() => ({ payouts: new Proxy([], { get: (t, k) => (k === "length" ? -1 : Reflect.get(t, k)) }) })), "payouts"],
+      [(u) => ({ ...(tenPercent(u) as object), units: new Proxy([], { get: (t, k) => (k === "length" ? "2" : Reflect.get(t, k)) }) }) as ReturnType<NetSplitter>, "units"],
+      [tweak((u) => ({ payouts: [u.payouts[0]!, boomLeg] })), "result"],
+    ];
+    for (const [split, detail] of answers) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = withSplit(fee235, split);
+      }).not.toThrow();
+      expect(r?.ok).toBe(false);
+      if (r && !r.ok) expect(r.violations.every((x) => x.code === "economics-malformed" && (x as { detail: string }).detail.startsWith(detail))).toBe(true);
+    }
+  });
+
+  it("the 78-digit bound: 78 digits parse (and fail conservation); 79 digits are not an amount", () => {
+    const at = (amount: string) => withSplit(fee235, tweak((u) => ({ payouts: [...u.payouts, { recipient: LICENSOR, amount }] })));
+    const d78 = at("9".repeat(78));
+    expect(d78.ok === false && codes(d78)).toEqual(["payout-sum-mismatch", "payout-sum-mismatch"]);
+    const d79 = at("1".padEnd(79, "0"));
+    expect(d79.ok === false && codes(d79)).toEqual(["invalid-payout-leg", "invalid-payout-leg"]);
+  });
+
+  it("astra: an answer getter that mutates the CALLER's input cannot change the compiled deal or make it throw", () => {
+    const p = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+    const mutate = (mutation: () => void): NetSplitter => (units) =>
+      Object.defineProperty({ ...(tenPercent(units) as object) }, "economicTermsHash", {
+        enumerable: true,
+        get() {
+          mutation();
+          return DIG("e1");
+        },
+      }) as ReturnType<NetSplitter>;
+    const swapped = compileAcceptedPlan(p, { splitNet: mutate(() => (p.feeRecipient = LICENSOR)) });
+    expect(swapped.ok).toBe(true);
+    if (swapped.ok) expect(swapped.plan.jobs.flatMap((j) => j.units.map((u) => u.feeRecipient))).toEqual([ADDR("fe"), ADDR("fe")]);
+    const q = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+    const late = compileAcceptedPlan(q, {
+      splitNet: mutate(() =>
+        Object.defineProperty(q, "feeRecipient", {
+          get() {
+            throw new Error("late");
+          },
+        }),
+      ),
+    });
+    expect(late.ok).toBe(true); // the compiler never re-reads the caller's object
   });
 
   it("boundaries are accepted: exactly 16 legs per unit, repeated recipients, and 16 units x 16 legs = 256 legs per job", () => {
@@ -751,4 +830,45 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   function unitsOf(): Parameters<NetSplitter>[0] {
     return [{ nodeId: "print", operator: OP_A, payoutAddress: ADDR("a1"), g: 10n * USDC, f: 235_000n, n: 9_765_000n }];
   }
+});
+
+describe("input snapshot (astra review of 4479b79a): the compiler reads the caller's input exactly once", () => {
+  it("a getter on the input is read once; the validated value is the value used", () => {
+    let reads = 0;
+    const p = Object.defineProperty(plan({ feeBps: 235 }), "feeRecipient", {
+      enumerable: true,
+      get: () => (reads++ === 0 ? ADDR("fe") : ADDR("00")),
+    });
+    const r = compileAcceptedPlan(p);
+    expect(reads).toBe(1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.plan.jobs[0]!.units[0]!.feeRecipient).toBe(ADDR("fe"));
+  });
+
+  it("the program gate cannot change a node after its validation by mutating the caller's input", () => {
+    const p = plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] });
+    const sneaky: ProgramGate = (a) => {
+      (p.nodes[0] as { grossBaseUnits: bigint }).grossBaseUnits = 1n; // after validation, before use
+      return gate(a);
+    };
+    const r = compileAcceptedPlan(p, { assertProgramForTier: sneaky });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.plan.jobs[0]!.units[0]!.g).toBe(10n * USDC);
+  });
+
+  it("a throwing input getter, a lying length or an over-bound list is a typed refusal, never a throw", () => {
+    const cases: Array<[unknown, string]> = [
+      [Object.defineProperty(plan(), "payer", { enumerable: true, get: () => { throw new Error("x"); } }), "input"],
+      [plan({ nodes: new Proxy([], { get: (t, k) => (k === "length" ? 1.5 : Reflect.get(t, k)) }) as unknown as AcceptedPlanNode[] }), "input"],
+      [plan({ nodes: Array.from({ length: 1025 }, (_, i) => node({ nodeId: `n${i}` })) }), "nodes"],
+      [null, "input"],
+    ];
+    for (const [input, field] of cases) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = compileAcceptedPlan(input as AcceptedPlanInput);
+      }).not.toThrow();
+      expect(r).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field }] });
+    }
+  });
 });
