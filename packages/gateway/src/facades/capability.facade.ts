@@ -49,8 +49,28 @@ export function filterCapabilitiesByTtl<
   });
 }
 
+/**
+ * The id of a kernel's capability of `type`: `cap-<kernelId>-<type>`.
+ *
+ * WP-C R5 (capability-id squat). Capability ids are global, and the heartbeat
+ * (KernelFacade.heartbeat) and setup/register-device derive this same id for a
+ * kernel's own listing. When POST /api/capabilities accepted a caller-chosen
+ * id, one operator could pre-take `cap-<victimKernel>-<type>` on its own
+ * kernel; the victim's heartbeat then left the foreign row alone and never
+ * created its own. So an id is always DERIVED, never chosen: a body id that
+ * disagrees with the derived one is refused (400 capability_id_mismatch).
+ */
+export function capabilityIdFor(kernelId: string, type: string): string {
+  return `cap-${kernelId}-${type}`;
+}
+
 /** Input shape for creating a new capability instance */
 export interface CreateCapabilityInput {
+  /**
+   * Optional, and only accepted when it equals the derived id
+   * `cap-<kernelId>-<type>` (see {@link capabilityIdFor}). Anything else is a
+   * 400 `capability_id_mismatch`.
+   */
   id?: string;
   kernelId: string;
   type: string;
@@ -316,19 +336,45 @@ export class CapabilityFacade extends BaseFacade {
   /**
    * Create a new capability instance (upsert-style: returns existing if already present).
    * Replaces: POST /api/capabilities (inline DB access)
+   *
+   * WP-C R5: the id is derived, `cap-<kernelId>-<type>` ({@link capabilityIdFor}).
+   *   - a body `id` that disagrees with it is refused: 400 `capability_id_mismatch`;
+   *   - when the derived id already belongs to a DIFFERENT kernel's row, the
+   *     create is refused with `capability_id_taken` (the route answers 409).
+   *     It never hands back another kernel's row as if it were the caller's
+   *     ("created: false"). Kernel ids and types may both contain "-", so two
+   *     (kernelId, type) pairs can derive the same id; see the open issue in
+   *     the WP-C report.
+   * Ownership of `kernelId` is the CALLER's check (POST /api/capabilities runs
+   * requireKernelOwner first).
    */
   async create(
     body: CreateCapabilityInput,
   ): Promise<Result<{ capability: CapabilityDTO; created: boolean }>> {
     return this.execute("create", async () => {
-      const { kernelId, type } = body;
-      if (!kernelId || !type) {
+      const { kernelId, type } = body ?? ({} as Partial<CreateCapabilityInput>);
+      if (typeof kernelId !== "string" || !kernelId || typeof type !== "string" || !type) {
         throw Object.assign(new Error("kernelId and type required"), { name: "BadRequestError" });
       }
-      const id = body.id || `cap-${kernelId}-${type}`;
+      const id = capabilityIdFor(kernelId, type);
+      const requestedId = body.id as unknown;
+      if (requestedId !== undefined && requestedId !== null && requestedId !== "" && requestedId !== id) {
+        throw Object.assign(
+          new Error(
+            `A capability id is derived as '${id}' (cap-<kernelId>-<type>); the body id disagrees`,
+          ),
+          { name: "BadRequestError", code: "capability_id_mismatch" },
+        );
+      }
       const context = this.defaultContext();
 
       const existing = this.repos.capabilities.findById(id);
+      if (existing && existing.kernelId !== kernelId) {
+        throw Object.assign(
+          new Error(`Capability id '${id}' already belongs to another kernel`),
+          { name: "BadRequestError", code: "capability_id_taken" },
+        );
+      }
       if (existing) {
         const kernel = this.repos.kernels.findById(existing.kernelId);
         const dto = populateCapabilityDTO(existing as any, kernel as any ?? undefined, context);

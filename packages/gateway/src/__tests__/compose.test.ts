@@ -1039,7 +1039,9 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     await registerRealCapability({
       kernelId: "kernel-facade-1",
       operatorAddress: "op-facade-1@example.com",
-      capabilityId: "cap-facade-print",
+      // WP-C R5: capability ids are derived, cap-<kernelId>-<type> (old: the
+      // caller-chosen "cap-facade-print", which the facade now refuses).
+      capabilityId: "cap-kernel-facade-1-facade-3d-printing",
       type: "facade-3d-printing",
       baseCostUSD: 18,
     });
@@ -1055,7 +1057,7 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     const body = res.json();
     expect(body.status).toBe("proposed");
     expect(body.steps).toHaveLength(1);
-    expect(body.steps[0].capabilityId).toBe("cap-facade-print");
+    expect(body.steps[0].capabilityId).toBe("cap-kernel-facade-1-facade-3d-printing");
     // operatorAddress resolved via KernelFacade, not present on CapabilityDTO.
     expect(body.steps[0].operatorAddress).toBe("op-facade-1@example.com");
     expect(body.steps[0].estimatedPriceUSD).toBe(18);
@@ -1066,14 +1068,15 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     await registerRealCapability({
       kernelId: "kernel-pizzeria",
       operatorAddress: "op-pizzeria@example.com",
-      capabilityId: "cap-make-pizza",
+      // WP-C R5: derived ids (old: "cap-make-pizza" / "cap-deliver-pizza").
+      capabilityId: "cap-kernel-pizzeria-make-pizza",
       type: "make-pizza",
       baseCostUSD: 12,
     });
     await registerRealCapability({
       kernelId: "kernel-courier",
       operatorAddress: "op-courier@example.com",
-      capabilityId: "cap-deliver-pizza",
+      capabilityId: "cap-kernel-courier-deliver-pizza",
       type: "deliver-pizza",
       baseCostUSD: 7,
     });
@@ -1095,8 +1098,8 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     expect(body.status).toBe("proposed");
     expect(body.steps).toHaveLength(2);
     expect(body.steps.map((s: { capabilityId: string }) => s.capabilityId)).toEqual([
-      "cap-make-pizza",
-      "cap-deliver-pizza",
+      "cap-kernel-pizzeria-make-pizza",
+      "cap-kernel-courier-deliver-pizza",
     ]);
     expect(body.steps.map((s: { capabilityType: string }) => s.capabilityType)).toEqual([
       "make-pizza",

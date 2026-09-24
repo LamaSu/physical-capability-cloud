@@ -62,7 +62,9 @@ describe("GET /api/capabilities/types -- union of templates + catalog + CSD", ()
       payload: {
         kernelId: "kernel-nyc", // a seeded kernel
         type: AD_HOC,
-        id: "cap-test-wood-fired-pizza",
+        // WP-C R5: the derived id cap-<kernelId>-<type> (old: the caller-chosen
+        // "cap-test-wood-fired-pizza", which is now refused with 400).
+        id: "cap-kernel-nyc-wood-fired-pizza",
         name: "Wood-fired pizza (ad-hoc)",
       },
     });

@@ -33,6 +33,7 @@ import {
   clampAssuranceTiers,
   isAssuranceTier,
 } from "../services/assurance-ceiling.js";
+import { capabilityIdFor } from "./capability.facade.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -113,7 +114,19 @@ export interface HeartbeatResult {
   acknowledged: true;
   kernelId: string;
   status: string;
+  /**
+   * Capability entries inserted or refreshed for THIS kernel. An entry whose
+   * derived id another kernel's row already holds is not counted; it is listed
+   * in `capabilitiesSkipped` instead (WP-C R5).
+   */
   capabilitiesReceived: number;
+  /**
+   * Present only when non-empty: announced capabilities that were NOT listed
+   * because their derived id `cap-<kernelId>-<type>` already belongs to a
+   * different kernel's row (WP-C R5). The operator must resolve the conflict;
+   * the heartbeat never touches the other kernel's row.
+   */
+  capabilitiesSkipped?: Array<{ type: string; capabilityId: string; reason: "capability_id_taken" }>;
   timestamp: string;
   /** ISO timestamp the kernel + its capabilities are valid until. */
   validUntil: string;
@@ -525,7 +538,8 @@ export class KernelFacade extends BaseFacade {
    *     ceiling, others are dropped, and an empty result becomes [0];
    *   - a row whose derived id `cap-<kernelId>-<type>` already belongs to a
    *     DIFFERENT kernel is left untouched (a heartbeat for one kernel never
-   *     refreshes another kernel's listing).
+   *     refreshes another kernel's listing), and is reported in
+   *     `capabilitiesSkipped` rather than counted as received (WP-C R5).
    */
   async heartbeat(
     kernelId: string,
@@ -583,13 +597,25 @@ export class KernelFacade extends BaseFacade {
 
       // Upsert capability announcements
       let capabilitiesReceived = 0;
-      if (capabilities && capabilities.length > 0) {
+      const capabilitiesSkipped: NonNullable<HeartbeatResult["capabilitiesSkipped"]> = [];
+      if (Array.isArray(capabilities) && capabilities.length > 0) {
         for (const cap of capabilities) {
-          const capType = (cap.type as string) ?? (cap.capability_type as string);
-          if (!capType) continue;
-          const capId = `cap-${kernelId}-${capType}`;
+          if (!cap || typeof cap !== "object") continue;
+          const capType = cap.type ?? cap.capability_type;
+          // A type is part of the derived id, so it must be a non-empty string.
+          if (typeof capType !== "string" || !capType) continue;
+          const capId = capabilityIdFor(kernelId, capType);
           try {
             const existing = repos.capabilities.findById(capId);
+            if (existing && existing.kernelId !== kernelId) {
+              // The derived id is already taken by ANOTHER kernel's row
+              // (capability ids are global). Leave that row untouched: this
+              // owner's heartbeat must not keep a different kernel's listing
+              // alive. Report it instead of counting it as received (WP-C R5),
+              // so the operator learns its own listing does not exist.
+              capabilitiesSkipped.push({ type: capType, capabilityId: capId, reason: "capability_id_taken" });
+              continue;
+            }
             if (!existing) {
               repos.capabilities.insert({
                 id: capId,
@@ -607,7 +633,7 @@ export class KernelFacade extends BaseFacade {
                 lastHeartbeatAt: now,
                 validUntil,
               } as any);
-            } else if (existing.kernelId === kernelId) {
+            } else {
               // Existing capability of THIS kernel — refresh its TTL.
               try {
                 repos.capabilities.update(capId, {
@@ -618,10 +644,6 @@ export class KernelFacade extends BaseFacade {
                 // soft fail
               }
             }
-            // Otherwise the derived id is already taken by ANOTHER kernel's row
-            // (capability ids are global and POST /api/capabilities accepts a
-            // caller-chosen id). Leave it untouched: this owner's heartbeat must
-            // not keep a different kernel's listing alive.
           } catch {
             // non-fatal
           }
@@ -674,6 +696,7 @@ export class KernelFacade extends BaseFacade {
         kernelId,
         status,
         capabilitiesReceived,
+        ...(capabilitiesSkipped.length > 0 ? { capabilitiesSkipped } : {}),
         timestamp: now,
         validUntil,
         resurrected,

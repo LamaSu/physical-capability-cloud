@@ -68,7 +68,9 @@ describe("GET /api/capabilities -- list correctness (P0 regression)", () => {
       payload: {
         kernelId,
         type: "pizza.order",
-        id: "cap-regression-pizza-order",
+        // WP-C R5: a capability id is derived, cap-<kernelId>-<type>. (Old:
+        // a caller-chosen id "cap-regression-pizza-order" was accepted.)
+        id: "cap-kernel-nyc-pizza.order",
         name: "Pizza Order (regression)",
       },
     });
@@ -81,7 +83,7 @@ describe("GET /api/capabilities -- list correctness (P0 regression)", () => {
     expect(listRes.statusCode).toBe(200);
     const listBody = listRes.json();
     const ids = listBody.items.map((c: any) => c.id);
-    expect(ids).toContain("cap-regression-pizza-order");
+    expect(ids).toContain("cap-kernel-nyc-pizza.order");
   });
 
   it("each item has the canonical CapabilityDTO shape (id, kernelId, type)", async () => {
@@ -116,7 +118,8 @@ describe("GET /api/capabilities?type= -- type-filter (P1 regression)", () => {
       payload: {
         kernelId: "kernel-nyc",
         type: "courier.dispatch",
-        id: "cap-regression-courier-dispatch",
+        // WP-C R5: the derived id (old: "cap-regression-courier-dispatch").
+        id: "cap-kernel-nyc-courier.dispatch",
       },
     });
 
@@ -137,7 +140,7 @@ describe("GET /api/capabilities?type= -- type-filter (P1 regression)", () => {
       expect(item.type).toBe("courier.dispatch");
     }
     const ids = filteredBody.items.map((c: any) => c.id);
-    expect(ids).toContain("cap-regression-courier-dispatch");
+    expect(ids).toContain("cap-kernel-nyc-courier.dispatch");
   });
 
   it("type= with no match returns an empty items array (not 400, not all rows)", async () => {

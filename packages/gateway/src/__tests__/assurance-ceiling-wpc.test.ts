@@ -360,11 +360,16 @@ describe("WP-C heartbeat: owner-only, clamped", () => {
     expect(getRepos().capabilities.findById(`cap-${id}-wpc-mill`)?.assuranceTiers).toEqual([1, 0]);
   });
 
-  it("[neg] an owner's heartbeat never refreshes ANOTHER kernel's row that squats its derived capability id", async () => {
+  // WP-C R5: POST /api/capabilities no longer accepts a caller-chosen id (see
+  // the R5 block below), so a squatted id can only pre-exist as a LEGACY row.
+  // (Old: this test created the squat through POST with id cap-<victim>-<type>,
+  // which R5 now refuses with 400.) The victim's heartbeat must leave that row
+  // alone AND report it as skipped instead of counting it as received.
+  it("[neg] an owner's heartbeat never refreshes ANOTHER kernel's row that squats its derived capability id, and reports it skipped", async () => {
     const victim = uid("wpc-hb-squat-victim");
     expect((await registerKernel(victim)).statusCode).toBe(201);
-    // The attacker owns its own kernel and lists a capability on it under the id
-    // the victim's heartbeat will derive (cap-<victimKernel>-<type>).
+    // The attacker owns its own kernel; a legacy row on it holds the id the
+    // victim's heartbeat will derive (cap-<victimKernel>-<type>).
     const squatter = uid("wpc-hb-squatter");
     const reg = await app.inject({
       method: "POST",
@@ -374,13 +379,7 @@ describe("WP-C heartbeat: owner-only, clamped", () => {
     });
     expect(reg.statusCode).toBe(201);
     const squatId = `cap-${victim}-wpc-squat`;
-    const pub = await app.inject({
-      method: "POST",
-      url: "/api/capabilities",
-      headers: asAttacker(),
-      payload: { kernelId: squatter, type: "wpc-squat", id: squatId },
-    });
-    expect(pub.statusCode).toBe(201);
+    insertCapabilityRow(squatId, squatter, "wpc-squat", [0]);
     const oldBeat = "2026-01-01T00:00:00.000Z";
     getRepos().capabilities.update(squatId, { lastHeartbeatAt: oldBeat, validUntil: oldBeat } as never);
 
@@ -391,6 +390,10 @@ describe("WP-C heartbeat: owner-only, clamped", () => {
       payload: { capabilities: [{ type: "wpc-squat" }] },
     });
     expect(hb.statusCode).toBe(200);
+    expect(hb.json().capabilitiesReceived).toBe(0);
+    expect(hb.json().capabilitiesSkipped).toEqual([
+      { type: "wpc-squat", capabilityId: squatId, reason: "capability_id_taken" },
+    ]);
     const row = getRepos().capabilities.findById(squatId)!;
     expect(row.kernelId).toBe(squatter);
     expect(row.lastHeartbeatAt).toBe(oldBeat);
@@ -507,6 +510,8 @@ describe("WP-C (extra) capability publish: owner-only", () => {
     expect(getRepos().capabilities.findById(`cap-${id}-ghost`)).toBeFalsy();
   });
 
+  // (Old payload carried id `cap-<kernel>-legit`, which R5 now refuses because
+  // it is not the derived `cap-<kernel>-wpc-legit`; the id is omitted.)
   it("the OWNER can publish; the served tiers are clamped to the kernel's ceiling", async () => {
     const id = uid("wpc-pub-owner");
     expect((await registerKernel(id)).statusCode).toBe(201);
@@ -514,9 +519,10 @@ describe("WP-C (extra) capability publish: owner-only", () => {
       method: "POST",
       url: "/api/capabilities",
       headers: asOwner(),
-      payload: { kernelId: id, type: "wpc-legit", id: `cap-${id}-legit`, assuranceTiers: [0, 1, 2, 3] },
+      payload: { kernelId: id, type: "wpc-legit", assuranceTiers: [0, 1, 2, 3] },
     });
     expect(res.statusCode).toBe(201);
+    expect(res.json().capability.id).toBe(`cap-${id}-wpc-legit`);
     expect(res.json().capability.assuranceTiers).toEqual([0]);
   });
 });
@@ -561,6 +567,8 @@ describe("WP-C (extra) capability publish: the handler does not rely on apiGate"
     expect(getRepos().capabilities.findById(`cap-${id}-bare`)).toBeFalsy();
   });
 
+  // (Old payload carried id `cap-<kernel>-bare`, not the derived
+  // `cap-<kernel>-wpc-bare`, which R5 now refuses; it sends the derived id.)
   it("the owner's key, resolved by the handler itself -> 201 (positive control)", async () => {
     const id = uid("wpc-bare-owner");
     expect((await registerKernel(id)).statusCode).toBe(201);
@@ -568,9 +576,119 @@ describe("WP-C (extra) capability publish: the handler does not rely on apiGate"
       method: "POST",
       url: "/api/capabilities",
       headers: asOwner(),
-      payload: { kernelId: id, type: "wpc-bare", id: `cap-${id}-bare` },
+      payload: { kernelId: id, type: "wpc-bare", id: `cap-${id}-wpc-bare` },
     });
     expect(res.statusCode).toBe(201);
+    expect(res.json().capability.id).toBe(`cap-${id}-wpc-bare`);
+  });
+});
+
+// ── R5: capability ids are derived, never chosen by the caller ──────────────
+// Review round 2 (LOW, probe P6): POST /api/capabilities took a caller-chosen
+// id, so an operator could list `cap-<victimKernel>-<type>` on its OWN kernel.
+// Kernel ids can be predicted, so the id could be taken before the victim
+// registered; the victim's heartbeat then never created its own row, while it
+// still reported the capability as received. A created id is now always
+// `cap-<kernelId>-<type>` of the caller's own kernel.
+
+describe("WP-C R5: a capability id is derived (cap-<kernelId>-<type>), never chosen", () => {
+  it("[neg] P6: an owner cannot list its capability under ANOTHER kernel's derived id: 400 capability_id_mismatch, nothing inserted", async () => {
+    const victim = uid("wpc-r5-victim");
+    expect((await registerKernel(victim)).statusCode).toBe(201);
+    const squatter = uid("wpc-r5-squatter");
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/kernels",
+          headers: asAttacker(),
+          payload: { id: squatter, name: "squatter" },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    const squatId = `cap-${victim}-wpc-r5-print`;
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asAttacker(),
+      payload: { kernelId: squatter, type: "wpc-r5-print", id: squatId },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("capability_id_mismatch");
+    expect(getRepos().capabilities.findById(squatId)).toBeFalsy();
+    expect(getRepos().capabilities.findById(`cap-${squatter}-wpc-r5-print`)).toBeFalsy();
+
+    // The victim can still list its own capability under the derived id.
+    const mine = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: victim, type: "wpc-r5-print" },
+    });
+    expect(mine.statusCode).toBe(201);
+    expect(getRepos().capabilities.findById(squatId)?.kernelId).toBe(victim);
+  });
+
+  it("[neg] a body id that disagrees with the derived id is refused even on the caller's own kernel", async () => {
+    const id = uid("wpc-r5-own");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    for (const bad of ["cap-custom-id", `cap-${id}-other-type`, `cap-${id}-wpc-r5-scan-x`, 42]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/capabilities",
+        headers: asOwner(),
+        payload: { kernelId: id, type: "wpc-r5-scan", id: bad },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("capability_id_mismatch");
+      if (typeof bad === "string") expect(getRepos().capabilities.findById(bad)).toBeFalsy();
+    }
+    expect(getRepos().capabilities.findById(`cap-${id}-wpc-r5-scan`)).toBeFalsy();
+  });
+
+  it("[neg] when ANOTHER kernel's legacy row already holds the derived id: 409 capability_id_taken, the row is untouched and never handed back", async () => {
+    const victim = uid("wpc-r5-taken-victim");
+    expect((await registerKernel(victim)).statusCode).toBe(201);
+    const squatter = uid("wpc-r5-taken-squatter");
+    insertKernelRow(squatter, { operatorAddress: ATTACKER });
+    const takenId = `cap-${victim}-wpc-r5-mill`;
+    insertCapabilityRow(takenId, squatter, "wpc-r5-mill", [0]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: victim, type: "wpc-r5-mill" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("capability_id_taken");
+    expect(res.json().capability).toBeUndefined();
+    const row = getRepos().capabilities.findById(takenId)!;
+    expect(row.kernelId).toBe(squatter);
+    expect(row.name).toBe(`wpc-r5-mill on ${squatter}`);
+  });
+
+  it("the derived id, sent explicitly or omitted, is accepted; a repeat is idempotent (created: false)", async () => {
+    const id = uid("wpc-r5-ok");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: id, type: "wpc-r5-ok", id: `cap-${id}-wpc-r5-ok` },
+    });
+    expect(first.statusCode).toBe(201);
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: id, type: "wpc-r5-ok" },
+    });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().created).toBe(false);
+    expect(again.json().capability.id).toBe(`cap-${id}-wpc-r5-ok`);
+    expect(again.json().capability.kernelId).toBe(id);
   });
 });
 

@@ -714,6 +714,10 @@ export async function capabilityRoutes(app: FastifyInstance) {
    * Otherwise anyone could list priced capabilities under another operator's
    * kernel and inherit its assurance ceiling, which is the same cross-tenant
    * catalog injection the heartbeat fix closes.
+   *
+   * The id is DERIVED (WP-C R5, CapabilityFacade.create): a body `id` other
+   * than `cap-<kernelId>-<type>` is 400 `capability_id_mismatch`, and a derived
+   * id that another kernel's row already holds is 409 `capability_id_taken`.
    */
   app.post<{ Body: CreateCapabilityInput }>("/api/capabilities", async (req, reply) => {
     const { kernelId, type } = req.body ?? ({} as Partial<CreateCapabilityInput>);
@@ -723,7 +727,8 @@ export async function capabilityRoutes(app: FastifyInstance) {
     if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
     const result = await facade.create(req.body);
     if (!result.success) {
-      return reply.code(result.error.httpStatus).send({
+      const status = result.error.code === "capability_id_taken" ? 409 : result.error.httpStatus;
+      return reply.code(status).send({
         error: result.error.code,
         message: result.error.message,
         ...(result.error.details ? { details: result.error.details } : {}),
