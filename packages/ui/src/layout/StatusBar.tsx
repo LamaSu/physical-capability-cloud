@@ -28,6 +28,12 @@ export interface StatusBarProps {
    * caller has it from a trusted source; there is no default.
    */
   network?: string;
+  /**
+   * The commit the gateway reports it was built from, already shortened by
+   * the caller (e.g. "build 1a2b3c4"). Rendered only when set: an unknown
+   * build is not shown at all.
+   */
+  build?: string;
   className?: string;
 }
 
@@ -70,6 +76,7 @@ export function StatusBar({
   networkStatus = "unknown",
   blockNumber,
   network,
+  build,
   className,
 }: StatusBarProps) {
   return (
@@ -100,7 +107,12 @@ export function StatusBar({
           </div>
         </>
       )}
-      {network && <div className="ml-auto text-white/20">{network}</div>}
+      {(network || build) && (
+        <div className="ml-auto flex items-center gap-3 text-white/20">
+          {network && <span>{network}</span>}
+          {build && <span title="The commit this gateway was built from">{build}</span>}
+        </div>
+      )}
     </footer>
   );
 }

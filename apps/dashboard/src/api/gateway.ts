@@ -71,7 +71,8 @@ export interface JobListResponse {
 
 export const api = {
   // Health
-  health: () => fetchAPI<{ status: string }>("/health"),
+  /** commit/commitSource arrive with N5 (#369); older gateways omit them. */
+  health: () => fetchAPI<{ status: string; commit?: string | null; commitSource?: string }>("/health"),
 
   // ── Capabilities ─────────────────────────────────────────────────────────
 

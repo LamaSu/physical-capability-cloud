@@ -24,6 +24,11 @@ function text(props: StatusBarProps = {}): string {
 }
 
 describe("StatusBar", () => {
+  it("shows the build only when given, beside the network", () => {
+    expect(render({ networkStatus: "connected", network: "base-sepolia (configured)", build: "build 1a2b3c4" })).toContain("build 1a2b3c4");
+    expect(render({ networkStatus: "connected" })).not.toContain("build");
+  });
+
   it("renders unknown counts as a dash, not as zero", () => {
     const t = text();
     expect(t).toContain("— kernels online");

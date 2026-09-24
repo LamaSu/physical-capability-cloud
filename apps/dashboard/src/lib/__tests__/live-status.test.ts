@@ -171,7 +171,17 @@ describe("deriveHomeStatus: the StatusBar from ProductHomeDTO", () => {
       activeJobs: 120,
       activeJobsAtLeast: false,
       network: "base-sepolia (configured)",
+      build: undefined,
     });
+  });
+
+  it("shows the served build only for an image-baked, well-formed commit (N5)", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const withBuild = (commit: unknown, commitSource: unknown) => ({ data: { status: "ok", commit, commitSource }, isSuccess: true, isError: false });
+    expect(deriveHomeStatus({ health: withBuild(sha, "image_build"), home: home() }).build).toBe("build 0123456");
+    expect(deriveHomeStatus({ health: withBuild(sha, "unknown"), home: home() }).build).toBeUndefined();
+    expect(deriveHomeStatus({ health: withBuild("not-a-sha", "image_build"), home: home() }).build).toBeUndefined();
+    expect(deriveHomeStatus({ health: withBuild(null, "unknown"), home: home() }).build).toBeUndefined();
   });
 
   it("a section the gateway couldn't read is unknown, never 0", () => {

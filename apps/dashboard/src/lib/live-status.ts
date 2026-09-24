@@ -71,6 +71,18 @@ export interface LiveStatus {
   activeJobsAtLeast: boolean;
   /** The settlement network the gateway is configured for, labelled as configuration. */
   network?: string;
+  /** "build <sha7>" when /api/health reports the commit baked into the image (N5). */
+  build?: string;
+}
+
+/**
+ * The served build, from /api/health (N5, #369): only a full 40-hex commit
+ * whose source is the image build. A runtime or unknown commit is not shown.
+ */
+export function buildLabel(health: QueryView<{ status: string; commit?: unknown; commitSource?: unknown }>): string | undefined {
+  const d = health.isSuccess ? health.data : undefined;
+  if (!d || d.commitSource !== "image_build" || typeof d.commit !== "string" || !/^[0-9a-f]{40}$/.test(d.commit)) return undefined;
+  return `build ${d.commit.slice(0, 7)}`;
 }
 
 /**
@@ -80,7 +92,7 @@ export interface LiveStatus {
  * reachability rule is the same as deriveLiveStatus's.
  */
 export function deriveHomeStatus(reads: {
-  health: QueryView<{ status: string }>;
+  health: QueryView<{ status: string; commit?: unknown; commitSource?: unknown }>;
   home: QueryView<ProductHomeDTO>;
 }): LiveStatus {
   const networkStatus = gatewayConnectivity(reads.health);
@@ -93,6 +105,7 @@ export function deriveHomeStatus(reads: {
     activeJobs: jobs ? jobs.active : undefined,
     activeJobsAtLeast: false,
     network: configuredNetworkLabel(home),
+    build: networkStatus === "connected" ? buildLabel(reads.health) : undefined,
   };
 }
 
