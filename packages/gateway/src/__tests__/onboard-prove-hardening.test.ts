@@ -86,6 +86,16 @@ async function register(app: FastifyInstance, operator: Record<string, unknown> 
   return res.json().registration.id;
 }
 
+/**
+ * /register mints ids as `reg-${Date.now()}`, so two registrations in the same
+ * millisecond collide (the second insert is dropped). Wait for the clock to
+ * move on before registering again in the same test.
+ */
+async function nextMillisecond(): Promise<void> {
+  const t = Date.now();
+  while (Date.now() === t) await new Promise((r) => setTimeout(r, 1));
+}
+
 function prove(app: FastifyInstance, regId: string, body: unknown, operator: string | null = OWNER) {
   return app.inject({
     method: "POST",
@@ -169,7 +179,9 @@ describe("/prove hardening (WP-B)", () => {
 
     // No operator at all: /register stores the zero-address placeholder, which
     // is not an owner — even for a caller whose identity is the zero address.
+    await nextMillisecond();
     const placeholder = await register(app, undefined);
+    expect(placeholder).not.toBe(noOwner);
     const zero = "0x0000000000000000000000000000000000000000";
     const res2 = await prove(app, placeholder, { evidence: { deviceHealth: DEVICE_HEALTH } }, zero);
     expect(res2.statusCode).toBe(403);
