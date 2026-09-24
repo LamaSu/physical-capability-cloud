@@ -471,6 +471,12 @@ export const READONLY_APP_PROXY_TOOLS: ReadonlySet<string> = new Set([
  *
  * Allowed:
  *   1. render_pcc_dashboard — pure client-side manifest render (no server effect).
+ *   1b. render_pcc_dashboard_ir — EFFECT-REVIEWED 2026-09-24 (genui 4df1e691): the same
+ *      zod validation + API-key refusal as (1), plus projectDashboardForMcpApp, a PURE
+ *      bounded projection (5000 nodes / depth 20) that fails closed on request-bearing or
+ *      credential action fields. No DB, network, token consumption, persistence or
+ *      trigger; returns the projected manifest + the B-mode ui:// URI. Stricter than (1).
+ *      Data is read client-side by the closed-IR binder (GET-only, fixed origin).
  *   2. a REGISTERED typed operation with `stateChanging === false` (today only
  *      pcc.op.capability.request_quote; an unregistered id → null → denied, and a
  *      state-changing op such as job.cancel → denied even once it registers).
@@ -486,7 +492,7 @@ export function isReadOnlyAppTool(
   toolsByName: Map<string, AgentPackageTool>,
 ): boolean {
   if (name === RENDER_DASHBOARD_TOOL_NAME) return true;
-  if (name === RENDER_IR_DASHBOARD_TOOL_NAME) return true; // read-only closed-IR render
+  if (name === RENDER_IR_DASHBOARD_TOOL_NAME) return true; // effect-reviewed: see (1b) above
   if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
     const policy = getOperationPolicyByToolName(name);
     return policy !== null && policy.stateChanging === false;
