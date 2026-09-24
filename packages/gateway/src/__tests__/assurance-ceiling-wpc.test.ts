@@ -25,7 +25,7 @@ import {
   _setSmokeTestFetch,
 } from "../routes/kernel-marketplace.js";
 import { composeRoutes, _clearComposeForTests } from "../routes/compose.js";
-import { _clearGraphSearchForTests } from "../routes/graph-search.js";
+import { _clearGraphSearchForTests, _seedGraphSearchForTests } from "../routes/graph-search.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
@@ -564,6 +564,13 @@ describe("WP-C compose: selection uses the clamped tiers", () => {
     await composeApp.close();
   });
 
+  /**
+   * Register the kernel and a capability claiming [0..3], AND a graph-search
+   * node for the same kernel and type claiming tier 3. /api/compose falls back
+   * to graph-search whenever the facade provider finds nothing, so without the
+   * node these tests would pass only because the graph store is empty
+   * (reviewer round 2, polarity note on this block; probe P7).
+   */
   async function seed(kernelId: string, type: string, signed: boolean) {
     const k = await getKernelFacade().register(
       { id: kernelId, name: kernelId, maxAssuranceTier: 3, ...(signed ? ed25519Proof(kernelId) : {}) },
@@ -571,16 +578,28 @@ describe("WP-C compose: selection uses the clamped tiers", () => {
     );
     expect(k.success).toBe(true);
     const c = await getCapabilityFacade().create({
-      id: `cap-${kernelId}`,
       kernelId,
       type,
       pricing: { currency: "USDC", baseCost: "5", minimum: "5" },
       assuranceTiers: [0, 1, 2, 3],
     });
     expect(c.success).toBe(true);
+    _seedGraphSearchForTests({
+      nodes: [
+        {
+          capabilityId: `node-${kernelId}`,
+          capabilityType: type,
+          kernelId,
+          estimatedPriceUSD: 5,
+          estimatedDurationMs: 1,
+          assuranceTier: 3,
+          outputTypes: [type],
+        },
+      ],
+    });
   }
 
-  it("[neg] an UNSIGNED kernel claiming [0..3] is not selected at minAssuranceTier 1", async () => {
+  it("[neg] an UNSIGNED kernel claiming [0..3] is not selected at minAssuranceTier 1, even with a tier-3 graph node for it", async () => {
     const type = uid("wpc-compose-type");
     await seed(uid("wpc-compose-unsigned"), type, false);
     const res = await composeApp.inject({
