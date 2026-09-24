@@ -120,6 +120,16 @@ const mockKernelsRepo = {
   findById: vi.fn(),
 };
 
+// These tests cover route-to-facade wiring with mocked facades and no store. The job read
+// gate (F3) is tested against a real store in readmodels/job-read-gate.test.ts, so here it
+// lets every read through.
+vi.mock("../readmodels/job-read-gate.js", () => ({
+  gateJobRead: () => ({ ok: true, job: { id: "mock-job" }, as: "admin" }),
+  refuseJobRead: () => {
+    throw new Error("the gate is mocked open in this file");
+  },
+}));
+
 vi.mock("../db.js", () => ({
   getRepos: () => ({
     jobs: mockJobsRepo,

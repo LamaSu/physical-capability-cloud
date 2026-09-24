@@ -329,6 +329,9 @@ describe("the legacy settlement routes on a real store", () => {
     app.addHook("onRequest", async (req) => {
       const t = req.headers["x-test-tenant"];
       if (typeof t === "string") (req as any).tenantId = t;
+      // Job reads are object-authorized (F3): read as the seeded kernel-nyc operator.
+      const p = req.headers["x-test-principal"];
+      (req as any).operatorId = typeof p === "string" ? p : "0x1111111111111111111111111111111111111111";
     });
     await app.register(paidJobFlowRoutes);
     await app.register(negotiationRoutes);

@@ -26,6 +26,7 @@ import {
 import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { gateJobRead } from "./job-read-gate.js";
 import {
   buildJobExecutionDTO,
   loadJobExecutionSources,
@@ -285,13 +286,14 @@ export type LegacySettlementLoad =
       sessions: SessionRead;
     }
   | { kind: "not_found" }
+  | { kind: "unauthenticated" }
   | { kind: "unavailable" };
 
 /**
- * Read one job's records for a legacy settlement read: the job row (a failed read is
- * `unavailable`, a missing row or another tenant's row under TENANT_ENFORCE is
- * `not_found`), then the same sources as the execution read model. The read time is
- * taken before any read.
+ * Read one job's records for a legacy settlement read. The job read gate runs first (F3):
+ * a failed read is `unavailable`, an anonymous caller `unauthenticated`, and a missing
+ * job, another tenant's, or one the caller is not a party to is `not_found`. Then the same
+ * sources as the execution read model. The read time is taken before any read.
  */
 export function loadLegacySettlement(
   req: FastifyRequest,
@@ -299,19 +301,11 @@ export function loadLegacySettlement(
   opts: { sessions?: boolean } = {},
 ): LegacySettlementLoad {
   const asOf = new Date().toISOString();
-  let store: ReturnType<typeof getStore>;
-  let job: (JobRow & LegacyJobRow) | undefined;
-  try {
-    store = getStore();
-    job = store.repos.jobs.findById(jobId) as (JobRow & LegacyJobRow) | undefined;
-  } catch (error) {
-    req.log.error({ jobId, err: error }, "legacy settlement read: job row read failed");
-    return { kind: "unavailable" };
-  }
-  if (!job) return { kind: "not_found" };
-
+  const gate = gateJobRead(req, jobId);
+  if (!gate.ok) return { kind: gate.kind };
+  const job = gate.job as JobRow & LegacyJobRow;
+  const store = getStore();
   const tenant = tenantOpts(req as any);
-  if (tenant && (job.tenantId ?? null) !== tenant.tenantId) return { kind: "not_found" };
 
   const onReadError = (source: string, error: unknown) =>
     req.log.warn({ jobId, source, err: error }, "legacy settlement read: source read failed");

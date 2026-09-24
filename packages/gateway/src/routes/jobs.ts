@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
 import { getRepos, getStore } from "../db.js";
+import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import {
@@ -62,6 +63,11 @@ export async function jobRoutes(app: FastifyInstance) {
    * Returns 404 when not found (previously returned 200 with { error: "not_found" }).
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId", async (req, reply) => {
+    // Object-authorized like /execution (F3): admin, kernel operator or recorded buyer.
+    const gate = gateJobRead(req, req.params.jobId);
+    if (!gate.ok) {
+      return refuseJobRead(reply, gate, { error: "JOB_NOT_FOUND", message: `job '${req.params.jobId}' not found` });
+    }
     const result = await facade.getById(req.params.jobId);
     if (result.success) {
       const { evidenceBundles, ...job } = result.data;
@@ -84,48 +90,12 @@ export async function jobRoutes(app: FastifyInstance) {
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/execution", async (req, reply) => {
     const asOf = new Date().toISOString();
-    const notFound = () =>
-      reply.code(404).send({ error: "not_found", message: `job '${req.params.jobId}' not found` });
-    let store;
-    let job: JobRow | undefined;
-    try {
-      store = getStore();
-      job = store.repos.jobs.findById(req.params.jobId) as JobRow | undefined;
-    } catch (error) {
-      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: job row read failed");
-      return reply.code(503).send({
-        error: "read_model_unavailable",
-        message: "The job record could not be read. Try again shortly.",
-      });
+    const gate = gateJobRead(req, req.params.jobId);
+    if (!gate.ok) {
+      return refuseJobRead(reply, gate, { error: "not_found", message: `job '${req.params.jobId}' not found` });
     }
-    if (!job) return notFound();
-
-    const tenant = tenantOpts(req as any);
-    if (tenant && (job.tenantId ?? null) !== tenant.tenantId) return notFound();
-
-    const principal = ((req as any).operatorId ?? (req as any).userId ?? null) as string | null;
-    const adminHeader = req.headers["x-admin-key"];
-    let decision;
-    try {
-      decision = authorizeJobRead(
-        job,
-        { principal, adminKey: typeof adminHeader === "string" ? adminHeader : null },
-        store.repos as unknown as JobExecutionRepos,
-        store.db,
-      );
-    } catch (error) {
-      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: authorization read failed");
-      return reply.code(503).send({
-        error: "read_model_unavailable",
-        message: "The job record could not be read. Try again shortly.",
-      });
-    }
-    if (!decision.allow) {
-      if (decision.reason === "unauthenticated") {
-        return reply.code(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
-      }
-      return notFound();
-    }
+    const { job } = gate;
+    const store = getStore();
 
     const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
       onReadError: (source, error) =>

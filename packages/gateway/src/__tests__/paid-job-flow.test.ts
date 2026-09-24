@@ -14,6 +14,7 @@ import { ot2RelayRoutes } from "../routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -73,6 +74,8 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app); // job reads are object-authorized (F3)
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
   await app.register(ot2RelayRoutes);

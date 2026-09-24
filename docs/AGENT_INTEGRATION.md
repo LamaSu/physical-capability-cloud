@@ -112,6 +112,8 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
 
+**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401.
+
 ### Escrow & Settlement
 
 | Method | Endpoint | Description |

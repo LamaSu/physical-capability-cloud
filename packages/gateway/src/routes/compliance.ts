@@ -20,6 +20,7 @@ import type { Result } from "@pcc/spec";
 import type { VerificationAttestation } from "@pcc/spec";
 import { getComplianceFacade } from "../facades/index.js";
 import { getRepos } from "../db.js";
+import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 //
@@ -58,6 +59,10 @@ export async function complianceRoutes(app: FastifyInstance) {
   app.get<{ Params: { jobId: string } }>(
     "/api/jobs/:jobId/drift-alerts",
     async (req, reply) => {
+      const gate = gateJobRead(req, req.params.jobId);
+      if (!gate.ok) {
+        return refuseJobRead(reply, gate, { error: "not_found", message: `job '${req.params.jobId}' not found` });
+      }
       const result = await facade.detectDrift(req.params.jobId);
       return sendResult(reply, result);
     },
@@ -70,6 +75,10 @@ export async function complianceRoutes(app: FastifyInstance) {
   app.get<{ Params: { jobId: string } }>(
     "/api/jobs/:jobId/evidence",
     async (req, reply) => {
+      const gate = gateJobRead(req, req.params.jobId);
+      if (!gate.ok) {
+        return refuseJobRead(reply, gate, { error: "not_found", message: `job '${req.params.jobId}' not found` });
+      }
       const result = await facade.getEvidenceForJob(req.params.jobId);
       return sendResult(reply, result);
     },
