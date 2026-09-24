@@ -161,7 +161,7 @@ class TestExecuteAndReport:
         assert post_body["callId"] == "c1"
         assert mock_pcc.call_args[0][:2] == ("POST", "/api/relay/k1/tool-result")
 
-    def test_does_not_report_without_a_kernel_id(self):
+    def test_does_not_execute_without_a_kernel_id(self):
         adapter = mock.Mock()
         adapter.device_type = "test"
         adapter.execute.return_value = json.dumps({"ok": True})
@@ -169,7 +169,37 @@ class TestExecuteAndReport:
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
             execute_and_report({"id": "c9", "toolName": "t", "args": {}}, [adapter], "http://pcc", "key")
 
+        adapter.execute.assert_not_called()
         mock_pcc.assert_not_called()
+
+    def test_refuses_a_call_that_names_another_kernel(self):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        call = {"id": "c8", "kernelId": "someone-elses", "toolName": "t", "args": {}}
+
+        with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
+            execute_and_report(call, [adapter], "http://pcc", "key", kernel_id="k1")
+
+        adapter.execute.assert_not_called()
+        mock_pcc.assert_not_called()
+
+    def test_the_polled_kernel_wins_and_is_url_encoded(self):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+        call = {"id": "c7", "toolName": "t", "args": {}}
+
+        with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {})
+            execute_and_report(call, [adapter], "http://pcc", "key", kernel_id="a/b?c#d")
+
+        assert mock_pcc.call_args[0][:2] == ("POST", "/api/relay/a%2Fb%3Fc%23d/tool-result")
+
+    def test_poll_url_encodes_the_kernel_id(self):
+        with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"calls": []})
+            poll_pending_jobs("http://pcc", "key", "../admin")
+        assert mock_pcc.call_args[0][:2] == ("GET", "/api/relay/..%2Fadmin/tool-call/pending")
 
     def test_falls_through_adapters(self):
         """If first adapter returns 'Unknown tool', try the next."""
