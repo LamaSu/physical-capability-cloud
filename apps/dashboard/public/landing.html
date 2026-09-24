@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PCC — your agent can do real things now</title>
-  <meta name="description" content="AI agents discover, hire, and verify real-world capability. Cryptographic proof on every job. The capability network." />
+  <meta name="description" content="AI agents discover, hire, and verify real-world capability. Public beta: payments settle on a test network. The capability network." />
 
   <!-- ── Canonical + Open Graph + Twitter (social & AI answer-engine previews) ── -->
   <link rel="canonical" href="https://capability.network/" />
@@ -16,21 +16,21 @@
   <meta property="og:site_name" content="PCC — Physical Capability Cloud" />
   <meta property="og:url" content="https://capability.network/" />
   <meta property="og:title" content="PCC — your agent can do real things now" />
-  <meta property="og:description" content="The capability network: AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays. Cryptographic proof on every job." />
+  <meta property="og:description" content="The capability network: AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays." />
   <meta property="og:image" content="https://capability.network/landing/og-image.jpg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="PCC — your agent can do real things now. The capability network." />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="PCC — your agent can do real things now" />
-  <meta name="twitter:description" content="The capability network: AI agents discover, hire, and verify real-world capability, with cryptographic proof on every job." />
+  <meta name="twitter:description" content="The capability network: AI agents discover, hire, and verify real-world capability." />
   <meta name="twitter:image" content="https://capability.network/landing/og-image.jpg" />
 
   <!-- ── AEO/GEO: help AI answer engines (ChatGPT, Claude, Perplexity…) learn about PCC.
        Structured summary lives in /llms.txt; machine-readable metadata in /agent-readability.json;
        AI crawlers are explicitly welcomed in /robots.txt. ── -->
   <link rel="alternate" type="text/plain" href="https://capability.network/llms.txt" title="llms.txt — structured summary for LLMs" />
-  <link rel="alternate" type="application/json" href="https://capability.network/agent-package.json" title="Agent package — 249 tools for any LLM" />
+  <link rel="alternate" type="application/json" href="https://capability.network/agent-package.json" title="Agent package for any LLM" />
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -57,7 +57,7 @@
         "@id": "https://capability.network/#website",
         "url": "https://capability.network/",
         "name": "PCC — your agent can do real things now",
-        "description": "The capability network: AI agents discover, hire, and verify real-world capability with cryptographic proof on every job.",
+        "description": "The capability network: AI agents discover, hire, and verify real-world capability.",
         "publisher": { "@id": "https://capability.network/#org" }
       },
       {
@@ -66,13 +66,12 @@
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Web, API",
         "url": "https://capability.network",
-        "description": "The capability network: AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays — with cryptographic proof on every job. On-chain settlement (Base Sepolia) via x402 and USDC. Includes a 249-tool agent package.",
+        "description": "The capability network: AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays. Settlement on the Base Sepolia test network via x402 and USDC. Includes an agent package for any LLM.",
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
         "featureList": [
           "AI agents discover, hire, and verify real-world capability",
-          "Cryptographic proof on every job — signed evidence, IPFS, anchored on-chain",
-          "On-chain settlement on Base Sepolia via x402 and USDC",
-          "249-tool agent package",
+          "Settlement on the Base Sepolia test network via x402 and USDC",
+          "Agent package for any LLM",
           "Operators publish capabilities in plain language — no code"
         ]
       },
@@ -83,7 +82,7 @@
         "provider": { "@id": "https://capability.network/#org" },
         "areaServed": "Global",
         "audience": { "@type": "Audience", "audienceType": "AI agents and capability operators" },
-        "description": "AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays — with cryptographic proof and on-chain (Base Sepolia) settlement via x402/USDC.",
+        "description": "AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays — with settlement on the Base Sepolia test network via x402/USDC.",
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "Free to connect and browse; jobs settle per-outcome via USDC escrow." }
       },
       {
@@ -402,7 +401,7 @@
     <div class="hero-in">
       <p class="label reveal">The capability network</p>
       <h1 class="reveal" style="margin-top:var(--sp-s);">Your agent can do <span class="y">real</span> things now.</h1>
-      <p class="sub reveal">It discovers, hires, and verifies real-world capability — pizza to power tools to lab assays. <b>Cryptographic proof on every job.</b></p>
+      <p class="sub reveal">It discovers, hires, and verifies real-world capability — pizza to power tools to lab assays. <b>Public beta: payments settle on a test network.</b></p>
       <div class="doors reveal">
         <a class="btn btn--do" href="#do">Do something <span class="arr">&rarr;</span></a>
         <a class="btn btn--offer" href="#offer">Offer something <span class="arr">&rarr;</span></a>
@@ -423,7 +422,7 @@
         <span class="step"><span class="d"></span> escrow</span><span class="s">&rarr;</span>
         <span class="step"><span class="d"></span> verified &check;</span>
       </div>
-      <a class="demolink" href="/docs">Illustrative — see the live API &amp; how jobs settle on-chain &rarr;</a>
+      <a class="demolink" href="/docs">Illustrative — see the API and how settlement works &rarr;</a>
     </div>
   </section>
 
@@ -452,7 +451,7 @@
         <ol class="steps">
           <li><span class="n">01</span> Describe your capability in plain language</li>
           <li><span class="n">02</span> An agent scaffolds the kernel — no code</li>
-          <li><span class="n">03</span> Publish. Jobs arrive. Escrow pays your wallet.</li>
+          <li><span class="n">03</span> Publish and take jobs. Beta payments settle on a test network.</li>
         </ol>
       </article>
     </div>
@@ -464,16 +463,15 @@
     <div class="shot-tint"></div>
     <div class="shot-veil center"></div>
     <div class="verify-in reveal">
-      <div class="big">100<span class="x">%</span></div>
+      <div class="big">0<span class="x">&ndash;</span>3</div>
       <div>
-        <p class="label">Proof, not promises</p>
-        <p>Every job returns signed, independently-verifiable evidence — encrypted, stored on IPFS, anchored on-chain. You don&rsquo;t trust the operator; you check the proof.</p>
+        <p class="label">Proof is part of the contract</p>
+        <p>Each job names an assurance tier, from self-attested (0) to independently verified (3). Tier checks are being hardened during the beta.</p>
         <ul class="proof">
-          <li><span class="dot"></span> Live · capability.network</li>
-          <li>5 sponsor integrations</li>
-          <li>On-chain · Base Sepolia</li>
-          <li>249-tool agent package</li>
-          <li>x402 · USDC settlement</li>
+          <li><span class="dot"></span> Public beta · capability.network</li>
+          <li>Test network · Base Sepolia</li>
+          <li>Agent package for any LLM</li>
+          <li>x402 · test USDC</li>
         </ul>
         <a class="btn btn--do" href="/start">Get started <span class="arr">&rarr;</span></a>
       </div>
@@ -523,7 +521,7 @@
         </a>
         <a class="contact-link" href="https://github.com/LamaSu/physical-capability-cloud" target="_blank" rel="noopener">
           <span class="ci">GitHub <span class="arr">&rarr;</span></span>
-          <span class="cd">Issues, source, and the 249-tool agent package.</span>
+          <span class="cd">Issues, source, and the agent package.</span>
         </a>
       </aside>
     </div>

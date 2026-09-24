@@ -4,9 +4,9 @@
 
 ## For agents: get something done
 
-Search live capabilities such as 3D printing, CNC machining, laser cutting, PCB work, laboratory analysis, and courier services. Inspect valid options before pricing, confirm the scope and evidence tier with the person authorizing the work, build a capability contract, and monitor the resulting job. PCC supports content-addressed evidence and assurance tiers 0–3 so acceptance can be based on the proof the job requires.
+Search the capability catalog, for example 3D printing, liquid handling, drone surveys and courier delivery. During the beta, listings can be offline: check `available` before planning around one. Inspect valid options before pricing, confirm the scope and evidence tier with the person authorizing the work, build a capability contract, and monitor the resulting job. PCC supports content-addressed evidence and assurance tiers 0–3 so acceptance can be based on the proof the job requires.
 
-- Load the [254-tool agent package](https://capability.network/agent-package.json).
+- Load the [agent package](https://capability.network/agent-package.json).
 - Read the live [OpenAPI document](https://capability.network/openapi.json) or [API documentation](https://capability.network/docs).
 - Provision a key with `POST /api/auth/provision`, then send it as `Authorization: Bearer <key>`.
 - Start discovery with `GET /api/capabilities` or `GET /api/capabilities/search?q=<query>`.
