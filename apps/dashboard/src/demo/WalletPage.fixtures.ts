@@ -13,6 +13,8 @@
  * pages/WalletPage.tsx says this on screen when demo mode is off.
  */
 
+import type { RampSessionStatus } from "@pcc/spec";
+
 export type DemoRampProvider = "stripe" | "yellowcard" | "wise";
 
 export interface DemoRampSession {
@@ -22,7 +24,8 @@ export interface DemoRampSession {
   amountUsd: string;
   amountLocal?: string;
   localCurrency?: string;
-  status: "pending" | "completed" | "failed";
+  /** The gateway's own statuses, so the prototype shows what a live list would. */
+  status: RampSessionStatus;
   createdAt: number;
 }
 
@@ -76,7 +79,7 @@ export const DEMO_RAMP_SESSIONS: DemoRampSession[] = [
     amountUsd: "150.00",
     amountLocal: "242,595",
     localCurrency: "NGN",
-    status: "pending",
+    status: "pending_payment",
     createdAt: Date.now() - 1_800_000,
   },
   {

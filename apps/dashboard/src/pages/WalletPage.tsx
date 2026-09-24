@@ -12,6 +12,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { CdpFundedKeyOnramp } from "../components/CdpFundedKeyOnramp.js";
 import { NotLiveState, DemoBanner } from "../components/DemoState.js";
 import { isDemoMode } from "../lib/demo-mode.js";
+import { rampSessionChip } from "../lib/ramp-status.js";
 import {
   DEMO_WALLET_SUMMARY,
   DEMO_RAMP_SESSIONS,
@@ -744,12 +745,6 @@ function ActivityTab({ sessions }: { sessions: DemoRampSession[] }) {
     return "gray";
   }
 
-  function sessionStatus(s: DemoRampSession["status"]): "completed" | "executing" | "failed" {
-    if (s === "completed") return "completed";
-    if (s === "pending") return "executing";
-    return "failed";
-  }
-
   return (
     <div className="space-y-4">
       {/* Filter bar */}
@@ -816,7 +811,7 @@ function ActivityTab({ sessions }: { sessions: DemoRampSession[] }) {
               <AmountDisplay amount={session.amountUsd} size="sm" />
 
               {/* Status */}
-              <StatusChip status={sessionStatus(session.status)} />
+              <StatusChip {...rampSessionChip(session.status)} />
 
               {/* Time */}
               <span className="text-[11px] text-white/30 shrink-0">{formatTime(session.createdAt)}</span>

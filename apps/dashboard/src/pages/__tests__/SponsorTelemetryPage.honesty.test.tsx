@@ -107,11 +107,13 @@ afterEach(() => {
 async function settle(client: QueryClient): Promise<void> {
   const tick = () =>
     act(async () => {
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 10));
     });
-  for (let i = 0; i < 12; i++) {
+  // Two idle ticks in a row, within 2 s: a query can read as idle for one tick between retries.
+  let idleTicks = 0;
+  for (let i = 0; i < 200 && idleTicks < 2; i++) {
     await tick();
-    if (client.isFetching() === 0) break;
+    idleTicks = client.isFetching() === 0 ? idleTicks + 1 : 0;
   }
   // react-query batches its notifications on a timer; let the last one render.
   await tick();

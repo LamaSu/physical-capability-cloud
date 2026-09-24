@@ -192,6 +192,9 @@ describe("demo mode (?demo=1)", () => {
     expect(t).toContain("14,150");
     await click(button("Activity"));
     expect(text()).toContain("fr_001");
+    // product-qa #3: the in-flight sample session reads as awaiting payment, and only the failed one reads failed
+    expect(text()).toContain("Awaiting payment");
+    expect(text().match(/Failed/g)?.length ?? 0).toBe(1);
     await click(button("API Credits"));
     expect(text()).toContain("Agent job submission — kernel-03");
     expect(requests(stub)).toEqual([]);

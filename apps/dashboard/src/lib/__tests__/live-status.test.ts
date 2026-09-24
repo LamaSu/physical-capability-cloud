@@ -56,6 +56,23 @@ describe("deriveLiveStatus", () => {
     expect(props.activeJobs).toBeUndefined();
   });
 
+  it("hides counts read before an outage once the gateway stops answering", () => {
+    const props = deriveLiveStatus({
+      health: failed({ status: "ok" }),
+      kernels: ok([kernel("online")]),
+      jobs: ok([job("in_progress")]),
+    });
+    expect(props.networkStatus).toBe("disconnected");
+    expect(props.kernelsOnline).toBeUndefined();
+    expect(props.activeJobs).toBeUndefined();
+  });
+
+  it("does not vouch for counts before liveness is known", () => {
+    const props = deriveLiveStatus({ health: loading(), kernels: ok([kernel("online")]), jobs: ok([job("queued")]) });
+    expect(props.kernelsOnline).toBeUndefined();
+    expect(props.activeJobs).toBeUndefined();
+  });
+
   it("is connected only when /api/health answered ok", () => {
     const base = { kernels: loading<KernelDTO[]>(), jobs: loading<JobDTO[]>() };
     expect(deriveLiveStatus({ ...base, health: ok({ status: "ok" }) }).networkStatus).toBe("connected");

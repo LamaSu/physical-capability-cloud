@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
+import { GATEWAY_BASE } from "../lib/gateway-base.js";
 import {
   runPasskeyRegistration,
   detectPasskeySupport,
@@ -31,7 +32,7 @@ const startRegistrationAdapter = startRegistration as unknown as (args: {
   optionsJSON: PublicKeyCredentialCreationOptionsJSONLite;
 }) => Promise<AttestationResponseJSON>;
 
-const API = (import.meta as any).env?.VITE_PCC_URL ?? "";
+const API = GATEWAY_BASE;
 
 export type PasskeyStatus =
   | "idle"
