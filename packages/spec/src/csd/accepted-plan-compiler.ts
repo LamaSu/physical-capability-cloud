@@ -248,6 +248,8 @@ export type CompileViolation =
   | { code: "duplicate-node"; nodeId: string }
   | { code: "invalid-node-field"; nodeId: string; field: string }
   | { code: "invalid-execution-json"; nodeId: string; field: "inputs" | "constraints"; reason: string }
+  | { code: "quote-without-agreement"; nodeId: string }
+  | { code: "operator-below-quote"; nodeId: string }
   | { code: "invalid-tier"; nodeId: string; tierKey: string }
   | { code: "operator-is-payer"; nodeId: string }
   | { code: "gross-out-of-range"; nodeId: string }
@@ -663,7 +665,14 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     if (n.committedProgramHash !== null && !isDigest(n.committedProgramHash)) {
       v.push({ code: "invalid-node-field", nodeId: id, field: "committedProgramHash" });
     }
-    if (!Array.isArray(n.evidenceRequirements)) {
+    // Each requirement is sealed verbatim into the node's canonicalPlan (N25), so its fields must be
+    // exactly typed here: printable-ASCII ids and an integer tier 0..3. No coercion, no bigint, no symbol.
+    if (
+      !Array.isArray(n.evidenceRequirements) ||
+      !n.evidenceRequirements.every(
+        (r) => typeof r === "object" && r !== null && isId(r.requirementId) && isId(r.evidenceTypeId) && Number.isInteger(r.tier) && r.tier >= 0 && r.tier <= 3,
+      )
+    ) {
       v.push({ code: "invalid-node-field", nodeId: id, field: "evidenceRequirements" });
     }
     for (const field of ["inputs", "constraints"] as const) {
@@ -795,9 +804,24 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
   let agreementHash: `0x${string}` | null = null;
   let economicTermsHash: `0x${string}` | null = null;
   let rightsTermsHash: `0x${string}` | null = null;
+  // A quote below the gross only means something under an agreement (royalties on top). Without one it
+  // is refused, never silently paid through.
+  if (splitFn === undefined) {
+    const stray = order.filter((id) => byId.get(id)!.quoteBaseUnits !== undefined && byId.get(id)!.quoteBaseUnits !== byId.get(id)!.grossBaseUnits);
+    if (stray.length > 0) return { ok: false, violations: sortViolations(stray.map((nodeId) => ({ code: "quote-without-agreement" as const, nodeId }))) };
+  }
   if (splitFn !== undefined) {
     const split = splitPayouts(order, byId, econOf, splitFn);
     if (!split.ok) return { ok: false, violations: sortViolations(split.violations) };
+    // The operator's floor, checked HERE as well as by economics (neither side trusts the other): the legs
+    // to the node's own payout address carry at least what the operator's quote alone would have paid.
+    const below = order.filter((id) => {
+      const node = byId.get(id)!;
+      if (node.quoteBaseUnits === undefined) return false;
+      const own = split.payouts.get(id)!.filter((p) => p.recipient.toLowerCase() === node.payoutAddress.toLowerCase()).reduce((a, p) => a + p.amount, 0n);
+      return own < unitEconomics(node.quoteBaseUnits, input.feeBps).n;
+    });
+    if (below.length > 0) return { ok: false, violations: sortViolations(below.map((nodeId) => ({ code: "operator-below-quote" as const, nodeId }))) };
     for (const [id, legs] of split.payouts) payoutsOf.set(id, legs);
     agreementHash = split.agreementHash;
     economicTermsHash = split.economicTermsHash;
@@ -887,9 +911,12 @@ function canonicalPlanOf(
   u: { g: bigint; currency: string; decimals: number; jobId: string; milestoneIndex: number; tier: number },
 ): CanonicalPlan {
   const lc = (x: string) => x.toLowerCase();
-  const evidence = n.evidenceRequirements.map((r) =>
-    Object.freeze({ requirementId: r.requirementId, evidenceTypeId: r.evidenceTypeId, tier: r.tier }),
-  );
+  // Sorted by (evidenceTypeId, tier, requirementId), a total order, so the order the requirements
+  // were listed in cannot change the planHash.
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const evidence = [...n.evidenceRequirements]
+    .sort((a, b) => cmp(a.evidenceTypeId, b.evidenceTypeId) || a.tier - b.tier || cmp(a.requirementId, b.requirementId))
+    .map((r) => Object.freeze({ requirementId: r.requirementId, evidenceTypeId: r.evidenceTypeId, tier: r.tier }));
   return Object.freeze({
     schema: CANONICAL_PLAN_SCHEMA,
     planId,
@@ -1065,7 +1092,8 @@ function splitPayouts(
       continue;
     }
     if (!Array.isArray(u.payouts)) {
-      v.push({ code: "too-many-payout-legs", nodeId: id, count: u.payouts.tooMany });
+      // A diagnostic, clamped so a lying length cannot put an unsafe integer into the violation list.
+      v.push({ code: "too-many-payout-legs", nodeId: id, count: Math.min(u.payouts.tooMany, Number.MAX_SAFE_INTEGER) });
       continue;
     }
     const legs: PayoutEntry[] = [];
@@ -1166,7 +1194,9 @@ export function acceptedDealPreimage(plan: Omit<CompiledAcceptedPlan, "acceptedD
       committedProgramHash: lc(b.committedProgramHash),
       // The carried hash is what VCR reads; the hash RECOMPUTED from the carried content makes any
       // disagreement between the two change this digest, so recompute-and-compare catches it.
-      planHash: lc(b.planHash),
+      // Verbatim, NOT case-folded: VCR compares planHash byte-exactly, and the compiler always emits the
+      // canonical lowercase form, so any other spelling must change this digest.
+      planHash: b.planHash,
       canonicalPlanHash: planHashOf(b.canonicalPlan),
     })),
   });

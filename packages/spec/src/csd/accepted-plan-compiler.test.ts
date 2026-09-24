@@ -620,11 +620,30 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     expect(r).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "result" }] });
   });
 
+  /** A stand-in for option (b): the operator keeps exactly its quote's net; the licensor gets the rest of n. */
+  const grossUp: NetSplitter = (units) => ({
+    ok: true,
+    agreementHash: DIG("a1"),
+    economicTermsHash: DIG("e1"),
+    rightsTermsHash: DIG("f1"),
+    units: units.map((u) => {
+      const own = u.quote - (u.quote * 235n) / 10_000n;
+      const royalty = u.n - own;
+      return {
+        unitRef: u.nodeId,
+        gross: u.g.toString(),
+        fee: u.f.toString(),
+        net: u.n.toString(),
+        payouts: royalty > 0n ? [{ recipient: u.payoutAddress, amount: own.toString() }, { recipient: LICENSOR, amount: royalty.toString() }] : [{ recipient: u.payoutAddress, amount: u.n.toString() }],
+      };
+    }),
+  });
+
   it("the operator's quote reaches the splitter (economics option b: royalties on top); without one it equals g", () => {
     const seen: Array<Array<{ nodeId: string; quote: bigint; g: bigint }>> = [];
     const spy: NetSplitter = (units) => {
       seen.push(units.map((u) => ({ nodeId: u.nodeId, quote: u.quote, g: u.g })));
-      return tenPercent(units);
+      return grossUp(units);
     };
     const grossedUp = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", grossBaseUnits: 11n * USDC, quoteBaseUnits: 10n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop" })] });
     expect(withSplit(grossedUp, spy).ok).toBe(true);
@@ -643,16 +662,54 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     expect(at(10n * USDC).ok).toBe(true);
   });
 
-  it("the quote is read once, with the rest of the node, and does not change the sealed deal (the live quote is committed through matchedCapabilityDigest)", () => {
+  it("the quote is read once, with the rest of the node: the splitter sees the value that was validated", () => {
     let reads = 0;
     const n = { ...node({ nodeId: "print", grossBaseUnits: 11n * USDC }) } as Record<string, unknown>;
     Object.defineProperty(n, "quoteBaseUnits", { enumerable: true, get: () => (reads++ === 0 ? 10n * USDC : 11n * USDC + 1n) });
-    const p = plan({ nodes: [n as unknown as AcceptedPlanNode, node({ nodeId: "mail", capabilityType: "mail.drop" })] });
-    const r = compileAcceptedPlan(p);
+    const quotes: bigint[] = [];
+    const spy: NetSplitter = (units) => {
+      quotes.push(...units.map((u) => u.quote));
+      return grossUp(units);
+    };
+    const r = withSplit(plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [n as unknown as AcceptedPlanNode, node({ nodeId: "mail", capabilityType: "mail.drop" })] }), spy);
     expect(reads).toBe(1);
     expect(r.ok).toBe(true);
-    const same = compileAcceptedPlan(plan({ nodes: [node({ nodeId: "print", grossBaseUnits: 11n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop" })] }));
-    expect(r.ok && same.ok && r.plan.acceptedDealDigest === same.plan.acceptedDealDigest).toBe(true);
+    expect(quotes).toEqual([10n * USDC, 10n * USDC]);
+  });
+
+  it("reviewer-alpha #4: a quote that differs from the gross is refused WITHOUT an agreement; an equal one is fine", () => {
+    const at = (q: bigint) => compileAcceptedPlan(plan({ nodes: [node({ nodeId: "print", grossBaseUnits: 11n * USDC, quoteBaseUnits: q }), node({ nodeId: "mail", capabilityType: "mail.drop" })] }));
+    expect(at(10n * USDC)).toEqual({ ok: false, violations: [{ code: "quote-without-agreement", nodeId: "print" }] });
+    expect(at(11n * USDC).ok).toBe(true);
+  });
+
+  it("reviewer-alpha #4: with an agreement, the operator's legs must carry at least its quote's net; the compiler checks it too", () => {
+    const stingy: NetSplitter = (units) => {
+      const r = grossUp(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return {
+        ...r,
+        units: r.units.map((u) => (u.unitRef === "print" ? { ...u, payouts: [{ recipient: ADDR("a1"), amount: "1" }, { recipient: LICENSOR, amount: (BigInt(u.net) - 1n).toString() }] } : u)),
+      };
+    };
+    const p = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", grossBaseUnits: 11n * USDC, quoteBaseUnits: 10n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop" })] });
+    expect(withSplit(p, stingy)).toEqual({ ok: false, violations: [{ code: "operator-below-quote", nodeId: "print" }] });
+    expect(withSplit(p, grossUp).ok).toBe(true); // exactly the quote's net is enough
+    // Addresses match case-insensitively: a checksummed payoutAddress paid at its lowercase spelling is paid.
+    const lowerLegs: NetSplitter = (units) => {
+      const r = grossUp(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return { ...r, units: r.units.map((u) => ({ ...u, payouts: u.payouts.map((l) => ({ ...l, recipient: l.recipient.toLowerCase() })) })) };
+    };
+    const mixed = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", payoutAddress: ADDR("A1"), grossBaseUnits: 11n * USDC, quoteBaseUnits: 10n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop" })] });
+    expect(withSplit(mixed, lowerLegs).ok).toBe(true);
+  });
+
+  it("reviewer-alpha #3b: a lying payouts length never puts an unsafe integer into the diagnostics", () => {
+    const lying: NetSplitter = (units) => {
+      const r = tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return { ...r, units: r.units.map((u) => ({ ...u, payouts: new Proxy([], { get: (t, k) => (k === "length" ? 2 ** 53 : Reflect.get(t, k)) }) as unknown as typeof u.payouts })) };
+    };
+    const r = withSplit(fee235, lying);
+    expect(r.ok === false && r.violations.map((v) => (v as { count?: number }).count)).toEqual([Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
   });
 
   it("an economics refusal is a compile refusal", () => {
@@ -939,7 +996,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   });
 
   function unitsOf(): Parameters<NetSplitter>[0] {
-    return [{ nodeId: "print", operator: OP_A, payoutAddress: ADDR("a1"), g: 10n * USDC, f: 235_000n, n: 9_765_000n }];
+    return [{ nodeId: "print", operator: OP_A, payoutAddress: ADDR("a1"), quote: 10n * USDC, g: 10n * USDC, f: 235_000n, n: 9_765_000n }];
   }
 });
 
