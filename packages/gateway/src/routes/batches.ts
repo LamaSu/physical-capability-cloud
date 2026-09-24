@@ -16,9 +16,33 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { requireAuth } from "../auth/require-auth.js";
 
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
+
+// Board row N49: a claim belongs to the authenticated caller (req.userId, which
+// apiGate sets from the API key's operatorId or the wallet session). A request
+// body can never name a different claimant. A claimant's identity and sample
+// labels (which can name real samples) are shown only to that claimant.
+function viewClaim(claim: BatchSlotClaim, viewer: string | null) {
+  const own = viewer !== null && claim.agentId === viewer;
+  return {
+    ...claim,
+    agentId: own ? claim.agentId : null,
+    sampleLabels: own ? claim.sampleLabels : [],
+    own,
+  };
+}
+
+function viewBatch(batch: SharedBatch, viewer: string | null) {
+  return { ...batch, claimedSlots: batch.claimedSlots.map((c) => viewClaim(c, viewer)) };
+}
+
+/** Test-only: reset the in-memory shared-batch store. */
+export function _clearSharedBatchesForTests(): void {
+  sharedBatches.clear();
+}
 
 export async function batchRoutes(app: FastifyInstance) {
   // List batch manifests — from in-memory BatchTracker (live lifecycle state)
@@ -110,7 +134,7 @@ export async function batchRoutes(app: FastifyInstance) {
     );
     if (kernelId) batches = batches.filter((b) => b.kernelId === kernelId);
     if (capabilityType) batches = batches.filter((b) => b.capabilityType === capabilityType);
-    return { batches };
+    return { batches: batches.map((b) => viewBatch(b, req.userId ?? null)) };
   });
 
   /** GET /api/batches/shared/:batchId — Get batch details including all claims */
@@ -120,7 +144,7 @@ export async function batchRoutes(app: FastifyInstance) {
 
     const claimedCount = batch.claimedSlots.reduce((sum: number, c: BatchSlotClaim) => sum + c.slotIndices.length, 0);
     return {
-      batch,
+      batch: viewBatch(batch, req.userId ?? null),
       summary: {
         totalSlots: batch.totalSlots,
         claimedSlots: claimedCount,
@@ -134,38 +158,60 @@ export async function batchRoutes(app: FastifyInstance) {
   /** POST /api/batches/shared/:batchId/claim — Claim slots in a batch */
   app.post<{ Params: { batchId: string } }>(
     "/api/batches/shared/:batchId/claim",
+    { preHandler: [requireAuth] },
     async (req, reply) => {
+      const claimant = req.userId;
+      if (!claimant) return reply.status(401).send({ error: "Authentication required" });
+
       const batch = sharedBatches.get(req.params.batchId);
       if (!batch) return reply.status(404).send({ error: "Batch not found" });
       if (batch.status !== "open" && batch.status !== "filling") {
         return reply.status(409).send({ error: `Batch is ${batch.status}, cannot claim slots` });
       }
 
-      const body = req.body as {
-        agentId: string;
-        slotCount: number;
+      const body = (req.body ?? {}) as {
+        agentId?: unknown;
+        slotCount?: unknown;
         sampleLabels?: string[];
         preferredIndices?: number[];
       };
 
-      if (!body.agentId || !body.slotCount) {
-        return reply.status(400).send({ error: "agentId and slotCount required" });
+      // The claimant is always the authenticated caller. A body agentId is accepted
+      // only when it names that same caller, so older clients keep working while
+      // a claim can never be attributed to someone else.
+      if (body.agentId !== undefined && body.agentId !== claimant) {
+        return reply.status(403).send({
+          error: "agent_mismatch",
+          message: "agentId must be omitted or equal the authenticated caller",
+        });
       }
+      if (!Number.isInteger(body.slotCount) || (body.slotCount as number) < 1) {
+        return reply.status(400).send({ error: "slotCount must be a positive integer" });
+      }
+      const slotCount = body.slotCount as number;
 
       // Calculate which indices are already claimed
       const claimedIndices = new Set(batch.claimedSlots.flatMap((c) => c.slotIndices));
       const claimedCount = claimedIndices.size;
       const available = batch.totalSlots - claimedCount;
 
-      if (body.slotCount > available) {
+      if (slotCount > available) {
         return reply.status(409).send({
-          error: `Only ${available} slots available, requested ${body.slotCount}`,
+          error: `Only ${available} slots available, requested ${slotCount}`,
         });
       }
 
       // Assign indices — prefer requested, otherwise auto-assign contiguous
       let indices: number[];
-      if (body.preferredIndices && body.preferredIndices.length === body.slotCount) {
+      if (Array.isArray(body.preferredIndices) && body.preferredIndices.length === slotCount) {
+        const valid =
+          new Set(body.preferredIndices).size === slotCount &&
+          body.preferredIndices.every((i) => Number.isInteger(i) && i >= 0 && i < batch.totalSlots);
+        if (!valid) {
+          return reply.status(400).send({
+            error: `preferredIndices must be ${slotCount} distinct integers in [0, ${batch.totalSlots})`,
+          });
+        }
         const conflict = body.preferredIndices.find((i) => claimedIndices.has(i));
         if (conflict !== undefined) {
           return reply.status(409).send({ error: `Slot ${conflict} is already claimed` });
@@ -173,7 +219,7 @@ export async function batchRoutes(app: FastifyInstance) {
         indices = body.preferredIndices;
       } else {
         indices = [];
-        for (let i = 0; i < batch.totalSlots && indices.length < body.slotCount; i++) {
+        for (let i = 0; i < batch.totalSlots && indices.length < slotCount; i++) {
           if (!claimedIndices.has(i)) indices.push(i);
         }
       }
@@ -181,18 +227,18 @@ export async function batchRoutes(app: FastifyInstance) {
       const perSlotPrice = parseFloat(batch.pricePerSlot);
       const claim: BatchSlotClaim = {
         id: `claim-${crypto.randomUUID().slice(0, 12)}`,
-        agentId: body.agentId,
+        agentId: claimant,
         slotIndices: indices,
         sampleLabels: body.sampleLabels ?? indices.map((i) => `sample-${i}`),
         status: "claimed",
-        amount: (perSlotPrice * body.slotCount).toFixed(2),
+        amount: (perSlotPrice * slotCount).toFixed(2),
         claimedAt: new Date().toISOString(),
       };
 
       batch.claimedSlots.push(claim);
 
       // Update batch status
-      const totalClaimed = claimedCount + body.slotCount;
+      const totalClaimed = claimedCount + slotCount;
       if (totalClaimed >= batch.totalSlots) {
         batch.status = "full";
       } else if (batch.status === "open") {
@@ -206,12 +252,19 @@ export async function batchRoutes(app: FastifyInstance) {
   /** DELETE /api/batches/shared/:batchId/claim/:claimId — Release claimed slots */
   app.delete<{ Params: { batchId: string; claimId: string } }>(
     "/api/batches/shared/:batchId/claim/:claimId",
+    { preHandler: [requireAuth] },
     async (req, reply) => {
+      const caller = req.userId;
+      if (!caller) return reply.status(401).send({ error: "Authentication required" });
+
       const batch = sharedBatches.get(req.params.batchId);
       if (!batch) return reply.status(404).send({ error: "Batch not found" });
 
       const claimIdx = batch.claimedSlots.findIndex((c) => c.id === req.params.claimId);
       if (claimIdx === -1) return reply.status(404).send({ error: "Claim not found" });
+      if (batch.claimedSlots[claimIdx].agentId !== caller) {
+        return reply.status(403).send({ error: "not_claimant", message: "Only the claimant can release a claim" });
+      }
 
       if (batch.status === "running" || batch.status === "completed") {
         return reply.status(409).send({ error: `Cannot release slots from a ${batch.status} batch` });
@@ -246,7 +299,8 @@ export async function batchRoutes(app: FastifyInstance) {
         available: availableIndices.length,
         availableIndices,
         claimedBy: batch.claimedSlots.map((c) => ({
-          agentId: c.agentId,
+          agentId: c.agentId === (req.userId ?? null) ? c.agentId : null,
+          own: c.agentId === (req.userId ?? null),
           slotCount: c.slotIndices.length,
           indices: c.slotIndices,
         })),
