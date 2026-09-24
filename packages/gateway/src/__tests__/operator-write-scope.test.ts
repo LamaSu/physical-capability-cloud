@@ -10,9 +10,12 @@
  * table). Ownership — WHICH kernel a key may act on — is the routes' job
  * (WP-C); this layer only refuses keys that are not operators at all.
  *
- * Legacy "*" keeps this access by design (A1: the wildcard stops being money
- * and admin authority only, and /api/operator/** is neither) — pinned below so
- * the choice is visible rather than accidental.
+ * A legacy "*" does NOT pass this floor (WP-A repair R3). It used to: the floor
+ * sat after the legacy-wildcard return, so all 80 wildcard keys — including one
+ * committed to public git history — kept emergency stop/resume, approvals,
+ * policy and diagnostics decrypt. Those are physical-safety controls, the same
+ * class as money and admin, where "*" is refused too. Pinned below for every
+ * mutating route, and with the explicit scope alongside "*" as the control.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -40,22 +43,27 @@ async function buildApp(principal: "key" | "session" = "key"): Promise<FastifyIn
   });
   await app.register(scopeChecker);
   const ok = async () => ({ reached: true });
-  // Real /api/operator/** templates (operator.ts, operator-relay.ts,
-  // support-messages.ts, diagnostic-logs.ts).
+  // Every real mutating /api/operator/** template (operator.ts,
+  // operator-relay.ts, support-messages.ts, diagnostic-logs.ts).
   app.post("/api/operator/emergency-stop", ok);
   app.post("/api/operator/emergency-resume", ok);
   app.post("/api/operator/approvals", ok);
   app.post("/api/operator/approvals/:id/approve", ok);
   app.post("/api/operator/approvals/:id/reject", ok);
+  app.put("/api/operator/policy/:kernelId", ok);
   app.patch("/api/operator/policy/:kernelId", ok);
   app.post("/api/operator/heartbeat", ok);
   app.post("/api/operator/evidence", ok);
+  app.post("/api/operator/job-status", ok);
   app.post("/api/operator/support", ok);
+  app.post("/api/operator/support/:threadId/reply", ok);
   app.patch("/api/operator/support/:threadId", ok);
   app.post("/api/operator/diagnostics", ok);
+  app.post("/api/operator/diagnostics/decrypt", ok);
   // Reads, and the PLURAL public namespace, are not affected.
   app.get("/api/operator/machines", ok);
   app.get("/api/operator/approvals", ok);
+  app.get("/api/operator/policy/:kernelId", ok);
   app.post("/api/operators/:id/rate", ok);
   await app.ready();
   return app;
@@ -67,15 +75,19 @@ const WRITES: Array<[string, string]> = [
   ["POST", "/api/operator/approvals"],
   ["POST", "/api/operator/approvals/apr-1/approve"],
   ["POST", "/api/operator/approvals/apr-1/reject"],
+  ["PUT", "/api/operator/policy/kernel-1"],
   ["PATCH", "/api/operator/policy/kernel-1"],
   ["POST", "/api/operator/heartbeat"],
   ["POST", "/api/operator/evidence"],
+  ["POST", "/api/operator/job-status"],
   ["POST", "/api/operator/support"],
+  ["POST", "/api/operator/support/thread-1/reply"],
   ["PATCH", "/api/operator/support/thread-1"],
   ["POST", "/api/operator/diagnostics"],
+  ["POST", "/api/operator/diagnostics/decrypt"],
 ];
 
-type M = "GET" | "POST" | "PATCH";
+type M = "GET" | "POST" | "PUT" | "PATCH";
 
 describe("F4 — /api/operator/** writes need operator or admin", () => {
   beforeEach(() => {
@@ -128,10 +140,56 @@ describe("F4 — /api/operator/** writes need operator or admin", () => {
     await app.close();
   });
 
-  it("a legacy wildcard key KEEPS operator writes (A1: \"*\" loses money/admin only)", async () => {
+  // WP-A repair R3. Old assertion: `"*"` -> 200 on POST /api/operator/heartbeat
+  // ("a legacy wildcard key KEEPS operator writes"). New: 403 on EVERY mutating
+  // route. Why: e-stop/resume, approvals, policy and diagnostics decrypt are
+  // physical safety, the same class as money and admin, and every legacy key —
+  // including one in public git history — is a wildcard.
+  it.each(WRITES)("%s %s DENIES a legacy wildcard key (\"*\" is not operator-control authority)", async (method, url) => {
     keyScopes = JSON.stringify(["*"]);
     const app = await buildApp();
-    const res = await app.inject({ method: "POST", url: "/api/operator/heartbeat", payload: { kernelId: "k" } });
+    const res = await app.inject({ method: method as M, url, payload: { kernelId: "kernel-1" } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reached).toBeUndefined();
+    expect(res.json().required_scopes).toEqual(["operator", "admin"]);
+    expect(res.json().caller_scopes).toEqual(["*"]);
+    expect(res.json().message).toMatch(/not money, admin or operator-control authority/);
+    await app.close();
+  });
+
+  it("the floor holds for \"*\" even when a governance row would open the route", async () => {
+    dbScopeRows = [{ method: "POST", routePattern: "/api/operator/**", requiredScopes: ["*"] }];
+    keyScopes = JSON.stringify(["*"]);
+    const app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/api/operator/emergency-stop", payload: { kernelId: "k" } });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("an ENCODED operator write is refused to \"*\" like the plain one", async () => {
+    keyScopes = JSON.stringify(["*"]);
+    const app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/api/operator/%65mergency-stop", payload: { kernelId: "k" } });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("an explicit operator scope held ALONGSIDE \"*\" passes (the scope, not the wildcard, decides)", async () => {
+    keyScopes = JSON.stringify(["*", "operator"]);
+    const app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/api/operator/emergency-stop", payload: { kernelId: "k" } });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it.each([
+    ["GET", "/api/operator/machines"],
+    ["GET", "/api/operator/approvals"],
+    ["GET", "/api/operator/policy/kernel-1"],
+  ])("a legacy wildcard key still READS %s %s (only writes are operator control)", async (method, url) => {
+    keyScopes = JSON.stringify(["*"]);
+    const app = await buildApp();
+    const res = await app.inject({ method: method as M, url });
     expect(res.statusCode).toBe(200);
     await app.close();
   });

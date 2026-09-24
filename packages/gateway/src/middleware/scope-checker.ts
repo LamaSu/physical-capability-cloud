@@ -6,9 +6,11 @@
  * endpointScopes table (cached 5 minutes) with hardcoded defaults as fallback.
  *
  * Behaviour:
- *   - Wildcard scope ("*") grants every NON-MONEY-WRITE, NON-ADMIN endpoint.
- *     It is NOT money authority and NOT admin authority: a money write needs an
- *     explicit MONEY_SCOPES entry and /api/admin/** needs an explicit "admin"
+ *   - Wildcard scope ("*") grants every endpoint EXCEPT money writes, the admin
+ *     namespace and operator-control writes. It is NOT money authority, NOT
+ *     admin authority and NOT operator-control authority: a money write needs an
+ *     explicit MONEY_SCOPES entry, /api/admin/** needs an explicit "admin" scope
+ *     and a write under /api/operator/** needs an explicit "operator"/"admin"
  *     scope, whatever else the key holds (see the migration note below).
  *   - The admin namespace (/api/admin/**) is enforced IN THE HOOK, independent
  *     of the rule table and of pattern precedence: explicit "admin", and a
@@ -23,8 +25,9 @@
  *     the Story IP royalty/revenue writes) are money writes too, resolved the
  *     same way (WP-A fold F2).
  *   - Mutating methods under /api/operator/** (the operator control surface:
- *     e-stop, approvals, the pcc-node relay) need `operator` or `admin` — a
- *     floor enforced in the hook, not a table row (WP-A fold F4).
+ *     e-stop, approvals, policy, diagnostics, the pcc-node relay) need an
+ *     EXPLICIT `operator` or `admin` — a floor enforced in the hook, not a table
+ *     row (WP-A fold F4), checked BEFORE the legacy wildcard (repair R3).
  *   - All other routes remain open-by-default when no requirement matches
  *     (backwards compatibility — see the note below on why this is not yet global).
  *   - If a requirement exists and the caller lacks all required scopes → 403.
@@ -58,17 +61,28 @@
  * scopes:["*"] (at the time of writing, every live production key). They used
  * to short-circuit this whole layer, money path and admin namespace included —
  * i.e. every live key could move money. That short-circuit is now narrowed:
- *   - an old wildcard key KEEPS every non-money-write, non-admin route (so
- *     existing integrations keep working — including rule-table requirements
- *     such as money-path READ rules, which bind explicit-scope keys only);
- *   - it LOSES money writes (needs an explicit `settlement`/`admin` key) and
- *     the whole /api/admin/** namespace (needs an explicit `admin` key).
- * The holder of a wildcard key that needs money or admin authority must be
- * RE-ISSUED an explicit key. This code does NOT make old wildcard keys
- * disappear: they keep their non-money access until they are REVOKED, and
- * revocation is the operator's call — see docs/security/WILDCARD_KEY_ROTATION.md.
- * GET /api/admin/keys/wildcard-audit lists the keys still holding "*". New keys
- * can no longer be minted with "*" at all (auth/api-key-auth.ts refuses it).
+ *   - an old wildcard key KEEPS every other route (so existing integrations
+ *     keep working — including rule-table requirements such as money-path READ
+ *     rules, which bind explicit-scope keys only, and every READ under
+ *     /api/operator/**);
+ *   - it LOSES money writes (needs an explicit `settlement`/`admin` key),
+ *     the whole /api/admin/** namespace (needs an explicit `admin` key), and
+ *     every MUTATING method under /api/operator/** (needs an explicit
+ *     `operator`/`admin` key). The last one is WP-A repair R3: emergency stop
+ *     and resume, approval decisions, policy and diagnostics decrypt are
+ *     physical-safety controls, the same class as money and admin, and a
+ *     leaked wildcard key (one sits in public git history) must not hold them.
+ *     It includes the pcc-node relay (heartbeat, evidence, job status, support,
+ *     diagnostics upload): a node that relays with a wildcard key needs an
+ *     explicit `operator` key BEFORE the deploy that carries this.
+ * The holder of a wildcard key that needs money, admin or operator-control
+ * authority must be RE-ISSUED an explicit key; a wildcard key cannot mint one
+ * for itself (auth/reserved-identities.ts callerMayDelegate). This code does
+ * NOT make old wildcard keys disappear: they keep their remaining access until
+ * they are REVOKED, and revocation is the operator's call — see
+ * docs/security/WILDCARD_KEY_ROTATION.md. GET /api/admin/keys/wildcard-audit
+ * lists the keys still holding "*". New keys can no longer be minted with "*"
+ * at all (auth/api-key-auth.ts refuses it).
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -261,18 +275,47 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  * widen it. Ownership — WHICH kernel a key may stop — is the route's job
  * (WP-C), not this layer's.
  *
- * Legacy `"*"`: it KEEPS this access. The wildcard is refused only as money
- * and admin authority (A1 / MUST-CLOSE 7); /api/operator/** is neither, and
- * every self-service key is minted `["operator"]` anyway, so excluding `"*"`
- * here would cut the legacy keys off the pcc-node relay without narrowing who
- * can reach these routes. A key-less SIWE session holds no scopes and is
- * refused, exactly as on the admin namespace.
+ * EXPLICIT scopes only: a legacy `"*"` does NOT pass this floor (WP-A repair
+ * R3). Emergency stop and resume, approval decisions, policy and diagnostics
+ * decrypt are physical-safety controls — the same class as money and admin, on
+ * which `"*"` is refused too (A1 / MUST-CLOSE 7) — and the one thing ownership
+ * checks cannot fix is a leaked key of the owner itself: every legacy key is a
+ * wildcard, and one of them sits in public git history. The floor is therefore
+ * checked BEFORE the legacy-wildcard return in the hook. It covers the whole
+ * mutating surface, the pcc-node relay (heartbeat, evidence, job status,
+ * support, diagnostics upload) included, so a node relaying with a wildcard key
+ * needs a re-issued explicit `operator` key (see the migration note). A key
+ * holding `"*"` AND `operator` passes. A key-less SIWE session holds no scopes
+ * and is refused, exactly as on the admin namespace.
  *
  * The singular `/api/operator` root only — `/api/operators/**` (public operator
  * profiles, ratings, channels) is a different namespace and is not affected.
  */
 const OPERATOR_NAMESPACE_ROOT = "/api/operator";
 const OPERATOR_WRITE_SCOPES = ["operator", "admin"];
+
+/** The explicit scopes an /api/operator/** write needs (F4 / R3). */
+export function operatorWriteScopes(): string[] {
+  return [...OPERATOR_WRITE_SCOPES];
+}
+
+/**
+ * Scopes whose authority a legacy `"*"` does NOT carry: exactly the explicit
+ * scopes this hook demands on the three request classes where `"*"` is refused
+ * — money writes (A1), the admin namespace (A1/A3) and operator-control writes
+ * (R3). Derived from those lists so it cannot drift from what is enforced.
+ *
+ * Used where a key's authority is REPORTED or DELEGATED rather than enforced:
+ * a wildcard key must never mint a new key holding one of these for itself
+ * (auth/reserved-identities.ts callerMayDelegate) — otherwise one call would
+ * launder `"*"` into the very authority it was denied.
+ */
+export const SCOPES_NOT_CARRIED_BY_WILDCARD: ReadonlySet<string> = new Set([
+  ...MONEY_SCOPES,
+  ...MONEY_DELETE_SCOPES,
+  ...ADMIN_SCOPES,
+  ...OPERATOR_WRITE_SCOPES,
+]);
 
 /** True for a MUTATING method at or under /api/operator (F4). */
 export function isOperatorWriteRequest(method: string, path: string): boolean {
@@ -577,8 +620,8 @@ const DOCS_URL = "https://capability.network/whitepaper.md";
 
 /** Appended to a refusal when the caller holds the legacy wildcard. */
 const WILDCARD_NOT_AUTHORITY =
-  " A legacy wildcard key (scopes [\"*\"]) is not money or admin authority: " +
-  "request a re-issued key carrying the explicit scope.";
+  " A legacy wildcard key (scopes [\"*\"]) is not money, admin or operator-control " +
+  "authority: request a re-issued key carrying the explicit scope.";
 
 function deny(
   reply: FastifyReply,
@@ -605,7 +648,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
 
     // Decided on method + normalized path ONLY — never on the rule table, never
     // on what the key holds — so neither a table rule nor a wildcard can move
-    // a request out of these two classes.
+    // a request out of these three classes.
     const adminRoute = isAdminScopedRoute(method, reqPath);
     const isMoneyWrite = isMoneyWriteRequest(method, reqPath);
     const operatorWrite = isOperatorWriteRequest(method, reqPath);
@@ -721,27 +764,31 @@ async function scopeCheckerImpl(app: FastifyInstance) {
       );
     }
 
-    // LEGACY WILDCARD — non-money-write, non-admin routes only (see the
-    // migration note in the header). Past this point the request is neither a
-    // money write nor in the admin namespace, which is exactly the access an
-    // old wildcard key keeps until it is revoked.
-    if (callerScopes.includes("*")) return;
-
     // OPERATOR CONTROL SURFACE — a scope FLOOR resolved here, independent of
-    // the table (F4): a mutating method under /api/operator needs `operator`
-    // or `admin`. Passing the floor is necessary, not sufficient — the request
-    // then falls through to normal rule matching, so a table rule can tighten
-    // one of these routes but can never open it. (Placed after the legacy
-    // wildcard on purpose; see OPERATOR_NAMESPACE_ROOT for why "*" keeps it.)
+    // the table (F4): a mutating method under /api/operator needs an EXPLICIT
+    // `operator` or `admin`. Checked BEFORE the legacy wildcard (repair R3):
+    // e-stop/resume, approvals, policy and diagnostics decrypt are physical
+    // safety, the same class as money and admin, so `"*"` does not count here
+    // either (see OPERATOR_NAMESPACE_ROOT). Passing the floor is necessary, not
+    // sufficient — an explicit-scope key then falls through to normal rule
+    // matching, so a table rule can tighten one of these routes but can never
+    // open it.
     if (operatorWrite && !OPERATOR_WRITE_SCOPES.some((s) => callerScopes.includes(s))) {
       return deny(
         reply,
         OPERATOR_WRITE_SCOPES,
         callerScopes,
-        `Changing operator state requires one of the following scopes: ${OPERATOR_WRITE_SCOPES.join(", ")}. ` +
+        `Changing operator state requires one of the following explicit scopes: ${OPERATOR_WRITE_SCOPES.join(", ")}. ` +
           `Your API key has: ${callerScopes.join(", ") || "none"}.`,
       );
     }
+
+    // LEGACY WILDCARD — everything else (see the migration note in the
+    // header). Past this point the request is not a money write, not in the
+    // admin namespace, and not an operator-control write the key lacks an
+    // explicit scope for — which is exactly the access an old wildcard key
+    // keeps until it is revoked.
+    if (callerScopes.includes("*")) return;
 
     // FIAT-RAMP SETUP — resolved against FIAT_SETUP_REQUIREMENTS alone, never
     // the table (A4). A governance row used to replace the defaults that held

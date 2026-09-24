@@ -25,9 +25,10 @@
  * once a key can ask what it may do, it can safely be given less. Self-service
  * keys are now minted narrow (never `"*"` — auth/api-key-auth.ts refuses it), and
  * the enforced scope layer (middleware/scope-checker.ts) treats a legacy `"*"` as
- * NEITHER money NOR admin authority. This endpoint must report exactly that, so
- * reachability for money writes and the admin namespace is computed with the
- * SAME predicates the scope-checker enforces (see operationReachable).
+ * NEITHER money, NOR admin, NOR operator-control authority. This endpoint must
+ * report exactly that, so reachability for money writes, the admin namespace and
+ * /api/operator/** writes is computed with the SAME predicates the scope-checker
+ * enforces (see operationReachable).
  *
  * Read-only. No settlement path. No writes.
  */
@@ -39,7 +40,9 @@ import { getRepos } from "../db.js";
 import {
   isAdminScopedRoute,
   isMoneyWriteRequest,
+  isOperatorWriteRequest,
   moneyWriteScopes,
+  operatorWriteScopes,
 } from "../middleware/scope-checker.js";
 
 // ── Scope registry ──────────────────────────────────────────────────
@@ -109,9 +112,9 @@ export const AGENT_OPERATIONS: AgentOperation[] = [
 
 /**
  * Does `held` satisfy `required`, for an operation that is NEITHER a money
- * write NOR in the admin namespace? (Those two are decided by
- * operationReachable with the enforcement predicates — `"*"` does not count
- * there.)
+ * write, NOR in the admin namespace, NOR a write under /api/operator/**? (Those
+ * three are decided by operationReachable with the enforcement predicates —
+ * `"*"` does not count there.)
  *
  * `*` is the legacy wildcard older keys carry. For everything else it is still
  * honoured by the scope-checker, so it is honoured here too: this endpoint
@@ -150,10 +153,12 @@ export function scopeSatisfied(held: string[], required: string | null): boolean
 /**
  * Can a key holding `held` reach `op`, as middleware/scope-checker.ts ENFORCES it?
  *
- * Money writes and the admin namespace are decided by the same predicates the
- * scope-checker uses, and there only an EXPLICIT scope counts — a legacy `"*"`
- * is not money or admin authority. Everything else falls back to the advertised
- * scope via scopeSatisfied. Returns the scope to ask for when unreachable.
+ * Money writes, the admin namespace and /api/operator/** writes are decided by
+ * the same predicates the scope-checker uses, and there only an EXPLICIT scope
+ * counts — a legacy `"*"` is not money, admin or operator-control authority
+ * (and a dotted `operator.write` is not the flat `operator` the floor demands).
+ * Everything else falls back to the advertised scope via scopeSatisfied.
+ * Returns the scope to ask for when unreachable.
  */
 export function operationReachable(
   held: string[],
@@ -164,6 +169,12 @@ export function operationReachable(
   }
   if (isMoneyWriteRequest(op.method, op.path)) {
     const need = moneyWriteScopes(op.method);
+    return need.some((s) => held.includes(s))
+      ? { reachable: true }
+      : { reachable: false, needs: need[0] };
+  }
+  if (isOperatorWriteRequest(op.method, op.path)) {
+    const need = operatorWriteScopes();
     return need.some((s) => held.includes(s))
       ? { reachable: true }
       : { reachable: false, needs: need[0] };
@@ -252,12 +263,15 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
         // Say the quiet part in the response rather than in a changelog.
         wildcard,
         wildcard_note: wildcard
-          ? "This key holds the legacy wildcard ['*']. It still reaches non-money, " +
-            "non-admin operations, but it is NOT money or admin authority: a money " +
-            "write needs an explicit `settlement` scope (DELETE: `admin`) and " +
-            "/api/admin/** needs an explicit `admin` scope. Ask the operator for a " +
-            "re-issued, explicitly-scoped key; wildcard keys are being retired " +
-            "(docs/security/WILDCARD_KEY_ROTATION.md)."
+          ? "This key holds the legacy wildcard ['*']. It still reaches most " +
+            "operations, but it is NOT money or admin authority, and NOT " +
+            "operator-control authority: a money write needs an explicit " +
+            "`settlement` scope (DELETE: `admin`), /api/admin/** needs an explicit " +
+            "`admin` scope, and a write under /api/operator/** (emergency stop and " +
+            "resume, approvals, policy, diagnostics, the pcc-node relay) needs an " +
+            "explicit `operator` scope. A wildcard key cannot mint those for itself. " +
+            "Ask the operator for a re-issued, explicitly-scoped key; wildcard keys " +
+            "are being retired (docs/security/WILDCARD_KEY_ROTATION.md)."
           : undefined,
       },
       tools,

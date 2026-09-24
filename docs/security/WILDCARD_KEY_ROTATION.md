@@ -19,9 +19,15 @@ ships, those keys:
   `settlement` or `admin` scope. A DELETE needs `admin`.
 - **lose admin authority.** Any method on `/api/admin/**` needs an explicit
   `admin` scope. A SIWE session with no API key is refused there too.
+- **lose operator-control authority.** Any mutating method under
+  `/api/operator/**` needs an explicit `operator` or `admin` scope. That covers
+  emergency stop and resume, approval decisions, policy, diagnostics upload and
+  decrypt, support, **and the pcc-node relay** (heartbeat, evidence, job
+  status). These are physical-safety controls, the same class as money and
+  admin. A wildcard key cannot mint an `operator` key for itself either.
 - **keep everything else** until they are **revoked**. That includes rule-table
-  requirements such as money-path READ rules. Existing integrations keep working
-  on every non-money, non-admin route.
+  requirements such as money-path READ rules and every READ under
+  `/api/operator/**`. Existing integrations keep working on every other route.
 
 Revoking them is an operator decision. Some of them back live integrations, so
 this runbook covers inventory, classification, notification, re-issuance,
@@ -44,7 +50,7 @@ note), `packages/gateway/src/auth/api-key-auth.ts` (`assertMintableScopes`),
 | `GET /api/admin/feedback` | `X-Admin-Token` only (public in api-gate) | unchanged |
 | Self-service `POST /api/auth/provision {email}` for an email on an admin allowlist | 201, a key the allowlist trusts | 403 `identity_reserved` |
 | Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that already has a key, or owns a kernel, a machine registration or a job offer | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its keys>`); the new key is then no wider than the caller's |
-| Mutating `/api/operator/**` (e-stop, approvals, relay) | any key or session | `operator` or `admin` scope; a wildcard key keeps it; a session is refused |
+| Mutating `/api/operator/**` (e-stop/resume, approvals, policy, diagnostics, support, the pcc-node relay) | any key or session | explicit `operator` or `admin` scope; a wildcard key is refused; a session is refused |
 
 The allowlists that `identity_reserved` protects are listed in
 `packages/gateway/src/auth/reserved-identities.ts`: `PCC_KEY_ADMINS`,
@@ -89,9 +95,12 @@ and `BROKER_OPERATORS`. The same refusal applies to
      ```
      An operator can hold at most 5 non-revoked keys; expired keys count toward
      the cap. Prefer a short expiry for admin keys.
-3. **Warn money integrations before the deploy.** From the moment the deploy
-   lands, a wildcard key that moves money gets 403. Do Steps 1 to 4 for money
-   integrations first.
+3. **Warn money integrations and pcc-node operators before the deploy.** From
+   the moment the deploy lands, a wildcard key gets 403 when it moves money,
+   and also when it relays for a pcc-node (heartbeat, evidence, job status),
+   presses emergency stop or resume, decides an approval or changes policy. Do
+   Steps 1 to 4 for those holders first. For a node that must keep relaying
+   through the deploy, narrow its key in place (Step 4).
 
 ## Step 1: Inventory
 
@@ -183,8 +192,8 @@ the wallet address the key was minted for. Tell them:
 
 - which key: the `key_prefix` (12 characters) and `created_at`. Never send the
   whole key;
-- what already changed: money writes and `/api/admin/**` are refused for this
-  key;
+- what already changed: money writes, `/api/admin/**` and every write under
+  `/api/operator/**` (the pcc-node relay included) are refused for this key;
 - what happens next: the key will be revoked on `<date>`;
 - what to do: obtain an explicitly scoped key (Step 4) and switch to it before
   that date.
@@ -199,6 +208,7 @@ Issue the narrowest set that covers what the holder actually does:
 |---|---|
 | onboarding: kernels, evidence, negotiate, build | self-service `POST /api/auth/provision` gives `["operator"]` |
 | funds movement | the operator adds their **wallet** to `PCC_SETTLEMENT_OPERATORS`. The holder proves the wallet with SIWE (`GET /api/auth/nonce`, then sign, then `POST /api/auth/verify`) and provisions with that session, which gives `["operator","settlement"]` |
+| operator control for an **existing** wildcard holder (pcc-node relay, e-stop, approvals, policy) | the operator re-issues. A wildcard key cannot mint an `operator` key for itself (403 `insufficient_scope`). Either narrow the existing key in place, so the holder's raw key keeps working with no client change (`UPDATE api_keys SET scopes = '["operator"]' WHERE id = '<key id>' AND revoked_at IS NULL;`, backup first, never for a known exposed key), or mint a new key out-of-band (Step 0, option (b), with `scopes: ["operator"]`). A wallet identity can also provision with SIWE |
 | contributor flows | `POST /api/contributors/quickstart` gives the four contributor scopes |
 | admin | out-of-band only: Step 0, option (a) or (b). Nobody self-provisions `admin` |
 
@@ -212,9 +222,11 @@ cannot be claimed again by an anonymous caller: `POST /api/auth/provision
 **authenticated as themselves**: `Authorization: Bearer <their current key>`
 with `{"email": "<their operator_id>"}`. The new key keeps the same
 `operator_id` and is never wider than the key that asked for it. A wildcard key
-can delegate `operator` this way, but never `settlement` or `admin` (those need
-the paths in the table above). An operator can hold at most 5 non-revoked keys,
-so revoke the old key promptly after the cut-over.
+can delegate only the contributor scopes this way (through
+`/api/contributors/quickstart`), never `operator`, `settlement` or `admin`: a
+wildcard is not operator-control, money or admin authority, so those need the
+paths in the table above. An operator can hold at most 5 non-revoked keys, so
+revoke the old key promptly after the cut-over.
 
 ## Step 5: Revoke
 
@@ -279,16 +291,16 @@ There are two independent levers. Use the smaller one.
   SELECT changes();
   COMMIT;
   ```
-  An un-revoked wildcard key still has **no** money or admin authority under
-  the WP-A code. For that authority, issue an explicit key (Step 4). Do not
-  un-revoke a wildcard key for it.
+  An un-revoked wildcard key still has **no** money, admin or operator-control
+  authority under the WP-A code. For that authority, issue an explicit key
+  (Step 4). Do not un-revoke a wildcard key for it.
   If the database is damaged, restore the Step 5 backup. That also undoes
   anything written after the backup was taken, so treat it as the last resort.
 - **Roll back the code change.** Retag the prior image to `:prod`, as described
-  in `docs/DEPLOY.md` (section "Rollback"). This restores wildcard money and
-  admin authority for **every** remaining wildcard key. It re-opens
-  MUST-CLOSE 7, so do it only as a short, deliberate emergency measure with a
-  re-deploy planned.
+  in `docs/DEPLOY.md` (section "Rollback"). This restores wildcard money,
+  admin and operator-control authority for **every** remaining wildcard key. It
+  re-opens MUST-CLOSE 7, so do it only as a short, deliberate emergency measure
+  with a re-deploy planned.
 
 ## Known exposed keys
 
@@ -344,7 +356,7 @@ refused with the old one.
 
 - [ ] `PCC_ADMIN_KEY` set in production (>= 32 random bytes); `NODE_ENV=production`
 - [ ] explicit `admin` key held by the operator (Step 0)
-- [ ] money integrations warned and re-issued before the deploy
+- [ ] money integrations and pcc-node relays warned and re-issued (or narrowed in place) before the deploy
 - [ ] inventory saved as the campaign list (Step 1)
 - [ ] every key classified (Step 2); notices sent and logged (Step 3)
 - [ ] replacement keys issued, with narrow scopes (Step 4)

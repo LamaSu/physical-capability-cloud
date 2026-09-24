@@ -231,10 +231,26 @@ describe("F3 — provision {email}: an identity that already exists cannot be cl
     expect(keysOf(victim)).toHaveLength(2);
   });
 
-  it("a legacy wildcard key may add an [operator] key for itself (\"*\" covers non-money scopes)", async () => {
+  // WP-A repair R3. Old assertion: a "*" key may add an ["operator"] key for
+  // itself -> 201 ["operator"]. New: 403 insufficient_scope, nothing minted.
+  // Why: "*" no longer passes the /api/operator/** write floor, so an
+  // ["operator"] key would be WIDER than the caller (e-stop, approvals, policy)
+  // — and one call would turn a leaked wildcard key back into that authority.
+  it("a legacy wildcard key can NOT mint an [operator] key for itself (\"*\" is not operator-control authority)", async () => {
     const victim = fresh("victim-wild");
     const wildKey = seedRawKey(victim, ["*"]);
     const res = await provision(victim, wildKey);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("insufficient_scope");
+    expect(res.json().api_key).toBeUndefined();
+    expect(keysOf(victim)).toHaveLength(1);
+    expect(keysOf(victim)[0].scopes).toEqual(["*"]);
+  });
+
+  it("an explicit operator scope held alongside \"*\" may still add an [operator] key", async () => {
+    const victim = fresh("victim-wild-op");
+    const key = seedRawKey(victim, ["*", "operator"]);
+    const res = await provision(victim, key);
     expect(res.statusCode).toBe(201);
     expect(res.json().scopes).toEqual(["operator"]);
   });
@@ -296,6 +312,16 @@ describe("F3 — contributors quickstart: the same binding", () => {
     const keys = keysOf(victim);
     expect(keys).toHaveLength(2);
     for (const k of keys) expect(k.scopes).toEqual(QUICKSTART_SCOPES);
+  });
+
+  it("a legacy wildcard key may still add a contributor key for itself (\"*\" carries contributor scopes)", async () => {
+    const victim = fresh("qs-wild");
+    const wildKey = seedRawKey(victim, ["*"]);
+    const res = await quickstart(victim, wildKey);
+    expect(res.statusCode).toBe(201);
+    const minted = keysOf(victim).filter((k) => !k.scopes.includes("*"));
+    expect(minted).toHaveLength(1);
+    expect(minted[0].scopes).toEqual(QUICKSTART_SCOPES);
   });
 
   it("the victim's OWN [operator] key cannot mint contributor scopes it lacks -> 403", async () => {

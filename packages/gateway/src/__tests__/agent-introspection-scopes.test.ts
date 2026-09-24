@@ -109,14 +109,45 @@ describe("operationReachable — mirrors the enforced money/admin rules", () => 
     expect(operationReachable(["*", "settlement"], moneyWrite)).toEqual({ reachable: true });
   });
 
-  it("the wildcard still reaches money READS, setup, and non-money operations", () => {
+  // WP-A repair R3. Old assertion: "*" reaches EVERY advertised operation
+  // ("none of today's advertised operations is a money write or admin route").
+  // New: every one EXCEPT the /api/operator/** writes (operator.emergencyStop),
+  // which answer needs_scope:operator. Why: the scope-checker now refuses "*"
+  // on operator-control writes, and this endpoint must report what is enforced.
+  it("the wildcard still reaches money READS, setup, and every non-operator-control operation", () => {
     expect(operationReachable(["*"], moneyRead)).toEqual({ reachable: true });
     expect(operationReachable(["*"], setup)).toEqual({ reachable: true });
     for (const op of AGENT_OPERATIONS) {
-      // None of today's advertised operations is a money write or admin route,
-      // so the wildcard reaches all of them — and must say so.
-      expect(operationReachable(["*"], op).reachable).toBe(true);
+      const isOperatorWrite = op.method !== "GET" && op.path.startsWith("/api/operator/");
+      expect(operationReachable(["*"], op), op.id).toEqual(
+        isOperatorWrite ? { reachable: false, needs: "operator" } : { reachable: true },
+      );
     }
+  });
+});
+
+describe("operationReachable — mirrors the enforced /api/operator/** write floor (R3)", () => {
+  const eStop = AGENT_OPERATIONS.find((op) => op.id === "operator.emergencyStop")!;
+  const machines = AGENT_OPERATIONS.find((op) => op.id === "operator.machines")!;
+
+  it("a legacy wildcard does NOT reach the emergency stop, and is told to ask for operator", () => {
+    expect(eStop).toBeDefined();
+    expect(operationReachable(["*"], eStop)).toEqual({ reachable: false, needs: "operator" });
+  });
+
+  it("only the FLAT scopes the floor enforces count (a dotted operator.write does not)", () => {
+    expect(operationReachable(["operator.write"], eStop)).toEqual({ reachable: false, needs: "operator" });
+    expect(operationReachable(["contributor:write"], eStop)).toEqual({ reachable: false, needs: "operator" });
+  });
+
+  it("explicit operator / admin reach it, with or without a wildcard alongside", () => {
+    expect(operationReachable(["operator"], eStop)).toEqual({ reachable: true });
+    expect(operationReachable(["admin"], eStop)).toEqual({ reachable: true });
+    expect(operationReachable(["*", "operator"], eStop)).toEqual({ reachable: true });
+  });
+
+  it("operator READS are unaffected: the wildcard still reaches them", () => {
+    expect(operationReachable(["*"], machines)).toEqual({ reachable: true });
   });
 });
 
@@ -168,5 +199,18 @@ describe("GET /api/agent/capabilities — the wildcard note is truthful", () => 
     expect(body.caller.wildcard_note).not.toMatch(/every operation/i);
     expect(body.caller.wildcard_note).not.toMatch(/not yet enforced/i);
     expect(body.caller.wildcard_note).toMatch(/NOT money or admin authority/);
+    // R3: the note must also say the wildcard is not operator control.
+    expect(body.caller.wildcard_note).toMatch(/NOT operator-control authority/);
+  });
+
+  it("reports the emergency stop as needs_scope:operator for a wildcard key (R3)", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/agent/capabilities",
+      headers: { authorization: `Bearer ${wildcardKey}` },
+    });
+    const tools = (res.json() as { tools: Array<{ id: string; reachability: string }> }).tools;
+    expect(tools.find((t) => t.id === "operator.emergencyStop")?.reachability).toBe("needs_scope:operator");
+    expect(tools.find((t) => t.id === "operator.machines")?.reachability).toBe("reachable");
   });
 });

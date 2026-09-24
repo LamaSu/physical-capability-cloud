@@ -29,6 +29,7 @@ import type { FastifyRequest } from "fastify";
 import { getRepos, getStore } from "../db.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
 import { resolveApiKey } from "./api-key-auth.js";
+import { SCOPES_NOT_CARRIED_BY_WILDCARD } from "../middleware/scope-checker.js";
 
 /** Every env var that grants elevated access by operatorId allowlist. */
 export const ADMIN_IDENTITY_ALLOWLIST_ENV_VARS = [
@@ -193,21 +194,23 @@ export function sameIdentity(a: string | null | undefined, b: string | null | un
   return x.length > 0 && x === normalize(b ?? "");
 }
 
-const MONEY_OR_ADMIN = new Set(["settlement", "admin"]);
-
 /**
  * The subset of `requested` a caller holding `callerScopes` may delegate to a
  * new key for its OWN identity — never wider than what the caller holds:
  *   - a scope the caller holds verbatim;
- *   - a legacy `"*"` covers any NON-money, NON-admin scope (A1: the wildcard
- *     is not settlement or admin authority, so it cannot delegate them);
+ *   - a legacy `"*"` covers a scope ONLY if the wildcard really carries that
+ *     scope's authority — never settlement or admin (A1: not money or admin
+ *     authority) and never operator (repair R3: not operator-control authority,
+ *     since /api/operator/** writes refuse `"*"`). See
+ *     SCOPES_NOT_CARRIED_BY_WILDCARD. Otherwise one self-service call would
+ *     turn a leaked wildcard key back into the authority it was denied;
  *   - `admin` covers `operator` (every operator rule also names admin).
  * Anything else is dropped. An empty result means "nothing to delegate".
  */
 export function callerMayDelegate(callerScopes: readonly string[], requested: readonly string[]): string[] {
   return requested.filter((s) => {
     if (callerScopes.includes(s)) return true;
-    if (callerScopes.includes("*") && !MONEY_OR_ADMIN.has(s)) return true;
+    if (callerScopes.includes("*") && !SCOPES_NOT_CARRIED_BY_WILDCARD.has(s)) return true;
     if (s === "operator" && callerScopes.includes("admin")) return true;
     return false;
   });
@@ -238,5 +241,7 @@ export const NOTHING_TO_DELEGATE_RESPONSE = {
   error: "insufficient_scope",
   message:
     "Your key holds none of the scopes this endpoint would mint, and a key " +
-    "can only mint keys no wider than itself.",
+    "can only mint keys no wider than itself. A legacy wildcard key is not " +
+    "operator, money or admin authority, so it cannot mint those: ask the PCC " +
+    "operator to re-issue your key with explicit scopes.",
 } as const;
