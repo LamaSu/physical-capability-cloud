@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { createPublicClient, http, type PublicClient } from "viem";
 import { baseSepolia } from "viem/chains";
 import {
@@ -7,6 +7,7 @@ import {
   REGISTRY_ADDRESSES,
 } from "@pcc/identity-8004";
 import { getRepos } from "../db.js";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 /**
  * ERC-8004 Identity/Reputation/Validation Registry routes.
@@ -16,9 +17,13 @@ import { getRepos } from "../db.js";
  * "list" endpoints iterate the gateway's own minted-agent DB rows (the only
  * agentIds we have a reliable list of without an indexer).
  *
- * Attestation / Validation reads remain mocked (the validation-registry
- * surface needs a per-requestHash key path, not a flat list) — they're
- * tagged `source: "mock"` until the indexer or a typed reader lands.
+ * Attestation / Validation reads have no real source yet (the
+ * validation-registry surface needs a per-requestHash key path, not a flat
+ * list); the only attestation is a fixture. Board N34 (server side of PX-3):
+ * the fixture is served only with PCC_DEMO_ROUTES=true, marked mock/demo.
+ * Otherwise the attestation routes answer 501 not_available, and the entity
+ * detail and summary keep their real fields and give null for the
+ * attestation fields, named in `unavailable`.
  *
  * Env vars (resolved lazily):
  *   IDENTITY_REGISTRY_CHAIN_ID — default 84532 (Base Sepolia)
@@ -158,8 +163,18 @@ async function readEntity(agentId: bigint, dbHint?: DbKnownAgent) {
 }
 
 // ---------------------------------------------------------------------------
-// Attestations — still mocked (validation-registry needs per-requestHash key)
+// Attestations — fixture only, demo only (validation-registry needs a
+// per-requestHash key path before there is a real read)
 // ---------------------------------------------------------------------------
+
+const ATTESTATIONS_NOT_RECORDED =
+  "Validation attestations are not recorded on this gateway, so nothing is returned rather than an example.";
+/** The registry reads that are real: identity and reputation, from chain. */
+const ATTESTATIONS_SEE = ["/api/registry/entities/:entityId", "/api/registry/reputation/:entityId"];
+
+function notAvailable(reply: FastifyReply, message: string, see: string[]) {
+  return reply.status(501).send({ error: "not_available", message, see });
+}
 
 const mockAttestations = [
   {
@@ -251,11 +266,15 @@ export async function registryRoutes(app: FastifyInstance) {
         // Reputation read failure is non-fatal — entity may have no feedback yet.
       }
 
+      if (!isDemoRoutesOn()) {
+        // Entity and reputation are real reads; attestations exist only as a fixture.
+        return { entity, reputation, attestations: null, unavailable: ["attestations"] };
+      }
       const attestations = mockAttestations.filter(
         (a) => a.subjectId === Number(agentId),
       );
 
-      return { entity, reputation, attestations };
+      return markDemo("demo", { entity, reputation, attestations });
     },
   );
 
@@ -332,11 +351,14 @@ export async function registryRoutes(app: FastifyInstance) {
     return { leaderboard: sorted, source: "onchain" as const };
   });
 
-  // ── Validation / Attestations (mock — pending indexer) ──────────────
+  // ── Validation / Attestations (fixture, demo only — pending indexer) ──
 
   app.get<{ Querystring: { subjectId?: string; claimType?: string } }>(
     "/api/registry/attestations",
-    async (req) => {
+    async (req, reply) => {
+      if (!isDemoRoutesOn()) {
+        return notAvailable(reply, ATTESTATIONS_NOT_RECORDED, ATTESTATIONS_SEE);
+      }
       let results = [...mockAttestations];
       if (req.query.subjectId) {
         const sid = parseInt(req.query.subjectId, 10);
@@ -347,17 +369,21 @@ export async function registryRoutes(app: FastifyInstance) {
       if (req.query.claimType) {
         results = results.filter((a) => a.claimType === req.query.claimType);
       }
-      return { attestations: results, total: results.length, source: "mock" };
+      return markDemo("demo", { attestations: results, total: results.length, source: "mock" });
     },
   );
 
   app.get<{ Params: { attestationId: string } }>(
     "/api/registry/attestations/:attestationId",
     async (req, reply) => {
+      // Before the lookup, so an unknown id cannot reveal which fixture ids exist.
+      if (!isDemoRoutesOn()) {
+        return notAvailable(reply, ATTESTATIONS_NOT_RECORDED, ATTESTATIONS_SEE);
+      }
       const id = parseInt(req.params.attestationId, 10);
       const att = mockAttestations.find((a) => a.id === id);
-      if (!att) return reply.status(404).send({ error: "Attestation not found" });
-      return { attestation: att };
+      if (!att) return reply.status(404).send(markDemo("demo", { error: "Attestation not found" }));
+      return markDemo("demo", { attestation: att });
     },
   );
 
@@ -365,7 +391,7 @@ export async function registryRoutes(app: FastifyInstance) {
 
   app.get("/api/registry/summary", async () => {
     const known = dbKnownAgents();
-    return {
+    const entities = {
       totalEntities: known.length,
       byType: {
         agents: known.length, // Only Agents on the IdentityRegistry surface.
@@ -373,10 +399,24 @@ export async function registryRoutes(app: FastifyInstance) {
         operators: 0,
         verifiers: 0,
       },
+    };
+    if (!isDemoRoutesOn()) {
+      // The entity counts are real (DB); the attestation counts would come from the fixture.
+      return {
+        ...entities,
+        totalAttestations: null,
+        activeAttestations: null,
+        averageReputation: null as number | null, // requires per-agent summary fetch
+        source: { entities: "db+onchain", attestations: null },
+        unavailable: ["totalAttestations", "activeAttestations"],
+      };
+    }
+    return markDemo("demo", {
+      ...entities,
       totalAttestations: mockAttestations.length,
       activeAttestations: mockAttestations.filter((a) => !a.revoked).length,
       averageReputation: null as number | null, // requires per-agent summary fetch
       source: { entities: "db+onchain", attestations: "mock" } as const,
-    };
+    });
   });
 }
