@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 log = logging.getLogger("pcc-node.job-executor")
 
@@ -251,6 +251,39 @@ HTTP_ACCEPTED = 202
 
 OCTOPRINT_SUCCESS_STATUSES = (200, 201, 204)
 
+# Generic HTTP completion contract (r31 astra verdict item 1, bus #2476).  A 2xx
+# is only the TRANSPORT's answer; "2xx and no recognized error" is not the
+# device saying the work finished.  _execute_generic_http therefore claims
+# `executed` only on the device's POSITIVE completion statement:
+#   * a per-device contract, when configured -- ``device["completionField"]``
+#     (a dot path into the JSON body, e.g. "result.phase") and
+#     ``device["completionValues"]`` (the values meaning finished; default
+#     [True]).  With a contract, the default vocabulary below is not used; or
+#   * by default, a completion word in ``status``/``state``, or a completion
+#     boolean set to True, at the body's top level or in one of
+#     GENERIC_OUTCOME_ENVELOPES.
+# A recognised queueing/running statement is acceptance (``submitted``).
+# Anything else -- {}, null, {"ok": true}, an unknown status word, a malformed
+# value, or completion and acceptance stated at once -- carries no flag at
+# all and classifies as unclassifiable, which fails the job closed.
+# "ok" and "success" are deliberately NOT completion words: many APIs use them
+# for "your REQUEST succeeded", which says nothing about the work.
+GENERIC_COMPLETION_STATUS_VALUES = frozenset({
+    "completed", "complete", "succeeded", "finished", "done",
+})
+GENERIC_ACCEPTANCE_STATUS_VALUES = frozenset({
+    "accepted", "queued", "pending", "submitted", "scheduled", "created",
+    "started", "running", "in_progress", "in-progress", "processing", "busy",
+    "printing", "waiting",
+})
+GENERIC_COMPLETION_BOOL_KEYS = ("completed", "complete", "done", "finished")
+GENERIC_ACCEPTANCE_BOOL_KEYS = ("submitted", "accepted", "queued")
+GENERIC_OUTCOME_ENVELOPES = ("result", "data", "response", "body", "payload")
+
+OUTCOME_COMPLETED = "completed"
+OUTCOME_ACCEPTED = "accepted"
+OUTCOME_UNKNOWN = "unknown"
+
 # Opentrons run lifecycle.  `POST /runs/<id>/actions {play}` only STARTS the
 # protocol; the run's own status is the only report that it finished, so a
 # protocol that starts and then fails at step 40 is invisible without polling.
@@ -410,6 +443,87 @@ def _nested_device_error(result: Dict) -> Optional[str]:
         if message:
             return f"{key}: {message}"
     return None
+
+
+def _contract_outcome(data: Any, field: Any, values: Any) -> Tuple[str, str]:
+    """Outcome under a device's own completion contract (see the constants)."""
+    if not isinstance(field, str) or not field.strip():
+        return OUTCOME_UNKNOWN, "completionField is not a usable path"
+    node: Any = data
+    for part in field.strip().split("."):
+        if not isinstance(node, dict) or part not in node:
+            return OUTCOME_UNKNOWN, f"completionField {field!r} is absent from the body"
+        node = node[part]
+    wanted = values if isinstance(values, list) and values else [True]
+    for want in wanted:
+        if isinstance(want, bool):
+            matched = node is want
+        elif isinstance(want, int):
+            matched = isinstance(node, int) and not isinstance(node, bool) and node == want
+        elif isinstance(want, str):
+            matched = isinstance(node, str) and node.strip().lower() == want.strip().lower()
+        else:
+            matched = False
+        if matched:
+            return OUTCOME_COMPLETED, f"completionField {field!r} = {_short(node)}"
+    if isinstance(node, str) and node.strip().lower() in GENERIC_ACCEPTANCE_STATUS_VALUES:
+        return OUTCOME_ACCEPTED, f"completionField {field!r} = {_short(node)}"
+    return OUTCOME_UNKNOWN, f"completionField {field!r} = {_short(node)} is not a completion value"
+
+
+def _generic_http_outcome(data: Any, device: Dict) -> Tuple[str, str]:
+    """What a 2xx device body positively states: completed, accepted or unknown.
+
+    Called only after the failure scan found nothing, and never for a 202.
+    Returns ``(outcome, reason)``.  Only an explicit, well-formed statement
+    counts; everything else is unknown.
+    """
+    if "completionField" in device:
+        return _contract_outcome(data, device.get("completionField"), device.get("completionValues"))
+
+    if not isinstance(data, dict):
+        return OUTCOME_UNKNOWN, "the device body states no outcome"
+    containers = [data] + [
+        data[key] for key in GENERIC_OUTCOME_ENVELOPES if isinstance(data.get(key), dict)
+    ]
+
+    completed = accepted = unreadable = False
+    for container in containers:
+        for key in STATUS_FIELD_KEYS:
+            if key not in container:
+                continue
+            value = container[key]
+            if isinstance(value, dict):
+                continue  # an object under "state" is a container, not a statement
+            word = value.strip().lower() if isinstance(value, str) else None
+            if word in GENERIC_COMPLETION_STATUS_VALUES:
+                completed = True
+            elif word in GENERIC_ACCEPTANCE_STATUS_VALUES:
+                accepted = True
+            else:
+                unreadable = True  # unknown word, number, list, null
+        for key in GENERIC_COMPLETION_BOOL_KEYS:
+            if key in container:
+                if container[key] is True:
+                    completed = True
+                else:
+                    unreadable = True
+        for key in GENERIC_ACCEPTANCE_BOOL_KEYS:
+            if key in container:
+                if container[key] is True:
+                    accepted = True
+                else:
+                    unreadable = True
+
+    if unreadable:
+        return OUTCOME_UNKNOWN, "the device body carries an outcome field this node cannot read"
+    if completed and accepted:
+        return OUTCOME_UNKNOWN, "the device body states both completion and acceptance"
+    if completed:
+        return OUTCOME_COMPLETED, "the device body states completion"
+    if accepted:
+        return OUTCOME_ACCEPTED, "the device body states acceptance"
+    return OUTCOME_UNKNOWN, "the device body states no outcome"
 
 
 def _describe_transport_status(status: int, data: Any) -> str:
@@ -1181,8 +1295,16 @@ class JobExecutor:
         * 202 Accepted is ACCEPTANCE, not completion (:data:`HTTP_ACCEPTED`):
           the device took the request and has not finished it.  A 202 reports
           the acceptance flag ``submitted`` instead of ``executed``, derived
-          the same way.  Every other 2xx is a synchronous API's own answer and
-          keeps ``executed``.
+          the same way.
+        * any other clean 2xx claims ``executed`` ONLY when the body positively
+          states completion (the device's contract, or the default completion
+          vocabulary -- see GENERIC_COMPLETION_STATUS_VALUES).  A recognised
+          queueing/running statement reports ``submitted``.  Anything else
+          (``{}``, ``null``, ``{"ok": true}``, an unknown status word, a
+          malformed value) carries NO flag, so it classifies as unclassifiable
+          and the job fails closed: "2xx and no recognised error" is the
+          transport answering, not the device saying the work finished (r31
+          astra verdict item 1).
         """
         from .http_util import http
 
@@ -1203,14 +1325,18 @@ class JobExecutor:
         # A 202 only acknowledges the request, so it may never claim `executed`.
         flag = "submitted" if status == HTTP_ACCEPTED else "executed"
 
-        result: Dict[str, Any] = {
-            flag: transport_ok and device_error is None,
-            "status_code": status,
-            "response": data,
-            "device": base_url,
-        }
+        result: Dict[str, Any] = {"status_code": status, "response": data, "device": base_url}
         if device_error is not None:
-            result["error"] = device_error
-        elif not transport_ok:
-            result["error"] = _describe_transport_status(status, data)
-        return result
+            return {flag: False, **result, "error": device_error}
+        if not transport_ok:
+            return {flag: False, **result, "error": _describe_transport_status(status, data)}
+        if status == HTTP_ACCEPTED:
+            return {"submitted": True, **result}
+
+        outcome, reason = _generic_http_outcome(data, device)
+        if outcome == OUTCOME_COMPLETED:
+            return {"executed": True, **result}
+        if outcome == OUTCOME_ACCEPTED:
+            return {"submitted": True, **result}
+        # No flag: the classifier reads this as unclassifiable (fail closed).
+        return {**result, "outcome": "unrecognized", "note": reason}
