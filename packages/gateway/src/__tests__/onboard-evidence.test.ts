@@ -22,7 +22,6 @@ import {
   inspectPhoto,
   isReservedDescription,
   parseImageDimensions,
-  proofRecordDigest,
   summarizeEvidence,
   toFabricationScreenInput,
   validateEvidenceShape,
@@ -265,15 +264,6 @@ describe("evidence-tier claim and the canonical evidence record", () => {
     expect(evidenceRecordDigest(record(a))).toBe(evidenceRecordDigest(record(b)));
     expect(evidenceRecordDigest(record(a))).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(record(a).events).toEqual({ sha256: eventsDigest(a), count: 1 });
-  });
-
-  it("reads the digest only from a well-formed server proof record", () => {
-    const digest = "sha256:" + "c".repeat(64);
-    expect(proofRecordDigest(`PROOF SUBMITTED: ${JSON.stringify({ evidenceDigest: digest })}`)).toBe(digest);
-    expect(proofRecordDigest(`PROOF SUBMITTED: ${JSON.stringify({ evidenceDigest: "sha256:zz" })}`)).toBeNull();
-    expect(proofRecordDigest("PROOF SUBMITTED: {not json")).toBeNull();
-    expect(proofRecordDigest("REJECTED: nope")).toBeNull();
-    expect(proofRecordDigest(null)).toBeNull();
   });
 
   it("reserves the server record prefixes", () => {

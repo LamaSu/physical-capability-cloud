@@ -21,7 +21,6 @@ import {
   inspectPhoto,
   isPlainObject,
   isReservedDescription,
-  proofRecordDigest,
   summarizeEvidence,
   validateEvidenceShape,
   type EvidenceRejection,
@@ -145,10 +144,51 @@ class AuditWriteError extends Error {
   }
 }
 
+type Repos = ReturnType<typeof getRepos>;
+
+// ── The evidence a transition is bound to ───────────────────────────────
+// The description column is operator-writable before review (/register,
+// PATCH, the wizard), so a digest parsed out of it could be forged. The
+// evidence of record is the latest operator.proof_submitted audit row for
+// the registration instead: only /prove writes that event, and only for
+// evidence that passed every screen. commitTransition reads it inside the
+// transition's transaction, so no proof can land between the read and the
+// write.
+
+const PROOF_SUBMITTED_EVENT = "operator.proof_submitted";
+const EVIDENCE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+interface LatestProof {
+  /** evidenceDigest of the latest proof_submitted row; null when there is none. */
+  evidenceDigest: string | null;
+  /** audit_log id of that row; null when there is none. */
+  auditId: number | null;
+}
+
+function latestProof(repos: Repos, registrationId: string): LatestProof {
+  const [row] = repos.auditLog.query({
+    eventType: PROOF_SUBMITTED_EVENT,
+    resourceType: "registration",
+    resourceId: registrationId,
+    limit: 1,
+  });
+  if (!row) return { evidenceDigest: null, auditId: null };
+  const digest = isPlainObject(row.metadata) ? row.metadata.evidenceDigest : undefined;
+  return { evidenceDigest: typeof digest === "string" && EVIDENCE_DIGEST_RE.test(digest) ? digest : null, auditId: row.id };
+}
+
+/** What a transition's guard and audit record see, all read in its transaction. */
+interface TransitionContext {
+  /** The registration as the transaction read it (status === expectedFrom). */
+  pre: RegistrationRow;
+  /** The latest screened proof for it. */
+  proof: LatestProof;
+}
+
 type TransitionFailure =
   | { ok: false; kind: "conflict"; currentStatus: string | null }
   | { ok: false; kind: "audit_failed" | "db_error"; error: unknown };
-type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow } | TransitionFailure;
+type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow; proof: LatestProof } | TransitionFailure;
 
 /**
  * Apply one status transition atomically with its audit record.
@@ -160,21 +200,26 @@ function commitTransition(args: {
   expectedFrom: string;
   to: string;
   extra?: { approvedAt?: string; description?: string };
-  audit: (pre: RegistrationRow, post: RegistrationRow) => AuditEntry;
+  audit: (ctx: TransitionContext & { post: RegistrationRow }) => AuditEntry;
 }): TransitionOutcome {
   try {
     return getStore().db.transaction(
       (): TransitionOutcome => {
         const repos = getRepos();
         const pre = repos.registrations.findById(args.id);
+        if (!pre) return { ok: false, kind: "conflict", currentStatus: null };
+        if (pre.status !== args.expectedFrom) return { ok: false, kind: "conflict", currentStatus: pre.status };
+        const ctx: TransitionContext = { pre, proof: latestProof(repos, pre.id) };
+        // The CAS itself, kept even though the immediate transaction already
+        // excludes every other writer.
         const post = repos.registrations.transitionStatus(args.id, [args.expectedFrom], args.to, args.extra);
-        if (!post || !pre) return { ok: false, kind: "conflict", currentStatus: pre?.status ?? null };
+        if (!post) return { ok: false, kind: "conflict", currentStatus: pre.status };
         try {
-          auditService.logStrict(args.audit(pre, post));
+          auditService.logStrict(args.audit({ ...ctx, post }));
         } catch (err) {
           throw new AuditWriteError(err); // rolls the CAS back
         }
-        return { ok: true, row: post, pre };
+        return { ok: true, row: post, pre, proof: ctx.proof };
       },
       { behavior: "immediate" },
     );
@@ -184,15 +229,18 @@ function commitTransition(args: {
   }
 }
 
-/** The audit fields every transition records. */
-function transitionAuditFields(pre: RegistrationRow, post: RegistrationRow, at: string): Record<string, unknown> {
-  return {
-    registrationId: pre.id,
-    from: pre.status,
-    to: post.status,
-    evidenceDigest: proofRecordDigest(pre.description),
-    at,
-  };
+/** registrationId, from -> to and the timestamp, as every transition records them. */
+function transitionAuditFields(ctx: TransitionContext & { post: RegistrationRow }, at: string): Record<string, unknown> {
+  return { registrationId: ctx.pre.id, from: ctx.pre.status, to: ctx.post.status, at };
+}
+
+/**
+ * The evidence an admin transition acted on: the latest screened proof, from
+ * the audit log (never from the description). With no proof on record the
+ * digest is null and evidenceVerified is false.
+ */
+function reviewedEvidenceFields(proof: LatestProof): Record<string, unknown> {
+  return { evidenceDigest: proof.evidenceDigest, evidenceVerified: proof.evidenceDigest !== null, proofAuditId: proof.auditId };
 }
 
 /** Which transition failed, for messages: `verb` ("approve") and `noun` ("approval"). */
@@ -401,13 +449,19 @@ export async function onboardRoutes(app: FastifyInstance) {
       expectedFrom: reg.status,
       to: "approved",
       extra: { approvedAt: at },
-      audit: (pre, post) => ({
+      audit: (ctx) => ({
         eventType: "operator.approved",
         actor: admin.actor,
         resourceType: "registration",
-        resourceId: pre.id,
+        resourceId: ctx.pre.id,
         action: "approve",
-        metadata: { ...transitionAuditFields(pre, post, at), name: pre.name, adminAuth: admin.adminAuth, caller: requestCaller(req) },
+        metadata: {
+          ...transitionAuditFields(ctx, at),
+          ...reviewedEvidenceFields(ctx.proof),
+          name: ctx.pre.name,
+          adminAuth: admin.adminAuth,
+          caller: requestCaller(req),
+        },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       }),
@@ -438,13 +492,20 @@ export async function onboardRoutes(app: FastifyInstance) {
       expectedFrom: reg.status,
       to: "rejected",
       extra: { description: `REJECTED: ${reason}` },
-      audit: (pre, post) => ({
+      audit: (ctx) => ({
         eventType: "operator.rejected",
         actor: admin.actor,
         resourceType: "registration",
-        resourceId: pre.id,
+        resourceId: ctx.pre.id,
         action: "reject",
-        metadata: { ...transitionAuditFields(pre, post, at), name: pre.name, reason, adminAuth: admin.adminAuth, caller: requestCaller(req) },
+        metadata: {
+          ...transitionAuditFields(ctx, at),
+          ...reviewedEvidenceFields(ctx.proof),
+          name: ctx.pre.name,
+          reason,
+          adminAuth: admin.adminAuth,
+          caller: requestCaller(req),
+        },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       }),
@@ -589,13 +650,19 @@ export async function onboardRoutes(app: FastifyInstance) {
       id: reg.id,
       expectedFrom: reg.status,
       to: "active",
-      audit: (pre, post) => ({
+      audit: (ctx) => ({
         eventType: "operator.activated",
         actor: admin.actor,
         resourceType: "registration",
-        resourceId: pre.id,
+        resourceId: ctx.pre.id,
         action: "activate",
-        metadata: { ...transitionAuditFields(pre, post, at), name: pre.name, adminAuth: admin.adminAuth, caller: requestCaller(req) },
+        metadata: {
+          ...transitionAuditFields(ctx, at),
+          ...reviewedEvidenceFields(ctx.proof),
+          name: ctx.pre.name,
+          adminAuth: admin.adminAuth,
+          caller: requestCaller(req),
+        },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       }),
@@ -808,16 +875,18 @@ export async function onboardRoutes(app: FastifyInstance) {
             expectedFrom: reg.status,
             to: "reviewing",
             extra: { description },
-            audit: (pre, post) => ({
-              eventType: "operator.proof_submitted",
+            audit: (ctx) => ({
+              eventType: PROOF_SUBMITTED_EVENT,
               actor,
               resourceType: "registration",
-              resourceId: pre.id,
+              resourceId: ctx.pre.id,
               action: "prove",
               metadata: {
-                ...transitionAuditFields(pre, post, submittedAt),
+                ...transitionAuditFields(ctx, submittedAt),
                 evidenceDigest,
-                previousEvidenceDigest: proofRecordDigest(pre.description),
+                // The proof this one replaces, from the audit log (M1).
+                previousEvidenceDigest: ctx.proof.evidenceDigest,
+                previousProofAuditId: ctx.proof.auditId,
                 evidenceTierClaim: summary.evidenceTierClaim,
                 proofCount: summary.proofs.length,
                 proofs: summary.proofs,

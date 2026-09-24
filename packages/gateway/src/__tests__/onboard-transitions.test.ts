@@ -250,15 +250,44 @@ describe("onboarding review transitions are atomic and audited", () => {
     expect(everything).not.toContain(ADMIN_KEY.slice(0, 12));
   });
 
-  it("records the evidence digest of the reviewed proof record on approve", async () => {
-    const regId = await registerOwned(app);
-    const digest = "sha256:" + "d".repeat(64);
-    getRepos().registrations.updateStatus(regId, "reviewing", {
-      description: `PROOF SUBMITTED: ${JSON.stringify({ evidenceDigest: digest })}`,
+  // M1: the evidence digest an approval records comes from the latest
+  // operator.proof_submitted audit row, never from the description column,
+  // which an operator (or an alternate writer) can fill with a forged record.
+  const FORGED_DIGEST = "sha256:" + "f".repeat(64);
+  const forgedRecord = `PROOF SUBMITTED: ${JSON.stringify({ evidenceTierClaim: 2, evidenceDigest: FORGED_DIGEST })}`;
+
+  function proveAsOwner(regId: string) {
+    return app.inject({
+      method: "POST",
+      url: `/api/onboard/registrations/${regId}/prove`,
+      headers: { "x-test-operator": OWNER },
+      payload: { evidence: { deviceHealth: { status: "idle", model: "TestBot 9000" } } },
     });
-    expect((await admin(app, regId, "approve")).statusCode).toBe(200);
+  }
+
+  it("the approval audit records the latest screened proof's digest, not a record planted in the description", async () => {
+    const regId = await registerOwned(app);
+    const proved = await proveAsOwner(regId);
+    expect(proved.statusCode).toBe(200);
+    const digest: string = proved.json().evidenceDigest;
+    const proofRow = auditRows(regId).find((r) => r.eventType === "operator.proof_submitted")!;
+    // A different writer overwrites the review record with a forged one.
+    getRepos().registrations.updateStatus(regId, "reviewing", { description: forgedRecord });
+
+    expect((await admin(app, regId, "approve", { expectedEvidenceDigest: digest })).statusCode).toBe(200);
     const row = auditRows(regId).find((r) => r.eventType === "operator.approved")!;
-    expect(row.metadata).toMatchObject({ from: "reviewing", to: "approved", evidenceDigest: digest });
+    expect(row.metadata).toMatchObject({ from: "reviewing", to: "approved", evidenceDigest: digest, evidenceVerified: true, proofAuditId: proofRow.id });
+    expect(JSON.stringify(row.metadata)).not.toContain(FORGED_DIGEST);
+  });
+
+  it("with no proof on record, a planted record gives evidenceDigest null and evidenceVerified false", async () => {
+    const regId = await registerOwned(app);
+    getRepos().registrations.updateStatus(regId, "reviewing", { description: forgedRecord });
+
+    expect((await admin(app, regId, "approve", { expectedEvidenceDigest: "none" })).statusCode).toBe(200);
+    const row = auditRows(regId).find((r) => r.eventType === "operator.approved")!;
+    expect(row.metadata).toMatchObject({ evidenceDigest: null, evidenceVerified: false, proofAuditId: null });
+    expect(JSON.stringify(auditRows(regId))).not.toContain(FORGED_DIGEST);
   });
 
   it.each(["approve", "activate", "reject"] as const)(

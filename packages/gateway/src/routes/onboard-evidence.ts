@@ -613,26 +613,19 @@ export function evidenceRecordDigest(record: OnboardEvidenceRecordV1): string {
   return `sha256:${sha256Hex(canonicalize(record))}`;
 }
 
-/** Prefix of the server-written review record kept in the registration description. */
+/**
+ * Prefix of the review record /prove writes into the registration description,
+ * for the admin reviewing it. It is a display copy only: no transition trusts
+ * anything parsed out of the description. The evidence of record is the
+ * latest operator.proof_submitted audit row (routes/onboard.ts).
+ */
 export const PROOF_RECORD_PREFIX = "PROOF SUBMITTED: ";
-
-/** The evidenceDigest of a server-written proof record in `description`, or null if there is none. */
-export function proofRecordDigest(description: string | null | undefined): string | null {
-  if (typeof description !== "string" || !description.startsWith(PROOF_RECORD_PREFIX)) return null;
-  try {
-    const parsed = JSON.parse(description.slice(PROOF_RECORD_PREFIX.length)) as { evidenceDigest?: unknown };
-    const d = parsed?.evidenceDigest;
-    return typeof d === "string" && /^sha256:[0-9a-f]{64}$/.test(d) ? d : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Descriptions that look like a server-written review record ("PROOF
  * SUBMITTED: ..." or the pre-review "PROVED: ..."). Operators may not write
- * these through /register or PATCH, so a record in the column is always one
- * the server screened and wrote.
+ * these (/register, PATCH, the onboarding wizard), so an admin never sees an
+ * operator's text dressed up as a server record.
  */
 export function isReservedDescription(description: unknown): boolean {
   if (typeof description !== "string") return false;
