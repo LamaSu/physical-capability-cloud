@@ -12,12 +12,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import {
   dashboardManifestToIr, validateIr, WITHHELD_PROSE, isMoneyClaim, LIST_ROW_CAP,
   EFFECT_REVIEWED_READS, bindPolicyRouteSources, reviewedRouteSource,
+  RECORD_STATUS_NOTE, isMoneyState, recordValueText,
 } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bindListRows } from "./dashboard-ir-renderer.js";
+import { bindListRows, bindScalar, bindSchemaCard } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 
 const KIT = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
@@ -177,5 +179,90 @@ describe("#344 /mcp/apps: every bindable route carries an effect review", () => 
       expect(r.handler.length, r.route).toBeGreaterThan(10);
       expect(r.effect, r.route).toMatch(/^read only/);
     }
+  });
+});
+
+describe("#3013 (pcc-design): a record's status word is never a payment fact", () => {
+  it("money-state words are recognised through case, joins, fullwidth, lookalikes and zero-width", () => {
+    for (const v of ["settled", "Settled", "SETTLED_RELEASED", "payoutPending", "refund-pending", "released", "paid",
+      "\uff53\uff45\uff54\uff54\uff4c\uff45\uff44", "s\u0435ttled", "sett\u200bled", "funded", "escrowed"]) {
+      expect(isMoneyState(v), v).toBe(true);
+    }
+    for (const v of ["running", "queued", "completed", "verified", "approved", "online", "unsettled", "settlement pending", ""]) {
+      expect(isMoneyState(v), v).toBe(false);
+    }
+  });
+
+  it("recordValueText qualifies only a value read from a field named status", () => {
+    expect(recordValueText("status", "settled")).toBe("settled" + RECORD_STATUS_NOTE);
+    expect(recordValueText("job.status", "SETTLED_RELEASED")).toBe("SETTLED_RELEASED" + RECORD_STATUS_NOTE);
+    expect(recordValueText("kernel.status", "online")).toBe("online");
+    expect(recordValueText("name", "settled")).toBe("settled");     // not a status field
+    expect(recordValueText("statusText", "paid")).toBe("paid");      // not a field NAMED status
+    expect(recordValueText("status", "")).toBe("");
+  });
+
+  it("every renderer sink applies it: metric, run card, list badge and list meta", () => {
+    expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "status" } } as unknown as IrNode, { status: "released" }))
+      .toBe("released" + RECORD_STATUS_NOTE);
+    expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: "paid" }))
+      .toBe("paid"); // progress is not a status field
+    const slots = [{ textContent: "" }, { textContent: "" }];
+    bindSchemaCard("run-summary-v1", { job: { status: "settled", progress: 100 } }, slots);
+    expect(slots.map((x) => x.textContent)).toEqual(["settled" + RECORD_STATUS_NOTE, "100"]);
+    bindSchemaCard("run-summary-v1", { status: "running", progress: 5 }, slots);
+    expect(slots[0]!.textContent).toBe("running");
+    type FakeEl = RElement & { attrs: Record<string, string> };
+    const fdoc: RDocument = { createElement(): RElement {
+      const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+      return e;
+    } };
+    const listEl = fdoc.createElement("div");
+    const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId", "status"], statusFrom: "status" } } as unknown as IrNode;
+    bindListRows(fdoc, listEl, node, [{ id: "j3", kernelId: "k1", status: "released" }, { id: "j4", kernelId: "k1", status: "running" }]);
+    const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
+    expect(texts).toEqual([
+      ["j3", "k1", "released" + RECORD_STATUS_NOTE, "released" + RECORD_STATUS_NOTE],
+      ["j4", "k1", "running", "running"],
+    ]);
+  });
+
+  it("the shipped kit shows the qualifier in all three sinks (committed bytes, URL-routed reads)", async () => {
+    const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p>waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
+    const w = dom.window as unknown as Record<string, any>;
+    w.TextDecoder = NodeTextDecoder;
+    w.parent.postMessage = () => {};
+    w.__PCC_IR_ORIGIN__ = "https://capability.network";
+    const byPath: Record<string, unknown> = {
+      "/api/jobs/j1/status": { status: "settled", progress: 100 },
+      "/api/jobs/j2": { job: { status: "SETTLED_RELEASED", progress: 100 } },
+      "/api/jobs": { items: [{ id: "j3", kernelId: "k1", status: "released" }, { id: "j4", kernelId: "k1", status: "running" }] },
+    };
+    w.fetch = (url: string) => {
+      const body = byPath[new URL(String(url)).pathname];
+      const bytes = new NodeTextEncoder().encode(JSON.stringify(body ?? {}));
+      let sent = false;
+      return Promise.resolve({
+        status: body === undefined ? 404 : 200, redirected: false,
+        headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? "application/json" : null) },
+        body: { getReader: () => ({ read: async () => (sent ? { done: true } : ((sent = true), { done: false, value: bytes })), cancel: async () => {} }), cancel: async () => {} },
+      });
+    };
+    w.eval(KIT);
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2026-01-26" } } }));
+    const m = man([
+      { kind: "metric", label: "Status", select: "status", binding: { path: "/api/jobs/j1/status" } },
+      { kind: "run", binding: { path: "/api/jobs/j2", sse: "/sse/stream/job/j2" }, statusFrom: "status", latestFrom: "latest" },
+      { kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", meta: ["kernelId", "status"], statusFrom: "status" } },
+    ], "Jobs", "Runs");
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(JSON.stringify(m)) } } } }));
+    for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 0));
+    const text = w.document.getElementById("pcc-ir-root").textContent as string;
+    expect(text).toContain("settled" + RECORD_STATUS_NOTE);
+    expect(text).toContain("SETTLED_RELEASED" + RECORD_STATUS_NOTE);
+    expect(text.split("released" + RECORD_STATUS_NOTE).length - 1).toBe(2); // j3's meta + badge
+    expect(text.split(RECORD_STATUS_NOTE).length - 1).toBe(4);              // and nothing else is qualified
+    expect(text).toContain("running");
+    dom.window.close();
   });
 });

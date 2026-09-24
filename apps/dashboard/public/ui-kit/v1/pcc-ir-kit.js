@@ -92,6 +92,15 @@
   function proseText(text) {
     return isMoneyClaim(text) ? WITHHELD_PROSE : text;
   }
+  var RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
+  var MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/i;
+  function isMoneyState(value) {
+    const t = foldForClaims(value).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[^A-Za-z0-9]+/g, " ");
+    return MONEY_STATE_RE.test(t);
+  }
+  function recordValueText(field, value) {
+    return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+  }
   var LIST_PROFILES = {
     "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
     "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
@@ -775,7 +784,7 @@
       const v = readSelector(data, k);
       if (v === "") continue;
       if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-      return v;
+      return recordValueText(k, v);
     }
     return UNAVAILABLE;
   }
@@ -879,16 +888,16 @@
     for (const row of rows) {
       if (shown >= limit) break;
       if (row === null || typeof row !== "object") continue;
-      const title = readSelector(row, rowTitle);
+      const title = recordValueText(rowTitle, readSelector(row, rowTitle));
       if (title === "") continue;
       const line = el(doc, CLS.row);
       line.appendChild(el(doc, CLS.heading, title, true));
       for (const m of rowMeta) {
-        const v = readSelector(row, m);
+        const v = recordValueText(m, readSelector(row, m));
         if (v !== "") line.appendChild(el(doc, CLS.meta, v, true));
       }
       if (statusFrom) {
-        const s = readSelector(row, statusFrom);
+        const s = recordValueText(statusFrom, readSelector(row, statusFrom));
         if (s !== "") line.appendChild(el(doc, CLS.badge, s, true));
       }
       listEl.appendChild(line);
@@ -898,7 +907,7 @@
   function bindScalar(node, data) {
     const sel = node.bind?.select;
     if (!sel) return "";
-    return readSelector(data, sel);
+    return recordValueText(sel, readSelector(data, sel));
   }
   function bootIrView(doc, mount, rawDoc, validate) {
     if (!validate(rawDoc).ok) {

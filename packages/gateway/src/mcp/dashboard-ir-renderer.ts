@@ -20,7 +20,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
-import { LIST_ROW_CAP } from "./dashboard-ir.js";
+import { LIST_ROW_CAP, recordValueText } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -145,7 +145,7 @@ function readField(data: unknown, f: SchemaField): string {
     const v = readSelector(data, k);
     if (v === "") continue;
     if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-    return v;
+    return recordValueText(k, v); // a record's money-state status word is qualified (#3013)
   }
   return UNAVAILABLE;
 }
@@ -240,12 +240,13 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
   for (const row of rows) {
     if (shown >= limit) break;
     if (row === null || typeof row !== "object") continue;
-    const title = readSelector(row, rowTitle);
+    // Every bound value passes recordValueText: a record's money-state status word is qualified (#3013).
+    const title = recordValueText(rowTitle, readSelector(row, rowTitle));
     if (title === "") continue; // drop malformed row (no valid title)
     const line = el(doc, CLS.row);
     line.appendChild(el(doc, CLS.heading, title, true));
-    for (const m of rowMeta) { const v = readSelector(row, m); if (v !== "") line.appendChild(el(doc, CLS.meta, v, true)); }
-    if (statusFrom) { const s = readSelector(row, statusFrom); if (s !== "") line.appendChild(el(doc, CLS.badge, s, true)); }
+    for (const m of rowMeta) { const v = recordValueText(m, readSelector(row, m)); if (v !== "") line.appendChild(el(doc, CLS.meta, v, true)); }
+    if (statusFrom) { const s = recordValueText(statusFrom, readSelector(row, statusFrom)); if (s !== "") line.appendChild(el(doc, CLS.badge, s, true)); }
     listEl.appendChild(line);
     shown++;
   }
@@ -257,7 +258,7 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
 export function bindScalar(node: IrNode, data: unknown): string {
   const sel = node.bind?.select;
   if (!sel) return "";
-  return readSelector(data, sel);
+  return recordValueText(sel, readSelector(data, sel)); // a status metric's money-state word is qualified (#3013)
 }
 
 /**

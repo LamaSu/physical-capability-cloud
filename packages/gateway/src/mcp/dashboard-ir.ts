@@ -75,6 +75,22 @@ export function isMoneyClaim(text: string): boolean {
 }
 function proseText(text: string): string { return isMoneyClaim(text) ? WITHHELD_PROSE : text; }
 
+// A bound RECORD status is the record's own word, never a payment fact: a job row can literally say
+// "settled" with nothing paid (#313; pcc-design #3013). Any value read from a field named `status`
+// (status, job.status, kernel.status) whose word is a money state gets PCC's fixed qualifier, in every
+// sink (metric, run card, list badge and list meta). Narrower than CLAIM_RE on purpose ("verified",
+// "approved" are not money states). Lookalikes, zero-width characters, fullwidth forms and camel,
+// snake or kebab joins ("SETTLED_RELEASED", "payoutPending") are folded first.
+export const RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
+const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/i;
+export function isMoneyState(value: string): boolean {
+  const t = foldForClaims(value).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[^A-Za-z0-9]+/g, " ");
+  return MONEY_STATE_RE.test(t);
+}
+export function recordValueText(field: string, value: string): string {
+  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+}
+
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
 // A list may show ONLY these fields of each allowlisted collection route; a selector is never
 // "safe because it parses". Money amounts, prices and payment state are not listable: they
