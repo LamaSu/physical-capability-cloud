@@ -11,7 +11,7 @@
  * is one onRequest hook encapsulated to the spaces plugin; the last block proves it
  * reaches no other plugin.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { spaceRoutes } from "../routes/spaces.js";
 import { kernelRoutes } from "../routes/kernels.js";
@@ -117,6 +117,22 @@ describe("NEGATIVE: without PCC_DEMO_ROUTES every spaces route refuses (501 not_
     const res = await call({ method: "GET", url: "/api/spaces/space-none" });
     expect(res.statusCode).toBe(501);
     expect(res.json().error).toBe("not_available");
+  });
+
+  it("/match draws no random score when it refuses (the demo half proves the spy sees a draw)", async () => {
+    const random = vi.spyOn(Math, "random");
+    try {
+      const refused = await call({ method: "POST", url: "/api/spaces/match", payload: {} });
+      expect(refused.statusCode).toBe(501);
+      expect(random).not.toHaveBeenCalled();
+
+      process.env.PCC_DEMO_ROUTES = "true";
+      const demo = await call({ method: "POST", url: "/api/spaces/match", payload: {} });
+      expect(demo.statusCode).toBe(200);
+      expect(random).toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+    }
   });
 });
 
