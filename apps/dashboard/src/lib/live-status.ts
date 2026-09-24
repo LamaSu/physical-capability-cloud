@@ -72,9 +72,11 @@ export interface LiveStatus {
 /**
  * Turn the live reads into what the StatusBar shows.
  *
- * A count is shown only when its latest read succeeded; otherwise it is left
- * undefined, which the bar renders as unavailable rather than as 0. The
- * gateway is "connected" only after /api/health answered ok.
+ * A count is shown only when its latest read succeeded AND the gateway is
+ * confirmed reachable right now. Otherwise it is left undefined, which the
+ * bar renders as unavailable rather than as 0. A count read before an outage
+ * is not presented as current. The gateway is "connected" only after
+ * /api/health answered ok.
  */
 export function deriveLiveStatus(reads: {
   health: QueryView<{ status: string }>;
@@ -87,11 +89,13 @@ export function deriveLiveStatus(reads: {
   if (health.isError) networkStatus = "disconnected";
   else if (health.isSuccess) networkStatus = health.data?.status === "ok" ? "connected" : "disconnected";
 
-  const kernelsOnline =
-    kernels.isSuccess && kernels.data ? kernels.data.filter(isKernelOnline).length : undefined;
+  const reachable = networkStatus === "connected";
 
-  const activeJobs = jobs.isSuccess && jobs.data ? jobs.data.filter(isActiveJob).length : undefined;
-  const activeJobsAtLeast = Boolean(jobs.isSuccess && jobs.data && mayBeTruncated(jobs.data));
+  const kernelsOnline =
+    reachable && kernels.isSuccess && kernels.data ? kernels.data.filter(isKernelOnline).length : undefined;
+
+  const activeJobs = reachable && jobs.isSuccess && jobs.data ? jobs.data.filter(isActiveJob).length : undefined;
+  const activeJobsAtLeast = Boolean(activeJobs !== undefined && jobs.data && mayBeTruncated(jobs.data));
 
   return { networkStatus, kernelsOnline, activeJobs, activeJobsAtLeast };
 }
