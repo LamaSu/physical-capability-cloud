@@ -364,6 +364,32 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
     expect(r.body).not.toContain("escrow-milestone");
   });
 
+  // The route's EconomicsRecord (settlement-read.ts): amount is a raw BASE-unit integer; there is no tokenDecimals today.
+  const ECON = { amount: "1000000", feeAmount: "23500", recipient: "0xRecipient", token: "0xUSDC", assuranceTier: 1 };
+  const settledReceipt = (economics: unknown) => ({ chainId: 84532, escrow: "0xE", unitId: "u1", finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", network: { chainId: 84532 }, economics });
+
+  it("a real V-next receipt's economics.amount (base units, no decimals) is never shown as a sum", async () => {
+    const r = await receiptOf(RC, settledReceipt(ECON));
+    expect(r.cls).toContain("st-settled");
+    expect(r.body).toContain("1000000 base units (decimals not reported)");
+    expect(r.body).not.toContain("1,000,000");
+    expect(r.body).not.toContain("USDC");
+  });
+
+  it("with the record's own tokenDecimals the base units become the exact display amount", async () => {
+    for (const [amount, d, shown] of [["1000000", 6, "1"], ["1234567", 6, "1.234567"], ["25", 6, "0.000025"], ["1500000000000", 6, "1,500,000"], ["7", 0, "7"]] as Array<[string, number, string]>) {
+      const r = await receiptOf(RC, settledReceipt({ ...ECON, amount, tokenDecimals: d }));
+      expect(r.body, amount + "/" + d).toContain(shown);
+    }
+  });
+
+  it("a malformed base-unit amount is 'amount not reported', never a guess", async () => {
+    for (const amount of ["1e6", "-5", "1,000", "0x10", "", { v: 1 }]) {
+      const r = await receiptOf(RC, settledReceipt({ ...ECON, amount }));
+      expect(r.body, JSON.stringify(amount)).toContain("amount not reported");
+    }
+  });
+
   it("an amount without a currency shows no invented currency", async () => {
     const r = await receiptOf(RC, { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", totalAmount: "10.00", payer: "0xP", payee: "0xQ" });
     expect(r.body).toContain("10.00");

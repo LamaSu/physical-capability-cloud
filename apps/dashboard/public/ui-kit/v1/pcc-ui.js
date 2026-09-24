@@ -271,6 +271,20 @@
     return cur;
   }
 
+  // A settlement record's economics.amount is a raw integer in the token's BASE units (read-surface
+  // contract rule 14). It becomes a display amount only with the record's own tokenDecimals (exact
+  // string arithmetic, no float); without them it is shown as labelled base units, because
+  // 1000000 base units of a 6-decimal token is 1, not 1,000,000.00. Anything else: null.
+  function baseUnitsText(raw, decimals) {
+    var s = typeof raw === 'number' && isFinite(raw) && raw % 1 === 0 && raw >= 0 ? String(raw) : raw;
+    if (typeof s !== 'string' || !/^\d+$/.test(s)) return null;
+    if (typeof decimals !== 'number' || decimals % 1 !== 0 || decimals < 0 || decimals > 36) {
+      return s.replace(/^0+(?=\d)/, '') + ' base units (decimals not reported)';
+    }
+    while (s.length <= decimals) s = '0' + s;
+    var ip = s.slice(0, s.length - decimals).replace(/^0+(?=\d)/, ''), fp = s.slice(s.length - decimals).replace(/0+$/, '');
+    return ip.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fp ? '.' + fp : '');
+  }
   function fmtUsd(v) {
     var n = Number(v);
     if (!isFinite(n)) return String(v == null ? '' : v);
@@ -1113,11 +1127,15 @@
       // Nothing is invented: an amount, currency, payer, payee or rail the record does not carry is
       // shown as not reported, never defaulted ("USDC", "payer", "escrow-milestone").
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
-      var amount = e.totalAmount != null ? e.totalAmount : (e.amount != null ? e.amount : econ.amount);
+      var amount = e.totalAmount != null ? e.totalAmount : e.amount;
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
+      var econText = (amount == null || amount === '') && econ.amount != null ? baseUnitsText(econ.amount, econ.tokenDecimals) : null;
       if (amount != null && amount !== '') {
         amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
         if (typeof e.currency === 'string' && e.currency) amtRow.appendChild(el('span', 'pcc-receipt-cur', ' ' + e.currency));
+      } else if (econText !== null) {
+        // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
+        amtRow.appendChild(el('span', 'pcc-receipt-num', econText));
       } else {
         amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', 'amount not reported'));
       }
