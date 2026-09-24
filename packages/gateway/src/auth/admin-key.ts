@@ -81,3 +81,28 @@ export function checkAdminKey(req: FastifyRequest): AdminKeyCheck {
   }
   return { ok: true, mode: "key" };
 }
+
+// ── Shared-token admin check (X-Admin-Token) — WP-A fold F7 ──────────
+//
+// routes/waitlist.ts and routes/feedback.ts gate their admin exports on
+// `X-Admin-Token === WAITLIST_ADMIN_TOKEN`, and compared with `!==`: a
+// short-circuiting string compare whose timing leaks how long a matching
+// prefix is (and the secret's length). This keeps THOSE semantics exactly —
+// same header, same env var, 403 on any failure, no dev-open mode — and only
+// swaps the comparison for the constant-time one above.
+//
+// Fail closed, and slightly stricter than before: an unset, empty OR
+// whitespace-only token denies (a blank env var used to match a blank-looking
+// header); a missing, empty or repeated header denies.
+
+export const ADMIN_TOKEN_HEADER = "x-admin-token";
+
+/** True only when X-Admin-Token equals the configured token, compared in constant time. */
+export function adminTokenMatches(req: FastifyRequest, envVar = "WAITLIST_ADMIN_TOKEN"): boolean {
+  const expected = process.env[envVar];
+  if (typeof expected !== "string" || expected.trim().length === 0) return false;
+  const provided = req.headers[ADMIN_TOKEN_HEADER];
+  // A repeated header arrives as an array: ambiguous input grants nothing.
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  return adminKeyMatches(provided, expected);
+}
