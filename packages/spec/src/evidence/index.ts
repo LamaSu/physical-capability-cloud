@@ -26,6 +26,7 @@ export * from "./is-fabricated.js";
 // contract every Ed25519 producer and consumer of evidence builds its message from.
 export * from "./signing-preimage.js";
 export * from "./eligibility.js";
+export * from "./measurement-profile.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";

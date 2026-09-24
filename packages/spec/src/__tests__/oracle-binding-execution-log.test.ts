@@ -15,11 +15,18 @@ import {
   GENESIS_HASH,
   type LogChainEntryView,
 } from "../evidence/verifiers/log-chain.js";
-import type { SHA256, Signature, Timestamp } from "../types/common.js";
+import type { Address, SHA256, Signature, Timestamp } from "../types/common.js";
 
 const GOOD_SIG_PREFIX = "sig-ok:";
+const SIGNER = "0x1111111111111111111111111111111111111111" as Address;
+/** The common Signature object — the shape every real log-chain producer emits. */
+const signedFor = (entryHash: SHA256): Signature => ({
+  signer: SIGNER,
+  algorithm: "ed25519",
+  value: `${GOOD_SIG_PREFIX}${entryHash}`,
+});
 const verifyOk = (entryHash: SHA256, signature: Signature) =>
-  signature === (`${GOOD_SIG_PREFIX}${entryHash}` as Signature);
+  signature.value === `${GOOD_SIG_PREFIX}${entryHash}`;
 
 async function buildChain(
   contents: string[],
@@ -40,7 +47,7 @@ async function buildChain(
       rawContent,
       source,
       capturedAt,
-      kernelSignature: `${GOOD_SIG_PREFIX}${entryHash}` as Signature,
+      kernelSignature: signedFor(entryHash),
     });
   }
   return out;
@@ -57,14 +64,14 @@ describe("#52 binding — accepts a real kernel-signed chain", () => {
     expect(res.detail.join(" ")).toContain("3-entry");
   });
 
-  it("disclosure param is capture-side: accepted with a note, never a gate", async () => {
+  it("disclosure param on a full-content chain: accepted with a note, never a gate", async () => {
     const res = await v().verify(
       await buildChain(["a", "b"]),
       { logKind: "job_log", disclosure: "redacted-commit" },
       CTX,
     );
     expect(res.met).toBe(true);
-    expect(res.detail.join(" ")).toContain("capture-side");
+    expect(res.detail.join(" ")).toContain("disclosure");
   });
 
   it("minCadenceMs met when gaps are within bound", async () => {
@@ -96,7 +103,7 @@ describe("#52 binding — one rejecting test per failure class (fail closed)", (
 
   it("invalid kernel signature → rejected", async () => {
     const chain = await buildChain(["a", "b"]);
-    chain[1] = { ...chain[1]!, kernelSignature: "sig-forged" as Signature };
+    chain[1] = { ...chain[1]!, kernelSignature: { ...chain[1]!.kernelSignature, value: "sig-forged" } };
     const res = await v().verify(chain, PARAMS, CTX);
     expect(res.met).toBe(false);
     expect(res.detail.join(" ")).toContain("kernel signature invalid");
@@ -150,10 +157,60 @@ describe("#52 binding — one rejecting test per failure class (fail closed)", (
     expect(res.met).toBe(false);
   });
 
+  it("a bare-string kernelSignature → rejected (no producer emits one; the relay treats it as unsigned)", async () => {
+    const chain = await buildChain(["a", "b"]);
+    const bare = [chain[0], { ...chain[1]!, kernelSignature: chain[1]!.kernelSignature.value }];
+    const res = await v().verify(bare, PARAMS, CTX);
+    expect(res.met).toBe(false);
+    expect(res.detail.join(" ")).toContain("entry 1: kernelSignature must be a Signature object");
+  });
+
+  it("a redacted entry (no rawContent) → rejected, because its hash cannot be recomputed", async () => {
+    const chain = await buildChain(["a", "b"]);
+    const { rawContent: _dropped, ...redacted } = chain[1]!;
+    const res = await v().verify([chain[0], redacted], PARAMS, CTX);
+    expect(res.met).toBe(false);
+    expect(res.detail.join(" ")).toContain("entry 1: rawContent absent (a redacted entry)");
+  });
+
+  it("an unknown signature algorithm → rejected", async () => {
+    const chain = await buildChain(["a"]);
+    const res = await v().verify(
+      [{ ...chain[0]!, kernelSignature: { ...chain[0]!.kernelSignature, algorithm: "rsa" } }],
+      PARAMS,
+      CTX,
+    );
+    expect(res.met).toBe(false);
+    expect(res.detail.join(" ")).toContain("algorithm must be ed25519 or secp256k1");
+  });
+
+  it("an empty signer → rejected", async () => {
+    const chain = await buildChain(["a"]);
+    const res = await v().verify(
+      [{ ...chain[0]!, kernelSignature: { ...chain[0]!.kernelSignature, signer: "" } }],
+      PARAMS,
+      CTX,
+    );
+    expect(res.met).toBe(false);
+    expect(res.detail.join(" ")).toContain("signer missing");
+  });
   it("null instance → pending (data not yet available, per verifier-interface)", async () => {
     const res = await v().verify(null, PARAMS, CTX);
     expect(res.met).toBe("pending");
   });
+
+});
+
+describe("#52 binding — accepts the shape real producers emit", () => {
+  it("a kernel LogCaptureService entry (secp256k1 Signature object) passes the shape guard", async () => {
+    const chain = (await buildChain(["a", "b"])).map((e) => ({
+      ...e,
+      kernelSignature: { ...e.kernelSignature, algorithm: "secp256k1" as const },
+    }));
+    const res = await v().verify(chain, PARAMS, CTX);
+    expect(res.met).toBe(true);
+  });
+
 });
 
 describe("industrial verifier maps", () => {
