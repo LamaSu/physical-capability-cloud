@@ -88,3 +88,22 @@ describe("formatUsdcBaseUnits", () => {
     for (const bad of ["", "1.5", "-1", "abc", " 1"]) expect(formatUsdcBaseUnits(bad), bad).toBeNull();
   });
 });
+
+// Bodies captured from a real gateway (NODE_ENV=production, fresh DB, an operator key), 2026-09-24.
+describe("the gateway's real answers", () => {
+  it("a gateway with batch settlement off: status reads, and the empty history is empty", () => {
+    const status = { batchEnabled: false, pending: 0, totalValue: "0", oldestAge: 0, autoFlush: false, smartAccountAddress: null };
+    expect(statusFromResponse(200, status)).toEqual({ state: "read", value: status });
+    expect(epochsFromResponse(200, { epochs: [] })).toEqual({ state: "read", value: [] });
+  });
+
+  it("a flush refused for scope shows the gateway's own message", () => {
+    const body = {
+      error: "insufficient_scope",
+      message: "Funds movement requires one of the following explicit scopes: settlement, admin.",
+      required_scopes: ["settlement", "admin"],
+      caller_scopes: ["operator"],
+    };
+    expect(flushOutcome(403, body)).toEqual({ ok: false, message: body.message });
+  });
+});
