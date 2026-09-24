@@ -14,6 +14,7 @@ import {
   type CommittedProgram,
   type CommittedProgramEntry,
 } from "../evidence/committed-program.js";
+import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 import type { CsdEvidenceTier } from "../csd/schema.js";
 
 const CSD = "document-print-and-mail";
@@ -44,6 +45,20 @@ const PRINT_ONLY: CommittedProgram = {
     { id: "auth", predicate: "not-simulated" },
   ],
 };
+
+/**
+ * print-and-mail with the fixes eligibility asks for: ident.registered_key where
+ * a signed primitive depends on it, and a Family-G primitive at tier2. Tier3
+ * still lists primitives that do not support tier 3, so it stays ineligible.
+ */
+function fixedTiers(): Record<string, CsdEvidenceTier> {
+  const t = structuredClone(tiers);
+  for (const k of ["tier1", "tier2", "tier3"]) t[k]!.primitives!.push({ id: "ident.registered_key" });
+  for (const k of ["tier2", "tier3"]) t[k]!.primitives!.push({ id: "approval.payer" });
+  return t;
+}
+/** The v1 vocabulary as it reads once every verifier is registered and live. */
+const LIVE = new Map(EVIDENCE_PRIMITIVES.map((d) => [d.id, { ...d, verifierStatus: "live" as const }]));
 
 const entry = (tier: string, program: CommittedProgram): CommittedProgramEntry => ({
   csd: CSD,
@@ -179,14 +194,17 @@ describe("resolveAcceptedProgram — one program per (CSD, non-zero tier), else 
 });
 
 describe("assertAcceptedProgramForTier — the pre-funding gate (required negatives)", () => {
+  // These negatives exercise the program legs, so they fund a CSD that is
+  // eligible with live verifiers; the eligibility leg has its own block below.
   const gate = (
     tierKey: string,
     committedProgramHash: string | null,
     registry: readonly CommittedProgramEntry[] = COMMITTED_PROGRAM_REGISTRY,
   ) =>
     assertAcceptedProgramForTier(
-      { csd: CSD, tierKey, tier: tiers[tierKey]!, committedProgramHash },
+      { csd: CSD, tierKey, evidence: fixedTiers(), committedProgramHash },
       registry,
+      { primitiveIndex: LIVE },
     );
 
   it("tier2 with its exact program hash is accepted (hex case is not meaningful)", () => {
@@ -250,5 +268,69 @@ describe("assertAcceptedProgramForTier — the pre-funding gate (required negati
       code: "program-fails-tier-check",
       violations: [{ code: "positive-stage-not-bound-by-tier", stageId: "mail" }],
     });
+  });
+});
+
+describe("assertAcceptedProgramForTier — the funded tier must be verifiable end to end (N19)", () => {
+  const gate = (
+    tierKey: string,
+    committedProgramHash: string | null,
+    evidence: Record<string, CsdEvidenceTier>,
+    primitiveIndex?: typeof LIVE,
+  ) => assertAcceptedProgramForTier({ csd: CSD, tierKey, evidence, committedProgramHash }, COMMITTED_PROGRAM_REGISTRY, { primitiveIndex });
+
+  it("print-and-mail as authored cannot be funded at tier2, and the reasons say why", () => {
+    const r = gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, tiers);
+    expect(r).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    const reasons = (r as { reasons: string[] }).reasons.join("\n");
+    expect(reasons).toContain('depends on "ident.registered_key"');
+    expect(reasons).toContain("human-attestation");
+    expect(reasons).toContain('"capture.photo_nonced" verifier not implemented');
+  });
+
+  it("the fixed CSD is still refused while its verifiers are stubs", () => {
+    const r = gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, fixedTiers());
+    expect(r).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    expect((r as { reasons: string[] }).reasons.every((x) => x.includes("verifier not implemented"))).toBe(true);
+  });
+
+  it("the fixed CSD with every verifier live is funded", () => {
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, fixedTiers(), LIVE)).toEqual({ ok: true });
+  });
+
+  it("eligibility covers tiers 0..T: a tier1 that is only self-attested blocks tier2", () => {
+    const t = fixedTiers();
+    t.tier1!.primitives = [{ id: "decl.self_attested" }];
+    const r = gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE);
+    expect(r).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    expect((r as { reasons: string[] }).reasons.join("\n")).toContain("tier1: only decl.self_attested");
+  });
+
+  it("a CSD eligible exactly one tier below the funded tier is refused", () => {
+    const t = fixedTiers();
+    t.tier2!.primitives = t.tier2!.primitives!.filter((p) => p.id !== "approval.payer");
+    const r = gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE);
+    expect(r).toMatchObject({ ok: false, code: "tier-not-eligible" });
+    expect((r as { reasons: string[] }).reasons).toEqual(["tier2: no human-attestation (Family-G) primitive — the tier≥2 human floor"]);
+  });
+
+  it("a missing lower tier blocks the funded tier", () => {
+    const t = fixedTiers();
+    delete t.tier1;
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE)).toMatchObject({
+      ok: false,
+      code: "tier-not-eligible",
+      reasons: ["tiers 0..2 are not all declared"],
+    });
+  });
+
+  it("the funded tier must be in the CSD being funded", () => {
+    const t = fixedTiers();
+    delete t.tier2;
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE)).toEqual({ ok: false, code: "tier-not-in-csd" });
+  });
+
+  it("tier0 stays fundable with no program", () => {
+    expect(gate("tier0", null, tiers)).toEqual({ ok: true });
   });
 });

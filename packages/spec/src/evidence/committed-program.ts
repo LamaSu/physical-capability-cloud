@@ -34,6 +34,17 @@
  * the pre-funding gate: the committed hash must equal the resolved program's
  * hash exactly, so a tier upgrade or downgrade without its own program is
  * refused, and the resolved program must pass the tier check.
+ *
+ * The gate also refuses a tier that cannot be verified end to end (N19). The
+ * oracle reads the tier's evidence two ways: event presence under the CSD's
+ * ladder (tier-ladder.ts) and a registered verifier per listed primitive, which
+ * fails closed while it is a stub (verifier-interface.ts). So the funded CSD's
+ * tiers 0..T must be eligible under `computeCsdEligibility` in its
+ * oracle-enforcing mode (`requireImplementedVerifier`). Otherwise the program
+ * would be sold for evidence nobody can check, and the unenforced tier
+ * evidence above would silently weaken the promise. As authored,
+ * document-print-and-mail is eligible only at tier 0, so its tier2 program
+ * stays pinned but cannot be funded until the CSD and its verifiers are fixed.
  */
 
 import type { CsdEvidenceTier } from "../csd/schema.js";
@@ -42,6 +53,7 @@ import {
   computeVerificationProgramHash,
   type VerificationProgram,
 } from "../types/verification-program.js";
+import { computeCsdEligibility, type EligibilityOptions } from "./eligibility.js";
 import {
   DEVICE_REPORTED_EVENT_TYPES,
   INSPECTION_EVENT_TYPES,
@@ -129,7 +141,9 @@ export interface CommittedProgramEntry {
  * The one committed program per (CSD, non-zero tier). A tier with no entry has
  * no committed program and cannot be funded above tier 0. Only
  * document-print-and-mail tier2 (independent carrier acceptance scan) has one
- * today; tier1 (print only) and tier3 (close on delivery) have none.
+ * today; tier1 (print only) and tier3 (close on delivery) have none. An entry
+ * is necessary, not sufficient: the gate also requires the tier to be
+ * eligible, which print-and-mail tier2 is not yet (see the module header).
  */
 export const COMMITTED_PROGRAM_REGISTRY: readonly CommittedProgramEntry[] = [
   {
@@ -279,24 +293,36 @@ export type AcceptedProgramGateResult =
         | "program-hash-mismatch"
         | "registry-hash-mismatch"
         | "program-on-tier-zero"
+        | "tier-not-in-csd"
+        | "tier-not-eligible"
         | "program-fails-tier-check";
       violations?: TierAssuranceViolation[];
+      /** tier-not-eligible: why tiers 0..T cannot be verified end to end. */
+      reasons?: string[];
     };
 
+export interface AcceptedProgramGateOptions {
+  /** Primitive index eligibility resolves against. Defaults to the v1 vocabulary. */
+  primitiveIndex?: EligibilityOptions["index"];
+}
+
 /**
- * Pre-funding gate for one (CSD, tier) selection. `committedProgramHash` is
- * what the plan or composition commitment carries (null when none). A non-zero
- * tier passes only when that hash equals the resolved program's hash exactly
- * and the program passes `checkCommittedProgramForTier` for this tier.
+ * Pre-funding gate for one (CSD, tier) selection. `evidence` is the funded
+ * CSD's whole evidence map (tiers 0..3), and `committedProgramHash` is what the
+ * plan or composition commitment carries (null when none). A non-zero tier
+ * passes only when that hash equals the resolved program's hash exactly, the
+ * CSD's tiers 0..T are eligible with implemented verifiers, and the program
+ * passes `checkCommittedProgramForTier` for the CSD's own tier.
  */
 export function assertAcceptedProgramForTier(
   input: {
     csd: string;
     tierKey: string;
-    tier: CsdEvidenceTier;
+    evidence: Readonly<Record<string, CsdEvidenceTier>>;
     committedProgramHash: string | null;
   },
   registry: readonly CommittedProgramEntry[] = COMMITTED_PROGRAM_REGISTRY,
+  options: AcceptedProgramGateOptions = {},
 ): AcceptedProgramGateResult {
   const resolved = resolveAcceptedProgram(input.csd, input.tierKey, registry);
   if (!resolved.ok) return { ok: false, code: "no-committed-program" };
@@ -313,7 +339,19 @@ export function assertAcceptedProgramForTier(
   ) {
     return { ok: false, code: "program-hash-mismatch" };
   }
-  const check = checkCommittedProgramForTier(resolved.program, input.tier);
+  const tier = input.evidence?.[input.tierKey];
+  const k = tierNumber(input.tierKey);
+  if (tier === undefined || k === null) return { ok: false, code: "tier-not-in-csd" };
+  const eligibility = computeCsdEligibility(
+    { url: input.csd, evidence: { ...input.evidence } },
+    { requireImplementedVerifier: true, index: options.primitiveIndex },
+  );
+  if (eligibility.eligibleTier < k) {
+    const reasons = eligibility.perTier.filter((t) => t.tier <= k).flatMap((t) => t.reasons);
+    if (reasons.length === 0) reasons.push(`tiers 0..${k} are not all declared`);
+    return { ok: false, code: "tier-not-eligible", reasons };
+  }
+  const check = checkCommittedProgramForTier(resolved.program, tier);
   if (check.violations.length > 0) {
     return { ok: false, code: "program-fails-tier-check", violations: check.violations };
   }
