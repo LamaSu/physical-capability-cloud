@@ -7,6 +7,8 @@
  *
  * Built to gen-UI read-surface contract **v1.5** (coord #666 -> #712 -> #733)
  * with escrow's DTO mapping (#667). Ownership per operator ruling #657/#661.
+ * Contract (rules 1-26): docs/genui/settlement-read-surface-contract.md
+ * Conformance target:    docs/genui/settlement-read-surface-conformance-matrix.md
  *
  * ── WHY THERE IS A PORT AND NOT A CHAIN CALL ─────────────────────────
  * The V-next escrow is NOT DEPLOYED — escrow's M-2 has not produced artifact
