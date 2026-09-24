@@ -17,24 +17,55 @@
  * "Placeholder" = the zero address and every other address whose first 36 hex
  * digits are zero (value < 0x10000): the precompile/sentinel range that
  * contains the old `…0001` default and `…dEaD`-style burn stand-ins. No real
- * treasury lives there.
+ * treasury lives there. Since WP-A round 5 it also covers repeated-digit
+ * addresses and a short list of known burn / public-key test accounts, and a
+ * mixed-case address must pass its EIP-55 checksum.
  *
  * Env is read on every call (no import-time freeze), so a deployment — or a
  * test — sets it before registering the gate.
  */
 
+import { isAddress } from "viem";
+
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const PLACEHOLDER_RE = /^0x0{36}[0-9a-fA-F]{4}$/;
+/** One hex digit repeated 40 times: 0x1111…1111, 0xffff…ffff, 0xaaaa…aaaa (sol #2963). */
+const REPEATED_DIGIT_RE = /^0x([0-9a-fA-F])\1{39}$/;
+/**
+ * Known stand-ins that are not a treasury (WP-A round 5, sol #2963). The first is
+ * a common "dead" burn address. The rest are the Hardhat / Anvil default accounts
+ * #0-#4. Their private keys are PUBLIC (the "test test ... junk" mnemonic), so
+ * anything paid to them can be taken by anyone.
+ */
+const KNOWN_PLACEHOLDERS: ReadonlySet<string> = new Set(
+  [
+    "0xdead000000000000000042069420694206942069",
+    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+  ].map((a) => a.toLowerCase()),
+);
 
-/** True for the zero address and the rest of the sub-0x10000 sentinel range. */
+/**
+ * True for the zero address and the rest of the sub-0x10000 sentinel range, a
+ * repeated-digit address, and the known burn / public-key test accounts.
+ */
 export function isPlaceholderAddress(address: string): boolean {
-  return PLACEHOLDER_RE.test(address);
+  return PLACEHOLDER_RE.test(address) || REPEATED_DIGIT_RE.test(address) || KNOWN_PLACEHOLDERS.has(address.toLowerCase());
 }
 
-/** A well-formed, non-placeholder EVM address from `raw`, else null. */
+/**
+ * A well-formed, non-placeholder EVM address from `raw`, else null. A MIXED-case
+ * address must carry a valid EIP-55 checksum: a mistyped treasury fails it, so the
+ * gateway refuses rather than asking agents to pay a near-miss. All-lowercase (or
+ * all-uppercase) addresses carry no checksum and pass on shape alone.
+ */
 export function configuredAddress(raw: string | undefined): `0x${string}` | null {
   const value = (raw ?? "").trim();
   if (!EVM_ADDRESS_RE.test(value)) return null;
+  if (!isAddress(value, { strict: true })) return null;
   if (isPlaceholderAddress(value)) return null;
   return value as `0x${string}`;
 }

@@ -142,7 +142,7 @@ describe("payment gate prices the normalized path", () => {
     // refused 503 payments_not_configured instead of being gated on the old
     // 0x…0001 placeholder. This suite is about PATH normalization, so it
     // configures a real-looking treasury to exercise the 402 path.
-    process.env.PCC_TREASURY_ADDRESS = "0x1111111111111111111111111111111111111111";
+    process.env.PCC_TREASURY_ADDRESS = "0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
     const { paymentGate } = await import("../middleware/x402-gate.js");
     app = Fastify({ logger: false });
     await paymentGate(app); // hooks on the root: they govern every route

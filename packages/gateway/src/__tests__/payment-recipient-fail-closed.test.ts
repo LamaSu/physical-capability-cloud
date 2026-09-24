@@ -24,8 +24,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 const PLACEHOLDER = "0x0000000000000000000000000000000000000001";
-const TREASURY = "0x1111111111111111111111111111111111111111";
-const TEMPO = "0x2222222222222222222222222222222222222222";
+const TREASURY = "0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+const TEMPO = "0x4b20993bc481177ec7e8f571cecae8a9e22c02db";
 
 const ENV_KEYS = [
   "PCC_PAYMENT_ENABLED",
@@ -202,5 +202,27 @@ describe("F1 — payment disabled is unchanged", () => {
     const routes = await app.inject({ method: "GET", url: "/api/x402/routes" });
     expect(routes.body).not.toContain(PLACEHOLDER);
     await app.close();
+  });
+});
+
+// ── WP-A round 5 (sol #2963): checksum and a broader placeholder policy ────────
+describe("configuredAddress: checksum and known placeholders", () => {
+  it.each<[string, string]>([
+    ["a repeated-digit address", "0x1111111111111111111111111111111111111111"],
+    ["another repeated-digit address", "0xffffffffffffffffffffffffffffffffffffffff"],
+    ["the 0xdead…42069 burn address", "0xdEaD000000000000000042069420694206942069"],
+    ["Hardhat/Anvil account #0 (public private key)", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"],
+    ["a mixed-case address with a BROKEN EIP-55 checksum", "0xF39Fd6e51aad88F6F4ce6aB8827279cffFb92266"],
+  ])("[neg] %s is not a configured recipient", async (_name, address) => {
+    const { configuredAddress } = await import("../config/payment-recipient.js");
+    expect(configuredAddress(address)).toBeNull();
+  });
+
+  it("control: a checksummed mixed-case address and an all-lowercase address are accepted", async () => {
+    const { configuredAddress } = await import("../config/payment-recipient.js");
+    const { getAddress } = await import("viem");
+    const checksummed = getAddress("0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432");
+    expect(configuredAddress(checksummed)).toBe(checksummed);
+    expect(configuredAddress("0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432")).toBe("0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432");
   });
 });
