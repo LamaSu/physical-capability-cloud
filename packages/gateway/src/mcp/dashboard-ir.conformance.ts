@@ -1,6 +1,6 @@
 /**
  * Phase B conformance for dashboard-ir.ts (R5 hardened). Plain Node, no deps:
- *   node --experimental-strip-types dashboard-ir.conformance.ts
+ *   npx tsx dashboard-ir.conformance.ts   (CI runs it via dashboard-ir.conformance-suite.test.ts)
  * The real projection→adapter chain is covered by dashboard-ir.integration.test.ts (vitest/CI).
  */
 import assert from "node:assert/strict";

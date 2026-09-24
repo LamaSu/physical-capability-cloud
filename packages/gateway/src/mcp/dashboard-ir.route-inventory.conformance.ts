@@ -1,6 +1,6 @@
 /**
  * Phase B route-inventory collision proof (sol R7 finding 1). Plain Node, no deps:
- *   node --experimental-strip-types dashboard-ir.route-inventory.conformance.ts
+ *   npx tsx dashboard-ir.route-inventory.conformance.ts   (CI runs it via dashboard-ir.conformance-suite.test.ts)
  *
  * The id-grammar closes the CURRENT collision class, but is not mathematically complete
  * for FUTURE routes (a sibling with a digit/underscore could slip it). This test scans

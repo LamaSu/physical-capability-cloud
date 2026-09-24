@@ -1,6 +1,6 @@
 /**
  * Phase B renderer conformance (item 7). Plain Node, no deps:
- *   node --experimental-strip-types dashboard-ir-renderer.conformance.ts
+ *   npx tsx dashboard-ir-renderer.conformance.ts   (CI runs it via dashboard-ir.conformance-suite.test.ts)
  */
 import assert from "node:assert/strict";
 import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";

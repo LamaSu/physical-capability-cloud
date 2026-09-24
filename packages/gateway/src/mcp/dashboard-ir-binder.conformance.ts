@@ -1,6 +1,6 @@
 /**
  * Phase B binder conformance (item 8 core). Plain Node, no deps:
- *   node --experimental-strip-types dashboard-ir-binder.conformance.ts
+ *   npx tsx dashboard-ir-binder.conformance.ts   (CI runs it via dashboard-ir.conformance-suite.test.ts)
  */
 import assert from "node:assert/strict";
 import { bindUrl, channelFor, clampPoll, startBind, BINDER_LIM, type BinderDeps, type GetResult } from "./dashboard-ir-binder.js";
