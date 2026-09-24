@@ -10,7 +10,7 @@ import logging
 import time
 
 from .http_util import pcc_request
-from .crypto import sign_announcement
+from .crypto import sign_announcement, _HAS_NACL as _ED25519_AVAILABLE
 from .log_capture import sign_ed25519_utf8, LogSigningRefused
 
 log = logging.getLogger("pcc-node.register")
@@ -192,6 +192,24 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
     Each device type maps to one or more capabilities.  Announcements are
     optionally signed with the node's Ed25519 key.
 
+    The announcement goes to the kernel HEARTBEAT (``POST
+    /api/kernels/<id>/heartbeat``), the route that actually writes the
+    capability catalog.  ``POST /api/kernels/<id>/capabilities`` is a stub
+    that answers ``acknowledged`` and stores nothing, so a node registered
+    through it stayed undiscoverable (bus #2622 item 3).  Only capability
+    types are sent: the raw device dicts (URLs, and credentials such as an
+    OctoPrint ``api_key``) never leave the node.
+
+    Each capability claims ``assuranceTiers: [0]``: the node proves nothing
+    by announcing, and the gateway's default for an absent claim is wider.
+
+    Signature (canonical form, so a verifier can rebuild it from the
+    request): Ed25519 over the compact, key-sorted JSON of
+    ``{"kernelId": <the kernel id in the path>, "capabilities": <the body's
+    capability types, in order>, "timestamp": <the body's timestamp>}``.
+    Types are sorted before sending.  Without PyNaCl the announcement goes
+    unsigned: an HMAC is not a signature anyone else can verify.
+
     Parameters
     ----------
     pcc_base : str
@@ -214,50 +232,53 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
         "mdns": ["network-instrument"],
     }
 
-    capabilities = []
+    found = set()
     for dev in devices:
         dtype = dev.get("type", "")
-        slugs = cap_map.get(dtype, [dtype] if dtype else [])
-        for slug in slugs:
-            capabilities.append({
-                "slug": slug,
-                "device": dev,
-            })
+        found.update(cap_map.get(dtype, [dtype] if dtype else []))
+    slugs = sorted(found)
 
-    if not capabilities:
+    if not slugs:
         log.info("No capabilities to announce")
         return
 
     announcement = {
         "kernelId": kernel_id,
-        "capabilities": [c["slug"] for c in capabilities],
+        "capabilities": slugs,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
     signature = ""
-    if secret_key:
+    if secret_key and _ED25519_AVAILABLE:
         signature = sign_announcement(announcement, secret_key)
+    elif secret_key:
+        log.info("PyNaCl is not installed: sending the capability announcement unsigned")
 
     payload = {
-        **announcement,
+        "status": "online",
+        "capabilities": [{"type": slug, "assuranceTiers": [0]} for slug in slugs],
+        "timestamp": announcement["timestamp"],
         "signature": signature,
-        "devices": [c["device"] for c in capabilities],
     }
 
     status, data = pcc_request(
-        "POST", f"/api/kernels/{kernel_id}/capabilities",
+        "POST", f"/api/kernels/{kernel_id}/heartbeat",
         body=payload,
         base_url=pcc_base,
         api_key=api_key,
     )
 
-    if status in (200, 201):
-        log.info(
-            f"Announced {len(capabilities)} capabilities: "
-            f"{', '.join(c['slug'] for c in capabilities)}"
+    if status not in (200, 201):
+        log.warning(f"Capability announcement failed (HTTP {status}): {data}")
+        return
+    received = data.get("capabilitiesReceived") if isinstance(data, dict) else None
+    if isinstance(received, int) and not isinstance(received, bool) and received < len(slugs):
+        log.warning(
+            "Capability announcement: the gateway recorded %d of %d capabilities (%s)",
+            received, len(slugs), ", ".join(slugs),
         )
     else:
-        log.warning(f"Capability announcement failed (HTTP {status}): {data}")
+        log.info(f"Announced {len(slugs)} capabilities: {', '.join(slugs)}")
 
 
 def send_heartbeat(pcc_base, api_key, kernel_id, status_str="online"):
