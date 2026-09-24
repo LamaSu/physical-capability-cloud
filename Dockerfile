@@ -156,9 +156,31 @@ ENV PCC_DB_PATH=/app/data/pcc.sqlite
 ENV SERVE_DASHBOARD=true
 ENV DASHBOARD_PATH=/app/apps/dashboard/dist
 
-# Build provenance (N5): CI passes the commit being built; /api/health reports it.
+# Build provenance (N5): the commit this image was built from, written into the image's
+# FILES (not an ENV), so no runtime variable can override what /api/health reports.
+#   PCC_BUILD_SHA           CI's GHCR image build passes github.sha (ci.yml build-args).
+#   RAILWAY_GIT_COMMIT_SHA  Railway provides it when it builds this Dockerfile from a commit.
+# Only a full 40-hex SHA is recorded. If both are given they must agree, or the build fails
+# (a stale value must never be baked in). If neither is valid, no file is written and
+# /api/health reports the commit as unknown.
 ARG PCC_BUILD_SHA=""
-ENV PCC_BUILD_SHA=${PCC_BUILD_SHA}
+ARG RAILWAY_GIT_COMMIT_SHA=""
+RUN set -e; \
+    ci="$(printf '%s' "$PCC_BUILD_SHA" | tr 'A-F' 'a-f')"; \
+    rw="$(printf '%s' "$RAILWAY_GIT_COMMIT_SHA" | tr 'A-F' 'a-f')"; \
+    full() { case "$1" in ""|*[!0-9a-f]*) return 1;; esac; [ "${#1}" -eq 40 ]; }; \
+    if full "$ci" && full "$rw" && [ "$ci" != "$rw" ]; then \
+      echo "[docker] PCC_BUILD_SHA ($ci) and RAILWAY_GIT_COMMIT_SHA ($rw) disagree; refusing to record a build commit" >&2; exit 1; \
+    fi; \
+    if full "$ci"; then sha="$ci"; arg="PCC_BUILD_SHA"; \
+    elif full "$rw"; then sha="$rw"; arg="RAILWAY_GIT_COMMIT_SHA"; \
+    else sha=""; fi; \
+    if [ -n "$sha" ]; then \
+      printf '{"commit":"%s","buildArg":"%s"}\n' "$sha" "$arg" > /app/BUILD_INFO.json && chmod 0444 /app/BUILD_INFO.json; \
+      echo "[docker] build commit $sha (from $arg)"; \
+    else \
+      echo "[docker] no full 40-hex build commit given; /api/health will report the commit as unknown"; \
+    fi
 
 # As root: ensure the (possibly volume-mounted) /app/data is writable by pcc, then drop to pcc.
 ENTRYPOINT ["/bin/sh", "-c", "if [ \"$(id -u)\" = \"0\" ]; then mkdir -p /app/data && chown -R pcc:pcc /app/data && exec gosu pcc \"$@\"; fi; exec \"$@\"", "--"]

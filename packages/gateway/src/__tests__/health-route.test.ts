@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { healthRoutes } from "../routes/health.js";
+import { readBuildInfo, type BuildInfo } from "../build-info.js";
 
 // GET /api/health + bare GET /health (STATUS-BOARD N5): the original payload
 // fields are unchanged, and both paths additionally report WHICH COMMIT is
-// being served (commit + commitSource, from build-info.ts).
+// being served. The commit comes only from the image's build-info file
+// (build-info.ts); the tests inject it through the plugin's buildInfo option.
 
 const SHA40 = "0123456789abcdef0123456789abcdef01234567";
 const OTHER40 = "fedcba9876543210fedcba9876543210fedcba98";
 const PATHS = ["/api/health", "/health"] as const;
-const PAYLOAD_KEYS = ["commit", "commitSource", "status", "timestamp", "version"];
+const PAYLOAD_KEYS = ["buildArg", "commit", "commitSource", "deployMetadata", "status", "timestamp", "version"];
 
 const ENV_KEYS = ["PCC_BUILD_SHA", "RAILWAY_GIT_COMMIT_SHA"] as const;
 let savedEnv: Record<string, string | undefined> = {};
@@ -33,10 +35,14 @@ afterEach(async () => {
   }
 });
 
+/** The build info a given image file (or none) yields, with the current env. */
+const fromFile = (content: string | null) => () => readBuildInfo({ readFile: () => content });
+const baked = (commit: string, buildArg = "PCC_BUILD_SHA") => JSON.stringify({ commit, buildArg });
+
 /** Build a fresh app AFTER the test has set its env (build info is read at registration). */
-async function buildApp(): Promise<FastifyInstance> {
+async function buildApp(buildInfo: () => BuildInfo = fromFile(null)): Promise<FastifyInstance> {
   app = Fastify({ logger: false });
-  await app.register(healthRoutes);
+  await app.register(healthRoutes, { buildInfo });
   await app.ready();
   return app;
 }
@@ -71,8 +77,7 @@ describe("GET /api/health + /health: original fields unchanged", () => {
   });
 
   it("both paths return the identical shape and the same values (timestamp aside)", async () => {
-    process.env.PCC_BUILD_SHA = SHA40;
-    const both = await getBoth(await buildApp());
+    const both = await getBoth(await buildApp(fromFile(baked(SHA40))));
     const api = both["/api/health"]!.body;
     const bare = both["/health"]!.body;
     expect(Object.keys(api).sort()).toEqual(PAYLOAD_KEYS);
@@ -84,50 +89,47 @@ describe("GET /api/health + /health: original fields unchanged", () => {
 });
 
 describe("GET /api/health + /health: commit / commitSource", () => {
-  it("with nothing set: commit null + commitSource 'unknown' (no invented SHA)", async () => {
+  it("with no build-info file: commit null + commitSource 'unknown' (no invented SHA)", async () => {
     const both = await getBoth(await buildApp());
     for (const url of PATHS) {
       const { body } = both[url]!;
       expect(body.commit, url).toBeNull();
       expect(body.commitSource, url).toBe("unknown");
+      expect(body.buildArg, url).toBeNull();
       // null is reported explicitly, not omitted
       expect(Object.keys(body), url).toContain("commit");
     }
   });
 
-  it("PCC_BUILD_SHA (baked by CI) -> image_build, lowercased", async () => {
-    process.env.PCC_BUILD_SHA = SHA40.toUpperCase();
-    process.env.RAILWAY_GIT_COMMIT_SHA = OTHER40;
-    const both = await getBoth(await buildApp());
+  it("the image file's commit -> image_build, with the build argument that supplied it", async () => {
+    const both = await getBoth(await buildApp(fromFile(baked(SHA40, "RAILWAY_GIT_COMMIT_SHA"))));
     for (const url of PATHS) {
       expect(both[url]!.body.commit, url).toBe(SHA40);
       expect(both[url]!.body.commitSource, url).toBe("image_build");
+      expect(both[url]!.body.buildArg, url).toBe("RAILWAY_GIT_COMMIT_SHA");
     }
   });
 
-  it("only RAILWAY_GIT_COMMIT_SHA -> railway_deploy", async () => {
+  it("NEGATIVE (review #2886): runtime variables never change the reported commit", async () => {
+    process.env.PCC_BUILD_SHA = OTHER40;
     process.env.RAILWAY_GIT_COMMIT_SHA = OTHER40;
-    const both = await getBoth(await buildApp());
+    const withFile = await getBoth(await buildApp(fromFile(baked(SHA40))));
     for (const url of PATHS) {
-      expect(both[url]!.body.commit, url).toBe(OTHER40);
-      expect(both[url]!.body.commitSource, url).toBe("railway_deploy");
+      expect(withFile[url]!.body.commit, url).toBe(SHA40);
+      // Railway's value is reported, but only as deploy metadata.
+      expect(withFile[url]!.body.deployMetadata, url).toEqual({ railwayGitCommitSha: OTHER40 });
+    }
+    await app?.close();
+    const noFile = await getBoth(await buildApp(fromFile(null)));
+    for (const url of PATHS) {
+      expect(noFile[url]!.body.commit, url).toBeNull();
+      expect(noFile[url]!.body.commitSource, url).toBe("unknown");
     }
   });
 
-  it("an empty PCC_BUILD_SHA (Dockerfile ARG default) falls back to RAILWAY_GIT_COMMIT_SHA", async () => {
-    process.env.PCC_BUILD_SHA = "";
-    process.env.RAILWAY_GIT_COMMIT_SHA = OTHER40;
-    const both = await getBoth(await buildApp());
-    for (const url of PATHS) {
-      expect(both[url]!.body.commit, url).toBe(OTHER40);
-      expect(both[url]!.body.commitSource, url).toBe("railway_deploy");
-    }
-  });
-
-  it("never echoes malformed env content: injection-looking values -> null / 'unknown'", async () => {
-    process.env.PCC_BUILD_SHA = "abc1234\nX-Injected: pwned";
+  it("never echoes malformed content: injection-looking values -> null / 'unknown'", async () => {
     process.env.RAILWAY_GIT_COMMIT_SHA = "abc; rm -rf /";
-    const both = await getBoth(await buildApp());
+    const both = await getBoth(await buildApp(fromFile(baked("abc1234\nX-Injected: pwned"))));
     for (const url of PATHS) {
       const { body, raw } = both[url]!;
       expect(body.commit, url).toBeNull();

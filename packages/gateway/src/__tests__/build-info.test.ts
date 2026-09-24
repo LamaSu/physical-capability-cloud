@@ -1,147 +1,83 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { readBuildInfo, type BuildInfo } from "../build-info.js";
+import { describe, it, expect, vi } from "vitest";
+import { BUILD_INFO_FILE, readBuildInfo, type BuildInfo } from "../build-info.js";
 
-// Build provenance (STATUS-BOARD N5): readBuildInfo decides which commit
-// /api/health reports. It must never echo arbitrary env content and never
-// invent a SHA: a malformed value is treated exactly like an absent one.
+// Build provenance (STATUS-BOARD N5): readBuildInfo decides which commit /api/health
+// reports. The commit comes ONLY from the file baked into the image at build time, so no
+// runtime variable can change it (coord-watch #2886: a service variable used to override the
+// baked value, and was then reported as the build). It never echoes arbitrary content and
+// never invents a SHA.
 
 const SHA40 = "0123456789abcdef0123456789abcdef01234567";
 const OTHER40 = "fedcba9876543210fedcba9876543210fedcba98";
 
-const UNKNOWN: BuildInfo = { commit: null, commitSource: "unknown" };
+const file = (content: string | null) => () => content;
+const info = (content: string | null, env: NodeJS.ProcessEnv = {}) => readBuildInfo({ readFile: file(content), env });
+const baked = (commit: unknown, buildArg: unknown = "PCC_BUILD_SHA") => JSON.stringify({ commit, buildArg });
+const UNKNOWN: BuildInfo = { commit: null, commitSource: "unknown", buildArg: null, deployMetadata: { railwayGitCommitSha: null } };
 
-const ENV_KEYS = ["PCC_BUILD_SHA", "RAILWAY_GIT_COMMIT_SHA"] as const;
-let savedEnv: Record<string, string | undefined> = {};
-
-beforeEach(() => {
-  savedEnv = {};
-  for (const key of ENV_KEYS) {
-    savedEnv[key] = process.env[key];
-    delete process.env[key];
-  }
-});
-
-afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const value = savedEnv[key];
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-});
-
-describe("readBuildInfo: precedence", () => {
-  it("prefers PCC_BUILD_SHA (baked by CI) over RAILWAY_GIT_COMMIT_SHA", () => {
-    expect(readBuildInfo({ PCC_BUILD_SHA: SHA40, RAILWAY_GIT_COMMIT_SHA: OTHER40 })).toEqual({
+describe("readBuildInfo: the image file is the only source of `commit`", () => {
+  it("reads the commit and the build argument the Dockerfile recorded", () => {
+    expect(info(baked(SHA40))).toEqual({
       commit: SHA40,
       commitSource: "image_build",
+      buildArg: "PCC_BUILD_SHA",
+      deployMetadata: { railwayGitCommitSha: null },
+    });
+    expect(info(baked(OTHER40, "RAILWAY_GIT_COMMIT_SHA"))).toMatchObject({ commit: OTHER40, buildArg: "RAILWAY_GIT_COMMIT_SHA" });
+  });
+
+  it("reads the fixed path /app/BUILD_INFO.json, which no variable can redirect", () => {
+    expect(BUILD_INFO_FILE).toBe("/app/BUILD_INFO.json");
+    const readFile = vi.fn(() => null);
+    readBuildInfo({ readFile, env: { PCC_BUILD_INFO_PATH: "/tmp/fake.json" } as NodeJS.ProcessEnv });
+    expect(readFile).toHaveBeenCalledWith("/app/BUILD_INFO.json");
+  });
+
+  it("NEGATIVE (review #2886): a runtime PCC_BUILD_SHA never reaches `commit`, with or without the file", () => {
+    expect(info(null, { PCC_BUILD_SHA: SHA40 })).toEqual(UNKNOWN);
+    expect(info(baked(SHA40), { PCC_BUILD_SHA: OTHER40 }).commit).toBe(SHA40);
+  });
+
+  it("NEGATIVE: Railway's runtime commit is deploy metadata, never `commit`", () => {
+    const r = info(null, { RAILWAY_GIT_COMMIT_SHA: OTHER40.toUpperCase() });
+    expect(r.commit).toBeNull();
+    expect(r.commitSource).toBe("unknown");
+    expect(r.deployMetadata).toEqual({ railwayGitCommitSha: OTHER40 });
+    expect(info(baked(SHA40), { RAILWAY_GIT_COMMIT_SHA: OTHER40 })).toMatchObject({
+      commit: SHA40,
+      deployMetadata: { railwayGitCommitSha: OTHER40 },
     });
   });
 
-  it("uses RAILWAY_GIT_COMMIT_SHA when PCC_BUILD_SHA is absent", () => {
-    expect(readBuildInfo({ RAILWAY_GIT_COMMIT_SHA: OTHER40 })).toEqual({
-      commit: OTHER40,
-      commitSource: "railway_deploy",
-    });
+  it("NEGATIVE (review #2886): only a full 40-hex SHA is accepted; a prefix could be ambiguous", () => {
+    expect(info(baked("0123456"))).toEqual(UNKNOWN);
+    expect(info(baked(SHA40.slice(0, 39)))).toEqual(UNKNOWN);
+    expect(info(baked(SHA40 + "0"))).toEqual(UNKNOWN);
+    expect(info(null, { RAILWAY_GIT_COMMIT_SHA: "0123456" }).deployMetadata.railwayGitCommitSha).toBeNull();
   });
 
-  it("returns { commit: null, commitSource: 'unknown' } when both are absent", () => {
-    expect(readBuildInfo({})).toEqual(UNKNOWN);
-  });
-
-  it("falls through an INVALID PCC_BUILD_SHA to a valid RAILWAY_GIT_COMMIT_SHA", () => {
-    expect(readBuildInfo({ PCC_BUILD_SHA: "not-a-sha", RAILWAY_GIT_COMMIT_SHA: OTHER40 })).toEqual({
-      commit: OTHER40,
-      commitSource: "railway_deploy",
-    });
-  });
-
-  it("falls through an EMPTY PCC_BUILD_SHA (the Dockerfile ARG default) to RAILWAY_GIT_COMMIT_SHA", () => {
-    expect(readBuildInfo({ PCC_BUILD_SHA: "", RAILWAY_GIT_COMMIT_SHA: OTHER40 })).toEqual({
-      commit: OTHER40,
-      commitSource: "railway_deploy",
-    });
-  });
-
-  it("is 'unknown' when both values are present but invalid (never echoes either)", () => {
-    expect(readBuildInfo({ PCC_BUILD_SHA: "${evil}", RAILWAY_GIT_COMMIT_SHA: "abc; rm -rf /" })).toEqual(
-      UNKNOWN,
-    );
-  });
-
-  it("reads process.env by default", () => {
-    process.env.PCC_BUILD_SHA = SHA40;
-    expect(readBuildInfo()).toEqual({ commit: SHA40, commitSource: "image_build" });
-
-    delete process.env.PCC_BUILD_SHA;
-    process.env.RAILWAY_GIT_COMMIT_SHA = OTHER40;
-    expect(readBuildInfo()).toEqual({ commit: OTHER40, commitSource: "railway_deploy" });
-
-    delete process.env.RAILWAY_GIT_COMMIT_SHA;
-    expect(readBuildInfo()).toEqual(UNKNOWN);
-  });
-});
-
-describe("readBuildInfo: accepted values", () => {
-  it.each([
-    ["7-char short SHA", "abc1234", "abc1234"],
-    ["40-char full SHA", SHA40, SHA40],
-    ["uppercase hex, lowercased", "ABCDEF0123456789ABCDEF0123456789ABCDEF01", "abcdef0123456789abcdef0123456789abcdef01"],
-    ["mixed case, lowercased", "AbC1234", "abc1234"],
-    ["surrounding whitespace trimmed", "  abc1234\t", "abc1234"],
-    ["trailing newline trimmed (e.g. from a file or $(...))", "abc1234\n", "abc1234"],
-  ])("accepts %s", (_label, raw, expected) => {
-    expect(readBuildInfo({ PCC_BUILD_SHA: raw })).toEqual({ commit: expected, commitSource: "image_build" });
-    expect(readBuildInfo({ RAILWAY_GIT_COMMIT_SHA: raw })).toEqual({
-      commit: expected,
-      commitSource: "railway_deploy",
-    });
-  });
-});
-
-describe("readBuildInfo: rejected values are treated as absent", () => {
-  it.each([
-    ["empty string", ""],
-    ["spaces only", "   "],
-    ["tabs/newlines only", "\t\n\r\n"],
-    ["6 chars (too short)", "abc123"],
-    ["41 chars (too long)", `${SHA40}8`],
-    ["64-char hex (longer than a SHA-1)", "a".repeat(64)],
-    ["non-hex letters", "zzzzzzz"],
-    ["hex-like with a non-hex char", "abc123g"],
-    ["0x prefix", "0xabc1234"],
-    ["shell injection", "abc; rm -rf /"],
-    ["template injection", "${evil}"],
-    ["embedded newline (second line smuggled)", "abc1234\ndeadbeef"],
-    ["embedded newline + header injection", "abc1234\nX-Injected: 1"],
-    ["embedded CRLF", "abc1234\r\ndeadbee"],
-    ["internal space", "abc1234 deadbee"],
-    ["html", "<script>alert(1)</script>"],
-  ])("rejects %s", (_label, raw) => {
-    expect(readBuildInfo({ PCC_BUILD_SHA: raw })).toEqual(UNKNOWN);
-    expect(readBuildInfo({ RAILWAY_GIT_COMMIT_SHA: raw })).toEqual(UNKNOWN);
-  });
-});
-
-describe("readBuildInfo: invariants", () => {
-  it("commitSource is 'unknown' exactly when commit is null", () => {
-    const envs: NodeJS.ProcessEnv[] = [
-      {},
-      { PCC_BUILD_SHA: SHA40 },
-      { RAILWAY_GIT_COMMIT_SHA: OTHER40 },
-      { PCC_BUILD_SHA: "zzzzzzz" },
-      { RAILWAY_GIT_COMMIT_SHA: "" },
-      { PCC_BUILD_SHA: "zzzzzzz", RAILWAY_GIT_COMMIT_SHA: "${evil}" },
-    ];
-    for (const env of envs) {
-      const info = readBuildInfo(env);
-      expect(info.commit === null).toBe(info.commitSource === "unknown");
-      if (info.commit !== null) expect(info.commit).toMatch(/^[0-9a-f]{7,40}$/);
+  it("NEGATIVE: an absent, malformed or tampered file is unknown, never echoed", () => {
+    for (const content of [
+      null,
+      "",
+      "not json",
+      "[]",
+      "null",
+      JSON.stringify(SHA40),
+      baked(SHA40.toUpperCase()),
+      baked(` ${SHA40}`),
+      baked(`${SHA40}\nX-Injected: pwned`),
+      baked(SHA40, "SOMETHING_ELSE"),
+      baked(SHA40, null),
+      baked(12345),
+      baked(SHA40) + " ".repeat(600),
+    ]) {
+      expect(info(content), String(content).slice(0, 40)).toEqual(UNKNOWN);
     }
   });
 
-  it("does not mutate the env it is given", () => {
-    const env: NodeJS.ProcessEnv = { PCC_BUILD_SHA: "  ABC1234 ", RAILWAY_GIT_COMMIT_SHA: "zzz" };
-    readBuildInfo(env);
-    expect(env).toEqual({ PCC_BUILD_SHA: "  ABC1234 ", RAILWAY_GIT_COMMIT_SHA: "zzz" });
+  it("an unreadable path (the default reader) is unknown, not an error", () => {
+    // /app/BUILD_INFO.json does not exist outside the image.
+    expect(readBuildInfo({ env: {} })).toEqual(UNKNOWN);
   });
 });
