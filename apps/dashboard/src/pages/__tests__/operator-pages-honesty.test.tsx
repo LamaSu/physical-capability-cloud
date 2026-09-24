@@ -241,6 +241,29 @@ describe("gateway unreachable: the pages say so, and show nothing invented", () 
   });
 });
 
+describe("an account answer without a machines section", () => {
+  const PARTIAL: Routes = {
+    "GET /api/agent/me": { status: 200, body: { ok: true, as_of: NOW, identity: ME.identity, kernels: { count: null, items: [], unavailable: "db timeout" } } },
+  };
+
+  it("dashboard says the machines are unavailable, not that there are none", async () => {
+    stubFetch(PARTIAL);
+    const t = await render(<OperatorDashboardPage />);
+    expect(t).toContain("Couldn't load your machines");
+    expect(t).not.toMatch(/No machines are registered|EMERGENCY STOP/);
+  });
+
+  it("mobile says the same, and the account tab does not crash on missing sections", async () => {
+    stubFetch({ "GET /api/agent/me": { status: 200, body: { ok: true, as_of: NOW, identity: ME.identity } } });
+    let t = await render(<OperatorMobilePage />);
+    expect(t).toContain("Couldn't load your machines");
+    expect(t).not.toContain("No machines are registered");
+    await click(button("Account"));
+    t = await waitForText(/op@example\.com/);
+    expect(t).toMatch(/Unavailable: unexpected response/);
+  });
+});
+
 // ── signed in, gateway answering ─────────────────────────────────────────────
 
 describe("dashboard with a real account", () => {

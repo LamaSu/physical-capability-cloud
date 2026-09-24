@@ -13,8 +13,18 @@
  * and the page tells the operator to use the machine's physical stop.
  */
 
-import type { JobDTO } from "../types/dto.js";
+import type { AgentMeDTO, JobDTO } from "../types/dto.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+
+/**
+ * The signed-in operator's machines from GET /api/agent/me, or null when that
+ * section is missing, malformed or reported unavailable (never an empty list).
+ */
+export function kernelsOf(me: AgentMeDTO | undefined): AgentMeDTO["kernels"]["items"] | null {
+  const k = me?.kernels;
+  if (!k || k.unavailable || !Array.isArray(k.items)) return null;
+  return k.items;
+}
 
 const API_ROOT: string = import.meta.env.VITE_PCC_URL ?? "";
 

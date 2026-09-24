@@ -11,6 +11,7 @@ import {
   decideApproval,
   emergencyResume,
   emergencyStop,
+  kernelsOf,
   listPendingApprovals,
   readStopState,
   type PendingApproval,
@@ -269,7 +270,7 @@ export function OperatorDashboardPage() {
     setPageMeta("Operator Dashboard", me.data?.identity.operator ?? "");
   }, [setPageMeta, me.data?.identity.operator]);
 
-  const kernels = me.data && !me.data.kernels.unavailable ? me.data.kernels.items : null;
+  const kernels = kernelsOf(me.data);
 
   return (
     <div className="space-y-6">
@@ -290,9 +291,9 @@ export function OperatorDashboardPage() {
       {(activeTab === "overview" || activeTab === "approvals") && me.isLoading && (
         <GlassPanel padding="lg" className="text-center text-xs text-white/30">Loading your account…</GlassPanel>
       )}
-      {(activeTab === "overview" || activeTab === "approvals") && (me.isError || (me.data && me.data.kernels.unavailable)) && (
+      {(activeTab === "overview" || activeTab === "approvals") && (me.isError || (me.data && kernels === null)) && (
         <GlassPanel padding="lg">
-          <UnavailableState what="your machines" error={me.error ?? me.data?.kernels.unavailable} onRetry={() => void me.refetch()} />
+          <UnavailableState what="your machines" error={me.error ?? me.data?.kernels?.unavailable ?? "unexpected response from /api/agent/me"} onRetry={() => void me.refetch()} />
         </GlassPanel>
       )}
 
@@ -303,12 +304,12 @@ export function OperatorDashboardPage() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             <GlassPanel padding="md" className="text-center">
               <div className="text-[10px] text-white/30">Your machines</div>
-              <div className="text-2xl font-mono text-white/70 mt-1">{me.data.kernels.count ?? kernels.length}</div>
+              <div className="text-2xl font-mono text-white/70 mt-1">{me.data.kernels?.count ?? kernels.length}</div>
             </GlassPanel>
             <GlassPanel padding="md" className="text-center">
               <div className="text-[10px] text-white/30">Jobs in flight</div>
               <div className="text-2xl font-mono text-white/70 mt-1">
-                {me.data.work.unavailable ? "—" : me.data.work.in_flight}
+                {!me.data.work || me.data.work.unavailable ? "—" : me.data.work.in_flight}
               </div>
               <div className="text-[10px] text-white/25">pending, queued, in progress or paused</div>
             </GlassPanel>
@@ -322,7 +323,7 @@ export function OperatorDashboardPage() {
           {kernels.length === 0 && (
             <GlassPanel padding="lg" className="text-center space-y-1">
               <div className="text-sm text-white/50">No machines are registered to this key yet.</div>
-              {me.data.next.map((n) => <div key={n} className="text-xs text-white/30">{n}</div>)}
+              {(me.data.next ?? []).map((n) => <div key={n} className="text-xs text-white/30">{n}</div>)}
             </GlassPanel>
           )}
         </div>

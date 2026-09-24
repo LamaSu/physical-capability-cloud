@@ -15,6 +15,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   base64FromDataUrl,
+  kernelsOf,
   checkPhoto,
   comparePhotos,
   decideApproval,
@@ -51,6 +52,24 @@ function fakeFetch(routes: Record<string, Reply>) {
   });
   return { impl: impl as unknown as typeof fetch, calls };
 }
+
+describe("kernelsOf: the account's machines, or null (never an empty list by default)", () => {
+  const me = (kernels: unknown) => ({ ok: true, as_of: "t", identity: { operator: "o", key_id: "k", key_name: null, scopes: [] }, kernels }) as never;
+
+  it("returns the items when the section is present", () => {
+    expect(kernelsOf(me({ count: 1, items: [{ id: "k1", name: "n", status: "online", last_heartbeat: null }] }))).toEqual([
+      { id: "k1", name: "n", status: "online", last_heartbeat: null },
+    ]);
+    expect(kernelsOf(me({ count: 0, items: [] }))).toEqual([]);
+  });
+
+  it("is null when the section is missing, malformed or unavailable", () => {
+    expect(kernelsOf(undefined)).toBeNull();
+    expect(kernelsOf(me(undefined))).toBeNull();
+    expect(kernelsOf(me({ count: null, items: [], unavailable: "db timeout" }))).toBeNull();
+    expect(kernelsOf(me({ count: 1, items: "nope" }))).toBeNull();
+  });
+});
 
 describe("emergencyStop: stopped only when the gateway confirms it for this machine", () => {
   it("confirmed stop", async () => {

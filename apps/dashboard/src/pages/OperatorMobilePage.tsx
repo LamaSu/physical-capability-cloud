@@ -9,6 +9,7 @@ import {
   base64FromDataUrl,
   checkPhoto,
   comparePhotos,
+  kernelsOf,
   listKernelJobs,
   sendSupportReport,
   type PhotoCheck,
@@ -68,7 +69,7 @@ function readDataUrl(file: File): Promise<string> {
 /** The account's machines, from GET /api/agent/me. `null` while unknown. */
 function useMyKernels() {
   const me = useAgentMe();
-  const kernels = me.data && !me.data.kernels.unavailable ? me.data.kernels.items : null;
+  const kernels = kernelsOf(me.data);
   return { me, kernels };
 }
 
@@ -426,8 +427,8 @@ function JobsTab() {
   });
 
   if (me.isLoading) return <Spinner />;
-  if (me.isError || (me.data && me.data.kernels.unavailable)) {
-    return <UnavailableState what="your machines" error={me.error ?? me.data?.kernels.unavailable} onRetry={() => void me.refetch()} />;
+  if (me.isError || (me.data && kernels === null)) {
+    return <UnavailableState what="your machines" error={me.error ?? me.data?.kernels?.unavailable ?? "unexpected response from /api/agent/me"} onRetry={() => void me.refetch()} />;
   }
   if (kernels && kernels.length === 0) {
     return (
@@ -480,7 +481,9 @@ function AccountTab() {
   if (me.isError || !me.data) {
     return <UnavailableState what="your account" error={me.error} onRetry={() => void me.refetch()} />;
   }
-  const { identity, kernels, keys } = me.data;
+  const { identity } = me.data;
+  const kernels = kernelsOf(me.data);
+  const wildcardKeys = me.data.keys?.wildcard_keys ?? 0;
   const wildcard = identity.scopes.includes("*");
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
@@ -499,15 +502,17 @@ function AccountTab() {
 
       {wildcard && (
         <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200/80">
-          This key has every permission (wildcard). {keys.wildcard_keys > 1 ? `${keys.wildcard_keys} of your keys do.` : ""}
+          This key has every permission (wildcard). {wildcardKeys > 1 ? `${wildcardKeys} of your keys do.` : ""}
         </div>
       )}
 
       <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-2">
         <div className="text-xs text-white/30 uppercase tracking-wider">Your machines</div>
-        {kernels.unavailable && <div className="text-xs text-amber-300/80">Unavailable: {kernels.unavailable}</div>}
-        {!kernels.unavailable && kernels.items.length === 0 && <div className="text-xs text-white/40">None registered.</div>}
-        {kernels.items.map((k) => (
+        {kernels === null && (
+          <div className="text-xs text-amber-300/80">Unavailable: {me.data.kernels?.unavailable ?? "unexpected response"}</div>
+        )}
+        {kernels !== null && kernels.length === 0 && <div className="text-xs text-white/40">None registered.</div>}
+        {(kernels ?? []).map((k) => (
           <div key={k.id} className="flex items-center justify-between text-xs">
             <span className="text-white/60">{k.name || k.id}</span>
             <span className="text-white/40">
