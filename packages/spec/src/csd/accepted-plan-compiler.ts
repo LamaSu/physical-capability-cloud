@@ -527,6 +527,14 @@ function readGateResult(g: unknown): { ok: true } | { ok: false; code: string } 
 
 /** Compile an accepted, server-validated plan into V-next jobs. Fail closed on any violation. */
 export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileDeps = {}): CompileResult {
+  // The injected callbacks are read ONCE, before any input (astra round 4): no callback can swap a
+  // dependency out from under a later read. Reading `deps` is trusted server wiring; a slot that
+  // holds something other than a function is treated fail-closed below.
+  const gateFn = deps.assertProgramForTier;
+  const splitFn = deps.splitNet;
+  if (splitFn !== undefined && typeof splitFn !== "function") {
+    return { ok: false, violations: [{ code: "economics-malformed", detail: "dependency" }] };
+  }
   // Only compiler-owned, frozen data from here on: see `snapshotInput`.
   const snap = snapshotInput(untrusted);
   if ("refused" in snap) return { ok: false, violations: [snap.refused] };
@@ -650,11 +658,11 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
       v.push({ code: "program-required-for-tier", nodeId: id });
       continue;
     }
-    if (!deps.assertProgramForTier) {
+    if (typeof gateFn !== "function") {
       v.push({ code: "program-gate-missing", nodeId: id });
       continue;
     }
-    const gate = readGateResult(deps.assertProgramForTier({ csd: n.csd, tierKey: n.tierKey, committedProgramHash: n.committedProgramHash }));
+    const gate = readGateResult(gateFn({ csd: n.csd, tierKey: n.tierKey, committedProgramHash: n.committedProgramHash }));
     if (!gate.ok) {
       v.push({ code: "program-gate-refused", nodeId: id, reason: gate.code });
       continue;
@@ -719,8 +727,8 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
   const payoutsOf = new Map<string, PayoutEntry[]>();
   let economicTermsHash: `0x${string}` | null = null;
   let rightsTermsHash: `0x${string}` | null = null;
-  if (deps.splitNet) {
-    const split = splitPayouts(order, byId, econOf, deps.splitNet);
+  if (splitFn !== undefined) {
+    const split = splitPayouts(order, byId, econOf, splitFn);
     if (!split.ok) return { ok: false, violations: sortViolations(split.violations) };
     for (const [id, legs] of split.payouts) payoutsOf.set(id, legs);
     economicTermsHash = split.economicTermsHash;
@@ -839,10 +847,10 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
     if (typeof res !== "object" || res === null) return "malformed";
     const r = res as Record<string, unknown>;
     const ok = r.ok;
-    if (ok === false) return { ok: false, code: r.code };
+    if (ok === false) return { ok: false, code: leaf(r.code) };
     if (ok !== true) return "malformed";
-    const economicTermsHash = r.economicTermsHash;
-    const rightsTermsHash = r.rightsTermsHash;
+    const economicTermsHash = leaf(r.economicTermsHash);
+    const rightsTermsHash = leaf(r.rightsTermsHash);
     const unitsRaw = r.units;
     if (!Array.isArray(unitsRaw)) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
     const unitCount = lengthOf(unitsRaw);
@@ -856,10 +864,10 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
         continue;
       }
       const ur = u as Record<string, unknown>;
-      const unitRef = ur.unitRef;
-      const gross = ur.gross;
-      const fee = ur.fee;
-      const net = ur.net;
+      const unitRef = leaf(ur.unitRef);
+      const gross = leaf(ur.gross);
+      const fee = leaf(ur.fee);
+      const net = leaf(ur.net);
       const payoutsRaw = ur.payouts;
       let payouts: UnitSnapshot["payouts"] = "not-array";
       if (Array.isArray(payoutsRaw)) {
@@ -872,7 +880,7 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
             if (typeof leg !== "object" || leg === null) legs.push({ recipient: undefined, amount: undefined });
             else {
               const lr = leg as Record<string, unknown>;
-              legs.push({ recipient: lr.recipient, amount: lr.amount });
+              legs.push({ recipient: leaf(lr.recipient), amount: leaf(lr.amount) });
             }
           }
           payouts = legs;
