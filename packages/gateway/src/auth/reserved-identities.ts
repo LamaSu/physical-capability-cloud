@@ -173,10 +173,14 @@ function rawSqlite(): RawSqlite {
 // Each query answers "does anything already belong to this id?" — LIMIT 1, no
 // data returned. Every stored owner id goes through pcc_norm (= normalizeIdentity)
 // and is compared with the needle folded by the same function. A function over
-// the column cannot use a b-tree index on it, so each lookup is a scan of that
-// table (or of its owner index, when it covers the query); the earlier
-// lower(trim(col)) form was a scan too, and both paths that run it are
-// rate-limited self-service signups.
+// the column cannot use a b-tree index on it, so each lookup is a scan: of the
+// table for api_keys, shop_kernels and machine_registrations, of the covering
+// owner index for job_offers and ui_artifacts (EXPLAIN QUERY PLAN). The earlier
+// lower(trim(col)) form was a scan too. Both callers are rate-limited signups:
+// provision at 5 per IP per hour (canProvision), quickstart only by the global
+// per-IP limiter (and it also creates a wallet, a key and a schedule per call).
+// An expression index would need a schema change and the function registered on
+// every connection that writes these tables, so it is not done here.
 //
 // machine_registrations.operator is JSON: CASE (evaluated lazily, unlike AND)
 // guards json_extract, so one malformed row cannot make every lookup throw.
