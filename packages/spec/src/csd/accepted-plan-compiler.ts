@@ -106,8 +106,20 @@ export interface AcceptedPlanNode {
   operator: Address;
   /** The payout wallet the operator agent requested and the payer accepted (#1690). */
   payoutAddress: Address;
-  /** Gross price in token base units, from the server-side quote. */
+  /**
+   * Gross price in token base units: what the payer pays for this unit. Without an economic agreement
+   * it is the operator's live quote (R10). With one, royalties go ON TOP (economics #3025, option b),
+   * so the gross is the agreement's unit gross and `quoteBaseUnits` carries the operator's own price.
+   */
   grossBaseUnits: bigint;
+  /**
+   * The operator's live quote in base units (R10), when an agreement grosses the unit up. It must be at
+   * most the gross, and it is absent without an agreement (it then equals the gross). The splitter
+   * receives it, so economics can hold the operator's legs to at least quote - floor(quote*feeBps/1e4)
+   * (OPERATOR_BELOW_QUOTE). The quote is committed through `matchedCapabilityDigest`, which R10
+   * recomputes from the live row.
+   */
+  quoteBaseUnits?: bigint;
   /** The deal-snapshot digest the quote was made against (R10 recomputes it from the live row). */
   matchedCapabilityDigest: string;
   /** Server-resolved program hash for (csd, tierKey); null at tier 0. */
@@ -284,6 +296,8 @@ export interface SplitUnitInput {
   nodeId: string;
   operator: Address;
   payoutAddress: Address;
+  /** The operator's live quote: at most g; equal to g unless an agreement grossed the unit up. */
+  quote: bigint;
   g: bigint;
   f: bigint;
   n: bigint;
@@ -504,7 +518,7 @@ function execJson(x: unknown): PlanJsonObject | InvalidExecutionJson {
 
 const NODE_FIELDS = [
   "nodeId", "capabilityId", "capabilityType", "csd", "tierKey", "operator", "payoutAddress",
-  "grossBaseUnits", "matchedCapabilityDigest", "committedProgramHash",
+  "grossBaseUnits", "quoteBaseUnits", "matchedCapabilityDigest", "committedProgramHash",
 ] as const;
 
 /**
@@ -655,6 +669,10 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     for (const field of ["inputs", "constraints"] as const) {
       const x: unknown = n[field];
       if (x instanceof InvalidExecutionJson) v.push({ code: "invalid-execution-json", nodeId: id, field, reason: x.reason });
+    }
+    // The quote, when present, is the operator's own price: positive and never above the gross it is part of.
+    if (n.quoteBaseUnits !== undefined && (typeof n.quoteBaseUnits !== "bigint" || n.quoteBaseUnits <= 0n || (typeof n.grossBaseUnits === "bigint" && n.quoteBaseUnits > n.grossBaseUnits))) {
+      v.push({ code: "invalid-node-field", nodeId: id, field: "quoteBaseUnits" });
     }
     if (typeof n.grossBaseUnits !== "bigint" || n.grossBaseUnits < MIN_GROSS_BASE_UNITS || n.grossBaseUnits > MAX_GROSS_BASE_UNITS) {
       v.push({ code: "gross-out-of-range", nodeId: id });
@@ -1017,7 +1035,7 @@ function splitPayouts(
     order.map((id) => {
       const node = byId.get(id)!;
       const e = econOf.get(id)!;
-      return { nodeId: id, operator: node.operator, payoutAddress: node.payoutAddress, g: e.g, f: e.f, n: e.n };
+      return { nodeId: id, operator: node.operator, payoutAddress: node.payoutAddress, quote: node.quoteBaseUnits ?? e.g, g: e.g, f: e.f, n: e.n };
     }),
   );
   const snap = snapshotSplit(res, order.length);
