@@ -459,3 +459,84 @@ describe("/prove hardening (WP-B)", () => {
     expect(second.metadata).toMatchObject({ from: "reviewing", to: "reviewing", previousEvidenceDigest: expectedDigest });
   });
 });
+
+describe("owner routes fail closed and the review record cannot be forged or rewritten", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    setEvidencePhotoStoreForTests({ put: async () => ({ cid: "bafk-unused" }) });
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    setEvidencePhotoStoreForTests(null);
+    await app.close();
+    closeStore();
+  });
+
+  const patch = (regId: string, payload: Record<string, unknown>, operator: string | null = OWNER) =>
+    app.inject({
+      method: "PATCH",
+      url: `/api/onboard/registrations/${regId}`,
+      headers: operator === null ? {} : { "x-test-operator": operator },
+      payload,
+    });
+  const del = (regId: string, operator: string | null = OWNER) =>
+    app.inject({
+      method: "DELETE",
+      url: `/api/onboard/registrations/${regId}`,
+      headers: operator === null ? {} : { "x-test-operator": operator },
+    });
+
+  it("PATCH and DELETE with no authenticated actor are 401 and change nothing", async () => {
+    const regId = await register(app);
+    const before = stored(regId);
+    expect((await patch(regId, { description: "hijacked" }, null)).statusCode).toBe(401);
+    expect((await del(regId, null)).statusCode).toBe(401);
+    expect(stored(regId).status).toBe("submitted");
+    expect(stored(regId).description ?? null).toBe(before.description ?? null);
+  });
+
+  it("PATCH and DELETE of a registration with no owner identity are 403 for everyone", async () => {
+    const regId = await register(app, { displayName: "Nobody" });
+    expect((await patch(regId, { description: "mine now" }, OTHER)).statusCode).toBe(403);
+    expect((await del(regId, OTHER)).statusCode).toBe(403);
+    expect(stored(regId).status).toBe("submitted");
+  });
+
+  it("the owner cannot rewrite the review record once evidence is submitted", async () => {
+    const regId = await register(app);
+    expect((await prove(app, regId, { evidence: { deviceHealth: DEVICE_HEALTH } })).statusCode).toBe(200);
+    const record = stored(regId).description;
+    const forged = `PROOF SUBMITTED: ${JSON.stringify({ evidenceTierClaim: 2, evidenceDigest: "sha256:" + "e".repeat(64) })}`;
+    for (const description of [forged, "plain text", null]) {
+      const res = await patch(regId, { description });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("evidence_locked");
+    }
+    expect(stored(regId).description).toBe(record);
+    // Fields that are not the review record stay editable.
+    expect((await patch(regId, { pricing: { baseCost: "5", minimum: "5", currency: "USDC" } })).statusCode).toBe(200);
+    expect(stored(regId).description).toBe(record);
+  });
+
+  it("a forged review record is refused at /register and by PATCH before any evidence", async () => {
+    const forged = `PROOF SUBMITTED: ${JSON.stringify({ evidenceTierClaim: 2 })}`;
+    const reg = await app.inject({
+      method: "POST",
+      url: "/api/onboard/register",
+      payload: { name: "Forger", category: "fdm", description: forged, operator: { walletAddress: OWNER, displayName: "O", certifications: [], trainingAcknowledgments: {} } },
+    });
+    expect(reg.statusCode).toBe(400);
+    expect(reg.json().error).toBe("reserved_description");
+
+    const regId = await register(app);
+    const res = await patch(regId, { description: "  proved: {\"tier\":2}" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("reserved_description");
+    // An ordinary description edit before evidence still works.
+    expect((await patch(regId, { description: "A Prusa MK4 in my garage" })).statusCode).toBe(200);
+    expect(stored(regId).description).toBe("A Prusa MK4 in my garage");
+  });
+});

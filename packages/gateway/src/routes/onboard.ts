@@ -20,6 +20,7 @@ import {
   getEvidencePhotoStore,
   inspectPhoto,
   isPlainObject,
+  isReservedDescription,
   proofRecordDigest,
   summarizeEvidence,
   validateEvidenceShape,
@@ -134,6 +135,9 @@ const ACTIVATE_FROM: readonly string[] = ["approved"];
 // overwrite its GDPR deletion record and move it out of "deleted".
 const REJECT_FROM: readonly string[] = ["draft", "submitted", "reviewing", "approved", "active", "suspended"];
 const REJECT_REASON_MAX_CHARS = 2000;
+// The owner may edit the description only before evidence is submitted; after
+// that the column holds the server-written review record.
+const DESCRIPTION_EDITABLE_STATUSES: readonly string[] = ["draft", "submitted"];
 
 class AuditWriteError extends Error {
   constructor(readonly original: unknown) {
@@ -249,8 +253,17 @@ export async function onboardRoutes(app: FastifyInstance) {
   });
 
   // Submit machine registration
-  app.post("/api/onboard/register", async (req) => {
-    const body = req.body as Partial<MachineRegistration>;
+  app.post("/api/onboard/register", async (req, reply) => {
+    const body = (req.body ?? {}) as Partial<MachineRegistration>;
+    // A registration's description is operator text until evidence is
+    // submitted; the "PROOF SUBMITTED:" record format is reserved for the
+    // server, so a forged record can never reach an admin reviewing "submitted".
+    if (isReservedDescription(body.description)) {
+      return reply.status(400).send({
+        error: "reserved_description",
+        message: "Descriptions starting with \"PROOF SUBMITTED:\" or \"PROVED:\" are reserved for server-written review records.",
+      });
+    }
     const registration: MachineRegistration = {
       id: `reg-${Date.now()}`,
       name: body.name ?? "Unknown",
@@ -443,21 +456,17 @@ export async function onboardRoutes(app: FastifyInstance) {
       status?: string; // explicitly rejected
     };
   }>("/api/onboard/registrations/:id", async (req, reply) => {
+    // Caller must own the registration, and the check fails closed (rule 7):
+    // no authenticated actor is 401 before any lookup; no owner matches nobody.
+    const callerId = authenticatedActor(req, ["operatorId", "userId", "apiKeyId", "walletAddress"]);
+    if (!callerId) {
+      return reply.status(401).send({ error: "authentication_required", message: "Editing a registration requires an authenticated operator." });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-
-    // Caller must own the registration. Mirror the /prove ownership check.
-    const callerId = (req as any).operatorId
-      ?? (req as any).userId
-      ?? (req as any).apiKeyId
-      ?? (req as any).walletAddress;
-    const regOperator = (reg as any).operator?.walletAddress
-      ?? (reg as any).operator?.email
-      ?? (reg as any).walletAddress
-      ?? (reg as any).email
-      ?? (reg as any).operatorId;
-    if (callerId && regOperator && callerId !== regOperator) {
+    const owner = registrationOwner(reg);
+    if (!owner || owner !== callerId) {
       return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
     }
     if (reg.status === "deleted") {
@@ -470,6 +479,24 @@ export async function onboardRoutes(app: FastifyInstance) {
         error: "status_immutable",
         message: "Status changes go through /approve, /reject, /activate — not PATCH.",
       });
+    }
+    if (body.description !== undefined) {
+      // Once evidence is submitted, the description column holds the
+      // server-written review record (or an admin's rejection). The owner may
+      // not rewrite what is under or after review, nor forge such a record.
+      if (!DESCRIPTION_EDITABLE_STATUSES.includes(reg.status)) {
+        return reply.status(409).send({
+          error: "evidence_locked",
+          message: `The description holds the review record once evidence is submitted; it can't be edited in "${reg.status}" status.`,
+          currentStatus: reg.status,
+        });
+      }
+      if (isReservedDescription(body.description)) {
+        return reply.status(400).send({
+          error: "reserved_description",
+          message: "Descriptions starting with \"PROOF SUBMITTED:\" or \"PROVED:\" are reserved for server-written review records.",
+        });
+      }
     }
 
     const patch: any = {};
@@ -489,7 +516,7 @@ export async function onboardRoutes(app: FastifyInstance) {
 
     auditService.log({
       eventType: "operator.edited",
-      actor: callerId ?? "anonymous",
+      actor: callerId,
       resourceType: "registration",
       resourceId: reg.id,
       action: "update",
@@ -502,20 +529,16 @@ export async function onboardRoutes(app: FastifyInstance) {
 
   // ── T2.2 — Delete (soft) registration (owner-only, GDPR-required) ──
   app.delete<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
+    // Owner-only, failing closed (rule 7), as for PATCH.
+    const callerId = authenticatedActor(req, ["operatorId", "userId", "apiKeyId", "walletAddress"]);
+    if (!callerId) {
+      return reply.status(401).send({ error: "authentication_required", message: "Deleting a registration requires an authenticated operator." });
+    }
     const repos = getRepos();
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
-
-    const callerId = (req as any).operatorId
-      ?? (req as any).userId
-      ?? (req as any).apiKeyId
-      ?? (req as any).walletAddress;
-    const regOperator = (reg as any).operator?.walletAddress
-      ?? (reg as any).operator?.email
-      ?? (reg as any).walletAddress
-      ?? (reg as any).email
-      ?? (reg as any).operatorId;
-    if (callerId && regOperator && callerId !== regOperator) {
+    const owner = registrationOwner(reg);
+    if (!owner || owner !== callerId) {
       return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
     }
     if (reg.status === "deleted") {
@@ -524,12 +547,12 @@ export async function onboardRoutes(app: FastifyInstance) {
 
     const deletedAt = new Date().toISOString();
     repos.registrations.updateStatus(req.params.id, "deleted", {
-      description: `DELETED at ${deletedAt} by ${callerId ?? "anonymous"} — original: ${reg.description ?? "(no description)"}`,
+      description: `DELETED at ${deletedAt} by ${callerId} — original: ${reg.description ?? "(no description)"}`,
     });
 
     auditService.log({
       eventType: "operator.deleted",
-      actor: callerId ?? "anonymous",
+      actor: callerId,
       resourceType: "registration",
       resourceId: reg.id,
       action: "delete",
