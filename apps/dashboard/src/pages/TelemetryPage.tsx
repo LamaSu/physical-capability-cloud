@@ -1,15 +1,37 @@
+/**
+ * Pipeline Telemetry: pipeline events, stats and logs, read live from the gateway.
+ *
+ * Reads GET /api/telemetry/stats, /api/telemetry/active,
+ * /api/telemetry/pipeline/:jobId and /api/telemetry/logs, plus the SSE stream
+ * /api/telemetry/logs/stream when it connects. The gateway serves these from
+ * its in-memory telemetry buffer (packages/gateway/src/telemetry.ts).
+ *
+ * A failed read shows as unavailable, or as stale over earlier data. It is
+ * never replaced by sample values. The sample timeline and logs render only in
+ * demo mode (lib/demo-mode.ts), under a DemoBanner.
+ */
+
 import React from "react";
-import { GlassPanel, GlowBadge } from "@pcc/ui";
+import { GlassPanel, GlowBadge, EmptyState } from "@pcc/ui";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { useUIStore } from "../stores/ui-store.js";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api/gateway.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { apiGet } from "../lib/api.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+import { DemoBanner } from "../components/DemoState.js";
+import {
+  DEMO_TELEMETRY_LOGS,
+  DEMO_TELEMETRY_SOURCES,
+  demoTelemetryActive,
+  demoTelemetryStats,
+  demoTelemetryTimeline,
+} from "../demo/TelemetryPage.fixtures.js";
 
 // ---------------------------------------------------------------------------
-// Types
+// Types (mirror packages/gateway/src/telemetry.ts and structured-logger.ts)
 // ---------------------------------------------------------------------------
 
-type PipelinePhase =
+export type PipelinePhase =
   | "discovery"
   | "quote_request"
   | "quote_response"
@@ -30,10 +52,10 @@ type PipelinePhase =
   | "delivery_pickup"
   | "delivery_complete";
 
-type TelemetryStatus = "started" | "completed" | "failed" | "skipped";
-type LogLevel = "debug" | "info" | "warn" | "error";
+export type TelemetryStatus = "started" | "completed" | "failed" | "skipped";
+export type LogLevel = "debug" | "info" | "warn" | "error";
 
-interface TelemetryEvent {
+export interface TelemetryEvent {
   id: string;
   jobId: string;
   timestamp: string;
@@ -45,7 +67,7 @@ interface TelemetryEvent {
   source: string;
 }
 
-interface LogEntry {
+export interface LogEntry {
   id: string;
   timestamp: string;
   level: LogLevel;
@@ -59,7 +81,7 @@ interface LogEntry {
   metadata?: Record<string, unknown>;
 }
 
-interface ActiveJobSummary {
+export interface ActiveJobSummary {
   jobId: string;
   currentPhase: PipelinePhase;
   startedAt: string;
@@ -67,7 +89,7 @@ interface ActiveJobSummary {
   lastUpdated: string;
 }
 
-interface TelemetryStats {
+export interface TelemetryStats {
   totalJobs: number;
   activeJobs: number;
   avgDuration_ms: number;
@@ -125,86 +147,86 @@ const PHASE_LABELS: Record<PipelinePhase, string> = {
   delivery_complete: "Delivered",
 };
 
+/** The gateway also emits phases the visualizer doesn't draw; show those by name. */
+function phaseLabel(phase: string): string {
+  return PHASE_LABELS[phase as PipelinePhase] ?? phase;
+}
+
 // ---------------------------------------------------------------------------
-// API helpers
+// API helpers (apiGet throws on a non-2xx answer, with the server's message)
 // ---------------------------------------------------------------------------
 
-async function fetchTelemetryActive(): Promise<{ active: ActiveJobSummary[]; count: number }> {
-  const res = await fetch("/api/telemetry/active", { headers: { ...getAuthHeaders() } });
-  if (!res.ok) return { active: [], count: 0 };
-  return res.json();
+interface ActiveResponse {
+  active: ActiveJobSummary[];
+  count: number;
 }
 
-async function fetchTelemetryStats(): Promise<{ stats: TelemetryStats }> {
-  const res = await fetch("/api/telemetry/stats", { headers: { ...getAuthHeaders() } });
-  if (!res.ok) return { stats: { totalJobs: 0, activeJobs: 0, avgDuration_ms: 0, successRate: 0, totalEvents: 0, byPhase: {} as TelemetryStats["byPhase"], eventsPerMinute: 0 } };
-  return res.json();
+interface StatsResponse {
+  stats: TelemetryStats;
 }
 
-async function fetchTelemetryTimeline(jobId: string): Promise<{ timeline: TelemetryEvent[] }> {
-  const res = await fetch(`/api/telemetry/pipeline/${jobId}`, { headers: { ...getAuthHeaders() } });
-  if (!res.ok) return { timeline: [] };
-  return res.json();
+interface TimelineResponse {
+  jobId: string;
+  timeline: TelemetryEvent[];
 }
 
-async function fetchLogs(params: { level?: string; source?: string; search?: string; limit?: number }): Promise<{ entries: LogEntry[]; sources: string[] }> {
+interface LogsResponse {
+  entries: LogEntry[];
+  total: number;
+  sources: string[];
+}
+
+/** A 2xx answer without the expected shape is a failed read, not an empty one. */
+function malformed(what: string): Error {
+  return new Error(`The gateway's ${what} response was not in the expected format.`);
+}
+
+async function fetchTelemetryActive(): Promise<ActiveResponse> {
+  const res = await apiGet<ActiveResponse>("/telemetry/active");
+  if (!Array.isArray(res?.active)) throw malformed("active pipelines");
+  return res;
+}
+
+const STATS_NUMBERS = ["totalJobs", "activeJobs", "avgDuration_ms", "successRate", "totalEvents", "eventsPerMinute"] as const;
+
+async function fetchTelemetryStats(): Promise<StatsResponse> {
+  const res = await apiGet<StatsResponse>("/telemetry/stats");
+  const stats = res?.stats;
+  // A missing figure is not a zero: treat the whole read as failed.
+  if (!stats || typeof stats !== "object" || STATS_NUMBERS.some((k) => typeof stats[k] !== "number")) {
+    throw malformed("stats");
+  }
+  return res;
+}
+
+async function fetchTelemetryTimeline(jobId: string): Promise<TimelineResponse> {
+  const res = await apiGet<TimelineResponse>(`/telemetry/pipeline/${encodeURIComponent(jobId)}`);
+  if (!Array.isArray(res?.timeline)) throw malformed("pipeline timeline");
+  return res;
+}
+
+async function fetchLogs(params: { level?: string; source?: string; search?: string; limit?: number }): Promise<LogsResponse> {
   const qs = new URLSearchParams();
   if (params.level && params.level !== "all") qs.set("level", params.level);
   if (params.source && params.source !== "all") qs.set("source", params.source);
   if (params.search) qs.set("search", params.search);
   if (params.limit) qs.set("limit", String(params.limit));
-  const res = await fetch(`/api/telemetry/logs?${qs}`, { headers: { ...getAuthHeaders() } });
-  if (!res.ok) return { entries: [], sources: [] };
-  return res.json();
+  const res = await apiGet<LogsResponse>(`/telemetry/logs?${qs}`);
+  if (!Array.isArray(res?.entries)) throw malformed("logs");
+  return { ...res, sources: Array.isArray(res.sources) ? res.sources : [] };
 }
 
-// ---------------------------------------------------------------------------
-// Mock data (used when gateway is offline)
-// ---------------------------------------------------------------------------
-
-function makeMockTimeline(jobId: string): TelemetryEvent[] {
-  const phases: PipelinePhase[] = ["discovery", "quote_request", "quote_response", "negotiation", "contract_build", "escrow_fund", "job_submit", "job_accepted", "job_started"];
-  const statuses: TelemetryStatus[] = ["completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "started"];
-  const now = Date.now();
-  return phases.map((phase, i) => ({
-    id: `evt-${i}`,
-    jobId,
-    timestamp: new Date(now - (phases.length - i) * 45_000).toISOString(),
-    phase,
-    status: statuses[i],
-    duration_ms: i < statuses.length - 1 ? Math.floor(Math.random() * 3000 + 500) : undefined,
-    metadata: {},
-    level: "info" as const,
-    source: "mock",
-  }));
+/** The log filters, applied to entries the server didn't filter (live stream, demo). */
+function passesLogFilters(e: LogEntry, level: string, source: string, search: string): boolean {
+  if (level !== "all" && e.level !== level) return false;
+  if (source !== "all" && e.source !== source) return false;
+  if (search && !`${e.message} ${e.source}`.toLowerCase().includes(search.toLowerCase())) return false;
+  return true;
 }
 
-const MOCK_LOGS: LogEntry[] = Array.from({ length: 20 }, (_, i) => {
-  const levels: LogLevel[] = ["info", "info", "info", "debug", "warn", "info", "error", "info"];
-  const sources = ["gateway", "kernel", "agent-broker", "verifier", "agent-user"];
-  const messages = [
-    "Job submitted to kernel queue",
-    "Quote request dispatched to 3 kernels",
-    "Evidence bundle encrypted and archived to IPFS",
-    "Merkle commitment computed for batch",
-    "Settlement milestone release triggered on-chain",
-    "Bittensor verification result received: quality=0.92",
-    "Escrow fund confirmation timeout — retrying",
-    "Agent negotiation completed in 2 rounds",
-    "ZK proof generated for evidence bundle",
-    "DePIN epoch reward distribution initiated",
-  ];
-  const now = Date.now();
-  return {
-    id: `log-${i}`,
-    timestamp: new Date(now - (20 - i) * 8_000).toISOString(),
-    level: levels[i % levels.length],
-    message: messages[i % messages.length],
-    source: sources[i % sources.length],
-    jobId: i % 2 === 0 ? "job-001" : "job-002",
-    metadata: {},
-  };
-});
+function logKey(e: LogEntry): string {
+  return `${e.id}|${e.timestamp}|${e.message}`;
+}
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -238,6 +260,39 @@ const LEVEL_BG: Record<LogLevel, string> = {
   warn: "bg-amber-400/[0.04]",
   error: "bg-red-400/[0.06]",
 };
+
+// ── Section frame ────────────────────────────────────────────────────────
+
+function Section({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <GlassPanel padding="lg">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">{title}</h2>
+          {right}
+        </div>
+        {children}
+      </div>
+    </GlassPanel>
+  );
+}
+
+function SectionLoading({ what }: { what: string }) {
+  return (
+    <div role="status" aria-busy="true" className="text-center py-6 text-white/25 text-xs">
+      Loading {what}…
+    </div>
+  );
+}
+
+function ClearPhaseFilter({ selectedPhase, onClear }: { selectedPhase: PipelinePhase | null; onClear: () => void }) {
+  if (!selectedPhase) return null;
+  return (
+    <button onClick={onClear} className="text-xs text-white/30 hover:text-white/60 transition-colors">
+      Clear filter
+    </button>
+  );
+}
 
 // ── Pipeline Visualizer ──────────────────────────────────────────────────
 
@@ -303,35 +358,34 @@ function PipelineVisualizer({ timeline, onPhaseClick, selectedPhase }: PipelineV
 
 // ── Stats Cards ──────────────────────────────────────────────────────────
 
-interface StatsCardsProps {
-  stats: TelemetryStats | null;
-}
-
-function StatsCards({ stats }: StatsCardsProps) {
+function StatsCards({ stats }: { stats: TelemetryStats }) {
+  // successRate is 0 both when nothing has finished and when everything failed;
+  // show 0% only when a failure was recorded.
+  const hasFailures = Object.values(stats.byPhase ?? {}).some((p) => (p?.failed ?? 0) > 0);
   const cards = [
     {
       label: "Total Events",
-      value: stats?.totalEvents ?? 0,
-      sub: `${(stats?.eventsPerMinute ?? 0).toFixed(1)}/min`,
-      glow: (stats?.totalEvents ?? 0) > 0,
+      value: stats.totalEvents,
+      sub: `avg ${stats.eventsPerMinute.toFixed(1)} per minute with events`,
+      glow: stats.totalEvents > 0,
     },
     {
       label: "Active Pipelines",
-      value: stats?.activeJobs ?? 0,
-      sub: `${stats?.totalJobs ?? 0} total jobs`,
-      glow: (stats?.activeJobs ?? 0) > 0,
+      value: stats.activeJobs,
+      sub: `${stats.totalJobs} tracked`,
+      glow: stats.activeJobs > 0,
     },
     {
       label: "Avg Duration",
-      value: stats?.avgDuration_ms ? `${(stats.avgDuration_ms / 1000).toFixed(1)}s` : "—",
-      sub: "per phase",
+      value: stats.avgDuration_ms > 0 ? `${(stats.avgDuration_ms / 1000).toFixed(1)}s` : "—",
+      sub: "per timed phase event",
       glow: false,
     },
     {
       label: "Success Rate",
-      value: stats?.successRate ? `${(stats.successRate * 100).toFixed(0)}%` : "—",
-      sub: "completed jobs",
-      glow: (stats?.successRate ?? 0) > 0.8,
+      value: stats.successRate > 0 || hasFailures ? `${(stats.successRate * 100).toFixed(0)}%` : "—",
+      sub: "last event completed, not failed",
+      glow: stats.successRate > 0.8,
     },
   ];
 
@@ -345,6 +399,16 @@ function StatsCards({ stats }: StatsCardsProps) {
             <div className="text-xs text-white/30">{c.sub}</div>
           </div>
         </GlassPanel>
+      ))}
+    </div>
+  );
+}
+
+function StatsLoading() {
+  return (
+    <div role="status" aria-busy="true" className="grid grid-cols-2 md:grid-cols-4 gap-3 animate-pulse">
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="h-[88px] rounded-xl bg-white/[0.03] border border-white/[0.04]" />
       ))}
     </div>
   );
@@ -371,7 +435,7 @@ function EventTimeline({ events, selectedPhase }: EventTimelineProps) {
   if (display.length === 0) {
     return (
       <div className="text-center py-8 text-white/20 text-sm">
-        {selectedPhase ? `No events for phase: ${PHASE_LABELS[selectedPhase]}` : "No events yet — start a job to see pipeline telemetry"}
+        {selectedPhase ? `No events for phase: ${PHASE_LABELS[selectedPhase]}` : "No events recorded for this pipeline yet."}
       </div>
     );
   }
@@ -395,7 +459,7 @@ function EventTimeline({ events, selectedPhase }: EventTimelineProps) {
                 {new Date(evt.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
               </span>
               <span className="text-white/30 bg-white/[0.04] px-1.5 py-0.5 rounded text-[10px]">
-                {PHASE_LABELS[evt.phase]}
+                {phaseLabel(evt.phase)}
               </span>
               <span className={`font-medium ${STATUS_TEXT[evt.status]}`}>{evt.status}</span>
               {evt.duration_ms !== undefined && (
@@ -403,7 +467,7 @@ function EventTimeline({ events, selectedPhase }: EventTimelineProps) {
               )}
               <span className="text-white/20 text-[10px]">{evt.source}</span>
             </div>
-            {Object.keys(evt.metadata).length > 0 && (
+            {Object.keys(evt.metadata ?? {}).length > 0 && (
               <div className="text-white/20 text-[10px] font-mono truncate">
                 {JSON.stringify(evt.metadata)}
               </div>
@@ -418,7 +482,10 @@ function EventTimeline({ events, selectedPhase }: EventTimelineProps) {
 // ── Log Viewer ────────────────────────────────────────────────────────────
 
 interface LogViewerProps {
-  logs: LogEntry[];
+  /** Entries to list, or null while they can't be listed (see `placeholder`). */
+  entries: LogEntry[] | null;
+  /** Shown in place of the list when `entries` is null: loading or unavailable. */
+  placeholder?: React.ReactNode;
   sources: string[];
   levelFilter: string;
   sourceFilter: string;
@@ -426,11 +493,11 @@ interface LogViewerProps {
   onLevelChange: (v: string) => void;
   onSourceChange: (v: string) => void;
   onSearchChange: (v: string) => void;
-  liveEntries: LogEntry[];
 }
 
 function LogViewer({
-  logs,
+  entries,
+  placeholder,
   sources,
   levelFilter,
   sourceFilter,
@@ -438,19 +505,21 @@ function LogViewer({
   onLevelChange,
   onSourceChange,
   onSearchChange,
-  liveEntries,
 }: LogViewerProps) {
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const display = entries ? entries.slice(-200) : null;
 
-  // Auto-scroll on new live entries
+  // Auto-scroll when new entries arrive
   React.useEffect(() => {
     if (containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [liveEntries.length]);
+  }, [display?.length]);
 
   const allLevels: LogLevel[] = ["debug", "info", "warn", "error"];
-  const display = [...logs, ...liveEntries].slice(-200);
+  // Keep the chosen source selectable while its results load.
+  const sourceOptions = sourceFilter !== "all" && !sources.includes(sourceFilter) ? [...sources, sourceFilter] : sources;
+  const filtersActive = levelFilter !== "all" || sourceFilter !== "all" || search !== "";
 
   return (
     <div className="space-y-3">
@@ -480,7 +549,7 @@ function LogViewer({
           className="px-2 py-1 rounded bg-white/[0.04] border border-white/[0.08] text-xs text-white/60 focus:outline-none focus:border-teal-400/40"
         >
           <option value="all">All sources</option>
-          {sources.map((s) => (
+          {sourceOptions.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
         </select>
@@ -494,23 +563,27 @@ function LogViewer({
           className="flex-1 min-w-[160px] px-3 py-1 rounded bg-white/[0.04] border border-white/[0.08] text-xs text-white/70 placeholder-white/20 focus:outline-none focus:border-teal-400/40"
         />
 
-        <span className="text-xs text-white/20 ml-auto">{display.length} entries</span>
+        {display && <span className="text-xs text-white/20 ml-auto">{display.length} entries</span>}
       </div>
 
       {/* Log table */}
       <div ref={containerRef} className="max-h-72 overflow-y-auto space-y-px">
-        {display.length === 0 ? (
-          <div className="text-center py-6 text-white/20 text-sm">No log entries match your filters</div>
+        {display === null ? (
+          placeholder
+        ) : display.length === 0 ? (
+          <div className="text-center py-6 text-white/20 text-sm">
+            {filtersActive ? "No log entries match your filters" : "No log entries recorded yet."}
+          </div>
         ) : (
-          display.map((entry) => (
+          display.map((entry, i) => (
             <div
-              key={entry.id}
-              className={`flex items-start gap-2 px-2 py-1.5 rounded text-xs ${LEVEL_BG[entry.level]}`}
+              key={`${entry.id}-${i}`}
+              className={`flex items-start gap-2 px-2 py-1.5 rounded text-xs ${LEVEL_BG[entry.level] ?? ""}`}
             >
               <span className="font-mono text-white/30 flex-shrink-0 w-20 text-[10px]">
                 {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
               </span>
-              <span className={`flex-shrink-0 w-10 font-medium ${LEVEL_COLORS[entry.level]} text-[10px] uppercase`}>
+              <span className={`flex-shrink-0 w-10 font-medium ${LEVEL_COLORS[entry.level] ?? "text-white/40"} text-[10px] uppercase`}>
                 {entry.level}
               </span>
               <span className="flex-shrink-0 w-20 text-white/30 text-[10px] truncate">
@@ -541,7 +614,7 @@ interface ActiveJobSelectorProps {
 function ActiveJobSelector({ jobs, selectedJobId, onSelect }: ActiveJobSelectorProps) {
   if (jobs.length === 0) {
     return (
-      <div className="text-xs text-white/25 italic">No active jobs — emit a telemetry event to see pipeline flow</div>
+      <div className="text-xs text-white/25 italic">No pipeline activity in the last hour.</div>
     );
   }
 
@@ -557,13 +630,23 @@ function ActiveJobSelector({ jobs, selectedJobId, onSelect }: ActiveJobSelectorP
               : "border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/60"
           }`}
         >
-          <div className={`w-1.5 h-1.5 rounded-full ${j.currentPhase ? "bg-teal-400 animate-pulse" : "bg-white/20"}`} />
+          {/* A summary carries no run state, so the dot doesn't pulse. */}
+          <div className="w-1.5 h-1.5 rounded-full bg-teal-400/60" />
           <span className="font-mono">{j.jobId}</span>
-          <span className="text-white/30">{PHASE_LABELS[j.currentPhase as PipelinePhase] ?? j.currentPhase}</span>
+          <span className="text-white/30">{phaseLabel(j.currentPhase)}</span>
           <GlowBadge color="teal">{j.eventCount} events</GlowBadge>
         </button>
       ))}
     </div>
+  );
+}
+
+function StreamIndicator({ label, dotClass }: { label: string; dotClass: string }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className={`w-1.5 h-1.5 rounded-full ${dotClass} animate-pulse`} />
+      {label}
+    </span>
   );
 }
 
@@ -578,6 +661,13 @@ export function TelemetryPage() {
     setPageMeta("Pipeline Telemetry", "Full pipeline visibility — events, logs, and phase tracking");
   }, [setPageMeta]);
 
+  // Sample values render only when the viewer asked for a demo (lib/demo-mode.ts).
+  return isDemoMode() ? <TelemetryDemo /> : <TelemetryLive />;
+}
+
+// ── Live: the gateway's telemetry reads ───────────────────────────────────
+
+function TelemetryLive() {
   // ── State ────────────────────────────────────────────────────────────────
   const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null);
   const [selectedPhase, setSelectedPhase] = React.useState<PipelinePhase | null>(null);
@@ -586,6 +676,8 @@ export function TelemetryPage() {
   const [logSearch, setLogSearch] = React.useState("");
   const [liveLogEntries, setLiveLogEntries] = React.useState<LogEntry[]>([]);
   const [liveTelemetryEvents, setLiveTelemetryEvents] = React.useState<TelemetryEvent[]>([]);
+  // True only while the SSE stream is connected; "Live" is never claimed otherwise.
+  const [streamOpen, setStreamOpen] = React.useState(false);
 
   // ── Queries ──────────────────────────────────────────────────────────────
 
@@ -615,6 +707,8 @@ export function TelemetryPage() {
     queryKey: ["telemetry", "logs", levelFilter, sourceFilter, logSearch],
     queryFn: () =>
       fetchLogs({ level: levelFilter, source: sourceFilter, search: logSearch, limit: 150 }),
+    // While a new filter loads, keep listing the last answer instead of blanking the list.
+    placeholderData: keepPreviousData,
     refetchInterval: 5_000,
     staleTime: 3_000,
   });
@@ -622,25 +716,34 @@ export function TelemetryPage() {
   // ── SSE stream for live updates ──────────────────────────────────────────
 
   React.useEffect(() => {
+    if (typeof EventSource === "undefined") return;
     const es = new EventSource("/api/telemetry/logs/stream");
+
+    es.onopen = () => setStreamOpen(true);
+    es.addEventListener("connected", () => setStreamOpen(true));
 
     es.addEventListener("log_entry", (e: MessageEvent) => {
       try {
         const entry = JSON.parse(e.data) as LogEntry;
+        if (typeof entry?.message !== "string") return;
         setLiveLogEntries((prev) => [...prev.slice(-500), entry]);
-      } catch { /* ignore */ }
+      } catch { /* malformed event: skip it */ }
     });
 
     es.addEventListener("telemetry_event", (e: MessageEvent) => {
       try {
         const evt = JSON.parse(e.data) as TelemetryEvent;
+        if (typeof evt?.jobId !== "string" || typeof evt.phase !== "string") return;
         setLiveTelemetryEvents((prev) => [...prev.slice(-500), evt]);
         // Auto-select new job if none selected
         setSelectedJobId((cur) => cur ?? evt.jobId);
-      } catch { /* ignore */ }
+      } catch { /* malformed event: skip it */ }
     });
 
+    // The stream is an addition to the polled reads; when it fails, the page
+    // keeps polling and stops saying "Live".
     es.onerror = () => {
+      setStreamOpen(false);
       es.close();
     };
 
@@ -649,147 +752,242 @@ export function TelemetryPage() {
 
   // ── Derived data ─────────────────────────────────────────────────────────
 
-  const activeJobs = activeQuery.data?.active ?? [];
-  const stats = statsQuery.data?.stats ?? null;
+  const activeJobs = activeQuery.data?.active;
 
   // If no job selected but active jobs exist, select first
   React.useEffect(() => {
-    if (!selectedJobId && activeJobs.length > 0) {
-      setSelectedJobId(activeJobs[0].jobId);
+    if (!selectedJobId && activeJobs && activeJobs.length > 0) {
+      setSelectedJobId(activeJobs[0]!.jobId);
     }
   }, [activeJobs, selectedJobId]);
 
-  // Merge server timeline with live SSE events
-  const serverTimeline = timelineQuery.data?.timeline ?? [];
-  const liveForJob = selectedJobId
-    ? liveTelemetryEvents.filter((e) => e.jobId === selectedJobId)
-    : [];
+  // The selected pipeline's events: the server's timeline plus newer streamed events.
+  // Null until the timeline has been read; a failed read never becomes an empty list.
   const mergedTimeline = React.useMemo(() => {
-    const seen = new Set(serverTimeline.map((e) => e.id));
-    const extras = liveForJob.filter((e) => !seen.has(e.id));
-    return [...serverTimeline, ...extras];
-  }, [serverTimeline, liveForJob]);
+    const server = timelineQuery.data?.timeline;
+    if (!server || !selectedJobId) return null;
+    const seen = new Set(server.map((e) => e.id));
+    const extras = liveTelemetryEvents.filter((e) => e.jobId === selectedJobId && !seen.has(e.id));
+    return [...server, ...extras];
+  }, [timelineQuery.data, liveTelemetryEvents, selectedJobId]);
 
-  // Merge server logs with live SSE log entries
-  const serverLogs = logsQuery.data?.entries ?? MOCK_LOGS;
-  const sources = logsQuery.data?.sources ?? ["gateway", "kernel", "agent-broker"];
+  // The logs read, plus streamed entries it doesn't already include.
+  const logEntries = React.useMemo(() => {
+    const server = logsQuery.data?.entries;
+    if (!server) return null;
+    const seen = new Set(server.map(logKey));
+    const live = liveLogEntries.filter(
+      (e) => passesLogFilters(e, levelFilter, sourceFilter, logSearch) && !seen.has(logKey(e)),
+    );
+    return [...server, ...live];
+  }, [logsQuery.data, liveLogEntries, levelFilter, sourceFilter, logSearch]);
 
-  // Live log entries that pass current filters
-  const filteredLive = liveLogEntries.filter((e) => {
-    if (levelFilter !== "all" && e.level !== levelFilter) return false;
-    if (sourceFilter !== "all" && e.source !== sourceFilter) return false;
-    if (logSearch && !(`${e.message} ${e.source}`).toLowerCase().includes(logSearch.toLowerCase())) return false;
-    return true;
-  });
+  // ── Sections ─────────────────────────────────────────────────────────────
+
+  const retryStats = () => void statsQuery.refetch();
+  const retryActive = () => void activeQuery.refetch();
+  const retryTimeline = () => void timelineQuery.refetch();
+  const retryLogs = () => void logsQuery.refetch();
+
+  const statsSection = statsQuery.data ? (
+    <div className="space-y-2">
+      {statsQuery.isError && (
+        <StaleNotice what="pipeline stats" updatedAt={statsQuery.dataUpdatedAt} onRetry={retryStats} />
+      )}
+      <StatsCards stats={statsQuery.data.stats} />
+      <p className="text-[11px] text-white/25">
+        Counts cover what this gateway process holds in memory and reset when it restarts.
+      </p>
+    </div>
+  ) : statsQuery.isError ? (
+    <GlassPanel padding="md">
+      <UnavailableState what="pipeline stats" error={statsQuery.error} onRetry={retryStats} />
+    </GlassPanel>
+  ) : (
+    <StatsLoading />
+  );
+
+  const timelineUnavailable = !!selectedJobId && !timelineQuery.data && timelineQuery.isError;
+
+  let phasesContent: React.ReactNode;
+  if (timelineUnavailable) {
+    phasesContent = <UnavailableState what="this pipeline's phases" error={timelineQuery.error} onRetry={retryTimeline} />;
+  } else {
+    phasesContent = (
+      <>
+        <PipelineVisualizer
+          timeline={mergedTimeline ?? []}
+          onPhaseClick={(phase) =>
+            setSelectedPhase((cur) => (cur === phase ? null : phase))
+          }
+          selectedPhase={selectedPhase}
+        />
+        {!selectedJobId && <p className="text-xs text-white/25">No pipeline selected.</p>}
+        {selectedJobId && !mergedTimeline && <SectionLoading what="phases" />}
+      </>
+    );
+  }
+
+  let jobsContent: React.ReactNode;
+  if (activeJobs) {
+    jobsContent = (
+      <>
+        {activeQuery.isError && (
+          <StaleNotice what="recent pipelines" updatedAt={activeQuery.dataUpdatedAt} onRetry={retryActive} />
+        )}
+        {activeJobs.length > 0 ? (
+          <>
+            <p className="text-[11px] text-white/25">Pipelines with a phase running or an event in the last hour.</p>
+            <ActiveJobSelector jobs={activeJobs} selectedJobId={selectedJobId} onSelect={setSelectedJobId} />
+          </>
+        ) : (
+          <EmptyState
+            title="No pipeline activity in the last hour"
+            description="A pipeline appears here when the gateway records telemetry for it: a negotiation, a job submission, or an escrow or settlement step."
+          />
+        )}
+      </>
+    );
+  } else if (activeQuery.isError) {
+    jobsContent = <UnavailableState what="recent pipelines" error={activeQuery.error} onRetry={retryActive} />;
+  } else {
+    jobsContent = <SectionLoading what="recent pipelines" />;
+  }
+
+  let eventsContent: React.ReactNode = null;
+  if (selectedJobId) {
+    if (mergedTimeline) {
+      eventsContent = (
+        <>
+          {timelineQuery.isError && (
+            <StaleNotice what="this pipeline's events" updatedAt={timelineQuery.dataUpdatedAt} onRetry={retryTimeline} />
+          )}
+          <EventTimeline events={mergedTimeline} selectedPhase={selectedPhase} />
+        </>
+      );
+    } else if (timelineUnavailable) {
+      eventsContent = <UnavailableState what="this pipeline's events" error={timelineQuery.error} onRetry={retryTimeline} />;
+    } else {
+      eventsContent = <SectionLoading what="events" />;
+    }
+  }
+
+  const logsPlaceholder = logsQuery.isError ? (
+    <UnavailableState what="logs" error={logsQuery.error} onRetry={retryLogs} />
+  ) : (
+    <SectionLoading what="logs" />
+  );
 
   // ── Render ───────────────────────────────────────────────────────────────
 
-  const gatewayOffline = activeQuery.isError && statsQuery.isError;
+  return (
+    <div className="space-y-5">
+      {/* ── Stats Row ── */}
+      {statsSection}
+
+      {/* ── Pipeline Visualizer ── */}
+      <Section
+        title="Pipeline Phases"
+        right={<ClearPhaseFilter selectedPhase={selectedPhase} onClear={() => setSelectedPhase(null)} />}
+      >
+        {phasesContent}
+      </Section>
+
+      {/* ── Active Jobs + Timeline ── */}
+      <Section
+        title="Event Timeline"
+        right={
+          <div className="flex items-center gap-2 text-xs text-white/30">
+            {streamOpen && <StreamIndicator label="Live" dotClass="bg-teal-400" />}
+            {selectedJobId && (
+              <span className="font-mono text-white/20">{selectedJobId}</span>
+            )}
+          </div>
+        }
+      >
+        {jobsContent}
+        {eventsContent}
+      </Section>
+
+      {/* ── Structured Log Viewer ── */}
+      <Section
+        title="Structured Logs"
+        right={
+          <div className="flex items-center gap-2 text-xs text-white/30">
+            {streamOpen && <StreamIndicator label="Streaming" dotClass="bg-cyan-400" />}
+          </div>
+        }
+      >
+        {logsQuery.isError && logsQuery.data && (
+          <StaleNotice what="logs" updatedAt={logsQuery.dataUpdatedAt} onRetry={retryLogs} />
+        )}
+        <LogViewer
+          entries={logEntries}
+          placeholder={logsPlaceholder}
+          sources={logsQuery.data?.sources ?? []}
+          levelFilter={levelFilter}
+          sourceFilter={sourceFilter}
+          search={logSearch}
+          onLevelChange={setLevelFilter}
+          onSourceChange={setSourceFilter}
+          onSearchChange={setLogSearch}
+        />
+      </Section>
+    </div>
+  );
+}
+
+// ── Demo: the prototype with sample values, under a DemoBanner ────────────
+
+function TelemetryDemo() {
+  const [selectedPhase, setSelectedPhase] = React.useState<PipelinePhase | null>(null);
+  const [levelFilter, setLevelFilter] = React.useState("all");
+  const [sourceFilter, setSourceFilter] = React.useState("all");
+  const [logSearch, setLogSearch] = React.useState("");
+
+  const timeline = React.useMemo(() => demoTelemetryTimeline(), []);
+  const jobs = React.useMemo(() => demoTelemetryActive(timeline), [timeline]);
+  const stats = React.useMemo(() => demoTelemetryStats(timeline), [timeline]);
+  const logs = DEMO_TELEMETRY_LOGS.filter((e) => passesLogFilters(e, levelFilter, sourceFilter, logSearch));
+  const jobId = jobs[0]?.jobId ?? null;
 
   return (
     <div className="space-y-5">
-      {gatewayOffline && (
-        <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/[0.03] border border-white/[0.06] text-xs text-white/30">
-          <span className="inline-block w-2 h-2 rounded-full bg-white/20" />
-          Gateway offline — showing mock telemetry data
-        </div>
-      )}
+      <DemoBanner what="Pipeline telemetry" />
 
-      {/* ── Stats Row ── */}
       <StatsCards stats={stats} />
 
-      {/* ── Pipeline Visualizer ── */}
-      <GlassPanel padding="lg">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
-              Pipeline Phases
-            </h2>
-            {selectedPhase && (
-              <button
-                onClick={() => setSelectedPhase(null)}
-                className="text-xs text-white/30 hover:text-white/60 transition-colors"
-              >
-                Clear filter
-              </button>
-            )}
-          </div>
+      <Section
+        title="Pipeline Phases"
+        right={<ClearPhaseFilter selectedPhase={selectedPhase} onClear={() => setSelectedPhase(null)} />}
+      >
+        <PipelineVisualizer
+          timeline={timeline}
+          onPhaseClick={(phase) => setSelectedPhase((cur) => (cur === phase ? null : phase))}
+          selectedPhase={selectedPhase}
+        />
+      </Section>
 
-          <PipelineVisualizer
-            timeline={mergedTimeline}
-            onPhaseClick={(phase) =>
-              setSelectedPhase((cur) => (cur === phase ? null : phase))
-            }
-            selectedPhase={selectedPhase}
-          />
-        </div>
-      </GlassPanel>
+      <Section
+        title="Event Timeline"
+        right={jobId && <span className="font-mono text-xs text-white/20">{jobId}</span>}
+      >
+        <ActiveJobSelector jobs={jobs} selectedJobId={jobId} onSelect={() => undefined} />
+        <EventTimeline events={timeline} selectedPhase={selectedPhase} />
+      </Section>
 
-      {/* ── Active Jobs + Timeline ── */}
-      <GlassPanel padding="lg">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
-              Event Timeline
-            </h2>
-            <div className="flex items-center gap-2 text-xs text-white/30">
-              {liveTelemetryEvents.length > 0 && (
-                <span className="flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse" />
-                  Live
-                </span>
-              )}
-              {selectedJobId && (
-                <span className="font-mono text-white/20">{selectedJobId}</span>
-              )}
-            </div>
-          </div>
-
-          {/* Job selector */}
-          <ActiveJobSelector
-            jobs={activeJobs}
-            selectedJobId={selectedJobId}
-            onSelect={setSelectedJobId}
-          />
-
-          {/* Timeline events */}
-          <EventTimeline
-            events={mergedTimeline.length > 0 ? mergedTimeline : makeMockTimeline("job-demo")}
-            selectedPhase={selectedPhase}
-          />
-        </div>
-      </GlassPanel>
-
-      {/* ── Structured Log Viewer ── */}
-      <GlassPanel padding="lg">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
-              Structured Logs
-            </h2>
-            <div className="flex items-center gap-2 text-xs text-white/30">
-              {liveLogEntries.length > 0 && (
-                <span className="flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                  Streaming
-                </span>
-              )}
-            </div>
-          </div>
-
-          <LogViewer
-            logs={serverLogs}
-            sources={sources}
-            levelFilter={levelFilter}
-            sourceFilter={sourceFilter}
-            search={logSearch}
-            onLevelChange={setLevelFilter}
-            onSourceChange={setSourceFilter}
-            onSearchChange={setLogSearch}
-            liveEntries={filteredLive}
-          />
-        </div>
-      </GlassPanel>
+      <Section title="Structured Logs">
+        <LogViewer
+          entries={logs}
+          sources={DEMO_TELEMETRY_SOURCES}
+          levelFilter={levelFilter}
+          sourceFilter={sourceFilter}
+          search={logSearch}
+          onLevelChange={setLevelFilter}
+          onSourceChange={setSourceFilter}
+          onSearchChange={setLogSearch}
+        />
+      </Section>
     </div>
   );
 }

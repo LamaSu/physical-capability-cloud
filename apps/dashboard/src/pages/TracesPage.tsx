@@ -1,20 +1,33 @@
 /**
- * TracesPage — real-time trace waterfall viewer.
+ * TracesPage — trace waterfall viewer.
  *
  * Shows backend Sentry-style traces as a nested span waterfall, similar to Jaeger or Sentry's trace explorer.
- * Connects to /api/traces/stream via SSE for live updates.
+ * Reads GET /api/traces every 5s: the gateway's in-memory trace collector
+ * (packages/gateway/src/trace-collector.ts), fed by kernel job lifecycles and
+ * settlement pipelines. When the SSE stream /api/traces/stream connects, its
+ * updates patch the list between reads.
+ *
+ * A failed read shows as unavailable, or as stale over earlier data. It is
+ * never replaced by sample traces. Sample traces render only in demo mode
+ * (lib/demo-mode.ts), under a DemoBanner.
  */
 
-import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { GlassPanel, GlowBadge } from "@pcc/ui";
+import { GlassPanel, GlowBadge, EmptyState, LoadingShell } from "@pcc/ui";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUIStore } from "../stores/ui-store.js";
+import { apiGet } from "../lib/api.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+import { DemoBanner } from "../components/DemoState.js";
+import { demoTraces } from "../demo/TracesPage.fixtures.js";
 
 // ---------------------------------------------------------------------------
 // Types (mirror gateway trace-collector.ts)
 // ---------------------------------------------------------------------------
 
-interface TraceSpan {
+export interface TraceSpan {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
@@ -29,7 +42,7 @@ interface TraceSpan {
   children?: TraceSpan[];
 }
 
-interface Trace {
+export interface Trace {
   traceId: string;
   rootSpan: TraceSpan;
   spans: TraceSpan[];
@@ -60,92 +73,42 @@ function serviceColor(service: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Mock data for when gateway is offline
+// Reading traces
 // ---------------------------------------------------------------------------
 
-function makeMockTraces(): Trace[] {
-  const now = Date.now();
+/** The gateway's collector keeps the latest 50 traces. */
+const TRACE_LIMIT = 50;
+const REFRESH_MS = 5_000;
+const TRACES_QUERY_KEY = ["traces", "recent"] as const;
 
-  const makeTrace = (
-    traceId: string,
-    rootOp: string,
-    service: string,
-    status: Trace["status"],
-    spans: { op: string; svc: string; start: number; dur?: number; parent?: string; status: TraceSpan["status"] }[],
-  ): Trace => {
-    const rootId = "root-" + traceId;
-    const rootSpan: TraceSpan = {
-      traceId,
-      spanId: rootId,
-      operation: rootOp,
-      service,
-      status: status === "in_progress" ? "in_progress" : status,
-      startTime: now - spans[0].start,
-      endTime: status !== "in_progress" ? now - spans[0].start + (spans[0].dur ?? 4200) : undefined,
-      duration_ms: status !== "in_progress" ? (spans[0].dur ?? 4200) : undefined,
-      attributes: { "job.id": traceId },
-      children: [],
-    };
+/** The fields the list and waterfall read; anything less is not a trace. */
+function isTrace(value: unknown): value is Trace {
+  const t = value as Partial<Trace> | null;
+  return !!t && typeof t.traceId === "string" && !!t.rootSpan && typeof t.rootSpan.operation === "string" && Array.isArray(t.spans);
+}
 
-    const allSpans: TraceSpan[] = [rootSpan];
-    const idMap: Record<string, string> = { root: rootId };
+async function fetchRecentTraces(): Promise<Trace[]> {
+  const res = await apiGet<{ traces?: unknown; total?: number }>(`/traces?limit=${TRACE_LIMIT}`);
+  // A 2xx answer without a trace list is a failed read, not an empty one.
+  if (!Array.isArray(res?.traces) || !res.traces.every(isTrace)) {
+    throw new Error("The gateway's traces response was not in the expected format.");
+  }
+  return res.traces;
+}
 
-    for (const s of spans.slice(1)) {
-      const spanId = `span-${traceId}-${s.op}`;
-      idMap[s.op] = spanId;
-      allSpans.push({
-        traceId,
-        spanId,
-        parentSpanId: s.parent ? (idMap[s.parent] ?? rootId) : rootId,
-        operation: s.op,
-        service: s.svc,
-        status: s.status,
-        startTime: now - s.start,
-        endTime: s.dur !== undefined ? now - s.start + s.dur : undefined,
-        duration_ms: s.dur,
-        attributes: {},
-        children: [],
-      });
-    }
+/** Add or replace a trace by traceId, newest first. */
+function upsertTrace(prev: Trace[], incoming: Trace): Trace[] {
+  const idx = prev.findIndex((t) => t.traceId === incoming.traceId);
+  if (idx >= 0) {
+    const next = [...prev];
+    next[idx] = incoming;
+    return next;
+  }
+  return [incoming, ...prev].slice(0, TRACE_LIMIT);
+}
 
-    return {
-      traceId,
-      rootSpan,
-      spans: allSpans,
-      startTime: rootSpan.startTime,
-      endTime: rootSpan.endTime,
-      duration_ms: rootSpan.duration_ms,
-      status,
-    };
-  };
-
-  return [
-    makeTrace("trace-abc123", "job.lifecycle", "kernel", "ok", [
-      { op: "job.lifecycle", svc: "kernel", start: 5000, dur: 4200, status: "ok" },
-      { op: "job.load_gcode", svc: "kernel", start: 4900, dur: 320, status: "ok" },
-      { op: "job.start_sensors", svc: "kernel", start: 4580, dur: 180, status: "ok" },
-      { op: "job.start_execution", svc: "kernel", start: 4400, dur: 1200, status: "ok" },
-      { op: "job.wait_for_completion", svc: "kernel", start: 3200, dur: 2100, status: "ok" },
-      { op: "evidence.finalize_bundle", svc: "kernel", start: 1100, dur: 850, status: "ok" },
-      { op: "settlement.ipfs_archive", svc: "storage", start: 950, dur: 620, parent: "evidence.finalize_bundle", status: "ok" },
-      { op: "settlement.pipeline", svc: "settlement", start: 500, dur: 1100, status: "ok" },
-      { op: "settlement.db_persist", svc: "db", start: 450, dur: 120, parent: "settlement.pipeline", status: "ok" },
-      { op: "settlement.onchain_submit", svc: "blockchain", start: 330, dur: 350, parent: "settlement.pipeline", status: "ok" },
-      { op: "settlement.onchain_release", svc: "blockchain", start: 100, dur: 150, parent: "settlement.pipeline", status: "ok" },
-    ]),
-    makeTrace("trace-def456", "job.lifecycle", "kernel", "in_progress", [
-      { op: "job.lifecycle", svc: "kernel", start: 2100, status: "in_progress" },
-      { op: "job.load_gcode", svc: "kernel", start: 2000, dur: 200, status: "ok" },
-      { op: "job.start_sensors", svc: "kernel", start: 1800, dur: 150, status: "ok" },
-      { op: "job.start_execution", svc: "kernel", start: 1650, status: "in_progress" },
-    ]),
-    makeTrace("trace-ghi789", "settlement.pipeline", "settlement", "error", [
-      { op: "settlement.pipeline", svc: "settlement", start: 1500, dur: 800, status: "error" },
-      { op: "settlement.ipfs_archive", svc: "storage", start: 1400, dur: 350, status: "ok" },
-      { op: "settlement.db_persist", svc: "db", start: 1050, dur: 100, status: "ok" },
-      { op: "settlement.onchain_submit", svc: "blockchain", start: 950, dur: 400, status: "error" },
-    ]),
-  ];
+function formatDuration(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +199,7 @@ function SpanBar({
             {span.status === "in_progress" ? (
               <span className="animate-pulse">running…</span>
             ) : duration !== undefined ? (
-              `${duration >= 1000 ? (duration / 1000).toFixed(1) + "s" : duration + "ms"}`
+              formatDuration(duration)
             ) : ""}
           </span>
         </div>
@@ -245,7 +208,7 @@ function SpanBar({
       {/* Duration label */}
       <div className="w-16 text-right shrink-0">
         <span className="font-mono text-[11px] text-white/40">
-          {span.status === "in_progress" ? "…" : duration !== undefined ? `${duration >= 1000 ? (duration / 1000).toFixed(1) + "s" : duration + "ms"}` : "-"}
+          {span.status === "in_progress" ? "…" : duration !== undefined ? formatDuration(duration) : "-"}
         </span>
       </div>
     </motion.div>
@@ -300,7 +263,7 @@ function TraceWaterfall({ trace }: { trace: Trace }) {
               span: {selectedSpan.spanId} / service: {selectedSpan.service}
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-              {Object.entries(selectedSpan.attributes).map(([k, v]) => (
+              {Object.entries(selectedSpan.attributes ?? {}).map(([k, v]) => (
                 <React.Fragment key={k}>
                   <span className="text-[11px] font-mono text-white/40 truncate">{k}</span>
                   <span className="text-[11px] font-mono text-white/70 truncate">{String(v)}</span>
@@ -367,7 +330,7 @@ function TraceListRow({
 
       {/* Duration */}
       <span className="font-mono text-xs text-white/50 w-16 text-right shrink-0">
-        {duration !== undefined ? (duration >= 1000 ? `${(duration / 1000).toFixed(1)}s` : `${duration}ms`) : "…"}
+        {duration !== undefined ? formatDuration(duration) : "…"}
       </span>
 
       {/* Span count */}
@@ -397,7 +360,8 @@ function SummaryCards({ traces }: { traces: Trace[] }) {
   const completed = traces.filter((t) => t.status === "ok").length;
   const errors = traces.filter((t) => t.status === "error").length;
   const durations = traces.filter((t) => t.duration_ms !== undefined).map((t) => t.duration_ms!);
-  const avgDuration = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+  // No finished trace means no average, not an average of 0ms.
+  const avgDuration = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null;
 
   const cards = [
     { label: "Active", value: String(active), color: "text-teal-400", bg: "bg-teal-500/10 border-teal-500/20" },
@@ -405,7 +369,7 @@ function SummaryCards({ traces }: { traces: Trace[] }) {
     { label: "Errors", value: String(errors), color: "text-red-400", bg: "bg-red-500/10 border-red-500/20" },
     {
       label: "Avg Duration",
-      value: avgDuration >= 1000 ? `${(avgDuration / 1000).toFixed(1)}s` : `${avgDuration}ms`,
+      value: avgDuration === null ? "—" : formatDuration(avgDuration),
       color: "text-amber-400",
       bg: "bg-amber-500/10 border-amber-500/20",
     },
@@ -424,114 +388,49 @@ function SummaryCards({ traces }: { traces: Trace[] }) {
 }
 
 // ---------------------------------------------------------------------------
-// Main page
+// Page frame: header, and the list + waterfall explorer
 // ---------------------------------------------------------------------------
 
-export function TracesPage() {
-  const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const [traces, setTraces] = useState<Trace[]>([]);
-  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [usingMock, setUsingMock] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+function TracesHeader({ status }: { status?: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between">
+      <div>
+        <h1 className="text-xl font-semibold text-white/90">Trace Explorer</h1>
+        <p className="text-xs text-white/40 mt-0.5">Sentry-style distributed trace waterfall</p>
+      </div>
+      <div className="flex items-center gap-2">{status}</div>
+    </div>
+  );
+}
 
-  useEffect(() => {
-    setPageMeta("Traces", "Real-time span waterfall viewer");
-  }, [setPageMeta]);
+/** "live" only while the SSE stream is connected; otherwise the page is polling. */
+function StreamStatus({ open }: { open: boolean }) {
+  return (
+    <span className={`flex items-center gap-1.5 text-xs ${open ? "text-emerald-400" : "text-white/30"}`}>
+      <span className={`inline-block h-1.5 w-1.5 rounded-full ${open ? "bg-emerald-400" : "bg-white/20"}`} />
+      {open ? "live" : `refreshing every ${REFRESH_MS / 1000}s`}
+    </span>
+  );
+}
 
-  // Merge a trace update into state (add or replace by traceId)
-  const mergeTrace = useCallback((incoming: Trace) => {
-    setTraces((prev) => {
-      const idx = prev.findIndex((t) => t.traceId === incoming.traceId);
-      if (idx >= 0) {
-        const next = [...prev];
-        next[idx] = incoming;
-        return next;
-      }
-      // New trace — prepend (newest first)
-      return [incoming, ...prev].slice(0, 50);
-    });
-  }, []);
-
-  // Auto-select first trace when list becomes non-empty
-  useEffect(() => {
-    if (traces.length > 0 && selectedTraceId === null) {
-      setSelectedTraceId(traces[0].traceId);
-    }
-  }, [traces, selectedTraceId]);
-
-  // SSE connection
-  useEffect(() => {
-    let cancelled = false;
-
-    function connect() {
-      if (cancelled) return;
-      const es = new EventSource("/api/traces/stream");
-      esRef.current = es;
-
-      es.addEventListener("connected", () => {
-        if (!cancelled) setConnected(true);
-      });
-
-      es.addEventListener("trace_update", (e: MessageEvent) => {
-        if (cancelled) return;
-        try {
-          const trace = JSON.parse(e.data) as Trace;
-          mergeTrace(trace);
-          setUsingMock(false);
-        } catch {
-          // malformed JSON — ignore
-        }
-      });
-
-      es.onerror = () => {
-        es.close();
-        if (!cancelled) {
-          setConnected(false);
-          // Fallback to mock data
-          setTraces(makeMockTraces());
-          setUsingMock(true);
-          // Retry after 5 seconds
-          reconnectTimer.current = setTimeout(connect, 5000);
-        }
-      };
-    }
-
-    connect();
-
-    return () => {
-      cancelled = true;
-      esRef.current?.close();
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-    };
-  }, [mergeTrace]);
-
+function TraceExplorer({
+  traces,
+  selectedTraceId,
+  onSelect,
+  caption,
+}: {
+  traces: Trace[];
+  selectedTraceId: string | null;
+  onSelect: (traceId: string) => void;
+  caption?: string;
+}) {
   const selectedTrace = traces.find((t) => t.traceId === selectedTraceId);
 
   return (
-    <div className="space-y-4 p-4 max-w-full">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-white/90">Trace Explorer</h1>
-          <p className="text-xs text-white/40 mt-0.5">Sentry-style distributed trace waterfall</p>
-        </div>
-        <div className="flex items-center gap-2">
-          {usingMock && (
-            <span className="text-[11px] font-mono text-amber-400/70 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded">
-              mock data (gateway offline)
-            </span>
-          )}
-          <span className={`flex items-center gap-1.5 text-xs ${connected ? "text-emerald-400" : "text-white/30"}`}>
-            <span className={`inline-block h-1.5 w-1.5 rounded-full ${connected ? "bg-emerald-400" : "bg-white/20"}`} />
-            {connected ? "live" : "connecting…"}
-          </span>
-        </div>
-      </div>
-
+    <>
       {/* Summary cards */}
       <SummaryCards traces={traces} />
+      {caption && <p className="text-[11px] text-white/25 -mt-1">{caption}</p>}
 
       {/* Trace list + waterfall split */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
@@ -543,32 +442,35 @@ export function TracesPage() {
               <span className="text-xs font-mono text-white/30">{traces.length} traces</span>
             </div>
 
-            {/* Column headers */}
-            <div className="flex items-center gap-4 px-4 py-1 text-[10px] font-mono text-white/25 uppercase tracking-wider">
-              <span className="w-24 shrink-0">Trace ID</span>
-              <span className="flex-1">Root Operation</span>
-              <span className="w-20 shrink-0">Service</span>
-              <span className="w-16 text-right shrink-0">Duration</span>
-              <span className="w-12 text-right shrink-0">Spans</span>
-              <span className="w-6 text-center shrink-0">OK</span>
-            </div>
-
-            <AnimatePresence initial={false}>
-              {traces.length === 0 ? (
-                <div className="text-center py-12 text-white/20 text-sm">
-                  No traces yet. Submit a job to see traces.
+            {traces.length === 0 ? (
+              <EmptyState
+                title="No traces recorded yet"
+                description="Traces appear here when a kernel runs a job or a settlement pipeline runs on this gateway. It keeps the latest 50 in memory until it restarts."
+              />
+            ) : (
+              <>
+                {/* Column headers */}
+                <div className="flex items-center gap-4 px-4 py-1 text-[10px] font-mono text-white/25 uppercase tracking-wider">
+                  <span className="w-24 shrink-0">Trace ID</span>
+                  <span className="flex-1">Root Operation</span>
+                  <span className="w-20 shrink-0">Service</span>
+                  <span className="w-16 text-right shrink-0">Duration</span>
+                  <span className="w-12 text-right shrink-0">Spans</span>
+                  <span className="w-6 text-center shrink-0">OK</span>
                 </div>
-              ) : (
-                traces.map((trace) => (
-                  <TraceListRow
-                    key={trace.traceId}
-                    trace={trace}
-                    isSelected={trace.traceId === selectedTraceId}
-                    onSelect={() => setSelectedTraceId(trace.traceId)}
-                  />
-                ))
-              )}
-            </AnimatePresence>
+
+                <AnimatePresence initial={false}>
+                  {traces.map((trace) => (
+                    <TraceListRow
+                      key={trace.traceId}
+                      trace={trace}
+                      isSelected={trace.traceId === selectedTraceId}
+                      onSelect={() => onSelect(trace.traceId)}
+                    />
+                  ))}
+                </AnimatePresence>
+              </>
+            )}
           </div>
         </GlassPanel>
 
@@ -586,7 +488,7 @@ export function TracesPage() {
                     <span className="font-mono text-xs text-white/40">
                       {selectedTrace.spans.length} spans
                       {selectedTrace.duration_ms !== undefined && (
-                        <> · {selectedTrace.duration_ms >= 1000 ? `${(selectedTrace.duration_ms / 1000).toFixed(1)}s` : `${selectedTrace.duration_ms}ms`} total</>
+                        <> · {formatDuration(selectedTrace.duration_ms)} total</>
                       )}
                     </span>
                     <StatusDot status={selectedTrace.status} />
@@ -596,7 +498,7 @@ export function TracesPage() {
               </>
             ) : (
               <div className="flex items-center justify-center h-48 text-white/20 text-sm">
-                Select a trace to view its waterfall
+                {traces.length > 0 ? "Select a trace to view its waterfall" : "No trace to show"}
               </div>
             )}
           </div>
@@ -612,6 +514,146 @@ export function TracesPage() {
           </div>
         ))}
       </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
+export function TracesPage() {
+  const setPageMeta = useUIStore((s) => s.setPageMeta);
+
+  useEffect(() => {
+    setPageMeta("Traces", "Real-time span waterfall viewer");
+  }, [setPageMeta]);
+
+  // Sample traces render only when the viewer asked for a demo (lib/demo-mode.ts).
+  return isDemoMode() ? <TracesDemo /> : <TracesLive />;
+}
+
+// ── Live: the gateway's trace collector ───────────────────────────────────
+
+function TracesLive() {
+  const queryClient = useQueryClient();
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  // True only while the SSE stream is connected; "live" is never claimed otherwise.
+  const [streamOpen, setStreamOpen] = useState(false);
+
+  const tracesQuery = useQuery({
+    queryKey: TRACES_QUERY_KEY,
+    queryFn: fetchRecentTraces,
+    refetchInterval: REFRESH_MS,
+    staleTime: 2_000,
+  });
+  const traces = tracesQuery.data;
+
+  // Auto-select first trace when list becomes non-empty
+  useEffect(() => {
+    if (traces && traces.length > 0 && selectedTraceId === null) {
+      setSelectedTraceId(traces[0]!.traceId);
+    }
+  }, [traces, selectedTraceId]);
+
+  // SSE: updates patch a list the page has already read. The stream never
+  // stands in for a failed read, and a stream error never swaps in other data.
+  // EventSource cannot send the Authorization header, so a viewer signed in
+  // with an API key (not a wallet session) gets only the polled reads.
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return;
+    let cancelled = false;
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connect() {
+      if (cancelled) return;
+      const source = new EventSource("/api/traces/stream");
+      es = source;
+
+      source.onopen = () => {
+        if (!cancelled) setStreamOpen(true);
+      };
+      source.addEventListener("connected", () => {
+        if (!cancelled) setStreamOpen(true);
+      });
+
+      source.addEventListener("trace_update", (e: MessageEvent) => {
+        if (cancelled) return;
+        let trace: unknown;
+        try {
+          trace = JSON.parse(e.data);
+        } catch {
+          return; // malformed event: skip it
+        }
+        if (!isTrace(trace)) return;
+        // Only while the last read succeeded, so a failing read keeps its stale notice.
+        if (queryClient.getQueryState(TRACES_QUERY_KEY)?.status !== "success") return;
+        queryClient.setQueryData<Trace[]>(TRACES_QUERY_KEY, (prev) => (prev ? upsertTrace(prev, trace) : prev));
+      });
+
+      source.onerror = () => {
+        source.close();
+        if (cancelled) return;
+        setStreamOpen(false);
+        // Retry after 5 seconds; the polled reads carry on meanwhile.
+        reconnectTimer = setTimeout(connect, REFRESH_MS);
+      };
+    }
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      es?.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    };
+  }, [queryClient]);
+
+  let body: React.ReactNode;
+  if (traces) {
+    body = (
+      <>
+        {tracesQuery.isError && (
+          <StaleNotice what="traces" updatedAt={tracesQuery.dataUpdatedAt} onRetry={() => void tracesQuery.refetch()} />
+        )}
+        <TraceExplorer
+          traces={traces}
+          selectedTraceId={selectedTraceId}
+          onSelect={setSelectedTraceId}
+          caption={`Across the ${traces.length} most recent traces the gateway holds in memory.`}
+        />
+      </>
+    );
+  } else if (tracesQuery.isError) {
+    body = (
+      <GlassPanel>
+        <UnavailableState what="traces" error={tracesQuery.error} onRetry={() => void tracesQuery.refetch()} />
+      </GlassPanel>
+    );
+  } else {
+    body = <LoadingShell rows={4} />;
+  }
+
+  return (
+    <div className="space-y-4 p-4 max-w-full">
+      <TracesHeader status={<StreamStatus open={streamOpen} />} />
+      {body}
+    </div>
+  );
+}
+
+// ── Demo: the prototype with sample traces, under a DemoBanner ────────────
+
+function TracesDemo() {
+  const traces = useMemo(() => demoTraces(), []);
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(() => traces[0]?.traceId ?? null);
+
+  return (
+    <div className="space-y-4 p-4 max-w-full">
+      <DemoBanner what="Trace explorer" />
+      <TracesHeader />
+      <TraceExplorer traces={traces} selectedTraceId={selectedTraceId} onSelect={setSelectedTraceId} />
     </div>
   );
 }
