@@ -12,6 +12,11 @@ import { BountyService, type DemandSignal } from "@pcc/payments";
 
 const bountyService = new BountyService();
 
+/** Test helper: the shared service, so tests can seed state no route can create. */
+export function _bountyServiceForTests(): BountyService {
+  return bountyService;
+}
+
 /**
  * The only demand-signal fields any caller may read back. Requester identity,
  * free-text descriptions, locations and self-declared budgets are private.

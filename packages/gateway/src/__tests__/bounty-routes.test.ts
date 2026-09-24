@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "vitest";
 import Fastify from "fastify";
-import { bountyRoutes } from "../routes/bounty.js";
+import { bountyRoutes, _bountyServiceForTests } from "../routes/bounty.js";
 
 function makeApp() {
   const app = Fastify({ logger: false });
@@ -117,16 +117,34 @@ describe("POST /api/bounty/verify", () => {
     }
   });
 
-  it("changes no state: no bounty becomes verified or paid", async () => {
+  it("changes no state: a claimed bounty stays claimed after a passing caller score", async () => {
     const app = makeApp();
-    await app.inject({
+    // Seed a claimed bounty directly; no route can create one any more.
+    const svc = _bountyServiceForTests();
+    const bounty = svc.createBounty({
+      capabilityType: "kits-test-verify",
+      description: "seeded for the verify test",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
+      expiresInDays: 30,
+    });
+    svc.claimBounty(bounty.id, "operator-seeded");
+
+    const res = await app.inject({
       method: "POST",
       url: "/api/bounty/verify",
-      payload: { bountyId: "bounty-x", jobId: "job-x", score: 0.99 },
+      payload: { bountyId: bounty.id, jobId: "job-x", score: 0.99 },
     });
-    for (const status of ["verified", "paid"]) {
-      const list = await app.inject({ method: "GET", url: `/api/bounty/list?status=${status}` });
-      expect(list.json().total).toBe(0);
-    }
+    expect(res.statusCode).toBe(410);
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/bounty/list?capabilityType=kits-test-verify",
+    });
+    const [after] = list.json().bounties;
+    expect(after.status).toBe("claimed");
+    expect(after.verificationScore).toBeUndefined();
+    expect(after.fundingStatus).toBe("unfunded");
   });
 });
