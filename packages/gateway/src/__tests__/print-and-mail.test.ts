@@ -55,6 +55,12 @@ const now = () => new Date(mockNowMs);
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  // x-test-operator stands in for an authenticated API key: courier-jobs claims
+  // are bound to the authenticated principal (kits K0 slice 2).
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h !== "") (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(courierJobsRoutes);
   await app.register(printAndMailRoutes);
   await app.ready();
@@ -107,6 +113,7 @@ async function createAndClaimJob(
   const claim = await app.inject({
     method: "POST",
     url: `/api/courier-jobs/${opts.jobId}/claim`,
+    headers: { "x-test-operator": opts.driver ?? DRIVER },
     payload: { driverAgent: opts.driver ?? DRIVER },
   });
   if (claim.statusCode !== 200) {
