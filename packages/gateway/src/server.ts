@@ -88,6 +88,7 @@ import { contributorRoutes } from "./routes/contributors.js";
 import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
 import { statusRoutes } from "./routes/status.js";
+import { healthRoutes } from "./routes/health.js";
 import { subnetRoutes } from "./routes/subnet.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
@@ -476,23 +477,8 @@ export async function createGateway(port = 3200) {
   // from it.
   await app.register(agentIntrospectionRoutes);
 
-  // Health check
-  app.get("/api/health", async () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "0.1.0",
-  }));
-
-  // Bare /health alias — monitors and curl-based healthchecks commonly hit
-  // /health directly (not /api/health). Without this, SERVE_DASHBOARD=true's
-  // SPA fallback (setNotFoundHandler below) would catch bare /health and
-  // return index.html — a false-positive 200 for anything watching for a
-  // real healthcheck. Same payload as /api/health.
-  app.get("/health", async () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "0.1.0",
-  }));
+  // Health check: GET /api/health + bare /health alias (routes/health.ts)
+  await app.register(healthRoutes);
 
   // Security monitor — attack detection, honeypots, rate tracking, fingerprinting
   // Must be registered early so the onRequest hook fires before route handlers

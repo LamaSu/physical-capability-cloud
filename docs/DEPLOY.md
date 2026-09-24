@@ -73,6 +73,32 @@ merge to master
 
 The **same Docker manifest** flows through every stage. `:sha`, `:staging`, and `:prod` are aliases for the same underlying layers — no rebuild, no drift between environments.
 
+## Verifying what is served
+
+`GET /api/health` (and its bare alias `GET /health`) reports which commit the running gateway was built from:
+
+```bash
+curl -s https://capability.network/api/health
+# {"status":"ok","timestamp":"…","version":"0.1.0","commit":"<40-char sha>","commitSource":"image_build",
+#  "buildArg":"PCC_BUILD_SHA","deployMetadata":{"railwayGitCommitSha":null}}
+# commit is JSON null (not a string) when commitSource is "unknown"
+```
+
+`commit` comes **only** from `/app/BUILD_INFO.json`, a file the Dockerfile writes into the image at build time. No runtime variable can change it, so a service variable set after the build (or a stale one) never shows up as the served commit.
+
+| Field | Meaning |
+|---|---|
+| `commitSource: "image_build"` | `commit` is the full 40-hex SHA recorded in the image. `buildArg` says which build argument supplied it: `PCC_BUILD_SHA` (CI's `build-image` job passes `github.sha`; `:staging` and `:prod` are retags of that image, so they report the SHA that was built) or `RAILWAY_GIT_COMMIT_SHA` (when Railway builds the Dockerfile and supplies it as a build argument). |
+| `commitSource: "unknown"` | `commit` and `buildArg` are `null`: the image recorded no build commit (for example a local build without the build arg). The gateway never guesses a SHA. |
+| `deployMetadata.railwayGitCommitSha` | Railway's **runtime** `RAILWAY_GIT_COMMIT_SHA`, if set. It is deploy metadata, not proof of the code served, so it is never reported as `commit`. |
+
+Build rules (Dockerfile, tested by `dockerfile-build-info.test.ts`):
+- Only a full 40-hex SHA is recorded. A 7-character prefix could be ambiguous, and anything else writes no file.
+- If both build arguments are given and differ, **the image build fails** rather than bake a stale commit.
+- `version` is a static literal (`"0.1.0"`; release-please does not bump it) and does not identify a deploy.
+
+Once Railway serves the GHCR `:prod` image, `commit` after a Deploy to Prod run should equal the SHA you promoted.
+
 ## Semver + CHANGELOG automation
 
 `release-please` watches Conventional Commits on `master` and maintains a rolling release PR. Merging it:
