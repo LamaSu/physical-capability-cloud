@@ -8,16 +8,26 @@
  * In the render-provenance vocabulary (render-provenance.ts) it is
  * `sourceClass: "preference"` and never occupies an authoritative slot.
  *
- * Settled with product-steward (#2587) and readmodels (#2731):
+ * Settled with product-steward (#2587), readmodels (#2731) and genui (#3156):
  * - The shape is closed. Unknown keys are rejected at every level, so no
  *   value can be smuggled in.
- * - `ref` must name a component in the trusted catalog. The catalog is an
- *   argument because genui owns its contents.
- * - A catalog component marked `mustShow` (pending approvals, an active
- *   e-stop, failed/disputed/refunded money, a required evidence action)
- *   cannot be hidden or collapsed.
- * - `view.emphasis` keys must be on some slot's catalog allowlist. They
- *   reorder or reveal fields; they never change what a field says.
+ * - `ref` must name a trusted COMPONENT in the catalog (e.g. "pcc.jobs.list",
+ *   "pcc.run.summary", "pcc.approval"), never a closed-IR node kind. The
+ *   catalog entry fixes the component's routes, fields, labels and source
+ *   class; a layout supplies placement only. The catalog is an argument
+ *   because genui owns its contents (TRUSTED_COMPONENTS, Wave 4). There is
+ *   deliberately no escrow list: money state appears only in per-unit
+ *   settlement components.
+ * - A catalog component marked `mustShow` cannot be hidden or collapsed. A
+ *   component in a must-show state (MUST_SHOW_STATES: a pending approval, an
+ *   active e-stop, failed, disputed, refunded or UNKNOWN money, a required
+ *   evidence action) is rendered whatever the layout says: mustShowNow().
+ * - `view.emphasis` keys must be on some slot's catalog allowlist of optional
+ *   fields. They reorder fields; they never change what a field says, and
+ *   never move a component's must-show fields (status or tone, the
+ *   provenance line, the withheld-prose marker, the "not confirmed by a
+ *   settlement read" qualifier, the Approval surface's "This will send"
+ *   block) out of view. validateWorkspaceCatalog() keeps the two lists apart.
  * - `focus` is an id the component re-reads from its A/B source. It is
  *   never content.
  * - Agent patches are Layer C until the user accepts them, and are capped
@@ -104,8 +114,41 @@ export type WorkspaceLayoutPatchOp =
 export interface WorkspaceCatalogEntry {
   /** Can never be hidden or collapsed by a layout or an accepted patch. */
   mustShow?: boolean;
-  /** Field keys this component lets `view.emphasis` bring forward. */
+  /** The component's optional fields: the only ones `view.emphasis` may bring forward. */
   emphasis?: readonly string[];
+  /**
+   * Fields that stay in view whatever the layout or emphasis says: the status
+   * or tone field, the provenance line, and markers such as "withheld" or
+   * "not confirmed by a settlement read". Never emphasisable.
+   */
+  mustShowFields?: readonly string[];
+}
+
+/**
+ * States in which a component is rendered whatever the layout says. Each is
+ * read from the component's own A/B source, never inferred by the UI.
+ * "money_unknown" is a settlement read the classifier could not verify
+ * ("settlement fields disagree", "incomplete settlement record"): hiding "I
+ * can't verify this payment" is as bad as hiding a failure (genui #3156).
+ */
+export const MUST_SHOW_STATES = [
+  "approval_pending",
+  "estop_active",
+  "money_failed",
+  "money_disputed",
+  "money_refunded",
+  "money_unknown",
+  "evidence_action_required",
+] as const;
+export type MustShowState = (typeof MUST_SHOW_STATES)[number];
+
+/**
+ * True when a slot must be rendered, expanded, regardless of its `visible`
+ * and `collapsed` settings: its component is always-shown, or it currently
+ * reports a must-show state.
+ */
+export function mustShowNow(entry: WorkspaceCatalogEntry | undefined, activeStates: readonly MustShowState[]): boolean {
+  return entry?.mustShow === true || activeStates.some((s) => (MUST_SHOW_STATES as readonly string[]).includes(s));
 }
 
 /** The trusted component catalog (genui owns its contents), keyed by ref. */
@@ -119,7 +162,8 @@ export type WorkspaceLayoutViolationCode =
   | "must_show_hidden"
   | "emphasis_not_allowed"
   | "too_many_slots"
-  | "patch_too_large";
+  | "patch_too_large"
+  | "bad_catalog";
 
 export interface WorkspaceLayoutViolation {
   code: WorkspaceLayoutViolationCode;
@@ -312,6 +356,36 @@ export function validateWorkspaceLayoutInput(
       view,
     },
   };
+}
+
+/**
+ * Checks the catalog itself (genui pins TRUSTED_COMPONENTS to this). Every
+ * ref and field key must be an id, and no field may be both emphasisable
+ * and must-show: that would let emphasis move a must-show field out of view.
+ */
+export function validateWorkspaceCatalog(catalog: WorkspaceCatalog): WorkspaceLayoutViolation[] {
+  const out: WorkspaceLayoutViolation[] = [];
+  for (const [ref, entry] of Object.entries(catalog)) {
+    if (!ID_RE.test(ref)) out.push({ code: "bad_catalog", path: ref, message: `"${ref}" is not a component id` });
+    for (const name of ["emphasis", "mustShowFields"] as const) {
+      (entry[name] ?? []).forEach((k, n) => {
+        if (typeof k !== "string" || !ID_RE.test(k)) {
+          out.push({ code: "bad_catalog", path: `${ref}.${name}[${n}]`, message: `"${String(k)}" is not a field key` });
+        }
+      });
+    }
+    const mustShow = new Set(entry.mustShowFields ?? []);
+    (entry.emphasis ?? []).forEach((k, n) => {
+      if (mustShow.has(k)) {
+        out.push({
+          code: "bad_catalog",
+          path: `${ref}.emphasis[${n}]`,
+          message: `"${k}" is a must-show field of ${ref}; emphasis may reorder only optional fields`,
+        });
+      }
+    });
+  }
+  return out;
 }
 
 /** Validate a stored layout, including the server-owned fields. */

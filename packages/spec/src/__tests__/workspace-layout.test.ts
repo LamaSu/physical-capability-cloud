@@ -1,5 +1,6 @@
 /**
- * WorkspaceLayoutV1 invariants (product-steward #2587, readmodels #2731).
+ * WorkspaceLayoutV1 invariants (product-steward #2587, readmodels #2731,
+ * genui #3156).
  * The gateway's PUT /api/me/workspaces/:workspace answers 422 with these
  * same violation codes.
  */
@@ -7,19 +8,24 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_PATCH_OPS,
+  MUST_SHOW_STATES,
   WORKSPACE_LAYOUT_SCHEMA,
   applyWorkspaceLayoutPatch,
+  mustShowNow,
+  validateWorkspaceCatalog,
   validateWorkspaceLayout,
   validateWorkspaceLayoutInput,
   type WorkspaceCatalog,
   type WorkspaceLayoutInput,
 } from "../workspace/workspace-layout.js";
 
+// Refs from genui's catalog contract (#3156). There is deliberately no
+// escrow list: money state appears only in per-unit settlement components.
 const CATALOG: WorkspaceCatalog = {
-  "pcc.jobs.list": { emphasis: ["margin", "deadline"] },
-  "pcc.job.execution": {},
-  "pcc.approvals.pending": { mustShow: true },
-  "pcc.escrow.list": { emphasis: ["amount"] },
+  "pcc.jobs.list": { emphasis: ["margin", "deadline"], mustShowFields: ["status", "provenance"] },
+  "pcc.run.summary": { mustShowFields: ["status", "provenance", "settlement-qualifier"] },
+  "pcc.approval": { mustShow: true, mustShowFields: ["this-will-send"] },
+  "pcc.capabilities.list": { emphasis: ["lead-time"] },
 };
 
 function base(): WorkspaceLayoutInput {
@@ -28,7 +34,7 @@ function base(): WorkspaceLayoutInput {
     workspace: "operate-work",
     slots: [
       { ref: "pcc.jobs.list", order: 0, size: "l", visible: true },
-      { ref: "pcc.approvals.pending", order: 1, size: "m", visible: true },
+      { ref: "pcc.approval", order: 1, size: "m", visible: true },
     ],
     view: { density: "comfortable", technicalDetails: "on-failure" },
   };
@@ -44,7 +50,7 @@ describe("validateWorkspaceLayoutInput", () => {
     input.slots.reverse();
     const r = validateWorkspaceLayoutInput(input, CATALOG);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value.slots.map((s) => s.ref)).toEqual(["pcc.jobs.list", "pcc.approvals.pending"]);
+    if (r.ok) expect(r.value.slots.map((s) => s.ref)).toEqual(["pcc.jobs.list", "pcc.approval"]);
   });
 
   it("journey 10: 'show margin first, hide blockchain details unless something fails' is expressible", () => {
@@ -84,8 +90,8 @@ describe("validateWorkspaceLayoutInput", () => {
   });
 
   it("emphasis must be on a slot's catalog allowlist", () => {
-    const input = { ...base(), view: { density: "compact", technicalDetails: "shown", emphasis: ["amount"] } };
-    // "amount" is allowed only by pcc.escrow.list, which is not in this workspace
+    const input = { ...base(), view: { density: "compact", technicalDetails: "shown", emphasis: ["lead-time"] } };
+    // "lead-time" is allowed only by pcc.capabilities.list, which is not in this workspace
     expect(codes(validateWorkspaceLayoutInput(input, CATALOG))).toContain("emphasis_not_allowed");
   });
 
@@ -103,6 +109,31 @@ describe("validateWorkspaceLayoutInput", () => {
   });
 });
 
+describe("must-show fields and states (genui #3156)", () => {
+  it("emphasis cannot name a must-show field, only an optional one", () => {
+    const input = { ...base(), view: { density: "compact", technicalDetails: "shown", emphasis: ["status"] } };
+    expect(codes(validateWorkspaceLayoutInput(input, CATALOG))).toEqual(["emphasis_not_allowed"]);
+  });
+
+  it("validateWorkspaceCatalog: a field both emphasisable and must-show is a catalog error", () => {
+    expect(validateWorkspaceCatalog(CATALOG)).toEqual([]);
+    const bad = { ...CATALOG, "pcc.run.summary": { emphasis: ["status"], mustShowFields: ["status"] } };
+    expect(validateWorkspaceCatalog(bad).map((v) => [v.code, v.path])).toEqual([["bad_catalog", "pcc.run.summary.emphasis[0]"]]);
+    expect(validateWorkspaceCatalog({ "not a ref": {} }).map((v) => v.code)).toEqual(["bad_catalog"]);
+  });
+
+  it("unknown money is a must-show state, like failed, disputed and refunded money", () => {
+    expect(MUST_SHOW_STATES).toEqual(expect.arrayContaining(["money_failed", "money_disputed", "money_refunded", "money_unknown"]));
+  });
+
+  it("mustShowNow: a hidden slot is rendered while its component reports a must-show state", () => {
+    const summary = CATALOG["pcc.run.summary"];
+    expect(mustShowNow(summary, [])).toBe(false);
+    expect(mustShowNow(summary, ["money_unknown"])).toBe(true);
+    expect(mustShowNow(CATALOG["pcc.approval"], [])).toBe(true);
+  });
+});
+
 describe("validateWorkspaceLayout (stored form)", () => {
   it("requires the server-owned scope, version and updatedAt", () => {
     const stored = { ...base(), scope: { kind: "user", id: "operator@example.test" }, version: 3, updatedAt: "2026-09-24T12:00:00Z" };
@@ -117,7 +148,7 @@ describe("applyWorkspaceLayoutPatch (agent proposals, Layer C)", () => {
       base(),
       [
         { op: "resize", ref: "pcc.jobs.list", size: "full" },
-        { op: "show", ref: "pcc.escrow.list" },
+        { op: "show", ref: "pcc.capabilities.list" },
         { op: "view", set: { emphasis: ["margin"] } },
       ],
       CATALOG,
@@ -125,12 +156,12 @@ describe("applyWorkspaceLayoutPatch (agent proposals, Layer C)", () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.value.slots.find((s) => s.ref === "pcc.jobs.list")?.size).toBe("full");
-      expect(r.value.slots.some((s) => s.ref === "pcc.escrow.list")).toBe(true);
+      expect(r.value.slots.some((s) => s.ref === "pcc.capabilities.list")).toBe(true);
     }
   });
 
   it("refuses a patch that would hide a mustShow component", () => {
-    const r = applyWorkspaceLayoutPatch(base(), [{ op: "hide", ref: "pcc.approvals.pending" }], CATALOG);
+    const r = applyWorkspaceLayoutPatch(base(), [{ op: "hide", ref: "pcc.approval" }], CATALOG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.violations.map((v) => v.code)).toContain("must_show_hidden");
   });
