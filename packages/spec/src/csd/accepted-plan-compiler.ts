@@ -29,8 +29,11 @@
  *    permissive gate would approve it; with no gate injected, a non-zero tier is refused.
  *  - A SEALED DEAL. `acceptedDealDigest` = sha256 over the canonical form of the ENTIRE compiled deal:
  *    every job, every unit field (tier, fee, amounts, payees, order), the signing operators, the
- *    reservation, the currency and its decimals, both v3 roots, and economics' two terms hashes
- *    (null when no agreement applies). This is the digest the reservation
+ *    reservation, the currency and its decimals, both v3 roots, economics' agreementHash plus its
+ *    two terms hashes (all null when no agreement applies; the agreementHash also covers the
+ *    agreement's envelope — asOf, version, deadline), and each node's EXECUTION CONTRACT (N25): the
+ *    `canonicalPlan` VCR hashes into `planHash` (server terms plus the node's plain-JSON `inputs` and
+ *    `constraints`, e.g. WHICH document gets printed). This is the digest the reservation
  *    consume seals (MUST-CLOSE 8). The v3 `compositionRoot` is derived here from the same input and
  *    echoed into every unit, but it commits the PLAN (contract, providers, prices, wallets, program),
  *    NOT the settlement terms: two deals that differ only in a node's tier, the fee, or the signing
@@ -66,6 +69,8 @@ import {
   type MatchedDAG,
 } from "./composition-commitment.js";
 import type { Address } from "../types/common.js";
+import { CANONICAL_PLAN_SCHEMA, planHashOf, type CanonicalPlan, type PlanHash } from "./canonical-plan.js";
+import { EMPTY_PLAN_JSON, copyPlanJson, type PlanJsonObject } from "./plan-json.js";
 
 // ── Frozen V-next ABI limits (escrow's VNEXT_SETTLEMENT_ABI.md §2, §5) ─────────────────────────
 export const MAX_UNITS_PER_JOB = 16;
@@ -77,8 +82,8 @@ export const MAX_FEE_BPS = 1000;
 export const BPS_DENOMINATOR = 10_000n;
 /** Stored in each UnitConfig; 0 means "not composed". */
 export const COMPOSITION_SCHEMA_VERSION = 3;
-/** Domain tag inside the accepted-deal digest's canonical preimage. */
-export const ACCEPTED_DEAL_DOMAIN = "PCC:accepted-deal:v1";
+/** Domain tag inside the accepted-deal digest's canonical preimage. v2 added `agreementHash` and each node's `planHash` (N25). */
+export const ACCEPTED_DEAL_DOMAIN = "PCC:accepted-deal:v2";
 /**
  * Settlement tokens this compiler will price, with their on-chain decimals. Server-owned: decimals
  * are never taken from a caller. Add a token here only with its real decimals.
@@ -109,6 +114,14 @@ export interface AcceptedPlanNode {
   committedProgramHash: string | null;
   /** The node's evidence requirements from its CSD tier (committed in the v3 contract root). */
   evidenceRequirements: EvidenceRequirement[];
+  /**
+   * Execution inputs (N25): the caller's plain-JSON content, e.g. the document hash and page count.
+   * It says WHAT runs, never who is paid or how much. It is sealed through the node's `planHash`.
+   * Absent means `{}`.
+   */
+  inputs?: PlanJsonObject;
+  /** Execution constraints (N25), e.g. a deadline: plain JSON, sealed like `inputs`. Absent means `{}`. */
+  constraints?: PlanJsonObject;
 }
 
 export interface AcceptedPlanEdge {
@@ -185,6 +198,10 @@ export interface NodeUnitBinding {
   stepIdBytes32: Bytes32;
   tier: number;
   committedProgramHash: string | null;
+  /** VCR's per-node execution contract (N25): what runs, for whom, at what price, on which inputs. */
+  canonicalPlan: CanonicalPlan;
+  /** `planHashOf(canonicalPlan)`. VCR recomputes it from the plan bytes it receives. Sealed. */
+  planHash: PlanHash;
 }
 
 export interface CompiledAcceptedPlan {
@@ -200,7 +217,12 @@ export interface CompiledAcceptedPlan {
   totalObligationBaseUnits: bigint;
   compositionRoot: Bytes32;
   capabilityContractRoot: Bytes32;
-  /** Economics' terms hashes when an agreement split the payouts (R15); null otherwise. Both sealed. */
+  /**
+   * Economics' hashes when an agreement split the payouts (R15); null otherwise. All three are sealed.
+   * `agreementHash` is the one acceptance binds: the two terms hashes do not cover the agreement's
+   * envelope (asOf, version, deadline), so sealing only them would leave `asOf` mutable after acceptance.
+   */
+  agreementHash: `0x${string}` | null;
   economicTermsHash: `0x${string}` | null;
   rightsTermsHash: `0x${string}` | null;
   jobs: CompiledJob[];
@@ -213,6 +235,7 @@ export type CompileViolation =
   | { code: "invalid-node-id"; nodeId: string }
   | { code: "duplicate-node"; nodeId: string }
   | { code: "invalid-node-field"; nodeId: string; field: string }
+  | { code: "invalid-execution-json"; nodeId: string; field: "inputs" | "constraints"; reason: string }
   | { code: "invalid-tier"; nodeId: string; tierKey: string }
   | { code: "operator-is-payer"; nodeId: string }
   | { code: "gross-out-of-range"; nodeId: string }
@@ -281,6 +304,8 @@ export type NetSplitResult =
         net: string;
         payouts: ReadonlyArray<{ recipient: string; amount: string }>;
       }>;
+      /** What acceptance binds (economics #2755): it covers both terms hashes AND the envelope (asOf, version, deadline). */
+      agreementHash: string;
       economicTermsHash: string;
       rightsTermsHash: string;
     }
@@ -459,6 +484,24 @@ function copyFields(
   return Object.freeze(out);
 }
 
+/**
+ * Execution JSON (`inputs`/`constraints`) that could not be copied as plain JSON. Only `execJson` creates
+ * one, and copied data can never be an instance (copyPlanJson refuses non-plain prototypes), so a caller
+ * cannot forge it. Node validation reports it as `invalid-execution-json`.
+ */
+class InvalidExecutionJson {
+  constructor(readonly reason: string) {
+    Object.freeze(this);
+  }
+}
+
+/** A node's execution JSON, read once: absent is `{}`; otherwise an owned frozen copy, or the refusal. */
+function execJson(x: unknown): PlanJsonObject | InvalidExecutionJson {
+  if (x === undefined) return EMPTY_PLAN_JSON;
+  const c = copyPlanJson(x);
+  return c.ok ? c.value : new InvalidExecutionJson(c.reason);
+}
+
 const NODE_FIELDS = [
   "nodeId", "capabilityId", "capabilityType", "csd", "tierKey", "operator", "payoutAddress",
   "grossBaseUnits", "matchedCapabilityDigest", "committedProgramHash",
@@ -496,6 +539,8 @@ function snapshotInput(untrusted: unknown): AcceptedPlanInput | { refused: Compi
           out.evidenceRequirements = copyList(o.evidenceRequirements, MAX_EVIDENCE_REQUIREMENTS_PER_NODE, over("evidenceRequirements"), (r) =>
             copyFields(r, ["requirementId", "evidenceTypeId", "tier"]),
           );
+          out.inputs = execJson(o.inputs);
+          out.constraints = execJson(o.constraints);
         }),
       ),
       edges: copyList(i.edges, MAX_PLAN_EDGES, over("edges"), (e) => copyFields(e, ["from", "to"])),
@@ -606,6 +651,10 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     }
     if (!Array.isArray(n.evidenceRequirements)) {
       v.push({ code: "invalid-node-field", nodeId: id, field: "evidenceRequirements" });
+    }
+    for (const field of ["inputs", "constraints"] as const) {
+      const x: unknown = n[field];
+      if (x instanceof InvalidExecutionJson) v.push({ code: "invalid-execution-json", nodeId: id, field, reason: x.reason });
     }
     if (typeof n.grossBaseUnits !== "bigint" || n.grossBaseUnits < MIN_GROSS_BASE_UNITS || n.grossBaseUnits > MAX_GROSS_BASE_UNITS) {
       v.push({ code: "gross-out-of-range", nodeId: id });
@@ -725,12 +774,14 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
   // with this compiler's own economics and conserve EXACTLY per unit — refused, never repaired.
   const econOf = new Map(order.map((id) => [id, unitEconomics(byId.get(id)!.grossBaseUnits, input.feeBps)]));
   const payoutsOf = new Map<string, PayoutEntry[]>();
+  let agreementHash: `0x${string}` | null = null;
   let economicTermsHash: `0x${string}` | null = null;
   let rightsTermsHash: `0x${string}` | null = null;
   if (splitFn !== undefined) {
     const split = splitPayouts(order, byId, econOf, splitFn);
     if (!split.ok) return { ok: false, violations: sortViolations(split.violations) };
     for (const [id, legs] of split.payouts) payoutsOf.set(id, legs);
+    agreementHash = split.agreementHash;
     economicTermsHash = split.economicTermsHash;
     rightsTermsHash = split.rightsTermsHash;
   } else {
@@ -772,6 +823,7 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
         compositionRoot,
         payouts,
       });
+      const canonicalPlan = canonicalPlanOf(input.planId, n, { g, currency: input.currency, decimals: currencyDecimals!, jobId, milestoneIndex, tier });
       nodeToUnit.push({
         nodeId: id,
         jobIndex,
@@ -782,6 +834,8 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
         stepIdBytes32: stepIdBytes32(id),
         tier,
         committedProgramHash: n.committedProgramHash,
+        canonicalPlan,
+        planHash: planHashOf(canonicalPlan),
       });
     }
     jobs.push({ jobId, operator: first.operator, payer: input.payer, units, nodeIds: [...ids] });
@@ -796,12 +850,46 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     totalObligationBaseUnits: total,
     compositionRoot,
     capabilityContractRoot: commitment.capabilityContractRoot as Bytes32,
+    agreementHash,
     economicTermsHash,
     rightsTermsHash,
     jobs,
     nodeToUnit,
   };
   return { ok: true, plan: { ...unsealed, acceptedDealDigest: acceptedDealDigest(unsealed) } };
+}
+
+/**
+ * VCR's per-node execution contract (N25), built only from this compiler's validated copy: server terms
+ * plus the node's copied `inputs`/`constraints`. Deeply frozen.
+ */
+function canonicalPlanOf(
+  planId: string,
+  n: AcceptedPlanNode,
+  u: { g: bigint; currency: string; decimals: number; jobId: string; milestoneIndex: number; tier: number },
+): CanonicalPlan {
+  const lc = (x: string) => x.toLowerCase();
+  const evidence = n.evidenceRequirements.map((r) =>
+    Object.freeze({ requirementId: r.requirementId, evidenceTypeId: r.evidenceTypeId, tier: r.tier }),
+  );
+  return Object.freeze({
+    schema: CANONICAL_PLAN_SCHEMA,
+    planId,
+    planNodeId: n.nodeId,
+    capability: Object.freeze({ type: n.capabilityType, id: n.capabilityId, csd: n.csd, matchedCapabilityDigest: lc(n.matchedCapabilityDigest) }),
+    operator: lc(n.operator),
+    payTo: lc(n.payoutAddress),
+    amount: Object.freeze({ baseUnits: u.g.toString(), currency: u.currency, decimals: u.decimals }),
+    job: Object.freeze({ jobId: u.jobId, milestoneIndex: u.milestoneIndex, stepId: n.nodeId }),
+    assurance: Object.freeze({
+      tier: u.tier,
+      tierKey: n.tierKey,
+      committedProgramHash: n.committedProgramHash === null ? null : lc(n.committedProgramHash),
+      evidence: Object.freeze(evidence) as CanonicalPlan["assurance"]["evidence"],
+    }),
+    inputs: n.inputs ?? EMPTY_PLAN_JSON,
+    constraints: n.constraints ?? EMPTY_PLAN_JSON,
+  });
 }
 
 /** Integer base units: canonical (no sign, no leading zeros) and at most 78 digits (a uint256 has 78). */
@@ -825,7 +913,13 @@ interface UnitSnapshot {
   payouts: LegSnapshot[] | "not-array" | { tooMany: number };
 }
 type SplitSnapshot =
-  | { ok: true; economicTermsHash: unknown; rightsTermsHash: unknown; units: Array<UnitSnapshot | null> | "not-array" | "too-many" }
+  | {
+      ok: true;
+      agreementHash: unknown;
+      economicTermsHash: unknown;
+      rightsTermsHash: unknown;
+      units: Array<UnitSnapshot | null> | "not-array" | "too-many";
+    }
   | { ok: false; code: unknown }
   | "malformed";
 
@@ -849,13 +943,16 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
     const ok = r.ok;
     if (ok === false) return { ok: false, code: leaf(r.code) };
     if (ok !== true) return "malformed";
-    const economicTermsHash = leaf(r.economicTermsHash);
-    const rightsTermsHash = leaf(r.rightsTermsHash);
+    const hashes = {
+      agreementHash: leaf(r.agreementHash),
+      economicTermsHash: leaf(r.economicTermsHash),
+      rightsTermsHash: leaf(r.rightsTermsHash),
+    };
     const unitsRaw = r.units;
-    if (!Array.isArray(unitsRaw)) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
+    if (!Array.isArray(unitsRaw)) return { ok: true, ...hashes, units: "not-array" };
     const unitCount = lengthOf(unitsRaw);
-    if (unitCount === null) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
-    if (unitCount > maxUnits) return { ok: true, economicTermsHash, rightsTermsHash, units: "too-many" };
+    if (unitCount === null) return { ok: true, ...hashes, units: "not-array" };
+    if (unitCount > maxUnits) return { ok: true, ...hashes, units: "too-many" };
     const units: Array<UnitSnapshot | null> = [];
     for (let i = 0; i < unitCount; i++) {
       const u: unknown = unitsRaw[i];
@@ -888,7 +985,7 @@ function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
       }
       units.push({ unitRef, gross, fee, net, payouts });
     }
-    return { ok: true, economicTermsHash, rightsTermsHash, units };
+    return { ok: true, ...hashes, units };
   } catch {
     return "malformed";
   }
@@ -907,7 +1004,13 @@ function splitPayouts(
   econOf: ReadonlyMap<string, { g: bigint; f: bigint; n: bigint }>,
   splitNet: NetSplitter,
 ):
-  | { ok: true; payouts: Map<string, PayoutEntry[]>; economicTermsHash: `0x${string}`; rightsTermsHash: `0x${string}` }
+  | {
+      ok: true;
+      payouts: Map<string, PayoutEntry[]>;
+      agreementHash: `0x${string}`;
+      economicTermsHash: `0x${string}`;
+      rightsTermsHash: `0x${string}`;
+    }
   | { ok: false; violations: CompileViolation[] } {
   const malformed = (detail: string) => ({ ok: false as const, violations: [{ code: "economics-malformed" as const, detail }] });
   const res = splitNet(
@@ -921,6 +1024,7 @@ function splitPayouts(
   if (snap === "malformed") return malformed("result");
   if (!snap.ok) return { ok: false, violations: [{ code: "economics-refused", reason: show(snap.code) }] };
   if (!isDigest(snap.economicTermsHash) || !isDigest(snap.rightsTermsHash)) return malformed("terms-hash");
+  if (!isDigest(snap.agreementHash)) return malformed("agreement-hash");
   if (snap.units === "not-array") return malformed("units");
   if (snap.units === "too-many") return malformed("unit-set");
   const byRef = new Map<string, UnitSnapshot>();
@@ -965,6 +1069,7 @@ function splitPayouts(
   return {
     ok: true,
     payouts,
+    agreementHash: snap.agreementHash.toLowerCase() as `0x${string}`,
     economicTermsHash: snap.economicTermsHash.toLowerCase() as `0x${string}`,
     rightsTermsHash: snap.rightsTermsHash.toLowerCase() as `0x${string}`,
   };
@@ -982,8 +1087,8 @@ function sortViolations(v: CompileViolation[]): CompileViolation[] {
 /**
  * sha256 over the canonical JSON of the whole compiled deal (bigints as decimal strings, addresses
  * and hashes lowercased — hex case carries no meaning). Any change to any settlement-significant
- * term — tier, fee, amount, payee, signing operator, unit order, reservation, currency or decimals —
- * changes this digest.
+ * term — tier, fee, amount, payee, signing operator, unit order, reservation, currency, decimals or
+ * the economic agreement (its whole hash, envelope included) — changes this digest.
  */
 export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): `0x${string}` {
   const lc = (x: string | null) => (x === null ? null : x.toLowerCase());
@@ -997,6 +1102,7 @@ export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDea
     totalObligationBaseUnits: plan.totalObligationBaseUnits.toString(),
     compositionRoot: lc(plan.compositionRoot),
     capabilityContractRoot: lc(plan.capabilityContractRoot),
+    agreementHash: lc(plan.agreementHash),
     economicTermsHash: lc(plan.economicTermsHash),
     rightsTermsHash: lc(plan.rightsTermsHash),
     jobs: plan.jobs.map((j) => ({
@@ -1030,6 +1136,10 @@ export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDea
       stepIdBytes32: lc(b.stepIdBytes32),
       tier: b.tier,
       committedProgramHash: lc(b.committedProgramHash),
+      // The carried hash is what VCR reads; the hash RECOMPUTED from the carried content makes any
+      // disagreement between the two change this digest, so recompute-and-compare catches it.
+      planHash: lc(b.planHash),
+      canonicalPlanHash: planHashOf(b.canonicalPlan),
     })),
   });
   return toHex(sha256(new TextEncoder().encode(preimage)));
