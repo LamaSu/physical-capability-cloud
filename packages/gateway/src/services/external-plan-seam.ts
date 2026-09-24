@@ -35,6 +35,7 @@ import {
   type CompileViolation,
   type CompiledAcceptedPlan,
   type EvidenceRequirement,
+  type NetSplitter,
   type PlanJsonObject,
   type PlanJsonRefusal,
   type ProgramGate,
@@ -105,6 +106,19 @@ export interface SeamDeps {
   policy: SettlementPolicy;
   /** Unix seconds. */
   now(): number;
+  /**
+   * R15, optional: present only when an economic agreement applies to this plan. The route binds it per
+   * request, to the agreement and the server's facts. Royalties go ON TOP (economics #3025, option b):
+   * each unit's gross is the agreement's, and it must cover the operator's live quote.
+   */
+  economics?: EconomicsBinding;
+}
+
+export interface EconomicsBinding {
+  /** Economics' `agreementUnitGross(agreement)`: the agreement's gross per plan node, in base units. */
+  unitGross(): { ok: true; gross: Record<string, bigint> } | { ok: false; code: string };
+  /** Economics' `netSplitterFor(...)`, bound to the agreement and the server's facts. The compiler calls it. */
+  splitNet: NetSplitter;
 }
 
 export interface SeamContext {
@@ -132,7 +146,13 @@ export type SeamRefusal =
   | { stage: "tier"; nodeId: string; reason: "below-reservation-minimum" }
   | { stage: "program"; nodeId: string; reason: "claimed-program-mismatch" }
   | { stage: "evidence"; nodeId: string; reason: "no-evidence-contract-for-tier" }
-  | { stage: "compile"; violations: CompileViolation[] };
+  | { stage: "compile"; violations: CompileViolation[] }
+  | {
+      stage: "economics";
+      reason: "agreement-refused" | "agreement-unreadable" | "unit-gross-missing" | "quote-not-covered";
+      nodeId?: string;
+      code?: string;
+    };
 
 /**
  * `submissionDigest` fingerprints the submission EXACTLY as evaluated (see `submissionDigest`), so a
@@ -297,6 +317,37 @@ function readReservation(raw: unknown): ReservationRead {
   }
 }
 
+/** The agreement's gross per node, copied once into owned data; each value must be a bigint. */
+type UnitGrossRead =
+  | { ok: true; gross: ReadonlyMap<string, bigint> }
+  | { ok: false; reason: "agreement-refused"; code: string }
+  | { ok: false; reason: "agreement-unreadable" };
+
+function readUnitGross(raw: unknown): UnitGrossRead {
+  try {
+    if (typeof raw !== "object" || raw === null) return { ok: false, reason: "agreement-unreadable" };
+    const o = raw as Record<string, unknown>;
+    const ok = o.ok;
+    if (ok === false) {
+      const code = leaf(o.code);
+      return { ok: false, reason: "agreement-refused", code: typeof code === "string" ? code : "unknown" };
+    }
+    if (ok !== true) return { ok: false, reason: "agreement-unreadable" };
+    const g: unknown = o.gross;
+    if (typeof g !== "object" || g === null) return { ok: false, reason: "agreement-unreadable" };
+    const keys = Object.keys(g);
+    if (keys.length > MAX_SUBMISSION_NODES) return { ok: false, reason: "agreement-unreadable" };
+    const gross = new Map<string, bigint>();
+    for (const k of keys) {
+      const v: unknown = (g as Record<string, unknown>)[k];
+      if (typeof v === "bigint") gross.set(k, v); // anything else is simply not a gross for k
+    }
+    return { ok: true, gross };
+  } catch {
+    return { ok: false, reason: "agreement-unreadable" };
+  }
+}
+
 // ── The seam ─────────────────────────────────────────────────────────────────────────────────────
 
 export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext, deps: SeamDeps): SeamResult {
@@ -313,6 +364,9 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   let feeBps: unknown;
   let feeRecipient: unknown;
   let reclaimAfterSec: unknown;
+  let economicsRaw: unknown;
+  let unitGrossFn: unknown;
+  let econSplitFn: unknown;
   try {
     revalidation = deps.revalidation;
     resolveProgramFn = deps.resolveProgram;
@@ -325,6 +379,11 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     feeBps = leaf(pol.feeBps);
     feeRecipient = leaf(pol.feeRecipient);
     reclaimAfterSec = leaf(pol.reclaimAfterSec);
+    economicsRaw = deps.economics;
+    if (economicsRaw !== undefined && typeof economicsRaw === "object" && economicsRaw !== null) {
+      unitGrossFn = (economicsRaw as Record<string, unknown>).unitGross;
+      econSplitFn = (economicsRaw as Record<string, unknown>).splitNet;
+    }
   } catch {
     throw new TypeError("acceptExternalPlan: SeamDeps could not be read (a wiring fault)");
   }
@@ -344,9 +403,10 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     typeof nowFn !== "function" ||
     typeof reclaimAfterSec !== "number" ||
     !Number.isSafeInteger(reclaimAfterSec) ||
-    reclaimAfterSec < 0
+    reclaimAfterSec < 0 ||
+    (economicsRaw !== undefined && (typeof unitGrossFn !== "function" || typeof econSplitFn !== "function"))
   ) {
-    throw new TypeError("acceptExternalPlan: malformed SeamDeps (functions and an integer reclaimAfterSec required)");
+    throw new TypeError("acceptExternalPlan: malformed SeamDeps (functions, an integer reclaimAfterSec, and economics as { unitGross, splitNet } when present)");
   }
 
   // The submission, read once. Everything below uses only this copy.
@@ -424,8 +484,27 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   }
   const execValue = (e: ExecJsonSnapshot | undefined): PlanJsonObject | undefined => (e?.kind === "json" ? e.value : undefined);
 
+  // R15 (economics, option b): with an agreement, each node's gross is the agreement's, and it must
+  // cover the operator's live quote. The agreement's gross map is read once, before any node.
+  let grossOf: ReadonlyMap<string, bigint> | null = null;
+  if (economicsRaw !== undefined) {
+    const read = readUnitGross(Reflect.apply(unitGrossFn as () => unknown, economicsRaw, []));
+    if (!read.ok) {
+      return refuse(read.reason === "agreement-refused" ? { stage: "economics", reason: read.reason, code: read.code } : { stage: "economics", reason: read.reason }, verdicts);
+    }
+    grossOf = read.gross;
+  }
+
   const nodes = [];
   for (const r of resolved) {
+    const quote = r.grossBaseUnits;
+    let gross = quote;
+    if (grossOf !== null) {
+      const g = grossOf.get(r.nodeId);
+      if (g === undefined) return refuse({ stage: "economics", nodeId: r.nodeId, reason: "unit-gross-missing" }, verdicts);
+      if (g < quote) return refuse({ stage: "economics", nodeId: r.nodeId, reason: "quote-not-covered" }, verdicts);
+      gross = g;
+    }
     if (r.currency !== resv.currency) {
       return refuse({ stage: "currency", nodeId: r.nodeId, reason: "node-currency-differs-from-reservation" }, verdicts);
     }
@@ -452,7 +531,8 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
       tierKey: r.tierKey,
       operator: r.operator,
       payoutAddress: r.payoutAddress,
-      grossBaseUnits: r.grossBaseUnits,
+      grossBaseUnits: gross,
+      ...(grossOf !== null ? { quoteBaseUnits: quote } : {}),
       matchedCapabilityDigest: r.matchedCapabilityDigest,
       committedProgramHash: program, // null here at a non-zero tier is refused by the compiler
       evidenceRequirements: evidence, // the compiler copies it once into owned data
@@ -483,7 +563,13 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
         maxAmountBaseUnits: resv.maxAmountBaseUnits as bigint,
       },
     },
-    { assertProgramForTier: (a) => call(assertProgramForTier, [a]) as ReturnType<ProgramGate> },
+    {
+      assertProgramForTier: (a) => call(assertProgramForTier, [a]) as ReturnType<ProgramGate>,
+      // Called with the economics binding as its receiver, like every other dependency.
+      ...(economicsRaw !== undefined
+        ? { splitNet: (units: Parameters<NetSplitter>[0]) => Reflect.apply(econSplitFn as NetSplitter, economicsRaw, [units]) as ReturnType<NetSplitter> }
+        : {}),
+    },
   );
   if (!compiled.ok) return refuse({ stage: "compile", violations: compiled.violations }, verdicts);
   return { ok: true, plan: compiled.plan, resolved, verdicts, submissionDigest: submissionDigestValue };
