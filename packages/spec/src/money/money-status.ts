@@ -163,6 +163,14 @@ export const VNEXT_STATE_PRESENTATION: Readonly<Record<Exclude<VNextUnitStateNam
   SETTLED_REFUNDED: entry("refunded", "refunded - payer refunded, payees NOT paid"),
 });
 
+/** The read models' `phase` for each reachable state (gateway unit-state-mapper PHASE_BY_STATE). */
+export const VNEXT_PHASE: Readonly<Record<Exclude<VNextUnitStateName, "AWAITING_FUNDING">, string>> = Object.freeze({
+  FUNDED_ACTIVE: "active", PRIMARY_ASSERTED: "contest", CHALLENGED: "contest",
+  BACKUP_PENDING: "escalation", BACKUP_ASSERTED: "escalation",
+  RELEASE_ALLOCATED: "allocated", REFUND_ALLOCATED: "allocated",
+  SETTLED_RELEASED: "settled", SETTLED_REFUNDED: "settled",
+});
+
 /**
  * The V-next state NAME for a wire value: an integer 1..9 or its exact name. 0 is a read error
  * (unitState() reverts UnitNotFound for a missing unit, so a "0" never describes a real unit);
@@ -205,29 +213,42 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
   if (record === null || typeof record !== "object" || Array.isArray(record)) return NOT_A_SETTLEMENT_RECORD();
   const o = record as Record<string, unknown>;
 
+  // The read models' own field semantics (gateway settlement/unit-state-mapper.ts, served by
+  // /api/settlement/units/:id/lifecycle and /receipt): `isTerminal` is true for 8/9 only;
+  // `isAllocated` means "outcome decided, money NOT fully moved" and is true for 6/7 ONLY, so a
+  // settled record says isAllocated:false; `finalState` names 8/9 and is null otherwise; `phase`
+  // follows VNEXT_PHASE. Every field present must agree, and a FINAL state needs them all.
   if (has(o, "unitState")) {
     const name = vnextUnitStateName(o.unitState);
     if (name === null) return UNKNOWN("", "unreadable unit state");
     const ord = VNEXT_UNIT_STATES.indexOf(name);
     const terminal = ord >= 8;
-    const allocated = ord >= 6;
+    const allocated = ord === 6 || ord === 7;
     if (has(o, "finalState") && (o.finalState ?? null) !== (terminal ? name : null)) return DISAGREE();
     if (has(o, "isAllocated") && o.isAllocated !== allocated) return DISAGREE();
     if (has(o, "isTerminal") && o.isTerminal !== terminal) return DISAGREE();
-    if (terminal && !(has(o, "finalState") && has(o, "isAllocated") && has(o, "isTerminal"))) return INCOMPLETE();
+    if (has(o, "phase") && o.phase !== VNEXT_PHASE[name]) return DISAGREE();
+    if (terminal && !(has(o, "finalState") && has(o, "isAllocated") && has(o, "isTerminal") && has(o, "phase"))) return INCOMPLETE();
     return FROM_TABLE(name);
   }
 
+  // A /receipt carries finalState, phase and isAllocated (no unitState, no isTerminal).
   if (has(o, "finalState")) {
     const fs = o.finalState;
-    if (fs === "SETTLED_RELEASED" || fs === "SETTLED_REFUNDED") {
-      if (!has(o, "isAllocated")) return INCOMPLETE();
-      if (o.isAllocated !== true) return DISAGREE();
+    const final = fs === "SETTLED_RELEASED" || fs === "SETTLED_REFUNDED";
+    if (has(o, "isTerminal") && o.isTerminal !== final) return DISAGREE();
+    if (final) {
+      if (!has(o, "isAllocated") || !has(o, "phase")) return INCOMPLETE();
+      if (o.isAllocated !== false || o.phase !== "settled") return DISAGREE();
       return FROM_TABLE(fs);
     }
-    if (fs === null) {
-      if (o.isAllocated === true) return Object.freeze({ key: "ALLOCATED", tone: "waiting" as const, label: "outcome decided - not yet paid out", known: true });
-      if (o.isAllocated === false) return Object.freeze({ key: "IN_FLIGHT", tone: "waiting" as const, label: "in progress - no outcome decided", known: true });
+    if (fs === null && o.isAllocated === true) {
+      if (has(o, "phase") && o.phase !== "allocated") return DISAGREE();
+      return Object.freeze({ key: "ALLOCATED", tone: "waiting" as const, label: "outcome decided - not yet paid out", known: true });
+    }
+    if (fs === null && o.isAllocated === false) {
+      if (has(o, "phase") && !(o.phase === "active" || o.phase === "contest" || o.phase === "escalation")) return DISAGREE();
+      return Object.freeze({ key: "IN_FLIGHT", tone: "waiting" as const, label: "in progress - no outcome decided", known: true });
     }
     return UNKNOWN("", "unreadable final state");
   }
