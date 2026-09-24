@@ -13,7 +13,7 @@ import { z } from "zod";
 import type { CompositionManifest } from "../types/composition-manifest.js";
 import { computeManifestHash } from "../types/composition-manifest.js";
 import type { TrainingManifest } from "../types/training-manifest.js";
-import { computeTrainingManifestHash } from "../types/training-manifest.js";
+import { computeTrainingManifestHash, TrainingManifestSchema } from "../types/training-manifest.js";
 import { cmpStr } from "./hash.js";
 import {
   ID_PATTERN,
@@ -41,7 +41,9 @@ export type AdapterRefusalCode =
   | "GRAPH_CYCLE"
   | "GRAPH_TOO_DEEP"
   | "GRAPH_EMPTY"
-  | "ID_TOO_LONG";
+  | "ID_TOO_LONG"
+  | "INVALID_ID"
+  | "MANIFEST_INVALID";
 
 export interface AdapterRefusal {
   code: AdapterRefusalCode;
@@ -54,6 +56,16 @@ export type AdapterResult<T> = ({ ok: true } & T) | { ok: false; refusals: Adapt
 function composedId(...parts: string[]): string | null {
   const id = parts.join("/");
   return ID_PATTERN.test(id) ? id : null;
+}
+
+/**
+ * A caller-supplied lookup table read safely: only the table's own keys count (never "constructor" or
+ * "__proto__" from Object.prototype), and only a valid Id is a party.
+ */
+function lookupParty(table: Readonly<Record<string, string>>, key: string): string | undefined {
+  if (!Object.prototype.hasOwnProperty.call(table, key)) return undefined;
+  const v: unknown = table[key];
+  return typeof v === "string" && ID_PATTERN.test(v) ? v : undefined;
 }
 
 /** CompositionRole → contributor role. `pilot` is the documented alias of `dataset-contributor`. */
@@ -96,6 +108,11 @@ export function clausesFromCompositionManifest(
 
   const groups = new Map<string, typeof m.entries>();
   for (const e of m.entries) {
+    if (!ID_PATTERN.test(e.ipId)) {
+      // The ipId becomes the clause's subject: it must be an agreement Id (printable ASCII, 1-128).
+      refusals.push({ code: "INVALID_ID", message: "the entry's ipId is not a valid agreement id", path: ["manifest", "ipId"] });
+      continue;
+    }
     const key = `${compositionRole(e.role)}\u0000${e.ipId}\u0000${e.rateScheduleHash.toLowerCase()}`;
     groups.set(key, [...(groups.get(key) ?? []), e]);
   }
@@ -114,7 +131,7 @@ export function clausesFromCompositionManifest(
     }
     const parties: string[] = [];
     for (const e of entries) {
-      const party = input.partyByAddress[e.contributorAddress.toLowerCase()];
+      const party = lookupParty(input.partyByAddress, e.contributorAddress.toLowerCase());
       if (party === undefined) {
         refusals.push({ code: "UNKNOWN_CONTRIBUTOR", message: `contributor ${e.contributorAddress} is not an agreement party`, path: [...at, e.contributorAddress] });
       } else {
@@ -138,16 +155,14 @@ export function clausesFromCompositionManifest(
       refusals.push({ code: "ID_TOO_LONG", message: "idPrefix makes an invalid id", path: ["idPrefix"] });
       return;
     }
+    // A co-author whose groupBps is 0 holds no share of the allocation, so it is not a member.
+    const members: SplitMember[] = entries
+      .map((e, i) => ({ to: { party: parties[i]! }, weight: e.groupBps ?? 1, role: null, subject: null }))
+      .filter((mem) => mem.weight > 0);
     let to: Clause["to"];
-    if (entries.length === 1) {
-      to = { party: parties[0]! };
+    if (members.length === 1) {
+      to = members[0]!.to;
     } else {
-      const members: SplitMember[] = entries.map((e, i) => ({
-        to: { party: parties[i]! },
-        weight: e.groupBps ?? 1,
-        role: null,
-        subject: null,
-      }));
       splits.push({ splitId, label: `Co-authors of ${role} for ${first.ipId}`.slice(0, 200), members });
       to = { split: splitId };
     }
@@ -203,8 +218,19 @@ export function splitsFromTrainingManifest(
       refusals.push({ code: "LINEAGE_TOO_DEEP", message: "model lineage deeper than 5", path: at });
       return null;
     }
+    const valid = TrainingManifestSchema.safeParse(m);
+    if (!valid.success) {
+      // For example dataset weights that do not total 10000: subdividing by them would pay a dataset
+      // more than its declared share.
+      refusals.push({ code: "MANIFEST_INVALID", message: valid.error.issues.map((i) => i.message).join("; "), path: at });
+      return null;
+    }
     if (computeTrainingManifestHash(m).toLowerCase() !== m.manifestHash.toLowerCase()) {
       refusals.push({ code: "MANIFEST_HASH_MISMATCH", message: "training manifest does not hash to its manifestHash", path: at });
+      return null;
+    }
+    if (!ID_PATTERN.test(m.modelIpId) || !ID_PATTERN.test(li.modelAuthorParty)) {
+      refusals.push({ code: "INVALID_ID", message: "the model id and the model author's party must be valid agreement ids", path: at });
       return null;
     }
     if (!Number.isInteger(li.passThroughBps) || li.passThroughBps < 0 || li.passThroughBps > 10000) {
@@ -231,9 +257,13 @@ export function splitsFromTrainingManifest(
 
     const datasetMembers: SplitMember[] = [];
     for (const d of m.datasets) {
-      const party = li.datasetParty[d.datasetIpId];
+      const party = lookupParty(li.datasetParty, d.datasetIpId);
       if (party === undefined) {
         refusals.push({ code: "UNKNOWN_CONTRIBUTOR", message: `dataset ${d.datasetIpId} has no party`, path: [...at, d.datasetIpId] });
+        continue;
+      }
+      if (!ID_PATTERN.test(d.datasetIpId)) {
+        refusals.push({ code: "INVALID_ID", message: `dataset ${d.datasetIpId} is not a valid agreement id`, path: [...at, "datasetIpId"] });
         continue;
       }
       if (d.weightBps > 0) {
@@ -325,10 +355,12 @@ export type ContributionGraph = z.infer<typeof ContributionGraphSchema>;
 
 /**
  * Turn a contribution graph into splits for one unit. Each node's incoming share is divided between
- * its own retain weight and its outgoing edges. An edge is dropped, and its weight returns to its
- * source node's retain, when it is not accepted, when its target requires participation and its
- * component does not run in this unit, or when its target ends up with nothing to pay. A routing node
- * (no party) with nothing left is dropped the same way. The root must end up payable.
+ * its own retain weight and its outgoing edges. An edge is dropped when it is not accepted, when its
+ * target requires participation and its component does not run in this unit, or when its target ends
+ * up with nothing to pay. A dropped edge's weight returns to its source node's retain when the source
+ * has a party. A routing node (no party) retains nothing: it is a pool, so its remaining edges share
+ * its whole inflow, and a routing node left with no edge is itself dropped. The root obeys the same
+ * participation rule as every other node, and must end up payable.
  */
 export function splitsFromContributionGraph(
   graphInput: unknown,
@@ -393,6 +425,7 @@ export function splitsFromContributionGraph(
       const payable = e.accepted && eligible && resolve(e.to) !== null;
       if (payable) kept.push({ to: { split: splitIdOf(e.to)! }, weight: e.weight, role: null, subject: null });
       else if (n.party !== null) retain += e.weight; // dropped share stays with the node that would have passed it on
+      // (a routing node keeps nothing: its remaining edges share its inflow, by their weights)
     }
     const out: SplitMember[] = [];
     if (retain > 0 && n.party !== null) out.push({ to: { party: n.party }, weight: retain, role: n.role, subject: n.subject });
@@ -407,7 +440,9 @@ export function splitsFromContributionGraph(
       return { ok: false, refusals: [{ code: "ID_TOO_LONG", message: "idPrefix + nodeId is not a valid id", path: [n.nodeId] }] };
     }
   }
-  const rootMembers = resolve(g.root);
+  const root = nodes.get(g.root)!;
+  const rootEligible = !root.participationRequired || usedComponents.has(root.componentRef!);
+  const rootMembers = rootEligible ? resolve(g.root) : null;
   if (rootMembers === null) {
     return { ok: false, refusals: [{ code: "GRAPH_EMPTY", message: "nothing in the graph is payable in this unit", path: [g.root] }] };
   }

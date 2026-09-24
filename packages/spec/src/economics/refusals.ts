@@ -22,8 +22,8 @@ export const REFUSAL_CODES = {
   OFFER_EXPIRED: "structure",
   ECONOMICS_UNDECIDED_OD4: "structure",
   INVALID_BOUNDS: "structure",
-  SCHEDULE_HASH_MISMATCH: "structure",
   RATE_PIN_MISMATCH: "structure",
+  TOO_MANY_ALLOCATIONS: "structure",
   // rights
   RIGHTS_UNKNOWN: "rights",
   LICENSE_NOT_IN_FORCE: "rights",
@@ -47,8 +47,12 @@ export type RefusalCode = keyof typeof REFUSAL_CODES;
 
 export interface Refusal {
   code: RefusalCode;
+  /** Informative only: never part of a refusal's identity (§3). */
   message: string;
-  /** The offending objects: party, unit, clause, split, license or component ids, outermost first. */
+  /**
+   * The offending objects by id, outermost first, per the path grammar of §3. `[]` is the agreement as a
+   * whole (a schema failure, or an agreement-wide limit); `["options"]` is the caller's options.
+   */
   path: string[];
 }
 

@@ -12,19 +12,34 @@
 import { z } from "zod";
 import { compileEconomics, type CompileOptions } from "./compile.js";
 import { cmpStr } from "./hash.js";
+import { snapshotJson } from "./input.js";
 import { refusal, type Refusal } from "./refusals.js";
-import { AmountSchema, EconomicAgreementSchema, IdSchema, LabelSchema, type EconomicAgreement } from "./types.js";
+import { AmountSchema, EconomicAgreementSchema, IdSchema, LabelSchema, MAX_AGREEMENT_UNITS, type EconomicAgreement } from "./types.js";
+
+export const MAX_SCENARIOS = 64;
+export const MAX_USES_OVERRIDES = 1024;
+
+function uniqueBy<T>(key: (x: T) => string) {
+  return (xs: readonly T[]) => new Set(xs.map(key)).size === xs.length;
+}
 
 export const ScenarioSchema = z
   .object({
     scenarioId: IdSchema,
     label: LabelSchema,
-    grossOverrides: z.array(z.object({ unitRef: IdSchema, gross: AmountSchema }).strict()).max(16),
+    grossOverrides: z
+      .array(z.object({ unitRef: IdSchema, gross: AmountSchema }).strict())
+      .max(MAX_AGREEMENT_UNITS)
+      .refine(uniqueBy((g) => g.unitRef), "a unit's gross is overridden twice"),
     /** `uses: "0"` means the component did not run in that unit. */
-    usesOverrides: z.array(z.object({ unitRef: IdSchema, ref: IdSchema, uses: AmountSchema }).strict()).max(64),
+    usesOverrides: z
+      .array(z.object({ unitRef: IdSchema, ref: IdSchema, uses: AmountSchema }).strict())
+      .max(MAX_USES_OVERRIDES)
+      .refine(uniqueBy((o) => `${o.unitRef}\u0000${o.ref}`), "a component's uses in one unit are overridden twice"),
     outcomes: z
       .array(z.object({ unitRef: IdSchema, outcome: z.enum(["released", "refunded", "pending"]) }).strict())
-      .max(16),
+      .max(MAX_AGREEMENT_UNITS)
+      .refine(uniqueBy((o) => o.unitRef), "a unit has two outcomes"),
   })
   .strict();
 export type Scenario = z.infer<typeof ScenarioSchema>;
@@ -71,25 +86,36 @@ function applyOverrides(base: EconomicAgreement, s: Scenario): EconomicAgreement
   return errors.length > 0 ? errors : variant;
 }
 
+/**
+ * One result per scenario, in the order given. If `scenarios` is not a list of at most MAX_SCENARIOS
+ * entries, the single result `scenarios` says so; nothing throws.
+ */
 export function simulateEconomics(
   agreement: unknown,
   scenarios: readonly unknown[],
   options: CompileOptions = {},
 ): ScenarioResult[] {
-  const parsedAgreement = EconomicAgreementSchema.safeParse(agreement);
-  return scenarios.map((raw, index): ScenarioResult => {
+  const list = snapshotJson(scenarios);
+  if (!list.ok || !Array.isArray(list.value) || list.value.length > MAX_SCENARIOS) {
+    const why = !list.ok ? list.reason : `scenarios must be a list of at most ${MAX_SCENARIOS}`;
+    return [{ scenarioId: "scenarios", label: "invalid scenarios", ok: false, refusals: [refusal("SCHEMA_INVALID", why, ["scenarios"])] }];
+  }
+  const agreementCopy = snapshotJson(agreement);
+  const parsedAgreement = agreementCopy.ok ? EconomicAgreementSchema.safeParse(agreementCopy.value) : null;
+  return list.value.map((raw, index): ScenarioResult => {
     const parsed = ScenarioSchema.safeParse(raw);
     if (!parsed.success) {
       return {
         scenarioId: `scenario-${index}`,
         label: "invalid scenario",
         ok: false,
-        refusals: parsed.error.issues.map((i) => refusal("SCHEMA_INVALID", i.message, ["scenario", ...i.path.map(String)])),
+        refusals: [refusal("SCHEMA_INVALID", parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "), ["scenario"])],
       };
     }
     const s = parsed.data;
-    if (!parsedAgreement.success) {
-      return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals: compileRefusals(agreement, options) };
+    if (parsedAgreement === null || !parsedAgreement.success) {
+      const r = compileEconomics(agreement, options);
+      return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals: r.ok ? [] : r.refusals };
     }
     const variant = applyOverrides(parsedAgreement.data, s);
     if (Array.isArray(variant)) return { scenarioId: s.scenarioId, label: s.label, ok: false, refusals: variant };
@@ -134,9 +160,4 @@ export function simulateEconomics(
       fee: { paid: feePaid.toString(), recipient: compiled.fee.feeRecipient },
     };
   });
-}
-
-function compileRefusals(agreement: unknown, options: CompileOptions): Refusal[] {
-  const r = compileEconomics(agreement, options);
-  return r.ok ? [] : r.refusals;
 }

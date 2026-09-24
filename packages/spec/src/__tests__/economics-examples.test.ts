@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { compileEconomics } from "../economics/compile.js";
-import { EXAMPLE_AGREEMENTS, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
+import { AGREEMENT_TEMPLATES, EXAMPLE_AGREEMENTS, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
 import golden from "./fixtures/economics-golden-v1.json";
 
 type Golden = {
@@ -30,6 +30,17 @@ describe("golden example agreements", () => {
 
   it("the pinned schedule hash is the one @pcc/spec computes for the printer kit schedule", () => {
     expect(PRINTER_KIT_SCHEDULE.scheduleHash).toBe("0xe0e75ab2547d106ab6f3e211f0859cb85fe3f9bdb1b081dde24e20122d50f61a");
+  });
+
+  it("the listable templates are the five examples, each compiling with its own options to the same golden hashes", () => {
+    expect(AGREEMENT_TEMPLATES.map((t) => t.build)).toEqual([...EXAMPLE_AGREEMENTS]);
+    expect(new Set(AGREEMENT_TEMPLATES.map((t) => t.templateId)).size).toBe(AGREEMENT_TEMPLATES.length);
+    for (const t of AGREEMENT_TEMPLATES) {
+      const r = compileEconomics(t.build(), t.compileOptions);
+      if (!r.ok) throw new Error(`${t.templateId}: ${JSON.stringify(r.refusals)}`);
+      expect(r.agreementHash).toBe((golden.agreements as Record<string, Golden>)[r.agreementId]!.agreementHash);
+      expect(t.build()).not.toBe(t.build()); // a fresh copy each time
+    }
   });
 
   it("hand check: the lab assay's minimum royalty and lineage", () => {

@@ -37,6 +37,12 @@ export const MAX_AGREEMENT_UNITS = 256;
 /** The escrow's MAX_PAYOUT_LEGS_PER_UNIT. */
 export const MAX_LEGS_PER_UNIT = 16;
 export const MAX_SPLIT_DEPTH = 8;
+/**
+ * Allocations (clause-to-party paths through splits, §4.5) over the whole agreement. Shared splits make
+ * the number of paths multiply per level, so it is counted before anything is expanded (§3,
+ * TOO_MANY_ALLOCATIONS). Real agreements use a few hundred.
+ */
+export const MAX_AGREEMENT_ALLOCATIONS = 65_536;
 
 function isValidLabel(s: string): boolean {
   if (s.normalize("NFC") !== s) return false;
@@ -224,12 +230,18 @@ export type RequirableRule = z.infer<typeof RequirableRuleSchema>;
 export const AppliesToSchema = z.union([
   z.object({ units: IdSetSchema(1, MAX_AGREEMENT_UNITS) }).strict(),
   z.object({ usingComponent: IdSchema }).strict(),
-  z.object({ oncePerJobUsing: IdSchema }).strict(),
+  z.object({ oncePerAgreementUsing: IdSchema }).strict(),
   z.object({ allUnits: z.literal(true) }).strict(),
 ]);
 export type AppliesTo = z.infer<typeof AppliesToSchema>;
 
 export const LicenseRefSchema = z.object({ licenseId: IdSchema, version: z.number().int().min(1).max(1_000_000_000) }).strict();
+
+/**
+ * A once-per-agreement amount is spread over the units that use the component (§2.4), so only a rule
+ * with an agreement-level amount can carry it.
+ */
+export const ONCE_PER_AGREEMENT_RULE_KINDS = ["fixed", "pass_through"] as const;
 
 export const ClauseSchema = z
   .object({
@@ -242,7 +254,11 @@ export const ClauseSchema = z
     underLicense: LicenseRefSchema.nullable(),
     rule: RuleSchema,
   })
-  .strict();
+  .strict()
+  .refine(
+    (c) => !("oncePerAgreementUsing" in c.appliesTo) || (ONCE_PER_AGREEMENT_RULE_KINDS as readonly string[]).includes(c.rule.kind),
+    { message: "a once-per-agreement clause needs a fixed or pass_through rule", path: ["rule"] },
+  );
 export type Clause = z.infer<typeof ClauseSchema>;
 
 // ── Rights ───────────────────────────────────────────────────────────────────
@@ -291,11 +307,20 @@ export const PaymentRequirementSchema = z
   .object({
     requirementId: IdSchema,
     role: RoleSchema,
-    per: z.enum(["using-unit", "job"]),
+    /** "using-unit": owed in every unit that uses the subject. "agreement": owed once, spread over them. */
+    per: z.enum(["using-unit", "agreement"]),
     payee: RequirementPayeeSchema,
     rule: RequirableRuleSchema,
   })
-  .strict();
+  .strict()
+  .refine((q) => q.per !== "agreement" || (ONCE_PER_AGREEMENT_RULE_KINDS as readonly string[]).includes(q.rule.kind), {
+    message: "a once-per-agreement payment needs a fixed or pass_through rule",
+    path: ["rule"],
+  })
+  .refine((q) => q.rule.kind !== "percent" || q.rule.rateSource === null, {
+    message: "a license states its percent; a rate source belongs to a clause pinned from a schedule",
+    path: ["rule", "rateSource"],
+  });
 export type PaymentRequirement = z.infer<typeof PaymentRequirementSchema>;
 
 export const LicenseSchema = z
@@ -340,7 +365,11 @@ export type License = z.infer<typeof LicenseSchema>;
 
 export const IntendedUseSchema = z
   .object({
-    commercial: z.boolean(),
+    /**
+     * Always true: every unit the compiler accepts pays out a gross of at least 5 base units, so every
+     * deal it compiles is paid work. A `false` here would only exist to dodge a noncommercial license.
+     */
+    commercial: z.literal(true),
     composite: z.boolean(),
     resell: z.boolean(),
     fieldOfUse: IdSchema,

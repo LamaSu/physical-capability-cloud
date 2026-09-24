@@ -677,3 +677,55 @@ export const EXAMPLE_AGREEMENTS = [
   exampleLabAssay,
   exampleDeckMilestones,
 ] as const;
+
+/**
+ * The same five examples as listable templates, for agents (ADK) and the approval preview. `build`
+ * returns a fresh copy each time. `compileOptions` is what the example needs besides itself: example 1's
+ * royalty is pinned from Priya's schedule, so its body is passed to verify the pin. A server supplies
+ * its own options (fee, forbidden recipients, sealed schedules); these are the demo's.
+ */
+export interface AgreementTemplate {
+  templateId: string;
+  title: string;
+  summary: string;
+  build: () => EconomicAgreement;
+  compileOptions: { schedules: readonly RateSchedule[] };
+}
+
+export const AGREEMENT_TEMPLATES: readonly AgreementTemplate[] = [
+  {
+    templateId: "spare-printer",
+    title: "A spare printer earns, and its kit earns a royalty",
+    summary: "Dana pays $25.00 to print a bracket on Sam's spare printer. The printer's open-source kit asks 0.40% of each job for its author, Priya. PCC's fee is 2.35%, and Sam keeps the rest.",
+    build: exampleSparePrinter,
+    compileOptions: { schedules: [PRINTER_KIT_SCHEDULE] },
+  },
+  {
+    templateId: "print-and-mail",
+    title: "An agent composes print-and-mail and keeps a margin",
+    summary: "Orbit sells 'print and mail a letter' for $22.00. It pays a print shop $12.00, and a courier $5.00 plus the $0.68 stamp at cost. The address check's inventor gets $0.25 each time it runs, and Orbit keeps what is left of each step. A failed step refunds that step only.",
+    build: examplePrintAndMail,
+    compileOptions: { schedules: [] },
+  },
+  {
+    templateId: "guild-repair",
+    title: "A repair guild: parts at cost, an inspector, a treasury, members by hours",
+    summary: "A $180.01 repair: Lee is paid back $42.50 of parts exactly and the inspector gets 1.5%. Of what is left, the guild treasury gets 10%, and three members share 90% by hours (5, 3 and 1).",
+    build: exampleGuildRepair,
+    compileOptions: { schedules: [] },
+  },
+  {
+    templateId: "lab-assay",
+    title: "A lab assay that uses a licensed AI model",
+    summary: "A $400.00 assay: the lab gets $320.00 to run it. The model's license asks 3% (never under $15.00), which its publisher splits 70% to the model's author and 30% to two datasets. The protocol's author gets 0.5% of net, and the lab keeps the rest.",
+    build: exampleLabAssay,
+    compileOptions: { schedules: [] },
+  },
+  {
+    templateId: "deck-milestones",
+    title: "A deck built in three paid milestones",
+    summary: "Design ($800), build ($6,500) and inspection ($700), each paid when done. The designer, the lumber yard (at cost), an insurer (1.2% of the build) and the inspector are paid, and the contractor keeps the rest of each step. A failed step refunds that step.",
+    build: exampleDeckMilestones,
+    compileOptions: { schedules: [] },
+  },
+];

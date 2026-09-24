@@ -442,8 +442,10 @@ describe("acceptance is immutable", () => {
     // The license names the schedule, so the pinned clause no longer meets it either way.
     expect(codes(compileEconomics(wrongPin, WITH_SCHEDULES))).toEqual(["RATE_PIN_MISMATCH"]);
 
+    // A body that does not hash to its own label is a malformed option, whatever order it came in.
     const tampered: RateSchedule = { ...PRINTER_KIT_SCHEDULE, segments: [{ kind: "constant", startTime: 0, endTime: null, bps: 10 }] };
-    expect(codes(compileEconomics(exampleSparePrinter(), { schedules: [tampered] }))).toEqual(["SCHEDULE_HASH_MISMATCH"]);
+    const t = compileEconomics(exampleSparePrinter(), { schedules: [tampered] });
+    expect(t.ok ? [] : t.refusals.map((x) => [x.code, x.path])).toEqual([["SCHEMA_INVALID", ["options"]]]);
 
     // Without the body, a license that names a schedule cannot be satisfied: the rate is unverified.
     expect(codes(compileEconomics(exampleSparePrinter()))).toEqual(["RATE_UNVERIFIED"]);
@@ -470,20 +472,25 @@ describe("participation decides eligibility", () => {
     expect(inventorUnits).toEqual(["b-mail"]); // released with the mail step, refunded with it
   });
 
-  it("per-use pricing counts uses, and a once-per-job fee is charged in one unit only", () => {
+  it("per-use pricing counts uses, and a once-per-agreement fee is spread over the units that run it", () => {
     const ag = examplePrintAndMail();
     ag.units[0]!.components.push({ ref: "method:address-verify@1", uses: "3" });
     const c = ok(compileEconomics(ag));
     expect(c.units[0]!.clauses.find((x) => x.clauseId === "address-check-fee")!.amount).toBe("750000");
     const once = clone(ag);
     const fee = once.clauses.find((x) => x.clauseId === "address-check-fee")!;
-    fee.appliesTo = { oncePerJobUsing: "method:address-verify@1" };
+    fee.appliesTo = { oncePerAgreementUsing: "method:address-verify@1" };
     fee.rule = { kind: "fixed", amount: "400000" };
     fee.underLicense = null;
     once.licenses.find((l) => l.licenseId === "lic-address-verify")!.requires.payments = [];
     const c2 = ok(compileEconomics(once));
     const owed = c2.units.flatMap((u) => u.clauses.filter((x) => x.clauseId === "address-check-fee").map((x) => [u.unitRef, x.amount]));
-    expect(owed).toEqual([["a-print", "400000"]]); // the first unit (by unitRef) that runs it
+    // $0.40 once, by gross 14 : 8. Floors 254545 / 145454; the leftover unit goes to the larger
+    // remainder (b-mail: 12,000,000 against 10,000,000 of 22,000,000). Each share is paid only if its unit is released.
+    expect(owed).toEqual([
+      ["a-print", "254545"],
+      ["b-mail", "145455"],
+    ]);
   });
 });
 
@@ -666,14 +673,22 @@ describe("every refusal code is reachable", () => {
         clauses: [...baseAgreement().clauses, { clauseId: "bounded", label: "Bounded", role: "verifier", to: { party: "seller" }, subject: null, appliesTo: { allUnits: true }, underLicense: null, rule: pctRule }],
       }),
     }),
-    SCHEDULE_HASH_MISMATCH: () => ({
-      input: exampleSparePrinter(),
-      options: { schedules: [{ ...PRINTER_KIT_SCHEDULE, segments: [{ kind: "constant", startTime: 0, endTime: null, bps: 1 }] }] },
-    }),
     RATE_PIN_MISMATCH: () => {
       const ag = exampleSparePrinter();
       (ag.clauses[0]!.rule as { bps: number }).bps = 39;
       return { input: ag, options: WITH_SCHEDULES };
+    },
+    TOO_MANY_ALLOCATIONS: () => {
+      // One clause paying a split of 32 splits of 32 parties (1,024 paths), in each of 70 units: 71,680 allocations.
+      const parties = [baseAgreement().parties[0]!, ...Array.from({ length: 32 }, (_, i) => ({ partyId: `p${i}`, label: `P${i}`, kind: "person" as const, payTo: a(0x400 + i) }))];
+      const inner = Array.from({ length: 32 }, (_, i) => ({
+        splitId: `in${i}`,
+        label: `In ${i}`,
+        members: parties.slice(1).map((p) => ({ to: { party: p.partyId }, weight: 1, role: null, subject: null })),
+      }));
+      const outer = { splitId: "out", label: "Out", members: inner.map((x) => ({ to: { split: x.splitId }, weight: 1, role: null, subject: null })) };
+      const units = Array.from({ length: 70 }, (_, i) => ({ unitRef: `u${i}`, label: `U${i}`, gross: "1000000", components: [], measures: [] }));
+      return { input: baseAgreement({ parties, units, splits: [outer, ...inner], clauses: [{ ...baseAgreement().clauses[0]!, to: { split: "out" } }] }) };
     },
     RIGHTS_UNKNOWN: () => ({ input: baseAgreement({ units: [{ ...baseAgreement().units[0]!, components: [{ ref: "mystery-module", uses: "1" }] }] }) }),
     LICENSE_NOT_IN_FORCE: () => {

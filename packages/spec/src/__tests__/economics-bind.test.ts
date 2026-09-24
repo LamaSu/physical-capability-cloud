@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { netSplitterFor, type PlanSplitUnit, type ServerEconomicsFacts } from "../economics/bind.js";
 import { compileEconomics } from "../economics/compile.js";
-import { examplePrintAndMail, exampleIncompatibleLicense, exampleSparePrinter, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
+import { exampleIncompatibleLicense, exampleLabAssay, examplePrintAndMail, exampleSparePrinter, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
 import type { EconomicAgreement } from "../economics/types.js";
 
 /**
@@ -23,12 +23,17 @@ type ComposedNetSplitter = (units: readonly ComposedSplitUnitInput[]) => Compose
 
 const FEE = "0xfee0000000000000000000000000000000000fee";
 
+/** What an honest server would know about this agreement's deal. */
 function server(ag: EconomicAgreement, over: Partial<ServerEconomicsFacts> = {}): ServerEconomicsFacts {
   return {
     feeBps: ag.fee.feeBps,
     feeRecipient: ag.fee.feeRecipient ?? "0x0000000000000000000000000000000000000000",
     currency: { code: "USDC", decimals: 6 },
+    now: ag.asOf + 600,
+    intendedUse: structuredClone(ag.use),
     licenses: structuredClone(ag.licenses),
+    parties: ag.parties.flatMap((p) => (p.payTo === null ? [] : [{ partyId: p.partyId, payTo: p.payTo }])),
+    unitFacts: Object.fromEntries(ag.units.map((u) => [u.unitRef, { components: structuredClone(u.components), measures: structuredClone(u.measures) }])),
     schedules: [PRINTER_KIT_SCHEDULE],
     forbiddenRecipients: ["0x00000000000000000000000000000000000e5c0f"],
     ...over,
@@ -50,15 +55,17 @@ const refusal = (r: ReturnType<ReturnType<typeof netSplitterFor>>) => (r.ok ? "o
 describe("netSplitterFor", () => {
   it("conforms to composition's NetSplitter type and returns exactly compileEconomics' payouts, in plan order", () => {
     const ag = examplePrintAndMail();
-    const split: ComposedNetSplitter = netSplitterFor({ agreement: ag, accepted: null, server: server(ag) });
-    const r = split(planUnits(ag, ["b-mail", "a-print"]) as ComposedSplitUnitInput[]);
+    const splitter = netSplitterFor({ agreement: ag, accepted: null, server: server(ag) });
+    const conforms: ComposedNetSplitter = splitter; // the conformance check
+    expect(conforms).toBe(splitter);
+    const r = splitter(planUnits(ag, ["b-mail", "a-print"]) as ComposedSplitUnitInput[]);
     if (!r.ok) throw new Error(r.code);
     const c = compileEconomics(ag, { schedules: [PRINTER_KIT_SCHEDULE] });
     if (!c.ok) throw new Error("fixture");
     expect(r.units.map((u) => u.unitRef)).toEqual(["b-mail", "a-print"]);
     expect(r.units[1]!.payouts).toEqual(c.units[0]!.payouts);
     expect(r.units[0]!.payouts).toEqual(c.units[1]!.payouts);
-    expect([r.economicTermsHash, r.rightsTermsHash]).toEqual([c.economicTermsHash, c.rightsTermsHash]);
+    expect([r.agreementHash, r.economicTermsHash, r.rightsTermsHash]).toEqual([c.agreementHash, c.economicTermsHash, c.rightsTermsHash]);
     for (const u of r.units) expect(u.payouts.reduce((s, p) => s + BigInt(p.amount), 0n)).toBe(BigInt(u.net));
   });
 
@@ -132,6 +139,57 @@ describe("netSplitterFor", () => {
     const withFn = { ...ag, sneaky: () => 1 };
     expect(refusal(netSplitterFor({ agreement: withFn, accepted: null, server: server(ag) })(planUnits(ag)))).toBe("economics:SCHEMA_INVALID");
     expect(refusal(netSplitterFor({ agreement: { schema: "nope" }, accepted: null, server: server(ag) })(planUnits(ag)))).toBe("economics:SCHEMA_INVALID");
+  });
+
+  it("asOf must be a recent server moment: a backdated or future agreement is refused (review N5)", () => {
+    const ag = exampleSparePrinter();
+    const run = (now: number, maxAgreementAgeSeconds?: number) =>
+      refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag, { now, ...(maxAgreementAgeSeconds === undefined ? {} : { maxAgreementAgeSeconds }) }) })(planUnits(ag)));
+    expect(run(ag.asOf)).toBe("ok");
+    expect(run(ag.asOf + 86_400)).toBe("ok");
+    expect(run(ag.asOf + 86_401)).toBe(`economics:AS_OF_OUT_OF_WINDOW:${ag.asOf}`); // backdated past the window
+    expect(run(ag.asOf - 1)).toBe(`economics:AS_OF_OUT_OF_WINDOW:${ag.asOf}`); // dated in the future
+    expect(run(ag.asOf + 3_600, 60)).toBe(`economics:AS_OF_OUT_OF_WINDOW:${ag.asOf}`);
+  });
+
+  it("the intended use is the server's, not the composer's description of itself (review N5)", () => {
+    const ag = examplePrintAndMail();
+    const run = (use: EconomicAgreement["use"]) => refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag, { intendedUse: use }) })(planUnits(ag)));
+    expect(run({ ...ag.use, region: "EU" })).toBe("economics:USE_MISMATCH");
+    expect(run({ ...ag.use, resell: false })).toBe("economics:USE_MISMATCH");
+    expect(run({ ...ag.use })).toBe("ok");
+  });
+
+  it("a licensor is paid at its registry address: re-pointing it at another wallet is refused (review M3)", () => {
+    const ag = exampleSparePrinter();
+    const honest = server(ag);
+    const redirected = exampleSparePrinter();
+    const sam = redirected.parties.find((p) => p.partyId === "sam")!;
+    redirected.parties.find((p) => p.partyId === "priya")!.payTo = sam.payTo;
+    expect(refusal(netSplitterFor({ agreement: redirected, accepted: null, server: honest })(planUnits(redirected)))).toBe("economics:PARTY_MISMATCH:priya");
+    const unregistered = server(ag, { parties: honest.parties.filter((p) => p.partyId !== "priya") });
+    expect(refusal(netSplitterFor({ agreement: ag, accepted: null, server: unregistered })(planUnits(ag)))).toBe("economics:PARTY_NOT_REGISTERED:priya");
+    // A declared distribution's parties are held to the registry too.
+    const lab = exampleLabAssay();
+    const labFacts = server(lab);
+    const rerouted = exampleLabAssay();
+    rerouted.parties.find((p) => p.partyId === "dataset-b")!.payTo = rerouted.parties.find((p) => p.partyId === "lab")!.payTo;
+    expect(refusal(netSplitterFor({ agreement: rerouted, accepted: null, server: labFacts })(planUnits(rerouted)))).toBe("economics:PARTY_MISMATCH:dataset-b");
+  });
+
+  it("what runs in each unit is the server's: a dropped or under-counted licensed component is refused (review N5)", () => {
+    const ag = examplePrintAndMail();
+    const facts = server(ag);
+    const run = (agreement: EconomicAgreement, f = facts) => refusal(netSplitterFor({ agreement, accepted: null, server: f })(planUnits(agreement)));
+    const dropped = examplePrintAndMail();
+    dropped.units[1]!.components = dropped.units[1]!.components.filter((c) => c.ref !== "method:address-verify@1");
+    expect(run(dropped)).toBe("economics:UNIT_FACTS_MISMATCH:b-mail");
+    const undercounted = examplePrintAndMail();
+    const ranTwice = server(ag, { unitFacts: { ...facts.unitFacts, "b-mail": { components: [{ ref: "service:letter-mail@3", uses: "1" }, { ref: "method:address-verify@1", uses: "2" }], measures: [] } } });
+    expect(run(undercounted, ranTwice)).toBe("economics:UNIT_FACTS_MISMATCH:b-mail");
+    const unlisted = server(ag, { unitFacts: { "a-print": facts.unitFacts["a-print"]! } });
+    expect(run(ag, unlisted)).toBe("economics:UNIT_FACTS_MISMATCH:b-mail");
+    expect(run(ag)).toBe("ok");
   });
 
   it("the protocol fee recipient stays the fee recipient: FEE is not in the payouts", () => {
