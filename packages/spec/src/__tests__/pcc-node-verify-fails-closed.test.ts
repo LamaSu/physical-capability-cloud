@@ -17,24 +17,31 @@ const CRYPTO_PY = fileURLToPath(new URL("../../../pcc-node/pcc_node/crypto.py", 
 const COMMITTED_KEY_FILE = fileURLToPath(new URL("../../../pcc-node/pcc-keys.json", import.meta.url));
 
 const PROBE = `
-import importlib.util, json, os, sys
+import hashlib, importlib.util, json, os, sys
 sys.modules["nacl"] = None  # PyNaCl unavailable
 spec = importlib.util.spec_from_file_location("pcc_node_crypto", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 home = os.path.expanduser("~")
+in_checkout = sys.argv[2]  # a path inside this repository's checkout
+try:
+    m.load_or_create_keys(in_checkout)
+    refused_in_checkout = False
+except m.KeyFileError:
+    refused_in_checkout = True
 print(json.dumps({
     "hasNacl": m._HAS_NACL,
     "verifiesWithoutPynacl": m.verify_signature({"a": 1}, "00" * 64, "11" * 32),
-    "compromisedKeys": len(m.COMPROMISED_PUBLIC_KEYS),
+    "compromisedKeyFingerprints": sorted(hashlib.sha256(k.encode()).hexdigest()[:16] for k in m.COMPROMISED_PUBLIC_KEYS),
     "defaultKeyPathUnderHome": m.default_key_path().startswith(home + os.sep),
+    "refusesKeyFileInCheckout": refused_in_checkout and not os.path.exists(in_checkout),
 }))
 `;
 
 describe("pcc-node verify_signature fails closed (N35b)", () => {
-  it("without PyNaCl no signature verifies, and the key file default is outside the checkout", () => {
+  it("without PyNaCl no signature verifies, the committed key is denylisted, and no key file is made in the checkout", () => {
     const out = JSON.parse(
-      execFileSync("python3", ["-c", PROBE, CRYPTO_PY], {
+      execFileSync("python3", ["-c", PROBE, CRYPTO_PY, COMMITTED_KEY_FILE], {
         encoding: "utf8",
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
       }),
@@ -42,8 +49,11 @@ describe("pcc-node verify_signature fails closed (N35b)", () => {
     expect(out).toEqual({
       hasNacl: false,
       verifiesWithoutPynacl: false,
-      compromisedKeys: 1,
+      // The committed key's entry itself (sha256 of its hex text), not a count.
+      compromisedKeyFingerprints: ["e3b726020a9bb4a5"],
       defaultKeyPathUnderHome: true,
+      // Creating a key file inside this checkout is refused, and nothing is written.
+      refusesKeyFileInCheckout: true,
     });
   });
 
