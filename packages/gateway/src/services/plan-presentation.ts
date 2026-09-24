@@ -1,25 +1,40 @@
 /**
  * PlanPresentation (product pack section 5, item 1): the typed read model a UI or an agent renders for
  * a caller-authored plan. It is built ONLY from server truth: the submission as proposed, R10's
- * verdicts, the seam's refusal or compiled deal, and the reservation store's seal. It is separate from
- * the settlement encoding — nothing here is hashed, signed or funded — and it offers no way to accept
- * a plan (item 7): acceptance is the seam plus the reservation consume, server-side.
+ * verdicts, the seam's refusal or compiled deal, and the reservation store's seal record. It is
+ * separate from the settlement encoding — nothing here is hashed, signed or funded — and it offers no
+ * way to accept a plan (item 7): acceptance is the seam plus the reservation consume, server-side.
  *
  * Authority is assigned HERE, by the server, never taken from content (product invariant 2 and the
- * five-layer rule). `layer` is "B" (accepted deal) only when the reservation store has sealed exactly
- * this plan's `acceptedDealDigest`. Everything else — proposed, re-quote needed, refused, compiled but
- * not yet sealed — is "C". No field a caller supplies can raise it.
+ * five-layer rule). `layer` is "B" (accepted deal) only when ALL of these hold; otherwise it is "C":
+ *  - the outcome belongs to THIS submission: its `submissionDigest` equals the digest of the submission
+ *    being displayed (so a genuine sealed outcome cannot be paired with a different submission);
+ *  - the compiled plan is intact: `acceptedDealDigest` is re-derived from an owned copy of the plan and
+ *    must equal the one it carries, and the plan is bound to the submission's request, reservation
+ *    and plan id, and to exactly its node set;
+ *  - the seal record names this reservation and exactly this deal digest.
+ *
+ * Every input is read ONCE into owned, validated data (the review pattern of #351/#355/#356). A
+ * malformed input never throws: the presentation is `state: "invalid"` with a reason, Layer C, and
+ * shows no nodes, money or deal — it never mixes data from inputs that do not agree.
  *
  * Node identity is the caller's node id, carried unchanged through every state (item 2):
- * proposed -> current | stale (with diffs and the live re-quote) | refused -> compiled -> sealed, and
- * into the execution unit (job, milestone, step id).
+ * proposed -> current | stale (diffs + the live re-quote) | refused -> compiled -> sealed, and into
+ * the execution unit (job, milestone, stepId).
  */
 
-import type { CompiledAcceptedPlan } from "@pcc/spec";
-import type { ExternalPlanSubmission, SeamRefusal, SeamResult } from "./external-plan-seam.js";
-import type { FieldDiff, LiveTerms, NodeVerdict } from "./plan-snapshot-revalidation.js";
+import {
+  acceptedDealDigest,
+  type CompiledAcceptedPlan,
+  type CompiledJob,
+  type NodeUnitBinding,
+  type PayoutEntry,
+  type UnitConfigInput,
+} from "@pcc/spec";
+import { planIdForReservation, snapshotSubmission, submissionDigest, type ExternalPlanSubmission, type SeamResult, type SubmissionSnapshot } from "./external-plan-seam.js";
+import type { SnapshotField } from "./plan-snapshot-revalidation.js";
 
-export type PlanState = "proposed" | "needs-requote" | "refused" | "compiled" | "sealed";
+export type PlanState = "proposed" | "needs-requote" | "refused" | "compiled" | "sealed" | "invalid";
 
 export type PlanNodeState =
   | "proposed"
@@ -33,11 +48,38 @@ export type PlanNodeState =
   | "compiled"
   | "sealed";
 
+export type InvalidReason =
+  | "malformed-input"
+  | "malformed-submission"
+  | "submission-mismatch"
+  | "malformed-outcome"
+  | "plan-integrity"
+  | "plan-binding";
+
 /** Money as exact base units, rendered as strings (never a float) with the token's decimals. */
 export interface Money {
   baseUnits: string;
   currency: string;
   decimals: number;
+}
+
+/** The server's live terms for a node, as displayed. */
+export interface LiveView {
+  capabilityType: string;
+  kernelId: string;
+  kernelStatus: string;
+  csd: string;
+  operator: string;
+  priceDecimal: string;
+  currency: string;
+  assuranceTiers: number[];
+  matchedCapabilityDigest: string;
+}
+
+export interface DiffView {
+  field: SnapshotField;
+  claimed: string;
+  live: string;
 }
 
 export interface PlanNodePresentation {
@@ -47,12 +89,9 @@ export interface PlanNodePresentation {
   /** What the caller proposed (Layer C, the caller's belief). */
   proposed: { price: string; currency: string; tierKey: string; kernelId: string; operator: string };
   /** The server's live terms, when R10 re-read them. */
-  live?: Pick<
-    LiveTerms,
-    "capabilityType" | "kernelId" | "kernelStatus" | "csd" | "operator" | "priceDecimal" | "currency" | "assuranceTiers" | "matchedCapabilityDigest"
-  >;
+  live?: LiveView;
   /** What changed between the proposal and the live row (item 5). */
-  diffs?: FieldDiff[];
+  diffs?: DiffView[];
   /** Why the node cannot be accepted, for missing/unavailable/unpriceable/incompatible/invalid-claim. */
   reason?: string;
   /** The execution unit this node became, once compiled (item 2's last step). */
@@ -63,11 +102,13 @@ export interface PlanNodePresentation {
 
 export interface PlanPresentation {
   schema: "pcc.plan-presentation.v1";
-  /** "B" only for a plan whose deal digest the reservation store sealed; "C" otherwise. Server-assigned. */
+  /** "B" only for an intact plan, bound to this submission, whose digest the store sealed; else "C". */
   layer: "B" | "C";
   state: PlanState;
-  requestId: string;
-  reservationId: string;
+  /** Present only when `state` is "invalid": nothing else is shown then. */
+  invalid?: { reason: InvalidReason };
+  requestId: string | null;
+  reservationId: string | null;
   planId?: string;
   /** Server time of the evaluation: the quote timestamp for every `live` block (item 4). */
   asOf: string;
@@ -91,161 +132,412 @@ export interface PlanPresentation {
     rightsTermsHash: string | null;
     sealed: boolean;
   };
-  refusal?: SeamRefusal;
+  /** Why the seam refused, normalized (never the caller's own structure). */
+  refusal?: { stage: string; reason?: string; nodeId?: string; codes?: string[] };
+}
+
+/** What the reservation store holds after the atomic consume (R13). */
+export interface SealRecord {
+  reservationId: string;
+  acceptedDealDigest: string;
 }
 
 export interface PresentPlanArgs {
   submission: ExternalPlanSubmission;
-  /** The seam's answer, once the plan has been evaluated. */
+  /** The seam's answer for THIS submission, once evaluated. */
   outcome?: SeamResult;
-  /** The digest the reservation store sealed for this reservation, if any (R13). */
-  sealedDigest?: string | null;
+  /** The store's seal record for the submission's reservation, if the consume has happened (R13). */
+  sealed?: SealRecord | null;
   /** Server time of the evaluation, ISO 8601. */
   asOf: string;
 }
 
-/** A display string for a caller-supplied value. Never throws, even on a value with no string form. */
-function show(x: unknown): string {
-  if (typeof x === "string") return x;
-  try {
-    return String(x);
-  } catch {
-    return `<${typeof x}>`;
+// ── Read-once validation. Any failure below throws inside `presentPlan`'s single catch, which does
+//    not inspect what was thrown and returns an "invalid" presentation. ──────────────────────────
+
+function fail(): never {
+  throw new Error("invalid");
+}
+function need(ok: boolean): void {
+  if (!ok) fail();
+}
+function obj(x: unknown): Record<string, unknown> {
+  need(typeof x === "object" && x !== null);
+  return x as Record<string, unknown>;
+}
+function isStr(x: unknown): x is string {
+  return typeof x === "string";
+}
+function isBig(x: unknown): x is bigint {
+  return typeof x === "bigint";
+}
+function isInt(x: unknown, lo: number, hi: number): x is number {
+  return typeof x === "number" && Number.isInteger(x) && x >= lo && x <= hi;
+}
+function str(x: unknown): string {
+  need(isStr(x));
+  return x as string;
+}
+function strOrNull(x: unknown): string | null {
+  need(x === null || isStr(x));
+  return x as string | null;
+}
+/** A list's items, its length read once and bounded, each item read once. */
+function listOf<T>(x: unknown, max: number, item: (v: unknown) => T): T[] {
+  need(Array.isArray(x));
+  const n: unknown = (x as unknown[]).length;
+  need(isInt(n, 0, max));
+  const out: T[] = [];
+  for (let i = 0; i < (n as number); i++) out.push(item((x as unknown[])[i]));
+  return out;
+}
+
+const VERDICT_STATUSES = new Set(["current", "stale", "missing", "unavailable", "unpriceable", "incompatible", "invalid-claim"]);
+const DIFF_FIELDS = new Set(["capabilityType", "csd", "currency", "kernelId", "matchedCapabilityDigest", "operator", "price", "tier"]);
+const REFUSAL_STAGES = new Set(["submission", "reservation", "revalidation", "currency", "tier", "program", "evidence", "compile"]);
+
+function readLive(x: unknown): LiveView {
+  const o = obj(x);
+  return {
+    capabilityType: str(o.capabilityType),
+    kernelId: str(o.kernelId),
+    kernelStatus: str(o.kernelStatus),
+    csd: str(o.csd),
+    operator: str(o.operator),
+    priceDecimal: str(o.priceDecimal),
+    currency: str(o.currency),
+    assuranceTiers: listOf(o.assuranceTiers, 4, (t) => {
+      need(isInt(t, 0, 3));
+      return t as number;
+    }),
+    matchedCapabilityDigest: str(o.matchedCapabilityDigest),
+  };
+}
+
+type VerdictView =
+  | { nodeId: string; status: "current"; live: LiveView }
+  | { nodeId: string; status: "stale"; live: LiveView; diffs: DiffView[] }
+  | { nodeId: string; status: Exclude<PlanNodeState, "proposed" | "current" | "stale" | "compiled" | "sealed">; reason: string };
+
+function readVerdict(x: unknown): VerdictView {
+  const o = obj(x);
+  const nodeId = str(o.nodeId);
+  const status = str(o.status);
+  need(VERDICT_STATUSES.has(status)); // a forged status such as "sealed" is refused
+  if (status === "current") return { nodeId, status, live: readLive(o.resolved) };
+  if (status === "stale") {
+    return {
+      nodeId,
+      status,
+      live: readLive(o.live),
+      diffs: listOf(o.diffs, 16, (d) => {
+        const r = obj(d);
+        const field = str(r.field);
+        need(DIFF_FIELDS.has(field));
+        return { field: field as SnapshotField, claimed: str(r.claimed), live: str(r.live) };
+      }),
+    };
   }
+  return { nodeId, status: status as Exclude<VerdictView["status"], "current" | "stale">, reason: str(o.reason) };
+}
+
+function readPayout(x: unknown): PayoutEntry {
+  const o = obj(x);
+  const recipient = str(o.recipient);
+  const amount = o.amount;
+  need(isBig(amount));
+  return { recipient: recipient as PayoutEntry["recipient"], amount: amount as bigint };
+}
+
+function readUnit(x: unknown): UnitConfigInput {
+  const o = obj(x);
+  const u = {
+    milestoneIndex: o.milestoneIndex,
+    stepId: o.stepId,
+    requiredTier: o.requiredTier,
+    requestedTier: o.requestedTier,
+    g: o.g,
+    f: o.f,
+    n: o.n,
+    feeBps: o.feeBps,
+    feeRecipient: o.feeRecipient,
+    reclaimAt: o.reclaimAt,
+    compositionSchemaVersion: o.compositionSchemaVersion,
+    compositionRoot: o.compositionRoot,
+    payouts: listOf(o.payouts, 16, readPayout),
+  };
+  need(
+    isBig(u.milestoneIndex) && isStr(u.stepId) && isInt(u.requiredTier, 0, 3) && isInt(u.requestedTier, 0, 3) &&
+      isBig(u.g) && isBig(u.f) && isBig(u.n) && isInt(u.feeBps, 0, 10_000) && isStr(u.feeRecipient) &&
+      isBig(u.reclaimAt) && isInt(u.compositionSchemaVersion, 0, 65_535) && isStr(u.compositionRoot),
+  );
+  return u as UnitConfigInput;
+}
+
+function readJob(x: unknown): CompiledJob {
+  const o = obj(x);
+  const job = {
+    jobId: str(o.jobId),
+    operator: str(o.operator),
+    payer: str(o.payer),
+    units: listOf(o.units, 16, readUnit),
+    nodeIds: listOf(o.nodeIds, 16, str),
+  };
+  need(job.units.length === job.nodeIds.length && job.units.length > 0);
+  return job as CompiledJob;
+}
+
+function readBinding(x: unknown): NodeUnitBinding {
+  const o = obj(x);
+  const b = {
+    nodeId: str(o.nodeId),
+    jobIndex: o.jobIndex,
+    jobId: str(o.jobId),
+    operator: str(o.operator),
+    milestoneIndex: o.milestoneIndex,
+    stepId: str(o.stepId),
+    stepIdBytes32: str(o.stepIdBytes32),
+    tier: o.tier,
+    committedProgramHash: strOrNull(o.committedProgramHash),
+  };
+  need(isInt(b.jobIndex, 0, 1023) && isInt(b.milestoneIndex, 0, 15) && isInt(b.tier, 0, 3));
+  return b as NodeUnitBinding;
+}
+
+/** An owned copy of the WHOLE compiled plan: every field the deal digest commits to. */
+function readPlan(x: unknown): CompiledAcceptedPlan {
+  const o = obj(x);
+  const p = {
+    planId: str(o.planId),
+    requestId: str(o.requestId),
+    reservationId: str(o.reservationId),
+    currency: str(o.currency),
+    currencyDecimals: o.currencyDecimals,
+    acceptedDealDigest: str(o.acceptedDealDigest),
+    totalObligationBaseUnits: o.totalObligationBaseUnits,
+    compositionRoot: str(o.compositionRoot),
+    capabilityContractRoot: str(o.capabilityContractRoot),
+    economicTermsHash: strOrNull(o.economicTermsHash),
+    rightsTermsHash: strOrNull(o.rightsTermsHash),
+    jobs: listOf(o.jobs, 1024, readJob),
+    nodeToUnit: listOf(o.nodeToUnit, 1024, readBinding),
+  };
+  need(isInt(p.currencyDecimals, 0, 18) && isBig(p.totalObligationBaseUnits) && p.jobs.length > 0);
+  return p as CompiledAcceptedPlan;
+}
+
+type RefusalView = NonNullable<PlanPresentation["refusal"]> & { verdicts?: VerdictView[] };
+
+function readRefusal(x: unknown): RefusalView {
+  const o = obj(x);
+  const stage = str(o.stage);
+  need(REFUSAL_STAGES.has(stage));
+  const out: RefusalView = { stage };
+  if (stage === "revalidation") out.verdicts = listOf(o.verdicts, 1024, readVerdict);
+  else if (stage === "compile") out.codes = listOf(o.violations, 4096, (v) => str(obj(v).code));
+  else {
+    out.reason = str(o.reason);
+    if (o.nodeId !== undefined) out.nodeId = str(o.nodeId);
+  }
+  return out;
+}
+
+type OutcomeView =
+  | { ok: true; plan: CompiledAcceptedPlan; verdicts: VerdictView[]; submissionDigest: string }
+  | { ok: false; refusal: RefusalView; verdicts?: VerdictView[]; submissionDigest: string };
+
+function readOutcome(x: unknown): OutcomeView {
+  const o = obj(x);
+  const ok = o.ok;
+  need(ok === true || ok === false);
+  const digest = str(o.submissionDigest);
+  const verdictsRaw = o.verdicts;
+  const verdicts = verdictsRaw === undefined ? undefined : listOf(verdictsRaw, 1024, readVerdict);
+  if (ok === true) {
+    const plan = readPlan(o.plan);
+    need(verdicts !== undefined);
+    return { ok: true, plan, verdicts: verdicts!, submissionDigest: digest };
+  }
+  return { ok: false, refusal: readRefusal(o.refusal), ...(verdicts ? { verdicts } : {}), submissionDigest: digest };
+}
+
+/** The plan must be intact and bound to this submission; each binding must name its own unit. */
+function planIsIntact(plan: CompiledAcceptedPlan): boolean {
+  const { acceptedDealDigest: carried, ...rest } = plan;
+  return acceptedDealDigest(rest).toLowerCase() === carried.toLowerCase();
+}
+
+function planIsBound(plan: CompiledAcceptedPlan, snap: SubmissionSnapshot, nodeIds: string[]): boolean {
+  if (plan.requestId !== snap.requestId || plan.reservationId !== snap.reservationId) return false;
+  if (plan.planId !== planIdForReservation(snap.reservationId as string)) return false;
+  const bound = plan.nodeToUnit.map((b) => b.nodeId);
+  if (new Set(bound).size !== bound.length || bound.length !== nodeIds.length) return false;
+  if (!nodeIds.every((id) => bound.includes(id))) return false;
+  // Every binding names exactly the unit that carries its node, so identity and money cannot mix.
+  return plan.nodeToUnit.every((b) => {
+    const job = plan.jobs[b.jobIndex];
+    return job !== undefined && job.jobId === b.jobId && job.nodeIds[b.milestoneIndex] === b.nodeId && job.units[b.milestoneIndex] !== undefined;
+  });
 }
 
 function money(amount: bigint, plan: CompiledAcceptedPlan): Money {
   return { baseUnits: amount.toString(), currency: plan.currency, decimals: plan.currencyDecimals };
 }
 
-function nodeStateOf(v: NodeVerdict): PlanNodeState {
-  return v.status;
+/** A display string for a proposal field (a primitive from the submission snapshot). */
+function shown(x: unknown): string {
+  return typeof x === "string" ? x : typeof x === "number" || typeof x === "boolean" || typeof x === "bigint" ? String(x) : `<${x === null ? "null" : typeof x}>`;
 }
 
-function liveOf(t: LiveTerms): NonNullable<PlanNodePresentation["live"]> {
-  return {
-    capabilityType: t.capabilityType,
-    kernelId: t.kernelId,
-    kernelStatus: t.kernelStatus,
-    csd: t.csd,
-    operator: t.operator,
-    priceDecimal: t.priceDecimal,
-    currency: t.currency,
-    assuranceTiers: [...t.assuranceTiers],
-    matchedCapabilityDigest: t.matchedCapabilityDigest,
-  };
-}
-
-/** Build the read model. Pure: the same arguments always give the same presentation. */
+/** Build the read model. Pure and total: the same arguments always give the same presentation, and it never throws. */
 export function presentPlan(args: PresentPlanArgs): PlanPresentation {
-  const { submission, outcome } = args;
-  const verdicts = new Map<string, NodeVerdict>((outcome?.verdicts ?? []).map((v) => [v.nodeId, v]));
-  const plan = outcome?.ok ? outcome.plan : undefined;
-  const sealed =
-    plan !== undefined &&
-    typeof args.sealedDigest === "string" &&
-    args.sealedDigest.toLowerCase() === plan.acceptedDealDigest.toLowerCase();
+  let snap: SubmissionSnapshot | null = null;
+  let asOf = "";
+  try {
+    const a = obj(args);
+    const submissionRaw = a.submission;
+    const outcomeRaw = a.outcome;
+    const sealedRaw = a.sealed;
+    asOf = str(a.asOf);
+    snap = snapshotSubmission(submissionRaw);
+    if (!snap || !isStr(snap.requestId) || !isStr(snap.reservationId)) return invalid("malformed-submission", asOf, snap);
 
-  let state: PlanState;
-  if (!outcome) state = "proposed";
-  else if (outcome.ok) state = sealed ? "sealed" : "compiled";
-  else if (outcome.refusal.stage === "revalidation" && outcome.refusal.verdicts.every((v) => v.status === "stale")) state = "needs-requote";
-  else state = "refused";
+    const nodes = snap.nodes.filter((n): n is NonNullable<typeof n> => n !== null && isStr(n.nodeId));
+    const nodeIds = nodes.map((n) => n.nodeId as string);
+    const outcome = outcomeRaw === undefined ? undefined : readOutcome(outcomeRaw);
+    if (outcome && outcome.submissionDigest !== submissionDigest(snap)) return invalid("submission-mismatch", asOf, snap);
 
-  const unitOf = new Map((plan?.nodeToUnit ?? []).map((b) => [b.nodeId, b]));
-  const unitConfigOf = new Map(
-    (plan?.jobs ?? []).flatMap((j) => j.units.map((u, i) => [j.nodeIds[i]!, u] as const)),
-  );
+    const plan = outcome?.ok ? outcome.plan : undefined;
+    if (plan && !planIsIntact(plan)) return invalid("plan-integrity", asOf, snap);
+    if (plan && !planIsBound(plan, snap, nodeIds)) return invalid("plan-binding", asOf, snap);
+    const verdictList = outcome ? (outcome.ok ? outcome.verdicts : outcome.verdicts ?? outcome.refusal.verdicts ?? []) : [];
+    if (!verdictList.every((v) => nodeIds.includes(v.nodeId))) return invalid("malformed-outcome", asOf, snap);
+    if (plan && !(verdictList.length === nodeIds.length && verdictList.every((v) => v.status === "current"))) {
+      return invalid("malformed-outcome", asOf, snap);
+    }
+    // All units of one compiled deal share one reclaim time; a plan where they differ is not intact.
+    const reclaims = plan ? [...new Set(plan.jobs.flatMap((j) => j.units.map((u) => u.reclaimAt.toString())))] : [];
+    if (plan && reclaims.length !== 1) return invalid("plan-integrity", asOf, snap);
 
-  const nodes: PlanNodePresentation[] = (Array.isArray(submission?.nodes) ? submission.nodes : [])
-    .filter((n) => n && typeof n.nodeId === "string")
-    .map((n) => {
-      const out: PlanNodePresentation = {
-        nodeId: n.nodeId,
-        capabilityId: show(n.capabilityId),
-        state: "proposed",
-        proposed: { price: show(n.price), currency: show(n.currency), tierKey: show(n.tierKey), kernelId: show(n.kernelId), operator: show(n.operator) },
-      };
-      const v = verdicts.get(n.nodeId);
-      if (v) {
-        out.state = nodeStateOf(v);
-        if (v.status === "current") out.live = liveOf(v.resolved);
-        else if (v.status === "stale") {
-          out.live = liveOf(v.live);
-          out.diffs = v.diffs.map((d) => ({ ...d }));
-        } else out.reason = v.reason;
-      }
-      const b = unitOf.get(n.nodeId);
-      const u = unitConfigOf.get(n.nodeId);
-      if (plan && b && u) {
-        out.state = sealed ? "sealed" : "compiled";
-        out.unit = {
-          jobId: b.jobId,
-          milestoneIndex: b.milestoneIndex,
-          stepId: b.stepId,
-          stepIdBytes32: b.stepIdBytes32,
-          tier: b.tier,
-          committedProgramHash: b.committedProgramHash,
+    let sealed = false;
+    if (plan && sealedRaw !== undefined && sealedRaw !== null) {
+      const s = obj(sealedRaw);
+      const sealedReservation = str(s.reservationId);
+      const sealedDigest = str(s.acceptedDealDigest);
+      sealed = sealedReservation === snap.reservationId && sealedDigest.toLowerCase() === plan.acceptedDealDigest.toLowerCase();
+    }
+
+    let state: PlanState;
+    if (!outcome) state = "proposed";
+    else if (outcome.ok) state = sealed ? "sealed" : "compiled";
+    else if (outcome.refusal.stage === "revalidation" && (outcome.refusal.verdicts ?? []).length > 0 && outcome.refusal.verdicts!.every((v) => v.status === "stale")) {
+      state = "needs-requote";
+    } else state = "refused";
+
+    const verdictOf = new Map(verdictList.map((v) => [v.nodeId, v]));
+    const bindingOf = new Map((plan?.nodeToUnit ?? []).map((b) => [b.nodeId, b]));
+    const presented: PlanNodePresentation[] = nodes
+      .map((n) => {
+        const id = n.nodeId as string;
+        const out: PlanNodePresentation = {
+          nodeId: id,
+          capabilityId: shown(n.capabilityId),
+          state: "proposed",
+          proposed: { price: shown(n.price), currency: shown(n.currency), tierKey: shown(n.tierKey), kernelId: shown(n.kernelId), operator: shown(n.operator) },
         };
-        out.money = {
-          gross: money(u.g, plan),
-          fee: money(u.f, plan),
-          net: money(u.n, plan),
-          payouts: u.payouts.map((p) => ({ recipient: p.recipient, amount: money(p.amount, plan) })),
-        };
-      }
-      return out;
-    })
-    .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+        const v = verdictOf.get(id);
+        if (v) {
+          out.state = v.status;
+          if (v.status === "current") out.live = v.live;
+          else if (v.status === "stale") {
+            out.live = v.live;
+            out.diffs = v.diffs;
+          } else out.reason = v.reason;
+        }
+        const b = bindingOf.get(id);
+        if (plan && b) {
+          const u = plan.jobs[b.jobIndex]!.units[b.milestoneIndex]!;
+          out.state = sealed ? "sealed" : "compiled";
+          out.unit = { jobId: b.jobId, milestoneIndex: b.milestoneIndex, stepId: b.stepId, stepIdBytes32: b.stepIdBytes32, tier: b.tier, committedProgramHash: b.committedProgramHash };
+          out.money = {
+            gross: money(u.g, plan),
+            fee: money(u.f, plan),
+            net: money(u.n, plan),
+            payouts: u.payouts.map((p) => ({ recipient: p.recipient, amount: money(p.amount, plan) })),
+          };
+        }
+        return out;
+      })
+      .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
 
-  const presentation: PlanPresentation = {
-    schema: "pcc.plan-presentation.v1",
-    layer: sealed ? "B" : "C",
-    state,
-    requestId: show(submission?.requestId),
-    reservationId: show(submission?.reservationId),
-    asOf: args.asOf,
-    nodes,
-    edges: (Array.isArray(submission?.edges) ? submission.edges : [])
-      .filter((e) => e && typeof e.from === "string" && typeof e.to === "string")
-      .map((e) => ({ from: e.from, to: e.to })),
-  };
-  if (outcome && !outcome.ok) presentation.refusal = outcome.refusal;
-  if (plan) {
-    presentation.planId = plan.planId;
-    let gross = 0n;
-    let fee = 0n;
-    let net = 0n;
-    const byRecipient = new Map<string, bigint>();
-    for (const j of plan.jobs) {
-      for (const u of j.units) {
-        gross += u.g;
-        fee += u.f;
-        net += u.n;
-        for (const p of u.payouts) {
-          const k = p.recipient.toLowerCase();
-          byRecipient.set(k, (byRecipient.get(k) ?? 0n) + p.amount);
+    const presentation: PlanPresentation = {
+      schema: "pcc.plan-presentation.v1",
+      layer: sealed ? "B" : "C",
+      state,
+      requestId: snap.requestId,
+      reservationId: snap.reservationId,
+      asOf,
+      nodes: presented,
+      edges: snap.edges
+        .filter((e): e is NonNullable<typeof e> => e !== null && isStr(e.from) && isStr(e.to))
+        .map((e) => ({ from: e.from as string, to: e.to as string })),
+    };
+    if (outcome && !outcome.ok) {
+      const { verdicts: _v, ...refusal } = outcome.refusal;
+      presentation.refusal = refusal;
+    }
+    if (plan) {
+      presentation.planId = plan.planId;
+      let gross = 0n;
+      let fee = 0n;
+      let net = 0n;
+      const byRecipient = new Map<string, bigint>();
+      for (const j of plan.jobs) {
+        for (const u of j.units) {
+          gross += u.g;
+          fee += u.f;
+          net += u.n;
+          for (const p of u.payouts) {
+            const k = p.recipient.toLowerCase();
+            byRecipient.set(k, (byRecipient.get(k) ?? 0n) + p.amount);
+          }
         }
       }
+      presentation.preview = {
+        gross: money(gross, plan),
+        fee: money(fee, plan),
+        net: money(net, plan),
+        payoutsByRecipient: [...byRecipient.entries()]
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([recipient, amount]) => ({ recipient, amount: money(amount, plan) })),
+        tierByNode: plan.nodeToUnit.map((b) => ({ nodeId: b.nodeId, tier: b.tier })).sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0)),
+        reclaimAt: reclaims[0]!,
+      };
+      presentation.deal = {
+        acceptedDealDigest: plan.acceptedDealDigest,
+        compositionRoot: plan.compositionRoot,
+        capabilityContractRoot: plan.capabilityContractRoot,
+        economicTermsHash: plan.economicTermsHash,
+        rightsTermsHash: plan.rightsTermsHash,
+        sealed,
+      };
     }
-    presentation.preview = {
-      gross: money(gross, plan),
-      fee: money(fee, plan),
-      net: money(net, plan),
-      payoutsByRecipient: [...byRecipient.entries()]
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([recipient, amount]) => ({ recipient, amount: money(amount, plan) })),
-      tierByNode: plan.nodeToUnit.map((b) => ({ nodeId: b.nodeId, tier: b.tier })).sort((a, b) => (a.nodeId < b.nodeId ? -1 : 1)),
-      reclaimAt: (plan.jobs[0]?.units[0]?.reclaimAt ?? 0n).toString(),
-    };
-    presentation.deal = {
-      acceptedDealDigest: plan.acceptedDealDigest,
-      compositionRoot: plan.compositionRoot,
-      capabilityContractRoot: plan.capabilityContractRoot,
-      economicTermsHash: plan.economicTermsHash,
-      rightsTermsHash: plan.rightsTermsHash,
-      sealed,
-    };
+    return presentation;
+  } catch {
+    return invalid(snap ? "malformed-outcome" : "malformed-input", asOf, snap);
   }
-  return presentation;
+}
+
+function invalid(reason: InvalidReason, asOf: string, snap: SubmissionSnapshot | null): PlanPresentation {
+  return {
+    schema: "pcc.plan-presentation.v1",
+    layer: "C",
+    state: "invalid",
+    invalid: { reason },
+    requestId: snap && isStr(snap.requestId) ? snap.requestId : null,
+    reservationId: snap && isStr(snap.reservationId) ? snap.reservationId : null,
+    asOf,
+    nodes: [],
+    edges: [],
+  };
 }

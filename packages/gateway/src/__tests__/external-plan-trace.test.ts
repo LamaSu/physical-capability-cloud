@@ -34,7 +34,7 @@ import {
 } from "../services/external-plan-seam.js";
 import type { LiveCapability, LiveKernel } from "../services/plan-snapshot-revalidation.js";
 import { submissionFromComposeResponse } from "../services/compose-plan-adapter.js";
-import { presentPlan } from "../services/plan-presentation.js";
+import { presentPlan, type PresentPlanArgs } from "../services/plan-presentation.js";
 
 const A = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const OP_PRINT = A("aa");
@@ -529,11 +529,15 @@ describe("PlanPresentation: the product read model, built only from server truth
     const { store, deps } = world();
     const outcome = acceptExternalPlan(agentDag(), CTX, deps);
     if (!outcome.ok) throw new Error("setup");
-    expect(presentPlan({ submission: agentDag(), outcome, sealedDigest: `0x${"ab".repeat(32)}`, asOf: ASOF }).layer).toBe("C");
+    const wrong = presentPlan({ submission: agentDag(), outcome, sealed: { reservationId: "resv-1", acceptedDealDigest: `0x${"ab".repeat(32)}` }, asOf: ASOF });
+    expect(wrong).toMatchObject({ layer: "C", state: "compiled", deal: { sealed: false } });
+    expect(wrong.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "compiled"], ["print", "compiled"]]);
     expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
-    const p = presentPlan({ submission: agentDag(), outcome, sealedDigest: store.sealed("resv-1"), asOf: ASOF });
+    // the right digest recorded under ANOTHER reservation is not this plan's seal
+    expect(presentPlan({ submission: agentDag(), outcome, sealed: { reservationId: "resv-other", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF }).layer).toBe("C");
+    const p = presentPlan({ submission: agentDag(), outcome, sealed: { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF });
     expect(p).toMatchObject({ layer: "B", state: "sealed", deal: { sealed: true, acceptedDealDigest: outcome.plan.acceptedDealDigest } });
-    expect(p.nodes.every((n) => n.state === "sealed")).toBe(true);
+    expect(p.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "sealed"], ["print", "sealed"]]);
   });
 
   it("content cannot raise authority: layer/state/sealed fields in the submission are ignored", () => {
@@ -576,12 +580,13 @@ describe("PlanPresentation: the product read model, built only from server truth
     for (const a of amounts) expect(a).toMatch(/^[0-9]+$/);
   });
 
-  it("a malformed submission renders without throwing", () => {
+  it("a malformed submission renders as 'invalid' without throwing, and shows nothing", () => {
     const junk = { requestId: Object.create(null), reservationId: 5, nodes: [null, { nodeId: "x", capabilityId: Object.create(null) }], edges: [null, { from: 1, to: "x" }] };
-    expect(() => presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF })).not.toThrow();
-    const p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
-    expect(p.nodes.map((n) => n.nodeId)).toEqual(["x"]);
-    expect(p.edges).toEqual([]);
+    let p: ReturnType<typeof presentPlan> | undefined;
+    expect(() => {
+      p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
+    }).not.toThrow();
+    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [] });
   });
 });
 
@@ -680,5 +685,99 @@ describe("seam read-once (the review pattern of #351/#355): every input is read 
     ];
     for (const v of variants) expect(submissionDigest(snapshotSubmission(v)!)).not.toBe(d);
     expect(submissionDigest(snapshotSubmission(agentDag())!)).toBe(d); // deterministic
+  });
+});
+
+describe("PlanPresentation hardening (astra review of #357): bound, intact, validated, total", () => {
+  const ASOF = "2026-09-24T13:00:00.000Z";
+  const reseal = (p: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): CompiledAcceptedPlan => ({ ...p, acceptedDealDigest: acceptedDealDigest(p) });
+  const accepted = () => {
+    const { store, deps } = world();
+    const outcome = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    return { store, outcome };
+  };
+
+  it("a genuine sealed outcome paired with ANOTHER submission is invalid, never Layer B", () => {
+    const { store, outcome } = accepted();
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const seal = { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! };
+    const others: ExternalPlanSubmission[] = [
+      { ...agentDag(), nodes: [agentDag().nodes[0]!, { ...agentDag().nodes[1]!, capabilityId: "cap-evil" }] },
+      { ...agentDag(), edges: [] },
+      { ...agentDag(), reservationId: "resv-2" },
+    ];
+    for (const submission of others) {
+      const p = presentPlan({ submission, outcome, sealed: seal, asOf: ASOF });
+      expect(p).toMatchObject({ layer: "C", state: "invalid", invalid: { reason: "submission-mismatch" }, nodes: [] });
+    }
+  });
+
+  it("a plan altered after sealing (old digest kept) is invalid; a RE-sealed plan bound elsewhere is invalid too", () => {
+    const { store, outcome } = accepted();
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const seal = { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! };
+    const altered = { ...outcome, plan: { ...outcome.plan, jobs: outcome.plan.jobs.map((j) => ({ ...j, units: j.units.map((u) => ({ ...u, payouts: [{ recipient: A("66"), amount: u.n }] })) })) } };
+    expect(presentPlan({ submission: agentDag(), outcome: altered, sealed: seal, asOf: ASOF })).toMatchObject({ layer: "C", state: "invalid", invalid: { reason: "plan-integrity" } });
+    const { acceptedDealDigest: _d, ...rest } = outcome.plan;
+    const elsewhere = { ...outcome, plan: reseal({ ...rest, requestId: "req-other" }) };
+    expect(presentPlan({ submission: agentDag(), outcome: elsewhere, asOf: ASOF })).toMatchObject({ state: "invalid", invalid: { reason: "plan-binding" } });
+    const uneven = { ...outcome, plan: reseal({ ...rest, jobs: rest.jobs.map((j, i) => (i === 0 ? { ...j, units: j.units.map((u) => ({ ...u, reclaimAt: u.reclaimAt + 1n })) } : j)) }) };
+    expect(presentPlan({ submission: agentDag(), outcome: uneven, asOf: ASOF })).toMatchObject({ state: "invalid", invalid: { reason: "plan-integrity" } });
+  });
+
+  it("a forged verdict status, a malformed verdict list, or an outcome without its submission digest is invalid", () => {
+    const { outcome } = accepted();
+    const cases: unknown[] = [
+      { ...outcome, verdicts: [{ ...outcome.verdicts[0]!, status: "sealed" }, outcome.verdicts[1]!] },
+      { ...outcome, verdicts: {} },
+      { ...outcome, verdicts: [null, null] },
+      { ...outcome, submissionDigest: undefined },
+      { ...outcome, plan: { ...outcome.plan, totalObligationBaseUnits: "9750000" } },
+      null,
+      Object.defineProperty({}, "ok", { get: () => { throw new Error("x"); } }),
+    ];
+    for (const c of cases) {
+      let p: ReturnType<typeof presentPlan> | undefined;
+      expect(() => {
+        p = presentPlan({ submission: agentDag(), outcome: c as SeamResult, asOf: ASOF });
+      }).not.toThrow();
+      expect(p?.state).toBe("invalid");
+      expect(p?.layer).toBe("C");
+      expect(p?.nodes).toEqual([]);
+    }
+  });
+
+  it("a forged status inside a REFUSAL's verdicts is invalid, never a node shown as 'sealed'", () => {
+    const d = submissionDigest(snapshotSubmission(agentDag())!);
+    const forged = { ok: false, refusal: { stage: "revalidation", verdicts: [{ nodeId: "print", status: "sealed", reason: "x" }] }, submissionDigest: d } as unknown as SeamResult;
+    const p = presentPlan({ submission: agentDag(), outcome: forged, asOf: ASOF });
+    expect(p).toMatchObject({ state: "invalid", layer: "C", nodes: [] });
+  });
+
+  it("an empty or mixed revalidation refusal is 'refused', never a re-quote", () => {
+    const d = submissionDigest(snapshotSubmission(agentDag())!);
+    const empty = { ok: false, refusal: { stage: "revalidation", verdicts: [] }, submissionDigest: d } as unknown as SeamResult;
+    expect(presentPlan({ submission: agentDag(), outcome: empty, asOf: ASOF }).state).toBe("refused");
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, capabilityId: "ghost" };
+    const mixed = acceptExternalPlan(dag, CTX, world().deps);
+    expect(presentPlan({ submission: dag, outcome: mixed, asOf: ASOF }).state).toBe("refused");
+  });
+
+  it("a non-string asOf, or a throwing getter anywhere in the arguments, is invalid and never throws", () => {
+    const { outcome } = accepted();
+    const inputs: unknown[] = [
+      { submission: agentDag(), outcome, asOf: 5 },
+      Object.defineProperty({ submission: agentDag(), asOf: ASOF }, "outcome", { enumerable: true, get: () => { throw new Error("x"); } }),
+      null,
+    ];
+    for (const i of inputs) {
+      let p: ReturnType<typeof presentPlan> | undefined;
+      expect(() => {
+        p = presentPlan(i as PresentPlanArgs);
+      }).not.toThrow();
+      expect(p?.state).toBe("invalid");
+    }
   });
 });
