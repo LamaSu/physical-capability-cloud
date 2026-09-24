@@ -1,6 +1,6 @@
 import { create } from "zustand";
+import { fetchWithKey } from "../lib/gateway-base.js";
 
-const API = import.meta.env.VITE_PCC_URL ?? "";
 const STORAGE_KEY = "pcc-api-key";
 
 interface AuthState {
@@ -37,9 +37,8 @@ export const useAuthStore = create<AuthState>((set) => {
 
     login: async (key: string): Promise<boolean> => {
       try {
-        const res = await fetch(`${API}/api/auth/validate`, {
-          headers: { Authorization: `Bearer ${key}` },
-        });
+        // The candidate key goes to the configured gateway and nowhere else.
+        const res = await fetchWithKey("/api/auth/validate", key);
         if (res.ok) {
           localStorage.setItem(STORAGE_KEY, key);
           set({ apiKey: key, isAuthenticated: true });
@@ -70,8 +69,11 @@ export const useAuthStore = create<AuthState>((set) => {
 });
 
 /**
- * Returns auth headers for API calls.
- * Call outside of React components (in fetch helpers, etc).
+ * Legacy: returns the Authorization header without knowing where the request
+ * goes. Use authorizedFetch (lib/authorized-fetch.ts), which attaches the key
+ * only for the configured gateway. The startup egress guard stops the
+ * remaining callers from carrying the key anywhere else, and
+ * __tests__/no-direct-auth-headers.test.ts ratchets them out.
  */
 export function getAuthHeaders(): Record<string, string> {
   const { apiKey } = useAuthStore.getState();

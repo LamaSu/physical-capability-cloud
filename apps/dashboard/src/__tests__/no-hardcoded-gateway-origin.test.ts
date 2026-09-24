@@ -4,6 +4,10 @@
  * came to send the signed-in user's API key to their own machine. Use
  * lib/gateway-base.ts (the configured gateway) instead.
  *
+ * This is the narrow check. The key itself is guarded by
+ * no-direct-auth-headers.test.ts (only fetchWithKey puts it on a request, after
+ * checking the destination) and, at runtime, by the egress guard.
+ *
  * Comment lines are ignored. KNOWN lists the remaining literals, each with
  * why it is not a key leak and who removes it; the list only shrinks.
  */
@@ -17,7 +21,6 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LOCAL_ORIGIN = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?/;
 
 const KNOWN: Record<string, string> = {
-  "pages/EarnFromYourWorkPage.tsx": "dev-only branch of API_BASE (PROD uses the real gateway); owner economics/launch",
   "pages/LandingPage.tsx": "unused API_BASE plus a dev-only base; the page is retire-after-parity (launch #2277)",
   "stores/setup-wizard-store.ts": "the local-chain RPC default (anvil :8545) offered in a config form; it is never fetched, let alone with the key",
 };

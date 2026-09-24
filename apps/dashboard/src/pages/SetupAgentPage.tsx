@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
-import { GATEWAY_BASE } from "../lib/gateway-base.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "test_results" | "setup_complete" | "text_input" | "selection";
 
@@ -78,10 +77,6 @@ const INITIAL_MESSAGES: ChatMessage[] = [
 async function agentStep(
   userInput: string,
   history: ChatMessage[],
-  // The configured gateway, the only origin these key-bearing requests may go
-  // to. It defaulted to http://localhost:3200, which sent the signed-in user's
-  // key to their own machine (N50).
-  gatewayUrl = GATEWAY_BASE,
 ): Promise<ChatMessage[]> {
   const lower = userInput.toLowerCase();
   const responses: ChatMessage[] = [];
@@ -134,9 +129,9 @@ async function agentStep(
 
       // Attempt real network scan
       try {
-        const res = await fetch(`${gatewayUrl}/api/setup/scan-network`, {
+        const res = await authorizedFetch("/api/setup/scan-network", {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
         });
         const data = res.ok ? await res.json() as { devices?: NetworkDevice[] } : { devices: [] };
@@ -263,9 +258,9 @@ async function agentStep(
 
     // Attempt gateway call
     try {
-      const res = await fetch(`${gatewayUrl}/api/ai/identify-machine`, {
+      const res = await authorizedFetch("/api/ai/identify-machine", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64: userInput.replace(/^data:image\/[^;]+;base64,/, "") }),
       });
       const data = res.ok ? await res.json() as { make?: string; model?: string; type?: string; confidence?: number; suggestedAdapterType?: string } : null;
@@ -327,9 +322,9 @@ async function agentStep(
     });
 
     try {
-      const regRes = await fetch(`${gatewayUrl}/api/setup/register-device`, {
+      const regRes = await authorizedFetch("/api/setup/register-device", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kernelId: "kernel_dev_001", deviceId: `dev_${Date.now()}`, type: "machine", adapterType: "mock" }),
       });
       const regData = regRes.ok ? await regRes.json() as { registered?: boolean } : { registered: false };
