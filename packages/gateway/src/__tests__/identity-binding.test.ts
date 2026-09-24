@@ -285,6 +285,68 @@ describe("F3 — provision {email}: an identity that already exists cannot be cl
   });
 });
 
+// WP-A repair R1. The needle was folded by JS (Unicode trim + toLowerCase) but
+// every stored column by SQLite lower(trim()), which folds ASCII letters and
+// plain spaces only — so an id with a non-ASCII uppercase letter (or Unicode
+// padding) was never found claimed, not even for the EXACT same string, and an
+// anonymous caller got a key that passes every exact-match ownership check of
+// the victim. Both sides now go through one fold (normalizeIdentity/pcc_norm).
+describe("R1 — non-ASCII identities fold the same way on both sides", () => {
+  const unicodeId = (tag: string) => `Émile.${tag}-${Date.now().toString(36)}-${++seq}@example.com`;
+
+  it("a stored 'Émile.Probe@…' key: the EXACT string is claimed (409)", async () => {
+    const victim = unicodeId("Probe");
+    expect((await provision(victim)).statusCode).toBe(201);
+    expect(keysOf(victim)[0].operatorId).toBe(victim); // stored verbatim, É and all
+    const res = await provision(victim);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("identity_claimed");
+    expect(keysOf(victim)).toHaveLength(1);
+  });
+
+  it("…and so is every case variant of it (409)", async () => {
+    const victim = unicodeId("Probe");
+    expect((await provision(victim)).statusCode).toBe(201);
+    for (const variant of [victim.toLowerCase(), victim.toUpperCase(), ` ${victim.toLowerCase()} `]) {
+      const res = await provision(variant);
+      expect(res.statusCode, JSON.stringify(variant)).toBe(409);
+    }
+    expect(keysOf(victim)).toHaveLength(1);
+  });
+
+  it("a kernel owned by a non-ASCII uppercase id is claimed for the exact string and a case variant", async () => {
+    const owner = `ÖMER.Kernel-${Date.now().toString(36)}-${++seq}@example.com`;
+    seedKernel(owner);
+    expect((await provision(owner)).statusCode).toBe(409);
+    expect((await provision(owner.toLowerCase())).statusCode).toBe(409);
+    expect(keysOf(owner)).toHaveLength(0);
+  });
+
+  it("a machine registration whose tenant or operator.email is non-ASCII uppercase is claimed", async () => {
+    const tenant = unicodeId("Tenant");
+    seedRegistration({ tenantId: tenant });
+    expect((await provision(tenant.toLowerCase())).statusCode).toBe(409);
+    const email = unicodeId("RegEmail");
+    seedRegistration({ email });
+    expect((await provision(email)).statusCode).toBe(409);
+  });
+
+  it("a legacy row padded with a Unicode space (NBSP) still claims the bare id", async () => {
+    const id = fresh("nbsp-legacy");
+    seedRawKey(` ${id} `, ["operator"]); // SQLite trim() never strips U+00A0
+    expect((await provision(id)).statusCode).toBe(409);
+  });
+
+  it("the fold does not over-match: a DIFFERENT letter is a different identity (201)", async () => {
+    const victim = unicodeId("Distinct");
+    expect((await provision(victim)).statusCode).toBe(201);
+    const other = victim.replace("Émile", "Emile"); // E, not É
+    const res = await provision(other);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().operator_id).toBe(other);
+  });
+});
+
 describe("F3 — contributors quickstart: the same binding", () => {
   it("victim HAS A KEY -> 409 before any wallet or key is created", async () => {
     const victim = fresh("qs-victim");

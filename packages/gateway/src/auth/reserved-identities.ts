@@ -47,18 +47,26 @@ export const ADMIN_IDENTITY_ALLOWLIST_ENV_VARS = [
 
 export type AdminIdentityAllowlist = (typeof ADMIN_IDENTITY_ALLOWLIST_ENV_VARS)[number];
 
-function normalize(id: string): string {
-  return id.trim().toLowerCase();
+/**
+ * THE identity fold: trimmed (every Unicode space, as JS `trim` does) and
+ * lower-cased (full Unicode, as JS `toLowerCase` does). Every identity
+ * comparison in this module applies it to BOTH sides — the requested id here in
+ * JS, a stored column through the `pcc_norm` SQL function (registered below with
+ * this very function) — so the two sides can never fold differently, and an
+ * exact string always matches itself. `null`/`undefined` fold to "".
+ */
+export function normalizeIdentity(id: unknown): string {
+  return String(id ?? "").trim().toLowerCase();
 }
 
 /** Names of the allowlists that contain `operatorId` (empty = not reserved). */
 export function reservedIdentityAllowlists(operatorId: string): AdminIdentityAllowlist[] {
-  const needle = normalize(operatorId);
+  const needle = normalizeIdentity(operatorId);
   if (!needle) return [];
   return ADMIN_IDENTITY_ALLOWLIST_ENV_VARS.filter((name) =>
     (process.env[name] ?? "")
       .split(",")
-      .map(normalize)
+      .map(normalizeIdentity)
       .some((entry) => entry.length > 0 && entry === needle),
   );
 }
@@ -108,49 +116,70 @@ export const IDENTITY_RESERVED_RESPONSE = {
 
 interface RawSqlite {
   prepare(sql: string): { get(...params: unknown[]): unknown };
+  function(name: string, options: { deterministic: boolean }, fn: (value: unknown) => string): unknown;
 }
+
+/** Connections that already carry `pcc_norm` (registration is per handle). */
+const normRegistered = new WeakSet<object>();
 
 function rawSqlite(): RawSqlite {
   const client = (getStore().db as unknown as { $client?: RawSqlite }).$client;
-  if (!client || typeof client.prepare !== "function") {
+  if (!client || typeof client.prepare !== "function" || typeof client.function !== "function") {
     throw new Error("identity binding: raw sqlite handle unavailable");
+  }
+  if (!normRegistered.has(client)) {
+    // SQLite's built-in lower()/trim() fold ASCII letters and plain spaces
+    // only. The claim check used to compare lower(trim(col)) with a needle
+    // folded by JS, so a stored 'Émile.Probe@…' stayed 'Émile.probe@…' in SQL
+    // while the needle became 'émile.probe@…': the identity was never found
+    // claimed, not even for the EXACT same string (review R1). The column is now
+    // folded by the same JS function as the needle.
+    client.function("pcc_norm", { deterministic: true }, (value) => normalizeIdentity(value));
+    normRegistered.add(client);
   }
   return client;
 }
 
 // Each query answers "does anything already belong to this id?" — LIMIT 1, no
-// data returned. machine_registrations.operator is JSON: json_valid() guards
-// json_extract so one malformed row cannot make every lookup throw.
+// data returned. Every stored owner id goes through pcc_norm (= normalizeIdentity)
+// and is compared with the needle folded by the same function. A function over
+// the column cannot use a b-tree index on it, so each lookup is a scan of that
+// table (or of its owner index, when it covers the query); the earlier
+// lower(trim(col)) form was a scan too, and both paths that run it are
+// rate-limited self-service signups.
+//
+// machine_registrations.operator is JSON: CASE (evaluated lazily, unlike AND)
+// guards json_extract, so one malformed row cannot make every lookup throw.
 const CLAIM_QUERIES: ReadonlyArray<{ sql: string; params: number }> = [
   {
-    sql: "SELECT 1 FROM api_keys WHERE revoked_at IS NULL AND lower(trim(operator_id)) = ? LIMIT 1",
+    sql: "SELECT 1 FROM api_keys WHERE revoked_at IS NULL AND pcc_norm(operator_id) = ? LIMIT 1",
     params: 1,
   },
   {
-    sql: "SELECT 1 FROM shop_kernels WHERE lower(trim(operator_address)) = ? LIMIT 1",
+    sql: "SELECT 1 FROM shop_kernels WHERE pcc_norm(operator_address) = ? LIMIT 1",
     params: 1,
   },
   {
     sql:
-      "SELECT 1 FROM machine_registrations WHERE lower(trim(coalesce(tenant_id, ''))) = ? " +
-      "OR (json_valid(operator) AND (" +
-      "lower(trim(coalesce(json_extract(operator, '$.walletAddress'), ''))) = ? " +
-      "OR lower(trim(coalesce(json_extract(operator, '$.email'), ''))) = ?)) LIMIT 1",
+      "SELECT 1 FROM machine_registrations WHERE pcc_norm(tenant_id) = ? " +
+      "OR pcc_norm(CASE WHEN json_valid(operator) THEN json_extract(operator, '$.walletAddress') END) = ? " +
+      "OR pcc_norm(CASE WHEN json_valid(operator) THEN json_extract(operator, '$.email') END) = ? LIMIT 1",
     params: 3,
   },
   {
-    sql: "SELECT 1 FROM job_offers WHERE lower(trim(coalesce(poster_did, ''))) = ? LIMIT 1",
+    sql: "SELECT 1 FROM job_offers WHERE pcc_norm(poster_did) = ? LIMIT 1",
     params: 1,
   },
 ];
 
 /**
- * True when `operatorId` (trimmed, case-insensitive) already has an unrevoked
- * API key, or owns a kernel, a machine registration or a job offer. Errors
- * count as claimed (fail closed). An empty id is never claimed.
+ * True when `operatorId` (trimmed, case-insensitive — normalizeIdentity on both
+ * sides) already has an unrevoked API key, or owns a kernel, a machine
+ * registration or a job offer. Errors count as claimed (fail closed). An empty
+ * id is never claimed.
  */
 export function isClaimedIdentity(operatorId: string): boolean {
-  const needle = normalize(operatorId);
+  const needle = normalizeIdentity(operatorId);
   if (!needle) return false;
   try {
     const db = rawSqlite();
@@ -190,8 +219,8 @@ export function callerApiKey(req: FastifyRequest) {
 
 /** Same identity, trimmed + case-insensitive. Never true for an empty id. */
 export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
-  const x = normalize(a ?? "");
-  return x.length > 0 && x === normalize(b ?? "");
+  const x = normalizeIdentity(a);
+  return x.length > 0 && x === normalizeIdentity(b);
 }
 
 /**
