@@ -140,7 +140,7 @@ Response (201):
   "api_key": "pcc_live_abc123...",
   "key_id": "key-uuid",
   "operator_id": "operator@example.com",
-  "scopes": ["*"],
+  "scopes": ["operator"],
   "rate_limit": 100,
   "expires_at": null,
   "warning": "Save this API key now — it will not be shown again.",
@@ -151,10 +151,32 @@ Response (201):
 }
 ```
 
-You can also provision with a wallet address instead of email:
-```json
-{"walletAddress": "0x1234...abcd", "name": "My Workshop"}
+You can also provision with a wallet address instead of email — this now requires proving you
+control that wallet via SIWE (EIP-4361) first (retire-the-wildcard #1099: an unproven
+`walletAddress` string is no longer trusted):
+
+```bash
+# 1. Get a nonce
+curl https://capability.network/api/auth/nonce
+# {"nonce": "..."}
+
+# 2. Build and sign the EIP-4361 message with your wallet (see auth/siwe-auth.ts for the
+#    exact format), then verify it — capture the returned `token`
+curl -X POST https://capability.network/api/auth/verify \
+  -H "Content-Type: application/json" \
+  -d '{"message": "<the SIWE message you signed>", "signature": "0x..."}'
+# {"token": "...", "address": "0x1234...abcd", "expiresAt": "..."}
+
+# 3. Provision using the verified session
+curl -X POST https://capability.network/api/auth/provision \
+  -H "Authorization: Bearer <token from step 2>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Workshop"}'
 ```
+
+`walletAddress` in the body is optional once you have a verified session (it's derived from the
+session), but if you do pass it, it must match the session's address or the request is rejected
+with `401 wallet_not_verified`.
 
 **Alternative**: If you have an invite code, use `POST /api/onboard/redeem` with `{inviteCode, email, password}` to get a key plus wallet, identity, and LLM proxy access in one call.
 
@@ -206,7 +228,7 @@ All endpoints are under `https://capability.network`. All require `Authorization
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. Returns `api_key`. |
+| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. `walletAddress` requires a verified SIWE session (`Authorization: Bearer <session-token>` from `/api/auth/verify`) matching that address — see Section 2 Step 1. Returns `api_key` scoped `["operator"]` (never `["*"]`). |
 | GET | `/api/auth/validate` | Validate current API key. Returns `{valid, operatorId}`. |
 | GET | `/api/auth/keys` | List your active API keys with usage stats. |
 | DELETE | `/api/auth/keys/:keyId` | Revoke an API key permanently. |
@@ -361,14 +383,18 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/fiat-ramp/wallet/balance` | USDC balance + pending deposits. |
-| GET | `/api/fiat-ramp/funding-options` | Available fiat-to-crypto options. |
-| POST | `/api/fiat-ramp/onramp/session` | Create Stripe funding session (card/ACH). |
-| POST | `/api/fiat-ramp/onramp/yellowcard` | Mobile money in 34 emerging market countries. |
-| GET | `/api/fiat-ramp/rates` | Live Yellowcard exchange rates. |
-| POST | `/api/fiat-ramp/offramp/withdraw` | Withdraw USDC to local fiat. |
-| POST | `/api/fiat-ramp/payout` | Wise enterprise bank payout (40+ currencies). |
-| GET | `/api/fiat-ramp/activity` | Recent on/off ramp activity. |
+| GET | `/api/fiat-ramp/status` | Which providers are configured (`mock: true` = not configured) and whether `demoRoutes` is on. |
+| POST | `/api/fiat-ramp/coinbase/onramp` | Card or Coinbase account → USDC on Base. Body: `{walletAddress, amount?, currency?}`. Returns `onrampUrl`. |
+| POST | `/api/fiat-ramp/stripe/onramp` | Stripe crypto onramp session. Body: `{walletAddress, sourceAmount?, ...}`. |
+| GET | `/api/fiat-ramp/yellowcard/channels` | Yellowcard payment channels. Optional `?country=`. |
+| GET | `/api/fiat-ramp/yellowcard/rates` | Yellowcard exchange rates. |
+| POST | `/api/fiat-ramp/yellowcard/deposit` | Mobile money / bank deposit → USDC. Needs `channelId` and recipient details. |
+| POST | `/api/fiat-ramp/yellowcard/withdraw` | USDC → local fiat (bank or mobile money). |
+| POST | `/api/fiat-ramp/wise/payout` | Wise bank payout. `/wise/batch-payout` for several. |
+| GET | `/api/fiat-ramp/cdp/wallet/:address/balance` | USDC balance of a CDP smart wallet. |
+| GET | `/api/fiat-ramp/sessions` | YOUR ramp sessions (matched to your wallet address); all sessions with `X-Admin-Key`. |
+
+A provider that is not **fully** configured on the gateway answers **503 `not_configured`**; nothing is created or quoted. A partial configuration counts as not configured: Stripe needs both keys, Yellowcard both keys, Wise the token and the profile, and CDP the key id, secret and wallet secret. The configuration is read once per process, so the answer and the client that produced it always agree. A live answer carries `environment` (`production` or `sandbox`, with `sandbox: true`; a sandbox moves no real money). With `PCC_DEMO_ROUTES=true` (demo deployments only; **ignored under `NODE_ENV=production`**) it answers with simulated data instead, and every such response carries `mock: true, demo: true`. Demo mode never builds a real Coinbase checkout URL. `GET /api/fiat-ramp/sessions` lists the sessions you created or that pay into or out of your wallet (all of them with a valid `X-Admin-Key`). The testnet faucet reports a submitted transaction as `submitted: true, confirmed: false`, never as a confirmed mint.
 
 ### DePIN, IP & Governance
 

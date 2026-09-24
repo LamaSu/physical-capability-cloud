@@ -113,8 +113,8 @@ function seed(): Seeded {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
 
-  const aliceToken = provisionApiKey({ operatorId: ALICE, name: "alice" }).rawKey;
-  const bobToken = provisionApiKey({ operatorId: BOB, name: "bob" }).rawKey;
+  const aliceToken = provisionApiKey({ operatorId: ALICE, name: "alice", scopes: ["operator"] }).rawKey;
+  const bobToken = provisionApiKey({ operatorId: BOB, name: "bob", scopes: ["operator"] }).rawKey;
 
   seedKernel("k-alice", ALICE);
   seedKernel("k-bob", BOB);
@@ -347,7 +347,7 @@ describe("[adversarial] missing/invalid/revoked/expired credentials fail closed"
   });
 
   it("a REVOKED key fails closed (revocation respected)", async () => {
-    const { rawKey, record } = provisionApiKey({ operatorId: ALICE, name: "to-revoke" });
+    const { rawKey, record } = provisionApiKey({ operatorId: ALICE, name: "to-revoke", scopes: ["operator"] });
     // sanity: works before revocation
     const before = await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, rawKey);
     expect(before.isError).not.toBe(true);

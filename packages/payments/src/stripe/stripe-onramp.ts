@@ -19,6 +19,8 @@ export interface StripeOnrampConfig {
 }
 
 export interface CreateOnrampSessionParams {
+  /** The gateway principal creating the session (recorded on it, never sent to the provider). */
+  createdBy?: string;
   /** User's wallet address on Base */
   walletAddress: Address;
   /** Amount in USD to convert */
@@ -101,6 +103,7 @@ export class StripeOnrampClient {
       cryptoCurrency: params.destinationCurrency ?? "usdc",
       cryptoNetwork: params.destinationNetwork ?? "base",
       walletAddress: params.walletAddress,
+      createdBy: params.createdBy,
       externalId: data.id as string,
       escrowId: params.escrowId,
       createdAt: new Date().toISOString(),
@@ -128,6 +131,7 @@ export class StripeOnrampClient {
       cryptoCurrency: params.destinationCurrency ?? "usdc",
       cryptoNetwork: params.destinationNetwork ?? "base",
       walletAddress: params.walletAddress,
+      createdBy: params.createdBy,
       externalId: id,
       escrowId: params.escrowId,
       createdAt: new Date().toISOString(),

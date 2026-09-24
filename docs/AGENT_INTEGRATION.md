@@ -185,14 +185,18 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/fiat-ramp/wallet/balance` | USDC balance + pending deposits. |
-| GET | `/api/fiat-ramp/funding-options` | Available fiat-to-crypto options. |
-| POST | `/api/fiat-ramp/onramp/session` | Create Stripe funding session (card/ACH). |
-| POST | `/api/fiat-ramp/onramp/yellowcard` | Mobile money in 34 emerging market countries. |
-| GET | `/api/fiat-ramp/rates` | Live Yellowcard exchange rates. |
-| POST | `/api/fiat-ramp/offramp/withdraw` | Withdraw USDC to local fiat. |
-| POST | `/api/fiat-ramp/payout` | Wise enterprise bank payout (40+ currencies). |
-| GET | `/api/fiat-ramp/activity` | Recent on/off ramp activity. |
+| GET | `/api/fiat-ramp/status` | Which providers are configured (`mock: true` = not configured) and whether `demoRoutes` is on. |
+| POST | `/api/fiat-ramp/coinbase/onramp` | Card or Coinbase account → USDC on Base. Body: `{walletAddress, amount?, currency?}`. Returns `onrampUrl`. |
+| POST | `/api/fiat-ramp/stripe/onramp` | Stripe crypto onramp session. Body: `{walletAddress, sourceAmount?, ...}`. |
+| GET | `/api/fiat-ramp/yellowcard/channels` | Yellowcard payment channels. Optional `?country=`. |
+| GET | `/api/fiat-ramp/yellowcard/rates` | Yellowcard exchange rates. |
+| POST | `/api/fiat-ramp/yellowcard/deposit` | Mobile money / bank deposit → USDC. Needs `channelId` and recipient details. |
+| POST | `/api/fiat-ramp/yellowcard/withdraw` | USDC → local fiat (bank or mobile money). |
+| POST | `/api/fiat-ramp/wise/payout` | Wise bank payout. `/wise/batch-payout` for several. |
+| GET | `/api/fiat-ramp/cdp/wallet/:address/balance` | USDC balance of a CDP smart wallet. |
+| GET | `/api/fiat-ramp/sessions` | YOUR ramp sessions (matched to your wallet address); all sessions with `X-Admin-Key`. |
+
+A provider that is not **fully** configured on the gateway answers **503 `not_configured`**; nothing is created or quoted. A partial configuration counts as not configured: Stripe needs both keys, Yellowcard both keys, Wise the token and the profile, and CDP the key id, secret and wallet secret. The configuration is read once per process, so the answer and the client that produced it always agree. A live answer carries `environment` (`production` or `sandbox`, with `sandbox: true`; a sandbox moves no real money). With `PCC_DEMO_ROUTES=true` (demo deployments only; **ignored under `NODE_ENV=production`**) it answers with simulated data instead, and every such response carries `mock: true, demo: true`. Demo mode never builds a real Coinbase checkout URL. `GET /api/fiat-ramp/sessions` lists the sessions you created or that pay into or out of your wallet (all of them with a valid `X-Admin-Key`). The testnet faucet reports a submitted transaction as `submitted: true, confirmed: false`, never as a confirmed mint.
 
 ### DePIN, IP & Governance
 

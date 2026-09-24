@@ -1009,7 +1009,8 @@ describe("POST /api/contributors/quickstart", () => {
 
     // Deep links
     expect(body.links.viewSchedule).toContain(body.scheduleHash);
-    expect(body.links.addUsdc).toContain("/api/fiat-ramp/onramp/session");
+    // The old link pointed at an unregistered route; this is the registered card onramp.
+    expect(body.links.addUsdc).toContain("/api/fiat-ramp/coinbase/onramp");
     expect(body.links.agentPackage).toContain("/agent-package.json");
   });
 

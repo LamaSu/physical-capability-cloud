@@ -14,6 +14,8 @@ import type { FiatRampSession, WithdrawalDestination } from "@pcc/spec";
 import type { YellowcardClient } from "./yellowcard-client.js";
 
 export interface OfframpParams {
+  /** The gateway principal creating the session (recorded on it, never sent to the provider). */
+  createdBy?: string;
   /** Operator wallet address (source of crypto) */
   walletAddress: Address;
   /** Amount in USD to withdraw */
@@ -112,6 +114,7 @@ export class YellowcardOfframp {
         settlementInfo?.cryptoAmount ?? params.amountUsd,
       ),
       walletAddress: params.walletAddress,
+      createdBy: params.createdBy,
       externalId: data.id as string,
       escrowId: params.escrowId,
       rate: String(data.rate ?? ""),
