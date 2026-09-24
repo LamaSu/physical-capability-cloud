@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canonicalize, sha256, hashEvent, hashBundle, verifyEventHash, verifyBundleHash } from "../util/canonical.js";
+import { NonCanonicalValueError, canonicalize, sha256, hashEvent, hashBundle, verifyEventHash, verifyBundleHash } from "../util/canonical.js";
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256, Signature } from "../types/common.js";
 
@@ -150,5 +150,182 @@ describe("hashBundle / verifyBundleHash", () => {
     const h1 = await hashBundle([evA, evB]);
     const h2 = await hashBundle([evB, evA]);
     expect(h1).toBe(h2);
+  });
+});
+
+describe("canonicalize — only JSON values have a canonical form", () => {
+  // Each of these used to produce text no JSON consumer could reproduce
+  // (cross-repo byte test, crossrepo-accepted-bundle-v1.json "nonJson").
+  const refused: Array<[string, unknown, string]> = [
+    ["NaN", { x: Number.NaN }, "$.x"],
+    ["Infinity", { x: Number.POSITIVE_INFINITY }, "$.x"],
+    ["-Infinity", [1, Number.NEGATIVE_INFINITY], "$[1]"],
+    ["bigint", { n: BigInt(10) }, "$.n"],
+    ["Date", { at: new Date(0) }, "$.at"],
+    ["Map", { m: new Map([["a", 1]]) }, "$.m"],
+    ["Set", { s: new Set([1]) }, "$.s"],
+    ["function", { f: () => 1 }, "$.f"],
+    ["symbol", { s: Symbol("s") }, "$.s"],
+    ["typed array", { b: new Uint8Array([1, 2]) }, "$.b"],
+    ["class instance", { c: new (class Point { x = 1; })() }, "$.c"],
+  ];
+  for (const [name, value, path] of refused) {
+    it(`refuses ${name} and names where it is`, () => {
+      let err: unknown;
+      try {
+        canonicalize(value);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(NonCanonicalValueError);
+      expect((err as NonCanonicalValueError).path).toBe(path);
+    });
+  }
+
+  it("still accepts every JSON value, byte-identical to before", () => {
+    const value = {
+      s: "é\u0000\"",
+      n: -0,
+      f: 1.5,
+      e: 1e-7,
+      t: true,
+      z: null,
+      a: [1, null, { b: 2 }],
+      skip: undefined,
+      o: Object.assign(Object.create(null), { k: "v" }),
+    };
+    expect(canonicalize(value)).toBe(
+      '{"a":[1,null,{"b":2}],"e":1e-7,"f":1.5,"n":0,"o":{"k":"v"},"s":"é\\u0000\\"","t":true,"z":null}',
+    );
+    expect(JSON.parse(canonicalize(value))).toEqual(JSON.parse(JSON.stringify(value)));
+  });
+});
+
+describe("canonicalize — number policy D5, sparse arrays and cycles (oracle #2473)", () => {
+  const refusedAt = (value: unknown): string => {
+    try {
+      canonicalize(value);
+    } catch (e) {
+      if (e instanceof NonCanonicalValueError) return e.path;
+      throw e;
+    }
+    return "accepted";
+  };
+
+  it("refuses an integer outside the safe range: it has already lost precision", () => {
+    expect(refusedAt({ n: 1e21 })).toBe("$.n");
+    expect(refusedAt([2 ** 53])).toBe("$[0]");
+    expect(refusedAt([-(2 ** 53)])).toBe("$[0]");
+    expect(refusedAt({ n: 123456789012345680000 })).toBe("$.n");
+    expect(refusedAt({ n: Number.MAX_VALUE })).toBe("$.n");
+  });
+
+  it("the shared cross-repo corpus 'numbers' case is refused at its first unsafe integer", () => {
+    const numbers = [0, -0, 1, -1, 1e21, 1.5e-7, 0.30000000000000004, 123456789012345680000, 5e-324, 1.7976931348623157e308];
+    expect(refusedAt(numbers)).toBe("$[4]");
+  });
+
+  it("keeps every safe number's bytes exactly as JSON writes them", () => {
+    const safe = [Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER, 0, -0, 1.5e-7, 0.30000000000000004, 5e-324, 3.14];
+    expect(canonicalize(safe)).toBe(JSON.stringify(safe));
+    expect(canonicalize(safe)).toBe("[9007199254740991,-9007199254740991,0,0,1.5e-7,0.30000000000000004,5e-324,3.14]");
+  });
+
+  it("refuses a hole and an explicit undefined element alike: JSON has neither", () => {
+    // eslint-disable-next-line no-sparse-arrays
+    expect(refusedAt([1, , 3])).toBe("$[1]");
+    expect(refusedAt({ a: [1, 2, , 4] })).toBe("$.a[2]");
+    expect(refusedAt([1, undefined, 3])).toBe("$[1]");
+    expect(refusedAt(undefined)).toBe("$");
+    // An undefined OBJECT member is still omitted, exactly as JSON.stringify omits it.
+    expect(canonicalize({ a: 1, gone: undefined })).toBe('{"a":1}');
+  });
+
+  it("refuses a cycle with a named error instead of overflowing the stack", () => {
+    const o: Record<string, unknown> = { a: 1 };
+    o.self = o;
+    expect(refusedAt(o)).toBe("$.self");
+    const arr: unknown[] = [1];
+    arr.push(arr);
+    expect(refusedAt(arr)).toBe("$[1]");
+  });
+
+  it("a value shared twice without a cycle is still fine", () => {
+    const shared = { k: "v" };
+    expect(canonicalize({ p: shared, q: [shared, shared] })).toBe('{"p":{"k":"v"},"q":[{"k":"v"},{"k":"v"}]}');
+  });
+});
+
+describe("canonicalize — only a plain JSON tree, so evaluators read only what was hashed (N15 round 2)", () => {
+  const refusedAt = (value: unknown): string => {
+    try {
+      canonicalize(value);
+    } catch (e) {
+      if (e instanceof NonCanonicalValueError) return e.path;
+      throw e;
+    }
+    return "accepted";
+  };
+
+  it("refuses an index that exists only on a substituted prototype", () => {
+    const arr = new Array(1);
+    Object.setPrototypeOf(arr, Object.assign(Object.create(Array.prototype), { 0: 7 }));
+    expect((arr as unknown[])[0]).toBe(7); // an evaluator would read 7
+    expect(refusedAt(arr)).toBe("$");
+  });
+
+  it("refuses an index inherited from a polluted Array.prototype", () => {
+    const proto = Array.prototype as unknown as Record<number, unknown>;
+    proto[0] = 7;
+    try {
+      const arr = new Array(1);
+      expect(arr[0]).toBe(7);
+      expect(refusedAt(arr)).toBe("$[0]");
+    } finally {
+      delete proto[0];
+    }
+  });
+
+  it("refuses an Array subclass and a named property on an array", () => {
+    class Tagged extends Array<number> {}
+    expect(refusedAt({ a: Tagged.from([1]) })).toBe("$.a");
+    const named = Object.assign([1, 2], { jobId: "job-b" });
+    expect(refusedAt({ a: named })).toBe("$.a.jobId");
+  });
+
+  it("refuses non-enumerable and symbol-keyed properties an evaluator could read", () => {
+    const payload = Object.defineProperty({ ok: true }, "jobId", { value: "job-b", enumerable: false });
+    expect((payload as { jobId?: string }).jobId).toBe("job-b");
+    expect(refusedAt({ payload })).toBe("$.payload.jobId");
+    const sym = Symbol("jobId");
+    expect(refusedAt({ [sym]: "job-b" })).toBe("$[Symbol(jobId)]");
+  });
+
+  it("refuses accessors without ever running them", () => {
+    let calls = 0;
+    const getter = {
+      get jobId() {
+        calls++;
+        return "job-b";
+      },
+    };
+    expect(refusedAt(getter)).toBe("$.jobId");
+    const element = Object.defineProperty([0], 0, { get: () => (calls++, 1), enumerable: true });
+    expect(refusedAt(element)).toBe("$[0]");
+    expect(() => canonicalize(getter)).toThrow(/accessor property/);
+    expect(() => canonicalize(element)).toThrow(/accessor element/);
+    expect(calls).toBe(0);
+  });
+
+  it("an event carrying a hidden, unhashed jobId cannot be hashed at all", async () => {
+    const payload = Object.defineProperty({ step: 1 }, "jobId", { value: "job-b", enumerable: false });
+    const event = { type: "execution_completed", timestamp: "2026-09-24T00:00:00.000Z", source: { deviceId: "d", deviceType: "machine", kernelId: "k" }, payload };
+    await expect(hashEvent(event as never)).rejects.toBeInstanceOf(NonCanonicalValueError);
+  });
+
+  it("anything JSON.parse produces is accepted, and round-trips to the same text", () => {
+    const text = canonicalize({ z: [1, "two", { three: null, four: [true, false] }], a: { nested: { deep: -0.5 } }, o: Object.create(null) });
+    expect(canonicalize(JSON.parse(text))).toBe(text);
+    expect(canonicalize(JSON.parse('{"__proto__":{"x":1},"k":[]}'))).toBe('{"__proto__":{"x":1},"k":[]}');
   });
 });
