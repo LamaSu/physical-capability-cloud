@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
@@ -67,16 +67,13 @@ const ProtocolDetailPage = lazy(() => import("./pages/ProtocolDetailPage.js").th
 const ProtocolBuilderPage = lazy(() => import("./pages/ProtocolBuilderPage.js").then(m => ({ default: m.ProtocolBuilderPage })));
 const ProtocolRunPage = lazy(() => import("./pages/ProtocolRunPage.js").then(m => ({ default: m.ProtocolRunPage })));
 const SubnetStatusPage = lazy(() => import("./pages/SubnetStatusPage.js").then(m => ({ default: m.SubnetStatusPage })));
-const DePINDashboardPage = lazy(() => import("./pages/DePINDashboardPage.js").then(m => ({ default: m.DePINDashboardPage })));
 const SettlementPage = lazy(() => import("./pages/SettlementPage.js").then(m => ({ default: m.SettlementPage })));
 const OnboardKitPage = lazy(() => import("./pages/OnboardKitPage.js").then(m => ({ default: m.OnboardKitPage })));
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage.js").then(m => ({ default: m.TelemetryPage })));
 const TracesPage = lazy(() => import("./pages/TracesPage.js").then(m => ({ default: m.TracesPage })));
 const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m => ({ default: m.NegotiationPage })));
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
-const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m => ({ default: m.SWFDashboardPage })));
-const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
-const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
+const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
@@ -252,9 +249,11 @@ function DashboardShell() {
               <Route path="/protocol-runs" element={<ProtocolRunPage />} />
               <Route path="/protocol-runs/:runId" element={<ProtocolRunPage />} />
               <Route path="/subnet" element={<SubnetStatusPage />} />
-              <Route path="/depin" element={<DePINDashboardPage />} />
-              <Route path="/swf" element={<SWFDashboardPage />} />
-              <Route path="/swf/governance/:proposalId" element={<SWFGovernancePage />} />
+              {/* DePIN rewards and the Sovereign Wealth Fund pages rendered hard-coded treasuries, epochs,
+                  claims and proposals with no API behind them (PX-12, product-steward #2559). Retired; the
+                  real money surface is the agreements page. */}
+              <Route path="/depin" element={<Navigate to="/economics" replace />} />
+              <Route path="/swf/*" element={<Navigate to="/economics" replace />} />
               <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/traces" element={<TracesPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
@@ -263,7 +262,9 @@ function DashboardShell() {
               <Route path="/negotiate/session" element={<NegotiationSessionPage />} />
               <Route path="/batch-board" element={<BatchBoardPage />} />
               <Route path="/agent-package" element={<AgentPackagePage />} />
-              <Route path="/ip" element={<IPRevenuePage />} />
+              <Route path="/economics" element={<EconomicAgreementsPage />} />
+              {/* The IP revenue page showed fabricated revenue beside a live Claim button (PX-12, N10). */}
+              <Route path="/ip" element={<Navigate to="/economics" replace />} />
               <Route path="/sponsors" element={<SponsorTelemetryPage />} />
               <Route path="/system" element={<SystemDashboardPage />} />
               <Route path="/analytics" element={<AnalyticsDashboardPage />} />
