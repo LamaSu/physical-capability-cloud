@@ -28,6 +28,7 @@ import type {
   ComplianceReportDTO,
   DriftAlertDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../../types/dto.js";
 
 // ---------------------------------------------------------------------------
@@ -244,11 +245,35 @@ export function useSettlementEpochs() {
 // Health
 // ---------------------------------------------------------------------------
 
-export function useGatewayHealth() {
+/**
+ * Gateway liveness (GET /api/health).
+ * `refetchInterval` lets always-visible chrome (the StatusBar) re-check
+ * periodically instead of reporting the state it saw at page load.
+ */
+export function useGatewayHealth(options?: { refetchInterval?: number }) {
   return useQuery({
     queryKey: ["health"],
     queryFn: () => api.health(),
     retry: 0,
+    staleTime: 30_000,
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the current API key's operator stands (GET /api/agent/me): identity,
+ * scopes, keys, kernels and in-flight work. Each section reports its own
+ * `unavailable` reason instead of failing the whole answer.
+ */
+export function useAgentMe() {
+  return useQuery<AgentMeDTO>({
+    queryKey: ["agentMe"],
+    queryFn: () => api.getAgentMe(),
+    retry: 1,
     staleTime: 30_000,
   });
 }
