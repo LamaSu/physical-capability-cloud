@@ -21,12 +21,15 @@ import {
 } from "./accepted-plan-compiler.js";
 import { CANONICAL_PLAN_SCHEMA, planHashOf, type CanonicalPlan } from "./canonical-plan.js";
 import { copyPlanJson, EMPTY_PLAN_JSON, PLAN_JSON_LIMITS, type PlanJsonObject } from "./plan-json.js";
+import { canonicalize } from "../util/canonical.js";
 
 const ADDR = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const DIG = (b: string) => `0x${b.repeat(32)}`;
 const USDC = 1_000_000n;
 const PROGRAM_T2 = DIG("d2");
 const DOC = "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3";
+/** Inputs whose canonical bytes another language's JSON would get wrong (the vector's edgeCases). */
+const EDGE_INPUTS = { documentHash: DOC, pages: 2, "\uFF01": 1, "\u{1F600}": 2, "\u00E9": "\u{1D11E}", small: 1.5e-7, tiny: 1e-7, negZero: -0, tab: "a\tb" };
 
 const gate: ProgramGate = ({ csd, tierKey, committedProgramHash }) =>
   csd === "document-print-and-mail" && tierKey === "tier2" && committedProgramHash?.toLowerCase() === PROGRAM_T2
@@ -181,6 +184,84 @@ describe("copyPlanJson: exactly JSON, bounded, owned, read once", () => {
   });
 });
 
+describe("reviewer-alpha self-check fixes (before astra round 6)", () => {
+  it("#1 D5: an integer outside +-(2^53-1) is refused (VCR, the oracle and #359 refuse to hash one); safe integers and fractions pass", () => {
+    for (const x of [2 ** 53, -(2 ** 53), 1e21, Number.MAX_VALUE, 1727200000000000000]) {
+      expect([x, copyPlanJson({ orderId: x })]).toEqual([x, { ok: false, reason: "unsafe-integer" }]);
+    }
+    for (const x of [2 ** 53 - 1, -(2 ** 53 - 1), 1.5, 1e-7, 0]) expect([x, copyPlanJson({ orderId: x }).ok]).toEqual([x, true]);
+    const r = compileAcceptedPlan(goldenPlan({ print: { inputs: { documentHash: DOC, orderId: 2 ** 53 } } }), { assertProgramForTier: gate });
+    expect(r).toEqual({ ok: false, violations: [{ code: "invalid-execution-json", nodeId: "print", field: "inputs", reason: "unsafe-integer" }] });
+  });
+
+  it("transport: every canonicalPlan re-hashes to its planHash after a JSON round trip (what VCR receives)", () => {
+    for (const b of compiled().nodeToUnit) expect(planHashOf(JSON.parse(JSON.stringify(b.canonicalPlan)))).toBe(b.planHash);
+  });
+
+  it("#2 evidence requirement fields are exactly typed: a number, boolean, bigint or symbol id, or a bad tier, is refused and never throws", () => {
+    const bad: unknown[] = [
+      { requirementId: 12345, evidenceTypeId: "execution_completed", tier: 2 },
+      { requirementId: true, evidenceTypeId: "execution_completed", tier: 2 },
+      { requirementId: 5n, evidenceTypeId: "execution_completed", tier: 2 },
+      { requirementId: Symbol("x"), evidenceTypeId: "execution_completed", tier: 2 },
+      { requirementId: "r", evidenceTypeId: 7, tier: 2 },
+      { requirementId: "r", evidenceTypeId: "execution_completed", tier: 2.5 },
+      { requirementId: "r", evidenceTypeId: "execution_completed", tier: 4 },
+      null,
+    ];
+    for (const req of bad) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = compileAcceptedPlan(goldenPlan({ print: { evidenceRequirements: [req as never] } }), { assertProgramForTier: gate });
+      }).not.toThrow();
+      expect(r).toEqual({ ok: false, violations: [{ code: "invalid-node-field", nodeId: "print", field: "evidenceRequirements" }] });
+    }
+  });
+
+  it("#5 the order evidence requirements are listed in changes neither the planHash nor the deal: sorted by (evidenceTypeId, tier, requirementId)", () => {
+    const three = [
+      { requirementId: "print.kernel-log", evidenceTypeId: "execution_completed", tier: 2 },
+      { requirementId: "print.photo", evidenceTypeId: "capture.photo", tier: 2 },
+      { requirementId: "print.z-log", evidenceTypeId: "execution_completed", tier: 1 },
+    ];
+    const a = compiled(goldenPlan({ print: { evidenceRequirements: three } }));
+    const b = compiled(goldenPlan({ print: { evidenceRequirements: [...three].reverse() } }));
+    expect(bindingOf(b, "print").planHash).toBe(bindingOf(a, "print").planHash);
+    expect(b.acceptedDealDigest).toBe(a.acceptedDealDigest);
+    // Pinned: type first, then TIER (z-log's tier 1 before kernel-log's tier 2), then requirementId.
+    expect(bindingOf(a, "print").canonicalPlan.assurance.evidence.map((e) => e.requirementId)).toEqual(["print.photo", "print.z-log", "print.kernel-log"]);
+  });
+
+  it("#8 which refusal an input gets does not depend on key insertion order", () => {
+    expect(copyPlanJson({ a: Number.NaN, b: 1n })).toEqual(copyPlanJson({ b: 1n, a: Number.NaN }));
+    expect(copyPlanJson({ a: Number.NaN, b: 1n })).toEqual({ ok: false, reason: "non-finite-number" });
+  });
+
+  it("#7 an oversized input is refused before the rest of it is read (a sound lower bound, checked as the copy grows)", () => {
+    let reads = 0;
+    const src = Object.defineProperty({ a: "s".repeat(4096), b: "t".repeat(4096), c: "u" }, "d", { enumerable: true, get: () => (reads++, "late") });
+    expect(copyPlanJson(src)).toEqual({ ok: false, reason: "too-large" });
+    expect(reads).toBe(0); // "d" sorts after the strings that already broke the bound
+    // Keys count too: 64 keys of 128 characters (the per-object maxima) already pass the bound by
+    // themselves, with no string value at all.
+    const wide = () => Object.fromEntries(Array.from({ length: 64 }, (_, i) => ["k" + String(i).padStart(127, "0"), 0]));
+    const keyed = Object.defineProperty({ a: wide(), b: wide() }, "z", { enumerable: true, get: () => (reads++, 0) });
+    expect(copyPlanJson(keyed)).toEqual({ ok: false, reason: "too-large" });
+    expect(reads).toBe(0);
+  });
+
+  it("F7: keys sort by UTF-16 code unit and numbers take JavaScript's shortest form (pinned in the vector's edgeCases)", () => {
+    const text = canonicalize(bindingOf(compiled(goldenPlan({ print: { inputs: EDGE_INPUTS } })), "print").canonicalPlan);
+    expect(text.indexOf('"\u{1F600}":')).toBeLessThan(text.indexOf('"\uFF01":'));
+    expect(text).toContain('"negZero":0,"pages":2,"small":1.5e-7,"tab":"a\\tb","tiny":1e-7');
+  });
+
+  it("#10 symbol-keyed and non-enumerable properties are ignored, exactly as JSON.stringify ignores them", () => {
+    const src = Object.defineProperty({ a: 1, [Symbol("s")]: 2 }, "hidden", { enumerable: false, value: 3 });
+    expect(copyPlanJson(src)).toEqual({ ok: true, value: { a: 1 } });
+  });
+});
+
 describe("canonicalPlan and planHash (N25): VCR's execution contract, sealed per node", () => {
   it("planHashOf is VCR's algorithm, byte-exact against crossrepo-accepted-bundle-v1 (and its one-byte mutation)", () => {
     const v1 = {
@@ -265,8 +346,8 @@ describe("canonicalPlan and planHash (N25): VCR's execution contract, sealed per
       swap(1, (b) => ({ canonicalPlan: { ...b.canonicalPlan, payTo: ADDR("ee") } })),
     ];
     for (const t of tampered) expect(acceptedDealDigest(t as typeof rest)).not.toBe(sealed);
-    // hex case carries no meaning
-    expect(acceptedDealDigest(swap(0, (b) => ({ planHash: b.planHash.toUpperCase().replace("SHA256:", "sha256:") })) as typeof rest)).toBe(sealed);
+    // reviewer-alpha #6: planHash is sealed VERBATIM (VCR compares it byte-exactly), so another spelling is tampering too
+    expect(acceptedDealDigest(swap(0, (b) => ({ planHash: b.planHash.toUpperCase().replace("SHA256:", "sha256:") })) as typeof rest)).not.toBe(sealed);
   });
 
   it("invalid execution JSON is refused for EVERY bad field, and the diagnostics do not depend on node order", () => {
@@ -354,10 +435,35 @@ describe("golden vector for VCR (execution-contract.vectors.json)", () => {
         nodes: plan.nodeToUnit.map((b) => ({ nodeId: b.nodeId, planHash: b.planHash, canonicalPlan: b.canonicalPlan })),
         compiledPlan: jsonSafe(plan),
       },
+      refusals: [
+        {
+          name: "print-inputs-unsafe-integer",
+          change: "print.inputs.orderId = 2**53 (number policy D5: VCR, the oracle and #359 refuse to hash it)",
+          expected: jsonSafe(compileAcceptedPlan(goldenPlan({ print: { inputs: { documentHash: DOC, pages: 2, copies: 1, duplex: false, notes: null, orderId: 2 ** 53 } } }), { assertProgramForTier: gate })),
+        },
+      ],
       mutations: [
         mutation("print-pages-2-to-3", "print", goldenPlan({ print: { inputs: { documentHash: DOC, pages: 3, copies: 1, duplex: false, notes: null } } }), "print.inputs.pages: 2 -> 3"),
         mutation("mail-constraint-added", "mail", goldenPlan({ mail: { constraints: { maxRetries: 1 } } }), "mail.constraints: {} -> {maxRetries: 1}"),
         mutation("print-payee", "print", goldenPlan({ print: { payoutAddress: ADDR("a2") } }), "print payTo: 0xa1a1... -> 0xa2a2..."),
+      ],
+      // Where another language's JSON would differ (reviewer-alpha F7): pinned byte-exactly, with the text.
+      edgeCases: [
+        (() => {
+          const m = compiled(goldenPlan({ print: { inputs: EDGE_INPUTS } }));
+          const b = bindingOf(m, "print");
+          return {
+            name: "print-inputs-unicode-keys-and-number-forms",
+            node: "print",
+            change:
+              "print.inputs = {documentHash, pages: 2, U+FF01: 1, U+1F600: 2, U+00E9: U+1D11E, small: 1.5e-7, tiny: 1e-7, negZero: -0, tab: 'a<TAB>b'}. " +
+              "Keys sort by UTF-16 code unit, so U+1F600 (a surrogate pair) sorts BEFORE U+FF01 (code-point order differs). " +
+              "Numbers take JavaScript's shortest form (1.5e-7, 1e-7; not 1.5e-07). -0 is 0.",
+            canonicalPlan: b.canonicalPlan,
+            canonicalText: canonicalize(b.canonicalPlan),
+            expected: { planHash: b.planHash, acceptedDealDigest: m.acceptedDealDigest },
+          };
+        })(),
       ],
     };
   }
@@ -368,5 +474,9 @@ describe("golden vector for VCR (execution-contract.vectors.json)", () => {
     const pinned = JSON.parse(readFileSync(VECTOR, "utf8"));
     expect(jsonSafe(built)).toEqual(pinned);
     for (const n of pinned.expected.nodes) expect(planHashOf(n.canonicalPlan)).toBe(n.planHash);
+    for (const e of pinned.edgeCases) {
+      expect(canonicalize(e.canonicalPlan)).toBe(e.canonicalText); // parsed back from the file: the same bytes
+      expect(planHashOf(e.canonicalPlan)).toBe(e.expected.planHash);
+    }
   });
 });
