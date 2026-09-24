@@ -366,6 +366,13 @@
     SETTLED_RELEASED:  ['st-settled',  'released - payout distribution discharged'],
     SETTLED_REFUNDED:  ['st-refunded', 'refunded - payer refunded, payees NOT paid']
   });
+  // The read models' `phase` per reachable state (gateway unit-state-mapper PHASE_BY_STATE).
+  var VNEXT_PHASE = Object.freeze({
+    FUNDED_ACTIVE: 'active', PRIMARY_ASSERTED: 'contest', CHALLENGED: 'contest',
+    BACKUP_PENDING: 'escalation', BACKUP_ASSERTED: 'escalation',
+    RELEASE_ALLOCATED: 'allocated', REFUND_ALLOCATED: 'allocated',
+    SETTLED_RELEASED: 'settled', SETTLED_REFUNDED: 'settled'
+  });
   // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass).
   var GENERIC_STATES = Object.freeze({
     RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
@@ -404,33 +411,47 @@
   function isVNextRecord(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && (ownKey(o, 'unitState') || ownKey(o, 'finalState')); }
   // A record classified by its SOURCE SCHEMA -> [pillClass, label or null, pill text]. Mirrors
   // classifySettlementRecord in @pcc/spec (the conformance test compares them over wire fixtures).
+  // The read models' own field semantics (gateway unit-state-mapper): isTerminal is true for 8/9
+  // only; isAllocated means "outcome decided, money NOT fully moved" (6/7 ONLY), so a settled
+  // record says isAllocated:false; finalState names 8/9, else null; phase follows VNEXT_PHASE.
+  // Every field present must agree, and a FINAL state needs them all (mirrors the spec).
   function settlementRecordClass(o) {
     if (!o || typeof o !== 'object' || Array.isArray(o)) return ['st-unknown', 'not a settlement record', 'no settlement state'];
+    var DISAGREE = 'settlement fields disagree - not shown as final', INCOMPLETE = 'incomplete settlement record - not shown as final';
     if (ownKey(o, 'unitState')) {
       var name = vnextUnitStateName(o.unitState);
       if (name === null) return ['st-unknown', 'unreadable unit state', String(o.unitState)];
-      var ord = VNEXT_UNIT_STATES.indexOf(name), terminal = ord >= 8, allocated = ord >= 6;
+      var ord = VNEXT_UNIT_STATES.indexOf(name), terminal = ord >= 8, allocated = ord === 6 || ord === 7;
       var fs = o.finalState === undefined ? null : o.finalState;
       if ((ownKey(o, 'finalState') && fs !== (terminal ? name : null)) ||
           (ownKey(o, 'isAllocated') && o.isAllocated !== allocated) ||
-          (ownKey(o, 'isTerminal') && o.isTerminal !== terminal)) {
-        return ['st-unknown', 'settlement fields disagree - not shown as final', name];
+          (ownKey(o, 'isTerminal') && o.isTerminal !== terminal) ||
+          (ownKey(o, 'phase') && o.phase !== VNEXT_PHASE[name])) {
+        return ['st-unknown', DISAGREE, name];
       }
       // A FINAL state needs every corroborating field present: absence is not corroboration.
-      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'isTerminal'))) {
-        return ['st-unknown', 'incomplete settlement record - not shown as final', name];
+      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'isTerminal') && ownKey(o, 'phase'))) {
+        return ['st-unknown', INCOMPLETE, name];
       }
       return [VNEXT_STATE_PRESENTATION[name][0], VNEXT_STATE_PRESENTATION[name][1], name];
     }
+    // A /receipt carries finalState, phase and isAllocated (no unitState, no isTerminal).
     if (ownKey(o, 'finalState')) {
-      var f = o.finalState;
-      if (f === 'SETTLED_RELEASED' || f === 'SETTLED_REFUNDED') {
-        if (!ownKey(o, 'isAllocated')) return ['st-unknown', 'incomplete settlement record - not shown as final', f];
-        if (o.isAllocated !== true) return ['st-unknown', 'settlement fields disagree - not shown as final', f];
+      var f = o.finalState, final = f === 'SETTLED_RELEASED' || f === 'SETTLED_REFUNDED';
+      if (ownKey(o, 'isTerminal') && o.isTerminal !== final) return ['st-unknown', DISAGREE, String(f)];
+      if (final) {
+        if (!ownKey(o, 'isAllocated') || !ownKey(o, 'phase')) return ['st-unknown', INCOMPLETE, f];
+        if (o.isAllocated !== false || o.phase !== 'settled') return ['st-unknown', DISAGREE, f];
         return [VNEXT_STATE_PRESENTATION[f][0], VNEXT_STATE_PRESENTATION[f][1], f];
       }
-      if (f === null && o.isAllocated === true) return ['st-waiting', 'outcome decided - not yet paid out', String(o.phase || 'allocated')];
-      if (f === null && o.isAllocated === false) return ['st-waiting', 'in progress - no outcome decided', String(o.phase || 'in progress')];
+      if (f === null && o.isAllocated === true) {
+        if (ownKey(o, 'phase') && o.phase !== 'allocated') return ['st-unknown', DISAGREE, String(o.phase)];
+        return ['st-waiting', 'outcome decided - not yet paid out', String(o.phase || 'allocated')];
+      }
+      if (f === null && o.isAllocated === false) {
+        if (ownKey(o, 'phase') && !(o.phase === 'active' || o.phase === 'contest' || o.phase === 'escalation')) return ['st-unknown', DISAGREE, String(o.phase)];
+        return ['st-waiting', 'in progress - no outcome decided', String(o.phase || 'in progress')];
+      }
       return ['st-unknown', 'unreadable final state', String(f)];
     }
     if (typeof o.status === 'string' && (ownKey(o, 'contractAddress') || ownKey(o, 'escrowAddress') || Array.isArray(o.milestones) || ownKey(o, 'cwmId') || ownKey(o, 'totalAmount'))) {

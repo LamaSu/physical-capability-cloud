@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import vm from "node:vm";
 import {
-  MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION,
+  MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
 } from "../money/money-status.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -38,6 +38,7 @@ type KitRegion = {
   dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown) => string;
   VNEXT_UNIT_STATES: readonly string[];
   VNEXT_STATE_PRESENTATION: Record<string, [string, string]>;
+  VNEXT_PHASE: Record<string, string>;
   settlementRecordClass: (r: unknown) => [string, string | null, string];
 };
 
@@ -50,7 +51,7 @@ function extractRegion(): KitRegion {
       "\nthis.MONEY_STATUS = MONEY_STATUS; this.GENERIC_STATES = GENERIC_STATES;" +
       " this.statusClass = statusClass; this.moneyStatusClass = moneyStatusClass;" +
       " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;" +
-      " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION;" +
+      " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION; this.VNEXT_PHASE = VNEXT_PHASE;" +
       " this.settlementRecordClass = settlementRecordClass;",
     ctx,
   );
@@ -205,7 +206,7 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
   });
 
   it("a genuine final release (a consistent V-next receipt) renders settled with its direction label", async () => {
-    const r = await renderedPill({ finalState: "SETTLED_RELEASED", isAllocated: true, phase: "settled" }); // wire shape
+    const r = await renderedPill({ finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" }); // the /receipt wire shape
     expect(r.cls).toContain("st-settled");
     expect(r.text).toBe("SETTLED_RELEASED");
     expect(r.rail).toContain("payout distribution discharged");
@@ -263,18 +264,24 @@ describe("reviewer-bravo F3/F4: 'completed' and generic success words never gree
 });
 
 // ── source-schema classification: kit == spec, pinned to the Solidity enum ─────────────────────
+// The routes' OWN field semantics (gateway unit-state-mapper): isAllocated is 6/7 ONLY, isTerminal 8/9.
+const PHASE = [undefined, "active", "contest", "contest", "escalation", "escalation", "allocated", "allocated", "settled", "settled"];
 const lifecycle = (n: number) => ({
-  chainId: 84532, escrow: "0xE", unitId: "u1", unitState: n,
-  phase: n >= 8 ? "settled" : n >= 6 ? "allocated" : "active",
-  finalState: n >= 8 ? VNEXT_UNIT_STATES[n] : null, isTerminal: n >= 8, isAllocated: n >= 6,
+  chainId: 84532, escrow: "0xE", unitId: "u1", unitState: n, phase: PHASE[n],
+  finalState: n >= 8 ? VNEXT_UNIT_STATES[n] : null, isTerminal: n >= 8, isAllocated: n === 6 || n === 7,
 });
 const FIXTURES: unknown[] = [
   ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, 8.5].map(lifecycle),
   { unitState: "SETTLED_RELEASED" }, { unitState: "settled_released" }, { unitState: "8" }, { unitState: null },
-  { ...lifecycle(8), finalState: null }, { ...lifecycle(8), isAllocated: false }, { ...lifecycle(8), isTerminal: false },
+  { ...lifecycle(8), finalState: null }, { ...lifecycle(8), isAllocated: true }, { ...lifecycle(8), isTerminal: false },
+  { ...lifecycle(8), phase: "allocated" }, { ...lifecycle(6), isAllocated: false }, { ...lifecycle(2), phase: "active" },
   { ...lifecycle(6), finalState: "SETTLED_RELEASED" }, { ...lifecycle(3), isAllocated: true },
-  { finalState: "SETTLED_RELEASED", isAllocated: true }, { finalState: "SETTLED_REFUNDED", isAllocated: true },
-  { finalState: "SETTLED_RELEASED", isAllocated: false }, { finalState: "SETTLED_RELEASED" },
+  { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" }, { finalState: "SETTLED_REFUNDED", isAllocated: false, phase: "settled" },
+  { finalState: "SETTLED_RELEASED", isAllocated: true, phase: "settled" }, { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "allocated" },
+  { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", isTerminal: false },
+  { finalState: "SETTLED_RELEASED", isAllocated: true }, { finalState: "SETTLED_RELEASED", isAllocated: false }, { finalState: "SETTLED_RELEASED" },
+  { finalState: null, isAllocated: true, phase: "allocated" }, { finalState: null, isAllocated: true, phase: "settled" },
+  { finalState: null, isAllocated: false, phase: "contest" }, { finalState: null, isAllocated: false, phase: "allocated" },
   { finalState: null, isAllocated: true }, { finalState: null, isAllocated: false }, { finalState: null },
   { finalState: 8, isAllocated: true }, { finalState: "RELEASED", isAllocated: true },
   { status: "refunded", contractAddress: "0x1" }, { status: "released", milestones: [] }, { status: "completed", totalAmount: "1" },
@@ -292,6 +299,11 @@ describe("settlement read models are classified by SOURCE SCHEMA (kit == spec)",
     expect(names.length).toBe(10);
     expect([...VNEXT_UNIT_STATES]).toEqual(names);
     expect([...kit.VNEXT_UNIT_STATES]).toEqual(names);
+  });
+
+  it("the kit's phase table equals the spec's", () => {
+    expect(kit.VNEXT_PHASE).toEqual({ ...VNEXT_PHASE });
+    expect(Object.isFrozen(kit.VNEXT_PHASE)).toBe(true);
   });
 
   it("the kit's V-next presentation equals the spec's (tone and label per state)", () => {
@@ -313,7 +325,7 @@ describe("settlement read models are classified by SOURCE SCHEMA (kit == spec)",
 
   it("only a consistent state-8 read model is green, in the kit", () => {
     const green = FIXTURES.filter((f) => kit.settlementRecordClass(f)[0] === "st-settled").map((f) => JSON.stringify(f));
-    expect(green).toEqual([JSON.stringify(lifecycle(8)), JSON.stringify({ finalState: "SETTLED_RELEASED", isAllocated: true })]);
+    expect(green).toEqual([JSON.stringify(lifecycle(8)), JSON.stringify({ finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" })]);
   });
 
   it("the kit's tables are frozen (a runtime write cannot turn anything green)", () => {
@@ -343,7 +355,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
   });
 
   it("a V-next receipt with no payer, payee, currency or rail invents none of them", async () => {
-    const r = await receiptOf(RC, { chainId: 84532, escrow: "0xE", unitId: "u1", finalState: "SETTLED_RELEASED", isAllocated: true, phase: "settled", economics: null });
+    const r = await receiptOf(RC, { chainId: 84532, escrow: "0xE", unitId: "u1", finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", economics: null });
     expect(r.cls).toContain("st-settled");
     expect(r.body).toContain("payer not reported");
     expect(r.body).toContain("payee not reported");
@@ -353,7 +365,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
   });
 
   it("an amount without a currency shows no invented currency", async () => {
-    const r = await receiptOf(RC, { finalState: "SETTLED_RELEASED", isAllocated: true, totalAmount: "10.00", payer: "0xP", payee: "0xQ" });
+    const r = await receiptOf(RC, { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", totalAmount: "10.00", payer: "0xP", payee: "0xQ" });
     expect(r.body).toContain("10.00");
     expect(r.body).not.toContain("USDC");
   });
@@ -366,7 +378,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
     const six = await receiptOf(LC, lifecycle(6));
     expect(six.cls).toContain("st-waiting");
     expect(six.body).toContain("payout outstanding");
-    const bad = await receiptOf(LC, { ...lifecycle(8), isAllocated: false });
+    const bad = await receiptOf(LC, { ...lifecycle(8), isAllocated: true });
     expect(bad.cls).toContain("st-unknown");
   });
 
