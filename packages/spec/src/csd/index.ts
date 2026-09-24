@@ -7,6 +7,7 @@ export * from "./registry-contract-adapter.js";
 // plan, the CapabilityNode[] adapter the gateway uses, and the document.print-and-mail composite plan template.
 export * from "./composition-commitment.js";
 export * from "./composition-commitment-adapter.js";
+export * from "./accepted-plan-compiler.js";
 export * from "./document-print-and-mail.plan.js";
 // Builtin CSDs registered by the gateway's live registry (not loadBuiltinCsds)
 export * from "./builtins/dashboard-v1.js";
