@@ -18,7 +18,9 @@
  *    a unit.
  *  - EXACT BIGINT ECONOMICS. Per unit: `f = floor(g·feeBps/10000)`, `n = g − f`, all bigint, and the
  *    payouts conserve EXACTLY (`Σ amount === n`). Conservation is checked per unit: a global total
- *    would let two units' errors cancel.
+ *    would let two units' errors cancel. Each unit pays one leg (the payout address receives n), or,
+ *    when an agreement applies, economics' split (R15, injected as `splitNet`), which must name
+ *    exactly the plan's units, agree with these g/f/n, and use 1–16 legs to non-zero addresses.
  *  - BOUNDED AUTHORITY. The plan's whole obligation (`Σ g`) must fit inside the server-issued
  *    reservation (R13), in its currency, for this request. Issuing and consuming the reservation
  *    atomically is the reservation store's job; the output names it so the consume can seal this plan.
@@ -27,7 +29,8 @@
  *    permissive gate would approve it; with no gate injected, a non-zero tier is refused.
  *  - A SEALED DEAL. `acceptedDealDigest` = sha256 over the canonical form of the ENTIRE compiled deal:
  *    every job, every unit field (tier, fee, amounts, payees, order), the signing operators, the
- *    reservation, the currency and its decimals, and both v3 roots. This is the digest the reservation
+ *    reservation, the currency and its decimals, both v3 roots, and economics' two terms hashes
+ *    (null when no agreement applies). This is the digest the reservation
  *    consume seals (MUST-CLOSE 8). The v3 `compositionRoot` is derived here from the same input and
  *    echoed into every unit, but it commits the PLAN (contract, providers, prices, wallets, program),
  *    NOT the settlement terms: two deals that differ only in a node's tier, the fee, or the signing
@@ -197,6 +200,9 @@ export interface CompiledAcceptedPlan {
   totalObligationBaseUnits: bigint;
   compositionRoot: Bytes32;
   capabilityContractRoot: Bytes32;
+  /** Economics' terms hashes when an agreement split the payouts (R15); null otherwise. Both sealed. */
+  economicTermsHash: `0x${string}` | null;
+  rightsTermsHash: `0x${string}` | null;
   jobs: CompiledJob[];
   nodeToUnit: NodeUnitBinding[];
 }
@@ -229,7 +235,12 @@ export type CompileViolation =
   | { code: "obligation-exceeds-reservation"; obligation: string; reservation: string }
   | { code: "too-many-units-for-operator"; operator: string; count: number }
   | { code: "payout-sum-mismatch"; nodeId: string; sum: string; net: string }
-  | { code: "commitment-refused"; reason: string };
+  | { code: "commitment-refused"; reason: string }
+  | { code: "economics-refused"; reason: string }
+  | { code: "economics-malformed"; detail: string }
+  | { code: "economics-mismatch"; nodeId: string; field: "gross" | "fee" | "net" }
+  | { code: "invalid-payout-leg"; nodeId: string; index: number }
+  | { code: "too-many-payout-legs"; nodeId: string; count: number };
 
 export type CompileResult =
   | { ok: true; plan: CompiledAcceptedPlan }
@@ -245,9 +256,43 @@ export type ProgramGate = (args: {
   committedProgramHash: string | null;
 }) => { ok: true } | { ok: false; code: string };
 
+/** One unit as the economics splitter sees it, in canonical plan order. */
+export interface SplitUnitInput {
+  nodeId: string;
+  operator: Address;
+  payoutAddress: Address;
+  g: bigint;
+  f: bigint;
+  n: bigint;
+}
+
+/**
+ * Economics' split of each unit's net (R15: economics' `compileEconomics`, bound by the route to the
+ * accepted agreement). Amounts are integer base-unit strings, as economics emits them; `unitRef` is
+ * the composition node id.
+ */
+export type NetSplitResult =
+  | {
+      ok: true;
+      units: ReadonlyArray<{
+        unitRef: string;
+        gross: string;
+        fee: string;
+        net: string;
+        payouts: ReadonlyArray<{ recipient: string; amount: string }>;
+      }>;
+      economicTermsHash: string;
+      rightsTermsHash: string;
+    }
+  | { ok: false; code: string };
+
+export type NetSplitter = (units: readonly SplitUnitInput[]) => NetSplitResult;
+
 export interface CompileDeps {
   /** Required whenever any node's tier is above 0. */
   assertProgramForTier?: ProgramGate;
+  /** Optional economics split (R15). Without it each unit pays one leg: `payoutAddress` receives `n`. */
+  splitNet?: NetSplitter;
 }
 
 // ── Small pure helpers (exported for direct testing) ─────────────────────────────────────────────
@@ -548,7 +593,24 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
   }
   const compositionRoot = commitment.compositionRoot as Bytes32;
 
-  // Jobs in operator-address order; units in canonical plan order within each job.
+  // Payouts: one leg per unit (the payout address receives n), or economics' split, which must agree
+  // with this compiler's own economics and conserve EXACTLY per unit — refused, never repaired.
+  const econOf = new Map(order.map((id) => [id, unitEconomics(byId.get(id)!.grossBaseUnits, input.feeBps)]));
+  const payoutsOf = new Map<string, PayoutEntry[]>();
+  let economicTermsHash: `0x${string}` | null = null;
+  let rightsTermsHash: `0x${string}` | null = null;
+  if (deps.splitNet) {
+    const split = splitPayouts(order, byId, econOf, deps.splitNet);
+    if (!split.ok) return { ok: false, violations: sortViolations(split.violations) };
+    for (const [id, legs] of split.payouts) payoutsOf.set(id, legs);
+    economicTermsHash = split.economicTermsHash;
+    rightsTermsHash = split.rightsTermsHash;
+  } else {
+    for (const id of order) payoutsOf.set(id, [{ recipient: byId.get(id)!.payoutAddress, amount: econOf.get(id)!.n }]);
+  }
+
+  // Jobs in operator-address order; units in canonical plan order within each job. (The frozen
+  // ABI's 256 legs per job is implied: at most 16 units per job, at most 16 legs per unit.)
   const jobs: CompiledJob[] = [];
   const nodeToUnit: NodeUnitBinding[] = [];
   const operators = [...byOperator.keys()].sort();
@@ -560,10 +622,10 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
     for (const [milestoneIndex, id] of ids.entries()) {
       const n = byId.get(id)!;
       const tier = tierOf.get(id)!;
-      const { g, f, n: net } = unitEconomics(n.grossBaseUnits, input.feeBps);
-      const payouts: PayoutEntry[] = [{ recipient: n.payoutAddress, amount: net }];
+      const { g, f, n: net } = econOf.get(id)!;
+      const payouts = payoutsOf.get(id)!;
       if (!payoutsConserve(payouts, net)) {
-        // Unreachable with one leg carrying `n`; kept so any future split path is checked here.
+        // Unreachable: both payout paths above are checked. Kept as the last guard before encoding.
         const sum = payouts.reduce((acc, p) => acc + p.amount, 0n);
         return { ok: false, violations: [{ code: "payout-sum-mismatch", nodeId: id, sum: sum.toString(), net: net.toString() }] };
       }
@@ -606,10 +668,96 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
     totalObligationBaseUnits: total,
     compositionRoot,
     capabilityContractRoot: commitment.capabilityContractRoot as Bytes32,
+    economicTermsHash,
+    rightsTermsHash,
     jobs,
     nodeToUnit,
   };
   return { ok: true, plan: { ...unsealed, acceptedDealDigest: acceptedDealDigest(unsealed) } };
+}
+
+const BASE_UNITS = /^(0|[1-9][0-9]*)$/;
+
+/** An integer base-unit string as a bigint, or null. */
+function baseUnits(x: unknown): bigint | null {
+  return typeof x === "string" && BASE_UNITS.test(x) ? BigInt(x) : null;
+}
+
+/**
+ * Ask economics to split each unit's net, then hold its answer to this compiler's own numbers:
+ * exactly the plan's units, the same gross/fee/net, 1–16 legs to non-zero addresses with positive
+ * amounts, and Σ legs === n per unit. Anything else is a violation.
+ */
+function splitPayouts(
+  order: readonly string[],
+  byId: ReadonlyMap<string, AcceptedPlanNode>,
+  econOf: ReadonlyMap<string, { g: bigint; f: bigint; n: bigint }>,
+  splitNet: NetSplitter,
+):
+  | { ok: true; payouts: Map<string, PayoutEntry[]>; economicTermsHash: `0x${string}`; rightsTermsHash: `0x${string}` }
+  | { ok: false; violations: CompileViolation[] } {
+  const malformed = (detail: string) => ({ ok: false as const, violations: [{ code: "economics-malformed" as const, detail }] });
+  const res = splitNet(
+    order.map((id) => {
+      const node = byId.get(id)!;
+      const e = econOf.get(id)!;
+      return { nodeId: id, operator: node.operator, payoutAddress: node.payoutAddress, g: e.g, f: e.f, n: e.n };
+    }),
+  );
+  if (typeof res !== "object" || res === null) return malformed("result");
+  if (res.ok === false) return { ok: false, violations: [{ code: "economics-refused", reason: show(res.code) }] };
+  if (res.ok !== true) return malformed("result");
+  if (!isDigest(res.economicTermsHash) || !isDigest(res.rightsTermsHash)) return malformed("terms-hash");
+  if (!Array.isArray(res.units)) return malformed("units");
+  const byRef = new Map<string, (typeof res.units)[number]>();
+  for (let i = 0; i < res.units.length; i++) {
+    const u = res.units[i];
+    if (typeof u !== "object" || u === null || !isId(u.unitRef) || byRef.has(u.unitRef)) return malformed("unit-ref");
+    byRef.set(u.unitRef, u);
+  }
+  if (byRef.size !== order.length || order.some((id) => !byRef.has(id))) return malformed("unit-set");
+
+  const v: CompileViolation[] = [];
+  const payouts = new Map<string, PayoutEntry[]>();
+  for (const id of order) {
+    const u = byRef.get(id)!;
+    const e = econOf.get(id)!;
+    if (baseUnits(u.gross) !== e.g) v.push({ code: "economics-mismatch", nodeId: id, field: "gross" });
+    if (baseUnits(u.fee) !== e.f) v.push({ code: "economics-mismatch", nodeId: id, field: "fee" });
+    if (baseUnits(u.net) !== e.n) v.push({ code: "economics-mismatch", nodeId: id, field: "net" });
+    const raw: unknown = u.payouts;
+    if (!Array.isArray(raw)) {
+      v.push({ code: "economics-malformed", detail: `payouts:${id}` });
+      continue;
+    }
+    if (raw.length > MAX_PAYOUT_LEGS_PER_UNIT) {
+      v.push({ code: "too-many-payout-legs", nodeId: id, count: raw.length });
+      continue;
+    }
+    const legs: PayoutEntry[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const leg: unknown = raw[i];
+      const recipient = typeof leg === "object" && leg !== null ? (leg as { recipient?: unknown }).recipient : undefined;
+      const amount = typeof leg === "object" && leg !== null ? baseUnits((leg as { amount?: unknown }).amount) : null;
+      if (!isNonZeroAddress(recipient) || amount === null || amount <= 0n) {
+        v.push({ code: "invalid-payout-leg", nodeId: id, index: i });
+        continue;
+      }
+      legs.push({ recipient, amount });
+    }
+    if (legs.length === raw.length && !payoutsConserve(legs, e.n)) {
+      const sum = legs.reduce((acc, p) => acc + p.amount, 0n);
+      v.push({ code: "payout-sum-mismatch", nodeId: id, sum: sum.toString(), net: e.n.toString() });
+    }
+    payouts.set(id, legs);
+  }
+  if (v.length > 0) return { ok: false, violations: v };
+  return {
+    ok: true,
+    payouts,
+    economicTermsHash: res.economicTermsHash.toLowerCase() as `0x${string}`,
+    rightsTermsHash: res.rightsTermsHash.toLowerCase() as `0x${string}`,
+  };
 }
 
 /** Deterministic total order over violations, so a rejected plan's diagnostics are permutation-stable. */
@@ -639,6 +787,8 @@ export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDea
     totalObligationBaseUnits: plan.totalObligationBaseUnits.toString(),
     compositionRoot: lc(plan.compositionRoot),
     capabilityContractRoot: lc(plan.capabilityContractRoot),
+    economicTermsHash: lc(plan.economicTermsHash),
+    rightsTermsHash: lc(plan.rightsTermsHash),
     jobs: plan.jobs.map((j) => ({
       jobId: j.jobId,
       operator: lc(j.operator),
