@@ -1174,6 +1174,18 @@ describe("G (ruling 2): acknowledgements are neutral; settled-green only comes f
     expect(document.body.innerHTML).not.toContain("st-settled");
   });
 
+  it("a MONEY 2xx stays an amber 'Submitted - awaiting network confirmation' (gate + mirrored bar), never green", async () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ path: "/api/escrow/chain/0xabc/fund", body: { amount: 1 } }));
+    btn("Go").click();
+    gateApproveBtn()!.click();
+    await flush();
+    expect(barStatus().textContent).toBe("Submitted - awaiting network confirmation");
+    expect(barStatus().className).toBe("pcc-action-status st-waiting");
+    expect(text(".pcc-overlay .pcc-action-status")).toBe("Submitted - awaiting network confirmation");
+    expect(document.body.innerHTML).not.toContain("st-settled");
+  });
+
   it("the kit stylesheet renders st-ack without a hue (never the signal green)", () => {
     installFetch(() => ({ status: 200 }));
     boot(act({ path: "/api/artifacts" }));
@@ -1181,5 +1193,38 @@ describe("G (ruling 2): acknowledgements are neutral; settled-green only comes f
     expect(css).toContain(".pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}");
     expect(css).toContain(".pcc-action-status.st-ack{color:var(--ink-2);}");
     expect(css).not.toMatch(/st-ack\{[^}]*--signal/);
+  });
+});
+
+describe("B: each validation layer is closed on its own (defense in depth)", () => {
+  // Pure helpers sliced from the SHIPPED source (the same brace-matched slicing the gateway suites use).
+  function extractFn(name: string): string {
+    const start = kitSrc.indexOf(`function ${name}(`);
+    if (start < 0) throw new Error(`kit fn not found: ${name}`);
+    const open = kitSrc.indexOf("{", start);
+    let depth = 0;
+    for (let j = open; j < kitSrc.length; j++) {
+      if (kitSrc[j] === "{") depth++;
+      else if (kitSrc[j] === "}" && --depth === 0) return kitSrc.slice(start, j + 1);
+    }
+    throw new Error(`unbalanced braces extracting ${name}`);
+  }
+  // eslint-disable-next-line no-new-func, @typescript-eslint/no-implied-eval
+  const kit = new Function([
+    extractFn("isAbsoluteOrSchemeUrl"), extractFn("safeApiPath"), extractFn("canonicalPath"),
+    "return { safeApiPath: safeApiPath, canonicalPath: canonicalPath };",
+  ].join("\n"))() as { safeApiPath(p: string, host: boolean): string | null; canonicalPath(p: string): string | null };
+  const ambiguous = ["/api%2Ffeedback", "/api%2ffeedback", "/api%252Ffeedback", "/api/x%25", "/api/x%5C", "/api/x%5c", "/api/x%3F", "/api/x%23"];
+
+  it("canonicalPath refuses every ambiguous escape by itself, so the classifier stays closed if validation regresses", () => {
+    for (const p of ambiguous) expect(kit.canonicalPath(p), p).toBeNull();
+    expect(kit.canonicalPath("/api/x%E0%A4%A")).toBeNull(); // malformed escape
+    expect(kit.canonicalPath("/api/fiat%2Dramp/session")).toBe("/api/fiat-ramp/session");
+  });
+
+  it("safeApiPath refuses ambiguous encodings in the PATH (a query may still carry an escaped value)", () => {
+    for (const p of ambiguous) expect(kit.safeApiPath(p, false), p).toBeNull();
+    expect(kit.safeApiPath("/api/jobs?q=100%25", false)).toBe("/api/jobs?q=100%25");
+    expect(kit.safeApiPath("/api/compose\u0085", false)).toBeNull(); // a C1 control
   });
 });
