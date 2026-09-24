@@ -303,6 +303,33 @@ describe("POST /api/settlement/agent-plans/accept: seam -> deal binding -> ONE a
     expect(two.store.state("resv-1")).toBe("consumed");
   });
 
+  it("N25 over HTTP: each node's inputs come back sealed in its canonicalPlan; invalid execution JSON is 400 and consumes nothing", async () => {
+    const DOC = "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3";
+    const withInputs = (inputs: unknown) => dag({ nodes: dag().nodes.map((n) => (n.nodeId === "print" ? { ...n, inputs: inputs as Record<string, unknown> } : n)) });
+    const { store, deps } = world();
+    const app = await appWith(deps);
+    const res = await accept(app, withInputs({ documentHash: DOC, pages: 2 }));
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const print = body.plan.nodeToUnit.find((b: { nodeId: string }) => b.nodeId === "print");
+    expect(print.canonicalPlan.inputs).toEqual({ documentHash: DOC, pages: 2 });
+    expect(print.planHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    const shown = body.presentation.nodes.find((n: { nodeId: string }) => n.nodeId === "print");
+    expect(shown.execution).toEqual({ planHash: print.planHash, inputs: { documentHash: DOC, pages: 2 }, constraints: {} });
+    expect(store.sealed("resv-1")).toBe(body.plan.acceptedDealDigest);
+
+    // Over HTTP a client can send a non-object, or JSON beyond the bounds; both are 400 and consume nothing.
+    const other = world();
+    const otherApp = await appWith(other.deps);
+    const keys = Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, i]));
+    for (const [inputs, reason] of [[["not", "an", "object"], "not-an-object"], [keys, "too-many-keys"]] as const) {
+      const r = await accept(otherApp, withInputs(inputs));
+      expect(r.statusCode).toBe(400);
+      expect(r.json().refusal).toEqual({ stage: "submission", reason: "invalid-execution-json", fields: [{ nodeId: "print", field: "inputs", reason }] });
+    }
+    expect(other.store.state("resv-1")).toBe("issued");
+  });
+
   it("a stale plan is refused with the live re-quote, shown as needs-requote, and consumes nothing", async () => {
     const { store, deps, encoderCalls } = world();
     const app = await appWith(deps);
