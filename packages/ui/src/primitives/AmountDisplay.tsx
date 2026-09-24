@@ -16,6 +16,21 @@ const sizeMap = {
   xl: "text-4xl",
 };
 
+/**
+ * Parse an amount string strictly: a plain decimal ("1234.5", "-3") or one
+ * with correct thousands grouping ("1,234.56"). Anything else is null.
+ * parseFloat was used before, and it read "1,234.56" as 1 and any garbage as
+ * NaN, which then rendered as a plausible $0.00.
+ */
+export function parseAmount(amount: string | number | null | undefined): number | null {
+  if (typeof amount === "number") return Number.isFinite(amount) ? amount : null;
+  if (typeof amount !== "string") return null;
+  const t = amount.trim();
+  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) return Number(t.replace(/,/g, ""));
+  return null;
+}
+
 export function AmountDisplay({
   amount,
   currency = "USDC",
@@ -23,8 +38,17 @@ export function AmountDisplay({
   glow = false,
   className,
 }: AmountDisplayProps) {
-  const num = parseFloat(amount);
-  const formatted = isNaN(num) ? "0.00" : num.toFixed(2);
+  const num = parseAmount(amount);
+
+  // An amount that can't be read is shown as unknown, never as $0.00.
+  if (num === null) {
+    return (
+      <span className={cn("font-mono text-white/40", sizeMap[size], className)} title="Amount unavailable">
+        —
+      </span>
+    );
+  }
+  const formatted = num.toFixed(2);
 
   return (
     <span
