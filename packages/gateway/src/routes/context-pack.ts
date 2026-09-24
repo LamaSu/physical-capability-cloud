@@ -45,9 +45,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/capabilities | List all registered capability instances |
 | GET | /api/capabilities/types | List capability type identifiers |
 | GET | /api/capabilities/templates | List capability templates with full details |
-| GET | /api/marketplace/classes | Browse marketplace capability classes |
-| GET | /api/marketplace/classes/:id | Get marketplace class details |
-| GET | /api/marketplace/demand-supply | Demand/supply analytics |
 | POST | /api/marketplace/roi | Calculate ROI for a capability class |
 | GET | /api/kernels | List Shop Kernels (physical sites), filter by ?status= |
 | GET | /api/kernels/:kernelId | Get kernel details + capabilities + devices |
@@ -151,9 +148,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 ### Device Discovery
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/discover/scan | Scan local network for devices (mDNS/IPP) |
 | POST | /api/discover/generate-csd | Generate a CSD from a discovered device |
-| POST | /api/discover/onboard | Full pipeline: discover, generate CSD, register device, register CSD |
 
 ### CSD (Capability StructureDefinitions)
 | Method | Path | Description |
@@ -181,31 +176,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/batches/shared | Create a shared batch |
 | GET | /api/batches/shared/open | List open shared batches |
 | GET | /api/batches/shared/:batchId | Get shared batch details |
-
-### Protocols (Multi-Step Workflows)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/protocols/:id | Get protocol template |
-| POST | /api/protocols | Create a new protocol template |
-| PUT | /api/protocols/:id | Update a protocol template |
-| POST | /api/protocols/:id/publish | Publish a protocol |
-| POST | /api/protocols/:id/fork | Fork a protocol |
-| GET | /api/protocols/:id/forks | List forks of a protocol |
-| GET | /api/protocols/:id/runs | List runs of a protocol |
-| POST | /api/protocols/:id/runs | Start a new protocol run |
-| POST | /api/protocols/:id/validate | Validate a protocol |
-| GET | /api/protocol-runs/:runId | Get protocol run details |
-| POST | /api/protocol-runs/:runId/start | Start a protocol run |
-| POST | /api/protocol-runs/:runId/pause | Pause a protocol run |
-| POST | /api/protocol-runs/:runId/resume | Resume a protocol run |
-| POST | /api/protocol-runs/:runId/cancel | Cancel a protocol run |
-
-### DePIN Rewards & Certificates
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/rewards/claims | Claim DePIN rewards |
-| POST | /api/certificates/mint | Mint a soulbound capability certificate |
-| GET | /api/treasury/summary | Treasury balance and allocation |
 
 ### IP (Intellectual Property via Story Protocol)
 | Method | Path | Description |
@@ -247,43 +217,9 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/faucet/usdc | Request testnet USDC |
 | GET | /api/faucet/usdc | Faucet status |
 
-### Spaces (Equipment Hosting)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/spaces | List available hosting spaces |
-| GET | /api/spaces/:id | Get space details |
-| POST | /api/spaces/match | Match equipment to spaces |
-
-### Logistics
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/logistics/providers | List logistics providers |
-| GET | /api/logistics/providers/:id | Get provider details |
-| GET | /api/logistics/shipments | List shipments |
-| GET | /api/logistics/shipments/:id | Get shipment details |
-| POST | /api/logistics/shipments/quote | Get shipping quote |
-| GET | /api/logistics/bookings | List bookings |
-| GET | /api/logistics/bookings/:id | Get booking details |
-| GET | /api/logistics/installations | List installations |
-| GET | /api/logistics/installations/:id | Get installation details |
-| GET | /api/logistics/timeline | Logistics timeline |
-| GET | /api/logistics/summary | Logistics summary dashboard |
-
-### Orchestrator (Multi-Instrument Workflows)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/orchestrator/graphs | List transfer graphs |
-| GET | /api/orchestrator/graphs/:kernelId | Get kernel transfer graph |
-| GET | /api/orchestrator/samples/:sampleId | Get sample routing info |
-| GET | /api/orchestrator/claims | List orchestrator claims |
-| POST | /api/orchestrator/workflows | Create an orchestration workflow |
-| GET | /api/orchestrator/workflows/:workflowId | Get workflow details |
-
 ### Agents & Negotiation
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /api/agents/conversations | List agent conversations |
-| GET | /api/agents/conversations/:convId | Get conversation details |
 | GET | /api/agent/tools | List available agent tools |
 | POST | /api/negotiate/session | Start a negotiation session |
 
@@ -369,6 +305,12 @@ All endpoints are relative to the base URL above. Most return JSON.
 |--------|------|-------------|
 | GET | /.well-known/agent-registration.json | ERC-8004 Agent Registration File |
 | GET | /.well-known/agent-card.json | Agent Card (Google A2A format) |
+
+### Not available on this gateway (demo only)
+These routes answer \`501 {error: "not_available", message, see}\` unless the gateway runs with \`PCC_DEMO_ROUTES=true\`, which production never does (the flag is ignored under \`NODE_ENV=production\`). In demo mode their answers are examples, marked \`mock: true, demo: true\` with the header \`x-pcc-demo: true\`. Never present them as live data; follow each refusal's \`see\` pointers instead.
+| Method | Path | Description |
+|--------|------|-------------|
+${DEMO_ONLY_ENDPOINTS.map((e) => `| ${e.method} | ${e.path} | ${e.description} |`).join("\n")}
 
 ## Data Types
 
@@ -495,6 +437,59 @@ interface EndpointDef {
   description: string;
 }
 
+// Routes that answer 501 not_available outside demo mode (board N34). Listed apart so an
+// agent never treats them as live; context-pack-availability.test.ts checks both lists.
+const DEMO_ONLY_ENDPOINTS: EndpointDef[] = [
+  { method: "GET", path: "/api/marketplace/classes", description: "Browse marketplace capability classes" },
+  { method: "GET", path: "/api/marketplace/classes/:id", description: "Get marketplace class details" },
+  { method: "GET", path: "/api/marketplace/demand-supply", description: "Demand/supply analytics" },
+  { method: "POST", path: "/api/discover/scan", description: "Scan local network for devices (mDNS/IPP)" },
+  { method: "POST", path: "/api/discover/onboard", description: "Full pipeline: discover, generate CSD, register device, register CSD" },
+  { method: "GET", path: "/api/protocols/:id", description: "Get protocol template" },
+  { method: "POST", path: "/api/protocols", description: "Create a new protocol template" },
+  { method: "PUT", path: "/api/protocols/:id", description: "Update a protocol template" },
+  { method: "POST", path: "/api/protocols/:id/publish", description: "Publish a protocol" },
+  { method: "POST", path: "/api/protocols/:id/fork", description: "Fork a protocol" },
+  { method: "GET", path: "/api/protocols/:id/forks", description: "List forks of a protocol" },
+  { method: "GET", path: "/api/protocols/:id/runs", description: "List runs of a protocol" },
+  { method: "POST", path: "/api/protocols/:id/runs", description: "Start a new protocol run" },
+  { method: "POST", path: "/api/protocols/:id/validate", description: "Validate a protocol" },
+  { method: "GET", path: "/api/protocol-runs/:runId", description: "Get protocol run details" },
+  { method: "POST", path: "/api/protocol-runs/:runId/start", description: "Start a protocol run" },
+  { method: "POST", path: "/api/protocol-runs/:runId/pause", description: "Pause a protocol run" },
+  { method: "POST", path: "/api/protocol-runs/:runId/resume", description: "Resume a protocol run" },
+  { method: "POST", path: "/api/protocol-runs/:runId/cancel", description: "Cancel a protocol run" },
+  { method: "POST", path: "/api/rewards/claims", description: "Claim DePIN rewards" },
+  { method: "POST", path: "/api/certificates/mint", description: "Mint a soulbound capability certificate" },
+  { method: "GET", path: "/api/treasury/summary", description: "Treasury balance and allocation" },
+  { method: "GET", path: "/api/spaces", description: "List available hosting spaces" },
+  { method: "GET", path: "/api/spaces/:id", description: "Get space details" },
+  { method: "POST", path: "/api/spaces/match", description: "Match equipment to spaces" },
+  { method: "GET", path: "/api/logistics/providers", description: "List logistics providers" },
+  { method: "GET", path: "/api/logistics/providers/:id", description: "Get provider details" },
+  { method: "GET", path: "/api/logistics/shipments", description: "List shipments" },
+  { method: "GET", path: "/api/logistics/shipments/:id", description: "Get shipment details" },
+  { method: "POST", path: "/api/logistics/shipments/quote", description: "Get shipping quote" },
+  { method: "GET", path: "/api/logistics/bookings", description: "List bookings" },
+  { method: "GET", path: "/api/logistics/bookings/:id", description: "Get booking details" },
+  { method: "GET", path: "/api/logistics/installations", description: "List installations" },
+  { method: "GET", path: "/api/logistics/installations/:id", description: "Get installation details" },
+  { method: "GET", path: "/api/logistics/timeline", description: "Logistics timeline" },
+  { method: "GET", path: "/api/logistics/summary", description: "Logistics summary dashboard" },
+  { method: "GET", path: "/api/orchestrator/graphs", description: "List transfer graphs" },
+  { method: "GET", path: "/api/orchestrator/graphs/:kernelId", description: "Get kernel transfer graph" },
+  { method: "GET", path: "/api/orchestrator/samples/:sampleId", description: "Get sample routing info" },
+  { method: "GET", path: "/api/orchestrator/claims", description: "List orchestrator claims" },
+  { method: "POST", path: "/api/orchestrator/workflows", description: "Create an orchestration workflow" },
+  { method: "GET", path: "/api/orchestrator/workflows/:workflowId", description: "Get workflow details" },
+  { method: "GET", path: "/api/agents/conversations", description: "List agent conversations" },
+  { method: "GET", path: "/api/agents/conversations/:convId", description: "Get conversation details" },
+];
+
+const DEMO_ONLY_NOTE =
+  "These routes answer 501 not_available unless the gateway runs with PCC_DEMO_ROUTES=true, which production never does. " +
+  "In demo mode their answers are examples marked mock: true, demo: true. Follow each refusal's see pointers instead.";
+
 interface EndpointGroup {
   name: string;
   endpoints: EndpointDef[];
@@ -507,6 +502,7 @@ function buildStructuredPack(baseUrl: string): {
   description: string;
   roles: string[];
   endpointGroups: EndpointGroup[];
+  demoOnlyEndpoints: { note: string; endpoints: EndpointDef[] };
   dataTypes: Record<string, Record<string, string>>;
   sseStreams: EndpointDef[];
   contracts: Record<string, string>;
@@ -526,9 +522,6 @@ function buildStructuredPack(baseUrl: string): {
           { method: "GET", path: "/api/capabilities", description: "List all registered capabilities" },
           { method: "GET", path: "/api/capabilities/types", description: "List capability type identifiers" },
           { method: "GET", path: "/api/capabilities/templates", description: "List capability templates" },
-          { method: "GET", path: "/api/marketplace/classes", description: "Browse marketplace classes" },
-          { method: "GET", path: "/api/marketplace/classes/:id", description: "Get marketplace class details" },
-          { method: "GET", path: "/api/marketplace/demand-supply", description: "Demand/supply analytics" },
           { method: "POST", path: "/api/marketplace/roi", description: "Calculate ROI" },
           { method: "GET", path: "/api/kernels", description: "List Shop Kernels" },
           { method: "GET", path: "/api/kernels/:kernelId", description: "Get kernel details" },
@@ -612,6 +605,7 @@ function buildStructuredPack(baseUrl: string): {
         ],
       },
     ],
+    demoOnlyEndpoints: { note: DEMO_ONLY_NOTE, endpoints: DEMO_ONLY_ENDPOINTS },
     dataTypes: {
       Capability: { id: "cap_...", type: "string", kernelId: "string", status: "available|busy|offline" },
       Kernel: { id: "kernel_...", name: "string", status: "online|offline|maintenance", capabilities: "string[]" },
