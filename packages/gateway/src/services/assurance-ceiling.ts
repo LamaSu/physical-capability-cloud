@@ -42,6 +42,7 @@
  */
 
 import type { AssuranceTier } from "@pcc/spec";
+import { getRepos } from "../db.js";
 import { getReputationService } from "./reputation-service.js";
 
 /** Highest assurance tier that exists. */
@@ -194,4 +195,29 @@ export function buildAssuranceCeilingMap(
 /** Ceiling for `kernelId` from a pre-built map. An unknown kernel is 0 (fail closed). */
 export function ceilingFor(map: ReadonlyMap<string, AssuranceTier>, kernelId: string): AssuranceTier {
   return map.get(kernelId) ?? 0;
+}
+
+/**
+ * Load the authorized ceiling of every kernel in `kernelIds` with ONE batched
+ * query (`IKernelRepository.findByIds`), for callers that hold rows which only
+ * name a kernel (graph-search nodes, compose candidates). A kernel with no row,
+ * or a lookup that fails, is left out of the map, so {@link ceilingFor} reads
+ * it as 0 (fail closed).
+ */
+export function loadAssuranceCeilingMap(kernelIds: Iterable<unknown>): Map<string, AssuranceTier> {
+  const unique = [...new Set([...kernelIds].filter((id): id is string => typeof id === "string" && id.length > 0))];
+  if (unique.length === 0) return new Map();
+  try {
+    return buildAssuranceCeilingMap(getRepos().kernels.findByIds(unique));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * The tier a CLAIMED tier is served, searched and selected at under `ceiling`:
+ * `min(normalizeClaim(claim), ceiling)`. A malformed claim or ceiling reads as 0.
+ */
+export function servedAssuranceTier(claim: unknown, ceiling: unknown): AssuranceTier {
+  return Math.min(normalizeClaim(claim), normalizeClaim(ceiling)) as AssuranceTier;
 }

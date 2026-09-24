@@ -14,6 +14,13 @@
  *
  * NOTE: POST graph-search returns 201 — it creates a retrievable search
  * proposal (consistent with the register-node/edge endpoints).
+ *
+ * WP-C R1 fixture: register-node now requires the actor to OWN the node's
+ * kernel, and every search serves a node at min(claimed tier, its kernel's
+ * authorized ceiling). The default kernel "k1" is therefore a real kernel row
+ * owned by GRAPH_OWNER with the maximum ceiling (3), and registrations carry
+ * GRAPH_OWNER's key. Served tier == claimed tier here, so every assertion below
+ * is unchanged. The clamp itself is covered by assurance-ceiling-search.test.ts.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -25,14 +32,22 @@ import {
   _seedGraphSearchForTests,
 } from "../routes/graph-search.js";
 import type { GraphSearchRequest } from "@pcc/spec";
+import { closeStore, initStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { ensureTrustedKernel } from "./fixtures/authorized-kernels.js";
 
 // -----------------------------------------------------------------------------
 // App bootstrap
 // -----------------------------------------------------------------------------
 
 let app: FastifyInstance;
+const GRAPH_OWNER = "graph-search-test-owner";
+let ownerKey: string;
 
 beforeAll(async () => {
+  initStore({ seed: false });
+  ownerKey = provisionApiKey({ operatorId: GRAPH_OWNER, scopes: ["operator"] }).rawKey;
+  ensureTrustedKernel("k1", GRAPH_OWNER);
   app = Fastify({ logger: false });
   await app.register(graphSearchRoutes);
   await app.ready();
@@ -40,6 +55,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close();
+  closeStore();
 });
 
 beforeEach(() => {
@@ -80,6 +96,7 @@ async function regNode(over: NodeInput) {
   const res = await app.inject({
     method: "POST",
     url: "/api/capabilities/graph/_dev/register-node",
+    headers: { authorization: `Bearer ${ownerKey}` },
     payload: mkNode(over),
   });
   expect(res.statusCode).toBe(201);

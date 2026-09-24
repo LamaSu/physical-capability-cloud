@@ -32,6 +32,19 @@
  * availability. Caps: budgetUSD (running total of node + handoff prices),
  * maxDepth (path node count, default 5), topN (default 5).
  *
+ * Assurance tiers (WP-C R1, MUST-CLOSE 5). A node's `assuranceTier` is a CLAIM
+ * made by whoever registered it. Every search serves each node at
+ * min(claim, authorizedAssuranceCeiling(its kernel row)), loaded with ONE
+ * batched kernel lookup per search; a node whose kernel has no row is served at
+ * 0. Filtering, `quality` ranking, the returned steps and the stored proposal
+ * all use that served tier, never the raw claim (services/assurance-ceiling.ts).
+ * compose.ts reaches this search as its multi-step and outcomeChain fallback,
+ * so the same clamp covers /api/compose.
+ *
+ * The `_dev/register-*` endpoints are open only in NODE_ENV test/development;
+ * elsewhere they need the admin secret (auth/dev-endpoint-gate.ts). A node may
+ * be registered only by the owner of the kernel it names.
+ *
  * Companion to PR #88. When that lands, returned paths feed straight into a
  * @pcc/workflow run for execution.
  */
@@ -57,6 +70,13 @@ import type {
 } from "@pcc/spec";
 import { schema, eq, sql } from "@pcc/store";
 import { getStore, initStore } from "../db.js";
+import {
+  ceilingFor,
+  loadAssuranceCeilingMap,
+  servedAssuranceTier,
+} from "../services/assurance-ceiling.js";
+import { requireDevOrAdmin } from "../auth/dev-endpoint-gate.js";
+import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
 
 // ---------------------------------------------------------------------------
 // Store access — see compose.ts for the lazy-init rationale.
@@ -104,6 +124,20 @@ function edgeKey(fromCapabilityId: string, toCapabilityId: string): string {
 function loadNodes(): CapabilityGraphNode[] {
   const rows = db().select().from(schema.graphSearchNodes).all();
   return rows.map((r) => r.data as CapabilityGraphNode);
+}
+
+/**
+ * WP-C R1: the same nodes, each at its SERVED tier,
+ * min(claimed tier, authorizedAssuranceCeiling(kernel row of node.kernelId)).
+ * One batched kernel lookup for the whole snapshot. A node whose kernel has no
+ * row is served at 0.
+ */
+function withServedTiers(nodes: CapabilityGraphNode[]): CapabilityGraphNode[] {
+  const ceilings = loadAssuranceCeilingMap(nodes.map((n) => n.kernelId));
+  return nodes.map((n) => {
+    const tier = servedAssuranceTier(n.assuranceTier, ceilingFor(ceilings, n.kernelId));
+    return tier === n.assuranceTier ? n : { ...n, assuranceTier: tier };
+  });
 }
 
 /** Snapshot of every graph edge. */
@@ -500,8 +534,9 @@ function runGraphSearch(req: GraphSearchRequest): GraphSearchResponse {
     cappedAtBudget: false,
   };
 
-  // Load the graph snapshot from SQLite for this traversal.
-  const all = loadNodes();
+  // Load the graph snapshot from SQLite for this traversal. Every node is
+  // served at its clamped tier (WP-C R1) before any filter or score reads it.
+  const all = withServedTiers(loadNodes());
   const edgeList = loadEdges();
   const edgesByKey = new Map(
     edgeList.map((e) => [edgeKey(e.fromCapabilityId, e.toCapabilityId), e] as const),
@@ -690,8 +725,18 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
 
   // ── POST /api/capabilities/graph/_dev/register-node ──────────────────────
   // Scaffold-only injection. Production replaces this with a CapabilityFacade-
-  // backed graph rebuild. Gated behind the gateway apiGate in production.
+  // backed graph rebuild.
+  //
+  // WP-C R1: apiGate only requires SOME key, so this used to let any key
+  // register a node for any kernel at a self-declared tier. Now:
+  //   - open only in NODE_ENV test/development, else the admin secret
+  //     (requireDevOrAdmin: 503 / 401 / 403);
+  //   - the authenticated actor must own `kernelId` (requireKernelOwner:
+  //     401 / 404 / 403 not_kernel_owner), checked before anything is written;
+  //   - the stored `operatorAddress` is that actor, never a body value.
+  // The claimed tier is stored as given; searches serve it clamped.
   app.post("/api/capabilities/graph/_dev/register-node", async (req, reply) => {
+    if (!requireDevOrAdmin(req, reply)) return reply;
     const parsed = RegisterGraphNodeSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -700,12 +745,17 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
-    const node = upsertNode(parsed.data);
+    const actor = await requireKernelOwner(req, reply, parsed.data.kernelId);
+    if (!actor) return reply;
+    const node = upsertNode({ ...parsed.data, operatorAddress: actor });
     return reply.status(201).send({ ok: true, node });
   });
 
   // ── POST /api/capabilities/graph/_dev/register-edge ──────────────────────
+  // Same environment gate as register-node (an edge names no kernel, so there
+  // is no owner to check).
   app.post("/api/capabilities/graph/_dev/register-edge", async (req, reply) => {
+    if (!requireDevOrAdmin(req, reply)) return reply;
     const parsed = RegisterGraphEdgeSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
