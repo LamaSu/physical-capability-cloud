@@ -97,8 +97,10 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
     queryKey: ["jobs", params],
     queryFn: async () => {
       const res = await api.getJobs(params);
-      // Route wraps result in { jobs: [...] } for backward compat.
-      return res.jobs ?? [];
+      // Route wraps result in { jobs: [...] } for backward compat. A response without that
+      // array is an error, never an empty list (absence is not evidence).
+      if (!Array.isArray(res?.jobs)) throw new Error("unexpected response shape from /api/jobs");
+      return res.jobs;
     },
     retry: 1,
     staleTime: 10_000,
@@ -276,7 +278,14 @@ export function useGatewayHealth(options?: { refetchInterval?: number }) {
 export function useAgentMe() {
   return useQuery<AgentMeDTO>({
     queryKey: ["agentMe"],
-    queryFn: () => api.getAgentMe(),
+    queryFn: async () => {
+      const res = await api.getAgentMe();
+      // An answer without the identity block is not an account; treat it as a failed read.
+      if (!res?.identity || !Array.isArray(res.identity.scopes)) {
+        throw new Error("unexpected response shape from /api/agent/me");
+      }
+      return res;
+    },
     retry: 1,
     staleTime: 30_000,
   });

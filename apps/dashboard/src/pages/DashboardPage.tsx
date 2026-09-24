@@ -37,9 +37,11 @@ export function DashboardPage() {
 
   if (jobsQ.isLoading || kernelsQ.isLoading || escrowsQ.isLoading) return <LoadingShell rows={4} />;
 
-  const jobs = jobsQ.data;
-  const kernels = kernelsQ.data;
-  const escrows = escrowsQ.data;
+  // A summary shows only what its latest read returned: after a failed refresh a
+  // figure is unavailable ("—"), not its last-known value presented as current.
+  const jobs = jobsQ.isError ? undefined : jobsQ.data;
+  const kernels = kernelsQ.isError ? undefined : kernelsQ.data;
+  const escrows = escrowsQ.isError ? undefined : escrowsQ.data;
 
   // Nothing could be read: say so instead of rendering zeros.
   if (!jobs && !kernels && !escrows) {

@@ -83,11 +83,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function renderPage(page: React.ReactElement): Promise<string> {
-  const client = new QueryClient({
+function newClient(): QueryClient {
+  return new QueryClient({
     // The hooks retry once; retry immediately so a failure settles fast.
     defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } },
   });
+}
+
+async function settle(client: QueryClient) {
+  for (let i = 0; i < 200; i++) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    if (client.isFetching() === 0) break;
+  }
+}
+
+async function renderPage(page: React.ReactElement, client: QueryClient = newClient()): Promise<string> {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
@@ -97,12 +109,7 @@ async function renderPage(page: React.ReactElement): Promise<string> {
   });
   // Let queries (including one retry) settle. Condition-based, so a loaded
   // machine or CI runner waits longer instead of asserting on a loading state.
-  for (let i = 0; i < 200; i++) {
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 10));
-    });
-    if (client.isFetching() === 0) break;
-  }
+  await settle(client);
   return container.textContent ?? "";
 }
 
@@ -179,6 +186,45 @@ describe("partial outage", () => {
 });
 
 describe("responses the pages cannot trust", () => {
+  it("after a failed refresh the Command Center shows —, not the last-known figures", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/jobs": { status: 200, body: { jobs: [{ id: "job-x", status: "in_progress" }, { id: "job-y", status: "queued" }] } },
+      "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", status: "online", isStale: false }] } },
+    });
+    const client = newClient();
+    const before = await renderPage(<DashboardPage />, client);
+    expect(before).toMatch(/Active Jobs\s*2/);
+    expect(before).toContain("1/1");
+
+    // The gateway goes away; the next refresh fails.
+    stubFetch({});
+    await act(async () => {
+      await client.refetchQueries();
+    });
+    await settle(client);
+    const after = container.textContent ?? "";
+    expect(after).not.toMatch(/Active Jobs\s*2/);
+    expect(after).not.toContain("1/1");
+  });
+
+  it("an unexpected /api/jobs shape is unavailable, not 0 active jobs", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/jobs": { status: 200, body: { items: [{ id: "job-a", status: "queued" }] } },
+      "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", status: "online", isStale: false }] } },
+    });
+    const t = await renderPage(<DashboardPage />);
+    expect(t).toContain("Some live data couldn't be loaded");
+    expect(t).not.toMatch(/Active Jobs\s*0/);
+  });
+
+  it("an unexpected /api/agent/me shape is a failed read in Settings, not a crash", async () => {
+    stubFetch({ "/api/agent/me": { status: 200, body: { ok: true } } });
+    const t = await renderPage(<SettingsPage />);
+    expect(t).toContain("Couldn't load your account");
+  });
+
   it("an unexpected /api/kernels shape is unavailable, not 0 kernels", async () => {
     stubFetch({
       ...EMPTY,
