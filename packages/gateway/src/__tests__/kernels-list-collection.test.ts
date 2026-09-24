@@ -15,8 +15,6 @@
  *     time, never a last-change time such as a heartbeat.
  * A failed read keeps the unchanged `{ error, message }` error path. It is never
  * presented as an (empty) collection, because absence is not evidence.
- *
- * agent: implementer-bravo (pcc-readmodels c255d7dc)
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
@@ -193,5 +191,36 @@ describe("GET /api/kernels: collection-v1 envelope { kernels, items, total, asOf
     const recovered = await getList(app);
     expect(recovered.res.statusCode).toBe(200);
     expect(recovered.body.items.length).toBeGreaterThan(0);
+  });
+});
+
+describe("GET /api/kernels: asOf is captured BEFORE the read", () => {
+  let app: FastifyInstance;
+
+  beforeAll(async () => {
+    app = await buildApp();
+  });
+
+  afterAll(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    await app.close();
+    closeStore();
+  });
+
+  it("a clock that moves during the read does not move asOf (read time, taken first)", async () => {
+    const T0 = "2031-02-03T04:05:06.789Z";
+    const T1 = "2031-02-03T04:09:06.789Z";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(T0));
+    const repo = getRepos().kernels as unknown as { findAll: (...a: unknown[]) => unknown };
+    const real = repo.findAll.bind(repo);
+    vi.spyOn(repo, "findAll").mockImplementation((...a: unknown[]) => {
+      vi.setSystemTime(new Date(T1)); // the store read "takes" four minutes
+      return real(...a);
+    });
+    const { res, body } = await getList(app);
+    expect(res.statusCode).toBe(200);
+    expect(body.asOf).toBe(T0);
   });
 });

@@ -65,8 +65,6 @@ export async function kernelRoutes(app: FastifyInstance) {
    *     last-change time such as a heartbeat.
    * The error path is unchanged: a failed read returns { error, message } and
    * never an empty collection.
-   *
-   * agent: implementer-bravo (pcc-readmodels c255d7dc)
    */
   app.get<{ Querystring: { status?: string } }>(
     "/api/kernels",
