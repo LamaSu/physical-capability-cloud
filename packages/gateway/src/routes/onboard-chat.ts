@@ -861,10 +861,9 @@ function holdArgs(
   id: string,
   entry: { conversationId: string; owner: string; args: Record<string, unknown>; expiresAtMs: number },
 ): boolean {
-  if (heldArgs.size >= MAX_HELD_ACTIONS) {
-    const now = Date.now();
-    for (const [key, held] of heldArgs) if (!(now < held.expiresAtMs)) heldArgs.delete(key);
-  }
+  // Expired arguments (possibly a password) do not outlive their window in memory.
+  const now = Date.now();
+  for (const [key, held] of heldArgs) if (!(now < held.expiresAtMs)) heldArgs.delete(key);
   if (heldArgs.size >= MAX_HELD_ACTIONS) return false;
   heldArgs.set(id, entry);
   return true;

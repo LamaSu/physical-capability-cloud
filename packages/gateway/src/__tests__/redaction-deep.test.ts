@@ -256,14 +256,15 @@ describe("redactSecretsDeep closes the R6 gaps", () => {
 
   it("generic auth, hmac, session and key names are secrets; parameter keys are not", () => {
     const uuid = "7a1c9e3b-2f4d-4c8a-b6e0-1d5f9a3c7e2b";
+    const uuidKey = "0b5e2d7c-4a1f-4e9b-8c3d-6f2a1b0e9d8c";
     const b64 = "q8V3xZ2mR7tK9pL4wN6yB1cD5fG0hJ==";
     const hex = "9f".repeat(20);
     const { out, json } = collect({
       auth: uuid, hmac: b64, "X-PCC-Session": uuid, llm_auth: "Bearer opaque", key: b64,
-      signing: { key: "short" }, wallet: { keys: ["abc"] }, hexKey: { key: hex },
+      signing: { key: "short" }, wallet: { keys: ["abc"] }, hexKey: { key: hex }, items: [{ key: uuidKey }],
       params: [{ key: "gradient_duration_min" }, { key: "color" }], keys: { active: 2, wildcard_keys: 0 },
     });
-    for (const secret of [uuid, b64, hex, "short", "abc", "opaque"]) expect(json, secret).not.toContain(secret);
+    for (const secret of [uuid, uuidKey, b64, hex, "short", "abc", "opaque"]) expect(json, secret).not.toContain(secret);
     expect(out.params).toEqual([{ key: "gradient_duration_min" }, { key: "color" }]);
     expect(out.keys).toEqual({ active: 2, wildcard_keys: 0 });
   });

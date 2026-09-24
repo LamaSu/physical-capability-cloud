@@ -196,12 +196,13 @@ const SECRET_PARENT_PARTS = [
   "crypt", "vault", "wallet", "keystore", "keychain", "keyring",
 ];
 const HEX_KEY_MATERIAL_RE = /^(?:0[xX])?[0-9a-fA-F]{32,}$/;
+const UUID_KEY_MATERIAL_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const B64_KEY_MATERIAL_RE = /^[A-Za-z0-9+/_-]{16,}={0,2}$/;
 
-/** A string that reads as random key material: long hex, or base64 mixing upper, lower and digits. */
+/** A string that reads as random key material: long hex, a UUID, or base64 mixing upper, lower and digits. */
 function isKeyMaterial(v: unknown): boolean {
   if (typeof v !== "string") return false;
-  if (HEX_KEY_MATERIAL_RE.test(v)) return true;
+  if (HEX_KEY_MATERIAL_RE.test(v) || UUID_KEY_MATERIAL_RE.test(v)) return true;
   return B64_KEY_MATERIAL_RE.test(v) && /[A-Z]/.test(v) && /[a-z]/.test(v) && /[0-9]/.test(v);
 }
 
