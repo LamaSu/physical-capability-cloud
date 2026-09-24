@@ -5,6 +5,8 @@
  *
  *   kernels         online / stale / other, using the kernel read model's own staleness
  *                   rule (a heartbeat window, with a grace for kernels that list a capability)
+ *   capabilities    listed capabilities, and how many sit on a kernel that is online by
+ *                   that same rule, per type. A listing is not a promise of capacity.
  *   jobs            counts by execution phase, and `active` (phases not finished and known)
  *   settlementNetwork  the network this gateway is CONFIGURED for, labelled as such: it is
  *                   not proof that any escrow lives there
@@ -81,6 +83,23 @@ export interface ProductHomeKernels {
   source: "gateway_kernel_rows";
 }
 
+export interface ProductHomeCapabilityType {
+  /** The capability's type; null for a row with no type. */
+  type: string | null;
+  total: number;
+  onOnlineKernels: number;
+}
+
+export interface ProductHomeCapabilities {
+  state: "read";
+  total: number;
+  /** Capabilities whose kernel is online and not stale by the kernels section's rule. */
+  onOnlineKernels: number;
+  /** Sorted by type, the null type last. */
+  byType: ProductHomeCapabilityType[];
+  source: "gateway_capability_rows";
+}
+
 export interface ProductHomeJobs {
   state: "read";
   total: number;
@@ -118,6 +137,7 @@ export interface ProductHomeDTO {
   /** When the gateway read its records (ISO-8601). */
   asOf: string;
   kernels: ProductHomeKernels | ProductHomeSectionError;
+  capabilities: ProductHomeCapabilities | ProductHomeSectionError;
   jobs: ProductHomeJobs | ProductHomeSectionError;
   settlementNetwork: {
     name: string | null;

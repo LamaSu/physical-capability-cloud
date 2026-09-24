@@ -1,7 +1,7 @@
 /**
  * GET /api/product/home — ProductHomeDTO (PX-7) for the shell's StatusBar and Command
- * Center: kernels online/stale, jobs by execution phase, the configured settlement network,
- * and funds recorded as held in escrow milestones. Aggregates only; behind the API gate like
+ * Center: kernels online/stale, capabilities listed and on online kernels, jobs by execution
+ * phase, the configured settlement network, and funds recorded as held in escrow milestones. Aggregates only; behind the API gate like
  * GET /api/jobs. `cache-control: no-store`.
  *
  * Under TENANT_ENFORCE, job counts are the caller's tenant's (unavailable for a caller with
@@ -42,7 +42,7 @@ export async function productHomeRoutes(app: FastifyInstance) {
     const sources: ProductHomeSources = {
       kernels: attempt("kernels", () => ({
         kernels: (db ?? fail()).select().from(schema.shopKernels).all(),
-        capabilities: (db ?? fail()).select({ kernelId: schema.capabilities.kernelId }).from(schema.capabilities).all(),
+        capabilities: (db ?? fail()).select({ kernelId: schema.capabilities.kernelId, type: schema.capabilities.type }).from(schema.capabilities).all(),
       })),
       jobs:
         tenant && !tenant.tenantId

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES } from "@pcc/spec";
 import {
+  buildCapabilities,
   buildEscrowHeld,
   buildJobs,
   buildKernels,
@@ -39,6 +40,47 @@ describe("kernels", () => {
     // A kernel that lists a capability gets the longer grace; one with no heartbeat is stale.
     expect(k).toMatchObject({ total: 6, online: 2, stale: 2, other: 2, source: "gateway_kernel_rows" });
     expect(k.rule).toMatch(/5 minutes/);
+  });
+});
+
+describe("capabilities", () => {
+  const kernels = [
+    { id: "k-live", status: "online", lastHeartbeat: ago(1 * MIN) },
+    // Past the 24-hour listing grace (it lists a capability, so the 5-minute window does not apply).
+    { id: "k-stale", status: "online", lastHeartbeat: new Date(NOW - 30 * 3_600_000).toISOString() },
+    { id: "k-off", status: "offline", lastHeartbeat: ago(1 * MIN) },
+  ];
+
+  it("counts listed capabilities per type, and those on a kernel online by the kernel rule", () => {
+    const c = buildCapabilities(
+      {
+        kernels,
+        capabilities: [
+          { kernelId: "k-live", type: "3d-printing" },
+          { kernelId: "k-live", type: "cnc" },
+          { kernelId: "k-stale", type: "3d-printing" },
+          { kernelId: "k-off", type: "cnc" },
+          { kernelId: "k-gone", type: "cnc" },
+          { kernelId: "k-live", type: "  " },
+        ],
+      },
+      NOW,
+    );
+    expect(c).toMatchObject({ state: "read", total: 6, onOnlineKernels: 3, source: "gateway_capability_rows" });
+    expect(c.byType).toEqual([
+      { type: "3d-printing", total: 2, onOnlineKernels: 1 },
+      { type: "cnc", total: 3, onOnlineKernels: 1 },
+      { type: null, total: 1, onOnlineKernels: 1 },
+    ]);
+  });
+
+  it("NEGATIVE: a capability on a stale, offline or missing kernel is listed but never counted as on an online kernel", () => {
+    const c = buildCapabilities(
+      { kernels, capabilities: ["k-stale", "k-off", "k-gone"].map((kernelId) => ({ kernelId, type: "cnc" })) },
+      NOW,
+    );
+    expect(c.total).toBe(3);
+    expect(c.onOnlineKernels).toBe(0);
   });
 });
 
@@ -158,7 +200,7 @@ describe("buildProductHomeDTO", () => {
 
   it("NEGATIVE: a section that could not be read is unavailable with a reason, never zero", () => {
     const dto = buildProductHomeDTO(sources({ kernels: { ok: false }, jobs: { ok: false }, escrow: { ok: false } }), AS_OF);
-    for (const section of [dto.kernels, dto.jobs, dto.escrowHeld]) {
+    for (const section of [dto.kernels, dto.capabilities, dto.jobs, dto.escrowHeld]) {
       expect(section.state).toBe("unavailable");
       expect((section as { reason: string }).reason).toMatch(/could not be read/);
     }
@@ -193,6 +235,9 @@ describe("GET /api/product/home on a real store", () => {
     const dto = res.json();
     expect(dto.kernels.state).toBe("read");
     expect(dto.kernels.total).toBeGreaterThan(0);
+    expect(dto.capabilities.state).toBe("read");
+    expect(dto.capabilities.total).toBeGreaterThan(0);
+    expect(dto.capabilities.byType.reduce((n: number, t: { total: number }) => n + t.total, 0)).toBe(dto.capabilities.total);
     expect(dto.jobs.state).toBe("read");
     expect(dto.jobs.total).toBeGreaterThan(0);
     expect(dto.escrowHeld.state).toBe("read");

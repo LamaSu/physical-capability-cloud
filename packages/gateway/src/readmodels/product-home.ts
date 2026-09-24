@@ -14,6 +14,8 @@ import {
   normalizeMoneyStatus,
   toBaseUnits,
   type ExecutionPhase,
+  type ProductHomeCapabilities,
+  type ProductHomeCapabilityType,
   type ProductHomeDTO,
   type ProductHomeEscrowHeld,
   type ProductHomeHeldAmount,
@@ -30,6 +32,7 @@ export interface HomeKernelRow {
 }
 export interface HomeCapabilityRow {
   kernelId: string;
+  type?: string | null;
 }
 export interface HomeJobRow {
   status?: string | null;
@@ -73,20 +76,47 @@ const KERNEL_RULE =
 const HELD = new Set(HELD_MILESTONE_STATUSES);
 const NOT_HELD = new Set(NOT_HELD_MILESTONE_STATUSES);
 
-export function buildKernels(src: { kernels: HomeKernelRow[]; capabilities: HomeCapabilityRow[] }, nowMs: number): ProductHomeKernels {
+type KernelState = "online" | "stale" | "other";
+
+function kernelStates(src: { kernels: HomeKernelRow[]; capabilities: HomeCapabilityRow[] }, nowMs: number): Map<string, KernelState> {
   const listing = new Set(src.capabilities.map((c) => c.kernelId));
-  let online = 0;
-  let stale = 0;
-  let other = 0;
+  const states = new Map<string, KernelState>();
   for (const k of src.kernels) {
-    if (k.status !== "online") {
-      other++;
-      continue;
-    }
-    if (isKernelStale(k.status ?? undefined, k.lastHeartbeat ?? null, listing.has(k.id), nowMs)) stale++;
-    else online++;
+    if (k.status !== "online") states.set(k.id, "other");
+    else if (isKernelStale(k.status ?? undefined, k.lastHeartbeat ?? null, listing.has(k.id), nowMs)) states.set(k.id, "stale");
+    else states.set(k.id, "online");
   }
-  return { state: "read", total: src.kernels.length, online, stale, other, rule: KERNEL_RULE, source: "gateway_kernel_rows" };
+  return states;
+}
+
+export function buildKernels(src: { kernels: HomeKernelRow[]; capabilities: HomeCapabilityRow[] }, nowMs: number): ProductHomeKernels {
+  const counts: Record<KernelState, number> = { online: 0, stale: 0, other: 0 };
+  for (const state of kernelStates(src, nowMs).values()) counts[state]++;
+  return { state: "read", total: src.kernels.length, ...counts, rule: KERNEL_RULE, source: "gateway_kernel_rows" };
+}
+
+/** A capability counts as on an online kernel only when its kernel row exists and is online by the kernel rule. */
+export function buildCapabilities(
+  src: { kernels: HomeKernelRow[]; capabilities: HomeCapabilityRow[] },
+  nowMs: number,
+): ProductHomeCapabilities {
+  const states = kernelStates(src, nowMs);
+  const byType = new Map<string | null, ProductHomeCapabilityType>();
+  let onOnline = 0;
+  for (const c of src.capabilities) {
+    const type = typeof c.type === "string" && c.type.trim() !== "" ? c.type.trim() : null;
+    const t = byType.get(type) ?? { type, total: 0, onOnlineKernels: 0 };
+    t.total++;
+    if (states.get(c.kernelId) === "online") {
+      t.onOnlineKernels++;
+      onOnline++;
+    }
+    byType.set(type, t);
+  }
+  const sorted = [...byType.values()].sort((a, b) =>
+    a.type === b.type ? 0 : a.type === null ? 1 : b.type === null ? -1 : a.type < b.type ? -1 : 1,
+  );
+  return { state: "read", total: src.capabilities.length, onOnlineKernels: onOnline, byType: sorted, source: "gateway_capability_rows" };
 }
 
 export function buildJobs(rows: HomeJobRow[]): ProductHomeJobs {
@@ -155,6 +185,7 @@ export function buildProductHomeDTO(src: ProductHomeSources, asOf: string): Prod
     schemaId: PRODUCT_HOME_SCHEMA_ID,
     asOf,
     kernels: src.kernels.ok ? buildKernels(src.kernels.value, nowMs) : unavailable(src.kernels, "kernel records"),
+    capabilities: src.kernels.ok ? buildCapabilities(src.kernels.value, nowMs) : unavailable(src.kernels, "kernel and capability records"),
     jobs: src.jobs.ok ? buildJobs(src.jobs.value) : unavailable(src.jobs, "job records"),
     settlementNetwork: {
       name,
