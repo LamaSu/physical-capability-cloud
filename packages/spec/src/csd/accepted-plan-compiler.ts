@@ -29,9 +29,11 @@
  *    permissive gate would approve it; with no gate injected, a non-zero tier is refused.
  *  - A SEALED DEAL. `acceptedDealDigest` = sha256 over the canonical form of the ENTIRE compiled deal:
  *    every job, every unit field (tier, fee, amounts, payees, order), the signing operators, the
- *    reservation, the currency and its decimals, both v3 roots, and economics' agreementHash plus its
+ *    reservation, the currency and its decimals, both v3 roots, economics' agreementHash plus its
  *    two terms hashes (all null when no agreement applies; the agreementHash also covers the
- *    agreement's envelope — asOf, version, deadline). This is the digest the reservation
+ *    agreement's envelope — asOf, version, deadline), and each node's EXECUTION CONTRACT (N25): the
+ *    `canonicalPlan` VCR hashes into `planHash` (server terms plus the node's plain-JSON `inputs` and
+ *    `constraints`, e.g. WHICH document gets printed). This is the digest the reservation
  *    consume seals (MUST-CLOSE 8). The v3 `compositionRoot` is derived here from the same input and
  *    echoed into every unit, but it commits the PLAN (contract, providers, prices, wallets, program),
  *    NOT the settlement terms: two deals that differ only in a node's tier, the fee, or the signing
@@ -67,6 +69,8 @@ import {
   type MatchedDAG,
 } from "./composition-commitment.js";
 import type { Address } from "../types/common.js";
+import { CANONICAL_PLAN_SCHEMA, planHashOf, type CanonicalPlan, type PlanHash } from "./canonical-plan.js";
+import { EMPTY_PLAN_JSON, copyPlanJson, type PlanJsonObject } from "./plan-json.js";
 
 // ── Frozen V-next ABI limits (escrow's VNEXT_SETTLEMENT_ABI.md §2, §5) ─────────────────────────
 export const MAX_UNITS_PER_JOB = 16;
@@ -78,7 +82,7 @@ export const MAX_FEE_BPS = 1000;
 export const BPS_DENOMINATOR = 10_000n;
 /** Stored in each UnitConfig; 0 means "not composed". */
 export const COMPOSITION_SCHEMA_VERSION = 3;
-/** Domain tag inside the accepted-deal digest's canonical preimage. v2 added `agreementHash`. */
+/** Domain tag inside the accepted-deal digest's canonical preimage. v2 added `agreementHash` and each node's `planHash` (N25). */
 export const ACCEPTED_DEAL_DOMAIN = "PCC:accepted-deal:v2";
 /**
  * Settlement tokens this compiler will price, with their on-chain decimals. Server-owned: decimals
@@ -110,6 +114,14 @@ export interface AcceptedPlanNode {
   committedProgramHash: string | null;
   /** The node's evidence requirements from its CSD tier (committed in the v3 contract root). */
   evidenceRequirements: EvidenceRequirement[];
+  /**
+   * Execution inputs (N25): the caller's plain-JSON content, e.g. the document hash and page count.
+   * It says WHAT runs, never who is paid or how much. It is sealed through the node's `planHash`.
+   * Absent means `{}`.
+   */
+  inputs?: PlanJsonObject;
+  /** Execution constraints (N25), e.g. a deadline: plain JSON, sealed like `inputs`. Absent means `{}`. */
+  constraints?: PlanJsonObject;
 }
 
 export interface AcceptedPlanEdge {
@@ -186,6 +198,10 @@ export interface NodeUnitBinding {
   stepIdBytes32: Bytes32;
   tier: number;
   committedProgramHash: string | null;
+  /** VCR's per-node execution contract (N25): what runs, for whom, at what price, on which inputs. */
+  canonicalPlan: CanonicalPlan;
+  /** `planHashOf(canonicalPlan)`. VCR recomputes it from the plan bytes it receives. Sealed. */
+  planHash: PlanHash;
 }
 
 export interface CompiledAcceptedPlan {
@@ -219,6 +235,7 @@ export type CompileViolation =
   | { code: "invalid-node-id"; nodeId: string }
   | { code: "duplicate-node"; nodeId: string }
   | { code: "invalid-node-field"; nodeId: string; field: string }
+  | { code: "invalid-execution-json"; nodeId: string; field: "inputs" | "constraints"; reason: string }
   | { code: "invalid-tier"; nodeId: string; tierKey: string }
   | { code: "operator-is-payer"; nodeId: string }
   | { code: "gross-out-of-range"; nodeId: string }
@@ -467,6 +484,24 @@ function copyFields(
   return Object.freeze(out);
 }
 
+/**
+ * Execution JSON (`inputs`/`constraints`) that could not be copied as plain JSON. Only `execJson` creates
+ * one, and copied data can never be an instance (copyPlanJson refuses non-plain prototypes), so a caller
+ * cannot forge it. Node validation reports it as `invalid-execution-json`.
+ */
+class InvalidExecutionJson {
+  constructor(readonly reason: string) {
+    Object.freeze(this);
+  }
+}
+
+/** A node's execution JSON, read once: absent is `{}`; otherwise an owned frozen copy, or the refusal. */
+function execJson(x: unknown): PlanJsonObject | InvalidExecutionJson {
+  if (x === undefined) return EMPTY_PLAN_JSON;
+  const c = copyPlanJson(x);
+  return c.ok ? c.value : new InvalidExecutionJson(c.reason);
+}
+
 const NODE_FIELDS = [
   "nodeId", "capabilityId", "capabilityType", "csd", "tierKey", "operator", "payoutAddress",
   "grossBaseUnits", "matchedCapabilityDigest", "committedProgramHash",
@@ -504,6 +539,8 @@ function snapshotInput(untrusted: unknown): AcceptedPlanInput | { refused: Compi
           out.evidenceRequirements = copyList(o.evidenceRequirements, MAX_EVIDENCE_REQUIREMENTS_PER_NODE, over("evidenceRequirements"), (r) =>
             copyFields(r, ["requirementId", "evidenceTypeId", "tier"]),
           );
+          out.inputs = execJson(o.inputs);
+          out.constraints = execJson(o.constraints);
         }),
       ),
       edges: copyList(i.edges, MAX_PLAN_EDGES, over("edges"), (e) => copyFields(e, ["from", "to"])),
@@ -614,6 +651,10 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     }
     if (!Array.isArray(n.evidenceRequirements)) {
       v.push({ code: "invalid-node-field", nodeId: id, field: "evidenceRequirements" });
+    }
+    for (const field of ["inputs", "constraints"] as const) {
+      const x: unknown = n[field];
+      if (x instanceof InvalidExecutionJson) v.push({ code: "invalid-execution-json", nodeId: id, field, reason: x.reason });
     }
     if (typeof n.grossBaseUnits !== "bigint" || n.grossBaseUnits < MIN_GROSS_BASE_UNITS || n.grossBaseUnits > MAX_GROSS_BASE_UNITS) {
       v.push({ code: "gross-out-of-range", nodeId: id });
@@ -782,6 +823,7 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
         compositionRoot,
         payouts,
       });
+      const canonicalPlan = canonicalPlanOf(input.planId, n, { g, currency: input.currency, decimals: currencyDecimals!, jobId, milestoneIndex, tier });
       nodeToUnit.push({
         nodeId: id,
         jobIndex,
@@ -792,6 +834,8 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
         stepIdBytes32: stepIdBytes32(id),
         tier,
         committedProgramHash: n.committedProgramHash,
+        canonicalPlan,
+        planHash: planHashOf(canonicalPlan),
       });
     }
     jobs.push({ jobId, operator: first.operator, payer: input.payer, units, nodeIds: [...ids] });
@@ -813,6 +857,39 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     nodeToUnit,
   };
   return { ok: true, plan: { ...unsealed, acceptedDealDigest: acceptedDealDigest(unsealed) } };
+}
+
+/**
+ * VCR's per-node execution contract (N25), built only from this compiler's validated copy: server terms
+ * plus the node's copied `inputs`/`constraints`. Deeply frozen.
+ */
+function canonicalPlanOf(
+  planId: string,
+  n: AcceptedPlanNode,
+  u: { g: bigint; currency: string; decimals: number; jobId: string; milestoneIndex: number; tier: number },
+): CanonicalPlan {
+  const lc = (x: string) => x.toLowerCase();
+  const evidence = n.evidenceRequirements.map((r) =>
+    Object.freeze({ requirementId: r.requirementId, evidenceTypeId: r.evidenceTypeId, tier: r.tier }),
+  );
+  return Object.freeze({
+    schema: CANONICAL_PLAN_SCHEMA,
+    planId,
+    planNodeId: n.nodeId,
+    capability: Object.freeze({ type: n.capabilityType, id: n.capabilityId, csd: n.csd, matchedCapabilityDigest: lc(n.matchedCapabilityDigest) }),
+    operator: lc(n.operator),
+    payTo: lc(n.payoutAddress),
+    amount: Object.freeze({ baseUnits: u.g.toString(), currency: u.currency, decimals: u.decimals }),
+    job: Object.freeze({ jobId: u.jobId, milestoneIndex: u.milestoneIndex, stepId: n.nodeId }),
+    assurance: Object.freeze({
+      tier: u.tier,
+      tierKey: n.tierKey,
+      committedProgramHash: n.committedProgramHash === null ? null : lc(n.committedProgramHash),
+      evidence: Object.freeze(evidence) as CanonicalPlan["assurance"]["evidence"],
+    }),
+    inputs: n.inputs ?? EMPTY_PLAN_JSON,
+    constraints: n.constraints ?? EMPTY_PLAN_JSON,
+  });
 }
 
 /** Integer base units: canonical (no sign, no leading zeros) and at most 78 digits (a uint256 has 78). */
@@ -1059,6 +1136,10 @@ export function acceptedDealDigest(plan: Omit<CompiledAcceptedPlan, "acceptedDea
       stepIdBytes32: lc(b.stepIdBytes32),
       tier: b.tier,
       committedProgramHash: lc(b.committedProgramHash),
+      // The carried hash is what VCR reads; the hash RECOMPUTED from the carried content makes any
+      // disagreement between the two change this digest, so recompute-and-compare catches it.
+      planHash: lc(b.planHash),
+      canonicalPlanHash: planHashOf(b.canonicalPlan),
     })),
   });
   return toHex(sha256(new TextEncoder().encode(preimage)));
