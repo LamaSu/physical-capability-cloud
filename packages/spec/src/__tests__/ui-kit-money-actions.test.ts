@@ -378,6 +378,18 @@ describe("F2: money detection is fail-closed by construction (unlisted writes ar
     });
   }
 
+  for (const p of ["/api%2Ffeedback", "/api/feedback%2Fagent-report", "/api/artifacts%2Fa1%2Ffork", "/api%2fartifacts"]) {
+    it(`an encoded separator has no canonical form and fails closed (${p})`, () => {
+      // Decoding would turn these into allowlisted routes, but the gateway does not split on
+      // %2F, so the kit cannot know what they route to: money until proven otherwise.
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(act({ path: p }));
+      btn("Go").click();
+      expect(document.querySelector(".pcc-overlay")).not.toBeNull();
+      expect(posts(calls).length).toBe(0);
+    });
+  }
+
   it("every allowlist entry is a real, non-x402 gateway write route (no dead or paid entries)", () => {
     const list = /var NON_MONEY_WRITES = \[([\s\S]*?)\];/.exec(kitSrc)![1]!;
     const entries = Array.from(list.matchAll(/'(POST|PATCH) ([^']+)'/g)).map((m) => [m[1]!, m[2]!] as const);
