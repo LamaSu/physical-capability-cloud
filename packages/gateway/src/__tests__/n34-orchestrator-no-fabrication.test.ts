@@ -20,6 +20,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { orchestratorRoutes } from "../routes/orchestrator.js";
 import { orchestratorTemplatesRoutes } from "../routes/orchestrator-templates.js";
 import { kernelRoutes } from "../routes/kernels.js";
+import { jobRoutes } from "../routes/jobs.js";
+import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { initStore, closeStore } from "../db.js";
@@ -183,6 +185,49 @@ const call = (c: { method: Method | "HEAD"; url: string; payload?: unknown }) =>
   app.inject({ method: c.method, url: c.url, payload: c.payload as any });
 
 describe("NEGATIVE: without PCC_DEMO_ROUTES every orchestrator route refuses (501 not_available)", () => {
+  it("every route the plugin registers (8) is refused with its own message, none with the fallback", async () => {
+    const FALLBACK = `Instrument orchestration data ${RETURNED}`;
+    const registered: Array<{ method: string; url: string }> = [];
+    const probe = Fastify({ logger: false });
+    probe.addHook("onRoute", (r) => {
+      for (const m of Array.isArray(r.method) ? r.method : [r.method]) {
+        if (m !== "HEAD") registered.push({ method: m, url: r.url });
+      }
+    });
+    await probe.register(orchestratorRoutes);
+    await probe.ready();
+    try {
+      expect(registered).toHaveLength(8);
+      // The table above exercises each of them.
+      expect(new Set(GATED.map((c) => `${c.method} ${c.url.split("?")[0]}`)).size).toBe(8);
+      for (const r of registered) {
+        const res = await probe.inject({ method: r.method as Method, url: r.url.replace(/:[A-Za-z]+/g, "x") });
+        expect(res.statusCode, `${r.method} ${r.url}`).toBe(501);
+        expect(res.json().message, `${r.method} ${r.url}`).not.toBe(FALLBACK);
+      }
+    } finally {
+      await probe.close();
+    }
+  });
+
+  it("every `see` pointer names a route this gateway registers", async () => {
+    const probe = Fastify({ logger: false });
+    await probe.register(kernelRoutes);
+    await probe.register(jobRoutes);
+    await probe.register(jobSubmitRoutes);
+    await probe.ready();
+    try {
+      const pointers = new Set(GATED.flatMap((c) => c.see));
+      expect(pointers.size).toBe(5);
+      for (const p of pointers) {
+        const [method, url] = p.split(" ");
+        expect(probe.hasRoute({ method: method as Method, url }), p).toBe(true);
+      }
+    } finally {
+      await probe.close();
+    }
+  });
+
   for (const c of GATED) {
     it(`${c.method} ${c.url} -> 501, its own message and pointers, nothing from the fixtures`, async () => {
       const res = await call(c);

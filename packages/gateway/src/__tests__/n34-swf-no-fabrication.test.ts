@@ -104,6 +104,13 @@ describe("NEGATIVE: without PCC_DEMO_ROUTES the distribution refuses (501) befor
     expect(swfService.getClaimsForEpoch(epochId)).toEqual([]);
   });
 
+  it("the `see` pointer names a route this gateway registers", () => {
+    for (const p of REFUSAL.see) {
+      const [method, url] = p.split(" ");
+      expect(app.hasRoute({ method: method as "GET", url }), p).toBe(true);
+    }
+  });
+
   it("an unknown epoch is refused the same way (501, not the old 409)", async () => {
     const res = await post("/api/swf/epochs/swf_epoch_none/distribute");
     expect(res.statusCode).toBe(501);

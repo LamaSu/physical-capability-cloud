@@ -20,6 +20,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { protocolRoutes } from "../routes/protocols.js";
 import { jobRoutes } from "../routes/jobs.js";
+import { jobSubmitRoutes } from "../routes/job-submit.js";
+import { capabilityRoutes } from "../routes/capabilities.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { initStore, closeStore } from "../db.js";
@@ -328,6 +330,24 @@ describe("NEGATIVE: without PCC_DEMO_ROUTES every protocol route refuses (501 no
         const res = await probe.inject({ method: r.method as Method, url: r.url.replace(/:[A-Za-z]+/g, "x") });
         expect(res.statusCode, `${r.method} ${r.url}`).toBe(501);
         expect(res.json().message, `${r.method} ${r.url}`).not.toBe(FALLBACK);
+      }
+    } finally {
+      await probe.close();
+    }
+  });
+
+  it("every `see` pointer names a route this gateway registers", async () => {
+    const probe = Fastify({ logger: false });
+    await probe.register(jobRoutes);
+    await probe.register(jobSubmitRoutes);
+    await probe.register(capabilityRoutes);
+    await probe.ready();
+    try {
+      const pointers = new Set(GATED.flatMap((c) => c.see));
+      expect(pointers.size).toBe(4);
+      for (const p of pointers) {
+        const [method, url] = p.split(" ");
+        expect(probe.hasRoute({ method: method as Method, url }), p).toBe(true);
       }
     } finally {
       await probe.close();
