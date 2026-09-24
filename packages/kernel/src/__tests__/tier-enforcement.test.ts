@@ -9,10 +9,11 @@
  * integration test for the JobRunner tier gating behavior.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as Sentry from "@sentry/node";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
+import { initSafetyGateway, resetSafetyGateway } from "../safety/gateway.js";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "../adapters/types.js";
 import type { EvidenceEvent, EvidenceSource, SHA256 } from "@pcc/spec";
 
@@ -350,9 +351,27 @@ describe("EvidenceEmitter — checkTierRequirements rejects fabricated events", 
 describe("JobRunner — tier gating", () => {
   let emitter: EvidenceEmitter;
 
+  /**
+   * These tests exercise TIER gating, not safety admission. JobRunner routes
+   * every machine command through the SafetyGateway, and load_gcode/start are
+   * class "scoped" — so each job here needs an initialized gateway and an
+   * execution scope to reach the tier logic under test. The safety boundary
+   * itself (including the zero-actuation negative control for a job WITHOUT a
+   * scope) is covered in job-runner-safety.test.ts.
+   */
+  const TEST_SCOPE = "scope-tier-test";
+
   beforeEach(() => {
     emitter = new EvidenceEmitter(KERNEL_ID);
+    // Fresh gateway per test so one test's device failures cannot trip the
+    // circuit breaker for the next.
+    resetSafetyGateway();
+    initSafetyGateway();
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    resetSafetyGateway();
   });
 
   describe("Tier 0 job", () => {
@@ -368,6 +387,7 @@ describe("JobRunner — tier gating", () => {
 
       const result = await runner.run({
         jobId: "job-tier0-001",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 0,
@@ -389,6 +409,7 @@ describe("JobRunner — tier gating", () => {
 
       await runner.run({
         jobId: "job-tier0-nosensors",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 0,
@@ -413,6 +434,7 @@ describe("JobRunner — tier gating", () => {
 
       const result = await runner.run({
         jobId: "job-tier1-001",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 1,
@@ -437,6 +459,7 @@ describe("JobRunner — tier gating", () => {
 
       const result = await runner.run({
         jobId: "job-tier1-warn",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 1,
@@ -463,6 +486,7 @@ describe("JobRunner — tier gating", () => {
 
       const result = await runner.run({
         jobId: "job-tier2-001",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 2,
@@ -491,6 +515,7 @@ describe("JobRunner — tier gating", () => {
 
       const result = await runner.run({
         jobId: "job-tier2-nocam",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 2,
@@ -519,6 +544,7 @@ describe("JobRunner — tier gating", () => {
 
       const result = await runner.run({
         jobId: "job-load-fail",
+        scopeId: TEST_SCOPE,
         stepId: "step-1",
         gcodeHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as SHA256,
         assuranceTier: 0,
