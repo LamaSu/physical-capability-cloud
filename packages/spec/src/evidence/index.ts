@@ -26,6 +26,9 @@ export * from "./is-fabricated.js";
 // inspected_output, the one classification of how strongly evidence shows the
 // work was done (must-close 5).
 export * from "./evidence-level.js";
+// summarizeEvidence — EvidenceSummaryV1, the evidence read model for product
+// surfaces: explicit enums so no UI reads "verified" from "evidence exists".
+export * from "./evidence-summary.js";
 export * from "./eligibility.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
