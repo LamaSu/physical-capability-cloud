@@ -1,9 +1,10 @@
 /**
  * PX-4 render-state provenance: the authority class of every rendered datum is DERIVED by
  * the trusted side (structure + the server-owned bind registry), never chosen by a manifest
- * or by generated content; bound data carries a visible "as of" freshness line, is marked
- * stale past its source's budget or when a refresh fails, and can never regress to an older
- * snapshot. Unit tests over the audited modules + end-to-end over the REBUILT kit bytes.
+ * or by generated content. Bound data is "fresh" only with a SOURCE read time and only within
+ * its budget (a timer expires it); a failed, off-schema, partial or empty-without-time read
+ * CLEARS the view and says "unavailable"; an older snapshot never regresses the view, across
+ * binding restarts too. Unit tests over the audited modules + end-to-end over the REBUILT kit.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -12,8 +13,8 @@ import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
 import { dashboardManifestToIr, validateIr, sourceClassOf, provenanceOf, type IrNode } from "./dashboard-ir.js";
-import { asOfFrom, isStale, acceptsNewer, ASOF_MAX_SKEW_MS } from "./dashboard-ir-binder.js";
-import { renderIrDoc, applyFreshness, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { sourceAsOf, isStale, acceptsNewer, ASOF_MAX_SKEW_MS } from "./dashboard-ir-binder.js";
+import { renderIrDoc, applyFreshness, applyUnknownTime, applyUnavailable, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
 const KIT = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
 const allNodes = (n: IrNode, out: IrNode[] = []): IrNode[] => { out.push(n); (n.children || []).forEach((c) => allNodes(c, out)); return out; };
@@ -94,20 +95,15 @@ describe("PX-4 derivation: the class is assigned by the source, never by the man
 
 describe("PX-4 freshness primitives (binder)", () => {
   const NOW = Date.parse("2026-09-24T12:00:00.000Z");
-  it("asOfFrom trusts an own-property ISO asOf, else falls back to receipt time", () => {
-    expect(asOfFrom({ asOf: "2026-09-24T11:59:00Z" }, NOW)).toBe("2026-09-24T11:59:00.000Z");
-    const fb = new Date(NOW).toISOString();
-    expect(asOfFrom({}, NOW)).toBe(fb);
-    expect(asOfFrom({ asOf: 12345 }, NOW)).toBe(fb);
-    expect(asOfFrom({ asOf: "not a date" }, NOW)).toBe(fb);
-    expect(asOfFrom([{ asOf: "2026-09-24T11:59:00Z" }], NOW)).toBe(fb);
-    expect(asOfFrom(null, NOW)).toBe(fb);
-    expect(asOfFrom(Object.create({ asOf: "2026-09-24T11:59:00Z" }), NOW)).toBe(fb); // inherited: ignored
+  it("sourceAsOf trusts only an own-property ISO asOf; receipt time is NOT a substitute", () => {
+    expect(sourceAsOf({ asOf: "2026-09-24T11:59:00Z" }, NOW)).toBe("2026-09-24T11:59:00.000Z");
+    for (const d of [{}, { asOf: 12345 }, { asOf: "not a date" }, [{ asOf: "2026-09-24T11:59:00Z" }], null, Object.create({ asOf: "2026-09-24T11:59:00Z" })]) {
+      expect(sourceAsOf(d, NOW), JSON.stringify(d)).toBeNull();
+    }
   });
-  it("a future-dated asOf beyond the skew is NOT trusted (it would freeze the view forever)", () => {
-    const fb = new Date(NOW).toISOString();
-    expect(asOfFrom({ asOf: new Date(NOW + ASOF_MAX_SKEW_MS + 1000).toISOString() }, NOW)).toBe(fb);
-    expect(asOfFrom({ asOf: new Date(NOW + 30_000).toISOString() }, NOW)).toBe(new Date(NOW + 30_000).toISOString()); // small skew ok
+  it("a future-dated asOf beyond the skew is not trusted (it would freeze the view forever)", () => {
+    expect(sourceAsOf({ asOf: new Date(NOW + ASOF_MAX_SKEW_MS + 1000).toISOString() }, NOW)).toBeNull();
+    expect(sourceAsOf({ asOf: new Date(NOW + 30_000).toISOString() }, NOW)).toBe(new Date(NOW + 30_000).toISOString()); // small skew ok
   });
   it("isStale compares against the source budget", () => {
     expect(isStale(new Date(NOW - 60_000).toISOString(), 120_000, NOW)).toBe(false);
@@ -125,7 +121,7 @@ describe("PX-4 freshness primitives (binder)", () => {
 describe("PX-4 renderer markers (fake DOM)", () => {
   type FE = RElement & { attrs: Record<string, string> };
   const mk = (): FE => { const children: RElement[] = []; const attrs: Record<string, string> = {};
-    return { textContent: "", className: "", children, attrs, setAttr(n: string, v: string) { attrs[n] = v; }, appendChild(c: RElement) { children.push(c); return c; } } as FE; };
+    return { textContent: "", className: "", children, attrs, setAttr(n: string, v: string) { attrs[n] = v; }, removeAttr(n: string) { delete attrs[n]; }, appendChild(c: RElement) { children.push(c); return c; } } as FE; };
   const doc: RDocument = { createElement: () => mk() };
   const walk = (e: RElement, out: FE[] = []): FE[] => { out.push(e as FE); e.children.forEach((c) => walk(c, out)); return out; };
 
@@ -140,18 +136,29 @@ describe("PX-4 renderer markers (fake DOM)", () => {
     for (const e of els) if (e.attrs["data-source"]) expect(e.className).toContain("pcc-src-" + e.attrs["data-source"]);
   });
 
-  it("applyFreshness writes a visible text line and toggles the stale class idempotently", () => {
+  it("applyFreshness labels the SOURCE read time with its date and toggles stale idempotently", () => {
     const host = mk(), meta = mk(); host.className = "pcc-stat pcc-src-authoritative";
     applyFreshness(host, meta, "2026-09-24T10:12:33.000Z", false);
-    expect(meta.textContent).toBe("as of 10:12:33Z");
+    expect(meta.textContent).toBe("source read 2026-09-24 10:12:33Z");
     expect(host.attrs["data-as-of"]).toBe("2026-09-24T10:12:33.000Z");
     expect(host.className).not.toContain("pcc-stale");
     applyFreshness(host, meta, "2026-09-24T10:12:33.000Z", true);
     applyFreshness(host, meta, "2026-09-24T10:12:33.000Z", true);
-    expect(meta.textContent).toBe("as of 10:12:33Z · stale");
+    expect(meta.textContent).toBe("source read 2026-09-24 10:12:33Z · stale");
     expect(host.className.split(" ").filter((c) => c === "pcc-stale").length).toBe(1);
-    applyFreshness(host, meta, "2026-09-24T10:15:00.000Z", false);
-    expect(host.className).not.toContain("pcc-stale");
+  });
+
+  it("unknown source time and unavailability drop data-as-of and say so", () => {
+    const host = mk(), meta = mk();
+    applyFreshness(host, meta, "2026-09-24T10:12:33.000Z", false);
+    applyUnknownTime(host, meta, "2026-09-24T10:13:00.000Z");
+    expect(host.attrs["data-as-of"]).toBeUndefined();
+    expect(meta.textContent).toBe("source time not reported · received 2026-09-24 10:13:00Z");
+    expect(host.className).toContain("pcc-time-unknown");
+    applyUnavailable(host, meta, "HTTP 500");
+    expect(host.className).toContain("pcc-unavail");
+    expect(host.className).not.toContain("pcc-time-unknown");
+    expect(meta.textContent).toBe("unavailable · HTTP 500");
   });
 });
 
@@ -161,8 +168,14 @@ const statManifest = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sectio
   { kind: "note", text: "agent context" },
   { kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } },
 ] }] };
-type Reply = { status: number; json?: unknown };
-function scene(replies: Reply[], nowMs: number) {
+const listManifest = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec L", windows: [
+  { kind: "list", binding: { path: "/api/capabilities" }, item: { title: "name", meta: ["type"], statusFrom: "available" } },
+] }] };
+const cardManifest = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec C", windows: [
+  { kind: "capability", binding: { path: "/api/capabilities/cap-1" } },
+] }] };
+type Reply = { status: number; json?: unknown; raw?: string; ct?: string };
+function scene(replies: Reply[], nowMs: number, opts: { origin?: boolean } = {}) {
   const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p class="pcc-invalid">waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
   const w: any = dom.window;
   let now = nowMs;
@@ -173,15 +186,17 @@ function scene(replies: Reply[], nowMs: number) {
   w.Date.now = () => now;
   w.TextDecoder = NodeTextDecoder;
   w.parent.postMessage = () => {};
-  w.__PCC_IR_ORIGIN__ = "https://capability.network";
+  if (opts.origin !== false) w.__PCC_IR_ORIGIN__ = "https://capability.network";
+  let hidden = false;
+  Object.defineProperty(w.document, "hidden", { configurable: true, get: () => hidden });
   let call = 0;
   w.fetch = () => {
     const r = replies[Math.min(call++, replies.length - 1)]!;
-    const bytes = new NodeTextEncoder().encode(JSON.stringify(r.json ?? {}));
+    const bytes = new NodeTextEncoder().encode(r.raw !== undefined ? r.raw : JSON.stringify(r.json ?? {}));
     let sent = false;
     return Promise.resolve({
       status: r.status, redirected: false,
-      headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? "application/json" : null) },
+      headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? (r.ct ?? "application/json") : null) },
       body: { getReader: () => ({ read: async () => (sent ? { done: true } : ((sent = true), { done: false, value: bytes })), cancel: async () => {} }), cancel: async () => {} },
     });
   };
@@ -191,27 +206,41 @@ function scene(replies: Reply[], nowMs: number) {
   const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
   /** Advance to the next POLL tick (skip the per-request timeout timers). */
   const nextPoll = async () => {
-    const polls = timers.filter((t) => t.at - now >= 5000 && t.at - now < 60_000).sort((a, b) => a.at - b.at);
+    const polls = timers.filter((t) => t.at - now >= 5000 && t.at - now <= 600_000).sort((a, b) => a.at - b.at);
     const t = polls[0]; if (!t) throw new Error("no poll timer scheduled");
     timers.splice(timers.indexOf(t), 1); now = t.at; t.fn(); await settle();
   };
-  const stat = () => w.document.querySelector(".pcc-stat") as any;
-  const fresh = () => (stat()?.nextElementSibling as any);
-  return { w, deliver, settle, nextPoll, stat, fresh, setNow: (t: number) => { now = t; }, close: () => w.close() };
+  /** Advance the clock by `ms`, firing every timer that falls due, in time order. */
+  const advance = async (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      const due = timers.filter((t) => t.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      timers.splice(timers.indexOf(due), 1); now = Math.max(now, due.at); due.fn(); await settle();
+    }
+    now = end;
+  };
+  const setHidden = async (h: boolean) => { hidden = h; w.document.dispatchEvent(new w.Event("visibilitychange")); await settle(); };
+  const q = (sel: string) => w.document.querySelector(sel) as any;
+  const stat = () => q(".pcc-stat");
+  const lineOf = (el: any) => el?.nextElementSibling as any;
+  const fresh = () => lineOf(stat());
+  return { w, deliver, settle, nextPoll, advance, setHidden, q, stat, lineOf, fresh, close: () => w.close() };
 }
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
+const value = (s: ReturnType<typeof scene>) => (s.stat().querySelector(".pcc-value")!.textContent as string);
 
 describe("PX-4 end-to-end on the rebuilt pcc-ir-kit.js", () => {
-  it("prose is marked proposed; bound data authoritative with a fresh 'as of' line", async () => {
+  it("prose is marked proposed; bound data authoritative with a dated source-read line", async () => {
     const s = scene([{ status: 200, json: { progress: 42, asOf: iso(T0 - 10_000) } }], T0);
     s.deliver(statManifest); await s.settle();
     expect(s.w.document.querySelector(".pcc-text")!.getAttribute("data-source")).toBe("proposed");
     expect(s.w.document.querySelector(".pcc-heading")!.getAttribute("data-source")).toBe("proposed");
     expect(s.stat().getAttribute("data-source")).toBe("authoritative");
-    expect(s.stat().textContent).toContain("42");
+    expect(value(s)).toBe("42");
     expect(s.stat().getAttribute("data-as-of")).toBe(iso(T0 - 10_000));
-    expect(s.fresh().textContent).toBe("as of 11:59:50Z");
+    expect(s.fresh().textContent).toBe("source read 2026-09-24 11:59:50Z");
     expect(s.stat().className).not.toContain("pcc-stale");
     s.close();
   });
@@ -227,131 +256,190 @@ describe("PX-4 end-to-end on the rebuilt pcc-ir-kit.js", () => {
   it("an OLDER snapshot (reconnect / out-of-order poll) never regresses the view", async () => {
     const s = scene([
       { status: 200, json: { progress: 80, asOf: iso(T0 - 5_000) } },
-      { status: 200, json: { progress: 10, asOf: iso(T0 - 60_000) } }, // older state arriving late
+      { status: 200, json: { progress: 10, asOf: iso(T0 - 60_000) } },
     ], T0);
     s.deliver(statManifest); await s.settle();
-    expect(s.stat().textContent).toContain("80");
+    expect(value(s)).toBe("80");
     await s.nextPoll();
-    expect(s.stat().textContent).toContain("80");
-    expect(s.stat().textContent).not.toContain("10");
+    expect(value(s)).toBe("80");
     expect(s.stat().getAttribute("data-as-of")).toBe(iso(T0 - 5_000));
     s.close();
   });
 
-  it("a FAILED refresh marks the shown datum stale (never implied current)", async () => {
-    const s = scene([
-      { status: 200, json: { progress: 55, asOf: iso(T0 - 1_000) } },
-      { status: 500 },
-    ], T0);
-    s.deliver(statManifest); await s.settle();
-    expect(s.fresh().textContent).not.toContain("stale");
-    await s.nextPoll();
-    expect(s.stat().textContent).toContain("55");
-    expect(s.fresh().textContent).toContain("stale");
-    expect(s.stat().className).toContain("pcc-stale");
-    s.close();
-  });
-
-  it("a future-dated asOf cannot freeze the view against later real updates", async () => {
+  it("a future-dated asOf is not a source time: shown as time-unknown, and cannot freeze later updates", async () => {
     const s = scene([
       { status: 200, json: { progress: 1, asOf: iso(T0 + 24 * 3600_000) } }, // bogus far future
       { status: 200, json: { progress: 2, asOf: iso(T0 + 20_000) } },
     ], T0);
     s.deliver(statManifest); await s.settle();
-    expect(s.stat().getAttribute("data-as-of")).toBe(iso(T0)); // fell back to receipt time
+    expect(s.stat().getAttribute("data-as-of")).toBeNull();
+    expect(s.fresh().textContent).toContain("source time not reported");
     await s.nextPoll();
-    expect(s.stat().textContent).toContain("2"); // the later real update was accepted
+    expect(value(s)).toBe("2"); // the later timed update was accepted
     s.close();
   });
 });
 
-// ── absence is not evidence: failure and off-schema payloads (found by a live trace) ──────
-// Production `/api/kernels` answers `{ kernels: [...] }` and `/api/jobs` answers 401 to an
-// anonymous read. Before this, both rendered as an EMPTY authoritative list (the first with a
-// fresh "as of" line), which reads as "none". They must say "unavailable" instead.
-const listManifest = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec L", windows: [
-  { kind: "list", binding: { path: "/api/capabilities" }, item: { title: "name", statusFrom: "available" } },
-] }] };
-const listOf = (s: ReturnType<typeof scene>) => s.w.document.querySelector(".pcc-list") as any;
-const lineOf = (s: ReturnType<typeof scene>) => listOf(s).nextElementSibling as any;
-const rowsOf = (s: ReturnType<typeof scene>) => Array.from(listOf(s).querySelectorAll(".pcc-row")).map((r: any) => r.textContent);
-
-describe("PX-4 absence is not evidence (rebuilt kit)", () => {
-  it("a FIRST read that fails says 'unavailable · HTTP 401', never an empty authoritative list", async () => {
-    const s = scene([{ status: 401 }], T0);
-    s.deliver(listManifest); await s.settle();
-    expect(listOf(s).className).toContain("pcc-unavail");
-    expect(lineOf(s).textContent).toBe("unavailable · HTTP 401");
-    expect(listOf(s).getAttribute("data-as-of")).toBeNull(); // nothing was observed
-    expect(rowsOf(s)).toEqual([]);
-    expect(listOf(s).querySelector(".pcc-empty")).toBeNull(); // and it does NOT claim "none"
+describe("PX-4 review #2524, absence: every failed, off-schema, partial or empty read says unavailable", () => {
+  it("a failed refresh CLEARS the shown value (never last-known) and says why", async () => {
+    const s = scene([{ status: 200, json: { progress: 55, asOf: iso(T0 - 1_000) } }, { status: 500 }], T0);
+    s.deliver(statManifest); await s.settle();
+    expect(value(s)).toBe("55");
+    await s.nextPoll();
+    expect(value(s)).toBe("");
+    expect(s.stat().className).toContain("pcc-unavail");
+    expect(s.stat().getAttribute("data-as-of")).toBeNull();
+    expect(s.fresh().textContent).toBe("unavailable · HTTP 500");
     s.close();
   });
 
-  it("a failed first read of a stat says unavailable, not a value", async () => {
-    const s = scene([{ status: 503 }], T0);
+  for (const [label, reply, why] of [
+    ["a metric response missing its field", { status: 200, json: { asOf: iso(T0) } }, "missing field"],
+    ["a metric field of the wrong type", { status: 200, json: { progress: "42%", asOf: iso(T0) } }, "mistyped field"],
+    ["HTTP 200 with the wrong content type", { status: 200, raw: "<html>ok</html>", ct: "text/html" }, "unexpected content type"],
+    ["unreadable JSON", { status: 200, raw: "{not json" }, "unreadable response"],
+    ["an empty (null) body", { status: 200, raw: "null" }, "empty response"],
+  ] as Array<[string, Reply, string]>) {
+    it(`${label} is unavailable ("${why}"), never a default value`, async () => {
+      const s = scene([reply], T0);
+      s.deliver(statManifest); await s.settle();
+      expect(s.stat().className).toContain("pcc-unavail");
+      expect(value(s)).toBe("");
+      expect(s.fresh().textContent).toBe("unavailable · " + why);
+      s.close();
+    });
+  }
+
+  it("a card missing a required field is unavailable, not a partial card", async () => {
+    const s = scene([{ status: 200, json: { type: "pizza", asOf: iso(T0) } }], T0);
+    s.deliver(cardManifest); await s.settle();
+    const card = s.q(".pcc-schema-card");
+    expect(card.className).toContain("pcc-unavail");
+    expect(s.lineOf(card).textContent).toBe("unavailable · missing required fields");
+    for (const v of Array.from(card.querySelectorAll(".pcc-value")) as any[]) expect(v.textContent).toBe("");
+    s.close();
+  });
+
+  it("a partial collection is unavailable (no fresh rows for the readable part)", async () => {
+    const s = scene([{ status: 200, json: { items: [{ name: "Alpha", type: "t", available: true }, { nope: 1 }], asOf: iso(T0) } }], T0);
+    s.deliver(listManifest); await s.settle();
+    const list = s.q(".pcc-list");
+    expect(list.className).toContain("pcc-unavail");
+    expect(list.querySelectorAll(".pcc-row").length).toBe(0);
+    expect(s.lineOf(list).textContent).toBe("unavailable · partial collection");
+    s.close();
+  });
+
+  it("empty-read policy: 'none' only when the source vouches for its read time", async () => {
+    const withTime = scene([{ status: 200, json: { items: [], asOf: iso(T0 - 1_000) } }], T0);
+    withTime.deliver(listManifest); await withTime.settle();
+    expect(withTime.q(".pcc-list .pcc-empty").textContent).toBe("none");
+    expect(withTime.lineOf(withTime.q(".pcc-list")).textContent).toBe("source read 2026-09-24 11:59:59Z");
+    withTime.close();
+    const noTime = scene([{ status: 200, json: { items: [] } }], T0);
+    noTime.deliver(listManifest); await noTime.settle();
+    expect(noTime.q(".pcc-list .pcc-empty")).toBeNull();
+    expect(noTime.lineOf(noTime.q(".pcc-list")).textContent).toBe("unavailable · empty result without a source time");
+    noTime.close();
+  });
+
+  it("a row missing a selected field shows 'not reported', never silently omits it", async () => {
+    const s = scene([{ status: 200, json: { items: [{ name: "Alpha" }], asOf: iso(T0) } }], T0);
+    s.deliver(listManifest); await s.settle();
+    const row = s.q(".pcc-list .pcc-row");
+    expect(row.textContent).toContain("Alpha");
+    expect(Array.from(row.querySelectorAll(".pcc-absent")).map((e: any) => e.textContent)).toEqual(["not reported", "not reported"]);
+    s.close();
+  });
+
+  it("operator free text that states money is withheld in list rows", async () => {
+    const s = scene([{ status: 200, json: { items: [{ name: "PAID - verified 100 USDC", type: "t", available: true }], asOf: iso(T0) } }], T0);
+    s.deliver(listManifest); await s.settle();
+    const row = s.q(".pcc-list .pcc-row");
+    expect(row.textContent).not.toContain("PAID");
+    expect(row.textContent).toContain("withheld: stated money");
+    s.close();
+  });
+
+  it("with no trusted origin, every bound element says unavailable (never sits empty)", async () => {
+    const s = scene([{ status: 200, json: { progress: 1, asOf: iso(T0) } }], T0, { origin: false });
     s.deliver(statManifest); await s.settle();
     expect(s.stat().className).toContain("pcc-unavail");
-    expect(s.fresh().textContent).toBe("unavailable · HTTP 503");
+    expect(s.fresh().textContent).toBe("unavailable · no live data source");
+    s.close();
+  });
+});
+
+describe("PX-4 review #2524, freshness: expires on its own; missing source time is unknown", () => {
+  it("a fresh datum turns stale when its budget passes, without any new read", async () => {
+    // metric budget 120 s; long poll so no read happens in between
+    const m = JSON.parse(JSON.stringify(statManifest)); m.sections[0].windows[1].binding.pollMs = 3_600_000;
+    const s = scene([{ status: 200, json: { progress: 5, asOf: iso(T0 - 10_000) } }], T0);
+    s.deliver(m); await s.settle();
+    expect(s.stat().className).not.toContain("pcc-stale");
+    await s.advance(115_000);
+    expect(s.stat().className).toContain("pcc-stale");
+    expect(s.fresh().textContent).toBe("source read 2026-09-24 11:59:50Z · stale");
+    s.close();
+  });
+
+  it("data without a source time is never presented as fresh", async () => {
+    const s = scene([{ status: 200, json: { progress: 7 } }], T0);
+    s.deliver(statManifest); await s.settle();
+    expect(value(s)).toBe("7");
     expect(s.stat().getAttribute("data-as-of")).toBeNull();
+    expect(s.stat().className).toContain("pcc-time-unknown");
+    expect(s.fresh().textContent).toBe("source time not reported · received 2026-09-24 12:00:00Z");
     s.close();
   });
 
-  it("a payload that is not a collection is unreadable, not an empty list", async () => {
-    const s = scene([{ status: 200, json: { kernels: [{ name: "k1", status: "online" }] } }], T0);
-    s.deliver(listManifest); await s.settle();
-    expect(listOf(s).className).toContain("pcc-unavail");
-    expect(lineOf(s).textContent).toBe("unavailable · unexpected response shape");
-    expect(listOf(s).getAttribute("data-as-of")).toBeNull();
-    expect(rowsOf(s)).toEqual([]);
+  it("the session cap ends updates: the view says unavailable instead of keeping old values", async () => {
+    const m = JSON.parse(JSON.stringify(statManifest)); m.sections[0].windows[1].binding.pollMs = 3_600_000;
+    const s = scene([{ status: 200, json: { progress: 9, asOf: iso(T0) } }], T0);
+    s.deliver(m); await s.settle();
+    await s.advance(31 * 60_000);
+    expect(value(s)).toBe("");
+    expect(s.fresh().textContent).toBe("unavailable · updates stopped");
     s.close();
   });
+});
 
-  it("rows present but none readable is unreadable, not 'none'", async () => {
-    const s = scene([{ status: 200, json: { items: [{ nope: 1 }, { nope: 2 }] } }], T0);
-    s.deliver(listManifest); await s.settle();
-    expect(listOf(s).className).toContain("pcc-unavail");
-    expect(listOf(s).querySelector(".pcc-empty")).toBeNull();
-    s.close();
-  });
-
-  it("a genuinely empty collection is a valid state: 'none', as of its time", async () => {
-    const s = scene([{ status: 200, json: { items: [], asOf: iso(T0 - 1_000) } }], T0);
-    s.deliver(listManifest); await s.settle();
-    expect(listOf(s).querySelector(".pcc-empty")!.textContent).toBe("none");
-    expect(lineOf(s).textContent).toBe("as of 11:59:59Z");
-    expect(listOf(s).className).not.toContain("pcc-unavail");
-    s.close();
-  });
-
-  it("after good rows, an off-schema refresh KEEPS the rows and marks them stale", async () => {
+describe("PX-4 review #2524, regression: the watermark and the metadata line survive restarts", () => {
+  it("after hide/show, an older snapshot still cannot overwrite a newer one, and one line remains", async () => {
     const s = scene([
-      { status: 200, json: { items: [{ name: "Alpha", available: true }], asOf: iso(T0 - 1_000) } },
-      { status: 200, json: { kernels: [] } },
+      { status: 200, json: { progress: 80, asOf: iso(T0 - 1_000) } },
+      { status: 200, json: { progress: 10, asOf: iso(T0 - 60_000) } }, // T1 < T2, served after the restart
     ], T0);
-    s.deliver(listManifest); await s.settle();
-    expect(rowsOf(s)).toEqual(["Alphatrue"]);
-    await s.nextPoll();
-    expect(rowsOf(s)).toEqual(["Alphatrue"]); // not wiped by the rejected payload
-    expect(listOf(s).className).toContain("pcc-stale");
-    expect(lineOf(s).textContent).toBe("as of 11:59:59Z · stale");
+    s.deliver(statManifest); await s.settle();
+    expect(value(s)).toBe("80");
+    await s.setHidden(true);
+    await s.setHidden(false); // restart: startBinds on the existing DOM
+    await s.settle();
+    expect(value(s)).toBe("80");
+    expect(s.stat().getAttribute("data-as-of")).toBe(iso(T0 - 1_000));
+    const lines = Array.from(s.w.document.querySelectorAll(".pcc-fresh"));
+    expect(lines.length).toBe(1);
     s.close();
   });
 
-  it("'unavailable' recovers to fresh data on the next good read", async () => {
-    const s = scene([
-      { status: 401 },
-      { status: 200, json: { items: [{ name: "Beta", available: false }], asOf: iso(T0 + 5_000) } },
-    ], T0);
-    // A declared 10s poll, so the one-failure backoff (x2) lands inside the harness's poll window.
-    const fast = JSON.parse(JSON.stringify(listManifest));
-    fast.sections[0].windows[0].binding.pollMs = 10_000;
-    s.deliver(fast); await s.settle();
-    expect(listOf(s).className).toContain("pcc-unavail");
-    await s.nextPoll();
-    expect(rowsOf(s)).toEqual(["Betafalse"]);
-    expect(listOf(s).className).not.toContain("pcc-unavail");
-    expect(lineOf(s).textContent).toMatch(/^as of \d{2}:\d{2}:\d{2}Z$/);
+  it("a resume re-checks freshness immediately", async () => {
+    const m = JSON.parse(JSON.stringify(statManifest)); m.sections[0].windows[1].binding.pollMs = 3_600_000;
+    const s = scene([{ status: 200, json: { progress: 3, asOf: iso(T0 - 10_000) } }, { status: 503 }], T0);
+    s.deliver(m); await s.settle();
+    await s.setHidden(true);
+    await s.advance(200_000); // hidden: past the 120 s budget
+    await s.setHidden(false);
+    expect(s.stat().className).toMatch(/pcc-stale|pcc-unavail/);
     s.close();
+  });
+});
+
+describe("PX-4 contrast (pcc-design #2540)", () => {
+  it("marker lines are not dimmed by stacked opacity", async () => {
+    const view = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "./mcp-app-view.ts"), "utf8");
+    for (const cls of ["pcc-fresh", "pcc-stale", "pcc-unavail", "pcc-empty", "pcc-time-unknown"]) {
+      const rules = view.match(new RegExp("\\." + cls + "[^{]*\\{[^}]*\\}", "g")) ?? [];
+      for (const r of rules) expect(r, cls).not.toMatch(/opacity\s*:\s*0?\.\d/);
+    }
   });
 });

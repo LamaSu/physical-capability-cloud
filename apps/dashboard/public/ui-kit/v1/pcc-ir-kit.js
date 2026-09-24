@@ -93,10 +93,14 @@
     return isMoneyClaim(text) ? WITHHELD_PROSE : text;
   }
   var LIST_PROFILES = {
-    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] }
+    "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], freeText: [] },
+    "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"], freeText: ["name", "location.label"] },
+    "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"], freeText: ["name", "location.label"] }
   };
+  function listFreeTextFields(path) {
+    return LIST_PROFILES[path]?.freeText ?? [];
+  }
+  var WITHHELD_FIELD = "withheld: stated money";
   function listProfileViolation(path, props) {
     const prof = LIST_PROFILES[path];
     if (!prof) return `no list field profile for ${path}`;
@@ -278,22 +282,30 @@
   var METRIC_PROFILE = [
     { route: route("/api/jobs/:/status"), fields: {
       // top-level envelope
-      status: { label: "Status", source: "status" },
-      progress: { label: "Progress", source: "progress" }
+      status: { label: "Status", source: "status", type: "string" },
+      progress: { label: "Progress", source: "progress", type: "number" }
     } },
     { route: route("/api/kernels/:"), fields: {
       // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-      status: { label: "Status", source: "kernel.status" },
-      reputation: { label: "Reputation", source: "kernel.reputation" },
-      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
-      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
-      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
-      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" }
+      status: { label: "Status", source: "kernel.status", type: "string" },
+      reputation: { label: "Reputation", source: "kernel.reputation", type: "number" },
+      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", type: "number" },
+      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", type: "number" },
+      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", type: "number" },
+      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", type: "number" }
     } }
   ];
   function metricFieldForSelect(path, select) {
     if (typeof select !== "string") return null;
     for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
+    return null;
+  }
+  function metricSourceType(path, source) {
+    if (typeof source !== "string") return null;
+    for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].type;
+      return null;
+    }
     return null;
   }
   function metricLabelForSource(path, source) {
@@ -735,8 +747,19 @@
     fresh: "pcc-fresh",
     stale: "pcc-stale",
     unavail: "pcc-unavail",
-    empty: "pcc-empty"
+    empty: "pcc-empty",
+    timeUnknown: "pcc-time-unknown",
+    absent: "pcc-absent"
   };
+  var STATE_CLASSES = ["pcc-stale", "pcc-unavail", "pcc-time-unknown"];
+  function withState(host, cls) {
+    const base = host.className.split(" ").filter((c) => c !== "" && !STATE_CLASSES.includes(c)).join(" ");
+    host.className = cls ? base + " " + cls : base;
+  }
+  function stamp(iso) {
+    const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(iso);
+    return m ? m[1] + " " + m[2] + "Z" : "unknown time";
+  }
   function readOwnPath(obj, sel) {
     let cur = obj;
     for (const seg of sel.split(".")) {
@@ -765,8 +788,8 @@
     "capability-summary-v1": Object.freeze({
       heading: "Capability",
       fields: Object.freeze([
-        { label: "Name", key: "name" },
-        { label: "Type", key: "type" },
+        { label: "Name", key: "name", required: true },
+        { label: "Type", key: "type", required: true },
         { label: "Base cost", key: "pricing.baseCost" },
         { label: "Currency", key: "pricing.currency" },
         { label: "Assurance tiers", key: "assuranceTiers", list: true },
@@ -779,7 +802,7 @@
       // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
       // keys (NOT a manifest selector); first present wins.
       fields: Object.freeze([
-        { label: "Status", key: ["status", "job.status"] },
+        { label: "Status", key: ["status", "job.status"], required: true },
         { label: "Progress", key: ["progress", "job.progress"] }
       ])
     })
@@ -814,11 +837,14 @@
   }
   function bindSchemaCard(schema, data, slots) {
     const spec = SCHEMA_FIELDS[schema];
-    if (!spec) return;
-    spec.fields.forEach((f, i) => {
+    if (!spec) return false;
+    const values = spec.fields.map((f) => readField(data, f));
+    if (spec.fields.some((f, i) => f.required && values[i] === UNAVAILABLE)) return false;
+    spec.fields.forEach((_f, i) => {
       const slot = slots[i];
-      if (slot) slot.textContent = readField(data, f);
+      if (slot) slot.textContent = values[i];
     });
+    return true;
   }
   function paintChildren(doc, node, into) {
     if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
@@ -906,15 +932,19 @@
   }
   function applyFreshness(host, meta, asOf, stale) {
     host.setAttr("data-as-of", asOf);
-    const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale && c !== CLS.unavail).join(" ");
-    host.className = stale ? base + " " + CLS.stale : base;
-    const hhmmss = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})/.exec(asOf);
+    withState(host, stale ? CLS.stale : null);
     meta.className = CLS.fresh;
-    meta.textContent = "as of " + (hhmmss ? hhmmss[1] + "Z" : "unknown time") + (stale ? " \xB7 stale" : "");
+    meta.textContent = "source read " + stamp(asOf) + (stale ? " \xB7 stale" : "");
+  }
+  function applyUnknownTime(host, meta, receivedIso) {
+    if (host.removeAttr) host.removeAttr("data-as-of");
+    withState(host, CLS.timeUnknown);
+    meta.className = CLS.fresh;
+    meta.textContent = "source time not reported \xB7 received " + stamp(receivedIso);
   }
   function applyUnavailable(host, meta, why) {
-    const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale && c !== CLS.unavail).join(" ");
-    host.className = base + " " + CLS.unavail;
+    if (host.removeAttr) host.removeAttr("data-as-of");
+    withState(host, CLS.unavail);
     meta.className = CLS.fresh;
     meta.textContent = "unavailable \xB7 " + why;
   }
@@ -923,11 +953,13 @@
     mount.appendChild(paintNode(doc, ir.title));
     mount.appendChild(paintNode(doc, ir.root));
   }
-  function bindListRows(doc, listEl, node, rows) {
+  function bindListRows(doc, listEl, node, rows, path = "") {
     const rowTitle = String(node.props?.rowTitle ?? "");
     const rowMeta = Array.isArray(node.props?.rowMeta) ? node.props.rowMeta : [];
     const statusFrom = typeof node.props?.statusFrom === "string" ? node.props.statusFrom : "";
     const limit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+    const freeText = listFreeTextFields(path);
+    const text = (field, v) => freeText.includes(field) && isMoneyClaim(v) ? WITHHELD_FIELD : v;
     let shown = 0;
     for (const row of rows) {
       if (shown >= limit) break;
@@ -935,14 +967,14 @@
       const title = readSelector(row, rowTitle);
       if (title === "") continue;
       const line = el(doc, CLS.row);
-      line.appendChild(el(doc, CLS.heading, title, true));
+      line.appendChild(el(doc, CLS.heading, text(rowTitle, title), true));
       for (const m of rowMeta) {
         const v = readSelector(row, m);
-        if (v !== "") line.appendChild(el(doc, CLS.meta, v, true));
+        line.appendChild(v !== "" ? el(doc, CLS.meta, text(m, v), true) : el(doc, CLS.meta + " " + CLS.absent, "not reported"));
       }
       if (statusFrom) {
-        const s = readSelector(row, statusFrom);
-        if (s !== "") line.appendChild(el(doc, CLS.badge, s, true));
+        const st = readSelector(row, statusFrom);
+        line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported"));
       }
       listEl.appendChild(line);
       shown++;
@@ -950,10 +982,13 @@
     if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none"));
     return shown;
   }
-  function bindScalar(node, data) {
-    const sel = node.bind?.select;
-    if (!sel) return "";
-    return readSelector(data, sel);
+  function listRowsReadable(node, rows) {
+    const rowTitle = String(node.props?.rowTitle ?? "");
+    for (const row of rows.slice(0, LIST_ROW_CAP)) {
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+      if (readSelector(row, rowTitle) === "") return false;
+    }
+    return true;
   }
   function bootIrView(doc, mount, rawDoc, validate) {
     if (!validate(rawDoc).ok) {
@@ -993,14 +1028,13 @@
     return Math.max(BINDER_LIM.minPollMs, Math.min(ms, BINDER_LIM.maxPollMs));
   }
   var ASOF_MAX_SKEW_MS = 12e4;
-  function asOfFrom(json, receivedAtMs) {
-    const fallback = new Date(receivedAtMs).toISOString();
-    if (json === null || typeof json !== "object" || Array.isArray(json)) return fallback;
-    if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return fallback;
+  function sourceAsOf(json, nowMs) {
+    if (json === null || typeof json !== "object" || Array.isArray(json)) return null;
+    if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return null;
     const raw = json.asOf;
-    if (typeof raw !== "string") return fallback;
+    if (typeof raw !== "string") return null;
     const t = Date.parse(raw);
-    if (!Number.isFinite(t) || t > receivedAtMs + ASOF_MAX_SKEW_MS) return fallback;
+    if (!Number.isFinite(t) || t > nowMs + ASOF_MAX_SKEW_MS) return null;
     return new Date(t).toISOString();
   }
   function isStale(asOfIso, maxAgeMs, nowMs) {
@@ -1011,7 +1045,7 @@
     if (currentAsOf === null) return true;
     return Date.parse(incomingAsOf) >= Date.parse(currentAsOf);
   }
-  function startBind(node, deps, onData, onStale) {
+  function startBind(node, deps, onData, onStale, onEnded) {
     const bind = node.bind;
     let stopped = false;
     let pollTimer = null;
@@ -1039,7 +1073,11 @@
       stop();
       return { stop };
     }
-    sessionTimer = deps.setTimer(stop, BINDER_LIM.sessionMs);
+    sessionTimer = deps.setTimer(() => {
+      if (stopped) return;
+      stop();
+      if (onEnded) onEnded("updates stopped");
+    }, BINDER_LIM.sessionMs);
     if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
       const sseUrl = deps.origin + bind.sse;
       sse = deps.openSse(sseUrl, (d) => {
@@ -1055,12 +1093,13 @@
         if (stopped) return;
         deps.getJson(url, deps.makeSignal()).then((r) => {
           if (stopped) return;
-          if (r.status === 200 && !r.redirected && !r.bytesOver) {
+          const clean = r.ok !== false && r.status === 200 && !r.redirected && !r.bytesOver && r.json !== null && typeof r.json === "object";
+          if (clean) {
             fails = 0;
             onData(r.json);
           } else {
             fails++;
-            if (onStale) onStale(r.redirected ? "redirected" : r.bytesOver ? "response too large" : "HTTP " + r.status);
+            if (onStale) onStale(r.reason ?? (r.redirected ? "redirected" : r.bytesOver ? "response too large" : r.status !== 200 ? "HTTP " + r.status : "empty response"));
           }
           pollTimer = deps.setTimer(tick, nextDelay());
         }).catch(() => {
@@ -1117,6 +1156,9 @@
       },
       setAttr(n, v) {
         real.setAttribute(n, v);
+      },
+      removeAttr(n) {
+        real.removeAttribute(n);
       },
       appendChild(c) {
         real.appendChild(c._el);
@@ -1217,7 +1259,8 @@
         await resp.body?.cancel();
       } catch {
       }
-      return { status: resp.status, redirected, bytesOver: false, json: null };
+      const reason = resp.status !== 200 ? "HTTP " + resp.status : redirected ? "redirected" : "unexpected content type";
+      return { status: resp.status, redirected, bytesOver: false, json: null, ok: false, reason };
     }
     const reader = resp.body ? resp.body.getReader() : null;
     const chunks = [];
@@ -1233,7 +1276,7 @@
               await reader.cancel();
             } catch {
             }
-            return { status: 200, redirected: false, bytesOver: true, json: null };
+            return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: "response too large" };
           }
           chunks.push(value);
         }
@@ -1243,9 +1286,10 @@
     try {
       json = JSON.parse(new TextDecoder().decode(concat(chunks, received)));
     } catch {
-      json = null;
+      return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "unreadable response" };
     }
-    return { status: 200, redirected: false, bytesOver: false, json };
+    if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "empty response" };
+    return { status: 200, redirected: false, bytesOver: false, json, ok: true };
   }
   var rendered = false;
   var disposed = false;
@@ -1266,35 +1310,86 @@
     walk(doc.root);
     return { stats, lists, schemaCards };
   }
-  function provenanced(node, el2, paint) {
+  var provStates = /* @__PURE__ */ new Map();
+  function provenanced(node, el2, paint, clear) {
     const prov = provenanceOf(node);
-    const metaReal = document.createElement("div");
-    if (el2.parentNode) el2.parentNode.insertBefore(metaReal, el2.nextSibling);
     const host = wrapEl(el2);
-    const meta = wrapEl(metaReal);
-    let last = null;
-    const failed = (why) => {
-      if (last !== null) {
-        if (prov) applyFreshness(host, meta, last, true);
-      } else applyUnavailable(host, meta, why);
+    let st = provStates.get(node.id);
+    if (!st) {
+      const metaReal = document.createElement("div");
+      if (el2.parentNode) el2.parentNode.insertBefore(metaReal, el2.nextSibling);
+      st = { meta: metaReal, watermark: null, shown: false, timeKnown: false, expiry: null };
+      provStates.set(node.id, st);
+    }
+    const state = st;
+    const meta = wrapEl(state.meta);
+    const disarm = () => {
+      if (state.expiry !== null) {
+        clearTimeout(state.expiry);
+        state.expiry = null;
+      }
     };
+    const markFresh = () => {
+      disarm();
+      if (!state.shown || !state.timeKnown || state.watermark === null || !prov) return;
+      const now = Date.now();
+      const stale = isStale(state.watermark, prov.maxAgeMs, now);
+      applyFreshness(host, meta, state.watermark, stale);
+      if (!stale) {
+        const left = Date.parse(state.watermark) + prov.maxAgeMs - now;
+        state.expiry = setTimeout(() => {
+          state.expiry = null;
+          if (state.shown && state.watermark) applyFreshness(host, meta, state.watermark, true);
+        }, Math.max(0, left) + 1);
+      }
+    };
+    const failed = (why) => {
+      disarm();
+      clear();
+      state.shown = false;
+      applyUnavailable(host, meta, why);
+    };
+    markFresh();
     return {
       onData: (data) => {
-        const asOf = asOfFrom(data, Date.now());
-        if (!acceptsNewer(last, asOf)) return;
-        if (!paint(data)) {
-          failed("unexpected response shape");
+        const now = Date.now();
+        const src = sourceAsOf(data, now);
+        if (state.watermark !== null && (src === null || !acceptsNewer(state.watermark, src))) return;
+        const painted = paint(data, src);
+        if (painted !== true) {
+          failed(painted);
           return;
         }
-        last = asOf;
-        if (prov) applyFreshness(host, meta, asOf, isStale(asOf, prov.maxAgeMs, Date.now()));
+        state.shown = true;
+        if (src !== null) {
+          state.watermark = src;
+          state.timeKnown = true;
+          markFresh();
+        } else {
+          disarm();
+          state.timeKnown = false;
+          applyUnknownTime(host, meta, new Date(now).toISOString());
+        }
       },
-      onStale: failed
+      onStale: failed,
+      onEnded: failed
     };
   }
   function startBinds(doc, root) {
     const origin = pccApiOrigin();
-    if (!origin) return;
+    if (!origin) {
+      const { stats: stats2, lists: lists2, schemaCards: schemaCards2 } = collectBound(doc);
+      const els = (cls) => Array.from(root.querySelectorAll("." + cls));
+      const mark = (nodes, cls) => nodes.forEach((node, i) => {
+        const el2 = els(cls)[i];
+        if (el2) provenanced(node, el2, () => "no live data source", () => {
+        }).onStale("no live data source");
+      });
+      mark(stats2, "pcc-stat");
+      mark(lists2, "pcc-list");
+      mark(schemaCards2, "pcc-schema-card");
+      return;
+    }
     const gen = new AbortController();
     genController = gen;
     const deps = {
@@ -1330,14 +1425,21 @@
     stats.forEach((node, i) => {
       const el2 = statEls[i];
       const slot = el2?.querySelector(".pcc-value");
-      if (el2 && slot) {
-        const pv = provenanced(node, el2, (data) => {
-          const v = bindScalar(node, data);
-          slot.textContent = v !== "" ? v : "\u2014";
-          return true;
-        });
-        push(startBind(node, deps, pv.onData, pv.onStale));
-      }
+      if (!el2 || !slot) return;
+      const want = node.bind ? metricSourceType(node.bind.path, node.bind.select) : null;
+      const pv = provenanced(node, el2, (data) => {
+        let cur = data;
+        for (const seg of String(node.bind?.select ?? "").split(".")) {
+          if (cur === null || typeof cur !== "object" || Array.isArray(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return "missing field";
+          cur = cur[seg];
+        }
+        if (want === "number" ? !(typeof cur === "number" && Number.isFinite(cur)) : !(typeof cur === "string" && cur !== "")) return "mistyped field";
+        slot.textContent = String(cur);
+        return true;
+      }, () => {
+        slot.textContent = "";
+      });
+      push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
     schemaCards.forEach((node, i) => {
       const el2 = schemaEls[i];
@@ -1345,25 +1447,27 @@
       const schema = node.bind?.schema;
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
-      const pv = provenanced(node, el2, (data) => {
-        bindSchemaCard(schema, data, slots);
-        return true;
+      const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots) ? true : "missing required fields", () => {
+        for (const sl of slots) sl.textContent = "";
       });
-      push(startBind(node, deps, pv.onData, pv.onStale));
+      push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];
       if (!el2) return;
-      const pv = provenanced(node, el2, (data) => {
+      const pv = provenanced(node, el2, (data, src) => {
         const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : null;
-        if (rows === null) return false;
+        if (rows === null) return "unexpected response shape";
+        if (!listRowsReadable(node, rows)) return "partial collection";
+        if (rows.length === 0 && src === null) return "empty result without a source time";
         const staging = document.createElement("div");
-        const shown = bindListRows(rdoc, wrapEl(staging), node, rows);
-        if (rows.length > 0 && shown === 0) return false;
+        bindListRows(rdoc, wrapEl(staging), node, rows, node.bind?.path ?? "");
         el2.replaceChildren(...Array.from(staging.childNodes));
         return true;
+      }, () => {
+        el2.replaceChildren();
       });
-      push(startBind(node, deps, pv.onData, pv.onStale));
+      push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
     });
   }
   function stopBinds() {

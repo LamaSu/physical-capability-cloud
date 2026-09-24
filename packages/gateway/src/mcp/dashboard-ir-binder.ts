@@ -58,7 +58,14 @@ export function clampPoll(bind: IrBind): number {
   return Math.max(BINDER_LIM.minPollMs, Math.min(ms, BINDER_LIM.maxPollMs));
 }
 
-export interface GetResult { status: number; redirected: boolean; bytesOver: boolean; json: unknown }
+export interface GetResult {
+  status: number; redirected: boolean; bytesOver: boolean; json: unknown;
+  /** False when the transport already knows the read failed (wrong content type, unreadable or
+   *  empty JSON). A failure is never delivered as data (PX-4 review #2524). */
+  ok?: boolean;
+  /** Short fixed reason for a failed read ("unexpected content type", ...). */
+  reason?: string;
+}
 export interface BinderDeps {
   origin: string;
   /** REQUIRED transport contract (sol R7): hardcoded `method:"GET"`, `redirect:"error"`,
@@ -78,19 +85,19 @@ export interface BinderDeps {
 // ── Provenance freshness (PX-4) ──────────────────────────────────────────────
 /** Max future skew tolerated on a source `asOf`. A timestamp further ahead than this is
  *  not trusted (it would otherwise "win" forever and freeze the view against later real
- *  updates), so we fall back to receipt time. */
+ *  updates). */
 export const ASOF_MAX_SKEW_MS = 120_000;
-/** The moment the SOURCE observed this state: an own-property ISO `asOf` on the payload if
- *  valid and not future-dated beyond the skew, else the receipt time. Always returned
- *  normalized (toISOString) so comparisons are exact. */
-export function asOfFrom(json: unknown, receivedAtMs: number): string {
-  const fallback = new Date(receivedAtMs).toISOString();
-  if (json === null || typeof json !== "object" || Array.isArray(json)) return fallback;
-  if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return fallback;
+/** The moment the SOURCE read this state: an own-property ISO `asOf` on the payload, valid and
+ *  not future-dated beyond the skew, normalized (toISOString) so comparisons are exact. NULL
+ *  when the source did not say: receipt time is NOT a substitute (PX-4 review #2524), so
+ *  data without a source time is never presented as fresh. */
+export function sourceAsOf(json: unknown, nowMs: number): string | null {
+  if (json === null || typeof json !== "object" || Array.isArray(json)) return null;
+  if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return null;
   const raw = (json as Record<string, unknown>).asOf;
-  if (typeof raw !== "string") return fallback;
+  if (typeof raw !== "string") return null;
   const t = Date.parse(raw);
-  if (!Number.isFinite(t) || t > receivedAtMs + ASOF_MAX_SKEW_MS) return fallback;
+  if (!Number.isFinite(t) || t > nowMs + ASOF_MAX_SKEW_MS) return null;
   return new Date(t).toISOString();
 }
 /** Older than the source's freshness budget at `nowMs`. */
@@ -109,12 +116,12 @@ export function acceptsNewer(currentAsOf: string | null, incomingAsOf: string): 
 /**
  * Start binding one node; returns a `{ stop }` handle. GET-only, single channel,
  * bounded, and auto-stopping after the session cap. `onData(json)` hands a validated
- * clean-200 payload to the painter. `onStale(why)` (optional) fires when a read FAILS,
- * with a short fixed reason ("HTTP 401", "network error", ...), so the view can mark the
- * last-shown datum stale, or say the source is unavailable, instead of implying it is
- * current. No data (and no staleness) is delivered after `stop()`.
+ * clean-200 JSON object or array to the painter. `onStale(why)` (optional) fires when a read
+ * FAILS, with a short fixed reason ("HTTP 401", "unexpected content type", ...), so the view
+ * says the source is unavailable instead of implying it is current. `onEnded(why)` (optional)
+ * fires once when the session cap ends the binding. Nothing is delivered after `stop()`.
  */
-export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: (why: string) => void): { stop: () => void } {
+export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: (why: string) => void, onEnded?: (why: string) => void): { stop: () => void } {
   const bind = node.bind;
   let stopped = false;
   let pollTimer: unknown = null;
@@ -130,7 +137,11 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
   if (!bind) return { stop };
   const url = bindUrl(deps.origin, bind);
   if (url === null) { stop(); return { stop }; }         // unbuildable URL → bind is inert
-  sessionTimer = deps.setTimer(stop, BINDER_LIM.sessionMs); // whole-session teardown
+  sessionTimer = deps.setTimer(() => { // whole-session teardown: the view must stop claiming currency
+    if (stopped) return;
+    stop();
+    if (onEnded) onEnded("updates stopped");
+  }, BINDER_LIM.sessionMs);
 
   if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
     const sseUrl = deps.origin + bind.sse;                // sse path already policy-validated
@@ -145,8 +156,12 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
       if (stopped) return;
       deps.getJson(url, deps.makeSignal()).then((r) => {
         if (stopped) return;
-        if (r.status === 200 && !r.redirected && !r.bytesOver) { fails = 0; onData(r.json); } // consume ONLY a clean same-origin 200
-        else { fails++; if (onStale) onStale(r.redirected ? "redirected" : r.bytesOver ? "response too large" : "HTTP " + r.status); } // the read failed: nothing current to show
+        const clean = r.ok !== false && r.status === 200 && !r.redirected && !r.bytesOver && r.json !== null && typeof r.json === "object";
+        if (clean) { fails = 0; onData(r.json); } // consume ONLY a clean same-origin JSON object/array
+        else { // the read failed: nothing current to show
+          fails++;
+          if (onStale) onStale(r.reason ?? (r.redirected ? "redirected" : r.bytesOver ? "response too large" : r.status !== 200 ? "HTTP " + r.status : "empty response"));
+        }
         pollTimer = deps.setTimer(tick, nextDelay());
       }).catch(() => { if (stopped) return; fails++; if (onStale) onStale("network error"); pollTimer = deps.setTimer(tick, nextDelay()); });
     };

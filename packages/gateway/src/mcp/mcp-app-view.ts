@@ -1270,10 +1270,10 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
    bound data carries a text "as of" line that says "stale" when it is. */
 .pcc-src-proposed{border-left:2px dashed currentColor;padding-left:6px}
 .pcc-text.pcc-src-proposed::before,.pcc-heading.pcc-src-proposed::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
-.pcc-fresh{font-size:11px;opacity:.7}
-.pcc-stale{opacity:.55}
-.pcc-unavail{opacity:.55}
-.pcc-empty{font-style:italic;opacity:.7}
+.pcc-fresh{font-size:12px}
+.pcc-stale,.pcc-unavail,.pcc-time-unknown{border-left:3px solid currentColor;padding-left:6px}
+.pcc-absent{font-style:italic}
+.pcc-empty{font-style:italic}
 </style>
 </head>
 <body>

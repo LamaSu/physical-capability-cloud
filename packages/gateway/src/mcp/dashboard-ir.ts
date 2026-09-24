@@ -79,11 +79,19 @@ function proseText(text: string): string { return isMoneyClaim(text) ? WITHHELD_
 // A list may show ONLY these fields of each allowlisted collection route; a selector is never
 // "safe because it parses". Money amounts, prices and payment state are not listable: they
 // appear only in schema cards. Escrow is not a list route at all.
-const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[] }>> = {
-  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"] },
-  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"] },
-  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"] },
+// Source classes per field (PX-4 review #2524): every profile field is registry state the route
+// serves (authoritative); none is agent-generated content, so a list can never show proposed
+// content under an authoritative class. `freeText` fields are operator-authored text inside that
+// registry state: they render as untrusted text and are withheld if they state money.
+const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[]; freeText: readonly string[] }>> = {
+  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], freeText: [] },
+  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"], freeText: ["name", "location.label"] },
+  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"], freeText: ["name", "location.label"] },
 };
+/** The operator-authored free-text fields of a list route's profile ([] if none / unknown). */
+export function listFreeTextFields(path: string): readonly string[] { return LIST_PROFILES[path]?.freeText ?? []; }
+/** Shown in place of a free-text field that states money (short form of WITHHELD_PROSE). */
+export const WITHHELD_FIELD = "withheld: stated money";
 function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
   const prof = LIST_PROFILES[path];
   if (!prof) return `no list field profile for ${path}`;
@@ -292,25 +300,36 @@ function isCredentialName(k: string): boolean {
 // time"). The `source` handles per-route unwrapping: GET /api/kernels/:id returns { kernel: … },
 // so "reputation" reads "kernel.reputation" — else the metric would bind but stay inert.
 // validateIr MIRRORS this (stat label + bind.select-as-source must match a profile entry).
-interface MetricField { label: string; source: string }
+interface MetricField { label: string; source: string; type: "string" | "number" }
 const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
   { route: route("/api/jobs/:/status"), fields: { // top-level envelope
-    status: { label: "Status", source: "status" },
-    progress: { label: "Progress", source: "progress" },
+    status: { label: "Status", source: "status", type: "string" },
+    progress: { label: "Progress", source: "progress", type: "number" },
   } },
   { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-    status: { label: "Status", source: "kernel.status" },
-    reputation: { label: "Reputation", source: "kernel.reputation" },
-    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
-    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
-    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
-    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" },
+    status: { label: "Status", source: "kernel.status", type: "string" },
+    reputation: { label: "Reputation", source: "kernel.reputation", type: "number" },
+    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", type: "number" },
+    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", type: "number" },
+    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", type: "number" },
+    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", type: "number" },
   } },
 ];
 /** Adapter side: (route, logical selector) → the field profile (label + real source), or null. */
 function metricFieldForSelect(path: string, select: unknown): MetricField | null {
   if (typeof select !== "string") return null;
   for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
+  return null;
+}
+/** Browser side: the declared type of a metric's SOURCE field, or null (not a metric field). A
+ *  metric read whose field is missing or of another type is not data for that metric (PX-4
+ *  review #2524: the painter must validate the route-specific payload, not accept any scalar). */
+export function metricSourceType(path: string, source: unknown): "string" | "number" | null {
+  if (typeof source !== "string") return null;
+  for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].type;
+    return null;
+  }
   return null;
 }
 /** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
