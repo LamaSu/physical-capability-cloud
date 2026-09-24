@@ -93,6 +93,22 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
     }
   });
 
+  it("a /receipt that ALSO carries unitState (escrow ruling #3163, additive) classifies the same, with the 6-vs-7 direction from unitState", async () => {
+    for (const s of STATES) {
+      const b = await bodies(s);
+      const rc = both({ ...b.receipt, unitState: b.lifecycle.unitState });
+      expect(rc.tone, `receipt+unitState ${s}`).toBe(LIFECYCLE_TONE[s]);
+      expect(rc.tone === "settled", `green @ ${s}`).toBe(s === 8);
+      if (s === 6) expect(rc.label).toContain("release decided");
+      if (s === 7) expect(rc.label).toContain("refund decided");
+    }
+    const eight = await bodies(UnitState.SETTLED_RELEASED);
+    const withState = { ...eight.receipt, unitState: 8 };
+    for (const bad of [{ ...withState, unitState: 6 }, { ...withState, isAllocated: true }, { ...withState, phase: "allocated" }, { ...withState, isTerminal: false }]) {
+      expect(both(bad).tone, JSON.stringify(bad)).toBe("unknown");
+    }
+  });
+
   it("the real settled bodies carry isAllocated:false (6/7 only) -- the semantics the classifier keys on", async () => {
     const b = await bodies(UnitState.SETTLED_RELEASED);
     expect(b.lifecycle).toMatchObject({ unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" });

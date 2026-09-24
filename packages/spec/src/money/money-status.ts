@@ -217,7 +217,10 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
   // /api/settlement/units/:id/lifecycle and /receipt): `isTerminal` is true for 8/9 only;
   // `isAllocated` means "outcome decided, money NOT fully moved" and is true for 6/7 ONLY, so a
   // settled record says isAllocated:false; `finalState` names 8/9 and is null otherwise; `phase`
-  // follows VNEXT_PHASE. Every field present must agree, and a FINAL state needs them all.
+  // follows VNEXT_PHASE. Every field present must agree, and a FINAL state needs unitState,
+  // finalState, isAllocated and phase. isTerminal is cross-checked when present but not required:
+  // /receipt gains unitState (escrow ruling #3163, additive) but carries no isTerminal, and the
+  // 6-vs-7 direction is keyed off unitState, never off finalState.
   if (has(o, "unitState")) {
     const name = vnextUnitStateName(o.unitState);
     if (name === null) return UNKNOWN("", "unreadable unit state");
@@ -228,7 +231,7 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
     if (has(o, "isAllocated") && o.isAllocated !== allocated) return DISAGREE();
     if (has(o, "isTerminal") && o.isTerminal !== terminal) return DISAGREE();
     if (has(o, "phase") && o.phase !== VNEXT_PHASE[name]) return DISAGREE();
-    if (terminal && !(has(o, "finalState") && has(o, "isAllocated") && has(o, "isTerminal") && has(o, "phase"))) return INCOMPLETE();
+    if (terminal && !(has(o, "finalState") && has(o, "isAllocated") && has(o, "phase"))) return INCOMPLETE();
     return FROM_TABLE(name);
   }
 
