@@ -74,3 +74,4 @@ export * from "./reputation.js";
 export * from "./graph-search.js";
 // UI artifacts — the On-Ramp's saved/shared/forkable dashboard entity
 export * from "./ui-artifact.js";
+export * from "./render-provenance.js";
