@@ -238,6 +238,11 @@ class PCCGatewayClient:
         """Record a job ID so we don't re-execute it this session."""
         self._seen_jobs.add(job_id)
 
+    def forget_job(self, job_id: str):
+        """Drop a job ID from the seen set so a later poll can claim it again
+        (used when the job was never started)."""
+        self._seen_jobs.discard(job_id)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
