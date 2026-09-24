@@ -6,10 +6,11 @@
  * (#154); we just render the back-and-forth and let the LLM make every
  * decision about what to call. No API key required to reach this page.
  *
- * Route: /onboard/chat (mounted as a public path in App.tsx)
- *
- * Why we don't reuse `AgentChatPage`: that file is a dashboard mock, not a
- * connected chat. This component is the actual user-facing chat.
+ * Routes (App.tsx):
+ *   /onboard/chat  public, variant "onboard"
+ *   /agent         the dashboard's Agent workspace, variant "agent": the same
+ *                  live conversation without the onboarding framing. It
+ *                  replaced the AgentChatPage mock showcase.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
@@ -57,7 +58,10 @@ const STARTER_LINES = [
   "I want to order a custom 12-inch pepperoni pizza delivered to 200 5th Ave by 7pm tonight.",
 ];
 
-export function OnboardChatPage() {
+export type ChatVariant = "onboard" | "agent";
+
+export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant } = {}) {
+  const isAgent = variant === "agent";
   const navigate = useNavigate();
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -251,21 +255,28 @@ export function OnboardChatPage() {
   ];
 
   return (
-    <div className="flex flex-col h-screen bg-gradient-to-b from-black via-zinc-950 to-black text-white/90">
+    <div
+      className={`flex flex-col ${isAgent ? "h-full min-h-0" : "h-screen"} bg-gradient-to-b from-black via-zinc-950 to-black text-white/90`}
+      data-chat-variant={variant}
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06] bg-black/40 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => navigate("/onboard")}
-            className="text-xs text-white/40 hover:text-white/70 transition-colors"
-            aria-label="Back to onboard landing"
-          >
-            ←
-          </button>
+          {!isAgent && (
+            <button
+              onClick={() => navigate("/onboard")}
+              className="text-xs text-white/40 hover:text-white/70 transition-colors"
+              aria-label="Back to onboard landing"
+            >
+              ←
+            </button>
+          )}
           <div>
-            <h1 className="text-sm font-semibold text-white/90">No-Code Onboarding</h1>
+            <h1 className="text-sm font-semibold text-white/90">{isAgent ? "PCC agent" : "No-Code Onboarding"}</h1>
             <p className="text-[11px] text-white/40">
-              Tell me what you do and I'll register it. No CLI, no API key.
+              {isAgent
+                ? "Ask for an outcome, offer a capability, or check on work."
+                : "Tell me what you do and I'll register it. No CLI, no API key."}
             </p>
           </div>
         </div>
@@ -295,7 +306,8 @@ export function OnboardChatPage() {
         </div>
       </div>
 
-      {/* 4-step unified flow progress */}
+      {/* 4-step unified flow progress (onboarding only) */}
+      {!isAgent && (
       <div className="px-6 py-2 bg-black/30 border-b border-white/[0.04]">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-2">
           {steps.map((s, i) => {
@@ -332,6 +344,7 @@ export function OnboardChatPage() {
           })}
         </div>
       </div>
+      )}
 
       {/* Message list */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-6 py-6">
@@ -339,10 +352,14 @@ export function OnboardChatPage() {
           {messages.length === 0 && (
             <div className="space-y-6">
               <div className="text-center space-y-2">
-                <h2 className="text-xl font-semibold text-white/80">What do you want to register?</h2>
+                <h2 className="text-xl font-semibold text-white/80">
+                  {isAgent ? "What do you need?" : "What do you want to register?"}
+                </h2>
                 <p className="text-sm text-white/40 max-w-xl mx-auto">
                   Plain English works — a service you sell, a machine you own, or a job you want done.
-                  I'll ask questions, then create the capability for you.
+                  {isAgent
+                    ? " The agent uses PCC's public tools; it does not act with your API key, so it can't see your private jobs yet."
+                    : " I'll ask questions, then create the capability for you."}
                 </p>
               </div>
               <div className="grid gap-2 max-w-2xl mx-auto">
@@ -423,8 +440,7 @@ export function OnboardChatPage() {
           </button>
         </form>
         <div className="max-w-3xl mx-auto mt-2 text-[11px] text-white/30 text-center">
-          Conversation history is saved on the gateway and survives a page reload.
-          {conversationId && <span className="ml-1 font-mono opacity-60">#{conversationId.slice(0, 12)}</span>}
+          The gateway keeps this conversation, but this page doesn't reopen it: reloading starts a new one.
         </div>
       </div>
     </div>
