@@ -1,64 +1,65 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@pcc/spec";
+import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
-const mockMachines = [
-  { id: "reg-001", name: "Prusa MK4 Workshop", type: "fdm", status: "active", utilization: 72, jobsCompleted: 98, uptime: 99.2 },
-  { id: "reg-002", name: "Epilog Fusion Pro", type: "laser-cut", status: "active", utilization: 58, jobsCompleted: 44, uptime: 97.8 },
-];
-
-const mockCerts: OperatorCertification[] = [
-  { id: "cert-1", name: "OSHA 10-Hour General Industry", issuer: "OSHA", issuedAt: "2025-06-15T00:00:00Z", expiresAt: "2028-06-15T00:00:00Z", status: "valid" },
-  { id: "cert-2", name: "3D Printing Safety Training", issuer: "PCC Network", issuedAt: "2025-09-01T00:00:00Z", expiresAt: "2026-09-01T00:00:00Z", status: "valid" },
-];
-
-const mockMaintenance: MaintenanceEvent[] = [
-  { id: "maint-1", machineId: "reg-001", type: "scheduled", description: "Replace nozzle and clean heatbreak", scheduledAt: "2026-03-10T09:00:00Z", status: "upcoming" },
-  { id: "maint-2", machineId: "reg-001", type: "inspection", description: "Quarterly belt tension check", scheduledAt: "2026-03-20T14:00:00Z", status: "upcoming" },
-  { id: "maint-3", machineId: "reg-001", type: "scheduled", description: "Firmware update v5.2.0", scheduledAt: "2026-03-01T10:00:00Z", completedAt: "2026-03-01T10:30:00Z", status: "completed" },
-];
+/**
+ * An operator read the gateway has no real source for yet. It answers 501 with a
+ * reason and pointers to the reads that ARE real, instead of inventing data.
+ *
+ * These four routes used to return hard-coded machines, certifications and
+ * maintenance rows, and a freshly randomized daily earnings series on every call. The public
+ * agent package advertises them as an operator's earnings, so an agent acting for an
+ * operator read invented income. A missing fact is not a plausible number.
+ */
+function notAvailable(what: string, why: string, see: string[]) {
+  return { error: "not_available", message: `${what} ${why} Nothing is returned rather than an estimate.`, see };
+}
 
 export async function operatorRoutes(app: FastifyInstance) {
-  // List operator's machines
-  app.get("/api/operator/machines", async () => {
-    return { machines: mockMachines };
+  // Machines: the operator's real kernels, devices and in-flight jobs are at
+  // /api/agent/me. There is no per-operator machine registry with utilization or
+  // uptime to serve here.
+  app.get("/api/operator/machines", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable(
+        "Operator machines with utilization and uptime are not recorded.",
+        "Your kernels, devices and in-flight jobs are real and available at /api/agent/me.",
+        ["/api/agent/me", "/api/kernels/:kernelId", "/api/kernels/:kernelId/devices"],
+      ),
+    );
   });
 
-  // Earnings data with period filter
-  app.get("/api/operator/earnings", async (req) => {
-    const query = req.query as Record<string, string>;
-    const days = query.period === "7d" ? 7 : query.period === "90d" ? 90 : query.period === "1y" ? 365 : 30;
-
-    const earnings = Array.from({ length: days }, (_, i) => {
-      const daily = 15 + Math.random() * 40;
-      return {
-        date: new Date(Date.now() - (days - i) * 86400000).toISOString().split("T")[0],
-        earnings: Math.round(daily * 100) / 100,
-      };
-    });
-
-    let cumulative = 0;
-    const withCumulative = earnings.map((e) => {
-      cumulative += e.earnings;
-      return { ...e, cumulative: Math.round(cumulative * 100) / 100 };
-    });
-
-    return { earnings: withCumulative, total: Math.round(cumulative * 100) / 100 };
+  // Earnings: escrow records carry no per-operator payout history or release time,
+  // so a daily series cannot be reported. Per-job payout state is at
+  // /api/jobs/:jobId/execution (settlement axis, from the escrow record).
+  app.get("/api/operator/earnings", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable(
+        "Operator earnings history is not recorded yet.",
+        "Per-job payment state is available at /api/jobs/:jobId/execution.",
+        ["/api/jobs", "/api/jobs/:jobId/execution"],
+      ),
+    );
   });
 
-  // Certification list
-  app.get("/api/operator/certifications", async () => {
-    return { certifications: mockCerts };
+  // Certifications: there is no certification store.
+  app.get("/api/operator/certifications", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable("Operator certifications are not recorded.", "There is no certification store yet.", []),
+    );
   });
 
-  // Maintenance events
-  app.get("/api/operator/maintenance", async () => {
-    return { events: mockMaintenance };
+  // Maintenance: nothing writes maintenance events yet, so an empty list would read
+  // as "no maintenance scheduled" (absence is not evidence).
+  app.get("/api/operator/maintenance", async (_req, reply) => {
+    return reply.code(501).send(
+      notAvailable("Operator maintenance windows are not recorded.", "Nothing records maintenance events yet.", []),
+    );
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -68,20 +69,23 @@ export async function operatorRoutes(app: FastifyInstance) {
   /** GET /api/operator/policy/:kernelId — Get operator policy */
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
-    async (req) => {
+    async (req, reply) => {
+      let row;
       try {
         const { db } = getStore();
-        const row = db.select().from(operatorPolicies)
+        row = db.select().from(operatorPolicies)
           .where(eq(operatorPolicies.kernelId, req.params.kernelId))
           .get();
-
-        if (!row) {
-          return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
-        }
-        return { policy: row.policy, updatedAt: row.updatedAt };
-      } catch {
+      } catch (err) {
+        // A failed read is not "no policy set": answering the default here would show
+        // an operator's real guardrails as the defaults.
+        req.log.warn({ kernelId: req.params.kernelId, err }, "operator policy read failed");
+        return reply.code(503).send({ error: "read_failed", message: "The operator policy could not be read. Try again shortly." });
+      }
+      if (!row) {
         return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
       }
+      return { policy: row.policy, updatedAt: row.updatedAt };
     },
   );
 
