@@ -51,12 +51,29 @@
   // may never select it. Parsed origin (protocol+host+port), never a string/suffix compare.
   var API_ORIGIN = (function () { try { return new URL(API_DEFAULT).origin; } catch (e) { return API_DEFAULT; } })();
   var POLL_DEFAULT_MS = 30000; // the system_prompt's own recommended cadence
-  // Money detection is FAIL-CLOSED: a money action that slips past it never reaches the Approval
-  // gate and fires on a bare click. So the verb list is broad (every known money verb, not just
-  // escrow's), AND any write into a money NAMESPACE is money even when the verb is unrecognised
-  // (a new money route cannot slip through as "not money"). Both run on the DECODED path.
-  var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve|withdraw|payout|deposit|charge|settle|refund|transfer|onramp|offramp|escrow|pay)(?:[\/_.-]|$)/i;
-  var MONEY_NAMESPACE = /^\/api\/(escrow|fiat-ramp|compose)(\/|$)/i;
+  // Money detection is FAIL-CLOSED BY CONSTRUCTION: every manifest-authored WRITE is money (the
+  // Approval gate; "submitted", never "done") unless it is one of the few writes KNOWN to move no
+  // money. A new or unrecognised route therefore cannot slip through as "not money": being unlisted
+  // already gates it (a new non-money route is merely over-gated until listed). Entries are exact
+  // route templates (":" = one id segment) matched against the path the wire carries (canonicalPath).
+  // The paid x402 routes (capabilities quote/simulate/route) are money and stay OFF this list.
+  var NON_MONEY_WRITES = [
+    'POST /api/artifacts',             // save a dashboard artifact
+    'POST /api/artifacts/:/fork',      // fork a dashboard artifact
+    'POST /api/csd/validate',          // validate a CSD document
+    'POST /api/csd/resolve',           // resolve a CSD by canonical URL
+    'POST /api/feedback',              // product feedback
+    'POST /api/feedback/agent-report'  // an agent's feedback report
+  ];
+  // Kit-owned per-action state (idempotency instance, in-flight flag, open gate). It lives in a
+  // WeakMap keyed by the action object, never ON the action: an action is untrusted manifest JSON,
+  // and a manifest must not be able to pre-seed a key, strip the header, or make an action inert.
+  var ACTION_STATE = new WeakMap();
+  function actionState(action) {
+    var st = ACTION_STATE.get(action);
+    if (!st) { st = { idem: null, posting: false, gateOpen: false }; ACTION_STATE.set(action, st); }
+    return st;
+  }
 
   // ═══════════════════════════════════════════════════════════════════════
   // DOM helpers (verbatim shape from control-plane bus.js) — textContent only
@@ -224,6 +241,10 @@
 
   function safeApiPath(path, isHost) {
     if (typeof path !== 'string' || !path) return null;
+    // The URL parser silently strips TAB/LF/CR anywhere, trims edge spaces and control characters,
+    // and drops a '#fragment', so "/api/comp\tose" would be SENT as /api/compose. Refuse them: the
+    // path we classify must be the path we send.
+    if (/[\s#\u0000-\u001f\u007f]/.test(path)) return null;
     if (isAbsoluteOrSchemeUrl(path)) return null;   // no absolute / scheme / //host
     if (path.charAt(0) !== '/') return null;         // must be root-relative
     if (path.indexOf('\\') !== -1) return null;      // backslash escape
@@ -891,10 +912,10 @@
         // sent. (A real server-side deny needs a separately registered typed deny operation.)
         deny.onclick = function () {
           status.className = 'pcc-action-status';
-          status.textContent = 'Denied - nothing was sent.';
+          status.textContent = 'Closed here - nothing was sent. This does not decline it on the network.';
           approve.disabled = true; deny.disabled = true;
           var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
-          if (pill) { pill.textContent = 'denied'; pill.className = 'pcc-pill st-failed'; }
+          if (pill) { pill.textContent = 'not approved here'; pill.className = 'pcc-pill st-unknown'; }
         };
         foot.appendChild(deny);
       }
@@ -1075,16 +1096,51 @@
   // through the Approval surface; snapshot mode emits copyable intent chips.
   // ═══════════════════════════════════════════════════════════════════════
 
+  // The ONE canonical form of a manifest path: the pathname the wire will carry (WHATWG URL parsing
+  // against the fixed API origin), %-decoded the way the gateway routes it. An encoded '/', '?',
+  // '#' or '\\' would split differently at the server, so it has no canonical form (null).
+  function canonicalPath(path) {
+    try {
+      var p = new URL(String(path == null ? '' : path), API_ORIGIN).pathname;
+      if (/%(2f|3f|23|5c)/i.test(p)) return null;
+      return decodeURIComponent(p);
+    } catch (e) { return null; }
+  }
+  function matchesWriteTemplate(template, method, path) {
+    var sp = template.indexOf(' ');
+    if (template.slice(0, sp) !== method) return false;
+    var t = template.slice(sp + 1).split('/'), p = path.split('/');
+    if (t.length !== p.length) return false;
+    for (var i = 0; i < t.length; i++) {
+      if (t[i] === ':') { if (!/^[A-Za-z0-9_.~-]+$/.test(p[i])) return false; }
+      else if (t[i] !== p[i]) return false;
+    }
+    return true;
+  }
   function isMoneyAction(action) {
     if (!action) return false;
     if (action.confirm === 'approval') return true;
-    // Classify the path the SERVER will route. The gateway decodes %-escapes, and safeApiPath sends
-    // the original string, so a raw-string test would let "/api/fiat%2Dramp/session" skip the gate.
-    // A malformed escape is money (fail closed). A projected MCP-App action has no `path` ('').
-    var path;
-    try { path = decodeURIComponent(String(action.path || '').split('?')[0]); } catch (e) { return true; }
-    if (MONEY_NAMESPACE.test(path)) return true;
-    return MONEY_VERB.test(path + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
+    // A projected MCP-App action has no raw path (a typed operation, host mode): no raw write.
+    if (!action.path) return true;
+    var canon = canonicalPath(action.path);
+    if (canon === null) return true; // no canonical form: fail closed
+    var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
+    for (var i = 0; i < NON_MONEY_WRITES.length; i++) {
+      if (matchesWriteTemplate(NON_MONEY_WRITES[i], method, canon)) return false;
+    }
+    return true; // unlisted write: money until proven otherwise
+  }
+  // 53-bit string hash (cyrb53) for a deterministic idempotency key. Not a security primitive.
+  function hash53(str) {
+    var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   }
 
   // Pull the first text line out of an MCP tool-error result (server-authored,
@@ -1155,17 +1211,23 @@
   }
 
   function doPost(ctx, action, opts, status) {
+    var st = actionState(action);
     // One effect per click: a re-entrant dispatch of the SAME action while its request is in
     // flight is ignored (a money button must not fire twice).
-    if (action.__posting) return;
+    if (st.posting) return null;
     var body = Object.assign({}, action.body || {}, opts.formValues || {});
     // Idempotency key, stable per action INSTANCE = (action, request body): a double-click or a
     // retry after a failure / unknown outcome resends the SAME key, so the server dedupes instead
     // of double-charging. A different body is a different intent (new key); a 2xx consumes the
-    // instance (the key rotates). A form may derive the key from a field (idempotencyFrom).
+    // instance (the key rotates). A form may name a reference field (idempotencyFrom): the key is
+    // then DERIVED from (reference, body), so the same reference + body dedupes even across a reload,
+    // and a changed body can never be replayed under an earlier request's key.
     var fp = JSON.stringify(body);
-    if (!action.__idem || action.__idem.fp !== fp) action.__idem = { key: 'idem-' + uuid(), fp: fp };
-    var idem = (action.idempotencyFrom && opts.formValues && opts.formValues[action.idempotencyFrom]) || action.__idem.key;
+    var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
+    if (!st.idem || st.idem.fp !== fp) {
+      st.idem = { key: (ref != null && ref !== '') ? 'idem-' + hash53(String(ref) + '|' + fp) : 'idem-' + uuid(), fp: fp };
+    }
+    var idem = st.idem.key;
     if (action.kind === 'post') body.idempotencyKey = idem; // legacy body field, preserved
     var money = isMoneyAction(action);
     function show(cls, text) {
@@ -1174,13 +1236,13 @@
       // line so it never stays at a stale "Working...".
       if (opts.mirror && opts.mirror !== status) { opts.mirror.className = cls; opts.mirror.textContent = text; }
     }
-    action.__posting = true;
+    st.posting = true;
     show('pcc-action-status', 'Working…');
     var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
-    ctx.tx.send(method, action.path, body, idem).then(function (res) {
-      action.__posting = false;
+    return ctx.tx.send(method, action.path, body, idem).then(function (res) {
+      st.posting = false;
       if (res.ok) {
-        action.__idem = null; // this intent is consumed
+        st.idem = null; // this intent is consumed
         var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
         // Accepted is not settled: a money write never renders green here. Its settlement state
         // comes from a read model (a receipt window), not from this HTTP status.
@@ -1191,7 +1253,7 @@
         show('pcc-action-status st-failed', postErrorText(res, action));
       }
     }, function (err) {
-      action.__posting = false;
+      st.posting = false;
       show('pcc-action-status st-failed', String(err && err.message || 'Request failed'));
     });
   }
@@ -1200,11 +1262,13 @@
   // C-03 endpoint changes instead of a bare status code.
   function postErrorText(res, action) {
     var msg = res.body && (res.body.message || res.body.error);
-    if (msg) return String(msg);
-    var path = String((action && action.path) || '');
+    if (msg) return typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 300);
+    var canon = canonicalPath(action && action.path) || '';
     if (res.status === 410) return 'This action is no longer available - the endpoint was removed. Nothing was executed.';
-    if (res.status === 404 && /\/fund(\/|$|\?)/.test(path)) return 'Funding was refused: this escrow is not recognised by the protocol.';
-    if (res.status === 503) return 'Temporarily unavailable (a safety gate is closed) - nothing was charged; you can retry shortly.';
+    if (res.status === 404 && /^\/api\/escrow\/chain\/[^\/]+\/fund$/.test(canon)) return 'Funding was refused: this escrow is not recognised by the protocol.';
+    // A 5xx can come from the edge AFTER the gateway executed the write. The kit cannot know the
+    // outcome, so it never claims that nothing was charged.
+    if (res.status >= 500) return 'Failed (HTTP ' + res.status + ') - the outcome is unknown. Check the receipt before retrying.';
     return 'Failed (HTTP ' + res.status + ')';
   }
 
@@ -1250,9 +1314,15 @@
     // Host lockdown: writes are disabled in a hosted view — never open the gate.
     // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
     if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
+    var st = actionState(action);
+    // An intent already in flight: say so, never open a second gate whose Approve would be inert.
+    if (st.posting) {
+      if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; opts.status.textContent = 'Already submitted - waiting for the response.'; }
+      return;
+    }
     // One approval modal per action: a rapid second click must not stack a second gate.
-    if (action.__gateOpen) return;
-    action.__gateOpen = true;
+    if (st.gateOpen) return;
+    st.gateOpen = true;
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
@@ -1273,7 +1343,7 @@
     approve.type = 'button';
     var cancel = el('button', 'pcc-btn pcc-btn-quiet', 'Cancel');
     cancel.type = 'button';
-    function close() { action.__gateOpen = false; if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    function close() { st.gateOpen = false; if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
     approve.onclick = function () {
       if (desc.destination === null) {
         status.className = 'pcc-action-status st-failed';
@@ -1282,8 +1352,10 @@
         return;
       }
       approve.disabled = true; // one Approve per gate opening
-      doPost(ctx, action, Object.assign({}, opts, { viaApproval: true, mirror: opts.status }), status);
-      setTimeout(close, 1200);
+      var sent = doPost(ctx, action, Object.assign({}, opts, { viaApproval: true, mirror: opts.status }), status);
+      // Keep the gate (and its one-gate guard) until the request settles, then show the outcome briefly.
+      var later = function () { setTimeout(close, 1200); };
+      if (sent && typeof sent.then === 'function') sent.then(later, later); else later();
     };
     cancel.onclick = close;
     overlay.onclick = function (e) { if (e.target === overlay) close(); };
