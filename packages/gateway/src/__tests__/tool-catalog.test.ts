@@ -11,8 +11,15 @@ import {
   _clearCatalogForTests,
 } from "../routes/tool-catalog.js";
 
+/** Test principal: x-test-operator sets req.operatorId ("" = unauthenticated). */
+const OWNER = "owner@kits.test";
 function makeApp() {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    const id = typeof h === "string" ? h : OWNER;
+    if (id !== "") (req as unknown as { operatorId?: string }).operatorId = id;
+  });
   void app.register(toolCatalogRoutes);
   return app;
 }
@@ -77,6 +84,74 @@ describe("POST /api/tool-catalog/register", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("validation_failed");
+  });
+});
+
+describe("POST /api/tool-catalog/register: ownership (kits K0)", () => {
+  beforeEach(() => _clearCatalogForTests());
+
+  it("refuses an unauthenticated registration (401)", async () => {
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/tool-catalog/register",
+      headers: { "x-test-operator": "" },
+      payload: SAMPLE,
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("missing_identity");
+  });
+
+  it("refuses another operator re-registering the same package, leaving maintainerDid intact", async () => {
+    const app = makeApp();
+    const first = await app.inject({ method: "POST", url: "/api/tool-catalog/register", payload: SAMPLE });
+    expect(first.statusCode).toBe(201);
+
+    const hijack = await app.inject({
+      method: "POST",
+      url: "/api/tool-catalog/register",
+      headers: { "x-test-operator": "attacker@kits.test" },
+      payload: { ...SAMPLE, maintainerDid: "did:erc8004:0xATTACKER", description: "hijacked" },
+    });
+    expect(hijack.statusCode).toBe(403);
+
+    const after = await app.inject({ method: "GET", url: `/api/tool-catalog/${first.json().id}` });
+    expect(after.json().maintainerDid).toBe(SAMPLE.maintainerDid);
+    expect(after.json().description).toBe(SAMPLE.description);
+  });
+
+  it("refuses a hijack by repoUrl when the package has no npm name", async () => {
+    const app = makeApp();
+    const { packageName: _omit, ...noPkg } = SAMPLE;
+    await app.inject({ method: "POST", url: "/api/tool-catalog/register", payload: noPkg });
+    const hijack = await app.inject({
+      method: "POST",
+      url: "/api/tool-catalog/register",
+      headers: { "x-test-operator": "attacker@kits.test" },
+      payload: { ...noPkg, maintainerDid: "did:erc8004:0xATTACKER" },
+    });
+    expect(hijack.statusCode).toBe(403);
+  });
+
+  it("lets the registrant update its own entry, matching identity case-insensitively", async () => {
+    const app = makeApp();
+    await app.inject({ method: "POST", url: "/api/tool-catalog/register", payload: SAMPLE });
+    const update = await app.inject({
+      method: "POST",
+      url: "/api/tool-catalog/register",
+      headers: { "x-test-operator": "  OWNER@kits.test " },
+      payload: { ...SAMPLE, status: "beta" },
+    });
+    expect(update.statusCode).toBe(200);
+    expect(update.json().status).toBe("beta");
+  });
+
+  it("never serializes the registrant's operatorId", async () => {
+    const app = makeApp();
+    const reg = await app.inject({ method: "POST", url: "/api/tool-catalog/register", payload: SAMPLE });
+    const list = await app.inject({ method: "GET", url: "/api/tool-catalog" });
+    expect(reg.body).not.toContain(OWNER);
+    expect(list.body).not.toContain(OWNER);
   });
 });
 
