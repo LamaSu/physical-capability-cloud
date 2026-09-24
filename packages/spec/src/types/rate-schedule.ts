@@ -350,10 +350,19 @@ export function computeScheduleHash(
  * Validate that a RateSchedule's segments are non-overlapping and time-ordered.
  * Throws on violation. Used by upstream `setRateSchedule` callers; pure.
  */
-export function assertScheduleIsWellFormed(schedule: RateSchedule): void {
+export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segments">): void {
   let prevEnd: number | null = null;
   for (let i = 0; i < schedule.segments.length; i++) {
     const seg = schedule.segments[i];
+
+    // An open-ended segment (endTime null) covers every later moment, and evaluation returns the FIRST
+    // covering segment, so anything after it could never apply. Before this check, `prevEnd = null`
+    // silently disabled the overlap test below for every later segment (pcc-economics D1).
+    if (i > 0 && prevEnd === null) {
+      throw new Error(
+        `RateSchedule segments[${i}] follows an open-ended segment (endTime null) and could never apply`,
+      );
+    }
 
     if (prevEnd !== null && seg.startTime < prevEnd) {
       throw new Error(

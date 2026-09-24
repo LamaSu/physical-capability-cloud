@@ -423,6 +423,44 @@ describe("POST /api/contributors/schedules", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("refuses to seal a schedule whose later segments can never apply (open-ended segment first)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: ALICE,
+        schedule: {
+          version: 1,
+          segments: [
+            { kind: "constant", startTime: 0, endTime: null, bps: 40 },
+            { kind: "constant", startTime: 1000, endTime: null, bps: 80 },
+          ],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<{ error: string }>().error).toBe("malformed_schedule");
+  });
+
+  it("refuses to seal overlapping segments", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: ALICE,
+        schedule: {
+          version: 1,
+          segments: [
+            { kind: "constant", startTime: 0, endTime: 2000, bps: 40 },
+            { kind: "constant", startTime: 1000, endTime: null, bps: 80 },
+          ],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<{ error: string }>().error).toBe("malformed_schedule");
+  });
+
   it("rejects mismatched caller-claimed scheduleHash with 400", async () => {
     const wrongHash = "0x" + "f".repeat(64);
     const res = await app.inject({

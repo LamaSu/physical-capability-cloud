@@ -617,6 +617,13 @@ export class LicensingEngine {
    * `captureClassFromEvidence()` at the top of the file to populate the
    * context from an evidence bundle.
    */
+  /**
+   * @deprecated Do not use for payouts. It resolves each entry's rate by `ipId` from this mutable
+   * in-memory cache instead of the manifest's `rateScheduleHash`, and for a `model-author` it pays the
+   * model's share to the author AND the same share again to its datasets (2x), with no sum guard
+   * (pcc-economics D3/D5). It has no production callers. Use @pcc/spec `economics`:
+   * `splitsFromTrainingManifest` subdivides a model allocation exactly, and `compileEconomics` pays it.
+   */
   getRoyaltyDistributionRich(input: {
     childIpId: string;
     jobRevenue: bigint;
