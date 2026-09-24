@@ -486,8 +486,6 @@ export interface JobExecutionDb {
 }
 
 export interface JobExecutionLoadOptions {
-  /** From tenantOpts(req): passed through to the tenant-scoped evidence read. */
-  tenant?: { tenantId: string | null };
   /** Called with the source name and error when a read fails, for the gateway log. */
   onReadError?: (source: string, error: unknown) => void;
 }
@@ -516,8 +514,11 @@ export function loadJobExecutionSources(
     job,
     capability: attempt("capability", () => (repos.capabilities.findById(job.capabilityId) ?? null) as any),
     kernel: attempt("kernel", () => (repos.kernels.findById(job.kernelId) ?? null) as any),
+    // Evidence is scoped through the job, which the caller is already authorized to read
+    // (tenancy included). It is NOT filtered by evidence_bundles.tenant_id: no writer sets that
+    // column, so a tenant filter matched no rows and reported "no evidence" for a job that has it.
     evidence: attempt("evidence", () => {
-      const bundles = repos.evidence.findByJob(job.id, opts.tenant) as Array<Omit<EvidenceBundleRow, "events">>;
+      const bundles = repos.evidence.findByJob(job.id) as Array<Omit<EvidenceBundleRow, "events">>;
       return bundles.map((b) => ({
         ...b,
         events: repos.evidence.findEventsByBundle(b.id) as EvidenceBundleRow["events"],
