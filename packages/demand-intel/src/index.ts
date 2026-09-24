@@ -22,6 +22,7 @@ export type { AggregatorState, IngestSummary } from "./aggregator.js";
 export {
   UnmetDemandLens,
   resolveCapabilityKey,
+  normalizeCountry,
   VERIFIED_ACTOR_TYPE,
   SERVER_CAPTURE_EVENT_CLASSES,
 } from "./unmet-lens.js";

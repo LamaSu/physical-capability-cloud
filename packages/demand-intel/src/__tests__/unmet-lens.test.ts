@@ -12,11 +12,12 @@ import {
   type KitDemandPriorRef,
   type UnmetCapability,
 } from "@pcc/spec";
-import { UnmetDemandLens, resolveCapabilityKey, VERIFIED_ACTOR_TYPE } from "../unmet-lens.js";
+import { UnmetDemandLens, resolveCapabilityKey, normalizeCountry, VERIFIED_ACTOR_TYPE } from "../unmet-lens.js";
 
 const HPLC = "pcc://capabilities/synthetic-hplc/v1";
 const WIDGET = "pcc://capabilities/synthetic-widget/v1";
-const WINDOW = { from: "2026-09-01T00:00:00.000Z", to: "2026-09-30T23:59:59.999Z" };
+/** 37 days: comfortably above the 30-day public window floor. */
+const WINDOW = { from: "2026-08-25T00:00:00.000Z", to: "2026-09-30T23:59:59.999Z" };
 const NOW = () => "2026-09-24T12:00:00.000Z";
 
 let seq = 0;
@@ -29,6 +30,9 @@ interface RowSpec {
   unmet?: UnmetCapability[];
   fulfillmentPath?: DemandEnvelope["fulfillmentPath"];
   budgetBand?: DemandEnvelope["budgetBand"];
+  urgencyBand?: DemandEnvelope["urgencyBand"];
+  assuranceTier?: DemandEnvelope["assuranceTier"];
+  geographicRegion?: string;
   createdAt?: string;
   payloadOverride?: unknown;
 }
@@ -45,9 +49,11 @@ function persist(store: Store, spec: RowSpec = {}): void {
       capabilityTypes: ["synthetic-hplc"],
       summary: "synthetic",
       budgetBand: spec.budgetBand ?? "100_1k",
-      urgencyBand: "standard",
+      urgencyBand: spec.urgencyBand ?? "standard",
+      ...(spec.assuranceTier === undefined ? {} : { assuranceTier: spec.assuranceTier }),
+      ...(spec.geographicRegion === undefined ? {} : { geographicRegion: spec.geographicRegion }),
       createdAt: spec.createdAt ?? "2026-09-10T00:00:00.000Z",
-      ...(spec.fulfillmentPath === undefined ? { fulfillmentPath: "unfulfilled" } : { fulfillmentPath: spec.fulfillmentPath }),
+      fulfillmentPath: spec.fulfillmentPath ?? "unfulfilled",
       unmet: spec.unmet ?? [{ capabilityType: HPLC, reason: "no_kernel_offering", supplyCount: 0 }],
     } satisfies Record<string, unknown>);
   store.repos.analytics.insertEvent({
@@ -69,6 +75,18 @@ function verified(store: Store, principal: string, extra: RowSpec = {}): void {
   persist(store, { actorType: VERIFIED_ACTOR_TYPE, actorId: principal, ...extra });
 }
 
+describe("normalizeCountry", () => {
+  it("keeps only ISO alpha-2 countries and drops sub-country detail", () => {
+    expect(normalizeCountry("US")).toBe("US");
+    expect(normalizeCountry("us-ca")).toBe("US");
+    expect(normalizeCountry("DE-BY")).toBe("DE");
+    expect(normalizeCountry("Europe")).toBe("unknown");
+    expect(normalizeCountry("unknown")).toBe("unknown");
+    expect(normalizeCountry(undefined)).toBe("unknown");
+    expect(normalizeCountry("US-CA-SF-94103")).toBe("unknown");
+  });
+});
+
 describe("UnmetDemandLens", () => {
   let store: Store;
   let lens: UnmetDemandLens;
@@ -87,27 +105,48 @@ describe("UnmetDemandLens", () => {
     expect(diagnostics.rowsRead).toBe(0);
   });
 
-  it("counts a server-captured unmet intent with its class, reason, band and server timestamp", () => {
-    persist(store, { timestamp: "2026-09-12T08:00:00.000Z", createdAt: "1999-01-01T00:00:00.000Z", budgetBand: "1k_10k" });
+  it("counts a server-captured unmet intent with its class, histograms, window and server timestamp", () => {
+    persist(store, {
+      timestamp: "2026-09-12T08:00:00.000Z",
+      createdAt: "1999-01-01T00:00:00.000Z",
+      budgetBand: "1k_10k",
+      urgencyBand: "rush",
+      assuranceTier: 2,
+      geographicRegion: "us-ca",
+    });
     const { signals } = lens.compute({ ...WINDOW, now: NOW });
     expect(signals).toHaveLength(1);
     const internal = signals[0]!.internal!;
     expect(signals[0]!.capabilityKey).toBe(HPLC);
     expect(internal.unmetCount).toBe(1);
-    expect(internal.byEvidenceClass).toEqual({ funded: 0, authenticated_order: 1, query: 0 });
+    expect(internal.byEvidenceClass).toEqual({ query: 0, authenticated_order: 1, funded: 0 });
     expect(internal.reasonHistogram).toEqual({ no_kernel_offering: 1 });
     expect(internal.budgetBandHistogram).toEqual({ "1k_10k": 1 });
+    expect(internal.urgencyHistogram).toEqual({ rush: 1 });
+    expect(internal.assuranceTierHistogram).toEqual({ "2": 1 });
+    expect(internal.countryHistogram).toEqual({ US: 1 });
+    expect(internal.windowFrom).toBe(WINDOW.from);
+    expect(internal.windowTo).toBe(WINDOW.to);
     // The caller-influenced createdAt (1999) is ignored; the server row timestamp is used.
     expect(internal.firstSeen).toBe("2026-09-12T08:00:00.000Z");
     expect(internal.lastSeen).toBe("2026-09-12T08:00:00.000Z");
+  });
+
+  it("counts an intent without a tier toward every histogram except the tier one", () => {
+    persist(store);
+    const internal = lens.compute({ ...WINDOW, now: NOW }).signals[0]!.internal!;
+    expect(internal.assuranceTierHistogram).toEqual({});
+    expect(internal.countryHistogram).toEqual({ unknown: 1 });
   });
 
   it("gives today's rows zero verified breadth: body-supplied actors never count", () => {
     for (let i = 0; i < 50; i++) persist(store, { actorType: "requestor", actorId: `body-actor-${i}` });
     for (let i = 0; i < 50; i++) persist(store, { eventType: "intent.atomic_session", actorType: "agent", actorId: `agent-${i}` });
     const { signals, diagnostics } = lens.compute({ ...WINDOW, now: NOW });
-    expect(signals[0]!.internal!.unmetCount).toBe(100);
-    expect(signals[0]!.internal!.distinctVerifiedRequesters).toBe(0);
+    const internal = signals[0]!.internal!;
+    expect(internal.unmetCount).toBe(100);
+    expect(internal.distinctVerifiedRequesters).toBe(0);
+    expect(internal.distinctVerifiedRequestersAtOrAbove).toEqual({ query: 0, authenticated_order: 0, funded: 0 });
     expect(diagnostics.verifiedRows).toBe(0);
   });
 
@@ -118,10 +157,22 @@ describe("UnmetDemandLens", () => {
     expect(internal.distinctVerifiedRequesters).toBe(1);
   });
 
+  it("tracks verified requesters per class and cumulatively by strongest class", () => {
+    verified(store, "a", { eventType: "intent.synthetic_query" });
+    verified(store, "a", { eventType: "intent.composite_request" });
+    verified(store, "c", { eventType: "intent.synthetic_query" });
+    verified(store, "d", { eventType: "intent.atomic_session" });
+    const internal = lens.compute({ ...WINDOW, now: NOW }).signals[0]!.internal!;
+    expect(internal.byEvidenceClass).toEqual({ query: 2, authenticated_order: 2, funded: 0 });
+    expect(internal.distinctVerifiedRequestersByClass).toEqual({ query: 2, authenticated_order: 2, funded: 0 });
+    expect(internal.distinctVerifiedRequestersAtOrAbove).toEqual({ query: 3, authenticated_order: 2, funded: 0 });
+    expect(internal.distinctVerifiedRequesters).toBe(3);
+  });
+
   it("classes nl-query intents as query evidence", () => {
     persist(store, { eventType: "intent.synthetic_query" });
     const internal = lens.compute({ ...WINDOW, now: NOW }).signals[0]!.internal!;
-    expect(internal.byEvidenceClass).toEqual({ funded: 0, authenticated_order: 0, query: 1 });
+    expect(internal.byEvidenceClass).toEqual({ query: 1, authenticated_order: 0, funded: 0 });
   });
 
   it("skips intents the server did not mark unmet, and malformed payloads", () => {
@@ -164,7 +215,7 @@ describe("UnmetDemandLens", () => {
   });
 
   it("filters by the server timestamp window and rejects an inverted window", () => {
-    persist(store, { timestamp: "2026-08-31T23:59:59.000Z" });
+    persist(store, { timestamp: "2026-08-24T23:59:59.000Z" });
     persist(store, { timestamp: "2026-10-01T00:00:00.000Z" });
     persist(store, { timestamp: "2026-09-15T00:00:00.000Z" });
     const { signals, diagnostics } = lens.compute({ ...WINDOW, now: NOW });
@@ -198,9 +249,9 @@ describe("UnmetDemandLens", () => {
 
   it("is deterministic: the same rows in any order give identical signals and digests", () => {
     const specs: Array<[string, RowSpec]> = [
-      ["op-1", { timestamp: "2026-09-02T00:00:00.000Z" }],
-      ["op-2", { timestamp: "2026-09-03T00:00:00.000Z", budgetBand: "1k_10k" }],
-      ["op-3", { timestamp: "2026-09-04T00:00:00.000Z", eventType: "intent.atomic_session" }],
+      ["op-1", { timestamp: "2026-09-02T00:00:00.000Z", geographicRegion: "DE" }],
+      ["op-2", { timestamp: "2026-09-03T00:00:00.000Z", budgetBand: "1k_10k", assuranceTier: 3 }],
+      ["op-3", { timestamp: "2026-09-04T00:00:00.000Z", eventType: "intent.atomic_session", urgencyBand: "emergency" }],
     ];
     for (const [p, s] of specs) verified(store, p, s);
     const a = lens.compute({ ...WINDOW, now: NOW }).signals;
@@ -221,16 +272,30 @@ describe("seam: UnmetDemandLens -> toPublicOpportunityAggregate", () => {
     lens = new UnmetDemandLens(store.repos);
   });
 
-  it("keeps a type private with 4 verified principals and publishes it at 5", () => {
+  it("keeps a type private with 4 order-backed principals and publishes it at 5", () => {
     for (let i = 1; i <= 4; i++) verified(store, `operator-${i}`, { timestamp: `2026-09-1${i}T00:00:00.000Z` });
     expect(toPublicOpportunityAggregate(lens.compute({ ...WINDOW, now: NOW }).signals[0]!)).toBeNull();
     verified(store, "operator-5", { timestamp: "2026-09-19T06:00:00.000Z" });
     expect(toPublicOpportunityAggregate(lens.compute({ ...WINDOW, now: NOW }).signals[0]!)).toEqual({
       schema: "pcc.public-opportunity-aggregate.v0",
       capabilityType: HPLC,
-      demandBand: "5+",
+      demandBand: "5-9",
+      countedEvidence: "authenticated_order",
       asOf: "2026-09-19",
     });
+  });
+
+  it("keeps query-only demand private, even from many verified principals", () => {
+    for (let i = 1; i <= 9; i++) verified(store, `querier-${i}`, { eventType: "intent.synthetic_query" });
+    const [signal] = lens.compute({ ...WINDOW, now: NOW }).signals;
+    expect(signal!.internal!.distinctVerifiedRequesters).toBe(9);
+    expect(toPublicOpportunityAggregate(signal!)).toBeNull();
+  });
+
+  it("keeps a window shorter than 30 days private", () => {
+    for (let i = 1; i <= 6; i++) verified(store, `operator-${i}`, { timestamp: "2026-09-10T00:00:00.000Z" });
+    const short = lens.compute({ from: "2026-09-01T00:00:00.000Z", to: "2026-09-20T00:00:00.000Z", now: NOW });
+    expect(toPublicOpportunityAggregate(short.signals[0]!)).toBeNull();
   });
 
   it("publishes nothing from today's data shape, however large the volume", () => {

@@ -22,6 +22,10 @@
  *    the envelope's `createdAt`.
  *  - Counting is exact (a Set), not HyperLogLog: the public k threshold must
  *    never be crossed on an estimate.
+ *  - Evidence classes come from the event type (`SERVER_CAPTURE_EVENT_CLASSES`).
+ *    No capture point produces `funded` evidence yet; budget-backed demand
+ *    (approved asset-outbound budgets, funded job offers) becomes `funded` only
+ *    when the gateway emits it (D2).
  *
  * PRIVATE output. Only `toPublicOpportunityAggregate()` (@pcc/spec) may turn a
  * signal into anything that leaves the server.
@@ -30,11 +34,15 @@
 import {
   ServerCapturedDemandEnvelopeSchema,
   KitDemandSignalSchema,
+  DEMAND_EVIDENCE_CLASSES,
+  evidenceClassRank,
   type KitDemandSignal,
   type KitDemandPriorRef,
   type DemandEvidenceClass,
   type UnmetReason,
   type BudgetBand,
+  type UrgencyBand,
+  type AssuranceTierKey,
 } from "@pcc/spec";
 import type { IRepositories } from "@pcc/store";
 
@@ -50,6 +58,16 @@ export const SERVER_CAPTURE_EVENT_CLASSES: Readonly<Record<string, DemandEvidenc
 
 const CSD_URI = /^pcc:\/\/capabilities\/[a-z0-9-]+\/v[0-9]+$/;
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
+const COUNTRY = /^([A-Za-z]{2})(-[A-Za-z0-9]{1,3})?$/;
+
+/**
+ * Reduce an envelope region to an ISO 3166-1 alpha-2 country, or "unknown".
+ * Sub-country detail ("US-CA") is dropped, never kept.
+ */
+export function normalizeCountry(region: string | undefined): string {
+  const m = region === undefined ? null : COUNTRY.exec(region.trim());
+  return m ? m[1]!.toUpperCase() : "unknown";
+}
 
 /**
  * Map an unmet capability to a signal key. A type PCC knows must arrive as its
@@ -92,10 +110,16 @@ export interface UnmetLensResult {
 
 interface Accumulator {
   unmetCount: number;
-  verified: Set<string>;
   byEvidenceClass: Record<DemandEvidenceClass, number>;
+  /** Verified principal -> rank of its strongest evidence class for this key */
+  strongest: Map<string, number>;
+  /** Verified principals seen in each class for this key */
+  principalsByClass: Record<DemandEvidenceClass, Set<string>>;
   reasons: Map<UnmetReason, number>;
   bands: Map<BudgetBand, number>;
+  urgency: Map<UrgencyBand, number>;
+  tiers: Map<AssuranceTierKey, number>;
+  countries: Map<string, number>;
   firstSeenMs: number;
   lastSeenMs: number;
 }
@@ -165,10 +189,14 @@ export class UnmetDemandLens {
           if (acc === undefined) {
             acc = {
               unmetCount: 0,
-              verified: new Set(),
-              byEvidenceClass: { funded: 0, authenticated_order: 0, query: 0 },
+              byEvidenceClass: { query: 0, authenticated_order: 0, funded: 0 },
+              strongest: new Map(),
+              principalsByClass: { query: new Set(), authenticated_order: new Set(), funded: new Set() },
               reasons: new Map(),
               bands: new Map(),
+              urgency: new Map(),
+              tiers: new Map(),
+              countries: new Map(),
               firstSeenMs: ts,
               lastSeenMs: ts,
             };
@@ -178,7 +206,16 @@ export class UnmetDemandLens {
           acc.byEvidenceClass[evidenceClass]++;
           increment(acc.reasons, unmet.reason);
           increment(acc.bands, envelope.budgetBand);
-          if (principal !== null) acc.verified.add(principal);
+          increment(acc.urgency, envelope.urgencyBand);
+          increment(acc.countries, normalizeCountry(envelope.geographicRegion));
+          if (envelope.assuranceTier !== undefined) {
+            increment(acc.tiers, String(envelope.assuranceTier) as AssuranceTierKey);
+          }
+          if (principal !== null) {
+            acc.principalsByClass[evidenceClass].add(principal);
+            const rank = evidenceClassRank(evidenceClass);
+            acc.strongest.set(principal, Math.max(acc.strongest.get(principal) ?? -1, rank));
+          }
           acc.firstSeenMs = Math.min(acc.firstSeenMs, ts);
           acc.lastSeenMs = Math.max(acc.lastSeenMs, ts);
         }
@@ -186,27 +223,44 @@ export class UnmetDemandLens {
     }
 
     const computedAt = options.now ? options.now() : new Date().toISOString();
+    const windowFrom = new Date(fromMs).toISOString();
+    const windowTo = new Date(toMs).toISOString();
     const keys = new Set<string>([...accumulators.keys(), ...(options.priors?.keys() ?? [])]);
     const signals: KitDemandSignal[] = [];
     for (const key of [...keys].sort()) {
       const acc = accumulators.get(key);
       const prior = options.priors?.get(key);
+      let internal: KitDemandSignal["internal"];
+      if (acc) {
+        const atOrAbove = { query: 0, authenticated_order: 0, funded: 0 };
+        for (const rank of acc.strongest.values()) {
+          for (const c of DEMAND_EVIDENCE_CLASSES) if (rank >= evidenceClassRank(c)) atOrAbove[c]++;
+        }
+        internal = {
+          windowFrom,
+          windowTo,
+          unmetCount: acc.unmetCount,
+          byEvidenceClass: { ...acc.byEvidenceClass },
+          distinctVerifiedRequestersByClass: {
+            query: acc.principalsByClass.query.size,
+            authenticated_order: acc.principalsByClass.authenticated_order.size,
+            funded: acc.principalsByClass.funded.size,
+          },
+          distinctVerifiedRequestersAtOrAbove: atOrAbove,
+          distinctVerifiedRequesters: acc.strongest.size,
+          reasonHistogram: sortedRecord(acc.reasons),
+          budgetBandHistogram: sortedRecord(acc.bands),
+          urgencyHistogram: sortedRecord(acc.urgency),
+          assuranceTierHistogram: sortedRecord(acc.tiers),
+          countryHistogram: sortedRecord(acc.countries) as Record<string, number>,
+          firstSeen: new Date(acc.firstSeenMs).toISOString(),
+          lastSeen: new Date(acc.lastSeenMs).toISOString(),
+        };
+      }
       const candidate: KitDemandSignal = {
         schema: "pcc.kit-demand-signal.v0",
         capabilityKey: key,
-        ...(acc
-          ? {
-              internal: {
-                unmetCount: acc.unmetCount,
-                distinctVerifiedRequesters: acc.verified.size,
-                byEvidenceClass: { ...acc.byEvidenceClass },
-                reasonHistogram: sortedRecord(acc.reasons),
-                budgetBandHistogram: sortedRecord(acc.bands),
-                firstSeen: new Date(acc.firstSeenMs).toISOString(),
-                lastSeen: new Date(acc.lastSeenMs).toISOString(),
-              },
-            }
-          : {}),
+        ...(internal ? { internal } : {}),
         ...(prior ? { prior } : {}),
         computedAt,
       };

@@ -6,7 +6,8 @@
  *   2. Priors (desk research, external complaint corpora) — PRIVATE strategy data.
  *   3. Public opportunity aggregates — produced ONLY by
  *      `toPublicOpportunityAggregate()`: allow-listed fields, banded counts,
- *      suppressed below k distinct verified requesters.
+ *      suppressed below k distinct verified requesters at or above an evidence
+ *      floor, over a window of at least MIN_WINDOW_DAYS.
  *
  * This module holds types and pure functions. The data they describe is
  * private; no real record of it belongs in this public package or its tests.
@@ -14,7 +15,15 @@
 import { z } from "zod";
 import { sha256 as sha256Hash } from "@noble/hashes/sha256";
 import { canonicalize } from "../util/canonical.js";
-import { BudgetBandSchema, UnmetReasonSchema, type BudgetBand, type UnmetReason } from "./demand.js";
+import type { SHA256 } from "./common.js";
+import {
+  BudgetBandSchema,
+  UnmetReasonSchema,
+  UrgencyBandSchema,
+  type BudgetBand,
+  type UnmetReason,
+  type UrgencyBand,
+} from "./demand.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -24,8 +33,26 @@ export type KitBuildClass =
   | "build" // a new connector is needed
   | "blocked"; // buildable, but per-task economics wait on a roadmap mechanism
 
-/** Demand evidence, ordered by how costly it is to fake (highest first). */
-export type DemandEvidenceClass = "funded" | "authenticated_order" | "query";
+/**
+ * Demand evidence, by how costly it is to fake. Until the gateway binds keys to
+ * verified identity (ledger R28/R29), only `funded` costs a forger real money:
+ * `authenticated_order` and `query` both need nothing more than a free API key.
+ */
+export type DemandEvidenceClass = "query" | "authenticated_order" | "funded";
+
+/** Evidence classes, weakest first. */
+export const DEMAND_EVIDENCE_CLASSES: readonly DemandEvidenceClass[] = Object.freeze([
+  "query",
+  "authenticated_order",
+  "funded",
+] as const);
+
+/** 0 = query, 1 = authenticated_order, 2 = funded. */
+export function evidenceClassRank(c: DemandEvidenceClass): number {
+  return DEMAND_EVIDENCE_CLASSES.indexOf(c);
+}
+
+export type AssuranceTierKey = "0" | "1" | "2" | "3";
 
 /** Pointer from a signal to a private prior record (never the record itself). */
 export interface KitDemandPriorRef {
@@ -38,15 +65,33 @@ export interface KitDemandPriorRef {
   datasetDigest: string;
 }
 
+type PerClass = Record<DemandEvidenceClass, number>;
+
 /** Server-computed unmet demand for one capability key over a window. */
 export interface KitDemandInternal {
+  /** The window the counts cover, ISO 8601 */
+  windowFrom: string;
+  windowTo: string;
   /** Unmet intents for this key, computed server-side at first-party capture */
   unmetCount: number;
-  /** Distinct SERVER-derived requester identities — never caller-supplied hashes */
+  /** Unmet intents per evidence class; sums to unmetCount */
+  byEvidenceClass: PerClass;
+  /** Distinct SERVER-verified requesters with at least one intent in exactly this class */
+  distinctVerifiedRequestersByClass: PerClass;
+  /**
+   * Distinct SERVER-verified requesters whose strongest intent is at or above
+   * this class. Cumulative and exact; the public projection uses it.
+   */
+  distinctVerifiedRequestersAtOrAbove: PerClass;
+  /** Equals distinctVerifiedRequestersAtOrAbove.query */
   distinctVerifiedRequesters: number;
-  byEvidenceClass: Record<DemandEvidenceClass, number>;
   reasonHistogram: Partial<Record<UnmetReason, number>>;
   budgetBandHistogram: Partial<Record<BudgetBand, number>>;
+  urgencyHistogram: Partial<Record<UrgencyBand, number>>;
+  /** Only intents that carry an assurance tier are counted; sums to <= unmetCount */
+  assuranceTierHistogram: Partial<Record<AssuranceTierKey, number>>;
+  /** ISO 3166-1 alpha-2 codes or "unknown"; never finer than country; sums to unmetCount */
+  countryHistogram: Record<string, number>;
   /** ISO 8601 */
   firstSeen: string;
   /** ISO 8601 */
@@ -73,8 +118,11 @@ export const CapabilityKeySchema = z
     "Must be a CSD URI (pcc://capabilities/<slug>/v<N>) or proposed:<slug>",
   );
 
+export const DemandEvidenceClassSchema = z.enum(["query", "authenticated_order", "funded"]);
+
 const Count = z.number().int().nonnegative();
 const IsoTimestamp = z.string().datetime({ offset: true });
+const PerClassSchema = z.object({ query: Count, authenticated_order: Count, funded: Count }).strict();
 
 export const KitDemandPriorRefSchema = z
   .object({
@@ -92,28 +140,53 @@ function sumOf(values: Record<string, number | undefined>): number {
 
 export const KitDemandInternalSchema = z
   .object({
+    windowFrom: IsoTimestamp,
+    windowTo: IsoTimestamp,
     unmetCount: Count,
+    byEvidenceClass: PerClassSchema,
+    distinctVerifiedRequestersByClass: PerClassSchema,
+    distinctVerifiedRequestersAtOrAbove: PerClassSchema,
     distinctVerifiedRequesters: Count,
-    byEvidenceClass: z
-      .object({ funded: Count, authenticated_order: Count, query: Count })
-      .strict(),
     reasonHistogram: z.record(UnmetReasonSchema, Count),
     budgetBandHistogram: z.record(BudgetBandSchema, Count),
+    urgencyHistogram: z.record(UrgencyBandSchema, Count),
+    assuranceTierHistogram: z.record(z.enum(["0", "1", "2", "3"]), Count),
+    countryHistogram: z.record(z.string().regex(/^([A-Z]{2}|unknown)$/), Count),
     firstSeen: IsoTimestamp,
     lastSeen: IsoTimestamp,
   })
   .strict()
   .superRefine((v, ctx) => {
     const fail = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-    if (v.distinctVerifiedRequesters > v.unmetCount) {
-      fail("distinctVerifiedRequesters cannot exceed unmetCount");
+    const n = v.unmetCount;
+    // Each unmet intent contributes exactly one class, reason, budget band,
+    // urgency and country for this key; the tier is present only sometimes.
+    if (sumOf(v.byEvidenceClass) !== n) fail("byEvidenceClass must sum to unmetCount");
+    if (sumOf(v.reasonHistogram) !== n) fail("reasonHistogram must sum to unmetCount");
+    if (sumOf(v.budgetBandHistogram) !== n) fail("budgetBandHistogram must sum to unmetCount");
+    if (sumOf(v.urgencyHistogram) !== n) fail("urgencyHistogram must sum to unmetCount");
+    if (sumOf(v.countryHistogram) !== n) fail("countryHistogram must sum to unmetCount");
+    if (sumOf(v.assuranceTierHistogram) > n) fail("assuranceTierHistogram cannot exceed unmetCount");
+
+    const by = v.distinctVerifiedRequestersByClass;
+    const up = v.distinctVerifiedRequestersAtOrAbove;
+    for (const c of DEMAND_EVIDENCE_CLASSES) {
+      if (by[c] > v.byEvidenceClass[c]) fail(`distinct requesters in ${c} exceed its intents`);
+      if (by[c] > up[c]) fail(`distinctVerifiedRequestersByClass.${c} exceeds its at-or-above count`);
     }
-    // Each unmet intent contributes exactly one evidence class, one reason and
-    // one budget band for this key, so every histogram must account for all of them.
-    if (sumOf(v.byEvidenceClass) !== v.unmetCount) fail("byEvidenceClass must sum to unmetCount");
-    if (sumOf(v.reasonHistogram) !== v.unmetCount) fail("reasonHistogram must sum to unmetCount");
-    if (sumOf(v.budgetBandHistogram) !== v.unmetCount) fail("budgetBandHistogram must sum to unmetCount");
-    if (Date.parse(v.firstSeen) > Date.parse(v.lastSeen)) fail("firstSeen must not be after lastSeen");
+    if (!(up.query >= up.authenticated_order && up.authenticated_order >= up.funded)) {
+      fail("distinctVerifiedRequestersAtOrAbove must be non-increasing from query to funded");
+    }
+    if (up.funded !== by.funded) fail("at-or-above funded must equal by-class funded");
+    if (up.authenticated_order > by.authenticated_order + by.funded) fail("at-or-above authenticated_order exceeds its union bound");
+    if (up.query > by.query + by.authenticated_order + by.funded) fail("at-or-above query exceeds its union bound");
+    if (v.distinctVerifiedRequesters !== up.query) fail("distinctVerifiedRequesters must equal at-or-above query");
+    if (v.distinctVerifiedRequesters > n) fail("distinctVerifiedRequesters cannot exceed unmetCount");
+
+    const t = (s: string) => Date.parse(s);
+    if (!(t(v.windowFrom) <= t(v.firstSeen) && t(v.firstSeen) <= t(v.lastSeen) && t(v.lastSeen) <= t(v.windowTo))) {
+      fail("require windowFrom <= firstSeen <= lastSeen <= windowTo");
+    }
   });
 
 export const KitDemandSignalSchema = z
@@ -131,40 +204,59 @@ export const KitDemandSignalSchema = z
 
 // ── Digest ───────────────────────────────────────────────────────
 
-/** `0x` + SHA-256 over the canonical JSON of a validated signal. */
-export function kitDemandSignalDigest(signal: KitDemandSignal): `0x${string}` {
+/**
+ * `sha256:<hex>` over the canonical JSON of a validated signal. The bytes match
+ * the async `sha256(canonicalize(signal))` helper in util/canonical; this one is
+ * synchronous so projections and folds need not await.
+ */
+export function kitDemandSignalDigest(signal: KitDemandSignal): SHA256 {
   const parsed = KitDemandSignalSchema.parse(signal);
   const bytes = sha256Hash(new TextEncoder().encode(canonicalize(parsed)));
-  return `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+  return `sha256:${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}` as SHA256;
 }
 
 // ── Public projection ────────────────────────────────────────────
 
-/** No public aggregate may ever describe fewer distinct verified requesters than this. */
+/** No public aggregate may describe fewer distinct verified requesters than this. */
 export const MIN_PUBLIC_K = 5;
+/** No public aggregate may cover a window shorter than this many days. */
+export const MIN_WINDOW_DAYS = 30;
+/** The weakest evidence class a public aggregate may count. */
+export const MIN_PUBLIC_EVIDENCE_CLASS: DemandEvidenceClass = "authenticated_order";
 
-export type DemandBand = "5+" | "10+" | "25+" | "50+" | "100+";
+export type DemandBand = "5-9" | "10-24" | "25-99" | "100+";
 
 const BANDS: ReadonlyArray<readonly [number, DemandBand]> = [
   [100, "100+"],
-  [50, "50+"],
-  [25, "25+"],
-  [10, "10+"],
-  [5, "5+"],
+  [25, "25-99"],
+  [10, "10-24"],
+  [5, "5-9"],
 ];
 
 export interface OpportunityAggregatePolicy {
-  /** Minimum distinct verified requesters before a type may appear publicly (>= MIN_PUBLIC_K) */
+  /** Minimum distinct verified requesters (>= MIN_PUBLIC_K) */
   k: number;
+  /** Count only requesters whose strongest intent is at or above this class (>= MIN_PUBLIC_EVIDENCE_CLASS) */
+  minEvidenceClass: DemandEvidenceClass;
+  /** Minimum window length in days (>= MIN_WINDOW_DAYS) */
+  minWindowDays: number;
 }
+
+export const DEFAULT_OPPORTUNITY_POLICY: Readonly<OpportunityAggregatePolicy> = Object.freeze({
+  k: MIN_PUBLIC_K,
+  minEvidenceClass: MIN_PUBLIC_EVIDENCE_CLASS,
+  minWindowDays: MIN_WINDOW_DAYS,
+});
 
 /** The only demand-intelligence shape that may leave the server. */
 export interface PublicOpportunityAggregate {
   schema: "pcc.public-opportunity-aggregate.v0";
   /** A CSD URI. Proposed types are strategy data and never public. */
   capabilityType: string;
-  /** Banded distinct verified requesters; never an exact count */
+  /** Banded distinct verified requesters at or above `countedEvidence`; never an exact count */
   demandBand: DemandBand;
+  /** The evidence floor the band counts (policy, not data) */
+  countedEvidence: DemandEvidenceClass;
   /** UTC day (YYYY-MM-DD) of the most recent unmet intent */
   asOf: string;
 }
@@ -174,21 +266,36 @@ export interface PublicOpportunityAggregate {
  * must stay private. Returns `null` for:
  *   - prior-only signals (priors are strategy, not demand anyone expressed);
  *   - `proposed:` keys;
- *   - fewer than `policy.k` distinct verified requesters. One caller inflating
- *     `unmetCount` never makes a type public.
- * Throws on an invalid signal or a policy below MIN_PUBLIC_K, so it fails closed.
+ *   - a window shorter than `policy.minWindowDays`;
+ *   - fewer than `policy.k` distinct verified requesters whose strongest intent
+ *     is at or above `policy.minEvidenceClass`. Volume from one caller, or
+ *     query-only demand, never makes a type public.
+ * Throws on an invalid signal or on a policy weaker than the floors, so it
+ * fails closed. k-anonymity is a privacy floor, not a Sybil control: until
+ * R28/R29 bind keys to identity, only `funded` evidence costs a forger money.
  */
 export function toPublicOpportunityAggregate(
   signal: KitDemandSignal,
-  policy: OpportunityAggregatePolicy = { k: MIN_PUBLIC_K },
+  policy: OpportunityAggregatePolicy = DEFAULT_OPPORTUNITY_POLICY,
 ): PublicOpportunityAggregate | null {
   if (!Number.isInteger(policy.k) || policy.k < MIN_PUBLIC_K) {
     throw new Error(`toPublicOpportunityAggregate: policy.k must be an integer >= ${MIN_PUBLIC_K}`);
   }
+  if (!DEMAND_EVIDENCE_CLASSES.includes(policy.minEvidenceClass)) {
+    throw new Error("toPublicOpportunityAggregate: unknown policy.minEvidenceClass");
+  }
+  if (evidenceClassRank(policy.minEvidenceClass) < evidenceClassRank(MIN_PUBLIC_EVIDENCE_CLASS)) {
+    throw new Error(`toPublicOpportunityAggregate: policy.minEvidenceClass must be at least ${MIN_PUBLIC_EVIDENCE_CLASS}`);
+  }
+  if (!Number.isFinite(policy.minWindowDays) || policy.minWindowDays < MIN_WINDOW_DAYS) {
+    throw new Error(`toPublicOpportunityAggregate: policy.minWindowDays must be >= ${MIN_WINDOW_DAYS}`);
+  }
   const s = KitDemandSignalSchema.parse(signal);
   if (s.capabilityKey.startsWith("proposed:")) return null;
   if (s.internal === undefined) return null;
-  const n = s.internal.distinctVerifiedRequesters;
+  const windowDays = (Date.parse(s.internal.windowTo) - Date.parse(s.internal.windowFrom)) / 86_400_000;
+  if (windowDays < policy.minWindowDays) return null;
+  const n = s.internal.distinctVerifiedRequestersAtOrAbove[policy.minEvidenceClass];
   if (n < policy.k) return null;
   const band = BANDS.find(([floor]) => n >= floor);
   if (band === undefined) return null;
@@ -196,6 +303,7 @@ export function toPublicOpportunityAggregate(
     schema: "pcc.public-opportunity-aggregate.v0",
     capabilityType: s.capabilityKey,
     demandBand: band[1],
+    countedEvidence: policy.minEvidenceClass,
     asOf: new Date(s.internal.lastSeen).toISOString().slice(0, 10),
   };
 }
