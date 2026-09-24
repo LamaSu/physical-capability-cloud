@@ -548,6 +548,25 @@ describe("identity is never lost", () => {
   });
 });
 
+// ── Composition node ids are valid unit references ───────────────────────────
+
+describe("ids match the accepted-plan compiler's grammar", () => {
+  it("any printable-ASCII node id (1-128, no space) is a valid unitRef", () => {
+    const odd = 'print#1("a4"),\\b|c';
+    const ag = baseAgreement({ units: [{ ...baseAgreement().units[0]!, unitRef: odd }] });
+    const c = ok(compileEconomics(ag));
+    expect(c.units[0]!.unitRef).toBe(odd);
+    expect(compileEconomics(shuffleAgreement(ag, 3)).ok).toBe(true);
+  });
+
+  it("a space, a control character, non-ASCII, or 129 characters is refused", () => {
+    for (const bad of ["print 1", "print\u00011", "print\u00e9", "x".repeat(129), ""]) {
+      const r = compileEconomics(baseAgreement({ units: [{ ...baseAgreement().units[0]!, unitRef: bad }] }));
+      expect(r.ok ? [] : r.refusals.map((x) => x.code)).toContain("SCHEMA_INVALID");
+    }
+  });
+});
+
 // ── Every refusal, provoked ──────────────────────────────────────────────────
 
 describe("every refusal code is reachable", () => {

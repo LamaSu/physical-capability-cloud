@@ -13,7 +13,7 @@ Everything below is exact. Two implementations that follow this document produce
 
 - **Amount:** a non-negative integer number of base units of the agreement's currency, written as a decimal string with no sign, no leading zeros (`"0"` is allowed), no exponent. Arithmetic is exact integer arithmetic (`bigint`). Amounts never pass through floating point.
 - **bps:** an integer basis-point value, `0 <= bps <= 10000`. "Of 10000" means exactly `x * bps / 10000` with the rounding named where it is used.
-- **Id:** 1 to 128 characters matching `^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$`. All ids are ASCII, so string order is byte order in every language. Ids are compared exactly (case-sensitive).
+- **Id:** 1 to 128 printable ASCII characters without spaces, `^[\x21-\x7E]{1,128}$`. This is exactly the accepted-plan compiler's node-id grammar, so a plan's node id is always a valid unit reference. All ids are ASCII, so string order is byte order in every language, and canonical JSON escapes only `"` and `\`. Ids are compared exactly (case-sensitive).
 - **Address:** `0x` followed by 40 hex digits. It is normalized to lowercase before anything else. The zero address is never a valid payee.
 - **Label:** human text shown to people. 1 to 200 characters, Unicode NFC, with no control characters (U+0000–U+001F, U+007F–U+009F) and no unpaired surrogates. Labels are hashed, so a relabelled agreement is a different agreement.
 - **Time:** an integer count of unix seconds.
@@ -32,7 +32,7 @@ EconomicAgreementV1 {
   currency:     { code: /^[A-Z0-9]{2,12}$/, decimals: integer 0..36 }
   payer:        Id                        // a party; receives refunds
   parties:      Party[]    (1..64)
-  units:        Unit[]     (1..16)
+  units:        Unit[]     (1..256)
   splits:       Split[]    (0..64)
   clauses:      Clause[]   (1..128)
   licenses:     License[]  (0..64)
@@ -90,7 +90,7 @@ Clause {
   role:         Role
   to:           { party: Id } | { split: Id }
   subject:      Id | null                     // what the payment is for: a component, kit, IP, method
-  appliesTo:    { units: Id[] (1..16) } | { usingComponent: Id } | { oncePerJobUsing: Id } | { allUnits: true }
+  appliesTo:    { units: Id[] (1..256) } | { usingComponent: Id } | { oncePerJobUsing: Id } | { allUnits: true }
   underLicense: { licenseId: Id, version: integer >= 1 } | null
   rule:         one of the rules below
 }
@@ -271,7 +271,7 @@ An allocation's role and subject are the clause's, replaced by the nearest split
 3. Zero-amount legs are not payouts (the escrow forbids them). They are listed in the result's `zeroLegs`.
 4. If a unit has more than 16 legs, legs with the same `payTo` are merged (**compaction**). The merged leg's identity is `(payTo, roles joined "+", subjects joined "+")`, both sorted and de-duplicated, and it keeps all attribution. If there are still more than 16, the refusal is `TOO_MANY_LEGS`.
 5. Legs are ordered by `payTo`, then role, then subject (subject `null` sorts as the empty string).
-6. The unit ends with 1 to 16 legs, each `> 0`, summing to exactly `N`. This holds by construction: every clause amount is fully apportioned, and whatever is left goes to the residual or is refused. The compiler asserts it and never emits a unit that breaks it. With at most 16 units, the job-wide total is at most 256 legs, the escrow's limit.
+6. The unit ends with 1 to 16 legs, each `> 0`, summing to exactly `N`. This holds by construction: every clause amount is fully apportioned, and whatever is left goes to the residual or is refused. The compiler asserts it and never emits a unit that breaks it. An agreement may span several V-next jobs (one per operator). Grouping its units into jobs, and the escrow's per-job limits of 16 units and 256 legs, belong to the accepted-plan compiler, which refuses a plan that does not fit.
 
 Refusals from different units are all reported, not only the first unit's.
 

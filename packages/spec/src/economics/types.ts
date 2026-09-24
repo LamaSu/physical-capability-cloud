@@ -12,7 +12,12 @@ import { CONTRIBUTOR_ROLES } from "../payouts.js";
 
 // ── Grammar ──────────────────────────────────────────────────────────────────
 
-export const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$/;
+/**
+ * 1-128 printable ASCII characters, no space. Exactly composition's `ID_PATTERN`
+ * (csd/composition-commitment.ts), so every plan node id is a valid `unitRef`. ASCII keeps string
+ * order equal to byte order in every language, and canonical JSON escapes only `"` and `\`.
+ */
+export const ID_PATTERN = /^[\x21-\x7E]{1,128}$/;
 export const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,77})$/;
 export const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 export const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
@@ -24,9 +29,13 @@ export const MAX_UNIT_GROSS = (1n << 128n) - 1n;
 export const MIN_UNIT_GROSS = 5n;
 /** The escrow's MAX_FEE_BPS. */
 export const MAX_FEE_BPS = 1000;
-export const MAX_UNITS = 16;
+/**
+ * Units per agreement. An agreement can span several V-next jobs (one per operator); grouping units
+ * into jobs, and the escrow's per-job limits (16 units, 256 legs), belong to the accepted-plan compiler.
+ */
+export const MAX_AGREEMENT_UNITS = 256;
+/** The escrow's MAX_PAYOUT_LEGS_PER_UNIT. */
 export const MAX_LEGS_PER_UNIT = 16;
-export const MAX_TOTAL_LEGS = 256;
 export const MAX_SPLIT_DEPTH = 8;
 
 function isValidLabel(s: string): boolean {
@@ -213,7 +222,7 @@ export const RequirableRuleSchema = z.union([
 export type RequirableRule = z.infer<typeof RequirableRuleSchema>;
 
 export const AppliesToSchema = z.union([
-  z.object({ units: IdSetSchema(1, MAX_UNITS) }).strict(),
+  z.object({ units: IdSetSchema(1, MAX_AGREEMENT_UNITS) }).strict(),
   z.object({ usingComponent: IdSchema }).strict(),
   z.object({ oncePerJobUsing: IdSchema }).strict(),
   z.object({ allUnits: z.literal(true) }).strict(),
@@ -362,7 +371,7 @@ export const EconomicAgreementSchema = z
       .strict(),
     payer: IdSchema,
     parties: z.array(PartySchema).min(1).max(64),
-    units: z.array(UnitSchema).min(1).max(MAX_UNITS),
+    units: z.array(UnitSchema).min(1).max(MAX_AGREEMENT_UNITS),
     splits: z.array(SplitSchema).max(64),
     clauses: z.array(ClauseSchema).min(1).max(128),
     licenses: z.array(LicenseSchema).max(64),
