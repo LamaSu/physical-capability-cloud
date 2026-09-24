@@ -45,7 +45,14 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
     On Linux/macOS: ``lp -h <ip> -d default <file>``
     On Windows:     ``notepad /p <file>``  (or rundll32 for images)
 
-    Returns a result dict with printed, filepath, returncode.
+    Returns a result dict with submitted, filepath, returncode.
+
+    A zero exit status means the spooler QUEUED the job -- CUPS answers
+    "request id is ..." the moment it accepts it, before a sheet is printed,
+    and a job can still jam, run out of paper or be cancelled.  That is
+    ACCEPTANCE, not completion, so every path reports the acceptance flag
+    ``submitted`` and none the completion flag ``printed``: this adapter never
+    observes the job's own state (IPP job-state / ``lpstat``).
     """
     params = job.get("parameters", {})
     content = params.get("content", params.get("text", "Hello from PCC"))
@@ -93,7 +100,8 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
                 )
 
         return {
-            "printed": result.returncode == 0,
+            # Exit 0 = QUEUED (accepted), never printed -- see the docstring.
+            "submitted": result.returncode == 0,
             "filepath": filepath,
             "returncode": result.returncode,
             "stdout": result.stdout[:500] if result.stdout else "",
@@ -103,7 +111,7 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
         }
     except subprocess.TimeoutExpired:
         return {
-            "printed": False,
+            "submitted": False,
             "filepath": filepath,
             "error": "print command timed out",
             "printer_ip": printer_ip,
@@ -112,14 +120,14 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
         # lp / notepad not found -- return a soft success so tests pass
         log.warning(f"Print command not found: {e}")
         return {
-            "printed": False,
+            "submitted": False,
             "filepath": filepath,
             "error": f"print command not available: {e}",
             "printer_ip": printer_ip,
         }
     except Exception as e:
         return {
-            "printed": False,
+            "submitted": False,
             "filepath": filepath,
             "error": str(e),
             "printer_ip": printer_ip,
@@ -140,13 +148,27 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
 RESULT_SUCCESS = "success"
 RESULT_FAILURE = "failure"
 RESULT_UNCLASSIFIABLE = "unclassifiable"
+# The device ACCEPTED the work and its outcome has not been observed: neither a
+# success nor a failure (classify_execution_result rule 10).
+RESULT_ACCEPTED = "accepted"
 
 # Every type emitted here must be a member of the closed EVIDENCE_EVENT_TYPES
 # enum in packages/spec/src/types/evidence.ts (tests parse it); consumers that
 # validate bundles reject any other string.
 EVENT_EXECUTION_STARTED = "execution_started"
+EVENT_EXECUTION_PROGRESS = "execution_progress"
 EVENT_EXECUTION_COMPLETED = "execution_completed"
 EVENT_EXECUTION_FAILED = "execution_failed"
+
+# Evidence levels, weakest first:
+#   submitted        -- the device only ACCEPTED the command (a spooler queued
+#                       the job, a print was started, an API answered 202)
+#   device-reported  -- the device itself reported the work finished
+#   inspected-output -- the output itself was inspected
+# Only device-reported (or stronger) evidence may carry execution_completed,
+# which is what the settlement oracle releases on.  A submitted-only result is
+# recorded as execution_progress at this level and never as a completion.
+EVIDENCE_LEVEL_SUBMITTED = "submitted"
 
 # Outcome reported directly by an adapter via a "status" key.  Compared after
 # `.strip().lower()`: a device that shouts "FAILED" must not slip past the
@@ -160,14 +182,23 @@ SUCCESS_STATUS_VALUES = frozenset({
 })
 
 # COMPLETION flags -- the device reported that the WORK ITSELF finished.
-#   printed  -> execute_ipp_print, JobExecutor._execute_octoprint
-#   executed -> JobExecutor._execute_generic_http
+# Reserved for adapters that actually OBSERVE completion:
+#   executed -> JobExecutor._execute_generic_http, for a 2xx other than 202:
+#               a synchronous API's own answer that it ran the request
+#   printed  -> no current adapter.  An ``lp`` exit of 0 and an OctoPrint 2xx
+#               both mean the job was QUEUED or STARTED, so those adapters
+#               report ``submitted``; ``printed`` waits for an adapter that
+#               observes a finished print (IPP job-state, OctoPrint /api/job).
 COMPLETION_FLAG_KEYS = ("printed", "executed")
 
 # ACCEPTANCE flags -- the device only reported that it TOOK the request.
+#   submitted -> execute_ipp_print, JobExecutor._execute_octoprint,
+#                JobExecutor._execute_generic_http (HTTP 202 only),
+#                JobExecutor._execute_opentrons
 # Acceptance is not completion: an Opentrons run that is playing has been
 # accepted and can still fail at step 40.  True here is therefore NOT a success
-# (the outcome is not yet known -- fail closed); False is still a failure.
+# -- alone it classifies as accepted (rule 10), which never emits
+# execution_completed -- and False is still a failure.
 ACCEPTANCE_FLAG_KEYS = ("submitted",)
 
 ALL_FLAG_KEYS = COMPLETION_FLAG_KEYS + ACCEPTANCE_FLAG_KEYS
@@ -201,6 +232,11 @@ TRANSPORT_FAILURE_MAX_STATUS = 0
 # a bare `status < 400` also admits the transport sentinel above.
 HTTP_SUCCESS_MIN = 200
 HTTP_SUCCESS_MAX_EXCLUSIVE = 300
+
+# RFC 9110 sec 15.3.3, 202 Accepted: "the request has been accepted for
+# processing, but the processing has not been completed".  Inside the 2xx band,
+# but it is the device's own statement that the work has NOT finished.
+HTTP_ACCEPTED = 202
 
 OCTOPRINT_SUCCESS_STATUSES = (200, 201, 204)
 
@@ -388,10 +424,11 @@ def _is_returncode_failure(result: Dict) -> bool:
 
 
 def classify_execution_result(result: Any) -> str:
-    """Classify an adapter result as success / failure / unclassifiable.
+    """Classify an adapter result as success / failure / accepted / unclassifiable.
 
     Pure function -- no I/O, no side effects.  Returns one of
-    :data:`RESULT_SUCCESS`, :data:`RESULT_FAILURE`, :data:`RESULT_UNCLASSIFIABLE`.
+    :data:`RESULT_SUCCESS`, :data:`RESULT_FAILURE`, :data:`RESULT_ACCEPTED`,
+    :data:`RESULT_UNCLASSIFIABLE`.
 
     First matching rule wins:
 
@@ -409,7 +446,9 @@ def classify_execution_result(result: Any) -> str:
     8.  ``status`` present as a string but unrecognised   -> unclassifiable
     9.  a :data:`COMPLETION_FLAG_KEYS` flag is present
         (and every flag passed rule 6)                     -> success
-    10. anything else                                      -> unclassifiable
+    10. an :data:`ACCEPTANCE_FLAG_KEYS` flag is ``True``
+        (no success status, no completion flag)            -> accepted
+    11. anything else                                      -> unclassifiable
 
     Why the order is what it is, rule by rule:
 
@@ -436,8 +475,19 @@ def classify_execution_result(result: Any) -> str:
       recognise as success.
     * Rule 9 uses COMPLETION flags only.  An ACCEPTANCE flag (``submitted``)
       says the device took the request, never that the work finished, so
-      ``{"submitted": True}`` alone falls through to rule 10 -- unclassifiable,
-      which emits neither ``execution_completed`` nor ``execution_failed``.
+      ``{"submitted": True}`` alone never reaches a success.
+    * Rule 10 names that SUBMITTED evidence level rather than lumping it in
+      with results the classifier cannot read.  Accepted is neither outcome:
+      the bundle records the submission as ``execution_progress`` (level
+      ``submitted``) and carries no ``execution_completed`` for the settlement
+      oracle to release on, and the job is left non-terminal -- it has not
+      failed, it simply has not been observed to finish.  A success ``status``
+      (rule 7) or a completion flag (rule 9) outranks it, because each is the
+      device reporting the work done.  Rule 8 outranks it too, and not only by
+      position: ``{"submitted": True, "status": "running"}`` stays
+      unclassifiable because a status the classifier cannot read may name a
+      failure it does not know (``"rejected"``, ``"jammed"``), and accepted
+      would leave that job waiting instead of failing it closed.
     """
     if not isinstance(result, dict):
         return RESULT_UNCLASSIFIABLE
@@ -472,6 +522,11 @@ def classify_execution_result(result: Any) -> str:
 
     if any(key in result for key in COMPLETION_FLAG_KEYS):
         return RESULT_SUCCESS
+
+    # `is True`, not `in`: rule 6 already guarantees it, but this rule must not
+    # turn `submitted: False` into an acceptance if the rules are ever reordered.
+    if any(result.get(key) is True for key in ACCEPTANCE_FLAG_KEYS):
+        return RESULT_ACCEPTED
 
     return RESULT_UNCLASSIFIABLE
 
@@ -520,6 +575,9 @@ def build_evidence_bundle(
 
     * success        -> ``execution_completed``
     * failure        -> ``execution_failed`` (never ``execution_completed``)
+    * accepted       -> ``execution_progress`` with payload
+      ``{"level": "submitted", "result": <raw result>}``; no outcome event,
+      and never ``execution_completed``
     * unclassifiable -> no outcome event at all; the raw result is kept in
       ``bundle["result"]``
 
@@ -538,7 +596,8 @@ def build_evidence_bundle(
 
 
 def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
-    """Default event trail: ``execution_started`` plus at most one outcome event."""
+    """Default event trail: ``execution_started`` plus at most one more event --
+    an outcome (completed / failed), or a submitted-level progress record."""
     events: List[Dict] = [
         {
             "type": EVENT_EXECUTION_STARTED,
@@ -566,6 +625,17 @@ def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
                     "error": describe_execution_failure(result),
                     "result": result,
                 },
+            }
+        )
+    elif verdict == RESULT_ACCEPTED:
+        # SUBMITTED evidence: the device took the work and its outcome is not
+        # yet observed.  Progress, not an outcome -- and never
+        # execution_completed, which is what the settlement oracle releases on.
+        events.append(
+            {
+                "type": EVENT_EXECUTION_PROGRESS,
+                "timestamp": now,
+                "payload": {"level": EVIDENCE_LEVEL_SUBMITTED, "result": result},
             }
         )
     # Unclassifiable: fail closed by emitting NO outcome event. An invented
@@ -648,6 +718,11 @@ class JobExecutor:
                             "result": result,
                         },
                     )
+                elif verdict == RESULT_ACCEPTED:
+                    # No terminal status.  The device took the job but has not
+                    # reported it finished, so it is neither completed nor
+                    # failed; it stays "running", as reported above.
+                    pass
                 else:
                     self._report_terminal_failure(
                         job_id,
@@ -660,6 +735,13 @@ class JobExecutor:
                 log.warning(
                     f"Job {job_id} failed on device {device_label}: "
                     f"{describe_execution_failure(result)}"
+                )
+            elif verdict == RESULT_ACCEPTED:
+                log.info(
+                    f"Job {job_id} accepted by device {device_label}; completion "
+                    f"not yet observed (evidence level "
+                    f"'{EVIDENCE_LEVEL_SUBMITTED}'), so no terminal status is "
+                    f"reported and the job stays running"
                 )
             else:
                 log.warning(
@@ -942,11 +1024,17 @@ class JobExecutor:
     def _execute_octoprint(self, device: Dict, job: Dict) -> Dict[str, Any]:
         """Start an OctoPrint print job.
 
-        ``printed`` reads the device's answer, not just the status line, for
-        the same reason as :meth:`_execute_generic_http`: OctoPrint answering
-        200/204 means the API accepted ``select + print``, and a printer that
-        replies ``{"error": "E_JAM: carriage jam, job aborted"}`` in a 200 body
-        has failed.  A failure stated in the body outranks the status code.
+        OctoPrint answering 200/201/204 to ``select + print`` means the API
+        ACCEPTED the job -- it selected the file and started the print -- not
+        that anything was printed: the print can still fail hours later.  The
+        result therefore carries the acceptance flag ``submitted``, never the
+        completion flag ``printed``.  Observing completion needs the job's own
+        state (``GET /api/job``), which this adapter does not poll.
+
+        ``submitted`` still reads the device's answer, not just the status
+        line, for the same reason as :meth:`_execute_generic_http`: a printer
+        that replies ``{"error": "E_JAM: carriage jam, job aborted"}`` in a 200
+        body has failed.  A failure stated in the body outranks the status code.
         """
         from .http_util import http
 
@@ -973,7 +1061,8 @@ class JobExecutor:
         device_error = _extract_device_error(data)
 
         result: Dict[str, Any] = {
-            "printed": transport_ok and device_error is None,
+            # Accepted-and-started, never printed -- see the docstring.
+            "submitted": transport_ok and device_error is None,
             "filename": filename,
             "status_code": status,
             "device": base_url,
@@ -1005,6 +1094,11 @@ class JobExecutor:
           REST ``{"status": "error"}``, ``{"success": false}``, a SOAP fault --
           is a failed job, and lifting its reason here is what stops the bundle
           claiming ``execution_completed`` for it.
+        * 202 Accepted is ACCEPTANCE, not completion (:data:`HTTP_ACCEPTED`):
+          the device took the request and has not finished it.  A 202 reports
+          the acceptance flag ``submitted`` instead of ``executed``, derived
+          the same way.  Every other 2xx is a synchronous API's own answer and
+          keeps ``executed``.
         """
         from .http_util import http
 
@@ -1022,9 +1116,11 @@ class JobExecutor:
 
         transport_ok = HTTP_SUCCESS_MIN <= status < HTTP_SUCCESS_MAX_EXCLUSIVE
         device_error = _extract_device_error(data)
+        # A 202 only acknowledges the request, so it may never claim `executed`.
+        flag = "submitted" if status == HTTP_ACCEPTED else "executed"
 
         result: Dict[str, Any] = {
-            "executed": transport_ok and device_error is None,
+            flag: transport_ok and device_error is None,
             "status_code": status,
             "response": data,
             "device": base_url,
