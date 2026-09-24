@@ -72,6 +72,7 @@ export type {
 // Story Protocol IP Service
 export {
   StoryIPService,
+  StoryNotExecutedError,
   getStoryIPService,
   resetStoryIPService,
 } from "./story-ip-service.js";
