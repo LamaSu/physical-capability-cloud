@@ -202,13 +202,12 @@ function buildTimeline(model: RawJob, evidenceBundles: RawEvidenceBundle[]): Job
     });
   }
 
-  // `completed` means the executor finished the work. It is NOT settlement: payment is
-  // a separate fact this row does not carry (the JobExecutionDTO settlement axis reads it
-  // from the escrow record). `settled` is echoed only because the row itself says so.
-  if (model.status === "completed") {
+  // The job row can say the WORK finished; it cannot prove payment. Mock settlement
+  // writes `settled` into this row with no money moving, so every "work finished" row
+  // status becomes a `completed` event and the timeline never emits `settled`. Payment
+  // lives on the escrow record (the JobExecutionDTO settlement axis).
+  if (executionPhaseOf(model.status) === "completed" && model.status !== "disputed") {
     events.push({ type: "completed", timestamp: model.completedAt ?? createdAt });
-  } else if (model.status === "settled") {
-    events.push({ type: "settled", timestamp: model.completedAt ?? createdAt });
   } else if (model.status === "failed") {
     events.push({ type: "failed", timestamp: model.completedAt ?? createdAt });
   } else if (model.status === "disputed") {

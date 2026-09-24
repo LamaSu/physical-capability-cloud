@@ -203,11 +203,13 @@ describe("populateJobDetailDTO()", () => {
     expect(verifiedEvent).toBeDefined();
   });
 
-  it("timeline includes settled event for status=settled", () => {
-    const model = makeRawJob({ status: "settled", completedAt: "2026-01-01T15:00:00.000Z" });
-    const dto = populateJobDetailDTO(model, mockKernelMap, mockCapabilityMap, emptyBundles, makeCtx());
-    const settledEvent = dto.timeline.find((e) => e.type === "settled");
-    expect(settledEvent).toBeDefined();
+  it("NEGATIVE: a job row saying `settled` (mock settlement writes it) is a completed event, never settled", () => {
+    for (const status of ["settled", "evidence_stored", "evidence_submitted"]) {
+      const model = makeRawJob({ status, completedAt: "2026-01-01T15:00:00.000Z" });
+      const dto = populateJobDetailDTO(model, mockKernelMap, mockCapabilityMap, emptyBundles, makeCtx());
+      expect(dto.timeline.some((e) => e.type === "completed"), status).toBe(true);
+      expect(dto.timeline.some((e) => e.type === "settled"), status).toBe(false);
+    }
   });
 
   it("NEGATIVE: status=completed emits a completed event, never settled (completed is not paid)", () => {
