@@ -32,6 +32,7 @@ import {
 } from "../services/external-plan-seam.js";
 import type { LiveCapability, LiveKernel } from "../services/plan-snapshot-revalidation.js";
 import { submissionFromComposeResponse } from "../services/compose-plan-adapter.js";
+import { presentPlan } from "../services/plan-presentation.js";
 
 const A = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const OP_PRINT = A("aa");
@@ -474,5 +475,110 @@ describe("the server composer is one planner among many: /api/compose output ent
     const s = proposal().steps;
     expect(adapt(proposal({}, [s[0]!, { ...s[1]!, dependsOn: [7] }]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
     expect(adapt(proposal({}, [s[0]!, { ...s[1]!, index: 0 }]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+  });
+});
+
+describe("PlanPresentation: the product read model, built only from server truth", () => {
+  const ASOF = "2026-09-24T13:00:00.000Z";
+
+  it("proposed only: Layer C, every node 'proposed', no preview and no deal", () => {
+    const p = presentPlan({ submission: agentDag(), asOf: ASOF });
+    expect(p).toMatchObject({ schema: "pcc.plan-presentation.v1", layer: "C", state: "proposed", requestId: "req-42", reservationId: "resv-1", asOf: ASOF });
+    expect(p.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "proposed"], ["print", "proposed"]]);
+    expect(p.preview).toBeUndefined();
+    expect(p.deal).toBeUndefined();
+  });
+
+  it("compiled: live terms, the execution unit and exact money per node; preview totals; still Layer C", () => {
+    const outcome = acceptExternalPlan(agentDag(), CTX, world().deps);
+    const p = presentPlan({ submission: agentDag(), outcome, asOf: ASOF });
+    expect(p.state).toBe("compiled");
+    expect(p.layer).toBe("C"); // compiled is not accepted: nothing is sealed yet
+    const print = p.nodes.find((n) => n.nodeId === "print")!;
+    expect(print.state).toBe("compiled");
+    expect(print.live).toMatchObject({ priceDecimal: "6.5", operator: OP_PRINT, csd: PRINT, assuranceTiers: [0, 1, 2] });
+    expect(print.unit).toEqual({
+      jobId: `plan.resv-1:${OP_PRINT}`,
+      milestoneIndex: 0,
+      stepId: "print",
+      stepIdBytes32: stepIdBytes32("print"),
+      tier: 2,
+      committedProgramHash: PROGRAM,
+    });
+    expect(print.money?.net).toEqual({ baseUnits: "6347250", currency: "USDC", decimals: 6 });
+    expect(p.preview).toEqual({
+      gross: { baseUnits: "9750000", currency: "USDC", decimals: 6 },
+      fee: { baseUnits: "229125", currency: "USDC", decimals: 6 },
+      net: { baseUnits: "9520875", currency: "USDC", decimals: 6 },
+      payoutsByRecipient: [
+        { recipient: OP_PRINT, amount: { baseUnits: "6347250", currency: "USDC", decimals: 6 } },
+        { recipient: OP_MAIL, amount: { baseUnits: "3173625", currency: "USDC", decimals: 6 } },
+      ],
+      tierByNode: [
+        { nodeId: "mail", tier: 0 },
+        { nodeId: "print", tier: 2 },
+      ],
+      reclaimAt: String(NOW + 7 * 24 * 3600),
+    });
+    expect(p.deal?.sealed).toBe(false);
+  });
+
+  it("sealed: Layer B only when the reservation store sealed EXACTLY this deal's digest", () => {
+    const { store, deps } = world();
+    const outcome = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    expect(presentPlan({ submission: agentDag(), outcome, sealedDigest: `0x${"ab".repeat(32)}`, asOf: ASOF }).layer).toBe("C");
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const p = presentPlan({ submission: agentDag(), outcome, sealedDigest: store.sealed("resv-1"), asOf: ASOF });
+    expect(p).toMatchObject({ layer: "B", state: "sealed", deal: { sealed: true, acceptedDealDigest: outcome.plan.acceptedDealDigest } });
+    expect(p.nodes.every((n) => n.state === "sealed")).toBe(true);
+  });
+
+  it("content cannot raise authority: layer/state/sealed fields in the submission are ignored", () => {
+    const forged = { ...agentDag(), layer: "B", state: "sealed", deal: { sealed: true } } as unknown as ExternalPlanSubmission;
+    expect(presentPlan({ submission: forged, asOf: ASOF })).toMatchObject({ layer: "C", state: "proposed" });
+    const outcome = acceptExternalPlan(agentDag(), CTX, world().deps);
+    expect(presentPlan({ submission: forged, outcome, asOf: ASOF })).toMatchObject({ layer: "C", state: "compiled" });
+  });
+
+  it("needs-requote: the stale node carries its diffs and the live re-quote; the other node stays current", () => {
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, price: "5.00" };
+    const p = presentPlan({ submission: dag, outcome: acceptExternalPlan(dag, CTX, world().deps), asOf: ASOF });
+    expect(p.state).toBe("needs-requote");
+    const print = p.nodes.find((n) => n.nodeId === "print")!;
+    expect(print).toMatchObject({ state: "stale", diffs: [{ field: "price", claimed: "5", live: "6.5" }], live: { priceDecimal: "6.5" } });
+    expect(p.nodes.find((n) => n.nodeId === "mail")!.state).toBe("current");
+    expect(p.preview).toBeUndefined();
+  });
+
+  it("refused: before R10 the nodes stay 'proposed'; a missing capability is 'refused', never a re-quote", () => {
+    const early = presentPlan({ submission: agentDag(), outcome: acceptExternalPlan(agentDag(), { principal: "agent:intruder" }, world().deps), asOf: ASOF });
+    expect(early).toMatchObject({ state: "refused", refusal: { stage: "reservation", reason: "wrong-principal" } });
+    expect(early.nodes.every((n) => n.state === "proposed")).toBe(true);
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, capabilityId: "ghost" };
+    const gone = presentPlan({ submission: dag, outcome: acceptExternalPlan(dag, CTX, world().deps), asOf: ASOF });
+    expect(gone.state).toBe("refused");
+    expect(gone.nodes.find((n) => n.nodeId === "print")).toMatchObject({ state: "missing", reason: "capability-not-found" });
+  });
+
+  it("money is always exact base-unit strings, never a float", () => {
+    const p = presentPlan({ submission: agentDag(), outcome: acceptExternalPlan(agentDag(), CTX, world().deps), asOf: ASOF });
+    const amounts: string[] = [];
+    JSON.stringify(p, (_k, v) => {
+      if (v && typeof v === "object" && "baseUnits" in v) amounts.push((v as { baseUnits: string }).baseUnits);
+      return v;
+    });
+    expect(amounts.length).toBeGreaterThan(8);
+    for (const a of amounts) expect(a).toMatch(/^[0-9]+$/);
+  });
+
+  it("a malformed submission renders without throwing", () => {
+    const junk = { requestId: Object.create(null), reservationId: 5, nodes: [null, { nodeId: "x", capabilityId: Object.create(null) }], edges: [null, { from: 1, to: "x" }] };
+    expect(() => presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF })).not.toThrow();
+    const p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
+    expect(p.nodes.map((n) => n.nodeId)).toEqual(["x"]);
+    expect(p.edges).toEqual([]);
   });
 });

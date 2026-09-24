@@ -108,9 +108,13 @@ export type SeamRefusal =
   | { stage: "evidence"; nodeId: string; reason: "no-evidence-contract-for-tier" }
   | { stage: "compile"; violations: CompileViolation[] };
 
+/**
+ * `verdicts` is every node's R10 verdict, present whenever R10 ran (always on success). A read model
+ * renders from it; it grants nothing.
+ */
 export type SeamResult =
-  | { ok: true; plan: CompiledAcceptedPlan; resolved: ResolvedNodeTerms[] }
-  | { ok: false; refusal: SeamRefusal };
+  | { ok: true; plan: CompiledAcceptedPlan; resolved: ResolvedNodeTerms[]; verdicts: NodeVerdict[] }
+  | { ok: false; refusal: SeamRefusal; verdicts?: NodeVerdict[] };
 
 /** The plan id is derived from the reservation: one reservation, one plan, and no caller-chosen job ids. */
 export function planIdForReservation(reservationId: string): string {
@@ -149,8 +153,10 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   // R10: every claim against the live rows. Anything but `current` everywhere is refused with the
   // verdicts (a stale verdict carries the re-quote the agent can re-submit against).
   const revalidated = revalidatePlanSnapshots(sub.nodes, deps.revalidation, { tenantId: ctx.tenantId ?? null });
+  // From here on every refusal also carries all of R10's verdicts, for the read model.
+  const after = (refusal: SeamRefusal): SeamResult => ({ ok: false, refusal, verdicts: revalidated.verdicts });
   if (!revalidated.ok) {
-    return refuse({ stage: "revalidation", verdicts: revalidated.verdicts.filter((v) => v.status !== "current") });
+    return after({ stage: "revalidation", verdicts: revalidated.verdicts.filter((v) => v.status !== "current") });
   }
   const resolved = revalidated.verdicts.map((v) => (v as Extract<NodeVerdict, { status: "current" }>).resolved);
   const claimed = new Map(sub.nodes.map((n) => [n.nodeId, n]));
@@ -158,22 +164,22 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   const nodes = [];
   for (const r of resolved) {
     if (r.currency !== resv.currency) {
-      return refuse({ stage: "currency", nodeId: r.nodeId, reason: "node-currency-differs-from-reservation" });
+      return after({ stage: "currency", nodeId: r.nodeId, reason: "node-currency-differs-from-reservation" });
     }
     if (resv.minTier !== undefined && !(r.tier >= resv.minTier)) {
-      return refuse({ stage: "tier", nodeId: r.nodeId, reason: "below-reservation-minimum" });
+      return after({ stage: "tier", nodeId: r.nodeId, reason: "below-reservation-minimum" });
     }
     // R11: the program is the server's for (csd, tier). A claimed one is only a cross-check.
     const program = r.tier === 0 ? null : deps.resolveProgram(r.csd, r.tierKey);
     const claim: unknown = claimed.get(r.nodeId)!.committedProgramHash;
     if (claim !== undefined) {
-      if (claim !== null && typeof claim !== "string") return refuse({ stage: "submission", reason: "malformed-submission" });
+      if (claim !== null && typeof claim !== "string") return after({ stage: "submission", reason: "malformed-submission" });
       if ((claim?.toLowerCase() ?? null) !== (program?.toLowerCase() ?? null)) {
-        return refuse({ stage: "program", nodeId: r.nodeId, reason: "claimed-program-mismatch" });
+        return after({ stage: "program", nodeId: r.nodeId, reason: "claimed-program-mismatch" });
       }
     }
     const evidence = deps.evidenceFor(r.csd, r.tierKey);
-    if (!evidence) return refuse({ stage: "evidence", nodeId: r.nodeId, reason: "no-evidence-contract-for-tier" });
+    if (!evidence) return after({ stage: "evidence", nodeId: r.nodeId, reason: "no-evidence-contract-for-tier" });
     nodes.push({
       nodeId: r.nodeId,
       capabilityId: r.capabilityId,
@@ -211,8 +217,8 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     },
     { assertProgramForTier: deps.assertProgramForTier },
   );
-  if (!compiled.ok) return refuse({ stage: "compile", violations: compiled.violations });
-  return { ok: true, plan: compiled.plan, resolved };
+  if (!compiled.ok) return after({ stage: "compile", violations: compiled.violations });
+  return { ok: true, plan: compiled.plan, resolved, verdicts: revalidated.verdicts };
 }
 
 function refuse(refusal: SeamRefusal): SeamResult {
