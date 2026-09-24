@@ -70,16 +70,6 @@ async function registerOwned(app: FastifyInstance, owner = OWNER): Promise<strin
 }
 
 /**
- * /register mints ids as `reg-${Date.now()}`, so two registrations in the same
- * millisecond collide (the second insert is dropped). Wait for the clock to
- * move on before registering again in the same test.
- */
-async function nextMillisecond(): Promise<void> {
-  const t = Date.now();
-  while (Date.now() === t) await new Promise((r) => setTimeout(r, 1));
-}
-
-/**
  * An admin-key call. /approve must name the evidence the admin reviewed (M2);
  * unless a test passes its own expectedEvidenceDigest, approvals here say
  * "none", which matches a registration with no proof on record.
@@ -228,7 +218,6 @@ describe("onboarding review transitions are atomic and audited", () => {
     const approvedId = await registerOwned(app);
     expect((await admin(app, approvedId, "approve")).statusCode).toBe(200);
     expect((await admin(app, approvedId, "activate")).statusCode).toBe(200);
-    await nextMillisecond();
     const rejectedId = await registerOwned(app);
     expect(rejectedId).not.toBe(approvedId);
     expect((await admin(app, rejectedId, "reject", { reason: "not a real machine" })).statusCode).toBe(200);

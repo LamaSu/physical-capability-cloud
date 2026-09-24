@@ -152,3 +152,44 @@ describe("/register binds the owner to the authenticated caller (M3)", () => {
     expect(rows()).toHaveLength(0);
   });
 });
+
+describe("/register ids and persistence (L4)", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await app.close();
+    closeStore();
+  });
+
+  it("two registrations in the same millisecond get distinct random ids, each for its own row", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const a = await register(app, { "x-test-operator": OWNER }, { displayName: "A" });
+    const b = await register(app, { "x-test-operator": ATTACKER }, { displayName: "B" });
+    now.mockRestore();
+    expect(a.statusCode).toBe(200);
+    expect(b.statusCode).toBe(200);
+    const idA: string = a.json().registration.id;
+    const idB: string = b.json().registration.id;
+    expect(idA).toMatch(/^reg-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(idB).not.toBe(idA);
+    // Before the fix the second caller got a 200 carrying the first caller's id.
+    expect(getRepos().registrations.findById(idA)!.operator).toMatchObject({ walletAddress: OWNER, displayName: "A" });
+    expect(getRepos().registrations.findById(idB)!.operator).toMatchObject({ walletAddress: ATTACKER, displayName: "B" });
+  });
+
+  it("a failed insert is 500 with no registration in the response, and nothing is recorded", async () => {
+    vi.spyOn(getRepos().registrations, "insert").mockImplementation(() => {
+      throw new Error("SQLITE_FULL: database or disk is full");
+    });
+    const res = await register(app, { "x-test-operator": OWNER });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toMatchObject({ error: "registration_persist_failed" });
+    expect(res.json()).not.toHaveProperty("registration");
+    expect(registeredAudits()).toHaveLength(0);
+  });
+});

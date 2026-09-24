@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
 import type { RegistrationRow } from "@pcc/store";
@@ -417,7 +417,9 @@ export async function onboardRoutes(app: FastifyInstance) {
       return reply.status(owner.status).send({ error: owner.error, message: owner.message, ...(owner.field ? { field: owner.field } : {}) });
     }
     const registration: MachineRegistration = {
-      id: `reg-${Date.now()}`,
+      // L4: random, as the wizard's ids are. A millisecond timestamp let two
+      // registrations collide, and the second caller got the first one's id.
+      id: `reg-${randomUUID()}`,
       name: body.name ?? "Unknown",
       category: body.category ?? "custom",
       manufacturer: body.manufacturer ?? "",
@@ -453,7 +455,7 @@ export async function onboardRoutes(app: FastifyInstance) {
       // means "public-discovery" — these rows surface to anonymous callers
       // even after TENANT_ENFORCE flips on.
       const tenantIdAtWrite = (req as any).tenantId ?? null;
-      repos.registrations.insert({
+      const inserted = repos.registrations.insert({
         id: registration.id,
         name: registration.name,
         category: registration.category,
@@ -472,7 +474,16 @@ export async function onboardRoutes(app: FastifyInstance) {
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
       });
-    } catch (e) { console.warn("[onboard] DB insert failed, continuing:", (e as Error).message); }
+      if (!inserted) throw new Error("the insert returned no row");
+    } catch (e) {
+      // L4: never answer 200 for a registration that was not saved.
+      req.log.error({ err: e }, "[onboard] registration insert failed");
+      Sentry.captureException(e, { extra: { action: "onboard.register" } });
+      return reply.status(500).send({
+        error: "registration_persist_failed",
+        message: "The registration could not be saved; nothing was registered. Try again.",
+      });
+    }
     pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
     trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
     auditService.log({
