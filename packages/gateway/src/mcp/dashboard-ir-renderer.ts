@@ -20,7 +20,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
-import { sourceClassOf, LIST_ROW_CAP, isMoneyClaim, listFreeTextFields, WITHHELD_FIELD } from "./dashboard-ir.js";
+import { sourceClassOf, LIST_ROW_CAP, isMoneyClaim, listFreeTextFields, WITHHELD_FIELD, recordValueText } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -159,7 +159,7 @@ function readField(data: unknown, f: SchemaField): string {
     const v = readSelector(data, k);
     if (v === "") continue;
     if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-    return v;
+    return recordValueText(k, v); // a record's money-state status word is qualified (#3013)
   }
   return UNAVAILABLE;
 }
@@ -300,13 +300,14 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
   for (const row of rows) {
     if (shown >= limit) break;
     if (row === null || typeof row !== "object") continue;
-    const title = readSelector(row, rowTitle);
+    // Every bound value passes recordValueText: a record's money-state status word is qualified (#3013).
+    const title = recordValueText(rowTitle, readSelector(row, rowTitle));
     if (title === "") continue; // drop malformed row (no valid title)
     const line = el(doc, CLS.row);
     line.appendChild(el(doc, CLS.heading, text(rowTitle, title), true));
     // A selected field the row lacks is shown as explicitly absent, never silently omitted.
-    for (const m of rowMeta) { const v = readSelector(row, m); line.appendChild(v !== "" ? el(doc, CLS.meta, text(m, v), true) : el(doc, CLS.meta + " " + CLS.absent, "not reported")); }
-    if (statusFrom) { const st = readSelector(row, statusFrom); line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported")); }
+    for (const m of rowMeta) { const v = recordValueText(m, readSelector(row, m)); line.appendChild(v !== "" ? el(doc, CLS.meta, text(m, v), true) : el(doc, CLS.meta + " " + CLS.absent, "not reported")); }
+    if (statusFrom) { const st = recordValueText(statusFrom, readSelector(row, statusFrom)); line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported")); }
     listEl.appendChild(line);
     shown++;
   }
@@ -331,7 +332,7 @@ export function listRowsReadable(node: IrNode, rows: unknown[]): boolean {
 export function bindScalar(node: IrNode, data: unknown): string {
   const sel = node.bind?.select;
   if (!sel) return "";
-  return readSelector(data, sel);
+  return recordValueText(sel, readSelector(data, sel)); // a status metric's money-state word is qualified (#3013)
 }
 
 /**
