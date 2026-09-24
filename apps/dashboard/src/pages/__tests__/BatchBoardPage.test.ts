@@ -60,6 +60,21 @@ describe("toSharedBatchView", () => {
     expect(view.claims).toEqual([{ agentId: null, own: false, slotCount: 0 }]);
   });
 
+  it("keeps a claimant identity only on the viewer's own claims, even if a server sends more", () => {
+    const view = toSharedBatchView(
+      serverBatch({
+        claimedSlots: [
+          { agentId: "someone-else", own: false, slotIndices: [0, 1] },
+          { agentId: "me", own: true, slotIndices: [2] },
+        ],
+      }),
+    );
+    expect(view.claims).toEqual([
+      { agentId: null, own: false, slotCount: 2 },
+      { agentId: "me", own: true, slotCount: 1 },
+    ]);
+  });
+
   it("parses a string or number price, and leaves an unknown price as NaN, never 0", () => {
     expect(toSharedBatchView(serverBatch({ pricePerSlot: "1.50" })).pricePerSlot).toBe(1.5);
     expect(toSharedBatchView(serverBatch({ pricePerSlot: 2 })).pricePerSlot).toBe(2);

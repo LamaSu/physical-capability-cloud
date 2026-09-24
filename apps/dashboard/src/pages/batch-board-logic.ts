@@ -55,11 +55,15 @@ function toPrice(value: unknown): number {
 /** Map one server batch (claims as an array) to the page's view (a claimed-slot count). */
 export function toSharedBatchView(raw: ServerSharedBatch): SharedBatchView {
   const serverClaims: ServerClaim[] = Array.isArray(raw.claimedSlots) ? raw.claimedSlots : [];
-  const claims = serverClaims.map((c) => ({
-    agentId: typeof c.agentId === "string" ? c.agentId : null,
-    own: c.own === true,
-    slotCount: Array.isArray(c.slotIndices) ? c.slotIndices.length : 0,
-  }));
+  const claims = serverClaims.map((c) => {
+    const own = c.own === true;
+    return {
+      // Kept only for the viewer's own claims, even if a server sent more.
+      agentId: own && typeof c.agentId === "string" ? c.agentId : null,
+      own,
+      slotCount: Array.isArray(c.slotIndices) ? c.slotIndices.length : 0,
+    };
+  });
   return {
     id: raw.id,
     kernelId: raw.kernelId,

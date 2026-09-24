@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { SampleSlot } from "@pcc/spec";
+import type { BatchEvent, BatchManifest, SampleSlot } from "@pcc/spec";
 
 // SharedBatch + BatchSlotClaim types inlined until spec rebuilds
 interface SharedBatch {
@@ -9,6 +9,8 @@ interface SharedBatch {
   status: "open" | "filling" | "full" | "running" | "completed" | "cancelled";
   minSlotsToRun: number; createdAt: string; closesAt: string;
   pricePerSlot: string; currency: string; evidenceBundleId?: string;
+  /** The authenticated principal that created the batch (N49). */
+  createdBy: string;
 }
 interface BatchSlotClaim {
   id: string; agentId: string; slotIndices: number[]; sampleLabels: string[];
@@ -19,24 +21,65 @@ import { batchTracker } from "../services.js";
 import { requireAuth } from "../auth/require-auth.js";
 
 // ── In-memory shared batch storage ────────────────────────────────
+// Module-local and in memory: a restart loses every batch and claim, and two
+// gateway instances would keep two ledgers. Batch pooling is not durable yet.
 const sharedBatches = new Map<string, SharedBatch>();
+
+// ── Input limits (N49 round 2, coord-watch #2939, gateway LOW-1) ──
+/** The largest standard plate has 1536 wells. */
+const MAX_TOTAL_SLOTS = 1536;
+/** Ids, types, positions and sample labels. */
+const MAX_TEXT = 200;
+/** A non-negative decimal amount with at most 6 decimals (USDC precision). */
+const AMOUNT_RE = /^\d{1,9}(\.\d{1,6})?$/;
+const SAMPLE_TYPES = new Set(["unknown", "standard", "blank", "system_suitability", "sample", "spike", "duplicate"]);
+
+function isText(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_TEXT;
+}
 
 // Board row N49: a claim belongs to the authenticated caller (req.userId, which
 // apiGate sets from the API key's operatorId or the wallet session). A request
-// body can never name a different claimant. A claimant's identity and sample
-// labels (which can name real samples) are shown only to that claimant.
+// body can never name a different claimant. Only the claimant sees the claim
+// itself. Everyone else sees which slots are taken and their status: no
+// claimant, sample labels, claim id (so a future claimId-keyed route cannot
+// become an IDOR), amount, escrow or time.
 function viewClaim(claim: BatchSlotClaim, viewer: string | null) {
-  const own = viewer !== null && claim.agentId === viewer;
-  return {
-    ...claim,
-    agentId: own ? claim.agentId : null,
-    sampleLabels: own ? claim.sampleLabels : [],
-    own,
-  };
+  if (viewer !== null && claim.agentId === viewer) return { ...claim, own: true };
+  return { slotIndices: claim.slotIndices, status: claim.status, agentId: null, sampleLabels: [], own: false };
 }
 
 function viewBatch(batch: SharedBatch, viewer: string | null) {
-  return { ...batch, claimedSlots: batch.claimedSlots.map((c) => viewClaim(c, viewer)) };
+  return {
+    ...batch,
+    createdBy: viewer !== null && batch.createdBy === viewer ? batch.createdBy : null,
+    claimedSlots: batch.claimedSlots.map((c) => viewClaim(c, viewer)),
+  };
+}
+
+// The legacy batch manifests (batchTracker) hold every sample's owner, label,
+// job and result reference. A viewer sees those only for their own samples.
+function viewSlot(slot: SampleSlot, viewer: string | null) {
+  if (viewer !== null && slot.userId === viewer) return { ...slot, own: true };
+  return {
+    id: slot.id,
+    position: slot.position,
+    sampleType: slot.sampleType,
+    status: slot.status,
+    acquisitionStart: slot.acquisitionStart,
+    acquisitionEnd: slot.acquisitionEnd,
+    own: false,
+  };
+}
+
+function viewManifest(batch: BatchManifest, viewer: string | null) {
+  return { ...batch, slots: batch.slots.map((s) => viewSlot(s, viewer)) };
+}
+
+/** Events about another viewer's sample keep their type and time, not their payload. */
+function viewEvents(batch: BatchManifest, events: BatchEvent[], viewer: string | null) {
+  const mine = new Set(batch.slots.filter((s) => viewer !== null && s.userId === viewer).map((s) => s.id));
+  return events.map((e) => (e.slotId && !mine.has(e.slotId) ? { ...e, payload: {} } : e));
 }
 
 /** Test-only: reset the in-memory shared-batch store. */
@@ -53,33 +96,57 @@ export async function batchRoutes(app: FastifyInstance) {
         kernelId: req.query.kernelId,
         status: req.query.status as any,
       });
-      return { batches };
+      return { batches: batches.map((b) => viewManifest(b, req.userId ?? null)) };
     },
   );
 
   // Batch detail with slots
-  app.get<{ Params: { batchId: string } }>("/api/batches/:batchId", async (req) => {
+  app.get<{ Params: { batchId: string } }>("/api/batches/:batchId", async (req, reply) => {
     const batch = batchTracker.getBatch(req.params.batchId);
-    if (!batch) return { error: "not_found" };
-    return { batch, events: batchTracker.getEvents(req.params.batchId) };
+    if (!batch) return reply.status(404).send({ error: "not_found" });
+    const viewer = req.userId ?? null;
+    return { batch: viewManifest(batch, viewer), events: viewEvents(batch, batchTracker.getEvents(req.params.batchId), viewer) };
   });
 
   // Batches containing a specific job's samples
   app.get<{ Params: { jobId: string } }>("/api/batches/by-job/:jobId", async (req) => {
     const batches = batchTracker.getBatchesForJob(req.params.jobId);
-    return { batches };
+    return { batches: batches.map((b) => viewManifest(b, req.userId ?? null)) };
   });
 
-  // Add sample slot to assembling batch
-  app.post<{ Params: { batchId: string }; Body: Omit<SampleSlot, "id" | "status"> }>(
+  // Add sample slot to assembling batch. The sample belongs to the caller: a
+  // body userId may only name the caller (N49, same rule as a shared claim).
+  app.post<{ Params: { batchId: string } }>(
     "/api/batches/:batchId/slots",
+    { preHandler: [requireAuth] },
     async (req, reply) => {
+      const owner = req.userId;
+      if (!owner) return reply.status(401).send({ error: "Authentication required" });
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (body.userId !== undefined && body.userId !== owner) {
+        return reply.status(403).send({
+          error: "agent_mismatch",
+          message: "userId must be omitted or equal the authenticated caller",
+        });
+      }
+      if (!isText(body.position) || !isText(body.jobId) || !isText(body.stepId) || !isText(body.sampleLabel)) {
+        return reply.status(400).send({
+          error: `position, jobId, stepId and sampleLabel must be non-empty strings of at most ${MAX_TEXT} characters`,
+        });
+      }
+      if (body.sampleType !== undefined && !SAMPLE_TYPES.has(body.sampleType as string)) {
+        return reply.status(400).send({ error: "sampleType is not a known sample type" });
+      }
       try {
-        const slot = batchTracker.addSample(
-          req.params.batchId,
-          req.body as Omit<SampleSlot, "id" | "status">,
-        );
-        return { slot };
+        const slot = batchTracker.addSample(req.params.batchId, {
+          position: body.position,
+          jobId: body.jobId,
+          stepId: body.stepId,
+          sampleLabel: body.sampleLabel,
+          sampleType: body.sampleType as SampleSlot["sampleType"],
+          userId: owner,
+        });
+        return { slot: viewSlot(slot, owner) };
       } catch (err: any) {
         return reply.code(400).send({ error: err.message });
       }
@@ -90,40 +157,69 @@ export async function batchRoutes(app: FastifyInstance) {
   // Multi-User Shared Batches — multiple users share one run
   // ═════════════════════════════════════════════════════════════════
 
-  /** POST /api/batches/shared — Create a shared batch run */
-  app.post("/api/batches/shared", async (req, reply) => {
-    const body = req.body as {
-      kernelId: string;
-      capabilityType: string;
-      totalSlots: number;
-      protocolType: string;
-      minSlotsToRun?: number;
-      closesAt?: string;
-      pricePerSlot: string;
-      currency?: string;
-    };
+  /**
+   * POST /api/batches/shared — Create a shared batch run.
+   * Authenticated, and the creator is recorded. Binding the batch to the
+   * kernel's operator is board row N55 (it needs requireKernelOperator from
+   * #335 / WP-C).
+   */
+  app.post("/api/batches/shared", { preHandler: [requireAuth] }, async (req, reply) => {
+    const creator = req.userId;
+    if (!creator) return reply.status(401).send({ error: "Authentication required" });
+    const body = (req.body ?? {}) as Record<string, unknown>;
 
-    if (!body.kernelId || !body.capabilityType || !body.totalSlots || !body.pricePerSlot) {
-      return reply.status(400).send({ error: "kernelId, capabilityType, totalSlots, and pricePerSlot required" });
+    if (!isText(body.kernelId) || !isText(body.capabilityType)) {
+      return reply.status(400).send({ error: `kernelId and capabilityType must be non-empty strings of at most ${MAX_TEXT} characters` });
+    }
+    if (body.protocolType !== undefined && !isText(body.protocolType)) {
+      return reply.status(400).send({ error: `protocolType must be a non-empty string of at most ${MAX_TEXT} characters` });
+    }
+    const totalSlots = body.totalSlots;
+    if (!Number.isInteger(totalSlots) || (totalSlots as number) < 1 || (totalSlots as number) > MAX_TOTAL_SLOTS) {
+      return reply.status(400).send({ error: `totalSlots must be an integer from 1 to ${MAX_TOTAL_SLOTS}` });
+    }
+    const minSlotsToRun = body.minSlotsToRun ?? 1;
+    if (!Number.isInteger(minSlotsToRun) || (minSlotsToRun as number) < 1 || (minSlotsToRun as number) > (totalSlots as number)) {
+      return reply.status(400).send({ error: "minSlotsToRun must be an integer from 1 to totalSlots" });
+    }
+    // The dashboard sends a number; other clients send a decimal string.
+    const rawPrice = body.pricePerSlot;
+    const pricePerSlot =
+      typeof rawPrice === "number" && Number.isFinite(rawPrice) && rawPrice >= 0 && rawPrice < 1e9
+        ? rawPrice.toFixed(6).replace(/\.?0+$/, "")
+        : rawPrice;
+    if (typeof pricePerSlot !== "string" || !AMOUNT_RE.test(pricePerSlot)) {
+      return reply.status(400).send({ error: "pricePerSlot must be a non-negative amount with at most 6 decimals" });
+    }
+    const currency = body.currency ?? "USDC";
+    if (typeof currency !== "string" || !/^[A-Z]{3,5}$/.test(currency)) {
+      return reply.status(400).send({ error: "currency must be 3 to 5 capital letters" });
+    }
+    let closesAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    if (body.closesAt !== undefined) {
+      const t = typeof body.closesAt === "string" ? Date.parse(body.closesAt) : Number.NaN;
+      if (!Number.isFinite(t)) return reply.status(400).send({ error: "closesAt must be an ISO date" });
+      closesAt = new Date(t).toISOString();
     }
 
     const batch: SharedBatch = {
       id: `sbatch-${crypto.randomUUID().slice(0, 12)}`,
       kernelId: body.kernelId,
       capabilityType: body.capabilityType,
-      totalSlots: body.totalSlots,
+      totalSlots: totalSlots as number,
       claimedSlots: [],
-      protocolType: body.protocolType,
+      protocolType: (body.protocolType as string | undefined) ?? "",
       status: "open",
-      minSlotsToRun: body.minSlotsToRun ?? 1,
+      minSlotsToRun: minSlotsToRun as number,
       createdAt: new Date().toISOString(),
-      closesAt: body.closesAt ?? new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
-      pricePerSlot: body.pricePerSlot,
-      currency: (body.currency ?? "USDC") as any,
+      closesAt,
+      pricePerSlot,
+      currency,
+      createdBy: creator,
     };
 
     sharedBatches.set(batch.id, batch);
-    return { batch };
+    return { batch: viewBatch(batch, creator) };
   });
 
   /** GET /api/batches/shared/open — List open batches available to join */
@@ -172,8 +268,8 @@ export async function batchRoutes(app: FastifyInstance) {
       const body = (req.body ?? {}) as {
         agentId?: unknown;
         slotCount?: unknown;
-        sampleLabels?: string[];
-        preferredIndices?: number[];
+        sampleLabels?: unknown;
+        preferredIndices?: unknown;
       };
 
       // The claimant is always the authenticated caller. A body agentId is accepted
@@ -190,6 +286,18 @@ export async function batchRoutes(app: FastifyInstance) {
       }
       const slotCount = body.slotCount as number;
 
+      // Supplied labels: at most one per slot, each a bounded string (gateway LOW-1).
+      let labels: string[] | undefined;
+      if (body.sampleLabels !== undefined) {
+        const raw = body.sampleLabels;
+        if (!Array.isArray(raw) || raw.length > slotCount || !raw.every((l) => typeof l === "string" && l.length <= MAX_TEXT)) {
+          return reply.status(400).send({
+            error: `sampleLabels must be an array of at most ${slotCount} strings of at most ${MAX_TEXT} characters`,
+          });
+        }
+        labels = raw as string[];
+      }
+
       // Calculate which indices are already claimed
       const claimedIndices = new Set(batch.claimedSlots.flatMap((c) => c.slotIndices));
       const claimedCount = claimedIndices.size;
@@ -201,22 +309,27 @@ export async function batchRoutes(app: FastifyInstance) {
         });
       }
 
-      // Assign indices — prefer requested, otherwise auto-assign contiguous
+      // Assign indices: the requested ones, or else the lowest free ones. Supplied
+      // preferredIndices must be valid; a malformed value is refused, never
+      // silently replaced by an automatic assignment.
       let indices: number[];
-      if (Array.isArray(body.preferredIndices) && body.preferredIndices.length === slotCount) {
+      if (body.preferredIndices !== undefined) {
+        const preferred = body.preferredIndices;
         const valid =
-          new Set(body.preferredIndices).size === slotCount &&
-          body.preferredIndices.every((i) => Number.isInteger(i) && i >= 0 && i < batch.totalSlots);
+          Array.isArray(preferred) &&
+          preferred.length === slotCount &&
+          new Set(preferred).size === slotCount &&
+          preferred.every((i) => Number.isInteger(i) && i >= 0 && i < batch.totalSlots);
         if (!valid) {
           return reply.status(400).send({
             error: `preferredIndices must be ${slotCount} distinct integers in [0, ${batch.totalSlots})`,
           });
         }
-        const conflict = body.preferredIndices.find((i) => claimedIndices.has(i));
+        const conflict = (preferred as number[]).find((i) => claimedIndices.has(i));
         if (conflict !== undefined) {
           return reply.status(409).send({ error: `Slot ${conflict} is already claimed` });
         }
-        indices = body.preferredIndices;
+        indices = preferred as number[];
       } else {
         indices = [];
         for (let i = 0; i < batch.totalSlots && indices.length < slotCount; i++) {
@@ -224,12 +337,14 @@ export async function batchRoutes(app: FastifyInstance) {
         }
       }
 
+      // Display amount, computed in floating point from the validated decimal
+      // price. Exact base units belong with the money path (D6), not this store.
       const perSlotPrice = parseFloat(batch.pricePerSlot);
       const claim: BatchSlotClaim = {
         id: `claim-${crypto.randomUUID().slice(0, 12)}`,
         agentId: claimant,
         slotIndices: indices,
-        sampleLabels: body.sampleLabels ?? indices.map((i) => `sample-${i}`),
+        sampleLabels: indices.map((slot, n) => labels?.[n] ?? `sample-${slot}`),
         status: "claimed",
         amount: (perSlotPrice * slotCount).toFixed(2),
         claimedAt: new Date().toISOString(),
