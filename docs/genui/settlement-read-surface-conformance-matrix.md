@@ -23,6 +23,10 @@ claim is safe: rule 12 keys `finalState` off `unitState() ∈ {8, 9}`, which sta
 
 ## §A: the 10-state golden (receipt + lifecycle)
 
+> **On master the routes follow escrow's DTO mapping (#667), which differs from rows 1-7 below.** Receipts answer 200 for
+> states 1-5, and states 6/7 carry `finalState: null` with `isAllocated: true` and `phase: "allocated"`. See the
+> contract's "Implemented on master" section for the exact shape consumers bind today.
+
 | unitState | receipt route | finalState | finalizedBlock | lifecycle.phase | presentation (kit) |
 |---|---|---|---|---|---|
 | 0 AWAITING_FUNDING | **unreachable** | n/a | n/a | n/a | **never returned** (see the state-0 note) |

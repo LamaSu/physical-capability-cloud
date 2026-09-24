@@ -5,6 +5,41 @@
 Until a concrete `SettlementUnitReader` is registered, the routes answer `INDEX_NOT_READY`.
 The golden per-state test target is [`settlement-read-surface-conformance-matrix.md`](./settlement-read-surface-conformance-matrix.md).
 
+## Implemented on master: what the routes return today (bind to THIS, not the design DTO below)
+
+The DTOs further down are the v1.5 contract as agreed (coord #666 -> #712 -> #733). The routes on master were built
+to it **through escrow's DTO mapping (#667)**, which changes the shape. This section was verified against
+`routes/settlement-read.ts` and `settlement/unit-state-mapper.ts` at master `ac86a404` (2026-09-24). A consumer
+that binds the design shape misreads real data; genui's own #313 did (see below).
+
+| | `GET .../lifecycle` | `GET .../receipt` |
+|---|---|---|
+| status | 200 for states 1-9; **503 for state 0** (fails closed; both routes share one prelude); 404 `UNKNOWN_UNIT` for an unknown unit and, indistinguishably, for another tenant's | same |
+| context | `chainId`, `escrow`, `unitId`, `asOfBlock` (a string), `asOfBlockHash`, `finality`, `logCompleteness` | same, plus `network: { chainId }` (an object, not a `"base-mainnet"` string) |
+| state | `unitState` (a NUMBER, 1-9), `phase`, `finalState`, `isTerminal`, `isAllocated`, `windowEndsAt` | `finalState`, `phase`, `isAllocated` (no `unitState`, no `isTerminal`) |
+| money | none | `economics` (`{amount, feeAmount, recipient, token, assuranceTier}` or null); `assetReality` (`{value, source: "registry", contractOrRegistryId, revision, attests: "identity-not-liveness"}` or null); `refundReason` and `finalizedBlock` (`"UNKNOWN"`, a source-marked value, or null) |
+
+Field semantics (unit-state-mapper):
+- `finalState` is `"SETTLED_RELEASED"` or `"SETTLED_REFUNDED"` for states 8/9 and **null for every other state**. It is never `RELEASE_ALLOCATED` / `REFUND_ALLOCATED` (the design DTO's non-terminal values).
+- `isTerminal` is true for 8/9 only. `isAllocated` is true for **6/7 ONLY** ("outcome decided, money NOT fully moved"), so a settled body says `isAllocated: false`.
+- `phase`: 1 `active`; 2-3 `contest`; 4-5 `escalation`; 6-7 `allocated`; 8-9 `settled`.
+- The receipt route answers 200 for states 1-5 too (`finalState: null, isAllocated: false`), not the golden matrix's 404.
+- Not emitted yet (design fields): `authorizationType`, `authorizationId`, `vcrReceiptPointer`, `evidenceBundleHash`, `verdictHash`, `oracleAuthEpoch`, `compositionRoot`, `allocatedBlock`, and a root-level `revision`.
+
+**Consumer rule (Surface A).** Settled-green comes only from a consistent state 8. That means `/lifecycle` with
+`unitState: 8`, `finalState: "SETTLED_RELEASED"`, `isTerminal: true`, `isAllocated: false` and `phase: "settled"`,
+or `/receipt` with `finalState: "SETTLED_RELEASED"`, `isAllocated: false` and `phase: "settled"`. Any disagreement or
+missing field is unknown. `@pcc/spec` `classifySettlementRecord` implements this (#313), pinned by a gateway suite that
+classifies the routes' own bodies (`settlement-read-money-status.test.ts`, #313).
+
+**Why this section exists.** #313's first cut assumed `isAllocated` was true for 6-9, since the implemented shape
+was never written down. A genuinely settled unit therefore rendered "fields disagree" and never went green. Found by
+checking the real routes; fixed in #313 @7061730a.
+
+**Open for the route owners (gateway, escrow).** The golden matrix (§A of the conformance doc) still says rows 1-5
+have no receipt (404) and rows 6/7 carry `finalState: *_ALLOCATED`. Either the matrix moves to the #667 mapping or the
+routes move to the matrix. Until one of them changes, THIS section is what consumers bind.
+
 **Serves (read-only, one build, two consumers):** the gen-UI settlement render ("Surface A": value chain + settlement)
 and composition's child-accepts-parent digest check.
 
