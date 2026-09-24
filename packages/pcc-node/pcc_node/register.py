@@ -10,7 +10,7 @@ import logging
 import time
 
 from .http_util import pcc_request
-from .crypto import sign_announcement
+from .crypto import sign_announcement, _HAS_NACL as _ED25519_AVAILABLE
 from .log_capture import sign_ed25519_utf8, LogSigningRefused
 
 log = logging.getLogger("pcc-node.register")
@@ -200,6 +200,16 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
     types are sent: the raw device dicts (URLs, and credentials such as an
     OctoPrint ``api_key``) never leave the node.
 
+    Each capability claims ``assuranceTiers: [0]``: the node proves nothing
+    by announcing, and the gateway's default for an absent claim is wider.
+
+    Signature (canonical form, so a verifier can rebuild it from the
+    request): Ed25519 over the compact, key-sorted JSON of
+    ``{"kernelId": <the kernel id in the path>, "capabilities": <the body's
+    capability types, in order>, "timestamp": <the body's timestamp>}``.
+    Types are sorted before sending.  Without PyNaCl the announcement goes
+    unsigned: an HMAC is not a signature anyone else can verify.
+
     Parameters
     ----------
     pcc_base : str
@@ -222,12 +232,11 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
         "mdns": ["network-instrument"],
     }
 
-    slugs = []
+    found = set()
     for dev in devices:
         dtype = dev.get("type", "")
-        for slug in cap_map.get(dtype, [dtype] if dtype else []):
-            if slug not in slugs:
-                slugs.append(slug)
+        found.update(cap_map.get(dtype, [dtype] if dtype else []))
+    slugs = sorted(found)
 
     if not slugs:
         log.info("No capabilities to announce")
@@ -240,12 +249,14 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
     }
 
     signature = ""
-    if secret_key:
+    if secret_key and _ED25519_AVAILABLE:
         signature = sign_announcement(announcement, secret_key)
+    elif secret_key:
+        log.info("PyNaCl is not installed: sending the capability announcement unsigned")
 
     payload = {
         "status": "online",
-        "capabilities": [{"type": slug} for slug in slugs],
+        "capabilities": [{"type": slug, "assuranceTiers": [0]} for slug in slugs],
         "timestamp": announcement["timestamp"],
         "signature": signature,
     }

@@ -125,10 +125,55 @@ class TestAnnounceCapabilities:
     def test_with_signature(self):
         devices = [{"type": "camera", "path": "/dev/video0"}]
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc, \
+             mock.patch("pcc_node.register._ED25519_AVAILABLE", True), \
              mock.patch("pcc_node.register.sign_announcement", return_value="deadbeef"):
             mock_pcc.return_value = (200, {})
             announce_capabilities("http://pcc", "key", "k1", devices, secret_key="ab" * 32)
         assert self._body(mock_pcc)["signature"] == "deadbeef"
+
+    def test_types_are_sorted_and_claim_tier_0_only(self):
+        """Gateway review of #390, note 2: the node claims no attestation."""
+        devices = [{"type": "opentrons"}, {"type": "octoprint"}, {"type": "opentrons"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 5})
+            announce_capabilities("http://pcc", "key", "k1", devices)
+        caps = self._body(mock_pcc)["capabilities"]
+        types = [c["type"] for c in caps]
+        assert types == sorted(types) == sorted(set(types))
+        assert all(c["assuranceTiers"] == [0] for c in caps)
+
+    @pytest.mark.skipif(not _HAS_NACL, reason="pynacl required")
+    def test_signature_verifies_over_what_is_sent(self):
+        """Gateway review of #390, note 1: a verifier must be able to rebuild
+        the signed message from the request alone."""
+        import json
+        import nacl.signing
+
+        seed = "deadbeef" * 8
+        verify_key = nacl.signing.SigningKey(bytes.fromhex(seed)).verify_key
+        devices = [{"type": "octoprint"}, {"type": "camera"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {})
+            announce_capabilities("http://pcc", "key", "k1", devices, secret_key=seed)
+        path = mock_pcc.call_args[0][1]
+        body = self._body(mock_pcc)
+        rebuilt = {
+            "kernelId": path.split("/")[3],
+            "capabilities": [c["type"] for c in body["capabilities"]],
+            "timestamp": body["timestamp"],
+        }
+        message = json.dumps(rebuilt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        verify_key.verify(message, bytes.fromhex(body["signature"]))
+
+    def test_no_hmac_stand_in_without_pynacl(self):
+        devices = [{"type": "camera"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc, \
+             mock.patch("pcc_node.register._ED25519_AVAILABLE", False), \
+             mock.patch("pcc_node.register.sign_announcement") as signer:
+            mock_pcc.return_value = (200, {})
+            announce_capabilities("http://pcc", "key", "k1", devices, secret_key="ab" * 32)
+        signer.assert_not_called()
+        assert self._body(mock_pcc)["signature"] == ""
 
 
 class TestSendHeartbeat:
