@@ -1,22 +1,28 @@
 /**
- * Negative tests for the onboard-chat secret exposure fix (bus #2288, board N9).
+ * Negative tests for the onboard-chat secret exposure fix (WP-D D1-D4; bus #2288,
+ * board N9).
  *
- * The public /api/onboard/chat surface runs agent-package tools anonymously. A
- * tool such as provision_api_key returns a live key, and before this fix the
- * raw tool result was pushed into the history, sent back to the model,
- * persisted, and replayed by the public GET /api/onboard/chat/:id behind a
- * guessable id. These tests pin the fixed behavior:
+ * Before the fix, the public /api/onboard/chat pushed each raw tool result into
+ * the history, sent it back to the model, persisted it, and replayed it through
+ * the public GET /api/onboard/chat/:id behind a guessable id. /api/auth/provision
+ * returns a live API key and an Ed25519 private key. These tests pin the fix:
  *   - a secret from a tool result never reaches the DB, the model or GET;
- *   - it reaches the caller exactly once, in that POST's revealedSecrets;
+ *   - it reaches the caller exactly once, in that POST's revealedSecrets (the
+ *     502 reply too, if the model fails after the tool ran);
  *   - nested secret fields and secret-shaped substrings are both caught;
  *   - error bodies (tool errors, LLM errors) are redacted too;
  *   - ids are 128-bit CSPRNG ids and legacy guessable ids are refused.
  *
- * The Anthropic SDK is replaced by a scripted client that records every request.
+ * The app runs the REAL apiGate and the REAL /api/auth/provision route, so the
+ * secrets under test are the ones production mints. The Anthropic SDK is replaced
+ * by a scripted client that records every request. This file imports nothing the
+ * pre-fix code lacks except the _setAgentPackageForTests seam, so each test can be
+ * run against the pre-fix route to prove it fails there.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { randomBytes } from "node:crypto";
 import { sql } from "@pcc/store";
 
 const llm = vi.hoisted(() => ({
@@ -49,12 +55,13 @@ vi.mock("../telemetry.js", () => ({
 
 import {
   onboardChatRoutes,
-  generateConversationId,
   _resetAnthropicCache,
   _resetAgentPackageCache,
   _setAgentPackageForTests,
 } from "../routes/onboard-chat.js";
-import { redactSecretsDeep, REDACTED_VALUE, type Redaction } from "../redaction.js";
+import { provisionRoutes } from "../routes/provision.js";
+import { apiGate } from "../middleware/api-gate.js";
+import { provisionApiKey, resolveApiKeyFromToken } from "../auth/api-key-auth.js";
 import { initStore, closeStore, getStore } from "../db.js";
 
 // ── Fixtures ────────────────────────────────────────────────────────
@@ -63,6 +70,7 @@ const LIVE_KEY = "pcc_live_" + "Q7xR2m".repeat(6) + "_k9";
 const PRIVATE_KEY = "0x" + "ab12cd34".repeat(8);
 const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcGVyYXRvci0xIn0.c2lnbmF0dXJlLWJ5dGVzLWhlcmU";
 const PUBLIC_ADDRESS = "0x" + "1234abcd".repeat(5);
+const REDACTED = "[REDACTED]";
 
 const PKG = {
   system_prompt: "test system prompt",
@@ -98,19 +106,9 @@ async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
   const app = Fastify({ logger: false });
-  // Stand-ins for the real routes the agent-package tools point at.
-  app.post("/api/auth/provision", async (_req, reply) =>
-    reply.code(201).send({
-      api_key: LIVE_KEY,
-      key_id: "key-1",
-      operator_id: "op@example.com",
-      scopes: ["*"],
-      usage: {
-        header: `Authorization: Bearer ${LIVE_KEY}`,
-        example: `curl -H "Authorization: Bearer ${LIVE_KEY}" https://capability.network/api/capabilities/types`,
-      },
-    }),
-  );
+  await app.register(apiGate); // non-encapsulated, exactly as in server.ts
+  await app.register(provisionRoutes); // the real key-minting route
+  // Authenticated stand-ins (not on apiGate's public list).
   app.get("/api/test/nested", async () => ({
     a: { b: { privateKey: PRIVATE_KEY } },
     note: `use Bearer ${JWT} for the next call`,
@@ -139,10 +137,15 @@ function insertRow(id: string, messages: unknown[]): void {
 
 const count = (hay: string, needle: string) => hay.split(needle).length - 1;
 
+type Reveal = { tool: string; path: string; value: string };
+const revealAt = (body: { revealedSecrets?: Reveal[] }, path: string) =>
+  (body.revealedSecrets ?? []).find((s) => s.path === path)?.value;
+
 // ── Route behavior ──────────────────────────────────────────────────
 
-describe("onboard-chat secret exposure (N9)", () => {
+describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
   let app: FastifyInstance;
+  let userKey: string; // a signed-in chat user's own key, for the authenticated tools
   const savedKey = process.env.ANTHROPIC_API_KEY;
 
   beforeEach(async () => {
@@ -153,6 +156,7 @@ describe("onboard-chat secret exposure (N9)", () => {
     _resetAgentPackageCache();
     _setAgentPackageForTests(PKG);
     app = await buildApp();
+    userKey = provisionApiKey({ operatorId: "chat-user@example.com" }).rawKey;
   });
 
   afterEach(async () => {
@@ -163,48 +167,87 @@ describe("onboard-chat secret exposure (N9)", () => {
     else delete process.env.ANTHROPIC_API_KEY;
   });
 
-  it("a provisioned key never reaches the DB, the model or GET, and is revealed exactly once", async () => {
-    llm.responses.push(toolTurn("provision_api_key", "tu_1", { email: "op@example.com" }), endTurn);
-    const post = await app.inject({ method: "POST", url: "/api/onboard/chat", payload: { message: "sign me up" } });
-    expect(post.statusCode).toBe(200);
-    const body = post.json();
-
-    // Exactly once in the whole POST reply, and that once is the reveal.
-    expect(count(post.body, LIVE_KEY)).toBe(1);
-    const reveals = (body.revealedSecrets as Array<{ tool: string; value: string }>).filter((s) => s.value === LIVE_KEY);
-    expect(reveals).toHaveLength(1);
-    expect(reveals[0].tool).toBe("provision_api_key");
-    expect(JSON.stringify(body.toolCalls)).not.toContain(LIVE_KEY);
-
-    // Never sent to the model; the model is told the user saw it once.
-    expect(llm.requests).toHaveLength(2);
-    expect(JSON.stringify(llm.requests)).not.toContain(LIVE_KEY);
-    expect(JSON.stringify(llm.requests[1])).toContain("shown to the user once");
-
-    // Never persisted, never replayed.
-    expect(persistedMessages(body.conversationId)).not.toContain(LIVE_KEY);
-    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${body.conversationId}` });
-    expect(get.statusCode).toBe(200);
-    expect(get.body).not.toContain(LIVE_KEY);
-    expect(get.body).not.toContain("revealedSecrets");
-
-    // The reveal is one-time: the next turn in the same conversation does not repeat it.
-    const next = await app.inject({
+  const chat = (payload: Record<string, unknown>, opts: { key?: string; ip?: string } = {}) =>
+    app.inject({
       method: "POST",
       url: "/api/onboard/chat",
-      payload: { conversationId: body.conversationId, message: "what now?" },
+      payload,
+      remoteAddress: opts.ip ?? "198.51.100.1",
+      headers: opts.key ? { authorization: `Bearer ${opts.key}` } : {},
     });
+
+  it("secrets minted by the real /api/auth/provision never reach the DB, the model or GET, and are revealed exactly once", async () => {
+    llm.responses.push(toolTurn("provision_api_key", "tu_1", { email: "new-operator@example.com" }), endTurn);
+    const post = await chat({ message: "sign me up" }, { ip: "198.51.100.11" });
+    expect(post.statusCode).toBe(200);
+    const body = post.json();
+    expect(body.toolCalls[0].status).toBe(201);
+
+    // The minted secrets, read from the one-time reveal. (Code without the fix has no
+    // reveal and leaves them in the raw trace; reading them from there makes such
+    // code fail on the leak assertions below rather than on a missing field.)
+    const trace = body.toolCalls[0].result;
+    const apiKey: string = revealAt(body, "$.api_key") ?? trace.api_key;
+    const edPrivate: string = revealAt(body, "$.ed25519.private_key") ?? trace.ed25519?.private_key;
+    const edPkcs8: string =
+      revealAt(body, "$.ed25519.private_key_pkcs8_base64") ?? trace.ed25519?.private_key_pkcs8_base64;
+    expect(apiKey).toMatch(/^pcc_live_[0-9a-f]{64}$/);
+    expect(edPrivate).toMatch(/^[0-9a-f]{64}$/);
+    expect(edPkcs8).toMatch(/^MC4CAQAwBQYDK2VwBCIEI/);
+
+    const secrets = [apiKey, edPrivate, edPkcs8];
+    for (const secret of secrets) {
+      expect(JSON.stringify(llm.requests)).not.toContain(secret); // never sent to the model
+      expect(persistedMessages(body.conversationId)).not.toContain(secret); // never persisted
+      expect(JSON.stringify(body.toolCalls)).not.toContain(secret);
+      expect(count(post.body, secret)).toBe(1); // in the reply exactly once: the reveal
+    }
+    expect(trace.api_key).toBe(REDACTED);
+    expect(trace.ed25519.private_key_pkcs8_base64).toBe(REDACTED);
+    expect(revealAt(body, "$.api_key")).toBe(apiKey);
+    expect(revealAt(body, "$.ed25519.private_key_pkcs8_base64")).toBe(edPkcs8);
+    // What the user is shown is the real, working key.
+    expect(resolveApiKeyFromToken(apiKey)?.operatorId).toBe("new-operator@example.com");
+    // The model is told the user saw it once.
+    expect(llm.requests).toHaveLength(2);
+    expect(JSON.stringify(llm.requests[1])).toContain("shown to the user once");
+
+    // Never replayed.
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${body.conversationId}` });
+    expect(get.statusCode).toBe(200);
+    for (const secret of secrets) expect(get.body).not.toContain(secret);
+    expect(get.body).not.toContain("revealedSecrets");
+
+    // One-time: the next turn in the same conversation does not repeat it.
+    const next = await chat({ conversationId: body.conversationId, message: "what now?" }, { ip: "198.51.100.11" });
     expect(next.statusCode).toBe(200);
-    expect(next.body).not.toContain(LIVE_KEY);
+    for (const secret of secrets) expect(next.body).not.toContain(secret);
     expect(next.json().revealedSecrets).toBeUndefined();
-    expect(JSON.stringify(llm.requests)).not.toContain(LIVE_KEY);
+    for (const secret of secrets) expect(JSON.stringify(llm.requests)).not.toContain(secret);
+  });
+
+  it("a key minted before the model fails is still revealed once, in the 502 reply, and never stored", async () => {
+    llm.responses.push(
+      toolTurn("provision_api_key", "tu_9", { email: "second@example.com" }),
+      new Error("529 overloaded"),
+    );
+    const post = await chat({ message: "sign me up" }, { ip: "198.51.100.12" });
+    expect(post.statusCode).toBe(502);
+    const body = post.json();
+    expect(body.error).toBe("anthropic_call_failed");
+    const apiKey = revealAt(body, "$.api_key");
+    expect(apiKey).toMatch(/^pcc_live_[0-9a-f]{64}$/);
+    expect(count(post.body, apiKey!)).toBe(1);
+    expect(JSON.stringify(llm.requests)).not.toContain(apiKey!);
+    expect(persistedMessages(body.conversationId)).not.toContain(apiKey!);
   });
 
   it("a nested secret field and a string-embedded Bearer JWT are redacted end to end", async () => {
     llm.responses.push(toolTurn("nested_secret", "tu_2"), endTurn);
-    const post = await app.inject({ method: "POST", url: "/api/onboard/chat", payload: { message: "check" } });
+    const post = await chat({ message: "check" }, { key: userKey });
     expect(post.statusCode).toBe(200);
     const body = post.json();
+    expect(body.toolCalls[0].status).toBe(200);
 
     for (const secret of [PRIVATE_KEY, JWT]) {
       expect(count(post.body, secret)).toBe(1); // the reveal only
@@ -212,18 +255,19 @@ describe("onboard-chat secret exposure (N9)", () => {
       expect(persistedMessages(body.conversationId)).not.toContain(secret);
     }
     const traced = body.toolCalls[0].result;
-    expect(traced.a.b.privateKey).toBe(REDACTED_VALUE);
-    expect(traced.note).toContain("Bearer [REDACTED]");
+    expect(traced.a.b.privateKey).toBe(REDACTED);
+    expect(traced.note).toBe(`use Bearer ${REDACTED} for the next call`);
     // A public 40-hex wallet address is not a secret and survives.
     expect(traced.wallet).toBe(PUBLIC_ADDRESS);
   });
 
   it("an error-path tool result that echoes a key is redacted", async () => {
     llm.responses.push(toolTurn("boom", "tu_3"), endTurn);
-    const post = await app.inject({ method: "POST", url: "/api/onboard/chat", payload: { message: "try it" } });
+    const post = await chat({ message: "try it" }, { key: userKey });
     expect(post.statusCode).toBe(200);
     const body = post.json();
     expect(body.toolCalls[0].status).toBe(500);
+    expect(body.toolCalls[0].result.message).toBe(`upstream rejected key ${REDACTED}`);
     expect(count(post.body, LIVE_KEY)).toBe(1); // the reveal only
     expect(JSON.stringify(body.toolCalls)).not.toContain(LIVE_KEY);
     expect(JSON.stringify(llm.requests)).not.toContain(LIVE_KEY);
@@ -232,7 +276,7 @@ describe("onboard-chat secret exposure (N9)", () => {
 
   it("an LLM error that echoes a key is redacted in the 502 reply and the stored turn", async () => {
     llm.responses.push(new Error(`401 invalid credential ${LIVE_KEY}`));
-    const post = await app.inject({ method: "POST", url: "/api/onboard/chat", payload: { message: "hello" } });
+    const post = await chat({ message: "hello" });
     expect(post.statusCode).toBe(502);
     expect(post.body).not.toContain(LIVE_KEY);
     expect(persistedMessages(post.json().conversationId)).not.toContain(LIVE_KEY);
@@ -240,11 +284,7 @@ describe("onboard-chat secret exposure (N9)", () => {
 
   it("a secret the user pastes is not sent to the model, stored or replayed", async () => {
     llm.responses.push(endTurn);
-    const post = await app.inject({
-      method: "POST",
-      url: "/api/onboard/chat",
-      payload: { message: `my key is ${LIVE_KEY}, please use it` },
-    });
+    const post = await chat({ message: `my key is ${LIVE_KEY}, please use it` });
     expect(post.statusCode).toBe(200);
     expect(JSON.stringify(llm.requests)).not.toContain(LIVE_KEY);
     const id = post.json().conversationId;
@@ -261,18 +301,14 @@ describe("onboard-chat secret exposure (N9)", () => {
     expect(get.statusCode).toBe(404);
     expect(get.body).not.toContain(LIVE_KEY);
 
-    const resume = await app.inject({
-      method: "POST",
-      url: "/api/onboard/chat",
-      payload: { conversationId: legacyId, message: "what did I say before?" },
-    });
+    const resume = await chat({ conversationId: legacyId, message: "what did I say before?" });
     expect(resume.statusCode).toBe(404);
     expect(resume.json().error).toBe("conversation_not_found");
     expect(llm.requests).toHaveLength(0);
   });
 
   it("GET redacts a current-format row written before redaction existed", async () => {
-    const id = generateConversationId();
+    const id = `cnv_${randomBytes(16).toString("base64url")}`;
     insertRow(id, [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: `{"api_key":"${LIVE_KEY}"}` }] }]);
     const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${id}` });
     expect(get.statusCode).toBe(200);
@@ -280,65 +316,20 @@ describe("onboard-chat secret exposure (N9)", () => {
   });
 
   it("new conversation ids are 128-bit CSPRNG ids, with no Math.random in the id path", async () => {
+    delete process.env.ANTHROPIC_API_KEY; // placeholder path: no LLM, just id + persist
     const spy = vi.spyOn(Math, "random").mockReturnValue(0.42);
+    const ids = new Set<string>();
     try {
-      const ids = new Set(Array.from({ length: 200 }, () => generateConversationId()));
-      expect(ids.size).toBe(200);
-      for (const id of ids) expect(id).toMatch(/^cnv_[A-Za-z0-9_-]{22}$/);
+      for (let i = 0; i < 40; i += 1) {
+        const post = await chat({ message: "hi" });
+        expect(post.statusCode).toBe(200);
+        ids.add(post.json().conversationId);
+      }
       expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
-    delete process.env.ANTHROPIC_API_KEY; // placeholder path: no LLM needed
-    const post = await app.inject({ method: "POST", url: "/api/onboard/chat", payload: { message: "hi" } });
-    expect(post.statusCode).toBe(200);
-    expect(post.json().conversationId).toMatch(/^cnv_[A-Za-z0-9_-]{22}$/);
-  });
-});
-
-// ── redactSecretsDeep unit behavior ─────────────────────────────────
-
-describe("redactSecretsDeep", () => {
-  it("replaces secret fields at any depth and secret-shaped substrings anywhere", () => {
-    const input = {
-      api_key: LIVE_KEY,
-      nested: { deeper: [{ operatorWalletPrivateKey: PRIVATE_KEY }] },
-      authorization: { scheme: "bearer", value: JWT },
-      text: `header: Authorization: Bearer ${JWT}`,
-    };
-    const seen: Redaction[] = [];
-    const out = redactSecretsDeep(input, (r) => seen.push(r));
-    const json = JSON.stringify(out);
-    for (const secret of [LIVE_KEY, PRIVATE_KEY, JWT]) expect(json).not.toContain(secret);
-    expect(out.api_key).toBe(REDACTED_VALUE);
-    expect(out.nested.deeper[0].operatorWalletPrivateKey).toBe(REDACTED_VALUE);
-    expect(out.authorization).toBe(REDACTED_VALUE);
-    expect(seen.map((r) => r.path)).toEqual(
-      expect.arrayContaining(["$.api_key", "$.nested.deeper[0].operatorWalletPrivateKey", "$.authorization", "$.text"]),
-    );
-    expect(seen.find((r) => r.path === "$.text")?.value).toBe(JWT); // "Bearer " prefix stripped
-  });
-
-  it("leaves non-secret fields alone and never mutates its input", () => {
-    const input = { publicKey: "0x" + "aa".repeat(32).slice(0, 40), idempotencyKey: "abc-123", hasApiKey: false, token: null, wallet: PUBLIC_ADDRESS };
-    const copy = JSON.parse(JSON.stringify(input));
-    const out = redactSecretsDeep(input);
-    expect(input).toEqual(copy);
-    expect(out).toEqual(copy);
-  });
-
-  it("is idempotent: a second pass changes nothing and reports nothing", () => {
-    const once = redactSecretsDeep({ api_key: LIVE_KEY, note: `Bearer ${JWT}` });
-    const seen: Redaction[] = [];
-    const twice = redactSecretsDeep(once, (r) => seen.push(r));
-    expect(twice).toEqual(once);
-    expect(seen).toHaveLength(0);
-  });
-
-  it("fails closed on a cycle", () => {
-    const a: Record<string, unknown> = { name: "loop" };
-    a.self = a;
-    const out = redactSecretsDeep(a) as Record<string, unknown>;
-    expect(out.self).toBe(REDACTED_VALUE);
+    expect(ids.size).toBe(40); // Math.random was pinned: uniqueness came from the CSPRNG
+    for (const id of ids) expect(id).toMatch(/^cnv_[A-Za-z0-9_-]{22}$/);
   });
 });

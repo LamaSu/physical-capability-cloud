@@ -24,11 +24,15 @@
  *    upward walk.
  * 2. Tools that arrive in `tool_use` blocks are executed by self-injecting
  *    HTTP requests against the same Fastify instance via `app.inject`.
- *    No outbound network call, no API key bootstrapping inside the
- *    conversation. The buyer/operator chat thus operates as if it WAS the
- *    user — anything the local gateway's apiGate normally lets through for
- *    unauthenticated calls is fair game; everything else returns the same
- *    401/403 the LLM can react to in plain English.
+ *    No outbound network call, and never a server-held key: each tool call
+ *    carries exactly the chat caller's OWN credential (the Bearer API key or
+ *    SIWE session on the POST, WP-D D6), resolved the way apiGate resolves
+ *    it, plus the caller's IP, so the full gate, scope and per-IP stack sees
+ *    the real caller. Anonymous chat is allowed, but reaches only tools
+ *    whose endpoint apiGate's own isPublicRoute() lets through with no
+ *    credential. Approve / activate / reject / admin tools are never run
+ *    from chat, whatever the auth. A refusal is a tool result the LLM can
+ *    explain in plain English.
  * 3. Conversations are persisted in a small `onboard_chat_conversations`
  *    table (created idempotently on first request, no schema migration
  *    needed). Each row carries the full message history as JSON; we cap
@@ -43,28 +47,34 @@
  * MCP install (Approach A) remains the power-user path; this endpoint is
  * the layperson default. See PR body for the A-vs-B decision.
  *
- * Secrets (bus #2288, board N9)
- * -----------------------------
+ * Secrets (WP-D; bus #2288, board N9)
+ * -----------------------------------
  * The whole /api/onboard/chat prefix is public, and a tool such as
- * provision_api_key returns a live key. So:
- *   - every tool result, tool input and error text is passed through
- *     redactSecretsDeep() before it enters the history, the model request, the
- *     database or the GET reply;
+ * provision_api_key returns a live key (and an Ed25519 private key). So:
+ *   - every tool result, tool input, user message and error text is passed
+ *     through redactSecretsDeep() before it enters the history, the model
+ *     request, the database or any reply (D1, D4);
  *   - the secrets removed from THIS request's live tool results go back to the
- *     caller exactly once, in the POST reply's `revealedSecrets`. They are never
- *     persisted, never sent to the model and never replayed by GET;
+ *     caller exactly once, in that POST reply's `revealedSecrets` (the 502
+ *     reply too, if the model fails after a tool ran). They are never
+ *     persisted, never sent to the model and never replayed by GET (D2);
  *   - conversation ids carry 128 bits of crypto randomness, the id is the only
- *     credential, and ids in the old guessable format are refused (404).
+ *     credential, and ids in the old guessable format are refused (404) (D3).
+ * Revealing a secret to the caller grants nothing new: the tool ran with the
+ * caller's own credential (D6), so the caller could have made that request.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
-import { redactSecrets, redactSecretsDeep, type Redaction, type RedactionKind } from "../redaction.js";
+import { redactSecretsDeep, type Redaction, type RedactionKind } from "../redaction.js";
+import { isPublicRoute } from "../middleware/api-gate.js";
+import { resolveApiKey } from "../auth/api-key-auth.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -105,6 +115,21 @@ interface RevealedSecret {
   path: string;
   kind: RedactionKind;
   value: string;
+}
+
+/**
+ * Who a chat request runs as (WP-D D6). Every tool call carries exactly this
+ * caller's own credential. There is no server-held key anywhere in this file.
+ */
+type ChatPrincipal =
+  | { kind: "anonymous" }
+  | { kind: "api_key" | "session"; authorization: string };
+
+/** Per-request context every tool call runs with. */
+interface ToolCallContext {
+  principal: ChatPrincipal;
+  /** The chat caller's IP: per-IP limits and audit see the caller, not 127.0.0.1. */
+  remoteAddress: string;
 }
 
 interface ConversationRecord {
@@ -288,22 +313,90 @@ function saveConversation(record: ConversationRecord): void {
                updated_at = excluded.updated_at`);
 }
 
+// ── Caller principal (WP-D D6) ──────────────────────────────────────
+
+/**
+ * Resolve the chat caller the way apiGate resolves any caller: an API key
+ * (`Authorization: Bearer pcc_…`) first, then a SIWE session (the pcc_session
+ * cookie, then `Bearer <session token>`). A session found in the cookie is
+ * forwarded as `Bearer <that session's token>`, which resolveSession accepts for
+ * the same session, so no cookie jar is replayed. An Authorization header that
+ * is present but resolves to nobody returns null (refused, 401): it never
+ * silently becomes anonymous. A stale cookie on its own leaves the chat anonymous.
+ */
+function resolveChatPrincipal(req: FastifyRequest): ChatPrincipal | null {
+  const authorization = req.headers.authorization;
+  if (resolveApiKey(req) && authorization) return { kind: "api_key", authorization };
+  const session = resolveSession(req);
+  if (session) return { kind: "session", authorization: `Bearer ${session.token}` };
+  if (authorization !== undefined) return null;
+  return { kind: "anonymous" };
+}
+
+// ── Tool policy (WP-D D6) ───────────────────────────────────────────
+
+/**
+ * Words that mark an authority action chat never takes, whatever the caller's
+ * auth: registration approve / activate / reject, any /api/admin route, and the
+ * same verbs anywhere else (escrow approve-release, operator approvals).
+ */
+const CHAT_FORBIDDEN_WORDS = new Set(["approve", "activate", "reject", "admin"]);
+
+function words(s: string): string[] {
+  return s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+/** True when a path (raw or percent-decoded) names an authority action or the chat itself. */
+function isChatForbiddenPath(path: string): boolean {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    return true; // undecodable: fail closed
+  }
+  if (path.startsWith("/api/onboard/chat") || decoded.startsWith("/api/onboard/chat")) return true;
+  return [...words(path), ...words(decoded)].some((w) => CHAT_FORBIDDEN_WORDS.has(w));
+}
+
+/**
+ * Why chat may never call this tool (decided on its name and endpoint template,
+ * before any input), or null. Such tools are also never offered to the model.
+ */
+function toolRefusedInChat(tool: AgentPackageTool): string | null {
+  const path = tool.endpoint?.path ?? "";
+  if (!path.startsWith("/api/")) return "Only this gateway's own /api routes can be called from chat.";
+  if (words(tool.name).some((w) => CHAT_FORBIDDEN_WORDS.has(w)) || isChatForbiddenPath(path)) {
+    return `${tool.name} is an approval, activation, rejection or admin action. Those are never run from chat, whatever your sign-in. Use the dashboard or the API directly.`;
+  }
+  return null;
+}
+
+const refusal = (status: number, error: string, message: string) => ({ status, result: { error, message } });
+
 // ── Tool execution (self-injection) ─────────────────────────────────
 
 /**
  * Execute a single LLM-emitted tool call by self-injecting an HTTP request
- * against the same Fastify instance.
+ * against the same Fastify instance, as the chat caller (WP-D D6).
  *
  * - GET-shaped tools (or DELETE): query string
  * - POST/PATCH/PUT: JSON body
  *
  * Path params are interpolated from the tool's input. Tool name maps to its
- * agent-package.json `endpoint`. Unknown tools fail closed (404).
+ * agent-package.json `endpoint`. Unknown tools fail closed (404). Refused,
+ * without any request being made:
+ *   - approve / activate / reject / admin tools and non-/api endpoints (403);
+ *   - a missing, empty or dot-segment path param (400), so the model cannot
+ *     walk a template (`{id}` = `..`) onto another route;
+ *   - for an anonymous caller, any endpoint apiGate's own isPublicRoute() does
+ *     not let through without a credential (401).
+ * Otherwise the request carries exactly the caller's credential and IP.
  */
 async function executeToolCall(
   app: FastifyInstance,
   tool: AgentPackageTool,
   input: Record<string, unknown>,
+  ctx: ToolCallContext,
 ): Promise<{ status: number; result: unknown }> {
   if (!tool.endpoint) {
     return {
@@ -311,17 +404,28 @@ async function executeToolCall(
       result: { error: "tool_has_no_endpoint", message: `Tool ${tool.name} has no endpoint mapping.` },
     };
   }
+  const refused = toolRefusedInChat(tool);
+  if (refused) return refusal(403, "tool_not_callable_from_chat", refused);
 
   const method = tool.endpoint.method.toUpperCase();
   let path = tool.endpoint.path;
 
   // Interpolate {param} -> input[param] and remember which keys went into the path
   const pathParams = new Set<string>();
+  let badParam: string | null = null;
   path = path.replace(/\{([^}]+)\}/g, (_, key: string) => {
     pathParams.add(key);
     const v = input[key];
-    return v == null ? "" : encodeURIComponent(String(v));
+    const s = v == null ? "" : String(v);
+    if (s === "" || s === "." || s === "..") {
+      badParam ??= key;
+      return "_";
+    }
+    return encodeURIComponent(s);
   });
+  if (badParam !== null) {
+    return refusal(400, "invalid_path_param", `Path parameter "${badParam}" must be a non-empty value other than "." or "..".`);
+  }
 
   let url = path;
   let payload: Record<string, unknown> | undefined;
@@ -342,12 +446,37 @@ async function executeToolCall(
     }
   }
 
+  // Decide on the URL the router will see: inject resolves dot segments the same way.
+  let target: URL;
+  try {
+    target = new URL(url, "http://onboard-chat.invalid");
+  } catch {
+    return refusal(400, "invalid_tool_url", `Tool ${tool.name} produced an invalid URL.`);
+  }
+  if (isChatForbiddenPath(target.pathname)) {
+    return refusal(403, "tool_not_callable_from_chat", `${tool.name} resolved to a route chat may not call.`);
+  }
+  // Anonymous chat reaches exactly what apiGate lets through with no credential:
+  // the gate's own predicate, never a hand-kept list.
+  if (ctx.principal.kind === "anonymous" && !isPublicRoute(target.pathname, method)) {
+    return refusal(
+      401,
+      "sign_in_required",
+      `${tool.name} needs a signed-in account, and this chat has none. ` +
+        "Send your own PCC API key as a Bearer token with the chat request, or sign in with your wallet, then ask again.",
+    );
+  }
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (ctx.principal.kind !== "anonymous") headers.authorization = ctx.principal.authorization;
+
   try {
     const res = await app.inject({
       method: method as any,
-      url,
+      url: target.pathname + target.search,
       payload,
-      headers: { "content-type": "application/json" },
+      headers,
+      remoteAddress: ctx.remoteAddress,
     });
     let body: unknown;
     try {
@@ -415,6 +544,19 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       model?: string;
     };
   }>("/api/onboard/chat", async (req, reply) => {
+    // WP-D D6: tools run as exactly this caller. A credential that is presented
+    // but does not resolve is refused, never downgraded to anonymous.
+    const principal = resolveChatPrincipal(req);
+    if (!principal) {
+      return reply.status(401).send({
+        error: "invalid_credential",
+        message:
+          "The Authorization header on this chat request is not a valid PCC API key or session. " +
+          "Send a valid one, or send none to chat anonymously.",
+      });
+    }
+    const toolCtx: ToolCallContext = { principal, remoteAddress: req.ip };
+
     const body = req.body ?? {};
     const message = body.message?.trim();
     if (!message) {
@@ -490,11 +632,15 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       if (!t.name || !t.input_schema) continue;
       toolByName.set(t.name, t);
     }
-    const tools = Array.from(toolByName.values()).map((t) => ({
-      name: t.name,
-      description: t.description ?? "",
-      input_schema: t.input_schema,
-    }));
+    // Tools chat may never call are not offered to the model at all; if the model
+    // names one anyway, executeToolCall refuses it (WP-D D6).
+    const tools = Array.from(toolByName.values())
+      .filter((t) => toolRefusedInChat(t) === null)
+      .map((t) => ({
+        name: t.name,
+        description: t.description ?? "",
+        input_schema: t.input_schema,
+      }));
 
     // ── Multi-turn tool-use loop ────────────────────────────────────
     const toolCalls: ToolCallTrace[] = [];
@@ -519,7 +665,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           messages: redactSecretsDeep(record.messages),
         });
       } catch (err) {
-        const errMsg = redactSecrets(String((err as Error)?.message ?? err));
+        const errMsg = redactSecretsDeep(String((err as Error)?.message ?? err));
         record.messages.push({
           role: "assistant",
           content: `(LLM call failed: ${errMsg}. Try again or contact support.)`,
@@ -530,6 +676,10 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           error: "anthropic_call_failed",
           message: errMsg,
           conversationId: record.id,
+          // A tool may already have run this request (e.g. minted a key): its
+          // redacted trace and its one-time reveal must not be lost with the reply.
+          toolCalls,
+          ...(revealed.size > 0 ? { revealedSecrets: Array.from(revealed.values()) } : {}),
         });
       }
 
@@ -563,7 +713,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           let durationMs = 0;
           if (tool) {
             const start = Date.now();
-            const exec = await executeToolCall(app, tool, block.input);
+            const exec = await executeToolCall(app, tool, block.input, toolCtx);
             durationMs = Date.now() - start;
             status = exec.status;
             result = exec.result;
@@ -578,8 +728,9 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
             }
           }
           toolCalls.push({ name: block.name, args: safeInput, status, result: safeResult, durationMs });
-          const note = removed.length > 0
-            ? `\n[pcc] ${removed.length} secret value(s) in this result were redacted. ` +
+          const removedCount = new Set(removed.map((r) => r.value)).size;
+          const note = removedCount > 0
+            ? `\n[pcc] ${removedCount} secret value(s) in this result were redacted. ` +
               "They were shown to the user once, directly, outside this conversation. " +
               "Do not ask the user to paste them into this chat."
             : "";
@@ -622,7 +773,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       conversationId: record.id,
-      assistant: redactSecrets(lastAssistantText) || "(no text response — see toolCalls for what happened)",
+      assistant: redactSecretsDeep(lastAssistantText) || "(no text response — see toolCalls for what happened)",
       toolCalls,
       done: doneReason === "end_turn",
       doneReason,
