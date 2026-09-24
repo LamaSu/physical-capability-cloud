@@ -176,11 +176,13 @@ afterEach(() => {
 });
 
 async function settle(client: QueryClient) {
-  for (let i = 0; i < 200; i++) {
+  // Two idle ticks in a row: a query can read as idle for one tick between retries.
+  let idleTicks = 0;
+  for (let i = 0; i < 200 && idleTicks < 2; i++) {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
     });
-    if (client.isFetching() === 0) break;
+    idleTicks = client.isFetching() === 0 ? idleTicks + 1 : 0;
   }
 }
 
