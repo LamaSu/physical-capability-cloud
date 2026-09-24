@@ -886,7 +886,9 @@ class TestClassifyExecutionResult:
         result = {"executed": True, "status_code": status_code, "response": ""}
         assert classify_execution_result(result) == RESULT_FAILURE
 
-    @pytest.mark.parametrize("status_code", [200, 201, 202, 204, 299])
+    # 202 is not here: it is the device saying the work has not finished (see
+    # TestAcceptedStatusAndShapeGaps).
+    @pytest.mark.parametrize("status_code", [200, 201, 204, 299])
     def test_2xx_status_codes_still_permit_success(self, status_code):
         result = {"executed": True, "status_code": status_code, "response": {"ok": True}}
         assert classify_execution_result(result) == RESULT_SUCCESS
@@ -2060,7 +2062,11 @@ class TestDroppedFailureReportIsSurfaced:
     def _run(self, result, ack, caplog):
         gateway = mock.Mock()
         gateway.push_evidence.return_value = True
-        gateway.update_job_status.return_value = ack
+        # The 'running' claim lands (otherwise the job never starts, see
+        # TestClaimBeforeSideEffect); `ack` governs the terminal report.
+        gateway.update_job_status.side_effect = (
+            lambda job_id, status, *rest, **kw: True if status == "running" else ack
+        )
         ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=gateway)
         job = {"id": "job-ack", "capabilityType": "document-printing", "parameters": {}}
 
@@ -2323,3 +2329,122 @@ class TestAcceptanceIsNotCompletion:
         assert self._statuses(gateway) == expected_statuses
         assert _event_types(bundle) == expected_types
         gateway.push_evidence.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# The last shapes by which a submitted or failed result could still read as a
+# success (review of item 5 against the R31 question: can a FAILED or merely
+# SUBMITTED device result reach execution_completed by any path?)
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptedStatusAndShapeGaps:
+    @pytest.mark.parametrize("result", [
+        pytest.param({"executed": True, "status_code": 202}, id="executed-flag"),
+        pytest.param({"printed": True, "status_code": 202}, id="printed-flag"),
+        pytest.param({"status": "completed", "status_code": 202}, id="success-status"),
+        pytest.param({"status_code": 202, "response": {"ok": True}}, id="bare-202"),
+        pytest.param({"submitted": True, "status_code": 202}, id="submitted-flag"),
+    ])
+    def test_a_202_never_classifies_as_success(self, result):
+        assert classify_execution_result(result) == RESULT_ACCEPTED
+
+    @pytest.mark.parametrize("result", [
+        pytest.param({"status_code": 202, "error": "queue full"}, id="error"),
+        pytest.param({"status_code": 202, "executed": False}, id="false-flag"),
+        pytest.param({"status_code": 202, "status": "failed"}, id="failure-status"),
+    ])
+    def test_a_failed_202_is_still_a_failure(self, result):
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_an_unreadable_status_still_outranks_a_202(self):
+        result = {"status_code": 202, "status": "jammed"}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    @pytest.mark.parametrize("status", [
+        pytest.param(["failed"], id="list"),
+        pytest.param({"state": "failed"}, id="dict"),
+        pytest.param(0, id="int"),
+        pytest.param(False, id="bool"),
+    ])
+    @pytest.mark.parametrize("flag", ["executed", "printed"])
+    def test_a_non_string_status_is_unclassifiable(self, status, flag):
+        result = {flag: True, "status": status}
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+    def test_an_absent_status_is_not_a_non_string_status(self):
+        assert classify_execution_result({"executed": True, "status": None}) == RESULT_SUCCESS
+
+    def test_a_202_bundle_never_carries_execution_completed(self):
+        bundle = build_evidence_bundle(
+            "job-202", {"id": "gh"}, {"executed": True, "status_code": 202}
+        )
+        assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
+        assert "execution_completed" not in _bundle_text(bundle)
+
+
+# ---------------------------------------------------------------------------
+# Claim before the side effect
+#
+# For an accepted job 'running' is the only status the node reports.  If that
+# claim is dropped the job stays 'queued' upstream, and a restarted daemon
+# (whose seen-set is in memory) would dispatch it again: a second physical
+# print.  So the node does not start a job whose claim did not land.
+# ---------------------------------------------------------------------------
+
+
+class TestClaimBeforeSideEffect:
+    IPP_DEVICE = {"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}
+    JOB = {"id": "job-claim", "capabilityType": "document-printing", "parameters": {}}
+
+    def _run(self, claim_ack, caplog):
+        gateway = mock.Mock()
+        gateway.push_evidence.return_value = True
+        gateway.update_job_status.return_value = claim_ack
+        ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=gateway)
+        with mock.patch("pcc_node.job_executor.execute_ipp_print") as patched:
+            patched.return_value = IPP_ACCEPTED
+            with caplog.at_level(logging.ERROR, logger="pcc-node.job-executor"):
+                out = ex.execute(dict(self.JOB))
+        return gateway, patched, out
+
+    def test_an_unacknowledged_claim_does_not_start_the_job(self, caplog):
+        gateway, adapter, out = self._run(claim_ack=False, caplog=caplog)
+        adapter.assert_not_called()
+        gateway.push_evidence.assert_not_called()
+        assert [c[0][1] for c in gateway.update_job_status.call_args_list] == ["running"]
+        gateway.forget_job.assert_called_once_with("job-claim")
+        assert out["error"] == "claim_not_acknowledged"
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("did not acknowledge the 'running' claim" in m for m in errors)
+
+    def test_an_acknowledged_claim_starts_the_job(self, caplog):
+        """Positive control: the same job runs once the claim lands."""
+        gateway, adapter, _ = self._run(claim_ack=True, caplog=caplog)
+        adapter.assert_called_once()
+        gateway.push_evidence.assert_called_once()
+        gateway.forget_job.assert_not_called()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_no_gateway_means_no_claim_to_wait_for(self):
+        ex = JobExecutor(devices=[self.IPP_DEVICE], gateway_client=None)
+        with mock.patch("pcc_node.job_executor.execute_ipp_print") as patched:
+            patched.return_value = IPP_ACCEPTED
+            ex.execute(dict(self.JOB))
+        patched.assert_called_once()
+
+    def test_a_forgotten_job_is_polled_again(self):
+        from pcc_node.ws_client import PCCGatewayClient
+
+        client = PCCGatewayClient.__new__(PCCGatewayClient)
+        client.gateway_url = "http://gw.test"
+        client.kernel_id = "k1"
+        client.api_key = "test-key"
+        client._seen_jobs = set()
+        with mock.patch(
+            "pcc_node.ws_client._http", return_value=(200, {"jobs": [{"id": "job-claim"}]})
+        ):
+            client.mark_job_seen("job-claim")
+            assert client.poll_for_jobs() == []
+            client.forget_job("job-claim")
+            assert [j["id"] for j in client.poll_for_jobs()] == ["job-claim"]

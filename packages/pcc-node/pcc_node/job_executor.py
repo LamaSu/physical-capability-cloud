@@ -443,12 +443,17 @@ def classify_execution_result(result: Any) -> str:
     6.  ANY flag in :data:`ALL_FLAG_KEYS` present and not
         ``True``                                          -> failure
     7.  ``status`` in :data:`SUCCESS_STATUS_VALUES`       -> success
-    8.  ``status`` present as a string but unrecognised   -> unclassifiable
+    8.  ``status`` present but unrecognised, or present
+        and not a string                                  -> unclassifiable
     9.  a :data:`COMPLETION_FLAG_KEYS` flag is present
         (and every flag passed rule 6)                     -> success
-    10. an :data:`ACCEPTANCE_FLAG_KEYS` flag is ``True``
-        (no success status, no completion flag)            -> accepted
+    10. an :data:`ACCEPTANCE_FLAG_KEYS` flag is ``True``,
+        or ``status_code`` is 202 (no success status,
+        no completion flag)                               -> accepted
     11. anything else                                      -> unclassifiable
+
+    A ``status_code`` of 202 (:data:`HTTP_ACCEPTED`) turns what rules 7 and 9
+    would call a success into accepted: the device said it has not finished.
 
     Why the order is what it is, rule by rule:
 
@@ -514,18 +519,24 @@ def classify_execution_result(result: Any) -> str:
     if any(result[key] is not True for key in ALL_FLAG_KEYS if key in result):
         return RESULT_FAILURE
 
-    if status in SUCCESS_STATUS_VALUES:
-        return RESULT_SUCCESS
+    # A 202 is the device saying the work has NOT finished, so it turns any
+    # success claim below (a success status, a completion flag) into accepted.
+    accepted_by_transport = result.get("status_code") == HTTP_ACCEPTED
 
-    if status is not None:
+    if status in SUCCESS_STATUS_VALUES:
+        return RESULT_ACCEPTED if accepted_by_transport else RESULT_SUCCESS
+
+    # A status that is present but not a string ({"status": ["failed"]}) is as
+    # unreadable as an unknown string, and may be a failure in another shape.
+    if status is not None or result.get("status") is not None:
         return RESULT_UNCLASSIFIABLE
 
     if any(key in result for key in COMPLETION_FLAG_KEYS):
-        return RESULT_SUCCESS
+        return RESULT_ACCEPTED if accepted_by_transport else RESULT_SUCCESS
 
     # `is True`, not `in`: rule 6 already guarantees it, but this rule must not
     # turn `submitted: False` into an acceptance if the rules are ever reordered.
-    if any(result.get(key) is True for key in ACCEPTANCE_FLAG_KEYS):
+    if accepted_by_transport or any(result.get(key) is True for key in ACCEPTANCE_FLAG_KEYS):
         return RESULT_ACCEPTED
 
     return RESULT_UNCLASSIFIABLE
@@ -681,8 +692,21 @@ class JobExecutor:
 
         log.info(f"Executing job {job_id} (capability: {capability_type})")
 
-        if self.gateway:
-            self.gateway.update_job_status(job_id, "running")
+        # Claim before the side effect.  For an accepted job "running" is the
+        # only status this node ever reports, so if the claim does not land the
+        # job stays "queued" upstream and a restarted daemon would run it again
+        # (a second print).  Not starting is the safe side; the job is forgotten
+        # so a later poll can claim it.
+        if self.gateway and not self.gateway.update_job_status(job_id, "running"):
+            log.error(
+                "Job %s: the gateway did not acknowledge the 'running' claim; "
+                "not starting it, so no later poll or restart can run it twice",
+                job_id,
+            )
+            forget = getattr(self.gateway, "forget_job", None)
+            if callable(forget):
+                forget(job_id)
+            return {"status": "not_started", "error": "claim_not_acknowledged"}
 
         try:
             device = self._find_device(job)
