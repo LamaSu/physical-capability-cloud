@@ -18,8 +18,9 @@ import { swfRoutes, swfService } from "../routes/swf.js";
 import { initStore, closeStore } from "../db.js";
 
 const MESSAGE =
-  "Per-epoch contribution data (jobs, reputation, activity, votes) is not recorded on this gateway, " +
-  "so the epoch was not scored or distributed: without it, every participant's share would come " +
+  "Per-epoch contribution scores (each participant's jobs, reputation, activity and votes in this epoch) " +
+  "are not computed on this gateway, " +
+  "so the epoch was not scored or distributed: without them, every participant's share would come " +
   "from random numbers.";
 const REFUSAL = { error: "not_available", message: MESSAGE, see: ["GET /api/swf/epochs/:epochId"] };
 

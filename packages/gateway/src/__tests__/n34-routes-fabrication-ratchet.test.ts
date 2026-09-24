@@ -34,13 +34,18 @@ export const ALLOWLIST: Readonly<Record<string, Allowance>> = Object.freeze({
   "logistics.ts": { mockData: 5, random: 0, owner: "carrier", why: `${DEMO}; the family is retired (carrier #2922)` },
   "marketplace.ts": { mockData: 4, random: 0, owner: "readmodels", why: DEMO },
   "operator.ts": { mockData: 3, random: 1, owner: "readmodels", why: "answered 501 not_available by #362 (N32), which also removes them" },
-  "orchestrator.ts": { mockData: 7, random: 0, owner: "refvertical", why: "the /api/orchestrator mocks are to wire or retire (steward #2498); N34 group c gates them" },
+  "orchestrator.ts": { mockData: 7, random: 0, owner: "refvertical", why: `${DEMO}; to wire or retire (steward #2498)` },
   "pizza-demo.ts": { mockData: 0, random: 2, owner: "product-steward", why: "an explicit demo route (census); to move behind the demo gate" },
-  "protocols.ts": { mockData: 7, random: 0, owner: "refvertical", why: "the /api/protocols mocks are to wire or retire (steward #2498); N34 group c gates them" },
+  "protocols.ts": { mockData: 7, random: 0, owner: "refvertical", why: `${DEMO}; to wire or retire (steward #2498)` },
   "registry.ts": { mockData: 1, random: 0, owner: "readmodels", why: `${DEMO} (attestations)` },
   "rewards.ts": { mockData: 5, random: 0, owner: "readmodels", why: DEMO },
   "spaces.ts": { mockData: 1, random: 1, owner: "readmodels", why: `${DEMO}; the random match score is drawn only in demo mode` },
-  "swf.ts": { mockData: 0, random: 4, owner: "readmodels", why: "N34 group c: random participant scores" },
+  "swf.ts": {
+    mockData: 0,
+    random: 4,
+    owner: "economics",
+    why: "random contribution scores drawn only in demo mode; outside it, epoch distribution answers 501 before any read or write (N34). #360 replaces the handler",
+  },
 });
 
 const DATA_DECL = /\b(?:const|let|var)\s+(mock[A-Z]\w*|MOCK_[A-Z0-9_]+|fake[A-Z]\w*|FAKE_[A-Z0-9_]+)\b\s*(?::[^=;]+)?=\s*(?:\[|\{|new Map\(|new Set\()/g;

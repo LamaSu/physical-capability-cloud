@@ -147,8 +147,9 @@ export async function swfRoutes(app: FastifyInstance) {
   });
 
   // Distributing an epoch divides its dividend pool by each participant's contribution
-  // score, and nothing records a participant's per-epoch contribution (jobs, reputation,
-  // activity, votes). This route drew those inputs from Math.random() and then DISTRIBUTED
+  // score, and nothing computes a participant's per-epoch contribution (its jobs, reputation,
+  // activity and votes in the epoch; jobs and votes are recorded, the per-epoch score is not).
+  // This route drew those inputs from Math.random() and then DISTRIBUTED
   // the epoch on them: a write that shared the fund out by chance. Board N34 (the server
   // side of PX-3): outside demo mode it answers 501 not_available BEFORE anything is read,
   // scored or written, so the epoch is left exactly as it was. With PCC_DEMO_ROUTES=true
@@ -161,8 +162,9 @@ export async function swfRoutes(app: FastifyInstance) {
         return reply.code(501).send({
           error: "not_available",
           message:
-            "Per-epoch contribution data (jobs, reputation, activity, votes) is not recorded on this gateway, " +
-            "so the epoch was not scored or distributed: without it, every participant's share would come " +
+            "Per-epoch contribution scores (each participant's jobs, reputation, activity and votes in this epoch) " +
+            "are not computed on this gateway, " +
+            "so the epoch was not scored or distributed: without them, every participant's share would come " +
             "from random numbers.",
           see: ["GET /api/swf/epochs/:epochId"],
         });
