@@ -100,6 +100,16 @@ describe("issue and read back: exact base units, never a float", () => {
     expect(store.issue(issueInput({ reservationId: "c", maxAmountBaseUnits: 10_000_000n, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
     expect(store.issue(issueInput({ reservationId: "d", requestId: "req-other", maxAmountBaseUnits: 30_000_000n, requestCeilingBaseUnits: ceiling })).ok).toBe(true); // per request
   });
+
+  it("an issued reservation past its expiry frees its share even before housekeeping marks it expired (it can never be consumed)", () => {
+    const { store } = fresh();
+    const ceiling = 20_000_000n;
+    expect(store.issue(issueInput({ reservationId: "a", expiresAt: NOW + 10, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
+    expect(store.issue(issueInput({ reservationId: "b", now: NOW + 5, expiresAt: NOW + 100, requestCeilingBaseUnits: ceiling }))).toEqual({ ok: false, reason: "over-request-ceiling" });
+    expect(store.issue(issueInput({ reservationId: "b", now: NOW + 10, expiresAt: NOW + 100, requestCeilingBaseUnits: ceiling })).ok).toBe(true); // a expired at NOW + 10
+    expect(store.findById("a")!.state).toBe("issued"); // no housekeeping ran
+    expect(store.consume(consumeInput({ reservationId: "a", now: NOW + 10 }))).toEqual({ ok: false, reason: "expired" });
+  });
 });
 
 describe("the ceiling is exact at any magnitude (a float would round these)", () => {
@@ -202,7 +212,8 @@ describe("the table's own constraints refuse what the store never writes", () =>
 describe("MC 9: a child reservation is bounded by the parent unit it is carved from (#2301)", () => {
   const parentTerms = { reservationId: "resv-1", unit: "plan.resv-1:0xaa#0", operator: "0xAAaa", netBaseUnits: 6_000_000n, reclaimAt: NOW + 7200 };
   const child = (over: Partial<IssueReservationInput> = {}) =>
-    issueInput({ reservationId: "child-1", principal: "0xaaaa", requestId: "req-child", maxAmountBaseUnits: 4_000_000n, requestCeilingBaseUnits: 0n, parent: parentTerms, ...over });
+    // The operator funds its subcontract from its OWN wallet, never the parent payer's.
+    issueInput({ reservationId: "child-1", principal: "0xaaaa", payerAddress: `0x${"aa".repeat(20)}`, requestId: "req-child", maxAmountBaseUnits: 4_000_000n, requestCeilingBaseUnits: 0n, parent: parentTerms, ...over });
 
   it("needs a consumed parent in the same currency, and only the parent unit's operator may hold it", () => {
     const { store } = fresh();
@@ -212,6 +223,7 @@ describe("MC 9: a child reservation is bounded by the parent unit it is carved f
     store.consume(consumeInput({ minUnitTier: 2 }));
     expect(store.issue(child({ currency: "USDT" }))).toEqual({ ok: false, reason: "parent-currency-mismatch" });
     expect(store.issue(child({ principal: "agent:buyer-1" }))).toEqual({ ok: false, reason: "child-principal-not-parent-operator" });
+    expect(store.issue(child({ payerAddress: PAYER.toUpperCase().replace("0X", "0x") }))).toEqual({ ok: false, reason: "child-payer-is-parent-payer" }); // never the parent payer's credentials
     const ok = store.issue(child({ minTier: 1 }));
     expect(ok.ok && ok.reservation).toMatchObject({ parentReservationId: "resv-1", parentUnit: parentTerms.unit, minTier: 2 }); // inherits max(parent, own)
   });
@@ -225,6 +237,15 @@ describe("MC 9: a child reservation is bounded by the parent unit it is carved f
     expect(store.issue(child({ reservationId: "child-2", maxAmountBaseUnits: 2_000_001n }))).toEqual({ ok: false, reason: "over-parent-unit" });
     expect(store.issue(child({ reservationId: "child-2", maxAmountBaseUnits: 2_000_000n })).ok).toBe(true); // exactly n
     expect(store.issue(child({ reservationId: "child-3", maxAmountBaseUnits: 1n, parent: { ...parentTerms, unit: "plan.resv-1:0xaa#1" } })).ok).toBe(true); // another unit
+  });
+
+  it("an expired child frees its share of the parent unit", () => {
+    const { store } = fresh();
+    store.issue(issueInput());
+    store.consume(consumeInput());
+    expect(store.issue(child({ maxAmountBaseUnits: 6_000_000n, expiresAt: NOW + 10 })).ok).toBe(true); // the whole unit
+    expect(store.issue(child({ reservationId: "child-2", now: NOW + 5, maxAmountBaseUnits: 1n }))).toEqual({ ok: false, reason: "over-parent-unit" });
+    expect(store.issue(child({ reservationId: "child-2", now: NOW + 10, maxAmountBaseUnits: 6_000_000n })).ok).toBe(true);
   });
 });
 

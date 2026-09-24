@@ -92,6 +92,7 @@ export type IssueRefusal =
   | "parent-not-consumed"
   | "parent-currency-mismatch"
   | "child-principal-not-parent-operator"
+  | "child-payer-is-parent-payer"
   | "over-parent-unit"
   | "child-outlives-parent-unit";
 
@@ -216,6 +217,13 @@ function decode(r: Row): BudgetReservation {
 
 const sum = (xs: readonly bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
+/**
+ * The reservations that still hold money against a ceiling: consumed ones, and issued ones that have
+ * not expired. An issued reservation past its expiry can never be consumed, so it must not keep its
+ * share, even before any housekeeping marks it 'expired'. Binds one parameter: now.
+ */
+const HOLDS_MONEY = "(state = 'consumed' OR (state = 'issued' AND expires_at > ?))";
+
 export class BudgetReservationStore {
   constructor(private readonly sqlite: Database.Database) {}
 
@@ -231,7 +239,8 @@ export class BudgetReservationStore {
 
   /**
    * Issue a reservation in ONE immediate transaction.
-   * - Top-level: the request's issued and consumed reservations, plus this one, must fit the ceiling.
+   * - Top-level: the request's reservations that still hold money (consumed, or issued and unexpired),
+   *   plus this one, must fit the ceiling.
    * - Child (MC 9): the parent must be consumed, in the same currency, and issued to the parent unit's
    *   operator. All the unit's children together must fit its net n, and none may outlive the unit's
    *   reclaimAt.
@@ -256,8 +265,8 @@ export class BudgetReservationStore {
       let minTier = i.minTier ?? null;
       if (parent === null) {
         const held = (this.sqlite
-          .prepare("SELECT max_amount_base_units AS a FROM budget_reservations WHERE request_id = ? AND parent_reservation_id IS NULL AND state IN ('issued', 'consumed')")
-          .all(i.requestId) as Array<{ a: string }>).map((r) => BigInt(r.a));
+          .prepare(`SELECT max_amount_base_units AS a FROM budget_reservations WHERE request_id = ? AND parent_reservation_id IS NULL AND ${HOLDS_MONEY}`)
+          .all(i.requestId, i.now) as Array<{ a: string }>).map((r) => BigInt(r.a));
         if (sum(held) + i.maxAmountBaseUnits > i.requestCeilingBaseUnits) return { ok: false, reason: "over-request-ceiling" };
       } else {
         const p = this.findById(parent.reservationId);
@@ -265,9 +274,11 @@ export class BudgetReservationStore {
         if (p.state !== "consumed") return { ok: false, reason: "parent-not-consumed" };
         if (p.currency !== i.currency) return { ok: false, reason: "parent-currency-mismatch" };
         if (parent.operator.toLowerCase() !== i.principal.toLowerCase()) return { ok: false, reason: "child-principal-not-parent-operator" };
+        // Never the parent payer's credentials (#2301): the operator funds its subcontract from its own wallet.
+        if (i.payerAddress.toLowerCase() === p.payerAddress.toLowerCase()) return { ok: false, reason: "child-payer-is-parent-payer" };
         const siblings = (this.sqlite
-          .prepare("SELECT max_amount_base_units AS a FROM budget_reservations WHERE parent_reservation_id = ? AND parent_unit = ? AND state IN ('issued', 'consumed')")
-          .all(parent.reservationId, parent.unit) as Array<{ a: string }>).map((r) => BigInt(r.a));
+          .prepare(`SELECT max_amount_base_units AS a FROM budget_reservations WHERE parent_reservation_id = ? AND parent_unit = ? AND ${HOLDS_MONEY}`)
+          .all(parent.reservationId, parent.unit, i.now) as Array<{ a: string }>).map((r) => BigInt(r.a));
         if (sum(siblings) + i.maxAmountBaseUnits > parent.netBaseUnits) return { ok: false, reason: "over-parent-unit" };
         if (i.expiresAt > parent.reclaimAt) return { ok: false, reason: "child-outlives-parent-unit" };
         // A child inherits the parent's assurance floor: max(parent's, its own) (#2302).
