@@ -22,7 +22,7 @@ import { simulateEconomics } from "../economics/simulate.js";
 import type { Clause, EconomicAgreement } from "../economics/types.js";
 import { verifyAcceptedAgreement } from "../economics/verify.js";
 import { computeManifestHash, type CompositionManifest } from "../types/composition-manifest.js";
-import { computeScheduleHash, evaluateRateSchedule, type RateSchedule } from "../types/rate-schedule.js";
+import { assertScheduleIsWellFormed, computeScheduleHash, evaluateRateSchedule, type RateSchedule } from "../types/rate-schedule.js";
 import { computeTrainingManifestHash } from "../types/training-manifest.js";
 import { canonicalize } from "../util/canonical.js";
 import { a, baseAgreement, clone } from "./economics-helpers.js";
@@ -803,6 +803,13 @@ describe("clean-room round 3b: every number in a schedule body means one value t
     for (const s of [adoption, decay]) {
       expect(refusals(compileEconomics(printerOn(s, 40), { schedules: [s], rateFacts: { jobsPerDay: 7 } }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
     }
+  });
+
+  it("round 3c (P104, P105): rule 5 names the known fields only, so an unknown one is ignored, even outside the parsers", () => {
+    // The licensing engine hands raw objects to this check, without the zod parse that strips unknown keys.
+    const segment = { kind: "constant", startTime: 0, endTime: null, bps: 40, note: 1.5, huge: JSON.parse("1e400") };
+    expect(() => assertScheduleIsWellFormed({ version: 1, segments: [segment as unknown as RateSchedule["segments"][number]] })).not.toThrow();
+    expect(() => assertScheduleIsWellFormed({ segments: [{ ...segment, startTime: 2 ** 53 } as unknown as RateSchedule["segments"][number]] })).toThrow(/startTime/);
   });
 
   it("a real number in a schedule body is written as ECMAScript Number.prototype.toString writes it", () => {

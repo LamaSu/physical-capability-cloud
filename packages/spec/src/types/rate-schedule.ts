@@ -349,8 +349,12 @@ export function computeScheduleHash(
 /** The largest schedule `version`: the `version` range of docs/ECONOMIC_AGREEMENTS.md §1. */
 export const MAX_SCHEDULE_VERSION = 1_000_000_000;
 
-/** The segment fields that hold real numbers; every other numeric segment field is an integer. */
-const REAL_SEGMENT_FIELDS: ReadonlySet<string> = new Set(["scale", "decayPerSecond"]);
+/**
+ * The numeric fields a segment kind defines. Unknown fields are not checked: they are dropped before
+ * hashing, and nothing reads them (docs/ECONOMIC_AGREEMENTS.md §3).
+ */
+const INTEGER_SEGMENT_FIELDS = ["startTime", "endTime", "bps", "startBps", "endBps", "floorBps", "capBps", "thresholdCents", "bpsLow", "bpsHigh", "default"] as const;
+const REAL_SEGMENT_FIELDS = ["scale", "decayPerSecond"] as const;
 
 /**
  * Validate that a RateSchedule's segments are non-overlapping and time-ordered, and that every number in
@@ -368,11 +372,17 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
     // A schedule is sealed under a hash of its numbers, so each must mean one value to every reader. An
     // integer above 2^53 - 1 is rounded by a JavaScript reader but not by an exact one, and JSON 1e400
     // reads as Infinity, which no rate can be computed from (pcc-economics clean-room round 3b, P100c).
-    for (const [field, v] of Object.entries(seg)) {
-      if (typeof v !== "number") continue;
-      const real = REAL_SEGMENT_FIELDS.has(field);
-      if (real ? !Number.isFinite(v) : !Number.isSafeInteger(v)) {
-        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not ${real ? "a finite number" : "an integer in 0..2^53-1"}`);
+    const fields = seg as unknown as Readonly<Record<string, unknown>>;
+    for (const field of INTEGER_SEGMENT_FIELDS) {
+      const v = fields[field];
+      if (typeof v === "number" && !Number.isSafeInteger(v)) {
+        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not an integer in 0..2^53-1`);
+      }
+    }
+    for (const field of REAL_SEGMENT_FIELDS) {
+      const v = fields[field];
+      if (typeof v === "number" && !Number.isFinite(v)) {
+        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not a finite number`);
       }
     }
 
