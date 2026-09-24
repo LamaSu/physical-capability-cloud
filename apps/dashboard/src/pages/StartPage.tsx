@@ -1,13 +1,13 @@
 import React, { useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { OnboardHandoffPanel } from "../components/onboard/OnboardHandoffPanel.js";
+import { buildOnboardChatDraft } from "../lib/onboard-handoff.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface FormState {
+export interface FormState {
   category: string;
   description: string;
   machineName: string;
@@ -265,13 +265,11 @@ function StepRate({
   setForm,
   onNext,
   onBack,
-  submitting,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
   onNext: () => void;
   onBack: () => void;
-  submitting: boolean;
 }) {
   return (
     <div className="space-y-8">
@@ -315,14 +313,6 @@ function StepRate({
         </div>
       </div>
 
-      <div className="rounded-xl bg-white/[0.02] ring-1 ring-white/[0.05] p-4">
-        <p className="text-xs text-white/30 leading-relaxed">
-          Your rate is visible to anyone searching for your capability.
-          You'll get notified when someone wants to place an order, and you
-          can accept or decline. You keep 100% — no platform fees.
-        </p>
-      </div>
-
       <div className="flex gap-3">
         <button
           onClick={onBack}
@@ -332,10 +322,9 @@ function StepRate({
         </button>
         <button
           onClick={onNext}
-          disabled={submitting}
-          className="flex-[2] rounded-xl bg-emerald-500 py-3.5 text-sm font-semibold text-black transition-all hover:bg-emerald-400 disabled:opacity-50"
+          className="flex-[2] rounded-xl bg-emerald-500 py-3.5 text-sm font-semibold text-black transition-all hover:bg-emerald-400"
         >
-          {submitting ? "Setting up…" : "Go live"}
+          Continue
         </button>
       </div>
     </div>
@@ -343,62 +332,53 @@ function StepRate({
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: You're live
+// Step 4: hand-off. This page cannot register a machine yet (PX-10 Wave 0,
+// #2386). It used to register the machine onto a shared development kernel
+// with a placeholder adapter, then report it live whatever the gateway
+// answered. Now nothing is sent, and the page says so.
 // ---------------------------------------------------------------------------
 
-function StepDone({ form }: { form: FormState }) {
-  const navigate = useNavigate();
+function connectionLabel(form: FormState): string {
+  return CONNECTIONS.find((c) => c.id === form.connectionType)?.label ?? "";
+}
+
+export function startPageDraft(form: FormState): string {
+  const cat = CATEGORIES.find((c) => c.id === form.category);
+  return buildOnboardChatDraft("I want to offer a machine on PCC.", [
+    { label: "Capability", value: cat?.label ?? form.category },
+    { label: "What it does", value: form.description },
+    { label: "Machine name", value: form.machineName },
+    { label: "Connection", value: connectionLabel(form) },
+    { label: "Connection address", value: form.connectionType === "manual" ? "" : form.connectionUrl },
+    { label: "Rate", value: form.rate ? `$${form.rate} per ${form.rateUnit}` : "" },
+  ]);
+}
+
+function StepNotLiveYet({ form, onStartOver }: { form: FormState; onStartOver: () => void }) {
   const cat = CATEGORIES.find((c) => c.id === form.category);
 
   return (
-    <div className="space-y-8 text-center">
-      <motion.div
-        initial={{ scale: 0 }}
-        animate={{ scale: 1 }}
-        transition={{ type: "spring", stiffness: 200, damping: 15, delay: 0.1 }}
-        className="mx-auto w-20 h-20 rounded-2xl bg-emerald-500/20 ring-1 ring-emerald-400/30 flex items-center justify-center text-4xl"
-      >
-        ✓
-      </motion.div>
-
+    <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight text-white">
-          You're live
+          Not live yet
         </h1>
         <p className="mt-2 text-white/40 text-base">
-          {cat?.icon} {form.machineName || cat?.label || "Your machine"} is on the network.
+          {cat?.icon} One more step to put {form.machineName || cat?.label || "your machine"} on the network.
         </p>
       </div>
 
-      <div className="rounded-xl bg-white/[0.03] ring-1 ring-white/[0.06] p-5 text-left space-y-3">
-        <Row label="Capability" value={cat?.label || form.category} />
-        <Row label="Connection" value={form.connectionType === "manual" ? "Manual updates" : form.connectionUrl} />
-        <Row label="Rate" value={`$${form.rate || "0"} / ${form.rateUnit}`} />
-      </div>
+      <OnboardHandoffPanel
+        machineLabel={form.machineName || cat?.label}
+        draft={startPageDraft(form)}
+      />
 
-      <div className="space-y-3">
-        <button
-          onClick={() => navigate("/operator")}
-          className="w-full rounded-xl bg-emerald-500 py-3.5 text-sm font-semibold text-black transition-all hover:bg-emerald-400"
-        >
-          Go to dashboard
-        </button>
-        <button
-          onClick={() => navigate("/start")}
-          className="w-full rounded-xl bg-white/[0.04] ring-1 ring-white/[0.08] py-3.5 text-sm text-white/50 hover:bg-white/[0.08] transition-all"
-        >
-          Add another machine
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between items-center">
-      <span className="text-xs text-white/30">{label}</span>
-      <span className="text-sm text-white/70">{value}</span>
+      <button
+        onClick={onStartOver}
+        className="w-full rounded-xl bg-white/[0.04] ring-1 ring-white/[0.08] py-3.5 text-sm text-white/50 hover:bg-white/[0.08] transition-all"
+      >
+        Start over
+      </button>
     </div>
   );
 }
@@ -410,7 +390,6 @@ function Row({ label, value }: { label: string; value: string }) {
 export function StartPage() {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>(INITIAL);
-  const [submitting, setSubmitting] = useState(false);
   const [direction, setDirection] = useState(1);
 
   const goNext = useCallback(() => {
@@ -423,50 +402,17 @@ export function StartPage() {
     setStep((s) => s - 1);
   }, []);
 
-  const handleSubmit = useCallback(async () => {
-    setSubmitting(true);
-    try {
-      // Map to API types
-      const adapterType =
-        form.connectionType === "octoprint"
-          ? "octoprint"
-          : form.connectionType === "manual"
-            ? "mock"
-            : "generic-http";
-
-      const deviceId = `dev_${form.category}_${Date.now().toString(36)}`;
-      const kernelId = "kernel_dev_001";
-
-      await fetch("/api/setup/register-device", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({
-          kernelId,
-          deviceId,
-          type: "machine",
-          model: form.description || form.machineName || form.category,
-          adapterType,
-          adapterConfig: form.connectionUrl
-            ? { url: form.connectionUrl }
-            : undefined,
-          capabilities: [form.category],
-        }),
-      });
-
-      setDirection(1);
-      setStep(3);
-    } catch (err) {
-      console.error("Registration failed:", err);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [form]);
+  const startOver = useCallback(() => {
+    setDirection(-1);
+    setForm(INITIAL);
+    setStep(0);
+  }, []);
 
   const steps = [
     <StepCapability key="cap" form={form} setForm={setForm} onNext={goNext} />,
     <StepConnect key="conn" form={form} setForm={setForm} onNext={goNext} onBack={goBack} />,
-    <StepRate key="rate" form={form} setForm={setForm} onNext={handleSubmit} onBack={goBack} submitting={submitting} />,
-    <StepDone key="done" form={form} />,
+    <StepRate key="rate" form={form} setForm={setForm} onNext={goNext} onBack={goBack} />,
+    <StepNotLiveYet key="handoff" form={form} onStartOver={startOver} />,
   ];
 
   return (

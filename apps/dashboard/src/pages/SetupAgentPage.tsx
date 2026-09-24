@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useUIStore } from "../stores/ui-store.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { OnboardHandoffPanel } from "../components/onboard/OnboardHandoffPanel.js";
+import { machineConfigDraft } from "../lib/onboard-handoff.js";
 
-type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "test_results" | "setup_complete" | "text_input" | "selection";
+type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "handoff" | "text_input" | "selection";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,11 +41,6 @@ interface MachineConfigPreview {
   url?: string;
 }
 
-interface TestResultsPreview {
-  registered: boolean;
-  testResult?: { success: boolean; duration?: number };
-  registrationError?: string;
-}
 
 // ---------------------------------------------------------------------------
 // Initial agent greeting (simulated since no live agent bus in dashboard)
@@ -54,7 +51,7 @@ const INITIAL_MESSAGES: ChatMessage[] = [
     id: "msg_init_0",
     role: "agent",
     content:
-      "Hello! I'm your PCC Setup Assistant. I'll guide you through adding a machine to your Physical Capability Cloud instance.\n\nLet's start by identifying your machine. Do you have a photo of it, or would you like to enter the details manually?",
+      "Hello! I'm your PCC Setup Assistant. I'll help you identify your machine and prepare its details. This page can't register machines yet; you'll finish in the onboarding chat.\n\nLet's start by identifying your machine. Do you have a photo of it, or would you like to enter the details manually?",
     timestamp: new Date().toISOString(),
     uiRequest: {
       component: "selection",
@@ -314,76 +311,29 @@ async function agentStep(
       });
     }
   } else if (phase === "machine_config_preview") {
-    // User confirmed the config — try to register and test
-    responses.push({
-      id: id(),
-      role: "agent",
-      content: "Configuration confirmed! Registering your device and running a test job...",
-      timestamp: ts(),
-    });
-
+    // PX-10 Wave 0 (#2386, #2544). This used to register the machine onto a
+    // shared development kernel with a placeholder adapter, then show a test
+    // result built from the HTTP status with a made-up duration, or a preview
+    // of results that never ran. This page cannot register machines yet.
+    let confirmed: MachineConfigPreview = {};
     try {
-      const regRes = await fetch(`${gatewayUrl}/api/setup/register-device`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ kernelId: "kernel_dev_001", deviceId: `dev_${Date.now()}`, type: "machine", adapterType: "mock" }),
-      });
-      const regData = regRes.ok ? await regRes.json() as { registered?: boolean } : { registered: false };
-
-      const testResults: TestResultsPreview = {
-        registered: regData.registered ?? regRes.ok,
-        testResult: { success: regRes.ok, duration: 1234 },
-      };
-
-      responses.push({
-        id: id(),
-        role: "agent",
-        content: regRes.ok
-          ? "Device registered successfully! Running a quick test job to verify connectivity..."
-          : "Registration encountered an issue, but I'll show you what the test results would look like:",
-        timestamp: ts(),
-        uiRequest: {
-          component: "test_results",
-          props: testResults as unknown as Record<string, unknown>,
-        },
-      });
+      const parsed: unknown = JSON.parse(userInput);
+      if (parsed !== null && typeof parsed === "object") confirmed = parsed as MachineConfigPreview;
     } catch {
-      const mockResults: TestResultsPreview = {
-        registered: false,
-        registrationError: "Gateway not reachable",
-        testResult: { success: false },
-      };
-
-      responses.push({
-        id: id(),
-        role: "agent",
-        content:
-          "The gateway isn't reachable right now. Here's what the results would look like once it's running:",
-        timestamp: ts(),
-        uiRequest: {
-          component: "test_results",
-          props: mockResults as unknown as Record<string, unknown>,
-        },
-      });
+      // Keep the draft empty rather than guess.
     }
-  } else if (phase === "test_results") {
-    // Final step
+
     responses.push({
       id: id(),
       role: "agent",
       content:
-        lower.includes("done") || lower.includes("finish") || lower.includes("complete")
-          ? "Setup complete! Your machine is now connected to PCC."
-          : "Your machine is configured. Would you like to add another device, or are you done?",
+        "Thanks. I can't register machines from this page yet, so nothing was registered and no test job ran. Continue in the onboarding chat with the details below.",
       timestamp: ts(),
       uiRequest: {
-        component: "setup_complete",
+        component: "handoff",
         props: {
-          nextSteps: [
-            { label: "View your kernel", href: "/kernels" },
-            { label: "Discover capabilities", href: "/discover" },
-            { label: "Add another device", href: "/setup/agent" },
-          ],
+          draft: machineConfigDraft(confirmed),
+          machineLabel: [confirmed.make, confirmed.model].filter(Boolean).join(" "),
         },
       },
     });
@@ -397,7 +347,7 @@ async function agentStep(
         "  - Scan your network for connected devices",
         "  - Auto-detect connection type (OctoPrint, Modbus, OPC-UA)",
         "  - Generate kernel configurations",
-        "  - Register devices and run test jobs",
+        "  - Prepare your machine's details for the onboarding chat",
         "",
         "Just describe what you want to do, or use the options I present.",
       ].join("\n"),
@@ -636,59 +586,6 @@ function MachineConfigPreviewComponent({
   );
 }
 
-function TestResultsComponent({ data }: { data: TestResultsPreview }) {
-  return (
-    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <span className={`w-2.5 h-2.5 rounded-full ${data.registered ? "bg-emerald-400" : "bg-red-400"}`} />
-        <span className="text-sm font-medium text-white/80">
-          Registration: {data.registered ? "Success" : "Failed"}
-        </span>
-      </div>
-      {data.registrationError && (
-        <p className="text-xs text-red-400">{data.registrationError}</p>
-      )}
-      {data.testResult && (
-        <div className="flex items-center gap-2">
-          <span className={`w-2.5 h-2.5 rounded-full ${data.testResult.success ? "bg-emerald-400" : "bg-red-400"}`} />
-          <span className="text-sm font-medium text-white/80">
-            Test Job: {data.testResult.success ? "Passed" : "Failed"}
-          </span>
-          {data.testResult.duration !== undefined && (
-            <span className="text-xs text-white/40 ml-auto">{data.testResult.duration}ms</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SetupCompleteComponent({ nextSteps }: { nextSteps?: Array<{ label: string; href: string }> }) {
-  return (
-    <div className="space-y-3">
-      <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center">
-        <div className="text-3xl mb-2">&#10003;</div>
-        <p className="text-sm font-semibold text-emerald-300">Setup Complete!</p>
-        <p className="text-xs text-white/40 mt-1">Your machine has been added to the PCC network.</p>
-      </div>
-      {nextSteps && nextSteps.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs text-white/40 uppercase tracking-wider font-medium">Next Steps</p>
-          {nextSteps.map((step) => (
-            <a
-              key={step.href}
-              href={step.href}
-              className="block px-4 py-2.5 rounded-xl border border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.05] hover:border-emerald-500/30 text-sm text-white/70 hover:text-white/90 transition-colors"
-            >
-              {step.label} &rarr;
-            </a>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function SelectionComponent({
   options,
   prompt,
@@ -754,13 +651,11 @@ function UIRenderer({
         />
       );
 
-    case "test_results":
-      return <TestResultsComponent data={props as unknown as TestResultsPreview} />;
-
-    case "setup_complete":
+    case "handoff":
       return (
-        <SetupCompleteComponent
-          nextSteps={props.nextSteps as Array<{ label: string; href: string }> | undefined}
+        <OnboardHandoffPanel
+          draft={String(props.draft ?? "")}
+          machineLabel={(props.machineLabel as string | undefined) || undefined}
         />
       );
 

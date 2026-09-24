@@ -8,6 +8,7 @@ import type {
   PricingConfig,
   OperatorCertification,
 } from "@pcc/spec";
+import { isPricingEntered } from "../pages/onboard/wizard-draft.js";
 
 interface WizardIdentity {
   name: string;
@@ -159,8 +160,8 @@ export const useOnboardWizardStore = create<OnboardWizardState>((set, get) => ({
       case 0: return s.identity.name.length > 0 && s.identity.category !== "" && s.identity.manufacturer.length > 0;
       case 1: return true; // docs optional
       case 2: return s.capabilities.length > 0;
-      case 3: return s.spaceRequirements !== null;
-      case 4: return s.pricing !== null;
+      case 3: return true; // space is not collected on this page yet (PX-10 Wave 0)
+      case 4: return isPricingEntered(s.pricing); // a price the user typed, not an example
       case 5: return s.operatorName.length > 0;
       case 6: return true; // review
       default: return false;
