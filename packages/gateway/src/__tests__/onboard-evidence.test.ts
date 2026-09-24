@@ -273,4 +273,40 @@ describe("evidence-tier claim and the canonical evidence record", () => {
     expect(isReservedDescription("A 3D printer in my garage")).toBe(false);
     expect(isReservedDescription(undefined)).toBe(false);
   });
+
+  // L1: what a reviewer would read as the reserved prefix is reserved.
+  it.each([
+    ["a zero-width space first (review probe P3)", "​PROOF SUBMITTED: {}"],
+    ["a no-break space inside (review probe P3)", "PROOF SUBMITTED: {}"],
+    ["Cyrillic O look-alikes (review probe P3)", "PRООF SUBMITTED: {}"],
+    ["a right-to-left override first", "‮PROOF SUBMITTED: {}"],
+    ["a combining grapheme joiner inside", "P͏ROOF SUBMITTED: {}"],
+    ["a combining accent", "ṔROOF SUBMITTED: {}"],
+    ["a blank braille pattern first", "⠀PROOF SUBMITTED: {}"],
+    ["a Hangul filler first", "ㅤPROOF SUBMITTED: {}"],
+    ["full-width letters and colon", "ＰＲＯＯＦ SUBMITTED： {}"],
+    ["no spaces at all", "PROOFSUBMITTED:{}"],
+    ["an em space and a space before the colon", "PROOF SUBMITTED : {}"],
+    ["digit zeros for O", "PR00F SUBMITTED: {}"],
+    ["a lower-case L for I", "PROOF SUBMlTTED: {}"],
+    ["Greek and Cyrillic capitals", "ΡRОΟF ЅUBMITTED: {}"],
+    ["a Cyrillic ER for P in PROVED", "РROVED: {}"],
+    ["Cherokee capitals", "ᏢᎡOOF SUBMIᎢTEᎠ: {}"],
+    ["a Devanagari visarga for the colon", "PROOF SUBMITTEDः {}"],
+    ["more than the scanned length of invisible characters first", "​".repeat(2000) + "PROOF SUBMITTED: {}"],
+  ])("refuses a reserved prefix with %s", (_label, description) => {
+    expect(isReservedDescription(description)).toBe(true);
+  });
+
+  it.each([
+    "Proved reliable over 10,000 hours of printing",
+    "Proof submitted to the city in 2024",
+    "My PROOF SUBMITTED: note",
+    "Робот-манипулятор for pick and place",
+    "Προϊόν: a Greek description",
+    "x".repeat(5000),
+    "",
+  ])("does not reserve ordinary text: %s", (description) => {
+    expect(isReservedDescription(description)).toBe(false);
+  });
 });

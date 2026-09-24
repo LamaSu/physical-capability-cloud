@@ -116,6 +116,14 @@ describe("wizard machine-onboarding completion gets /register's guards", () => {
     expect(JSON.stringify(approvalAudits())).not.toContain(FORGED_DIGEST);
   });
 
+  it("M1/L1: an invisible-prefix variant of the record through the wizard is refused too", async () => {
+    const { res, sessionStatus } = await completeWizard(app, OWNER, { description: `​${FORGED_RECORD}` });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("reserved_description");
+    expect(sessionStatus).toBe("in_progress");
+    expect(getRepos().registrations.findAll()).toHaveLength(0);
+  });
+
   it("M3: naming someone else as the operator in the wizard is 403 and creates nothing", async () => {
     const { res, sessionStatus } = await completeWizard(app, ATTACKER, { operator: { email: VICTIM, displayName: "Victim" } });
     expect(res.statusCode).toBe(403);

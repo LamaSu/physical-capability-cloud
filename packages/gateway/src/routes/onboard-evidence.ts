@@ -630,16 +630,78 @@ export function evidenceRecordDigest(record: OnboardEvidenceRecordV1): string {
  */
 export const PROOF_RECORD_PREFIX = "PROOF SUBMITTED: ";
 
+// ---------------------------------------------------------------------------
+// Reserved description prefixes (WP-B round 5, L1)
+// ---------------------------------------------------------------------------
+
+/** The reserved prefixes as skeletons: lower-case, with every space removed. */
+const RESERVED_SKELETONS = ["proofsubmitted:", "proved:"] as const;
+/** How much of a description the reserved-prefix check reads. */
+const RESERVED_SCAN_CHARS = 1024;
+
 /**
- * Descriptions that look like a server-written review record ("PROOF
- * SUBMITTED: ..." or the pre-review "PROVED: ..."). Operators may not write
- * these (/register, PATCH, the onboarding wizard), so an admin never sees an
+ * What a reader does not see as part of a word: format characters (Cf: zero
+ * width, bidi controls, ...), every separator (Z*), controls (Cc), combining
+ * marks (M*), default-ignorable code points (the combining grapheme joiner,
+ * variation selectors, Hangul fillers, ...) and the blank braille pattern.
+ */
+const INVISIBLE_RE = /[\p{Cf}\p{Z}\p{Cc}\p{M}\p{Default_Ignorable_Code_Point}⠀]/gu;
+
+/**
+ * Look-alikes that NFKC does not fold, for the letters of the reserved words
+ * and the colon: Cyrillic, Greek, Coptic, Armenian, Cherokee, Latin small
+ * capitals and other homoglyphs, ASCII digits/symbols read as letters, and
+ * colon-shaped signs (some are combining marks, so this runs before marks are
+ * removed). Lower-case forms: the text is lower-cased first. A targeted list,
+ * not the full Unicode TR39 confusables table.
+ */
+const CONFUSABLE_GROUPS: ReadonlyArray<readonly [string, string]> = [
+  ["p", "рρⲣꮲᴘ"],
+  ["r", "гʀⲅꭱꮢ"],
+  ["o", "оοσօⲟᴏ〇" + "0"],
+  ["f", "ϝꜰƒ"],
+  ["s", "ѕꜱʂꮪꮥ"],
+  ["u", "սυᴜʋ"],
+  ["b", "ьвβʙᏼꮟƅ"],
+  ["m", "мμᴍꮇⲙ"],
+  ["i", "іӏιıɪǀⲓɩ׀ו∣" + "l1|"],
+  ["t", "тτᴛꭲⲧ"],
+  ["e", "еҽεᴇꭼⲉ℮"],
+  ["d", "ԁᴅꭰ"],
+  ["v", "ѵνᴠꮩ∨"],
+  [":", "։׃∶꞉ː፡᛬ःঃઃఃಃഃඃး"],
+];
+const CONFUSABLES: ReadonlyMap<string, string> = new Map(
+  CONFUSABLE_GROUPS.flatMap(([ascii, lookalikes]) => Array.from(lookalikes, (ch) => [ch, ascii] as const)),
+);
+
+/**
+ * What `text` reads as, for the reserved-prefix check: NFKC compatibility
+ * folding (applied as NFKD, so combining marks come apart from their letters),
+ * lower-cased, look-alikes folded to ASCII, then everything invisible removed.
+ */
+function readingSkeleton(text: string): string {
+  let folded = "";
+  for (const ch of text.normalize("NFKD").toLowerCase().normalize("NFKD")) folded += CONFUSABLES.get(ch) ?? ch;
+  return folded.replace(INVISIBLE_RE, "");
+}
+
+/**
+ * Descriptions that read like a server-written review record ("PROOF
+ * SUBMITTED: ..." or the pre-review "PROVED: ..."), including invisible,
+ * spaced-out and look-alike variants. Operators may not write these
+ * (/register, PATCH, the onboarding wizard), so an admin never sees an
  * operator's text dressed up as a server record.
  */
 export function isReservedDescription(description: unknown): boolean {
   if (typeof description !== "string") return false;
-  const head = description.trimStart().slice(0, 32).toLowerCase();
-  return head.startsWith("proof submitted:") || head.startsWith("proved:");
+  const scanned = description.slice(0, RESERVED_SCAN_CHARS);
+  const skeleton = readingSkeleton(scanned);
+  if (RESERVED_SKELETONS.some((reserved) => skeleton.startsWith(reserved))) return true;
+  // The scanned part can end before enough visible characters to rule a
+  // reserved prefix out (e.g. after a long run of invisible characters):
+  // anything that could still turn into one is refused.
+  return description.length > scanned.length && RESERVED_SKELETONS.some((reserved) => reserved.startsWith(skeleton));
 }
 
 // ---------------------------------------------------------------------------

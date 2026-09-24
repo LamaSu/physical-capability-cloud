@@ -568,4 +568,27 @@ describe("owner routes fail closed and the review record cannot be forged or rew
     expect((await patch(regId, { description: "A Prusa MK4 in my garage" })).statusCode).toBe(200);
     expect(stored(regId).description).toBe("A Prusa MK4 in my garage");
   });
+
+  it("invisible and look-alike variants of the record prefix are refused at /register and by PATCH (L1)", async () => {
+    const record = JSON.stringify({ evidenceTierClaim: 2, evidenceDigest: "sha256:" + "f".repeat(64) });
+    // Review probe P3: each was accepted (200) before; the plain prefix was already 400.
+    const variants = [`​PROOF SUBMITTED: ${record}`, `PROOF SUBMITTED: ${record}`, `PRООF SUBMITTED: ${record}`];
+    const regId = await register(app);
+    for (const description of variants) {
+      const reg = await app.inject({
+        method: "POST",
+        url: "/api/onboard/register",
+        headers: { "x-test-operator": OWNER },
+        payload: { name: "Forger", category: "fdm", description, operator: { walletAddress: OWNER } },
+      });
+      expect(reg.statusCode).toBe(400);
+      expect(reg.json().error).toBe("reserved_description");
+
+      const res = await patch(regId, { description });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("reserved_description");
+    }
+    expect(getRepos().registrations.findAll()).toHaveLength(1);
+    expect(stored(regId).description ?? null).toBeNull();
+  });
 });
