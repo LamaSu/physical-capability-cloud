@@ -1858,6 +1858,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
+    if (loaded.kind === "unauthenticated") {
+      return reply.status(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
+    }
     if (loaded.kind === "unavailable") {
       return reply.status(503).send({
         error: "read_model_unavailable",

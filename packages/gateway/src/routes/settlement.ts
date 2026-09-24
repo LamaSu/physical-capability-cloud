@@ -25,6 +25,7 @@ import { getSettlementFacade } from "../facades/index.js";
 import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
 import { buildSettlementStatusRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
+import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import {
   isBatchEnabled,
   getSmartAccountAddress,
@@ -228,6 +229,9 @@ export async function settlementRoutes(app: FastifyInstance) {
     }
 
     const loaded = loadLegacySettlement(req, jobId);
+    if (loaded.kind === "unauthenticated") {
+      return reply.status(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
+    }
     if (loaded.kind === "unavailable") {
       return reply.status(503).send({
         error: "read_model_unavailable",
@@ -293,6 +297,12 @@ export async function settlementRoutes(app: FastifyInstance) {
       // hypothetical hash-shaped jobId keeps its pre-existing behavior.
     }
 
+    // The job-id form reads a job's evidence, so it is object-authorized (F3). The hash
+    // form above is content-addressed (the oracle fetches by the committed hash).
+    const gate = gateJobRead(req, param);
+    if (!gate.ok) {
+      return refuseJobRead(reply, gate, { error: "SETTLEMENT_NOT_FOUND", message: `evidence '${param}' not found` });
+    }
     const result = await settlementFacade.getJobEvidence(param);
     return sendResult(reply, result);
   });
