@@ -56,6 +56,7 @@ import { createJobFromSession } from "./paid-job-flow.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { resolveRequestActor } from "../auth/kernel-owner-guard.js";
 import { canAnonA2aDiscover } from "../middleware/security-hardening.js";
 import {
   attachChannel,
@@ -631,6 +632,11 @@ interface PccAuthorIntegrationParams {
   name?: string;
   type?: string;
   description?: string;
+  /**
+   * @deprecated IGNORED (WP-C R6). The new kernel's owner is the AUTHENTICATED
+   * caller of tasks/send, never a body field. Kept so existing agents that
+   * still send it are not rejected.
+   */
   operatorAddress?: string;
   location?: { lat: number; lng: number };
   pricing?: { currency?: string; baseCost?: number | string };
@@ -675,17 +681,29 @@ const PCC_AAI_GATEWAY_URL = process.env.PCC_GATEWAY_URL ?? "https://capability.n
  * Onboard an operator end-to-end from a description: register the kernel, publish
  * the capability (with the human-lane accept/deadline SLA), and return the live
  * A2A agent-card URL. Reuses KernelFacade.register + CapabilityFacade.create.
+ *
+ * OWNER = THE AUTHENTICATED CALLER (WP-C R6; review round 2, LOW). This used to
+ * register the kernel as `operatorAddress: p.operatorAddress ?? "a2a-operator"`
+ * with no actor: the owner came from the request body, or was a principal no
+ * key can hold. Under WP-C's owner-only heartbeat such kernels could never
+ * heartbeat and expired after the TTL, and any caller could nominate someone
+ * else as the owner. Now `actor` (the caller's API-key operatorId or SIWE
+ * address, resolved by the route) is passed to register() as the actorId, so
+ * the kernel is owned by the caller, and `p.operatorAddress` is ignored. The
+ * capability is published on that new kernel, the caller's own, so the facade
+ * call below is the same catalog mutation POST /api/capabilities allows its
+ * owner. The dispatcher refuses the skill when there is no caller.
  */
-async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promise<A2AArtifact[]> {
+async function handlePccAuthorIntegration(
+  p: PccAuthorIntegrationParams,
+  actor: string,
+): Promise<A2AArtifact[]> {
   if (!p.name || !p.type) {
     throw new Error("name and type are required for pcc-author-integration");
   }
   const lane = p.lane === "human" ? "human" : "machine";
 
-  const kr = await getKernelFacade().register({
-    name: p.name,
-    operatorAddress: p.operatorAddress ?? "a2a-operator",
-  });
+  const kr = await getKernelFacade().register({ name: p.name }, actor);
   if (!kr.success) {
     return [{ type: "pcc.author_integration", description: "kernel register failed", data: { error: kr.error.message } }];
   }
@@ -717,7 +735,8 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
   const csdRegistry = getCsdRegistry();
   const adoptedCsdUrl = csdRegistry.findUrlByType(p.type);
   if (adoptedCsdUrl) {
-    csdRegistry.recordUsage(adoptedCsdUrl, p.operatorAddress ?? "a2a-operator");
+    // The adopter is the authenticated caller who now owns the kernel (R6).
+    csdRegistry.recordUsage(adoptedCsdUrl, actor);
   }
 
   // Attach any channels the operator's onboarding agent passed in. This is
@@ -744,6 +763,8 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
     data: {
       lane,
       kernelId,
+      // The kernel's owner: the authenticated caller (R6), never a body field.
+      operatorAddress: actor,
       operatorSlug,
       capability: cr.data.capability,
       created: cr.data.created,
@@ -890,9 +911,15 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
   }];
 }
 
+/**
+ * @param getActor - the AUTHENTICATED caller (API-key operatorId, else SIWE
+ *   address), or undefined. Resolved lazily by the route; only skills that
+ *   create owned resources call it.
+ */
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
+  getActor: () => string | undefined = () => undefined,
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
   const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
@@ -1000,7 +1027,24 @@ async function dispatchTasksSend(
       }
 
       case "pcc-author-integration": {
-        const artifacts = await handlePccAuthorIntegration(skillParams as PccAuthorIntegrationParams);
+        // WP-C R6: the kernel this registers is owned by the AUTHENTICATED
+        // caller. With no caller (PCC_A2A_AUTH_DISABLED set and no
+        // credentials) there is no owner, so refuse, with the same error the
+        // route gives an unauthenticated gated call, rather than mint a kernel
+        // owned by a body field or by nobody.
+        const actor = getActor();
+        if (!actor) {
+          return rpcError(
+            rpcId,
+            -32600,
+            "Invalid Request: authentication required (Authorization: Bearer pcc_live_...); " +
+              "pcc-author-integration registers a kernel owned by the authenticated caller",
+          );
+        }
+        const artifacts = await handlePccAuthorIntegration(
+          skillParams as PccAuthorIntegrationParams,
+          actor,
+        );
         const task: A2ATask = {
           ...baseTask,
           state: "COMPLETED",
@@ -1225,9 +1269,28 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     //
     // Every tasks/send stores a task in the in-memory a2aTasks map, so the
     // anonymous path is per-IP rate-limited. Public is not unbounded.
+    //
+    // The caller's identity is resolved ONCE per request (resolveApiKey also
+    // counts key usage). With the gate on it comes from the gate's own
+    // resolution below. With PCC_A2A_AUTH_DISABLED it is resolved only if a
+    // skill asks for it (resolveRequestActor; a resolver error means no
+    // caller). WP-C R6: skills that create owned resources take the owner
+    // from here, never from the body.
+    let gateIdentity: { resolved: boolean; actor?: string } = { resolved: false };
+    const getActor = (): string | undefined => {
+      if (!gateIdentity.resolved) {
+        gateIdentity = { resolved: true, actor: resolveRequestActor(req) };
+      }
+      return gateIdentity.actor;
+    };
     if (process.env.PCC_A2A_AUTH_DISABLED !== "true") {
       const apiKey = resolveApiKey(req);
       const session = !apiKey ? resolveSession(req) : null;
+      const principal = apiKey?.operatorId ?? session?.address;
+      gateIdentity = {
+        resolved: true,
+        actor: typeof principal === "string" && principal.trim().length > 0 ? principal : undefined,
+      };
       if (!apiKey && !session) {
         if (!isPublicDiscoverCall(method, params)) {
           return reply.status(200).send(
@@ -1253,7 +1316,7 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     let result: JsonRpcSuccess | JsonRpcError;
     switch (method) {
       case "tasks/send":
-        result = await dispatchTasksSend(rpcId, params);
+        result = await dispatchTasksSend(rpcId, params, getActor);
         break;
       case "tasks/get":
         result = await dispatchTasksGet(rpcId, params);
