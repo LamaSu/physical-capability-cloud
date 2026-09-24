@@ -4727,7 +4727,7 @@
     },
     {
       "name": "pcc_job_settlement",
-      "description": "Get settlement status for a completed job: escrow address, evidence hash, milestones with amounts and status, paid amount, currency, and linked negotiation session.",
+      "description": "Get a job's settlement status from its own escrow records: status (settled only when a settlement read confirms the release; reported_released when the milestone record says released but nothing confirms it; simulated for a mock escrow; awaiting_settlement, no_settlement_record, unknown or unavailable otherwise), settled, payout, paidAmount (confirmed releases only), reportedReleasedAmount, quotedAmount, currency (recorded or null), escrow, milestones, the negotiation session, notices and asOf.",
       "input_schema": {
         "type": "object",
         "properties": {

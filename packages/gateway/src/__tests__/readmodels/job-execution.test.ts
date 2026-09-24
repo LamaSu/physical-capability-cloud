@@ -160,6 +160,21 @@ describe("NEGATIVE: completed is never paid", () => {
     expect(dto.settlement.payout).toBe("unknown");
     expect(dto.notices).toContain("job_row_reports_settled");
   });
+
+  it("NEGATIVE: a row saying `settled` over an unreleased or refunded milestone is unknown, never not_paid (records conflict)", () => {
+    // SettlementService.releaseMilestone updates only the job row after an on-chain
+    // release, so the milestone record can lag a real payment: "not paid" would be false.
+    for (const status of ["funded", "refunded"]) {
+      const dto = build({ job: job({ status: "settled" }), settlement: { ok: true, value: linked(escrow(), [milestone({ status })]) } });
+      expect(dto.settlement.payout, status).toBe("unknown");
+      expect(dto.notices).toEqual(expect.arrayContaining(["job_row_reports_settled", "settlement_row_conflict"]));
+      expect(dto.notices).not.toContain("settlement_records_conflict");
+    }
+    // Agreement stays a recorded release; the row alone never releases anything.
+    const agree = build({ job: job({ status: "settled" }), settlement: { ok: true, value: linked(escrow(), [milestone({ status: "released" })]) } });
+    expect(agree.settlement.payout).toBe("reported_released");
+    expect(agree.notices).not.toContain("settlement_row_conflict");
+  });
 });
 
 describe("settlement axis", () => {

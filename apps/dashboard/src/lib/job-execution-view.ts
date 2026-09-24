@@ -74,6 +74,8 @@ export const NOTICE_TEXT: Readonly<Record<JobExecutionNoticeCode, string>> = Obj
   unknown_execution_status: "This job has a status this view does not recognize, so it is shown as-is.",
   settlement_records_conflict:
     "This job's milestone record and its escrow record disagree about the money, so the payment is shown as unknown.",
+  settlement_row_conflict:
+    'The job record says "settled", but this job\'s milestone record does not show the money released, so the payment is shown as unknown.',
   settlement_link_conflict:
     "The records that tie this job to an escrow point at different escrows, so no payment record is shown.",
 });

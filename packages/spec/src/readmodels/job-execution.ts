@@ -393,6 +393,11 @@ export type JobExecutionNoticeCode =
   | "simulated_settlement"
   /** The job's milestone record and the escrow record disagree about money. */
   | "settlement_records_conflict"
+  /**
+   * The job row says `settled`, but this job's milestone record says not released or
+   * refunded: one of them is wrong, so the payout is unknown.
+   */
+  | "settlement_row_conflict"
   /** The job's recorded settlement identifiers point at different records. */
   | "settlement_link_conflict"
   /** The job-row status is not a documented job status. */

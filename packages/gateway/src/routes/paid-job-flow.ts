@@ -54,6 +54,7 @@ import {
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
+import { buildJobSettlementRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
@@ -1849,121 +1850,24 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════════
   // GET /api/jobs/:jobId/settlement — Settlement status
   // ═════════════════════════════════════════════════════════════════════
+  //
+  // A projection of the execution read model's settlement axis (legacy-settlement.ts):
+  // `status`, `settled` and `paidAmount` say only what this job's own escrow records show.
+  // A completed job is never "settled" by its row, a mock escrow is "simulated", and
+  // `paidAmount` is null unless this job's milestone record says released.
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
-    const { jobId } = req.params;
-
-    try {
-      const repos = getRepos();
-      const { db } = getStore();
-
-      const job = repos.jobs.findById(jobId);
-      if (!job) {
-        return reply.status(404).send({ error: "Job not found" });
-      }
-
-      // Look up negotiation session for escrow info
-      const sessionRow = db.select().from(negotiationSessions)
-        .where(eq(negotiationSessions.jobId, jobId))
-        .get();
-
-      const escrowAddress = sessionRow?.escrowAddress ?? null;
-      let escrowData: Record<string, unknown> | null = null;
-      let milestoneData: Array<Record<string, unknown>> = [];
-
-      // Look up escrow details
-      if (sessionRow?.cwmId) {
-        const escrow = repos.escrows.findByCwm(sessionRow.cwmId);
-        if (escrow) {
-          escrowData = {
-            id: escrow.id,
-            contractAddress: escrow.contractAddress,
-            totalAmount: escrow.totalAmount,
-            currency: escrow.currency,
-            escrowStatus: escrow.status,
-            deadline: escrow.deadline,
-          };
-
-          const milestones = repos.escrows.findMilestonesByEscrow(escrow.id);
-          milestoneData = milestones.map((ms) => ({
-            id: ms.id,
-            stepId: ms.stepId,
-            amount: ms.amount,
-            bondAmount: ms.bondAmount,
-            status: ms.status,
-            evidenceBundleHash: ms.evidenceBundleHash,
-            challengeWindowStart: ms.challengeWindowStart,
-            challengeWindowEnd: ms.challengeWindowEnd,
-          }));
-        }
-      }
-
-      // Look up evidence
-      const bundles = repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
-
-      // Map job status to settlement status
-      let settlementStatus: string;
-      switch (job.status) {
-        case "pending":
-          settlementStatus = "pending";
-          break;
-        case "active":
-        case "executing":
-        case "queued":
-        case "preparing":
-          settlementStatus = "executing";
-          break;
-        case "evidence_stored":
-        case "evidence_submitted":
-        case "collecting_evidence":
-          settlementStatus = "evidence_submitted";
-          break;
-        case "settled":
-          settlementStatus = "settled";
-          break;
-        case "completed":
-          settlementStatus = "settled";
-          break;
-        case "failed":
-        case "cancelled":
-          settlementStatus = "cancelled";
-          break;
-        default:
-          settlementStatus = job.status;
-      }
-
-      // Check if escrow is funded
-      if (settlementStatus === "pending" && escrowData) {
-        const eStatus = escrowData.escrowStatus as string;
-        if (eStatus === "funded" || eStatus === "active") {
-          settlementStatus = "funded";
-        }
-      }
-
-      const quote = sessionRow?.quote as Record<string, unknown> | null;
-
-      return {
-        jobId: job.id,
-        status: settlementStatus,
-        escrowAddress,
-        evidenceHash: latestBundle?.bundleHash ?? null,
-        evidenceBundleId: latestBundle?.id ?? job.evidenceBundleId ?? null,
-        milestones: milestoneData,
-        paidAmount: (escrowData?.totalAmount as string) ?? quote?.totalPrice ?? null,
-        currency: (escrowData?.currency as string) ?? (quote?.currency as string) ?? "USDC",
-        escrow: escrowData,
-        session: sessionRow ? {
-          id: sessionRow.id,
-          capabilityType: sessionRow.capabilityType,
-          committedAt: sessionRow.committedAt,
-        } : null,
-      };
-    } catch (err) {
-      return reply.status(500).send({
-        error: "query_failed",
-        details: err instanceof Error ? err.message : String(err),
+    const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
+    if (loaded.kind === "unavailable") {
+      return reply.status(503).send({
+        error: "read_model_unavailable",
+        message: "The job record could not be read. Try again shortly.",
       });
     }
+    if (loaded.kind === "not_found") {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+    reply.header("cache-control", "no-store");
+    return buildJobSettlementRead(loaded.job, loaded.sources, loaded.dto, loaded.sessions);
   });
 }
