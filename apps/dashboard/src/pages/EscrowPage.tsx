@@ -6,6 +6,7 @@ import {
 import { useUIStore } from "../stores/ui-store.js";
 import { useEscrows } from "../api/hooks/use-pcc-data.js";
 import { DisputeModal } from "../components/escrow/DisputeModal.js";
+import { moneyBadgeColor } from "../lib/money-badge.js";
 
 interface DisputeContext {
   escrowId: string;
@@ -28,7 +29,7 @@ export function EscrowPage() {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <GlassPanel padding="md" glow={totalLocked > 0 ? "green" : undefined}>
+        <GlassPanel padding="md">
           <DataCell label="Total Locked" value={<AmountDisplay amount={totalLocked.toFixed(2)} size="md" />} />
         </GlassPanel>
         <GlassPanel padding="md"><DataCell label="Active Escrows" value={activeCount} sub={`of ${escrows.length} total`} mono /></GlassPanel>
@@ -50,14 +51,15 @@ export function EscrowPage() {
               key={esc.id}
               hover
               padding="md"
-              glow={esc.id === selectedEscrow ? "green" : undefined}
+              glow={esc.id === selectedEscrow ? "gold" : undefined}
               onClick={() => setSelectedEscrow(esc.id === selectedEscrow ? null : esc.id)}
             >
               <div className="flex items-center gap-4">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white/80">{esc.id}</span>
-                    <GlowBadge color={esc.status === "active" ? "gold" : esc.status === "funded" ? "gray" : "green"}>
+                    {/* money honesty: the ONE canonical @pcc/spec map. On this page green is reserved for settlement (a bare escrow status is never green); selection and totals use neutral accents. */}
+                    <GlowBadge color={moneyBadgeColor(esc.status)}>
                       {esc.status}
                     </GlowBadge>
                   </div>
@@ -70,7 +72,7 @@ export function EscrowPage() {
                     <div key={i} className="flex items-center justify-between text-xs">
                       <span className="text-white/50">{m.name ?? `Milestone ${i + 1}`}</span>
                       <div className="flex items-center gap-2">
-                        <GlowBadge color={m.status === "fulfilled" ? "green" : m.status === "funded" ? "gold" : "gray"}>
+                        <GlowBadge color={moneyBadgeColor(m.status)}>
                           {m.status}
                         </GlowBadge>
                         {/* T2.8 — file dispute (open per-milestone modal) */}
