@@ -73,6 +73,23 @@ merge to master
 
 The **same Docker manifest** flows through every stage. `:sha`, `:staging`, and `:prod` are aliases for the same underlying layers — no rebuild, no drift between environments.
 
+## Verifying what is served
+
+`GET /api/health` (and its bare alias `GET /health`) reports which commit the running gateway was built from:
+
+```bash
+curl -s https://capability.network/api/health
+# {"status":"ok","timestamp":"…","version":"0.1.0","commit":"<sha or null>","commitSource":"…"}
+```
+
+| `commitSource` | `commit` is |
+|---|---|
+| `image_build` | The SHA baked into the image by CI: the `build-image` job passes `github.sha` as the `PCC_BUILD_SHA` build-arg. `:staging` and `:prod` are retags of that image, so they report the SHA that was built. |
+| `railway_deploy` | Railway's deploy commit (`RAILWAY_GIT_COMMIT_SHA`, set for GitHub-sourced deploys, i.e. today's Dockerfile builds, which do not pass the build-arg). |
+| `unknown` | `null`: neither value is present. The gateway never guesses a SHA. |
+
+Only a 7–40 character hex SHA is ever reported; any other value in those variables counts as absent. `version` is static (release-please owns it) and does not identify a deploy. Once Railway serves the GHCR `:prod` image, `commit` after a Deploy to Prod run should equal the SHA you promoted.
+
 ## Semver + CHANGELOG automation
 
 `release-please` watches Conventional Commits on `master` and maintains a rolling release PR. Merging it:

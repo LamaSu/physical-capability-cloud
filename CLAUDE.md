@@ -393,7 +393,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). |
+| GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). Also reports the served build: `commit` (git SHA or `null`) and `commitSource` (`image_build`, `railway_deploy` or `unknown`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
 | GET | `/agent-package.json` | 249-tool agent package for any LLM (PUBLIC). |
