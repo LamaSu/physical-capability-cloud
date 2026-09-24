@@ -3,8 +3,10 @@
 import json
 import os
 import platform
+import re
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
 from urllib.error import URLError
 
@@ -156,11 +158,22 @@ class TestBuildEvidenceBundle:
         assert isinstance(bundle["events"], list)
         assert len(bundle["events"]) == 2
 
-    def test_events_contain_job_started(self):
+    def test_events_contain_execution_started(self):
         device = {"id": "d1"}
         bundle = build_evidence_bundle("j1", device, {})
         event_types = [e["type"] for e in bundle["events"]]
-        assert "job_started" in event_types
+        assert "execution_started" in event_types
+        assert "job_started" not in event_types
+
+    def test_oh1_failure_shaped_result_is_not_execution_completed(self):
+        """OH-1 regression net (steward #2060 item 2): a device call that
+        returns NORMALLY with a failure-shaped result. RED on master @ 7a864910
+        (execution_completed emitted unconditionally), GREEN after the fix."""
+        device = {"id": "d1", "protocol": "ipp"}
+        result = {"printed": False, "error": "print command timed out"}
+        types = [e["type"] for e in build_evidence_bundle("job-oh1", device, result)["events"]]
+        assert "execution_failed" in types
+        assert "execution_completed" not in types
 
     def test_custom_events(self):
         device = {"id": "d1"}
@@ -357,10 +370,9 @@ from pcc_node.job_executor import (  # noqa: E402
     RESULT_SUCCESS,
     RESULT_FAILURE,
     RESULT_UNCLASSIFIABLE,
-    EVENT_JOB_STARTED,
+    EVENT_EXECUTION_STARTED,
     EVENT_EXECUTION_COMPLETED,
     EVENT_EXECUTION_FAILED,
-    EVENT_EXECUTION_UNCLASSIFIED,
     UNCLASSIFIABLE_REASON,
     COMPLETION_FLAG_KEYS,
     ACCEPTANCE_FLAG_KEYS,
@@ -862,7 +874,7 @@ class TestEvidenceBundleOutcomeEvents:
     def test_success_emits_execution_completed_only(self, result):
         bundle = build_evidence_bundle("j1", self.DEVICE, result)
         types = _event_types(bundle)
-        assert types == [EVENT_JOB_STARTED, EVENT_EXECUTION_COMPLETED]
+        assert types == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_COMPLETED]
         assert EVENT_EXECUTION_FAILED not in types
         assert EVENT_EXECUTION_FAILED not in _bundle_text(bundle)
 
@@ -870,7 +882,7 @@ class TestEvidenceBundleOutcomeEvents:
     def test_failure_emits_execution_failed_and_never_completed(self, result):
         bundle = build_evidence_bundle("j1", self.DEVICE, result)
         types = _event_types(bundle)
-        assert types == [EVENT_JOB_STARTED, EVENT_EXECUTION_FAILED]
+        assert types == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_FAILED]
         assert EVENT_EXECUTION_COMPLETED not in types
 
     @pytest.mark.parametrize("result", FAILURE_SHAPES)
@@ -896,29 +908,46 @@ class TestEvidenceBundleOutcomeEvents:
         types = _event_types(bundle)
         assert EVENT_EXECUTION_COMPLETED not in types
         assert EVENT_EXECUTION_FAILED not in types
-        assert types == [EVENT_JOB_STARTED, EVENT_EXECUTION_UNCLASSIFIED]
+        assert types == [EVENT_EXECUTION_STARTED]
         assert "execution_completed" not in _bundle_text(bundle)
 
     @pytest.mark.parametrize("result", UNCLASSIFIABLE_SHAPES)
-    def test_unclassifiable_payload_states_the_reason(self, result):
+    def test_unclassifiable_keeps_the_raw_result_without_an_outcome_event(self, result):
         bundle = build_evidence_bundle("j1", self.DEVICE, result)
-        assert bundle["events"][1]["payload"]["reason"] == UNCLASSIFIABLE_REASON
+        assert bundle["result"] == result
+        assert len(bundle["events"]) == 1
 
-    def test_job_started_present_for_every_verdict(self):
+    def test_execution_started_present_for_every_verdict(self):
         for result in (IPP_SUCCESS, IPP_FAIL_TIMEOUT, {}, None, {"foo": "bar"}):
             bundle = build_evidence_bundle("j1", self.DEVICE, result)
-            assert EVENT_JOB_STARTED in _event_types(bundle)
+            assert _event_types(bundle)[0] == EVENT_EXECUTION_STARTED
 
-    def test_exactly_one_outcome_event_for_every_verdict(self):
-        outcome_types = {
-            EVENT_EXECUTION_COMPLETED,
-            EVENT_EXECUTION_FAILED,
-            EVENT_EXECUTION_UNCLASSIFIED,
-        }
-        for result in (IPP_SUCCESS, IPP_FAIL_TIMEOUT, OP_FAIL_BAD_STATUS, {}, None):
+    def test_one_outcome_event_when_classified_and_none_otherwise(self):
+        outcome_types = {EVENT_EXECUTION_COMPLETED, EVENT_EXECUTION_FAILED}
+        for result, expected in (
+            (IPP_SUCCESS, 1),
+            (IPP_FAIL_TIMEOUT, 1),
+            (OP_FAIL_BAD_STATUS, 1),
+            ({}, 0),
+            (None, 0),
+        ):
             bundle = build_evidence_bundle("j1", self.DEVICE, result)
             found = [t for t in _event_types(bundle) if t in outcome_types]
-            assert len(found) == 1, f"expected 1 outcome event, got {found}"
+            assert len(found) == expected, f"{result!r}: expected {expected} outcome event(s), got {found}"
+
+    def test_every_emitted_type_is_in_the_evidence_vocabulary(self):
+        """Parse the closed EVIDENCE_EVENT_TYPES enum from @pcc/spec and prove
+        every type this producer can synthesize is a member of it."""
+        spec = Path(__file__).resolve().parents[2] / "spec" / "src" / "types" / "evidence.ts"
+        source = spec.read_text(encoding="utf-8")
+        block = source.split("export const EVIDENCE_EVENT_TYPES = [", 1)[1].split("] as const", 1)[0]
+        vocabulary = set(re.findall(r'"([a-z_]+)"', block))
+        assert len(vocabulary) > 20, "failed to parse EVIDENCE_EVENT_TYPES"
+        emitted = set()
+        for result in (IPP_SUCCESS, IPP_FAIL_TIMEOUT, OP_FAIL_BAD_STATUS, {}, None, {"foo": "bar"}):
+            emitted.update(_event_types(build_evidence_bundle("j1", self.DEVICE, result)))
+        assert emitted, "no events synthesized"
+        assert emitted <= vocabulary, f"not in EVIDENCE_EVENT_TYPES: {sorted(emitted - vocabulary)}"
 
     def test_result_is_still_embedded_verbatim(self):
         bundle = build_evidence_bundle("j1", self.DEVICE, IPP_FAIL_TIMEOUT)

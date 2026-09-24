@@ -141,10 +141,12 @@ RESULT_SUCCESS = "success"
 RESULT_FAILURE = "failure"
 RESULT_UNCLASSIFIABLE = "unclassifiable"
 
-EVENT_JOB_STARTED = "job_started"
+# Every type emitted here must be a member of the closed EVIDENCE_EVENT_TYPES
+# enum in packages/spec/src/types/evidence.ts (tests parse it); consumers that
+# validate bundles reject any other string.
+EVENT_EXECUTION_STARTED = "execution_started"
 EVENT_EXECUTION_COMPLETED = "execution_completed"
 EVENT_EXECUTION_FAILED = "execution_failed"
-EVENT_EXECUTION_UNCLASSIFIED = "execution_unclassified"
 
 # Outcome reported directly by an adapter via a "status" key.  Compared after
 # `.strip().lower()`: a device that shouts "FAILED" must not slip past the
@@ -518,7 +520,8 @@ def build_evidence_bundle(
 
     * success        -> ``execution_completed``
     * failure        -> ``execution_failed`` (never ``execution_completed``)
-    * unclassifiable -> ``execution_unclassified`` -- neither of the above
+    * unclassifiable -> no outcome event at all; the raw result is kept in
+      ``bundle["result"]``
 
     Passing ``events`` explicitly bypasses the branch entirely; that caller
     escape hatch is unchanged.
@@ -535,10 +538,10 @@ def build_evidence_bundle(
 
 
 def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
-    """Default event trail: ``job_started`` plus exactly ONE outcome event."""
+    """Default event trail: ``execution_started`` plus at most one outcome event."""
     events: List[Dict] = [
         {
-            "type": EVENT_JOB_STARTED,
+            "type": EVENT_EXECUTION_STARTED,
             "timestamp": now,
             "payload": {"deviceId": device.get("id", "unknown")},
         }
@@ -565,19 +568,9 @@ def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
                 },
             }
         )
-    else:
-        # Fail closed: an unrecognised result claims neither completion nor
-        # failure, so no completion event exists for a verifier to release on.
-        events.append(
-            {
-                "type": EVENT_EXECUTION_UNCLASSIFIED,
-                "timestamp": now,
-                "payload": {
-                    "reason": UNCLASSIFIABLE_REASON,
-                    "result": result,
-                },
-            }
-        )
+    # Unclassifiable: fail closed by emitting NO outcome event. An invented
+    # type would not be in the evidence vocabulary, and without
+    # execution_completed there is nothing for a verifier to release on.
 
     return events
 
