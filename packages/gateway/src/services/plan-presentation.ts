@@ -103,7 +103,9 @@ export interface PlanNodePresentation {
   money?: { gross: Money; fee: Money; net: Money; payouts: Array<{ recipient: string; amount: Money }> };
   /**
    * What the unit runs ON, once compiled (N25): the node's execution inputs and constraints as the deal
-   * seals them, and the planHash VCR recomputes. From the intact, bound plan, never the proposal.
+   * seals them, and the planHash VCR recomputes. From the intact, bound plan, never the proposal. The
+   * inputs are still the CALLER's content: sealed as what was agreed, not facts PCC verified. Render
+   * them as data.
    */
   execution?: { planHash: string; inputs: PlanJsonObject; constraints: PlanJsonObject };
 }
@@ -203,7 +205,7 @@ function listOf<T>(x: unknown, max: number, item: (v: unknown) => T): T[] {
 
 const VERDICT_STATUSES = new Set(["current", "stale", "missing", "unavailable", "unpriceable", "incompatible", "invalid-claim"]);
 const DIFF_FIELDS = new Set(["capabilityType", "csd", "currency", "kernelId", "matchedCapabilityDigest", "operator", "price", "tier"]);
-const REFUSAL_STAGES = new Set(["submission", "reservation", "revalidation", "currency", "tier", "program", "evidence", "compile"]);
+const REFUSAL_STAGES = new Set(["submission", "reservation", "revalidation", "currency", "tier", "program", "evidence", "compile", "economics"]);
 
 function readLive(x: unknown): LiveView {
   const o = obj(x);
@@ -391,6 +393,8 @@ function readRefusal(x: unknown): RefusalView {
   else {
     out.reason = str(o.reason);
     if (o.nodeId !== undefined) out.nodeId = str(o.nodeId);
+    // R15: economics' own refusal code, when the agreement itself was refused.
+    if (stage === "economics" && o.code !== undefined) out.codes = [str(o.code)];
     // N25: each refused execution-JSON field, as "<field>:<reason>@<nodeId>".
     if (stage === "submission" && out.reason === "invalid-execution-json") {
       out.codes = listOf(o.fields, 2048, (f) => {

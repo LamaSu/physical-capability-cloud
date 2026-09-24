@@ -620,6 +620,41 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     expect(r).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "result" }] });
   });
 
+  it("the operator's quote reaches the splitter (economics option b: royalties on top); without one it equals g", () => {
+    const seen: Array<Array<{ nodeId: string; quote: bigint; g: bigint }>> = [];
+    const spy: NetSplitter = (units) => {
+      seen.push(units.map((u) => ({ nodeId: u.nodeId, quote: u.quote, g: u.g })));
+      return tenPercent(units);
+    };
+    const grossedUp = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", grossBaseUnits: 11n * USDC, quoteBaseUnits: 10n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop" })] });
+    expect(withSplit(grossedUp, spy).ok).toBe(true);
+    expect(seen[0]).toEqual([
+      { nodeId: "print", quote: 10n * USDC, g: 11n * USDC },
+      { nodeId: "mail", quote: 10n * USDC, g: 10n * USDC }, // no quote given: the quote IS the gross
+    ]);
+  });
+
+  it("a quote above the gross, zero, negative or not a bigint is refused; exactly the gross is fine", () => {
+    const at = (q: unknown) => compileAcceptedPlan(plan({ nodes: [node({ nodeId: "print", quoteBaseUnits: q as bigint }), node({ nodeId: "mail", capabilityType: "mail.drop" })] }));
+    for (const q of [10n * USDC + 1n, 0n, -1n, 10, "10000000", null]) {
+      const r = at(q);
+      expect([q, r.ok === false && r.violations]).toEqual([q, [{ code: "invalid-node-field", nodeId: "print", field: "quoteBaseUnits" }]]);
+    }
+    expect(at(10n * USDC).ok).toBe(true);
+  });
+
+  it("the quote is read once, with the rest of the node, and does not change the sealed deal (the live quote is committed through matchedCapabilityDigest)", () => {
+    let reads = 0;
+    const n = { ...node({ nodeId: "print", grossBaseUnits: 11n * USDC }) } as Record<string, unknown>;
+    Object.defineProperty(n, "quoteBaseUnits", { enumerable: true, get: () => (reads++ === 0 ? 10n * USDC : 11n * USDC + 1n) });
+    const p = plan({ nodes: [n as unknown as AcceptedPlanNode, node({ nodeId: "mail", capabilityType: "mail.drop" })] });
+    const r = compileAcceptedPlan(p);
+    expect(reads).toBe(1);
+    expect(r.ok).toBe(true);
+    const same = compileAcceptedPlan(plan({ nodes: [node({ nodeId: "print", grossBaseUnits: 11n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop" })] }));
+    expect(r.ok && same.ok && r.plan.acceptedDealDigest === same.plan.acceptedDealDigest).toBe(true);
+  });
+
   it("an economics refusal is a compile refusal", () => {
     const r = withSplit(fee235, () => ({ ok: false, code: "license-incompatible" }));
     expect(r.ok === false && r.violations).toEqual([{ code: "economics-refused", reason: "license-incompatible" }]);
