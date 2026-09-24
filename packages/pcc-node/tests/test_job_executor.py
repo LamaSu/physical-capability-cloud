@@ -464,6 +464,8 @@ OT_SUCCESS = {
     "device": "http://192.168.1.200:31950",
     "status": "completed",
     "runStatus": "succeeded",
+    # r31 item 2: the success now keeps the polled run body it was decided on.
+    "response": {"data": {"id": "run-1", "status": "succeeded"}},
 }
 # The pre-fix shape: accepted, outcome never confirmed.  Locked as a shape that
 # must NEVER release -- it is exactly what "the run was accepted" looks like.
@@ -2685,3 +2687,56 @@ class TestR31GenericHttpCompletionContract:
         result = self._run(200, _json_body({"status": "completed"}), device)
         assert "executed" not in result
         assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+
+
+# ---------------------------------------------------------------------------
+# r31 astra verdict item 2 (bus #2476): an Opentrons run whose polled body says
+# "succeeded" in data.status but carries a failure marker anywhere else is a
+# failure; a success keeps the polled body as evidence.
+# ---------------------------------------------------------------------------
+
+
+class TestR31OpentronsConflictingMarkers:
+    OT_DEVICE = {"id": "ot1", "protocol": "opentrons", "url": "http://10.255.255.1:31950",
+                 "runPollInterval": 0, "runPollTimeout": 5}
+    RUN_ID = "run-xyz"
+
+    def _socket(self, run_body):
+        def _router(req, *args, **kwargs):
+            url = req.full_url
+            if url.endswith("/actions"):
+                return _FakeResponse(201, {"data": {"id": "a1"}})
+            if url.endswith("/runs"):
+                return _FakeResponse(201, {"data": {"id": self.RUN_ID}})
+            if url.endswith(f"/runs/{self.RUN_ID}"):
+                return _FakeResponse(200, run_body)
+            raise AssertionError(f"unexpected request to {url}")
+        return mock.patch("pcc_node.http_util.urlopen", side_effect=_router)
+
+    def _run(self, run_body):
+        ex = JobExecutor(devices=[])
+        with self._socket(run_body):
+            return ex._execute_opentrons(self.OT_DEVICE, {"id": "j", "parameters": {"protocolId": "p"}})
+
+    @pytest.mark.parametrize("run_body", [
+        pytest.param({"error": "run failed", "data": {"id": RUN_ID, "status": "succeeded"}}, id="top-level-error"),
+        pytest.param({"data": {"id": RUN_ID, "status": "succeeded", "result": {"success": False}}},
+                     id="nested-false-success"),
+        pytest.param({"data": {"id": RUN_ID, "status": "succeeded",
+                               "commands": [{"status": "failed", "commandType": "aspirate"}]}},
+                     id="failed-command-in-list"),
+    ])
+    def test_a_succeeded_status_with_a_conflicting_failure_is_a_failure(self, run_body):
+        result = self._run(run_body)
+        assert result["status"] == "failed"
+        assert result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+        bundle = build_evidence_bundle("j", self.OT_DEVICE, result)
+        assert EVENT_EXECUTION_COMPLETED not in _event_types(bundle)
+
+    def test_a_clean_success_keeps_the_polled_body(self):
+        run_body = {"data": {"id": self.RUN_ID, "status": "succeeded", "errors": []}}
+        result = self._run(run_body)
+        assert result["status"] == "completed"
+        assert result["response"] == run_body
+        assert classify_execution_result(result) == RESULT_SUCCESS

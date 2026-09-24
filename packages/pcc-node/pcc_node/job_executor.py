@@ -1141,14 +1141,19 @@ class JobExecutor:
         }
 
         run_errors = _opentrons_run_errors(run_body)
+        # r31 astra verdict item 2: a "succeeded" data.status is not enough when
+        # the same polled body also carries a failure marker anywhere
+        # ({"error": "run failed", "data": {"status": "succeeded"}}).  A
+        # conflict is a failure, never a success.
+        body_error = _extract_device_error(run_body)
 
-        if run_status in OPENTRONS_TERMINAL_FAILURE or run_errors:
-            reason = (
-                f"run reported {len(run_errors)} protocol error(s): "
-                f"{_short(run_errors)}"
-                if run_errors
-                else f"run finished with status {run_status!r}"
-            )
+        if run_status in OPENTRONS_TERMINAL_FAILURE or run_errors or body_error:
+            if run_errors:
+                reason = f"run reported {len(run_errors)} protocol error(s): {_short(run_errors)}"
+            elif run_status in OPENTRONS_TERMINAL_FAILURE:
+                reason = f"run finished with status {run_status!r}"
+            else:
+                reason = f"run status {run_status!r} conflicts with a failure in the run body: {body_error}"
             return {
                 **base_result,
                 "status": "failed",
@@ -1162,6 +1167,9 @@ class JobExecutor:
                 **base_result,
                 "status": "completed",
                 "runStatus": run_status,
+                # Keep the polled evidence: the classifier re-reads it (rule 3b)
+                # and the bundle carries what the success was decided on.
+                "response": run_body,
             }
 
         # Started, outcome unknown.  An explicit non-terminal status keeps this
