@@ -1,13 +1,13 @@
 /**
- * /onboard — three-card hero for layperson onboarding paths.
+ * /onboard — two-card hero for layperson onboarding paths.
  *
  *  1. Chat right now in the browser           → /onboard/chat (uses #159)
  *  2. Paste this into your existing AI        → copy-to-clipboard prompt
- *  3. Run it from your terminal               → `npx @pcc/onboard`
  *
  * Closes the owner ask #178: laypersons should be able to onboard by
- * pasting a snippet into Claude.ai / ChatGPT / Gemini / Cursor or by
- * running an npx command — not just by visiting the dashboard.
+ * pasting a snippet into Claude.ai / ChatGPT / Gemini / Cursor — not just
+ * by visiting the dashboard. Terminal users can curl /snippet.md. The npx
+ * card returns when @pcc/onboard is published to npm.
  *
  * Below the hero we keep the original Add-Machine / Onboard-Kit /
  * Marketplace / Spaces tiles as "more options" so power users don't lose
@@ -29,8 +29,6 @@ Please:
 
 I'll tell you about my role and we'll go from there.
 `;
-
-const NPX_SNIPPET = `npx @pcc/onboard`;
 
 interface CopyableCodeProps {
   label: string;
@@ -125,7 +123,7 @@ const secondaryPathways = [
   {
     title: "Add a Machine",
     description:
-      "Register any machine — from desktop 3D printers to industrial bio-reactors. Our AI assistant helps extract capabilities from your documentation.",
+      "Register any machine — from desktop 3D printers to industrial bio-reactors.",
     path: "/onboard/wizard",
     icon: "M12 4v8m0 0l-3-3m3 3l3-3M4 14v2a2 2 0 002 2h8a2 2 0 002-2v-2",
     glow: "green" as const,
@@ -133,7 +131,7 @@ const secondaryPathways = [
   {
     title: "Onboard Kit",
     description:
-      "SDK for developer teams — wraps your device API and connects to the network. 44 capability types, 6 adapter templates.",
+      "SDK for developer teams — wraps your device API and connects to the network. Capability types are open-ended; start from an adapter template.",
     path: "/onboard/kit",
     icon: "M10 2a1 1 0 011 0h2a1 1 0 011 0v2h2a1 1 0 011 1v2a1 1 0 01-1 1h-2v6h2a1 1 0 011 1v2a1 1 0 01-1 1h-2v2a1 1 0 01-1 0h-2a1 1 0 01-1 0v-2H8a1 1 0 01-1-1v-2a1 1 0 011-1h2V8H8a1 1 0 01-1-1V5a1 1 0 011-1h2V2z",
     glow: "green" as const,
@@ -141,7 +139,7 @@ const secondaryPathways = [
   {
     title: "Equipment Marketplace",
     description:
-      "Explore demand heatmaps, supply gaps, price trends, and ROI projections. Find the most profitable equipment to bring online.",
+      "Preview: equipment and demand views, not yet backed by live data.",
     path: "/marketplace",
     icon: "M3 3h14l-1.5 9H4.5L3 3zM7 17a1 1 0 100-2 1 1 0 000 2zM14 17a1 1 0 100-2 1 1 0 000 2z",
     glow: "gold" as const,
@@ -149,7 +147,7 @@ const secondaryPathways = [
   {
     title: "Find a Space",
     description:
-      "Browse hosting locations with power, environmental controls, and safety features that match your machine requirements.",
+      "Preview: hosting locations matched to your machine's needs, not yet backed by live data.",
     path: "/spaces",
     icon: "M3 10l7-7 7 7v7a1 1 0 01-1 1H4a1 1 0 01-1-1v-7zM9 17v-5h2v5",
     glow: "none" as const,
@@ -161,7 +159,7 @@ export function OnboardLandingPage(): React.ReactElement {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   useEffect(() => {
-    setPageMeta("Onboard", "Three ways to join the Physical Capability Cloud");
+    setPageMeta("Onboard", "Two ways to join the Physical Capability Cloud");
   }, [setPageMeta]);
 
   return (
@@ -171,17 +169,17 @@ export function OnboardLandingPage(): React.ReactElement {
           Onboard to the Physical Cloud
         </h1>
         <p className="text-sm text-white/50 max-w-2xl mx-auto leading-relaxed">
-          Three ways to register a capability, talk to an operator, or wire up a machine. Pick
-          whichever fits where you already are — browser, your own AI, or your terminal.
+          Two ways to register a capability, talk to an operator, or wire up a machine. Pick
+          whichever fits where you already are — the browser or your own AI.
         </p>
       </div>
 
-      {/* Hero — three onboarding paths */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Hero — two onboarding paths */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <HeroCard
           badge="1 — fastest"
           title="Chat right now"
-          subtitle="No install. No keys. Talk to PCC's agent live in your browser. It calls the same 249-tool agent-pack you'd use anywhere else."
+          subtitle="No install. No keys. Talk to PCC's agent live in your browser. It uses the same agent package you'd use anywhere else."
           glow="green"
           cta={{ label: "Start a conversation →", onClick: () => navigate("/onboard/chat") }}
         >
@@ -197,23 +195,6 @@ export function OnboardLandingPage(): React.ReactElement {
           glow="green"
         >
           <CopyableCode label="Snippet to paste into your AI" code={COPY_PASTE_SNIPPET} />
-        </HeroCard>
-
-        <HeroCard
-          badge="3 — from your terminal"
-          title="Install via npx"
-          subtitle="Local CLI. Uses your own Anthropic key. Same loop the in-browser chat runs, but the transcript stays on your machine."
-          glow="green"
-        >
-          <CopyableCode label="npx install command" code={NPX_SNIPPET} />
-          <a
-            href="https://www.npmjs.com/package/@pcc/onboard"
-            target="_blank"
-            rel="noreferrer"
-            className="block text-center text-[11px] text-white/40 hover:text-white/70 transition-colors"
-          >
-            View on npm →
-          </a>
         </HeroCard>
       </div>
 
