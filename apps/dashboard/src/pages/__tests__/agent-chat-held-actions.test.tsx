@@ -130,6 +130,14 @@ describe("who the chat runs as", () => {
     expect(sent[0]!.authorization).toBe(`Bearer ${KEY}`);
   });
 
+  it("a new conversation sends no conversationId; the next message sends the one the gateway gave", async () => {
+    await render("onboard");
+    await say("Hello");
+    await say("Again");
+    expect(sent[0]!.body).toEqual({ message: "Hello" });
+    expect(sent[1]!.body).toEqual({ conversationId: "conv-1", message: "Again" });
+  });
+
   it("public onboarding sends no key, even when someone is signed in", async () => {
     await render("onboard");
     await say("I run a print shop");

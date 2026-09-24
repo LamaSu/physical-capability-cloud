@@ -196,7 +196,9 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
         const res = await chatFetch({
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ conversationId, message: trimmed }),
+          // A new conversation omits conversationId: the gateway (#381) treats any
+          // conversationId it is sent, null included, as one to look up (404 if unknown).
+          body: JSON.stringify(conversationId ? { conversationId, message: trimmed } : { message: trimmed }),
         });
         const body: unknown = await res.json().catch(() => null);
         if (!res.ok) {
