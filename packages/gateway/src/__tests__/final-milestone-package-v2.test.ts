@@ -23,6 +23,8 @@ import {
   PackageBodyValidationError,
   PACKAGE_SCHEMA_VERSION,
   PACKAGE_FORMAT,
+  PackageNotMintableError,
+  assertMintablePackage,
   type FinalMilestonePackageV2Body,
 } from "../settlement/final-milestone-package-v2.js";
 import { packageDigestV2, type PackageSignature } from "../settlement/package-digest-v2.js";
@@ -238,5 +240,94 @@ describe("evidence's published settlement-vector golden (#1202, 974b3ff1)", () =
 
   it("packageDigestV2 over the same body matches the golden", () => {
     expect(packageDigestV2(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
+  });
+});
+
+
+// ── Pinned input forms and the mint-time guard (evidence schema owner) ──────
+
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+describe("validatePackageBody — pinned forms", () => {
+  it("refuses an unknown key at any level instead of dropping it", () => {
+    const cases: Array<[string, (b: any) => void]> = [
+      ["$", (b) => { b.extra = "x"; }],
+      ["$.unitBinding", (b) => { b.unitBinding.chainName = "base"; }],
+      ["$.producer", (b) => { b.producer.role = "operator"; }],
+      ["$.challengeBinding", (b) => { b.challengeBinding.issuedAt = "1"; }],
+      ["$.evidence", (b) => { b.evidence.bundleHash = H("2"); }],
+      ["$.evidenceTimeBounds", (b) => { b.evidenceTimeBounds.tz = "UTC"; }],
+    ];
+    for (const [path, mutate] of cases) {
+      const b = clone(BODY);
+      mutate(b);
+      expect(() => validatePackageBody(b), path).toThrow(new RegExp(`at \\${path}: unknown key`));
+    }
+  });
+
+  it("refuses a checksummed escrow address and uppercase hashes", () => {
+    const eip55 = clone(BODY);
+    eip55.unitBinding.escrow = "0x00000000000000000000000000000000000E5c0F" as `0x${string}`;
+    expect(() => validatePackageBody(eip55)).toThrow(PackageBodyValidationError);
+    const upper = clone(BODY);
+    upper.evidence.evidenceBlockHash = `0x${"E".repeat(64)}` as `0x${string}`; // uppercase hex digits
+    expect(() => validatePackageBody(upper)).toThrow(PackageBodyValidationError);
+  });
+
+  it("refuses empty identifiers and time bounds", () => {
+    for (const set of [
+      (b: any) => { b.producer.operatorPrincipalId = ""; },
+      (b: any) => { b.producer.kernelId = ""; },
+      (b: any) => { b.producer.devicePrincipalId = ""; },
+      (b: any) => { b.challengeBinding.tChallengeRef = ""; },
+      (b: any) => { b.evidenceTimeBounds.start = ""; },
+      (b: any) => { b.evidenceTimeBounds.end = ""; },
+    ]) {
+      const b = clone(BODY);
+      set(b);
+      expect(() => validatePackageBody(b)).toThrow(/must not be empty/);
+    }
+  });
+});
+
+describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted", () => {
+  const D1 = { signer: `0x${"ab".repeat(20)}`, scheme: "secp256k1", sig: `0x${"11".repeat(65)}` };
+  const D2 = { signer: `0x${"cd".repeat(32)}`, scheme: "ed25519", sig: `0x${"22".repeat(64)}` };
+
+  it("accepts a real D1 + D2 set and hashes exactly what the digest function would", () => {
+    const minted = assertMintablePackage(BODY, [D2, D1]);
+    expect(minted.signatures.map((s) => s.scheme)).toEqual(["secp256k1", "ed25519"]);
+    expect(packageDigestV2(minted.body, minted.signatures)).toBe(packageDigestV2(BODY, [D1, D2]));
+  });
+
+  it("refuses the interim challenge nonce", () => {
+    const b = clone(BODY);
+    b.challengeBinding.nonce = INTERIM_NONCE;
+    expect(() => assertMintablePackage(b, [D1, D2])).toThrow(PackageNotMintableError);
+  });
+
+  it("refuses anything but exactly one D1 and one D2", () => {
+    for (const sigs of [[D1], [D1, D2, { ...D2, signer: `0x${"ef".repeat(32)}` }], [D1, { ...D1, signer: `0x${"cc".repeat(20)}` }], "D1,D2"]) {
+      expect(() => assertMintablePackage(BODY, sigs)).toThrow(PackageNotMintableError);
+    }
+  });
+
+  it("refuses an extra key, a foreign scheme or a wrong-form signer or signature", () => {
+    const bad: unknown[] = [
+      { ...D2, note: "x" },
+      { ...D2, scheme: "ed25519-raw32" },
+      { ...D2, signer: `0x${"aa".repeat(20)}` }, // an address where the kernel key belongs
+      { ...D2, signer: D2.signer.toUpperCase().replace("0X", "0x") },
+      { ...D2, sig: `0x${"22".repeat(65)}` },
+    ];
+    for (const d2 of bad) {
+      expect(() => assertMintablePackage(BODY, [D1, d2]), JSON.stringify(d2)).toThrow(PackageNotMintableError);
+    }
+  });
+
+  it("the published golden's sample signature set is not a mintable set", () => {
+    // Its "ed25519" entry carries a 40-hex signer: fine as a digest vector,
+    // never as a real kernel signature.
+    expect(() => assertMintablePackage(JSON.parse(GOLDEN.jcsBody), GOLDEN.rawSigs)).toThrow(PackageNotMintableError);
   });
 });

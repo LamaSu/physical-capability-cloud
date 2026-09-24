@@ -30,6 +30,7 @@
 import { createHash } from "node:crypto";
 import { keccak256, toBytes } from "viem";
 import { canonicalize } from "@pcc/spec";
+import { canonicalSignatures, type PackageSignature } from "./package-digest-v2.js";
 
 export type Hex = `0x${string}`;
 
@@ -97,8 +98,11 @@ export class PackageBodyValidationError extends Error {
   }
 }
 
-const HEX32 = /^0x[0-9a-fA-F]{64}$/;
-const ADDR = /^0x[0-9a-fA-F]{40}$/;
+// Lowercase only. Hex case carries no meaning, but it changes the canonical
+// bytes, so an EIP-55 checksummed escrow would otherwise produce a different
+// packageBodyHash and packageDigestV2 for the same unit. The caller lowercases.
+const HEX32 = /^0x[0-9a-f]{64}$/;
+const ADDR = /^0x[0-9a-f]{40}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 
 function str(v: unknown, path: string): string {
@@ -111,14 +115,21 @@ function str(v: unknown, path: string): string {
   }
   return v;
 }
+function nonEmpty(v: unknown, path: string): string {
+  const s = str(v, path);
+  if (s.length === 0) throw new PackageBodyValidationError(path, "must not be empty");
+  return s;
+}
 function hex32(v: unknown, path: string): Hex {
   const s = str(v, path);
-  if (!HEX32.test(s)) throw new PackageBodyValidationError(path, `expected 0x+64hex, got "${s}"`);
+  if (!HEX32.test(s)) throw new PackageBodyValidationError(path, `expected 0x+64 lowercase hex, got "${s}"`);
   return s as Hex;
 }
 function addr(v: unknown, path: string): Hex {
   const s = str(v, path);
-  if (!ADDR.test(s)) throw new PackageBodyValidationError(path, `expected 0x+40hex address, got "${s}"`);
+  if (!ADDR.test(s)) {
+    throw new PackageBodyValidationError(path, `expected 0x+40 lowercase hex address, got "${s}"`);
+  }
   return s as Hex;
 }
 function dec(v: unknown, path: string): string {
@@ -131,9 +142,15 @@ function dec(v: unknown, path: string): string {
   }
   return s;
 }
-function obj(v: unknown, path: string): Record<string, unknown> {
+function obj(v: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
   if (v === null || typeof v !== "object" || Array.isArray(v)) {
     throw new PackageBodyValidationError(path, "expected an object");
+  }
+  // An unknown key would be silently dropped from the typed body, so the
+  // digest would cover a different object than the one the caller holds.
+  const extra = Object.keys(v).filter((k) => !keys.includes(k));
+  if (extra.length > 0) {
+    throw new PackageBodyValidationError(path, `unknown key(s): ${extra.join(", ")}`);
   }
   return v as Record<string, unknown>;
 }
@@ -145,7 +162,16 @@ function obj(v: unknown, path: string): Record<string, unknown> {
  * here becomes a digest the oracle cannot reproduce, discovered at mint.
  */
 export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body {
-  const b = obj(input, "$");
+  const b = obj(input, "$", [
+    "packageSchemaVersion",
+    "packageFormat",
+    "compositionSchemaVersion",
+    "unitBinding",
+    "producer",
+    "challengeBinding",
+    "evidence",
+    "evidenceTimeBounds",
+  ]);
 
   if (b.packageSchemaVersion !== PACKAGE_SCHEMA_VERSION) {
     throw new PackageBodyValidationError(
@@ -160,11 +186,20 @@ export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body
     );
   }
 
-  const ub = obj(b.unitBinding, "$.unitBinding");
-  const pr = obj(b.producer, "$.producer");
-  const cb = obj(b.challengeBinding, "$.challengeBinding");
-  const ev = obj(b.evidence, "$.evidence");
-  const tb = obj(b.evidenceTimeBounds, "$.evidenceTimeBounds");
+  const ub = obj(b.unitBinding, "$.unitBinding", [
+    "chainId",
+    "escrow",
+    "settlementUnitId",
+    "jobIdHash",
+    "milestoneIndex",
+    "stepId",
+    "compositionRoot",
+    "acceptedEnvelopeHash",
+  ]);
+  const pr = obj(b.producer, "$.producer", ["operatorPrincipalId", "kernelId", "devicePrincipalId"]);
+  const cb = obj(b.challengeBinding, "$.challengeBinding", ["nonce", "tChallengeRef"]);
+  const ev = obj(b.evidence, "$.evidence", ["evidenceBlockHash"]);
+  const tb = obj(b.evidenceTimeBounds, "$.evidenceTimeBounds", ["start", "end"]);
 
   return {
     packageSchemaVersion: PACKAGE_SCHEMA_VERSION,
@@ -181,20 +216,20 @@ export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body
       acceptedEnvelopeHash: hex32(ub.acceptedEnvelopeHash, "$.unitBinding.acceptedEnvelopeHash"),
     },
     producer: {
-      operatorPrincipalId: str(pr.operatorPrincipalId, "$.producer.operatorPrincipalId"),
-      kernelId: str(pr.kernelId, "$.producer.kernelId"),
-      devicePrincipalId: str(pr.devicePrincipalId, "$.producer.devicePrincipalId"),
+      operatorPrincipalId: nonEmpty(pr.operatorPrincipalId, "$.producer.operatorPrincipalId"),
+      kernelId: nonEmpty(pr.kernelId, "$.producer.kernelId"),
+      devicePrincipalId: nonEmpty(pr.devicePrincipalId, "$.producer.devicePrincipalId"),
     },
     challengeBinding: {
       nonce: hex32(cb.nonce, "$.challengeBinding.nonce"),
-      tChallengeRef: str(cb.tChallengeRef, "$.challengeBinding.tChallengeRef"),
+      tChallengeRef: nonEmpty(cb.tChallengeRef, "$.challengeBinding.tChallengeRef"),
     },
     evidence: {
       evidenceBlockHash: hex32(ev.evidenceBlockHash, "$.evidence.evidenceBlockHash"),
     },
     evidenceTimeBounds: {
-      start: str(tb.start, "$.evidenceTimeBounds.start"),
-      end: str(tb.end, "$.evidenceTimeBounds.end"),
+      start: nonEmpty(tb.start, "$.evidenceTimeBounds.start"),
+      end: nonEmpty(tb.end, "$.evidenceTimeBounds.end"),
     },
   };
 }
@@ -252,4 +287,79 @@ export function packageBodyJcs(body: FinalMilestonePackageV2Body): string {
 export const INTERIM_NONCE: Hex = `0x${"00".repeat(32)}` as Hex;
 export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {
   return body.challengeBinding.nonce.toLowerCase() === INTERIM_NONCE;
+}
+
+// ── The mint-time guard ─────────────────────────────────────────────────────
+
+/** Raised when a body + signature set must not be minted into a package. */
+export class PackageNotMintableError extends Error {
+  constructor(path: string, detail: string) {
+    super(`FinalMilestonePackageV2 not mintable at ${path}: ${detail}`);
+    this.name = "PackageNotMintableError";
+  }
+}
+
+/**
+ * The frozen signer profile: D1 = the operator's secp256k1 EIP-712 signature
+ * (signer = 0x + 40-hex address, 65-byte signature), D2 = the kernel's ed25519
+ * signature (signer = 0x + 64-hex public key, the registry's form; 64-byte
+ * signature). Lowercase hex only.
+ */
+const MINT_SIGNER_PROFILE: Readonly<Record<string, { signer: RegExp; sig: RegExp; role: string }>> = {
+  secp256k1: { signer: /^0x[0-9a-f]{40}$/, sig: /^0x[0-9a-f]{130}$/, role: "D1 operator" },
+  ed25519: { signer: /^0x[0-9a-f]{64}$/, sig: /^0x[0-9a-f]{128}$/, role: "D2 kernel" },
+};
+
+/**
+ * Refuse anything a real mint must never produce, before any digest exists.
+ * `canonicalSignatures` stays the oracle's canonicalization contract (#1368,
+ * #1395: signer case is a no-op, first occurrence wins); this guard makes sure
+ * a minted package never depends on those rules:
+ *  - the body passes `validatePackageBody` (exact keys, lowercase hex, non-empty ids);
+ *  - the challenge nonce is not the interim placeholder;
+ *  - exactly one D1 and one D2 signature, each with exactly the keys
+ *    {signer, scheme, sig} and the profile's signer and signature forms, so no
+ *    duplicate, extra, relabelled or foreign-scheme entry can reach the digest.
+ * Returns the validated body and the canonical signatures to hash.
+ */
+export function assertMintablePackage(
+  body: unknown,
+  sigs: unknown,
+): { body: FinalMilestonePackageV2Body; signatures: PackageSignature[] } {
+  const valid = validatePackageBody(body);
+  if (isInterimNonce(valid)) {
+    throw new PackageNotMintableError(
+      "$.challengeBinding.nonce",
+      "is the interim placeholder; the durable challenge is not built",
+    );
+  }
+  if (!Array.isArray(sigs) || sigs.length !== 2) {
+    throw new PackageNotMintableError("$signatures", "expected exactly two signatures (D1 operator, D2 kernel)");
+  }
+  const schemes = new Set<string>();
+  sigs.forEach((s: unknown, i: number) => {
+    const path = `$signatures[${i}]`;
+    if (s === null || typeof s !== "object" || Array.isArray(s)) {
+      throw new PackageNotMintableError(path, "expected an object");
+    }
+    const entry = s as Record<string, unknown>;
+    if (Object.keys(entry).sort().join(",") !== "scheme,sig,signer") {
+      throw new PackageNotMintableError(path, "keys must be exactly signer, scheme, sig");
+    }
+    const profile = typeof entry.scheme === "string" ? MINT_SIGNER_PROFILE[entry.scheme] : undefined;
+    if (!profile) {
+      throw new PackageNotMintableError(`${path}.scheme`, 'must be "secp256k1" (D1) or "ed25519" (D2)');
+    }
+    if (schemes.has(entry.scheme as string)) {
+      throw new PackageNotMintableError(`${path}.scheme`, `a second ${profile.role} signature`);
+    }
+    schemes.add(entry.scheme as string);
+    if (typeof entry.signer !== "string" || !profile.signer.test(entry.signer)) {
+      throw new PackageNotMintableError(`${path}.signer`, `not a ${profile.role} signer in its lowercase form`);
+    }
+    if (typeof entry.sig !== "string" || !profile.sig.test(entry.sig)) {
+      throw new PackageNotMintableError(`${path}.sig`, `not a ${profile.role} signature`);
+    }
+  });
+  return { body: valid, signatures: canonicalSignatures(sigs as PackageSignature[]) };
 }
