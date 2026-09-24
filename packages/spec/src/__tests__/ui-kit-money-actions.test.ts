@@ -1265,6 +1265,18 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     expect(posts(calls).length).toBe(0);
   });
 
+  it("a form submit body with a __proto__ key is refused on click too, not only tagged 'blocked'", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "form", schema: { properties: { note: { type: "string", default: "hi" } } },
+      submit: { id: "s", label: "Send", kind: "post", path: FUND, body: protoBody() } }]));
+    expect(btn("Send").textContent).toBe("Send · blocked");
+    btn("Send").click();
+    await flush();
+    expect(overlays()).toBe(0);
+    expect(calls.length).toBe(0);
+    expect(document.body.textContent).toContain('Refused: the request body has a "__proto__" key');
+  });
+
   it("a form field named __proto__ cannot make the gate show an amount the wire does not carry", async () => {
     const calls = installFetch(() => ({ status: 200 }));
     const schema = JSON.parse('{"properties":{"__proto__":{"type":"object","default":"{\\"amount\\":1,\\"jobId\\":\\"benign\\"}"},"note":{"type":"string","default":"hi"}}}');
