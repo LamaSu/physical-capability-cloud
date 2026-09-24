@@ -1079,41 +1079,49 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // (serve-the-flag) — the default money path is unchanged apart from the now
       // oracle-verifiable hash. When a real device has cleared #52 on deployed infra and
       // the gate is opened (NOT done here), a device-signed (#236) bundle captured by
-      // operator-relay (path 1) whose Ed25519 signature verifies against the kernel's
-      // REGISTERED signer anchors settlement on the DEVICE's own hash + signature
-      // instead of this placeholder. Fails closed to the gateway anchor on any verify
-      // failure — the money path never weakens.
+      // operator-relay (path 1) anchors settlement on the DEVICE's own hash + signature
+      // instead of this placeholder, but only when its signed bundleHash opens to the
+      // stored events, those events commit THIS job and the kernel that accepted it
+      // (LO-EV-9), and its Ed25519 signature verifies against that kernel's REGISTERED
+      // signer. Fails closed to the gateway anchor on any failure — the money path
+      // never weakens.
       const gatewaySignature: StoredSignature = {
         signer: "0x0000000000000000000000000000000000000000",
         algorithm: "ed25519",
         value: "gateway-auto-sign",
       };
       const seam2GateOpen = deviceEvidenceSettlementEnabled();
-      let seam2DeviceBundle: SettlementEvidenceSlot | null =
-        null;
+      let seam2DeviceBundles: SettlementEvidenceSlot[] = [];
       let seam2RegisteredSigner: unknown = null;
       if (seam2GateOpen) {
         // Extra lookups only when the gate is open — the closed path is unchanged.
-        const priorBundles = repos.evidence.findByJob(jobId);
-        const deviceRow = priorBundles.find((r) =>
-          isDeviceSignedSignature(r.kernelSignature as StoredSignature),
-        );
-        if (deviceRow) {
-          seam2DeviceBundle = {
-            bundleHash: deviceRow.bundleHash,
-            kernelSignature: deviceRow.kernelSignature as StoredSignature,
-            assuranceTier: deviceRow.assuranceTier,
-            ...(deviceRow.sessionKeyAuthorization
-              ? { sessionKeyAuthorization: deviceRow.sessionKeyAuthorization }
+        // Every device-signed row is a candidate: the relay accepts any number of
+        // rows per job, so the first row is not necessarily the genuine one.
+        seam2DeviceBundles = repos.evidence
+          .findByJob(jobId)
+          .filter((r) => isDeviceSignedSignature(r.kernelSignature as StoredSignature))
+          .map((r) => ({
+            bundleHash: r.bundleHash,
+            kernelSignature: r.kernelSignature as StoredSignature,
+            assuranceTier: r.assuranceTier,
+            ...(r.sessionKeyAuthorization
+              ? { sessionKeyAuthorization: r.sessionKeyAuthorization }
               : {}),
             contractId: jobId,
-          };
-        }
+            events: repos.evidence.findEventsByBundle(r.id).map((ev) => ({
+              type: ev.type,
+              timestamp: ev.timestamp,
+              source: ev.source,
+              payload: ev.payload,
+              hash: ev.hash,
+            })),
+            subject: { jobId, kernelId: job.kernelId },
+          }));
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
       }
       const settlementEvidence = await resolveSettlementEvidence({
-        deviceBundle: seam2DeviceBundle,
+        deviceBundles: seam2DeviceBundles,
         registeredSigner: seam2RegisteredSigner,
         fallback: {
           bundleHash: gatewayBundleHash,
