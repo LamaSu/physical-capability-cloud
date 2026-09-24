@@ -112,3 +112,71 @@ class TestLoadOrCreateKeys:
             data = json.load(f)
         assert "public" in data
         assert "secret" in data
+
+
+# ---------------------------------------------------------------------------
+# N35b: verification fails closed; no key file inside the checkout
+# ---------------------------------------------------------------------------
+
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from pcc_node import crypto as crypto_module  # noqa: E402
+
+
+class TestVerifyFailsClosed:
+    def test_without_pynacl_no_signature_verifies(self, monkeypatch):
+        # This used to return True as a "dev-mode pass-through".
+        monkeypatch.setattr(crypto_module, "_HAS_NACL", False)
+        assert verify_signature({"a": 1}, "00" * 64, "11" * 32) is False
+
+    @pytest.mark.skipif(not _HAS_NACL, reason="pynacl not installed")
+    def test_a_compromised_key_never_verifies(self, monkeypatch):
+        pub, sec = generate_node_keys()
+        sig = sign_announcement({"a": 1}, sec)
+        assert verify_signature({"a": 1}, sig, pub) is True
+        monkeypatch.setattr(crypto_module, "COMPROMISED_PUBLIC_KEYS", frozenset({pub}))
+        assert verify_signature({"a": 1}, sig, pub) is False
+        assert verify_signature({"a": 1}, sig, pub.upper()) is False
+
+    def test_the_committed_key_is_on_the_denylist(self):
+        assert len(crypto_module.COMPROMISED_PUBLIC_KEYS) >= 1
+        for key in crypto_module.COMPROMISED_PUBLIC_KEYS:
+            assert re.fullmatch("[0-9a-f]{64}", key)
+
+    @pytest.mark.skipif(not _HAS_NACL, reason="pynacl not installed")
+    def test_malformed_inputs_fail_closed_instead_of_raising(self):
+        pub, sec = generate_node_keys()
+        sig = sign_announcement({"a": 1}, sec)
+        assert verify_signature({"a": 1}, "zz", pub) is False
+        assert verify_signature({"a": 1}, sig, "zz") is False
+        assert verify_signature({"a": 1}, sig, pub[:-2]) is False
+        assert verify_signature({"a": 1}, sig, None) is False
+        assert verify_signature({"a": object()}, sig, pub) is False
+
+
+class TestKeyFileLocation:
+    def test_default_path_is_under_home_not_the_checkout(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert crypto_module.default_key_path() == str(tmp_path / ".pcc-node" / "keys.json")
+        package_dir = Path(crypto_module.__file__).resolve().parents[1]
+        assert not Path(crypto_module.default_key_path()).resolve().is_relative_to(package_dir)
+
+    def test_default_load_never_reads_the_working_directory(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+        # A key file where the old default ("./pcc-keys.json") would find it.
+        (cwd / "pcc-keys.json").write_text(json.dumps({"public": "aa" * 32, "secret": "bb" * 32}))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        pub, _ = load_or_create_keys()
+        assert pub != "aa" * 32
+        assert (home / ".pcc-node" / "keys.json").exists()
+
+    def test_a_compromised_key_file_is_refused(self, monkeypatch, tmp_path):
+        path = str(tmp_path / "keys.json")
+        pub, _ = load_or_create_keys(path)
+        monkeypatch.setattr(crypto_module, "COMPROMISED_PUBLIC_KEYS", frozenset({pub}))
+        with pytest.raises(crypto_module.CompromisedKeyError):
+            load_or_create_keys(path)
