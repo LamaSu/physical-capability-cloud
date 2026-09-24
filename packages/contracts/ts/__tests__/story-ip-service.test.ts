@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   StoryIPService,
+  StoryNotExecutedError,
   getStoryIPService,
   resetStoryIPService,
 } from "../story-ip-service.js";
@@ -484,5 +485,52 @@ describe("StoryIPService — singleton", () => {
 
     expect(fetched?.ipId).toBe(reg.ipId);
     resetStoryIPService();
+  });
+});
+
+// ── pcc-economics N10b: real mode fails closed; mock results say they are simulated ──
+
+describe("StoryIPService real mode fails closed (never a fabricated transaction)", () => {
+  const real = () => new StoryIPService({ mock: false });
+  const cap = { id: "cap-1", name: "Cap", type: "fdm", kernelId: "k1" };
+
+  it.each([
+    ["registerCapabilityAsIP", (s: StoryIPService) => s.registerCapabilityAsIP(cap, {} as never)],
+    [
+      "registerJobAsDerivative",
+      (s: StoryIPService) =>
+        s.registerJobAsDerivative("0xparent", {
+          jobId: "job-1",
+          evidenceBundleHash: "0xabc",
+          operatorAddress: "0x1",
+          operatorName: "Op",
+        } as never),
+    ],
+    ["distributeRoyaltyTokens", (s: StoryIPService) => s.distributeRoyaltyTokens("0xip", [])],
+    ["payJobRoyalty", (s: StoryIPService) => s.payJobRoyalty("0xip", "100", "0xpayer")],
+    ["claimRevenue", (s: StoryIPService) => s.claimRevenue("0xip")],
+    ["getRevenueSnapshot", (s: StoryIPService) => s.getRevenueSnapshot("0xip")],
+    ["raiseDispute", (s: StoryIPService) => s.raiseDispute("0xip", { hash: "0xh", reason: "r" })],
+    ["getIPRegistration", (s: StoryIPService) => s.getIPRegistration("cap-1")],
+    ["getDerivatives", (s: StoryIPService) => s.getDerivatives("0xip")],
+    ["getLineage", (s: StoryIPService) => s.getLineage("0xip")],
+  ] as const)("%s rejects with STORY_NOT_EXECUTED and returns no transaction hash", async (op, call) => {
+    const err = await call(real()).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(StoryNotExecutedError);
+    expect((err as StoryNotExecutedError).code).toBe("STORY_NOT_EXECUTED");
+    expect((err as StoryNotExecutedError).operation).toBe(op);
+    expect((err as Error).message).toMatch(/No transaction was sent/);
+  });
+
+  it("mock-mode money results are labelled simulated", async () => {
+    const s = new StoryIPService({ mock: true });
+    expect((await s.payJobRoyalty("0xip", "100", "0xpayer")).simulated).toBe(true);
+    expect((await s.claimRevenue("0xip")).simulated).toBe(true);
+    expect((await s.distributeRoyaltyTokens("0xip", [])).simulated).toBe(true);
+    expect((await s.getRevenueSnapshot("0xip")).simulated).toBe(true);
+    expect((await s.registerCapabilityAsIP(cap, {} as never)).simulated).toBe(true);
   });
 });

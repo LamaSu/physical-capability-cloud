@@ -28,6 +28,7 @@ import type {
   CaptureClass,
 } from "@pcc/spec";
 import {
+  canonicalize,
   evaluateRateSchedule,
   computeScheduleHash,
   computeTrainingManifestHash,
@@ -121,12 +122,43 @@ export class LicensingEngine {
 
   // ── Terms storage ────────────────────────────────────────────────────
 
-  setTerms(ipId: string, terms: LicensingTerms): void {
-    this.terms.set(ipId, terms);
+  /** Every version of every IP's terms, oldest first. Append-only: terms are never overwritten. */
+  private readonly termsHistory = new Map<string, LicensingTerms[]>();
+
+  /**
+   * Record licensing terms for an IP. Terms are VERSIONED and append-only (pcc-economics N10b): setting
+   * different terms appends version n+1 and keeps every earlier version readable, so anything agreed
+   * under version n can always be checked against exactly what was accepted. This used to be an
+   * unconditional overwrite, so terms could change under an existing derivative without a trace.
+   * Setting terms identical to the current version is a no-op. Returns the version now in force (1-based).
+   * Who may set terms for an IP is the route's authorization (board row N10a), not this engine's.
+   */
+  setTerms(ipId: string, terms: LicensingTerms): number {
+    const history = this.termsHistory.get(ipId) ?? [];
+    const latest = history[history.length - 1];
+    if (latest !== undefined && canonicalize(latest) === canonicalize(terms)) return history.length;
+    const frozen = structuredClone(terms);
+    history.push(frozen);
+    this.termsHistory.set(ipId, history);
+    this.terms.set(ipId, frozen);
+    return history.length;
   }
 
+  /** The terms now in force (a copy: callers cannot edit the record). */
   getTerms(ipId: string): LicensingTerms | undefined {
-    return this.terms.get(ipId);
+    const t = this.terms.get(ipId);
+    return t === undefined ? undefined : structuredClone(t);
+  }
+
+  /** A specific version (1-based), or undefined. Earlier versions stay readable forever. */
+  getTermsVersion(ipId: string, version: number): LicensingTerms | undefined {
+    const t = this.termsHistory.get(ipId)?.[version - 1];
+    return t === undefined ? undefined : structuredClone(t);
+  }
+
+  /** How many versions of terms an IP has had (0 when none). */
+  getTermsVersionCount(ipId: string): number {
+    return this.termsHistory.get(ipId)?.length ?? 0;
   }
 
   // ── License evaluation ───────────────────────────────────────────────
@@ -616,6 +648,13 @@ export class LicensingEngine {
    * non-capture-aware segments are unaffected. Callers may use
    * `captureClassFromEvidence()` at the top of the file to populate the
    * context from an evidence bundle.
+   */
+  /**
+   * @deprecated Do not use for payouts. It resolves each entry's rate by `ipId` from this mutable
+   * in-memory cache instead of the manifest's `rateScheduleHash`, and for a `model-author` it pays the
+   * model's share to the author AND the same share again to its datasets (2x), with no sum guard
+   * (pcc-economics D3/D5). It has no production callers. Use @pcc/spec `economics`:
+   * `splitsFromTrainingManifest` subdivides a model allocation exactly, and `compileEconomics` pays it.
    */
   getRoyaltyDistributionRich(input: {
     childIpId: string;

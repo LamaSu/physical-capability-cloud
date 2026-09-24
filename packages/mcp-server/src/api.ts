@@ -74,3 +74,17 @@ export async function pccFetch(path: string, opts: FetchOptions = {}): Promise<u
 
   return res.json();
 }
+
+/**
+ * Fetch several reads and report each on its own. A part the gateway cannot provide (for example a
+ * 501 `not_available`) comes back as `{ unavailable: true, reason }`, never as zero and never as an
+ * invented value, and one missing part does not hide the others.
+ */
+export async function pccFetchEach(paths: readonly string[]): Promise<unknown[]> {
+  const settled = await Promise.allSettled(paths.map((p) => pccFetch(p)));
+  return settled.map((r) =>
+    r.status === "fulfilled"
+      ? r.value
+      : { unavailable: true, reason: r.reason instanceof Error ? r.reason.message : String(r.reason) },
+  );
+}

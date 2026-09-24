@@ -18,7 +18,7 @@
  *   PCC_URL=http://localhost:3200 pcc jobs list
  */
 
-import { pccFetch, PCC_URL } from "./api.js";
+import { pccFetch, pccFetchEach, PCC_URL } from "./api.js";
 
 // ---------------------------------------------------------------------------
 // Output helpers
@@ -665,10 +665,10 @@ const commands: Record<string, Record<string, Handler>> = {
 
   depin: {
     stats: async (_pos, _flags, pretty) => {
-      const [epochs, certificates, treasury] = await Promise.all([
-        pccFetch("/api/rewards/epochs"),
-        pccFetch("/api/certificates"),
-        pccFetch("/api/treasury/summary"),
+      const [epochs, certificates, treasury] = await pccFetchEach([
+        "/api/rewards/epochs",
+        "/api/certificates",
+        "/api/treasury/summary",
       ]);
       out({ epochs, certificates, treasury }, pretty);
     },

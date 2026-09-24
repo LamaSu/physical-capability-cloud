@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { PCC_URL, pccFetch } from "./api.js";
+import { PCC_URL, pccFetch, pccFetchEach } from "./api.js";
 import { registerCaptureTools } from "./tools/capture.js";
 import { registerNegotiateTools } from "./tools/negotiate.js";
 
@@ -325,11 +325,12 @@ server.tool(
   "Get DePIN (Decentralized Physical Infrastructure Network) reward statistics: epochs, kernel scores, certificates, and treasury balance.",
   {},
   async () => {
-    // Fetch multiple reward-related endpoints in parallel
-    const [epochs, certificates, treasury] = await Promise.all([
-      pccFetch("/api/rewards/epochs"),
-      pccFetch("/api/certificates"),
-      pccFetch("/api/treasury/summary"),
+    // Each part is reported on its own. The gateway answers 501 not_available for data it does not
+    // record (it used to serve fixtures), and that must reach the agent as "unavailable", not as zero.
+    const [epochs, certificates, treasury] = await pccFetchEach([
+      "/api/rewards/epochs",
+      "/api/certificates",
+      "/api/treasury/summary",
     ]);
     return toolResult({ epochs, certificates, treasury });
   },
