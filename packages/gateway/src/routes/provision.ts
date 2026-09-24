@@ -13,7 +13,17 @@ import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
 import { resolveSession } from "../auth/siwe-auth.js";
-import { isReservedIdentity, IDENTITY_RESERVED_RESPONSE } from "../auth/reserved-identities.js";
+import {
+  isReservedIdentity,
+  IDENTITY_RESERVED_RESPONSE,
+  isClaimedIdentity,
+  IDENTITY_CLAIMED_RESPONSE,
+  callerApiKey,
+  sameIdentity,
+  callerMayDelegate,
+  parseStoredScopes,
+  NOTHING_TO_DELEGATE_RESPONSE,
+} from "../auth/reserved-identities.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -83,6 +93,11 @@ export async function provisionRoutes(app: FastifyInstance) {
      * matter what the allowlist says.
      */
     let siweVerified = false;
+    /**
+     * Set when the caller is authenticated AS the requested email identity
+     * (F3): the scopes of the caller's own key, which bound what may be minted.
+     */
+    let delegatingScopes: string[] | null = null;
 
     // Type guards — prevent object/array/number injection (red team #14, #15)
     if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
@@ -145,20 +160,24 @@ export async function provisionRoutes(app: FastifyInstance) {
       // {email:1}) is still a chosen-email intent — it must be VALIDATED and
       // rejected here, never allowed to fall through to the ambient SIWE session
       // below (which would mint that session's key, settlement scope and all).
-      if (typeof body.email !== "string" || body.email.length === 0) {
+      if (typeof body.email !== "string" || body.email.trim().length === 0) {
         return reply.status(400).send({
           error: "invalid_email",
           message: "email must be a non-empty string",
         });
       }
+      // Trim FIRST (F3): " victim@x.test " names the same identity as
+      // "victim@x.test", so it must reach the same identity checks rather than
+      // bounce off the format check while the bare form is claimable.
+      const email = body.email.trim();
       // Email path — RFC 5321 max total length is 254
-      if (body.email.length > 254) {
+      if (email.length > 254) {
         return reply.status(400).send({
           error: "invalid_email",
           message: "Email exceeds 254 character limit",
         });
       }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return reply.status(400).send({
           error: "invalid_email",
           message: "Please provide a valid email address",
@@ -169,10 +188,25 @@ export async function provisionRoutes(app: FastifyInstance) {
       // key for an allowlisted email would hand that admin identity to anyone who
       // can type it (WP-A A7). Refuse before anything is minted. The wallet paths
       // above/below are SIWE-proven and are not restricted by this.
-      if (isReservedIdentity(body.email)) {
+      if (isReservedIdentity(email)) {
         return reply.status(403).send(IDENTITY_RESERVED_RESPONSE);
       }
-      operatorId = body.email;
+      // IDENTITY BINDING (F3, board N2). Ownership checks across the gateway
+      // compare a key's operatorId with a resource's recorded owner, and owner
+      // ids are public — so an asserted email must not name an identity that
+      // already exists (a live key, a kernel, a registration, a job offer).
+      // Only that identity itself may add a key: a valid Bearer API key whose
+      // operatorId matches. The new key then carries the SAME operatorId string
+      // and scopes no wider than the caller's own. 409 never says what matched.
+      const caller = callerApiKey(req);
+      if (caller && sameIdentity(caller.operatorId, email)) {
+        operatorId = caller.operatorId;
+        delegatingScopes = parseStoredScopes(caller.scopes);
+      } else if (isClaimedIdentity(email)) {
+        return reply.status(409).send(IDENTITY_CLAIMED_RESPONSE);
+      } else {
+        operatorId = email;
+      }
     } else if (session) {
       // A verified SIWE session with NO explicit identity in the body — use the
       // cryptographically-proven address directly (the documented SIWE provision
@@ -210,10 +244,19 @@ export async function provisionRoutes(app: FastifyInstance) {
     // authority (middleware/scope-checker.ts migration note); listing and
     // retiring them is routes/admin-key-audit.ts +
     // docs/security/WILDCARD_KEY_ROTATION.md.
-    const scopes =
+    let scopes =
       siweVerified && isSettlementApproved(operatorId)
         ? ["operator", "settlement"]
         : ["operator"];
+    // An identity adding a key for itself (F3) delegates, and a delegated key is
+    // never wider than the delegating one (a legacy "*" cannot delegate
+    // settlement/admin — see callerMayDelegate).
+    if (delegatingScopes !== null) {
+      scopes = callerMayDelegate(delegatingScopes, scopes);
+      if (scopes.length === 0) {
+        return reply.status(403).send(NOTHING_TO_DELEGATE_RESPONSE);
+      }
+    }
 
     try {
       const { rawKey, record, ed25519 } = provisionApiKey({

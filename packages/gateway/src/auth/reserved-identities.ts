@@ -19,7 +19,16 @@
  * (no import-time freeze), mirroring the allowlist readers themselves. Most of
  * them lower-case both sides; PCC_OBSERVABILITY_ADMINS compares exactly, so
  * reserving case-insensitively is a superset of every reader — never narrower.
+ *
+ * The same paths also enforce IDENTITY BINDING (WP-A fold F3, below): an
+ * operatorId that already has a key or owns a kernel / registration / job
+ * offer cannot be claimed by anyone but itself.
  */
+
+import type { FastifyRequest } from "fastify";
+import { getRepos, getStore } from "../db.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import { resolveApiKey } from "./api-key-auth.js";
 
 /** Every env var that grants elevated access by operatorId allowlist. */
 export const ADMIN_IDENTITY_ALLOWLIST_ENV_VARS = [
@@ -68,4 +77,166 @@ export const IDENTITY_RESERVED_RESPONSE = {
     "This identity is reserved and cannot be claimed through unverified " +
     "self-service. An administrator's key is issued out-of-band (or, for a " +
     "wallet identity, provisioned after proving control with SIWE).",
+} as const;
+
+// ═════════════════════════════════════════════════════════════════════
+// Identity binding — WP-A fold F3 (operator-ux #2389 -> board N2)
+// ═════════════════════════════════════════════════════════════════════
+//
+// A7 above stops self-service from claiming an ADMIN identity. The general
+// case is the same bug for everyone else: ownership checks compare a key's
+// operatorId with the owner recorded on a resource (shop_kernels.
+// operator_address, a job offer's poster, ...), and operatorAddress is PUBLIC
+// (GET /api/operators/:slug/status). So anyone could provision
+// `{email: "<victim's operatorId>"}` and pass every ownership check the victim
+// passes — including the e-stop / claim guards other lanes are adding (#335).
+// Every ownership fix in that family needs this binding to mean anything.
+//
+// Rule, on the UNVERIFIED email paths (POST /api/auth/provision {email},
+// POST /api/contributors/quickstart): an operatorId that is already CLAIMED —
+// it has ANY unrevoked API key, or owns a kernel, a machine registration, or a
+// job offer (as poster) — is refused with 409 `identity_claimed`, UNLESS the
+// request is authenticated AS that operatorId (a valid Bearer API key whose
+// operatorId matches). Then the additional key is minted with scopes never
+// wider than the caller's own (callerMayDelegate). Matching is trimmed and
+// case-insensitive everywhere. The refusal never says WHICH resource matched.
+// The wallet path is unaffected: it is SIWE-gated (proof of control).
+//
+// Fails CLOSED: if the lookup itself errors, the identity is treated as
+// claimed — an unanswerable ownership question grants nothing.
+
+interface RawSqlite {
+  prepare(sql: string): { get(...params: unknown[]): unknown };
+}
+
+function rawSqlite(): RawSqlite {
+  const client = (getStore().db as unknown as { $client?: RawSqlite }).$client;
+  if (!client || typeof client.prepare !== "function") {
+    throw new Error("identity binding: raw sqlite handle unavailable");
+  }
+  return client;
+}
+
+// Each query answers "does anything already belong to this id?" — LIMIT 1, no
+// data returned. machine_registrations.operator is JSON: json_valid() guards
+// json_extract so one malformed row cannot make every lookup throw.
+const CLAIM_QUERIES: ReadonlyArray<{ sql: string; params: number }> = [
+  {
+    sql: "SELECT 1 FROM api_keys WHERE revoked_at IS NULL AND lower(trim(operator_id)) = ? LIMIT 1",
+    params: 1,
+  },
+  {
+    sql: "SELECT 1 FROM shop_kernels WHERE lower(trim(operator_address)) = ? LIMIT 1",
+    params: 1,
+  },
+  {
+    sql:
+      "SELECT 1 FROM machine_registrations WHERE lower(trim(coalesce(tenant_id, ''))) = ? " +
+      "OR (json_valid(operator) AND (" +
+      "lower(trim(coalesce(json_extract(operator, '$.walletAddress'), ''))) = ? " +
+      "OR lower(trim(coalesce(json_extract(operator, '$.email'), ''))) = ?)) LIMIT 1",
+    params: 3,
+  },
+  {
+    sql: "SELECT 1 FROM job_offers WHERE lower(trim(coalesce(poster_did, ''))) = ? LIMIT 1",
+    params: 1,
+  },
+];
+
+/**
+ * True when `operatorId` (trimmed, case-insensitive) already has an unrevoked
+ * API key, or owns a kernel, a machine registration or a job offer. Errors
+ * count as claimed (fail closed). An empty id is never claimed.
+ */
+export function isClaimedIdentity(operatorId: string): boolean {
+  const needle = normalize(operatorId);
+  if (!needle) return false;
+  try {
+    const db = rawSqlite();
+    for (const q of CLAIM_QUERIES) {
+      if (db.prepare(q.sql).get(...Array(q.params).fill(needle))) return true;
+    }
+  } catch {
+    return true; // cannot answer => refuse
+  }
+  // Offers live in the in-memory store (write-through to job_offers when a
+  // sqlite handle is attached; memory-only in some deployments and in tests).
+  try {
+    if (getJobOffersStore().hasOfferPostedBy(needle)) return true;
+  } catch {
+    // Store not initialised in this process => no offers were posted through
+    // it; persisted offers were already covered by the job_offers query.
+  }
+  return false;
+}
+
+/**
+ * The caller's own API key record, or null: the key api-gate already attached
+ * (non-public routes), else a `Bearer pcc_…` on this request (public routes
+ * such as /api/auth/provision, which api-gate does not resolve). Revoked or
+ * expired keys are never returned. A SIWE session is NOT a key.
+ */
+export function callerApiKey(req: FastifyRequest) {
+  const attached = (req as unknown as { apiKeyId?: string }).apiKeyId;
+  if (attached) {
+    const rec = getRepos().apiKeys.findById(attached);
+    if (!rec || rec.revokedAt) return null;
+    if (rec.expiresAt && new Date(rec.expiresAt).getTime() < Date.now()) return null;
+    return rec;
+  }
+  return resolveApiKey(req);
+}
+
+/** Same identity, trimmed + case-insensitive. Never true for an empty id. */
+export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = normalize(a ?? "");
+  return x.length > 0 && x === normalize(b ?? "");
+}
+
+const MONEY_OR_ADMIN = new Set(["settlement", "admin"]);
+
+/**
+ * The subset of `requested` a caller holding `callerScopes` may delegate to a
+ * new key for its OWN identity — never wider than what the caller holds:
+ *   - a scope the caller holds verbatim;
+ *   - a legacy `"*"` covers any NON-money, NON-admin scope (A1: the wildcard
+ *     is not settlement or admin authority, so it cannot delegate them);
+ *   - `admin` covers `operator` (every operator rule also names admin).
+ * Anything else is dropped. An empty result means "nothing to delegate".
+ */
+export function callerMayDelegate(callerScopes: readonly string[], requested: readonly string[]): string[] {
+  return requested.filter((s) => {
+    if (callerScopes.includes(s)) return true;
+    if (callerScopes.includes("*") && !MONEY_OR_ADMIN.has(s)) return true;
+    if (s === "operator" && callerScopes.includes("admin")) return true;
+    return false;
+  });
+}
+
+/** Parse a stored `scopes` column; anything but a JSON string array => none. */
+export function parseStoredScopes(raw: string | null | undefined): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw ?? "[]");
+    return Array.isArray(parsed) && parsed.every((s) => typeof s === "string") ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 409 body for a claimed identity. Deliberately does NOT say what matched. */
+export const IDENTITY_CLAIMED_RESPONSE = {
+  error: "identity_claimed",
+  message:
+    "This identity already belongs to an existing operator. To add a key for " +
+    "it, call this endpoint authenticated as that operator (Authorization: " +
+    "Bearer <one of its API keys>). A wallet identity can be provisioned after " +
+    "proving control with SIWE.",
+} as const;
+
+/** 403 body when the caller's own key holds none of the scopes being minted. */
+export const NOTHING_TO_DELEGATE_RESPONSE = {
+  error: "insufficient_scope",
+  message:
+    "Your key holds none of the scopes this endpoint would mint, and a key " +
+    "can only mint keys no wider than itself.",
 } as const;
