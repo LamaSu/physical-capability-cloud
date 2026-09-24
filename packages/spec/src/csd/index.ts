@@ -8,6 +8,10 @@ export * from "./registry-contract-adapter.js";
 export * from "./composition-commitment.js";
 export * from "./composition-commitment-adapter.js";
 export * from "./accepted-plan-compiler.js";
+// N25: the per-node execution contract (canonicalPlan + planHash) the accepted deal seals, and the
+// bounded plain-JSON rules for a node's execution inputs and constraints.
+export * from "./canonical-plan.js";
+export * from "./plan-json.js";
 export * from "./document-print-and-mail.plan.js";
 // Builtin CSDs registered by the gateway's live registry (not loadBuiltinCsds)
 export * from "./builtins/dashboard-v1.js";

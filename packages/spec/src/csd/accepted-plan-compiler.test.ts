@@ -487,6 +487,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   /** A stand-in for economics' compileEconomics: 10% of each unit's net to a licensor, the rest to the payout address. */
   const tenPercent: NetSplitter = (units) => ({
     ok: true,
+    agreementHash: DIG("A1"),
     economicTermsHash: DIG("E1"),
     rightsTermsHash: DIG("f1"),
     units: units.map((u) => {
@@ -531,10 +532,14 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
       { recipient: LICENSOR, amount: 976_500n },
     ]);
     expect(u0.payouts.reduce((a, p) => a + p.amount, 0n)).toBe(u0.n);
+    expect(r.plan.agreementHash).toBe(DIG("a1")); // lowercased
     expect(r.plan.economicTermsHash).toBe(DIG("e1")); // lowercased
     expect(r.plan.rightsTermsHash).toBe(DIG("f1"));
     const plainDeal = compileAcceptedPlan(fee235);
-    expect(plainDeal.ok && plainDeal.plan.economicTermsHash === null && plainDeal.plan.rightsTermsHash === null).toBe(true);
+    expect(plainDeal.ok).toBe(true);
+    if (plainDeal.ok) {
+      expect([plainDeal.plan.agreementHash, plainDeal.plan.economicTermsHash, plainDeal.plan.rightsTermsHash]).toEqual([null, null, null]);
+    }
     if (plainDeal.ok) expect(r.plan.acceptedDealDigest).not.toBe(plainDeal.plan.acceptedDealDigest);
   });
 
@@ -546,6 +551,73 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
       expect(b.plan.jobs).toEqual(a.plan.jobs); // same money...
       expect(b.plan.acceptedDealDigest).not.toBe(a.plan.acceptedDealDigest); // ...different terms, different deal
     }
+  });
+
+  it("the agreement hash is sealed (economics #2755): a different agreementHash alone — same money, same terms hashes — changes the deal digest", () => {
+    const a = withSplit(fee235, tenPercent);
+    const b = withSplit(fee235, (units) => ({ ...(tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>), agreementHash: DIG("a2") }));
+    expect(a.ok && b.ok).toBe(true);
+    if (a.ok && b.ok) {
+      expect(b.plan.jobs).toEqual(a.plan.jobs);
+      expect([b.plan.economicTermsHash, b.plan.rightsTermsHash]).toEqual([a.plan.economicTermsHash, a.plan.rightsTermsHash]);
+      expect(b.plan.agreementHash).toBe(DIG("a2"));
+      expect(b.plan.acceptedDealDigest).not.toBe(a.plan.acceptedDealDigest); // an envelope change (asOf, version) is a different deal
+      const { acceptedDealDigest: sealed, ...rest } = a.plan;
+      expect(acceptedDealDigest({ ...rest, agreementHash: DIG("a2") as `0x${string}` })).not.toBe(sealed);
+      expect(acceptedDealDigest({ ...rest, agreementHash: null })).not.toBe(sealed);
+      expect(acceptedDealDigest({ ...rest, agreementHash: DIG("A1") as `0x${string}` })).toBe(sealed); // hex case carries no meaning
+    }
+  });
+
+  it("the agreement hash is required: missing, malformed or non-string is refused as malformed, on an otherwise COMPLETE answer", () => {
+    const complete = (units: Parameters<NetSplitter>[0]) => tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+    const without: NetSplitter = (u) => {
+      const { agreementHash: _dropped, ...rest } = complete(u);
+      return rest as unknown as ReturnType<NetSplitter>;
+    };
+    const bad: unknown[] = [undefined, null, "", "0xabc", DIG("a1") + "\n", ` ${DIG("a1")}`, DIG("a1").slice(2), "0x" + "g".repeat(64), 42, {}, [DIG("a1")]];
+    const cases: NetSplitter[] = [without, ...bad.map((h): NetSplitter => (u) => ({ ...complete(u), agreementHash: h as string }))];
+    for (const split of cases) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = withSplit(fee235, split);
+      }).not.toThrow();
+      expect(r).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "agreement-hash" }] });
+    }
+  });
+
+  it("the agreement hash is read exactly once: the validated value is the sealed value; a throwing getter is malformed", () => {
+    const baseline = withSplit(fee235, tenPercent);
+    if (!baseline.ok) throw new Error("setup");
+    const reads: number[] = [];
+    const flipping = (second: string): NetSplitter => (units) => {
+      let n = 0;
+      reads.push(0);
+      return Object.defineProperty({ ...(tenPercent(units) as object) }, "agreementHash", {
+        enumerable: true,
+        get: () => {
+          reads[reads.length - 1] = ++n;
+          return n === 1 ? DIG("a1") : second;
+        },
+      }) as ReturnType<NetSplitter>;
+    };
+    for (const second of ["invalid", DIG("a2")]) {
+      const r = withSplit(fee235, flipping(second));
+      expect(r).toEqual(baseline); // the whole deal, digest included: the first (validated) read is what is sealed
+    }
+    expect(reads).toEqual([1, 1]);
+    const throwing: NetSplitter = (units) =>
+      Object.defineProperty({ ...(tenPercent(units) as object) }, "agreementHash", {
+        enumerable: true,
+        get: () => {
+          throw new Error("boom");
+        },
+      }) as ReturnType<NetSplitter>;
+    let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+    expect(() => {
+      r = withSplit(fee235, throwing);
+    }).not.toThrow();
+    expect(r).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "result" }] });
   });
 
   it("an economics refusal is a compile refusal", () => {
@@ -674,8 +746,8 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
       Object.defineProperty({}, "ok", { get: boom }),
       Object.defineProperty({ ok: false }, "code", { get: boom }),
       new Proxy({}, { get: boom }),
-      { ok: true, economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1"), units: [Object.defineProperty({}, "unitRef", { get: boom })] },
-      { ok: true, economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1"), units: new Proxy([], { get: (t, k) => (k === "length" ? 2 : boom()) }) },
+      { ok: true, agreementHash: DIG("a1"), economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1"), units: [Object.defineProperty({}, "unitRef", { get: boom })] },
+      { ok: true, agreementHash: DIG("a1"), economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1"), units: new Proxy([], { get: (t, k) => (k === "length" ? 2 : boom()) }) },
     ];
     for (const a of answers) {
       let r: ReturnType<typeof compileAcceptedPlan> | undefined;
@@ -696,6 +768,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
       return r.plan.acceptedDealDigest;
     };
     const rightsOnly: NetSplitter = (u) => ({ ...(tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>), rightsTermsHash: DIG("f2") });
+    const agreementOnly: NetSplitter = (u) => ({ ...(tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>), agreementHash: DIG("b2") });
     const recipientOnly = tweak((u) => ({ payouts: [u.payouts[0]!, { ...u.payouts[1]!, recipient: ADDR("c2") }] }));
     const amountOnly = tweak((u) => ({ payouts: [{ ...u.payouts[0]!, amount: (BigInt(u.payouts[0]!.amount) - 1n).toString() }, { ...u.payouts[1]!, amount: (BigInt(u.payouts[1]!.amount) + 1n).toString() }] }));
     const orderOnly = tweak((u) => ({ payouts: [u.payouts[1]!, u.payouts[0]!] }));
@@ -703,7 +776,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
       const r = tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>;
       return { ...r, units: [...r.units].reverse() };
     };
-    for (const s of [rightsOnly, recipientOnly, amountOnly, orderOnly]) expect(digestOf(s)).not.toBe(base.plan.acceptedDealDigest);
+    for (const s of [rightsOnly, agreementOnly, recipientOnly, amountOnly, orderOnly]) expect(digestOf(s)).not.toBe(base.plan.acceptedDealDigest);
     expect(digestOf(unitsReversed)).toBe(base.plan.acceptedDealDigest);
     // with UNEQUAL units, a positional (not by-reference) match would put print's legs on mail
     const uneven = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print" }), node({ nodeId: "mail", capabilityType: "mail.drop", grossBaseUnits: 3n * USDC })] });
@@ -759,7 +832,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     const answers: Array<[NetSplitter, string]> = [
       [() => proxy as ReturnType<NetSplitter>, "result"],
       [tweak(() => ({ payouts: new Proxy([], { get: (t, k) => (k === "length" ? -1 : Reflect.get(t, k)) }) })), "payouts"],
-      [(u) => ({ ...(tenPercent(u) as object), units: new Proxy([], { get: (t, k) => (k === "length" ? "2" : Reflect.get(t, k)) }) }) as ReturnType<NetSplitter>, "units"],
+      [(u) => ({ ...(tenPercent(u) as object), units: new Proxy([], { get: (t, k) => (k === "length" ? "2" : Reflect.get(t, k)) }) }) as unknown as ReturnType<NetSplitter>, "units"],
       [tweak((u) => ({ payouts: [u.payouts[0]!, boomLeg] })), "result"],
     ];
     for (const [split, detail] of answers) {
@@ -810,6 +883,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   it("boundaries are accepted: exactly 16 legs per unit, repeated recipients, and 16 units x 16 legs = 256 legs per job", () => {
     const sixteen = (units: Parameters<NetSplitter>[0]): ReturnType<NetSplitter> => ({
       ok: true,
+      agreementHash: DIG("a1"),
       economicTermsHash: DIG("e1"),
       rightsTermsHash: DIG("f1"),
       units: units.map((u) => ({
@@ -880,6 +954,7 @@ describe("input snapshot, round 3 (astra review of ce18cf42): no caller referenc
   /** A local splitter (one full leg per unit), so this block does not depend on another block's fixtures. */
   const oneLeg: NetSplitter = (units) => ({
     ok: true,
+    agreementHash: DIG("a1"),
     economicTermsHash: DIG("e1"),
     rightsTermsHash: DIG("f1"),
     units: units.map((u) => ({ unitRef: u.nodeId, gross: String(u.g), fee: String(u.f), net: String(u.n), payouts: [{ recipient: u.payoutAddress, amount: String(u.n) }] })),
@@ -1004,6 +1079,7 @@ describe("input snapshot, round 3 (astra review of ce18cf42): no caller referenc
 describe("round 4 (astra review of 0571c00c): dependencies are read once; the answer's scalars are normalized", () => {
   const oneLeg: NetSplitter = (units) => ({
     ok: true,
+    agreementHash: DIG("a1"),
     economicTermsHash: DIG("e1"),
     rightsTermsHash: DIG("f1"),
     units: units.map((u) => ({ unitRef: u.nodeId, gross: String(u.g), fee: String(u.f), net: String(u.n), payouts: [{ recipient: u.payoutAddress, amount: String(u.n) }] })),
