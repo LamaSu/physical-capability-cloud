@@ -2837,6 +2837,13 @@ class TestEvidenceBindsTheAssignment:
         same = build_evidence_bundle("job-7", self.DEVICE, {**GH_SUCCESS, "jobId": "job-7"})
         assert all(e["payload"]["jobId"] == "job-7" for e in same["events"])
 
+    @pytest.mark.parametrize("field,value", [("settlementUnitId", UNIT), ("challengeNonce", NONCE)])
+    def test_a_unit_field_the_assignment_never_named_cannot_reach_the_payload(self, field, value):
+        # evidence review of #420, F1 (probe P1): the result carries a unit
+        # field, the assignment names none -- refused, never signed through.
+        with pytest.raises(ValueError, match="not named by the assignment"):
+            build_evidence_bundle("job-1", self.DEVICE, {**GH_SUCCESS, field: value}, binding={"jobId": "job-1"})
+
     def test_bind_event_payload_wraps_a_non_dict(self):
         assert bind_event_payload("raw", {"jobId": "j"}) == {"result": "raw", "jobId": "j"}
 
@@ -2856,6 +2863,12 @@ class TestEvidenceBindsTheAssignment:
             {"id": "j", "settlementUnitId": "0x" + "ab" * 31},
             {"id": "j", "challengeNonce": "ab" * 32},
             {"id": "j", "challengeNonce": 7},
+            # evidence review of #420: F2, half a binding ...
+            {"id": "j", "settlementUnitId": UNIT},
+            {"id": "j", "challengeNonce": NONCE},
+            # ... and F3, an explicit null is not absence (kernel-sdk 400s)
+            {"id": "j", "settlementUnitId": None, "challengeNonce": None},
+            {"id": "j", "settlementUnitId": UNIT, "challengeNonce": None},
         ],
     )
     def test_assignment_binding_refuses_unbindable_assignments(self, job):
