@@ -86,9 +86,12 @@ const OWNER = "owner@example.com";
 const OWNER_HEADERS = { "x-test-operator": OWNER };
 
 async function registerMachine(app: FastifyInstance, overrides: Record<string, unknown> = {}): Promise<string> {
+  // The owner is the authenticated caller (M3): register as the operator the body names.
+  const operator = overrides.operator as { walletAddress?: string } | undefined;
   const res = await app.inject({
     method: "POST",
     url: "/api/onboard/register",
+    headers: { "x-test-operator": operator?.walletAddress ?? OWNER },
     payload: {
       name: "Test Printer",
       category: "fdm",

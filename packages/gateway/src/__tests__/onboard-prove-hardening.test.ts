@@ -70,10 +70,21 @@ async function buildApp(): Promise<FastifyInstance> {
   return app;
 }
 
-async function register(app: FastifyInstance, operator: Record<string, unknown> | undefined = { walletAddress: OWNER }): Promise<string> {
+/**
+ * Register as `actor` (default OWNER). The registration's owner is the
+ * authenticated caller (M3), so `actor` null with no identity in `operator`
+ * makes an ownerless registration (the zero-address placeholder).
+ * `operator` null sends no operator block at all.
+ */
+async function register(
+  app: FastifyInstance,
+  operator: Record<string, unknown> | null = { walletAddress: OWNER },
+  actor: string | null = OWNER,
+): Promise<string> {
   const res = await app.inject({
     method: "POST",
     url: "/api/onboard/register",
+    headers: actor === null ? {} : { "x-test-operator": actor },
     payload: {
       name: "Test Printer",
       category: "fdm",
@@ -177,7 +188,8 @@ describe("/prove hardening (WP-B)", () => {
 
   it("a registration with no owner identity cannot be proved by anyone (fails closed)", async () => {
     // Operator block without walletAddress or email: the old check skipped ownership entirely.
-    const noOwner = await register(app, { displayName: "Nobody" });
+    // Registered with no authenticated caller, so no owner is bound (M3).
+    const noOwner = await register(app, { displayName: "Nobody" }, null);
     const res = await prove(app, noOwner, { evidence: { deviceHealth: DEVICE_HEALTH } }, OTHER);
     expect(res.statusCode).toBe(403);
     expect(stored(noOwner).status).toBe("submitted");
@@ -185,8 +197,9 @@ describe("/prove hardening (WP-B)", () => {
     // No operator at all: /register stores the zero-address placeholder, which
     // is not an owner — even for a caller whose identity is the zero address.
     await nextMillisecond();
-    const placeholder = await register(app, undefined);
+    const placeholder = await register(app, null, null);
     expect(placeholder).not.toBe(noOwner);
+    expect(stored(placeholder).operator).toMatchObject({ walletAddress: "0x0000000000000000000000000000000000000000" });
     const zero = "0x0000000000000000000000000000000000000000";
     const res2 = await prove(app, placeholder, { evidence: { deviceHealth: DEVICE_HEALTH } }, zero);
     expect(res2.statusCode).toBe(403);
@@ -518,7 +531,7 @@ describe("owner routes fail closed and the review record cannot be forged or rew
   });
 
   it("PATCH and DELETE of a registration with no owner identity are 403 for everyone", async () => {
-    const regId = await register(app, { displayName: "Nobody" });
+    const regId = await register(app, { displayName: "Nobody" }, null);
     expect((await patch(regId, { description: "mine now" }, OTHER)).statusCode).toBe(403);
     expect((await del(regId, OTHER)).statusCode).toBe(403);
     expect(stored(regId).status).toBe("submitted");

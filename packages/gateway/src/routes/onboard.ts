@@ -31,6 +31,7 @@ import {
   coalesceAnalysisText,
   coalesceSourceDocumentId,
 } from "./onboard-analysis.js";
+import { bindRegistrationOwner } from "./onboard-owner.js";
 // Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
 // route filters registrations by req.tenantId (from T1.9 tenantContext
 // middleware). The /register handler always backfills tenant_id at insert
@@ -350,6 +351,13 @@ export async function onboardRoutes(app: FastifyInstance) {
         message: "Descriptions starting with \"PROOF SUBMITTED:\" or \"PROVED:\" are reserved for server-written review records.",
       });
     }
+    // M3: the owner is the authenticated caller, never an identity named in
+    // the body (see routes/onboard-owner.ts).
+    const actor = requestCaller(req);
+    const owner = bindRegistrationOwner(actor, (body as { operator?: unknown }).operator);
+    if (!owner.ok) {
+      return reply.status(owner.status).send({ error: owner.error, message: owner.message, ...(owner.field ? { field: owner.field } : {}) });
+    }
     const registration: MachineRegistration = {
       id: `reg-${Date.now()}`,
       name: body.name ?? "Unknown",
@@ -371,12 +379,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         vibrationIsolation: false,
       },
       pricing: body.pricing ?? { baseCost: "0", minimum: "0", currency: "USDC" },
-      operator: body.operator ?? {
-        walletAddress: "0x0000000000000000000000000000000000000000",
-        displayName: "Unknown",
-        certifications: [],
-        trainingAcknowledgments: {},
-      },
+      operator: owner.operator as unknown as MachineRegistration["operator"],
       // T2.3 — persist compliance regulations the operator claims to meet
       complianceRegulations: Array.isArray(body.complianceRegulations)
         ? body.complianceRegulations.filter((s) => typeof s === "string" && s.length > 0)
@@ -416,7 +419,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
     auditService.log({
       eventType: "operator.registered",
-      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? registration.operator?.walletAddress,
+      actor: actor ?? (req as any).apiKeyId ?? undefined,
       resourceType: "registration",
       resourceId: registration.id,
       action: "create",
