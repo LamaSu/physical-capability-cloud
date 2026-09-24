@@ -459,6 +459,40 @@ describe("GET /api/jobs/:jobId/execution", () => {
     expect(dto.job.contractedTier).toBe(2);
   });
 
+  it("NEGATIVE: two escrow records for the job's cwm are ambiguous: none is chosen (loader)", async () => {
+    const { repos } = getStore();
+    const now = "2026-09-24T10:00:00.000Z";
+    for (const id of ["esc-rm-dup-a", "esc-rm-dup-b"]) {
+      repos.escrows.insert({
+        id,
+        cwmId: "cwm-rm-dup",
+        contractAddress: `0x${id === "esc-rm-dup-a" ? "3" : "4"}${"0".repeat(39)}`,
+        payer: "0xpayer",
+        totalAmount: "5.00",
+        currency: "USDC",
+        status: "completed",
+        createdAt: now,
+        deadline: now,
+      } as any);
+    }
+    repos.jobs.insert({
+      id: "job-rm-dup",
+      stepId: "s-dup",
+      cwmId: "cwm-rm-dup",
+      capabilityId: "cap-nyc-fdm",
+      kernelId: "kernel-nyc",
+      status: "completed",
+      assignedDevices: [],
+      startedAt: now,
+      progress: 100,
+    } as any);
+    const dto = (await get("job-rm-dup")).json() as JobExecutionDTO;
+    expect(dto.settlement.link).toBe("ambiguous");
+    expect(dto.settlement.linkBasis).toBe("job_cwm");
+    expect(dto.settlement.record).toBeNull();
+    expect(dto.settlement.payout).toBe("unknown");
+  });
+
   it("NEGATIVE: under TENANT_ENFORCE a job of another tenant is a 404", async () => {
     const { repos } = getStore();
     repos.jobs.insert({
