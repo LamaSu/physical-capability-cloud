@@ -10,10 +10,17 @@
  *   - evidence     comes ONLY from the evidence store (received is not verified)
  *   - verification comes ONLY from verdict sources (none public for the outcome yet)
  *   - settlement   comes ONLY from the linked escrow record, classified by the canonical
- *                  money map (completed is not paid; a mock escrow is never paid)
+ *                  money map (completed is not paid; a mock escrow is never paid). The
+ *                  job-to-escrow link must be proven by every recorded identifier, and the
+ *                  job's own milestone must agree with the escrow's own status; anything
+ *                  less is `unknown`.
  *
  * A failed read becomes `unavailable` with a generic error. It never becomes an empty
  * list or a default, because absence is not evidence.
+ *
+ * Reading a job is object-authorized (authorizeJobRead): admin, the job's kernel
+ * operator, or its recorded buyer. Everyone else gets a 404, independent of the tenant
+ * flag.
  */
 
 import {
@@ -40,6 +47,7 @@ import {
   type SettlementRecordView,
   type VerificationAxis,
 } from "@pcc/spec";
+import { timingSafeEqual } from "node:crypto";
 import { schema, eq } from "@pcc/store";
 
 // ── Source shapes (structural; the builder never touches the DB) ─────────────
@@ -80,6 +88,7 @@ export interface CaptureVerdictRow {
 
 export interface EscrowRow {
   id: string;
+  cwmId?: string | null;
   contractAddress: string;
   totalAmount: string;
   currency: string;
@@ -99,8 +108,17 @@ export interface MilestoneRow {
 
 export type SettlementSource =
   | { link: "not_linked" }
-  | { link: "ambiguous"; basis: SettlementLinkBasis; candidates: number }
-  | { link: "linked"; basis: SettlementLinkBasis; escrow: EscrowRow; milestones: MilestoneRow[] };
+  | { link: "ambiguous"; basis: SettlementLinkBasis | "negotiation_session"; candidates: number }
+  | { link: "conflicting"; reason: string }
+  | {
+      link: "linked";
+      /** The strongest identifier that points at `escrow`. */
+      basis: SettlementLinkBasis;
+      /** Every recorded identifier that points at `escrow` (none points elsewhere). */
+      matches: SettlementLinkBasis[];
+      escrow: EscrowRow;
+      milestones: MilestoneRow[];
+    };
 
 /** One source read: the value, or the fact that the read failed. */
 export type SourceRead<T> = { ok: true; value: T } | { ok: false };
@@ -128,7 +146,7 @@ export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): Jo
   const execution = buildExecution(src.job);
   const evidence = buildEvidence(src.evidence);
   const verification = buildVerification(src.captureVerdicts);
-  const settlement = buildSettlement(src.job, src.settlement);
+  const { recordsConflict, ...settlement } = buildSettlement(src.job, src.settlement);
 
   const capability = src.capability.ok ? src.capability.value : null;
   const kernel = src.kernel.ok ? src.kernel.value : null;
@@ -153,7 +171,7 @@ export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): Jo
     evidence,
     verification,
     settlement,
-    notices: buildNotices(src.job, execution, evidence, settlement),
+    notices: buildNotices(src.job, execution, evidence, settlement, recordsConflict),
   };
 }
 
@@ -276,42 +294,54 @@ function moneyView(status: string, vocabulary: MoneyStateView["vocabulary"]): Mo
   return { sourceStatus: String(status ?? ""), vocabulary, tone: c.tone, label: c.label, known: c.known };
 }
 
-/** Tone -> payout, for a REAL (non-simulated) record. Unknown tones stay unknown. */
-function payoutOf(view: MoneyStateView): PayoutState {
-  switch (view.tone) {
+/**
+ * The payout for a REAL (non-simulated) record: this job's milestone status, reconciled
+ * with the escrow's own status. A combination the two records cannot both be true for is
+ * a conflict, and a conflict is `unknown`, never the milestone's claim.
+ *
+ *   milestone released  + escrow refunded/disputed/slashed/expired  -> conflict
+ *   milestone refunded  + escrow completed (everything released)    -> conflict
+ *   milestone unreleased + escrow completed (everything released)   -> conflict
+ *   either status unrecognized                                     -> unknown
+ */
+export function reconcilePayout(
+  milestone: MoneyStateView,
+  escrow: MoneyStateView,
+): { payout: Exclude<PayoutState, "simulated">; conflict: boolean } {
+  if (!milestone.known || !escrow.known || milestone.tone === "unknown" || escrow.tone === "unknown") {
+    return { payout: "unknown", conflict: false };
+  }
+  const escrowAllReleased = escrow.tone === "settled";
+  const escrowAgainstRelease = escrow.tone === "refunded" || escrow.tone === "failed";
+  switch (milestone.tone) {
     case "settled":
-      return "paid";
+      return escrowAgainstRelease ? { payout: "unknown", conflict: true } : { payout: "paid", conflict: false };
     case "refunded":
-      return "refunded";
-    case "waiting":
-    case "running":
-    case "failed":
-      return "not_paid";
+      return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "refunded", conflict: false };
     default:
-      return "unknown";
+      // waiting / running / failed: this job's money has not been released.
+      return escrowAllReleased ? { payout: "unknown", conflict: true } : { payout: "not_paid", conflict: false };
   }
 }
 
-function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): SettlementAxis {
-  const base = { source: "gateway_escrow_record" as const };
-  if (!read.ok) {
-    return {
-      ...base,
-      link: "unavailable",
-      linkBasis: null,
-      record: null,
-      payout: "unknown",
-      payoutBasis: null,
-      error: READ_FAILED("settlement store"),
-    };
-  }
+function buildSettlement(
+  job: JobRow,
+  read: SourceRead<SettlementSource>,
+): SettlementAxis & { recordsConflict: boolean } {
+  const empty = {
+    source: "gateway_escrow_record" as const,
+    linkBasis: null,
+    linkMatches: [] as SettlementLinkBasis[],
+    record: null,
+    payout: "unknown" as const,
+    payoutBasis: null,
+    payoutConfirmation: null,
+    error: null,
+    recordsConflict: false,
+  };
+  if (!read.ok) return { ...empty, link: "unavailable", error: READ_FAILED("settlement store") };
   const s = read.value;
-  if (s.link === "not_linked") {
-    return { ...base, link: "not_linked", linkBasis: null, record: null, payout: "unknown", payoutBasis: null, error: null };
-  }
-  if (s.link === "ambiguous") {
-    return { ...base, link: "ambiguous", linkBasis: s.basis, record: null, payout: "unknown", payoutBasis: null, error: null };
-  }
+  if (s.link !== "linked") return { ...empty, link: s.link };
 
   const escrow = s.escrow;
   const simulated = String(escrow.contractAddress ?? "").startsWith(MOCK_ESCROW_ADDRESS_PREFIX);
@@ -346,29 +376,37 @@ function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): Settl
     escrowTotal: { amount: String(escrow.totalAmount), currency: String(escrow.currency) },
     createdAt: escrow.createdAt,
     deadline: escrow.deadline,
+    // The escrow record stores no time for its current statuses.
+    statusObservedAt: null,
   };
 
-  // Payout: the job's own milestone. The whole escrow's status is used ONLY when the
-  // escrow records no milestones at all (a single payment). When milestones exist but
-  // none is this job's step, other steps' releases say nothing about this job: unknown.
-  // An ambiguous match or a mock escrow is never read as payment.
-  let payout: PayoutState;
-  let payoutBasis: SettlementAxis["payoutBasis"];
+  // Payout comes ONLY from this job's own milestone, reconciled with the escrow's status.
+  // No milestone for this job (none recorded, not this step, or several) is unknown: an
+  // escrow-level status can cover several jobs and never proves this job's payment.
+  let payout: PayoutState = "unknown";
+  let payoutBasis: SettlementAxis["payoutBasis"] = null;
+  let recordsConflict = false;
   if (simulated) {
     payout = "simulated";
-    payoutBasis = null;
   } else if (record.milestone) {
-    payout = payoutOf(record.milestone.status);
+    const r = reconcilePayout(record.milestone.status, record.escrow);
+    payout = r.payout;
+    recordsConflict = r.conflict;
     payoutBasis = "milestone_record";
-  } else if (milestoneMatch === "no_milestones") {
-    payout = payoutOf(record.escrow);
-    payoutBasis = "escrow_record";
-  } else {
-    payout = "unknown";
-    payoutBasis = null;
   }
 
-  return { ...base, link: "linked", linkBasis: s.basis, record, payout, payoutBasis, error: null };
+  return {
+    source: "gateway_escrow_record",
+    link: "linked",
+    linkBasis: s.basis,
+    linkMatches: s.matches,
+    record,
+    payout,
+    payoutBasis,
+    payoutConfirmation: payout === "paid" || payout === "refunded" ? "record_only" : null,
+    error: null,
+    recordsConflict,
+  };
 }
 
 function buildNotices(
@@ -376,6 +414,7 @@ function buildNotices(
   execution: ExecutionAxis,
   evidence: EvidenceAxis,
   settlement: SettlementAxis,
+  recordsConflict: boolean,
 ): JobExecutionNoticeCode[] {
   const notices: JobExecutionNoticeCode[] = [];
   const raw = normalizeJobRowStatus(job.status);
@@ -384,6 +423,8 @@ function buildNotices(
   if (execution.phase === "unknown") notices.push("unknown_execution_status");
   if ((evidence.fabricatedEventCount ?? 0) > 0) notices.push("fabricated_evidence");
   if (settlement.record?.simulated) notices.push("simulated_settlement");
+  if (recordsConflict) notices.push("settlement_records_conflict");
+  if (settlement.link === "conflicting") notices.push("settlement_link_conflict");
   return notices;
 }
 
@@ -412,37 +453,33 @@ export interface JobExecutionRepos {
     findCaptureVerdictsByJob(jobId: string): unknown[];
   };
   escrows: {
-    findByContractAddress(address: string): unknown;
     findMilestonesByEscrow(escrowId: string): unknown[];
   };
 }
 
-/** Drizzle db handle (better-sqlite3), for the two reads the repositories do not offer. */
+/** Drizzle db handle (better-sqlite3), for the reads the repositories do not offer. */
 export interface JobExecutionDb {
   select(): any;
 }
 
 export interface JobExecutionLoadOptions {
-  /** From tenantOpts(req): undefined = no tenant filter; otherwise rows must match. */
+  /** From tenantOpts(req): passed through to the tenant-scoped evidence read. */
   tenant?: { tenantId: string | null };
   /** Called with the source name and error when a read fails, for the gateway log. */
   onReadError?: (source: string, error: unknown) => void;
 }
 
 /**
- * Read every source for one job. Returns null when the job does not exist, or is not
- * visible to the caller's tenant. Throws only when the job row itself cannot be read.
+ * Read every source for one job the caller is already authorized to read (see
+ * authorizeJobRead). Each source is read separately; a failed read is recorded, never
+ * replaced with an empty value.
  */
 export function loadJobExecutionSources(
-  jobId: string,
+  job: JobRow,
   repos: JobExecutionRepos,
   db: JobExecutionDb,
   opts: JobExecutionLoadOptions = {},
-): JobExecutionSources | null {
-  const job = repos.jobs.findById(jobId) as JobRow | undefined;
-  if (!job) return null;
-  if (opts.tenant && (job.tenantId ?? null) !== opts.tenant.tenantId) return null;
-
+): JobExecutionSources {
   const attempt = <T>(source: string, fn: () => T): SourceRead<T> => {
     try {
       return { ok: true, value: fn() };
@@ -468,52 +505,144 @@ export function loadJobExecutionSources(
   };
 }
 
+const BASIS_STRENGTH: readonly SettlementLinkBasis[] = [
+  "negotiation_session_escrow_address",
+  "negotiation_session_cwm",
+  "job_cwm",
+];
+
 /**
- * Tie the job to its escrow record the same way the paid-job flow does (negotiation
- * session -> cwmId -> escrow; milestone by stepId), falling back to the job's own cwmId
- * and then to the session's escrow address. More than one candidate is `ambiguous`:
- * nothing is chosen.
+ * Prove the job-to-escrow relationship from EVERY recorded identifier.
+ *
+ * The paid-job flow creates the escrow and the job together from one negotiation
+ * session, and records on that session the escrow's contract address and the CWM id; the
+ * job row carries a CWM id too. Each identifier is looked up in full (cardinality, not
+ * "first match"):
+ *   - any identifier matching more than one escrow            -> ambiguous
+ *   - identifiers matching different escrows                  -> conflicting
+ *   - the one escrow found contradicting a recorded identifier
+ *     (its address or CWM differs from the session's)         -> conflicting
+ *   - a session that records no escrow identifier while the
+ *     job's CWM matches an escrow (the link is unproven)       -> conflicting
+ *   - more than one session naming the job                    -> ambiguous
+ *   - nothing matches                                          -> not_linked
+ * The job's CWM alone links only when the job has no negotiation session (legacy rows):
+ * the V2 escrow schema is one escrow per CWM with one milestone per step, and the payout
+ * still needs this job's own milestone.
  */
-function resolveSettlement(job: JobRow, repos: JobExecutionRepos, db: JobExecutionDb): SettlementSource {
+export function resolveSettlement(job: JobRow, repos: Pick<JobExecutionRepos, "escrows">, db: JobExecutionDb): SettlementSource {
   const { negotiationSessions, escrows } = schema;
   const sessions = db
     .select()
     .from(negotiationSessions)
     .where(eq(negotiationSessions.jobId, job.id))
     .all() as Array<{ cwmId: string | null; escrowAddress: string | null }>;
-  if (sessions.length > 1) {
-    return { link: "ambiguous", basis: "negotiation_session_cwm", candidates: sessions.length };
-  }
-  const session = sessions[0];
+  if (sessions.length > 1) return { link: "ambiguous", basis: "negotiation_session", candidates: sessions.length };
+  const session = sessions[0] ?? null;
 
-  const byCwm = (cwmId: string) =>
-    db.select().from(escrows).where(eq(escrows.cwmId, cwmId)).all() as EscrowRow[];
+  const byCwm = (cwmId: string) => db.select().from(escrows).where(eq(escrows.cwmId, cwmId)).all() as EscrowRow[];
+  const byAddress = (address: string) =>
+    db.select().from(escrows).where(eq(escrows.contractAddress, address)).all() as EscrowRow[];
 
-  const tries: Array<[SettlementLinkBasis, () => EscrowRow[]]> = [];
-  if (session?.cwmId) tries.push(["negotiation_session_cwm", () => byCwm(session.cwmId!)]);
-  if (job.cwmId) tries.push(["job_cwm", () => byCwm(job.cwmId)]);
-  if (session?.escrowAddress) {
-    tries.push([
-      "negotiation_session_escrow_address",
-      () => {
-        const e = repos.escrows.findByContractAddress(session.escrowAddress!) as EscrowRow | undefined;
-        return e ? [e] : [];
-      },
-    ]);
+  const lookups: Array<[SettlementLinkBasis, EscrowRow[]]> = [];
+  const sessionAddress = nonEmpty(session?.escrowAddress);
+  const sessionCwm = nonEmpty(session?.cwmId);
+  const jobCwm = nonEmpty(job.cwmId);
+  if (sessionAddress) lookups.push(["negotiation_session_escrow_address", byAddress(sessionAddress)]);
+  if (sessionCwm) lookups.push(["negotiation_session_cwm", byCwm(sessionCwm)]);
+  if (jobCwm) lookups.push(["job_cwm", byCwm(jobCwm)]);
+
+  for (const [basis, rows] of lookups) {
+    if (rows.length > 1) return { link: "ambiguous", basis, candidates: rows.length };
+  }
+  const found = new Map<string, EscrowRow>();
+  for (const [, rows] of lookups) for (const r of rows) found.set(r.id, r);
+  if (found.size === 0) return { link: "not_linked" };
+  if (found.size > 1) return { link: "conflicting", reason: "the recorded identifiers point at different escrow records" };
+
+  const escrow = [...found.values()][0]!;
+  if (sessionAddress && escrow.contractAddress !== sessionAddress) {
+    return { link: "conflicting", reason: "the escrow found does not have the address the negotiation session recorded" };
+  }
+  if (sessionCwm && nonEmpty(escrow.cwmId) !== sessionCwm) {
+    return { link: "conflicting", reason: "the escrow found does not have the CWM id the negotiation session recorded" };
+  }
+  if (session && !sessionAddress && !sessionCwm) {
+    return { link: "conflicting", reason: "the negotiation session records no escrow, yet the job's CWM matches one" };
   }
 
-  for (const [basis, find] of tries) {
-    const found = find();
-    if (found.length > 1) return { link: "ambiguous", basis, candidates: found.length };
-    if (found.length === 1) {
-      const escrow = found[0]!;
-      return {
-        link: "linked",
-        basis,
-        escrow,
-        milestones: repos.escrows.findMilestonesByEscrow(escrow.id) as MilestoneRow[],
-      };
-    }
-  }
-  return { link: "not_linked" };
+  const matches = lookups.filter(([, rows]) => rows.some((r) => r.id === escrow.id)).map(([b]) => b);
+  const basis = BASIS_STRENGTH.find((b) => matches.includes(b))!;
+  return {
+    link: "linked",
+    basis,
+    matches,
+    escrow,
+    milestones: repos.escrows.findMilestonesByEscrow(escrow.id) as MilestoneRow[],
+  };
+}
+
+// ── Object authorization ──────────────────────────────────────────────────────
+
+/** Who is asking, as the API gate resolved it. */
+export interface JobReadCaller {
+  /** The API key's operator id, or the SIWE wallet address. Null when anonymous. */
+  principal: string | null;
+  /** The raw X-Admin-Key header, when sent. */
+  adminKey?: string | null;
+}
+
+export type JobReadDecision =
+  | { allow: true; as: "admin" | "kernel_operator" | "buyer" }
+  | { allow: false; reason: "unauthenticated" | "not_a_party" };
+
+/**
+ * True only when PCC_ADMIN_KEY is set and the header equals it (constant-time). There is
+ * no development bypass: an unset key grants nothing.
+ */
+export function hasValidAdminKey(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
+  if (typeof expected !== "string" || expected.length === 0 || typeof provided !== "string") return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+const samePrincipal = (a: unknown, b: string) =>
+  typeof a === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/**
+ * May this caller read this job's execution, evidence and money? Only:
+ *   - an admin (valid X-Admin-Key),
+ *   - the job's kernel operator (the kernel's operatorAddress is the caller), or
+ *   - the job's recorded buyer (the negotiation session's userAgentId is the caller).
+ * Anyone else is refused, whatever the tenant flag says.
+ *
+ * Limits (stated, not hidden): the caller principal is the API key's operatorId, which
+ * self-service provisioning does not yet bind to a proven identity (board N2, gateway);
+ * the buyer is recorded only as the session's userAgentId, which the session creator
+ * supplied. Jobs submitted without a negotiation session record no buyer at all, so only
+ * their operator and admins can read them here.
+ */
+export function authorizeJobRead(
+  job: JobRow,
+  caller: JobReadCaller,
+  repos: Pick<JobExecutionRepos, "kernels">,
+  db: JobExecutionDb,
+): JobReadDecision {
+  if (hasValidAdminKey(caller.adminKey)) return { allow: true, as: "admin" };
+  const principal = caller.principal;
+  if (!principal || principal.trim() === "") return { allow: false, reason: "unauthenticated" };
+
+  const kernel = repos.kernels.findById(job.kernelId) as { operatorAddress?: string } | undefined;
+  if (kernel && samePrincipal(kernel.operatorAddress, principal)) return { allow: true, as: "kernel_operator" };
+
+  const { negotiationSessions } = schema;
+  const sessions = db
+    .select()
+    .from(negotiationSessions)
+    .where(eq(negotiationSessions.jobId, job.id))
+    .all() as Array<{ userAgentId: string | null }>;
+  if (sessions.length === 1 && samePrincipal(sessions[0]!.userAgentId, principal)) return { allow: true, as: "buyer" };
+
+  return { allow: false, reason: "not_a_party" };
 }
