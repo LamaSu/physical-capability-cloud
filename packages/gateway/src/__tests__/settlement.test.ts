@@ -601,15 +601,19 @@ describe("Settlement Routes", () => {
       expect(typeof body.settled).toBe("boolean");
     });
 
-    it("shows settled=true for a completed job", async () => {
-      // job-004 is seeded with status "completed"
+    it("NEGATIVE: a completed job is not settled by its row (readmodels F1)", async () => {
+      // job-004 is seeded "completed"; its escrow (esc-001, by CWM) has no milestone for
+      // its step, so the records cannot say whether this job was paid.
       const res = await app.inject({
         method: "GET",
         url: "/api/settlement/job-004",
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.settled).toBe(true);
+      expect(body.settled).toBe(false);
+      expect(body.status).toBe("unknown");
+      expect(body.jobStatus).toBe("completed");
+      expect(body.settledAt).toBeNull();
     });
 
     it("does not match static routes like 'status'", async () => {
@@ -702,14 +706,21 @@ describe("Full evidence-to-settlement flow", () => {
     const evidenceBody = evidenceRes.json();
     expect(evidenceBody.bundles[0].bundleId).toBe("bundle-test-001");
 
-    // Step 3: Verify settlement status reflects settled state
+    // Step 3: the settlement read reports what the records show. The release was sent to
+    // 0xDeAdBeEf...01, which the gateway holds no escrow record for, and
+    // SettlementService.releaseMilestone updates only the job row. job-004's own escrow
+    // record has no milestone for its step, so the payout is unknown, not settled; the
+    // row's "settled" is reported as the job row's claim (readmodels F1).
     const settlementRes = await app.inject({
       method: "GET",
       url: "/api/settlement/job-004",
     });
     expect(settlementRes.statusCode).toBe(200);
     const settlementBody = settlementRes.json();
-    expect(settlementBody.settled).toBe(true);
+    expect(settlementBody.jobStatus).toBe("settled");
+    expect(settlementBody.settled).toBe(false);
+    expect(settlementBody.status).toBe("unknown");
+    expect(settlementBody.notices).toContain("job_row_reports_settled");
   });
 
   it("processes evidence without on-chain calls when write is disabled", async () => {

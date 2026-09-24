@@ -24,6 +24,7 @@ import {
 import { getSettlementFacade } from "../facades/index.js";
 import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
+import { buildSettlementStatusRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
 import {
   isBatchEnabled,
   getSmartAccountAddress,
@@ -213,6 +214,11 @@ export async function settlementRoutes(app: FastifyInstance) {
   });
 
   // ── Settlement status for a job ───────────────────────────────────
+  //
+  // A projection of the execution read model's settlement axis (legacy-settlement.ts):
+  // `settled` is true only when this job's own milestone record says released, a mock
+  // escrow is `simulated`, and `status` uses the same vocabulary as
+  // GET /api/jobs/:jobId/settlement. The job row's own status is `jobStatus`.
 
   app.get<{ Params: { jobId: string } }>("/api/settlement/:jobId", async (req, reply) => {
     // Guard against routes that look like ":jobId" matching "status", "epochs", "submit", etc.
@@ -221,8 +227,19 @@ export async function settlementRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "not_found" });
     }
 
-    const result = await settlementFacade.getJobSettlementStatus(jobId);
-    return sendResult(reply, result);
+    const loaded = loadLegacySettlement(req, jobId);
+    if (loaded.kind === "unavailable") {
+      return reply.status(503).send({
+        error: "read_model_unavailable",
+        message: "The job record could not be read. Try again shortly.",
+      });
+    }
+    if (loaded.kind === "not_found") {
+      // The error code this route has always returned for an unknown job.
+      return reply.status(404).send({ error: "SETTLEMENT_NOT_FOUND", message: `job '${jobId}' not found` });
+    }
+    reply.header("cache-control", "no-store");
+    return buildSettlementStatusRead(loaded.job, loaded.sources, loaded.dto);
   });
 
   // ── Evidence bundle details for a job (or bundle bytes by hash) ───
