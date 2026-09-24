@@ -13,12 +13,20 @@ optimizer_runs = 200
 # exactly that directory, nothing wider: the rest of `deployments/` holds the live Base Sepolia records
 # (PCCProtocolV2, CaptureClassRegistry, EASSchema, SampleEscrow), which no forge test or script may overwrite.
 # `VNextDeployRecordTest.test_Record_GrantDoesNotReachOtherDeploymentRecords` fails if this is widened.
+# The grant is NOT a containment boundary against symlinks: Foundry authorizes a not-yet-existing path by
+# lexical normalization, so a symlinked directory or a dangling link under it can redirect a write. The deploy
+# script therefore refuses any symlink under `deployments/vnext` before it reads or writes a record, and CI
+# refuses a committed symlink anywhere under `deployments/` (ts/__tests__/deployments-no-symlinks.test.ts).
+# The second entry is READ-only on a committed test fixture of symlinks, so that refusal is tested.
 #
 # NOTE — deliberately ABSENT: a `libraries = [...]` entry. {VNextSettlementLib} is an external linked
 # library, and pinning its address here would link the TEST build against an address holding no code,
 # breaking every funding test. The V-next deploy scripts link per-invocation with `--libraries` instead
 # and assert the address they were linked against. See script/DeployVNextSettlement.s.sol.
-fs_permissions = [{ access = "read-write", path = "./deployments/vnext" }]
+fs_permissions = [
+    { access = "read-write", path = "./deployments/vnext" },
+    { access = "read", path = "./test/fixtures/fs-symlinks" },
+]
 
 [profile.default.fmt]
 line_length = 120

@@ -1122,6 +1122,7 @@ contract DeployVNextSettlement is Script {
     }
 
     function _guardAgainstRivalDeployment(Inputs memory i, address predictedFactory) internal view {
+        _assertNoSymlinksUnder(_recordRoot());
         string memory path = _artifactPath(i);
         if (!vm.exists(path)) return;
         address recorded = vm.parseJsonAddress(vm.readFile(path), ".factory");
@@ -1139,7 +1140,7 @@ contract DeployVNextSettlement is Script {
     ///      dry-run tuple is still written, because producing a reviewable tuple before anything is spent
     ///      is the point of the dry run; it is just kept where it cannot be mistaken for the real record.
     function _artifactPath(Inputs memory i) internal view returns (string memory) {
-        string memory dir = string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid), "/");
+        string memory dir = string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid), "/");
         string memory prefix = _isBroadcasting() ? "" : "DRYRUN-";
         if (keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL))) {
             return string.concat(dir, prefix, "PROVISIONAL-", i.label, ".json");
@@ -1229,9 +1230,10 @@ contract DeployVNextSettlement is Script {
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
+        _assertNoSymlinksUnder(_recordRoot());
         // `vm.writeJson` does not create intermediate directories, and a deploy that succeeded on-chain
         // but failed to record its tuple is the worst outcome available here.
-        vm.createDir(string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid)), true);
+        vm.createDir(string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeJson(finalJson, path);
         console2.log("wrote artifact:", path);
     }
@@ -1278,6 +1280,63 @@ contract DeployVNextSettlement is Script {
     //                                          INPUT / OUTPUT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+    /// @dev The only directory the deploy record ever lives in. `foundry.toml` grants exactly this path.
+    ///      `virtual` only so the record test can point the guard at a fixture of symlinks.
+    function _recordRoot() internal view virtual returns (string memory) {
+        return "deployments/vnext";
+    }
+    uint256 internal constant MAX_LABEL_BYTES = 64;
+
+    /// @dev `VNEXT_LABEL` goes into the record's FILENAME (`PROVISIONAL-<label>.json`) and into every CREATE2
+    ///      salt, so it is held to a short ASCII slug: `[A-Za-z0-9_-]{1,64}`. That excludes `/`, `\`, `.`,
+    ///      whitespace and control characters, so a label can never traverse out of its filename, reach a
+    ///      tracked record (`/../../../base-sepolia/...`), or land on another mode's or network's record
+    ///      (`/../CANONICAL`). Before this check the label was only required to be non-empty (sol review of
+    ///      #339). Canonical runs carry no label at all: `run()` passes "", and a stray `VNEXT_LABEL` in
+    ///      `predict()` would otherwise predict canonical addresses that `run()` never deploys.
+    function _requireValidLabel(string memory mode, string memory label) internal pure {
+        bytes memory b = bytes(label);
+        if (keccak256(bytes(mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL))) {
+            require(b.length == 0, "VNEXT_LABEL must be empty for a canonical deployment");
+            return;
+        }
+        require(b.length > 0 && b.length <= MAX_LABEL_BYTES, "VNEXT_LABEL must be 1-64 characters");
+        for (uint256 k; k < b.length; ++k) {
+            bytes1 c = b[k];
+            require(
+                (c >= "0" && c <= "9") || (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c == "-" || c == "_",
+                "VNEXT_LABEL may contain only A-Z a-z 0-9 - _"
+            );
+        }
+    }
+
+    /// @dev `fs_permissions` is NOT a containment boundary against symlinks. Foundry authorizes a path it
+    ///      cannot canonicalize (it does not exist yet) by lexical normalization. So a symlinked directory or
+    ///      a dangling symlink under the grant lets a write CREATE a file outside it; forge 1.7.1 was observed
+    ///      doing both. `vm.exists`, `vm.fsMetadata` and `vm.readLink` all resolve the link first, so none of
+    ///      them can see it. `vm.readDir` does not follow links and reports them. The record root is therefore
+    ///      walked, and any symlink under it refuses the read and the write. Two gaps remain. A symlinked
+    ///      record root itself is out of reach here (the walk starts inside it); CI refuses a committed
+    ///      symlink anywhere under `deployments/` instead (`ts/__tests__/deployments-no-symlinks.test.ts`).
+    ///      And a link swapped in between this check and the write is a TOCTOU window no cheatcode closes.
+    function _assertNoSymlinksUnder(string memory root) internal view {
+        if (!vm.exists(root)) return; // nothing there yet: `createDir` below makes real directories
+        VmSafe.DirEntry[] memory entries = vm.readDir(root, 3);
+        for (uint256 k; k < entries.length; ++k) {
+            if (bytes(entries[k].errorMessage).length != 0) {
+                // An entry removed between the listing and its inspection is gone, not hidden: skip it. Any other
+                // failure to inspect fails closed. A dangling symlink is NOT an error here; `readDir` reports it
+                // with `isSymlink` set, which the next check refuses.
+                if (!vm.exists(entries[k].path)) continue;
+                revert(string.concat("cannot inspect the deployment record root: ", entries[k].errorMessage));
+            }
+            require(
+                !entries[k].isSymlink,
+                string.concat("symlink under the deployment record root, refusing to read or write through it: ", entries[k].path)
+            );
+        }
+    }
+
     function _readInputs(string memory mode, string memory label) internal view returns (Inputs memory i) {
         bytes32 h = keccak256(bytes(mode));
         require(
@@ -1285,6 +1344,7 @@ contract DeployVNextSettlement is Script {
                 || h == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL)),
             "mode must be CANONICAL or PROVISIONAL"
         );
+        _requireValidLabel(mode, label);
         i.mode = mode;
         i.label = label;
         i.eas = vm.envAddress("VNEXT_EAS");

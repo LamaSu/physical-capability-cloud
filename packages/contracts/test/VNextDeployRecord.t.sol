@@ -21,7 +21,11 @@ import {VNextDeploySpec} from "../script/vnext/VNextDeploySpec.sol";
  *           2. the guard REFUSES a record naming a different factory (the rival-deployment property);
  *           3. a simulation writes a `DRYRUN-` path, never the deployment record itself;
  *           4. PROVISIONAL and CANONICAL records live in disjoint namespaces;
- *           5. the grant does NOT reach the other tracked records under `deployments/` (least privilege).
+ *           5. the grant does NOT reach the other tracked records under `deployments/` (least privilege);
+ *           6. `VNEXT_LABEL` cannot steer the record path: traversal, separators, dots, control characters and
+ *              over-long labels are refused, and a canonical run carries no label (sol review of #339);
+ *           7. a symlink under the record root refuses the read and the write, because `fs_permissions` alone
+ *              does not contain a write that goes through a symlinked directory or a dangling symlink.
  *
  * @dev The guard is invoked through an explicit STATICCALL, as {VNextDeployGatesTest} does for the gates, so a
  *      passing test also proves the guard is read-only: it cannot rewrite the record it is checking.
@@ -38,6 +42,14 @@ contract VNextDeployRecordTest is Test {
     /// @dev A tracked record OUTSIDE `deployments/vnext`. The name is deliberately impossible to confuse with a
     ///      real record, so that a test which wrongly succeeds leaves behind something obviously stray.
     string internal constant OUTSIDE_GRANT = "deployments/base-sepolia/ESCROW-TEST-MUST-NOT-BE-WRITABLE.json";
+
+    /// @dev A committed fixture holding a symlinked directory (`parent-link -> real`) and a dangling symlink
+    ///      (`dangling.json -> does-not-exist.json`). `foundry.toml` grants READ on it and nothing else, so the
+    ///      refusal is exercised without any test ever creating a link.
+    string internal constant SYMLINK_FIXTURE = "test/fixtures/fs-symlinks";
+
+    string internal constant LABEL_CHARSET = "VNEXT_LABEL may contain only A-Z a-z 0-9 - _";
+    string internal constant LABEL_LENGTH = "VNEXT_LABEL must be 1-64 characters";
 
     function setUp() public {
         harness = new DeployRecordHarness();
@@ -98,7 +110,110 @@ contract VNextDeployRecordTest is Test {
         } catch {}
     }
 
+    // ── 6. the label cannot steer the path ───────────────────────────────────────────────────────
+
+    function test_Label_AcceptsShortAsciiSlugs() public view {
+        harness.requireValidLabel(VNextDeploySpec.MODE_PROVISIONAL, "run-1");
+        harness.requireValidLabel(VNextDeploySpec.MODE_PROVISIONAL, "A_z-09");
+        harness.requireValidLabel(VNextDeploySpec.MODE_PROVISIONAL, _repeat("a", 64));
+        harness.requireValidLabel(VNextDeploySpec.MODE_CANONICAL, "");
+        // and an accepted label lands exactly where it should: one filename under the network directory
+        assertEq(
+            harness.artifactPath(VNextDeploySpec.MODE_PROVISIONAL, "run-1"),
+            "deployments/vnext/anvil/DRYRUN-PROVISIONAL-run-1.json"
+        );
+    }
+
+    /// @notice The reviewer's traversal cases, and every separator, dot or control character that could build one.
+    function test_Label_RefusesTraversalSeparatorsAndControlCharacters() public {
+        string[] memory bad = new string[](11);
+        bad[0] = "/../../base-sepolia/PCCProtocolV2"; // normalizes inside vnext, onto another network's name
+        bad[1] = "/../../../base-sepolia/PCCProtocolV2"; // normalizes onto the tracked Base Sepolia record
+        bad[2] = "/../CANONICAL"; // a provisional run landing on the canonical record
+        bad[3] = "..";
+        bad[4] = ".";
+        bad[5] = "a/b";
+        bad[6] = "a\\b"; // Windows separator
+        bad[7] = "a b";
+        bad[8] = "a.b";
+        bad[9] = "run\n1";
+        bad[10] = unicode"é";
+        for (uint256 k; k < bad.length; ++k) {
+            _assertLabelRefused(VNextDeploySpec.MODE_PROVISIONAL, bad[k], LABEL_CHARSET);
+        }
+    }
+
+    /// @notice The WIRING, not just the validator: `_readInputs` refuses a bad label before it reads a single
+    ///         environment variable. Without the check this call would fail on the missing `VNEXT_EAS` instead.
+    function test_Label_IsCheckedBeforeAnyInputIsRead() public {
+        try harness.readInputs(VNextDeploySpec.MODE_PROVISIONAL, "/../CANONICAL") {
+            fail("_readInputs accepted a traversal label");
+        } catch Error(string memory reason) {
+            assertEq(reason, LABEL_CHARSET, "_readInputs did not refuse the label first");
+        }
+    }
+
+    function test_Label_RefusesEmptyAndOverlong() public {
+        _assertLabelRefused(VNextDeploySpec.MODE_PROVISIONAL, "", LABEL_LENGTH);
+        _assertLabelRefused(VNextDeploySpec.MODE_PROVISIONAL, _repeat("a", 65), LABEL_LENGTH);
+    }
+
+    /// @notice `run()` passes "", so a label in canonical mode could only come from a stray `VNEXT_LABEL` in
+    ///         `predict()`, which would then predict canonical addresses that `run()` never deploys.
+    function test_Label_CanonicalCarriesNoLabel() public {
+        _assertLabelRefused(VNextDeploySpec.MODE_CANONICAL, "x", "VNEXT_LABEL must be empty for a canonical deployment");
+    }
+
+    // ── 7. symlinks under the record root ────────────────────────────────────────────────────────
+
+    function test_Symlinks_AreRefused() public {
+        // A checkout without symlink support (git core.symlinks=false, e.g. some Windows setups) turns the links
+        // into plain files. The property is then untestable in that checkout, not false. CI (Linux) has real links.
+        if (_symlinkCount(SYMLINK_FIXTURE) < 2) vm.skip(true);
+        (bool ok, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertNoSymlinksUnder, (SYMLINK_FIXTURE)));
+        assertFalse(ok, "a symlink under the root was not refused");
+        string memory reason = _reason(ret);
+        assertTrue(_contains(reason, "symlink under the deployment record root"), string.concat("wrong refusal: ", reason));
+    }
+
+    /// @notice The WIRING: the rival-deployment guard refuses a symlinked record root before it reads any record.
+    function test_Symlinks_GuardRefusesBeforeReadingTheRecord() public {
+        if (_symlinkCount(SYMLINK_FIXTURE) < 2) vm.skip(true);
+        harness.setRecordRoot(SYMLINK_FIXTURE);
+        _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, "symlink under the deployment record root");
+    }
+
+    function test_Symlinks_RealRecordTreePasses() public {
+        string memory path = _writeRecord(VNextDeploySpec.MODE_PROVISIONAL, "symlink-clean", FACTORY_A);
+        (bool ok, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertNoSymlinksUnder, ("deployments/vnext")));
+        assertTrue(ok, string.concat("a record tree with no symlinks was refused: ", _reason(ret)));
+        _clear(path);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────
+
+    function _assertLabelRefused(string memory mode, string memory label, string memory message) internal {
+        try harness.requireValidLabel(mode, label) {
+            fail(string.concat("label accepted: ", label));
+        } catch Error(string memory reason) {
+            assertEq(reason, message, string.concat("label refused for the wrong reason: ", label));
+        }
+    }
+
+    function _repeat(string memory unit, uint256 n) internal pure returns (string memory r) {
+        for (uint256 k; k < n; ++k) {
+            r = string.concat(r, unit);
+        }
+    }
+
+    function _symlinkCount(string memory dir) internal view returns (uint256 count) {
+        Vm.DirEntry[] memory entries = vm.readDir(dir, 3);
+        for (uint256 k; k < entries.length; ++k) {
+            if (entries[k].isSymlink) ++count;
+        }
+    }
 
     function _writeRecord(string memory mode, string memory label, address factory) internal returns (string memory path) {
         path = harness.artifactPath(mode, label);
@@ -177,6 +292,29 @@ contract DeployRecordHarness is DeployVNextSettlement {
 
     function writeFile(string calldata path, string calldata data) external {
         vm.writeFile(path, data);
+    }
+
+    function requireValidLabel(string calldata mode, string calldata label) external pure {
+        _requireValidLabel(mode, label);
+    }
+
+    function readInputs(string calldata mode, string calldata label) external view {
+        _readInputs(mode, label);
+    }
+
+    /// @dev Empty means the script's real root. Each test gets a fresh harness from `setUp`.
+    string internal recordRootOverride;
+
+    function setRecordRoot(string calldata root) external {
+        recordRootOverride = root;
+    }
+
+    function _recordRoot() internal view override returns (string memory) {
+        return bytes(recordRootOverride).length != 0 ? recordRootOverride : super._recordRoot();
+    }
+
+    function assertNoSymlinksUnder(string calldata root) external view {
+        _assertNoSymlinksUnder(root);
     }
 
     function removeFile(string calldata path) external {
