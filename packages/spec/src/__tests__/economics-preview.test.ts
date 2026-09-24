@@ -74,6 +74,21 @@ describe("buildEconomicPreview", () => {
     expect(p.moneyState.paid!.amount).toBe("0");
   });
 
+  it("a pinned rate on a clause that pays nothing here is not called checked, even with its schedule supplied", () => {
+    const ag = exampleSparePrinter();
+    const royalty = ag.clauses.find((c) => c.clauseId === "kit-royalty")!;
+    ag.clauses.push({ ...structuredClone(royalty), clauseId: "unused-royalty", label: "Royalty if the kit ran", appliesTo: { usingComponent: "kit:never-used" }, underLicense: null });
+    const compiled = compileEconomics(ag, opts);
+    if (!compiled.ok) throw new Error("fixture");
+    const p = buildEconomicPreview(ag, compiled, { feeVerified: true });
+    expect(p.rates.find((r) => r.clause === "Royalty if the kit ran")).toEqual({
+      clause: "Royalty if the kit ran",
+      percent: "0.40%",
+      verified: false,
+      note: "Not checked, because this clause pays nothing in this agreement.",
+    });
+  });
+
   it("print-and-mail: the composer's margin and the upstream method fee are told apart", () => {
     const ag = examplePrintAndMail();
     const compiled = compileEconomics(ag);

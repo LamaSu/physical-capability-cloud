@@ -227,6 +227,7 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
   const clauseById = new Map(ag.clauses.map((x) => [x.clauseId, x] as const));
   const splitById = new Map(ag.splits.map((s) => [s.splitId, s] as const));
   const licenseByKey = new Map(ag.licenses.map((l) => [`${l.licenseId}@${l.version}`, l] as const));
+  const paysNowhere = new Set(c.notEligible.map((n) => n.clauseId));
   const label = (partyId: string) => partyById.get(partyId)?.label ?? partyId;
   const payerLabel = label(c.payer);
 
@@ -355,9 +356,12 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
       clause: clauseById.get(r.clauseId)?.label ?? r.clauseId,
       percent: percentText(r.bps),
       verified: r.verified,
+      // A compiled deal checks every rate that pays out, so an unchecked one is a clause that pays nothing here.
       note: r.verified
         ? "Checked against the published rate schedule at the time of this agreement."
-        : "Not checked: the published rate schedule was not available.",
+        : paysNowhere.has(r.clauseId)
+          ? "Not checked, because this clause pays nothing in this agreement."
+          : "Not checked against the published rate schedule.",
     })),
     notOwed: c.notEligible.map((n) => {
       const clause = clauseById.get(n.clauseId)!;
