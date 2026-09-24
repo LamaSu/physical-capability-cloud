@@ -5,10 +5,13 @@
  *   agent DAG (claims) --R10--> live terms --R11--> programs --> AcceptedPlanInput --R12--> accepted deal
  *                                  reservation (durable, server-issued) ---^            (acceptedDealDigest)
  *
- * The agent supplies only the plan's SHAPE (nodes, edges) and what it believes each node costs. Every
- * settlement term is the server's: operator and payout address, gross, currency, program, evidence
- * requirements, payer, fee, reclaim time, and the plan id itself (derived from the reservation, so
- * a caller cannot choose job ids that collide with another plan's).
+ * The agent supplies only the plan's SHAPE (nodes, edges), what it believes each node costs, and the
+ * tier it buys each node at. Every other settlement term is the server's: operator and payout
+ * address, gross, currency, program, evidence requirements, payer, fee, reclaim time, and the plan id
+ * itself (derived from the reservation, so a caller cannot choose job ids that collide with another
+ * plan's). The tier is the principal's purchase choice, constrained twice: R10 admits only a tier
+ * the live row offers, and the reservation's `minTier`, when it carries one, is a floor — a delegated
+ * agent cannot spend money the payer authorized for tier 2 on tier-0 work (invariant 11).
  *
  * This module performs no I/O: every read is an injected dependency, so the accept decision is a pure
  * function of (submission, principal, live state). The route (R9; it needs R28 money scopes) calls it
@@ -59,6 +62,8 @@ export interface ReservationRecord {
   state: "issued" | "consumed" | "expired" | "released";
   /** The principal's paying wallet, recorded when the reservation was issued. */
   payer: Address;
+  /** Optional floor: the lowest assurance tier the payer authorized this money for. */
+  minTier?: number;
 }
 
 /** Server fee and timing policy. Never taken from the caller. */
@@ -98,6 +103,7 @@ export type SeamRefusal =
     }
   | { stage: "revalidation"; verdicts: NodeVerdict[] }
   | { stage: "currency"; nodeId: string; reason: "node-currency-differs-from-reservation" }
+  | { stage: "tier"; nodeId: string; reason: "below-reservation-minimum" }
   | { stage: "program"; nodeId: string; reason: "claimed-program-mismatch" }
   | { stage: "evidence"; nodeId: string; reason: "no-evidence-contract-for-tier" }
   | { stage: "compile"; violations: CompileViolation[] };
@@ -122,13 +128,22 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     return { ok: false, refusal: { stage: "submission", reason: "malformed-submission" } };
   }
 
-  // Authority first: the reservation is the server's record, read from the durable store.
+  // Authority first: the reservation is the server's record, read from the durable store. The id in
+  // the submission is only a lookup key; authority is the stored record plus the authenticated
+  // principal, and an empty principal matches nothing.
+  const principal = ctx?.principal;
+  if (typeof principal !== "string" || principal.length === 0) {
+    return refuse({ stage: "reservation", reason: "wrong-principal" });
+  }
   const resv = deps.loadReservation(sub.reservationId);
   if (!resv) return refuse({ stage: "reservation", reason: "not-found" });
-  if (resv.principal !== ctx.principal) return refuse({ stage: "reservation", reason: "wrong-principal" });
+  if (resv.principal !== principal) return refuse({ stage: "reservation", reason: "wrong-principal" });
   if (resv.requestId !== sub.requestId) return refuse({ stage: "reservation", reason: "wrong-request" });
   if (resv.state !== "issued") return refuse({ stage: "reservation", reason: "not-issued" });
-  const now = deps.now();
+  // Whole seconds (a `Date.now() / 1000` clock must not make BigInt throw). A broken clock is a
+  // server fault: throw rather than let NaN compare as "not expired".
+  const now = Math.floor(deps.now());
+  if (!Number.isFinite(now)) throw new TypeError("acceptExternalPlan: deps.now() must return finite unix seconds");
   if (resv.expiresAt <= now) return refuse({ stage: "reservation", reason: "expired" });
 
   // R10: every claim against the live rows. Anything but `current` everywhere is refused with the
@@ -144,6 +159,9 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   for (const r of resolved) {
     if (r.currency !== resv.currency) {
       return refuse({ stage: "currency", nodeId: r.nodeId, reason: "node-currency-differs-from-reservation" });
+    }
+    if (resv.minTier !== undefined && !(r.tier >= resv.minTier)) {
+      return refuse({ stage: "tier", nodeId: r.nodeId, reason: "below-reservation-minimum" });
     }
     // R11: the program is the server's for (csd, tier). A claimed one is only a cross-check.
     const program = r.tier === 0 ? null : deps.resolveProgram(r.csd, r.tierKey);

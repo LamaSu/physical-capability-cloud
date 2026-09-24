@@ -75,15 +75,26 @@ class ReservationStoreStandIn {
   sealed(id: string): string | undefined {
     return this.rows.get(id)?.sealedDigest;
   }
-  /** One atomic step: re-check everything, RECOMPUTE the digest (never trust the carried one), consume once, seal. */
+  /**
+   * One atomic step. The real consume is called with the plan the server ITSELF just compiled — never
+   * a compiled plan a caller presents — and still re-checks: authority (principal, state, expiry),
+   * every binding the reservation fixes (plan id, request, currency, EACH job's payer), the obligation
+   * DERIVED from the units (not the carried total), and the digest RECOMPUTED from the content.
+   * A recomputed digest proves integrity, not authority: a resealed plan with another payer still fails.
+   */
   consume(id: string, principal: string, plan: CompiledAcceptedPlan, now: number): { ok: true } | { ok: false; reason: string } {
     const r = this.rows.get(id);
     if (!r) return { ok: false, reason: "not-found" };
     if (r.principal !== principal) return { ok: false, reason: "wrong-principal" };
     if (r.state !== "issued") return { ok: false, reason: "not-issued" };
     if (r.expiresAt <= now) return { ok: false, reason: "expired" };
-    if (plan.reservationId !== id || plan.requestId !== r.requestId || plan.currency !== r.currency) return { ok: false, reason: "wrong-binding" };
-    if (plan.totalObligationBaseUnits > r.maxAmountBaseUnits) return { ok: false, reason: "obligation-exceeds-reservation" };
+    if (plan.planId !== planIdForReservation(id) || plan.reservationId !== id || plan.requestId !== r.requestId || plan.currency !== r.currency) {
+      return { ok: false, reason: "wrong-binding" };
+    }
+    if (plan.jobs.some((j) => j.payer.toLowerCase() !== r.payer.toLowerCase())) return { ok: false, reason: "wrong-payer" };
+    const derived = plan.jobs.reduce((acc, j) => acc + j.units.reduce((a, u) => a + u.g, 0n), 0n);
+    if (derived !== plan.totalObligationBaseUnits) return { ok: false, reason: "obligation-mismatch" };
+    if (derived > r.maxAmountBaseUnits) return { ok: false, reason: "obligation-exceeds-reservation" };
     const { acceptedDealDigest: carried, ...rest } = plan;
     if (acceptedDealDigest(rest) !== carried) return { ok: false, reason: "digest-mismatch" };
     r.state = "consumed";
@@ -318,6 +329,79 @@ describe("the charter's required negatives, through the whole seam", () => {
     });
   });
 
+  it("an empty principal matches nothing, even a reservation stored with an empty principal", () => {
+    expect(refusal(acceptExternalPlan(agentDag(), { principal: "" }, world({ reservation: { principal: "" } }).deps))).toEqual({
+      stage: "reservation",
+      reason: "wrong-principal",
+    });
+    expect(refusal(acceptExternalPlan(agentDag(), undefined as unknown as { principal: string }, world().deps))).toEqual({
+      stage: "reservation",
+      reason: "wrong-principal",
+    });
+  });
+
+  it("a fractional clock is floored (no BigInt throw); a broken clock fails closed", () => {
+    const { deps } = world();
+    const r = acceptExternalPlan(agentDag(), CTX, { ...deps, now: () => NOW + 0.75 });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.plan.jobs[0]!.units[0]!.reclaimAt).toBe(BigInt(NOW + 7 * 24 * 3600));
+    expect(() => acceptExternalPlan(agentDag(), CTX, { ...deps, now: () => Number.NaN })).toThrow("finite unix seconds");
+  });
+
+  it("consume re-checks at consume time: expiry after acceptance, another principal, a resealed plan with another payer or total", () => {
+    const { store, deps } = world();
+    const ok = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!ok.ok) throw new Error("setup");
+    const reseal = (p: Omit<CompiledAcceptedPlan, "acceptedDealDigest">): CompiledAcceptedPlan => ({ ...p, acceptedDealDigest: acceptedDealDigest(p) });
+    const { acceptedDealDigest: _d, ...base } = ok.plan;
+    expect(store.consume("resv-1", CTX.principal, ok.plan, NOW + 3600)).toEqual({ ok: false, reason: "expired" });
+    expect(store.consume("resv-1", "agent:intruder", ok.plan, NOW)).toEqual({ ok: false, reason: "wrong-principal" });
+    // a consistent, freshly RESEALED plan is still refused: integrity is not authority
+    const otherPayer = reseal({ ...base, jobs: base.jobs.map((j) => ({ ...j, payer: A("77") })) });
+    expect(store.consume("resv-1", CTX.principal, otherPayer, NOW)).toEqual({ ok: false, reason: "wrong-payer" });
+    const understated = reseal({ ...base, totalObligationBaseUnits: 1n });
+    expect(store.consume("resv-1", CTX.principal, understated, NOW)).toEqual({ ok: false, reason: "obligation-mismatch" });
+    const otherPlanId = reseal({ ...base, planId: "plan.someone-else" });
+    expect(store.consume("resv-1", CTX.principal, otherPlanId, NOW)).toEqual({ ok: false, reason: "wrong-binding" });
+    expect(store.consume("resv-1", CTX.principal, ok.plan, NOW)).toEqual({ ok: true }); // the genuine one still lands
+  });
+
+  it("a server-resolved program that the evidence gate rejects -> refused by the compiler", () => {
+    const dag = agentDag();
+    const { committedProgramHash: _c, ...printWithoutClaim } = dag.nodes[1]!;
+    dag.nodes[1] = printWithoutClaim;
+    const r = refusal(acceptExternalPlan(dag, CTX, world({ programs: { [`${PRINT}|tier2`]: `0x${"99".repeat(32)}` } }).deps));
+    expect(r?.stage).toBe("compile");
+    if (r?.stage === "compile") expect(r.violations.map((v) => v.code)).toEqual(["program-gate-refused"]);
+  });
+
+  it("a tier below the reservation's minimum -> refused (a delegate cannot downgrade the payer's assurance)", () => {
+    expect(refusal(acceptExternalPlan(agentDag(), CTX, world({ reservation: { minTier: 1 } }).deps))).toEqual({
+      stage: "tier",
+      nodeId: "mail",
+      reason: "below-reservation-minimum",
+    });
+    const onlyPrint = agentDag({ nodes: [agentDag().nodes[1]!], edges: [] });
+    expect(acceptExternalPlan(onlyPrint, CTX, world({ reservation: { minTier: 2 } }).deps).ok).toBe(true);
+  });
+
+  it("nested malformed nodes and edges get typed refusals, never a throw", () => {
+    const d = agentDag();
+    const cases: ExternalPlanSubmission[] = [
+      { ...d, nodes: [null as unknown as ExternalPlanSubmission["nodes"][number], ...d.nodes] },
+      { ...d, edges: [null as unknown as { from: string; to: string }] },
+      { ...d, edges: [{ from: 5 as unknown as string, to: "mail" }] },
+      { ...d, edges: [{ from: Object.create(null) as string, to: "mail" }] },
+    ];
+    for (const c of cases) {
+      let r: SeamResult | undefined;
+      expect(() => {
+        r = acceptExternalPlan(c, CTX, world().deps);
+      }).not.toThrow();
+      expect(r?.ok).toBe(false);
+    }
+  });
+
   it("a malformed submission gets a typed refusal, never a throw", () => {
     for (const bad of [null, {}, { requestId: "req-42", reservationId: "resv-1", nodes: "x", edges: [] }]) {
       expect(refusal(acceptExternalPlan(bad as unknown as ExternalPlanSubmission, CTX, world().deps))).toEqual({ stage: "submission", reason: "malformed-submission" });
@@ -372,7 +456,19 @@ describe("the server composer is one planner among many: /api/compose output ent
     expect(t?.stage === "revalidation" && t.verdicts[0]).toMatchObject({ status: "invalid-claim", reason: "malformed-price" });
   });
 
-  it("expired, non-proposed and malformed proposals never reach the seam", () => {
+  it("structurally malformed proposals get a typed refusal before the seam — including values whose coercion throws", () => {
+    const s = proposal().steps;
+    const noString = { toString: null } as unknown;
+    expect(adapt({ ...proposal(), status: noString as ComposeResponse["status"] })).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt({ ...proposal(), expiresAt: noString as string })).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt(proposal({}, [{ ...s[0]!, assuranceTier: noString as 0 }, s[1]!]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt(proposal({}, [{ ...s[0]!, assuranceTier: "2" as unknown as 2 }, s[1]!]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt(proposal({}, [{ ...s[0]!, capabilityId: undefined as unknown as string }, s[1]!]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt(proposal({}, [{ ...s[0]!, estimatedPriceUSD: Number.NaN }, s[1]!]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt(null as unknown as ComposeResponse)).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+  });
+
+  it("expired, non-proposed and structurally malformed proposals never reach the seam", () => {
     expect(adapt(proposal({ expiresAt: new Date(NOW * 1000).toISOString() }))).toEqual({ ok: false, refusal: { reason: "proposal-expired" } });
     expect(adapt(proposal({ status: "over_budget" }))).toEqual({ ok: false, refusal: { reason: "not-proposed", status: "over_budget" } });
     const s = proposal().steps;
