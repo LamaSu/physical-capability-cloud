@@ -4,27 +4,36 @@
 // A PCC API key is `pcc_live_` or `pcc_test_` followed by 64 hex characters
 // (packages/gateway/src/auth/api-key-auth.ts, generateApiKey:
 // randomBytes(32).toString("hex")). Oracle keys use `pcc_oracle_` with the same
-// body. Test fixtures use short placeholders, far under 32 characters, so a body
-// of 32 or more hex characters is treated as a real key.
+// body. Any body of 20 or more hex characters counts as key material: that
+// covers a whole key and most of a truncated one, and test fixtures use shorter
+// placeholders. The prefix matches in any letter case and after any character.
 //
-// The scan reads every file git tracks, skips binaries, and never prints a
-// matched value: only the file, the line, the prefix and the body length.
+// What is scanned is exactly what git records. Every entry in the index is read
+// from the object store (one `git cat-file --batch`), whatever the working tree
+// holds. Every blob is scanned byte for byte, binaries included, with no size cap.
+// File paths are scanned too. Submodule entries (gitlinks) carry no content in
+// this repository; they are listed, not scanned. A blob that cannot be read
+// fails the scan.
+//
+// Nothing that is printed carries key material. Findings name the file (with
+// any key in the path redacted), the line, the prefix and the body length.
+// Error messages are redacted the same way.
 //
 // Usage: node scripts/ci/secret-scan.mjs [--root <dir>]
 // Exit codes: 0 clean, 1 key literal found, 2 scan error.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// Same boundary rule as packages/gateway/src/redaction.ts: a letter or digit
-// before the prefix means it is part of a longer word, but `_`, `-`, quotes and
-// whitespace do not shield a key (`trace_pcc_live_…` is still a key).
-const KEY_SOURCE = "(?<![A-Za-z0-9])(pcc_(?:live|test|oracle)_)([0-9a-fA-F]{32,})";
+/** Bodies this long or longer are key material. Real keys have 64. */
+export const MIN_BODY_HEX = 20;
 
-// Files over this size are not read. They are reported, never skipped silently.
-export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const KEY_SOURCE = `(pcc_(?:live|test|oracle)_)([0-9a-f]{${MIN_BODY_HEX},})`;
+// For output only: redact any hex run after a prefix, however short.
+const REDACT_SOURCE = "(pcc_(?:live|test|oracle)_)[0-9a-f]+";
+
+const GITLINK_MODE = "160000";
 
 /**
  * Find key literals in one text. Returns positions and shapes only, never values.
@@ -32,7 +41,7 @@ export const MAX_FILE_BYTES = 25 * 1024 * 1024;
  * @returns {{ line: number, prefix: string, length: number }[]}
  */
 export function scanText(text) {
-  const re = new RegExp(KEY_SOURCE, "g");
+  const re = new RegExp(KEY_SOURCE, "gi");
   const findings = [];
   let match;
   while ((match = re.exec(text)) !== null) {
@@ -43,38 +52,78 @@ export function scanText(text) {
 }
 
 /**
- * Scan every file tracked in the git index under `root`.
- * @param {string} root
- * @param {{ maxFileBytes?: number }} [options]
+ * Remove key material from a string before it is printed.
+ * @param {unknown} value
+ * @returns {string}
  */
-export function scanRepo(root, { maxFileBytes = MAX_FILE_BYTES } = {}) {
-  const listing = execFileSync("git", ["-C", root, "ls-files", "-z"], {
+export function redact(value) {
+  return String(value).replace(new RegExp(REDACT_SOURCE, "gi"), "$1<redacted>");
+}
+
+/** Every index entry: mode, blob id and path. */
+function listIndex(root) {
+  const out = execFileSync("git", ["-C", root, "ls-files", "-z", "--stage"], {
     encoding: "buffer",
-    maxBuffer: 512 * 1024 * 1024,
+    maxBuffer: 256 * 1024 * 1024,
   });
-  const files = listing.toString("utf8").split("\0").filter(Boolean);
+  return out
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => {
+      const tab = entry.indexOf("\t");
+      const [mode, sha] = entry.slice(0, tab).split(" ");
+      return { mode, sha, path: entry.slice(tab + 1) };
+    });
+}
+
+/** Read blobs from the object store in one process: sha -> Buffer. */
+function readBlobs(root, shas) {
+  const blobs = new Map();
+  if (shas.length === 0) return blobs;
+  const out = execFileSync("git", ["-C", root, "cat-file", "--batch"], {
+    input: `${[...new Set(shas)].join("\n")}\n`,
+    maxBuffer: 1024 * 1024 * 1024,
+  });
+  let pos = 0;
+  while (pos < out.length) {
+    const eol = out.indexOf(0x0a, pos);
+    if (eol < 0) throw new Error("truncated git cat-file output");
+    const [sha, type, size] = out.subarray(pos, eol).toString("utf8").split(" ");
+    if (type === "missing" || size === undefined) throw new Error(`object ${sha} is missing`);
+    const length = Number(size);
+    blobs.set(sha, out.subarray(eol + 1, eol + 1 + length));
+    pos = eol + 1 + length + 1; // content, then a newline
+  }
+  return blobs;
+}
+
+/**
+ * Scan every entry tracked in the git index under `root`.
+ * @param {string} root
+ */
+export function scanRepo(root) {
+  const entries = listIndex(root);
+  const files = entries.filter((e) => e.mode !== GITLINK_MODE);
+  const blobs = readBlobs(root, files.map((e) => e.sha));
   const findings = [];
-  const oversized = [];
+  const gitlinks = [];
   let scanned = 0;
-  for (const rel of files) {
-    const abs = join(root, rel);
-    let stat;
-    try {
-      stat = statSync(abs);
-    } catch {
-      continue; // tracked in the index but deleted from the working tree
+  for (const entry of entries) {
+    for (const f of scanText(entry.path)) {
+      findings.push({ file: entry.path, line: 0, prefix: f.prefix, length: f.length, inPath: true });
     }
-    if (!stat.isFile()) continue;
-    if (stat.size > maxFileBytes) {
-      oversized.push(rel);
+    if (entry.mode === GITLINK_MODE) {
+      gitlinks.push(entry.path);
       continue;
     }
-    const buf = readFileSync(abs);
-    if (buf.subarray(0, 8000).includes(0)) continue; // binary
+    const blob = blobs.get(entry.sha);
+    if (!blob) throw new Error(`could not read ${redact(entry.path)}`);
     scanned += 1;
-    for (const f of scanText(buf.toString("utf8"))) findings.push({ file: rel, ...f });
+    // latin1 maps every byte to one character, so binaries are scanned byte-wise.
+    for (const f of scanText(blob.toString("latin1"))) findings.push({ file: entry.path, ...f });
   }
-  return { findings, scanned, oversized };
+  return { findings, scanned, gitlinks };
 }
 
 function main(argv) {
@@ -83,18 +132,22 @@ function main(argv) {
     i >= 0 && argv[i + 1]
       ? resolve(argv[i + 1])
       : execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-  const { findings, scanned, oversized } = scanRepo(root);
-  if (oversized.length > 0) {
-    console.log(`secret-scan: ${oversized.length} tracked file(s) over ${MAX_FILE_BYTES} bytes were not read:`);
-    for (const rel of oversized) console.log(`  ${rel}`);
+  const { findings, scanned, gitlinks } = scanRepo(root);
+  if (gitlinks.length > 0) {
+    console.log(
+      `secret-scan: ${gitlinks.length} submodule entr${gitlinks.length === 1 ? "y has" : "ies have"} ` +
+        "no content in this repository and were not scanned:",
+    );
+    for (const rel of gitlinks) console.log(`  ${redact(rel)}`);
   }
   if (findings.length === 0) {
-    console.log(`secret-scan: OK. ${scanned} tracked text files, no PCC key literals.`);
+    console.log(`secret-scan: OK. ${scanned} tracked files (binaries included), no PCC key literals.`);
     return 0;
   }
   console.error(`secret-scan: ${findings.length} PCC key literal(s) in tracked files:`);
   for (const f of findings) {
-    console.error(`  ${f.file}:${f.line}  ${f.prefix}<${f.length} hex chars, value not printed>`);
+    const where = f.inPath ? `${redact(f.file)} (in the file name)` : `${redact(f.file)}:${f.line}`;
+    console.error(`  ${where}  ${f.prefix}<${f.length} hex chars, value not printed>`);
   }
   console.error(
     "secret-scan: read keys from the environment instead. A key that was ever committed " +
@@ -107,7 +160,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     process.exitCode = main(process.argv.slice(2));
   } catch (err) {
-    console.error(`secret-scan: error: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`secret-scan: error: ${redact(err instanceof Error ? err.message : err)}`);
     process.exitCode = 2;
   }
 }

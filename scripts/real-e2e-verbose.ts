@@ -31,7 +31,10 @@ const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc 
 const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
 
 const log: string[] = [];
-function L(s: string) { console.log(s); log.push(s); }
+// N44: nothing that reaches the console or the report carries PCC key material,
+// whatever a response echoes back.
+const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
+function L(s: string) { const t = redactKeys(s); console.log(t); log.push(t); }
 function SEP() { L("─".repeat(72)); }
 function BIGSEP() { L("═".repeat(72)); }
 

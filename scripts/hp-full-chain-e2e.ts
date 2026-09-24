@@ -55,7 +55,10 @@ const wallet = createWalletClient({ account, chain: baseSepolia, transport });
 const pub = createPublicClient({ chain: baseSepolia, transport });
 
 const report: string[] = [];
-function L(s: string) { console.log(s); report.push(s); }
+// N44: nothing that reaches the console or the report carries PCC key material,
+// whatever a response echoes back.
+const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
+function L(s: string) { const t = redactKeys(s); console.log(t); report.push(t); }
 function SEP() { L("─".repeat(72)); }
 
 async function writeC(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
@@ -334,4 +337,4 @@ async function main() {
   fs.writeFileSync("/home/ryangeorge/hp-full-chain-report.txt", report.join("\n"));
 }
 
-main().catch(e => { console.error("FAIL:", e); process.exit(1); });
+main().catch(e => { console.error("FAIL:", redactKeys(e instanceof Error ? e.stack ?? e.message : String(e))); process.exit(1); });

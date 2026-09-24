@@ -7,14 +7,18 @@ on:
     branches: [master]
 
 jobs:
-  # Board row N44: a PCC key literal (pcc_live_/pcc_test_/pcc_oracle_ + 32 or more
-  # hex chars) in any tracked file fails CI. The scan prints file:line only, never a
-  # value. Node built-ins only: no install step, no third-party action beyond checkout.
+  # Board row N44: PCC key material (pcc_live_/pcc_test_/pcc_oracle_ in any case,
+  # then 20 or more hex chars) in any tracked file or file name fails CI. Every
+  # blob is read from git, binaries included, with no size cap. The scan prints
+  # file:line only, never a value. Node built-ins only: no install step, no
+  # third-party action beyond checkout.
   secret-scan:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -26,6 +30,20 @@ jobs:
 
       - name: Scan tracked files for PCC key literals
         run: node scripts/ci/secret-scan.mjs
+
+      # A PR could weaken the scanner in the same change that adds a key, so the
+      # scanner as it is on the base branch also scans this PR's files.
+      - name: Scan again with the base branch's scanner
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if git cat-file -e "origin/${BASE_REF}:scripts/ci/secret-scan.mjs" 2>/dev/null; then
+            git show "origin/${BASE_REF}:scripts/ci/secret-scan.mjs" > "$RUNNER_TEMP/secret-scan-base.mjs"
+            node "$RUNNER_TEMP/secret-scan-base.mjs" --root "$GITHUB_WORKSPACE"
+          else
+            echo "The base branch has no scanner yet: this change introduces it."
+          fi
 
   build-and-test:
     runs-on: ubuntu-latest

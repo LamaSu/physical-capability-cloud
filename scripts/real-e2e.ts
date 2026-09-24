@@ -89,7 +89,10 @@ const ESCROW_ABI = [
 ] as const;
 
 const report: string[] = [];
-function log(msg: string) { console.log(msg); report.push(msg); }
+// N44: nothing that reaches the console or the report carries PCC key material,
+// whatever a response echoes back.
+const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
+function log(msg: string) { const t = redactKeys(msg); console.log(t); report.push(t); }
 
 async function waitTx(hash: Hex) {
   const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
@@ -390,4 +393,4 @@ async function main() {
   log("DONE. Full protocol executed. No mocks.");
 }
 
-main().catch((e) => { console.error("FATAL:", e.message ?? e); process.exit(1); });
+main().catch((e) => { console.error("FATAL:", redactKeys(String(e?.message ?? e))); process.exit(1); });
