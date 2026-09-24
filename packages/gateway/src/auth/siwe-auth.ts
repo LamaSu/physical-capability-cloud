@@ -67,14 +67,67 @@ const NONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes
  */
 const MAX_OUTSTANDING_NONCES = 50_000;
 
+/**
+ * Minimum spacing between two capacity-triggered full sweeps (astra MED, #326).
+ *
+ * At capacity, every ADMITTED nonce request used to run a full O(n) sweep of a
+ * 50k-entry map before refusing — so a caller who filled the map (the per-IP
+ * limiter is process-local and per-IP, see limitation 2 above) turned each
+ * further unauthenticated request into a 50k-entry scan. Now reclamation at the
+ * boundary runs at most once per window; inside the window the request is
+ * refused with 503 WITHOUT scanning. The 5-minute timer below still collects
+ * expired entries in the steady state.
+ */
+const CAPACITY_SWEEP_MIN_INTERVAL_MS = 5_000;
+/** When the last capacity-triggered sweep ran (0 = never). */
+let lastCapacitySweepAt = 0;
+/** Number of full sweeps run — observable by tests via __nonceSweepCountForTests. */
+let nonceSweepCount = 0;
+
 /** Drop expired nonces from memory. Cheap, in-process, touches no DB. */
 function sweepNonces(): number {
+  nonceSweepCount++;
   const now = Date.now();
   for (const [nonce, expiry] of nonces) {
     if (expiry < now) nonces.delete(nonce);
   }
   return nonces.size;
 }
+
+/**
+ * At capacity: may this request pay for a full reclamation sweep? At most one
+ * per CAPACITY_SWEEP_MIN_INTERVAL_MS. A clock that moved BACKWARDS (elapsed < 0)
+ * also allows one, so a wall-clock step cannot wedge reclamation for its length.
+ */
+function capacitySweepAllowed(now: number): boolean {
+  const elapsed = now - lastCapacitySweepAt;
+  return lastCapacitySweepAt === 0 || elapsed < 0 || elapsed >= CAPACITY_SWEEP_MIN_INTERVAL_MS;
+}
+
+/** Test-only: forget every outstanding nonce and the sweep throttle state. */
+export function __resetNonceStateForTests(): void {
+  nonces.clear();
+  lastCapacitySweepAt = 0;
+  nonceSweepCount = 0;
+}
+
+/** Test-only: how many full nonce sweeps have run since the last reset. */
+export function __nonceSweepCountForTests(): number {
+  return nonceSweepCount;
+}
+
+/**
+ * Test-only: fill the store with `count` outstanding nonces expiring at
+ * `expiresAt` (default: a normal TTL from now), to reach the capacity boundary
+ * without issuing 50k HTTP requests.
+ */
+export function __fillNoncesForTests(count: number, expiresAt?: number): void {
+  const expiry = expiresAt ?? Date.now() + NONCE_TTL_MS;
+  for (let i = 0; i < count; i++) nonces.set(`test-fill-${i}`, expiry);
+}
+
+/** Test-only: the capacity bound (so a test does not hard-code 50_000). */
+export const __MAX_OUTSTANDING_NONCES_FOR_TESTS = MAX_OUTSTANDING_NONCES;
 
 /**
  * Remove expired sessions (DB) and nonces (in-memory).
@@ -320,12 +373,22 @@ export async function siweAuthPlugin(app: FastifyInstance) {
     // this unauthenticated request path. And only SCAN when actually at capacity:
     // sweeping on every nonce request was an O(n) map scan per call, O(n²) under a
     // fill-flood (finding M5). The timer sweep handles the steady state; this
-    // lazy check pays the scan only at the boundary.
-    if (nonces.size >= MAX_OUTSTANDING_NONCES && sweepNonces() >= MAX_OUTSTANDING_NONCES) {
-      return reply.status(503).send({
-        error: "nonce_capacity",
-        message: "Too many outstanding sign-in nonces. Try again shortly.",
-      });
+    // lazy check pays the scan only at the boundary — and, at the boundary, at
+    // most ONCE per CAPACITY_SWEEP_MIN_INTERVAL_MS (astra MED, #326): a request
+    // that finds the store full inside that window is refused without scanning.
+    if (nonces.size >= MAX_OUTSTANDING_NONCES) {
+      const now = Date.now();
+      let stillFull = true;
+      if (capacitySweepAllowed(now)) {
+        lastCapacitySweepAt = now;
+        stillFull = sweepNonces() >= MAX_OUTSTANDING_NONCES;
+      }
+      if (stillFull) {
+        return reply.status(503).send({
+          error: "nonce_capacity",
+          message: "Too many outstanding sign-in nonces. Try again shortly.",
+        });
+      }
     }
     const nonce = randomBytes(16).toString("hex");
     nonces.set(nonce, Date.now() + NONCE_TTL_MS);

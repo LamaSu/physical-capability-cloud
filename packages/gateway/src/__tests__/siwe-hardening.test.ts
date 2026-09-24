@@ -16,11 +16,17 @@
  * documented in the siwe-auth.ts docblock, not silently dropped.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
-import { siweAuthPlugin } from "../auth/siwe-auth.js";
+import {
+  siweAuthPlugin,
+  __resetNonceStateForTests,
+  __nonceSweepCountForTests,
+  __fillNoncesForTests,
+  __MAX_OUTSTANDING_NONCES_FOR_TESTS,
+} from "../auth/siwe-auth.js";
 import { __resetSiweNonceForTest } from "../middleware/security-hardening.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 
@@ -193,6 +199,63 @@ describe("SIWE hardening (PR #309 cross-family review)", () => {
       const res = await verify(await signed(account, { expirationTime: soon }));
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body).address.toLowerCase()).toBe(account.address.toLowerCase());
+    });
+  });
+
+  // ── WP-A A5 (astra MED, #326): capacity reclamation is throttled ──
+  //
+  // At MAX_OUTSTANDING_NONCES, every admitted request used to run a full sweep
+  // of the 50k-entry map before refusing: a fill-flood turned each further
+  // unauthenticated call into an O(n) scan. Distinct source IPs are used so the
+  // per-IP issuance limiter (60/min) is never what refuses these requests.
+  describe("nonce capacity reclamation is throttled", () => {
+    const MAX = __MAX_OUTSTANDING_NONCES_FOR_TESTS;
+    const nonceFrom = (ip: string) =>
+      app.inject({
+        method: "GET", url: "/api/auth/nonce",
+        headers: { host: "pcc.test" }, remoteAddress: ip,
+      });
+
+    beforeEach(() => { __resetNonceStateForTests(); });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      __resetNonceStateForTests();
+    });
+
+    it("at capacity with a recent sweep, refuses with 503 WITHOUT scanning again", async () => {
+      __fillNoncesForTests(MAX); // unexpired: a sweep reclaims nothing
+      const codes: number[] = [];
+      for (let i = 1; i <= 25; i++) codes.push((await nonceFrom(`198.51.100.${i}`)).statusCode);
+      expect(codes.every((c) => c === 503)).toBe(true);
+      // One reclamation attempt for the whole burst — not one per request.
+      expect(__nonceSweepCountForTests()).toBe(1);
+    });
+
+    it("sweeps again only after the window, and then reclaims expired entries", async () => {
+      let now = Date.now();
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      __fillNoncesForTests(MAX, now + 60_000); // all expire in one minute
+
+      expect((await nonceFrom("198.51.100.101")).statusCode).toBe(503);
+      expect(__nonceSweepCountForTests()).toBe(1);
+
+      now += 1_000; // inside the throttle window: refused, no scan
+      expect((await nonceFrom("198.51.100.102")).statusCode).toBe(503);
+      expect(__nonceSweepCountForTests()).toBe(1);
+
+      now += 60_000; // window elapsed AND the filler has expired
+      const res = await nonceFrom("198.51.100.103");
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).nonce).toMatch(/^[0-9a-f]{32}$/);
+      expect(__nonceSweepCountForTests()).toBe(2);
+    });
+
+    it("below capacity, issuing a nonce never scans", async () => {
+      __fillNoncesForTests(MAX - 10);
+      for (let i = 1; i <= 5; i++) {
+        expect((await nonceFrom(`198.51.100.${200 + i}`)).statusCode).toBe(200);
+      }
+      expect(__nonceSweepCountForTests()).toBe(0);
     });
   });
 });
