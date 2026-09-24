@@ -22,6 +22,10 @@ export * from "./primitives.js";
 // isFabricated / bundleHasFabricatedEvents — the ONE canonical fabricated-evidence
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
+// evidenceLevelOf / evidenceLevelOfBundle — submitted / device_reported /
+// inspected_output, the one classification of how strongly evidence shows the
+// work was done (must-close 5).
+export * from "./evidence-level.js";
 export * from "./eligibility.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
