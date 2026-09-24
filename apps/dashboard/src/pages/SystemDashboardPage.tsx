@@ -651,7 +651,8 @@ function AgentBusCard({ agents }: { agents: unknown }) {
   let body: React.ReactNode;
   if (conversations === null && messages === null) {
     body = <NotInReport what="agent activity" />;
-  } else if ((conversations?.length ?? 0) === 0 && (messages?.length ?? 0) === 0) {
+  } else if (conversations?.length === 0 && messages?.length === 0) {
+    // Both lists present and empty. A missing list is not an empty one: it renders "—" below.
     body = <ListsNone what="agent conversations" />;
   } else {
     const latest = messages ? latestTime(messages, "timestamp") : null;

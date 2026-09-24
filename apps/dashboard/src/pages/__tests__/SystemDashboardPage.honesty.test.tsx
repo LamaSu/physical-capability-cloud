@@ -360,6 +360,14 @@ describe("gateway answering", () => {
     expect(valueIn("Jobs", "Jobs")).toBe("5");
   });
 
+  it("agent conversations the report left out are not 'none', even when its message list is empty", async () => {
+    stubFetch({ [ROUTE]: { status: 200, body: { ...REPORT, agents: { recentMessages: [] } } } });
+    const t = (await renderPage()).text();
+    expect(t).not.toContain("The report lists no agent conversations.");
+    expect(valueIn("Agent Bus", "Conversations")).toBe("—");
+    expect(valueIn("Agent Bus", "Recent Messages")).toBe("0");
+  });
+
   it("a failed refresh keeps the earlier report and marks it stale", async () => {
     stubFetch({ [ROUTE]: { status: 200, body: REPORT } });
     const { client, text } = await renderPage();
