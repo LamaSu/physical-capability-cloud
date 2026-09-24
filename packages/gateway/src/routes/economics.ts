@@ -110,6 +110,27 @@ function sealedSchedules(hashes: readonly string[]): RateSchedule[] {
   return out;
 }
 
+/**
+ * A template is a starting point, so it is shown as a deal priced now. Its offer window, its licenses'
+ * validity and its pins' recorded moment all move by the same amount, and the seam's timing rules then
+ * hold. Its schedules are constant in time, so every pinned rate still holds (a test checks this a year on).
+ */
+function asOfNow(ag: EconomicAgreement, now: number): EconomicAgreement {
+  const delta = now - ag.asOf;
+  const shift = (t: number | null) => (t === null ? null : t + delta);
+  return {
+    ...ag,
+    asOf: now,
+    terms: { ...ag.terms, acceptBy: shift(ag.terms.acceptBy) },
+    clauses: ag.clauses.map((c) =>
+      c.rule.kind === "percent" && c.rule.rateSource !== null
+        ? { ...c, rule: { ...c.rule, rateSource: { ...c.rule.rateSource, evaluatedAt: c.rule.rateSource.evaluatedAt + delta } } }
+        : c,
+    ),
+    licenses: ag.licenses.map((l) => ({ ...l, validFrom: shift(l.validFrom), validUntil: shift(l.validUntil) })),
+  };
+}
+
 /** Default what-ifs: everything delivered, each step failing on its own, and a 20% lower price. */
 function defaultScenarios(ag: EconomicAgreement): unknown[] {
   const units = [...ag.units].sort((a, b) => (a.unitRef < b.unitRef ? -1 : a.unitRef > b.unitRef ? 1 : 0));
@@ -141,12 +162,13 @@ export async function economicsRoutes(app: FastifyInstance) {
   app.post<{ Body: PreviewBody }>("/api/economics/preview", async (req, reply) => {
     const body = req.body ?? {};
     const fee = configuredProtocolFee();
+    const now = Math.floor(Date.now() / 1000);
     let agreement: unknown;
     const extraSchedules: RateSchedule[] = [];
     if (typeof body.templateId === "string") {
       const t = AGREEMENT_TEMPLATES.find((x) => x.templateId === body.templateId);
       if (!t) return reply.code(404).send({ error: "template_not_found", message: `No template "${body.templateId}".` });
-      const built = t.build();
+      const built = asOfNow(t.build(), now);
       // A template is a starting point: PCC fills in the fee it actually charges.
       if (fee !== null) built.fee = { feeBps: fee.feeBps, feeRecipient: fee.feeRecipient };
       agreement = built;
@@ -169,6 +191,6 @@ export async function economicsRoutes(app: FastifyInstance) {
         : result.ok
           ? simulateEconomics(agreement, defaultScenarios(agreement as EconomicAgreement), options)
           : [];
-    return { preview: buildEconomicPreview(agreement, result, { feeVerified: fee !== null, scenarios }) };
+    return { preview: buildEconomicPreview(agreement, result, { feeVerified: fee !== null, scenarios, now }) };
   });
 }

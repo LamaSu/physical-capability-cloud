@@ -5,13 +5,16 @@
  * forbidden recipients from configuration. The agreement itself is only ever the author's proposal.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { canonicalize, computeScheduleHash, economics, type RateSchedule } from "@pcc/spec";
 import { configuredProtocolFee, economicsRoutes } from "../routes/economics.js";
 import { closeStore, getRepos, initStore } from "../db.js";
 
 const TREASURY = "0xfee0000000000000000000000000000000000fee";
+/** The moment every example agreement was priced; the tests' clock starts a minute later. */
+const AS_OF = economics.exampleSparePrinter().asOf;
+const at = (unixSeconds: number) => vi.setSystemTime(unixSeconds * 1000);
 const ENV_KEYS = ["PCC_PROTOCOL_FEE_BPS", "PCC_PROTOCOL_FEE_RECIPIENT", "PCC_FORBIDDEN_RECIPIENTS"] as const;
 
 async function buildApp(): Promise<FastifyInstance> {
@@ -30,6 +33,9 @@ describe("PX-12 economics routes", () => {
   const saved: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
+    // Only Date is faked: the seam's timing rules read the server's clock, and nothing else should move.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    at(AS_OF + 60);
     for (const k of ENV_KEYS) saved[k] = process.env[k];
     process.env.PCC_PROTOCOL_FEE_BPS = "235";
     process.env.PCC_PROTOCOL_FEE_RECIPIENT = TREASURY;
@@ -38,6 +44,7 @@ describe("PX-12 economics routes", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await app.close();
     closeStore();
     for (const k of ENV_KEYS) {
@@ -148,6 +155,49 @@ describe("PX-12 economics routes", () => {
     royalty.rule.rateSource.scheduleHash = scheduleHash;
     const { preview: p } = await preview({ agreement: ag });
     expect(p.refusals.map((r) => [r.code, r.path])).toEqual([["RATE_UNVERIFIED", ["clause", "kit-royalty", "rateSource"]]]);
+  });
+
+  describe("the seam's timing rules, at the server's clock", () => {
+    it("an agreement priced more than a day ago cannot be accepted now, and says so", async () => {
+      at(AS_OF + 2 * 86_400);
+      const { preview: p } = await preview({ agreement: economics.examplePrintAndMail() });
+      expect(p.status).toBe("not-acceptable-now");
+      expect(p.terms!.acceptableNow).toBe(false);
+      expect(p.terms!.timing).toBe("It was priced at 2026-09-21 14:13 UTC, more than a day ago, so it must be quoted again before it can be accepted.");
+      expect(p.headline.startsWith("It was priced at")).toBe(true);
+      expect(p.headline).toContain("As written, you pay at most ");
+      expect(p.moneyState.note).toContain("cannot be accepted now");
+      expect(p.refusals).toEqual([]);
+    });
+
+    it("an offer past its deadline cannot be accepted, even when freshly priced", async () => {
+      const ag = economics.examplePrintAndMail();
+      ag.terms.acceptBy = AS_OF + 3_600;
+      at(AS_OF + 7_200);
+      const { preview: p } = await preview({ agreement: ag });
+      expect(p.status).toBe("not-acceptable-now");
+      expect(p.terms!.deadline).toBe("The offer expired at 2026-09-21 15:13 UTC.");
+      expect(p.terms!.timing).toBe("This offer expired at 2026-09-21 15:13 UTC, so it can no longer be accepted.");
+    });
+
+    it("an agreement priced for a moment still to come cannot be accepted yet", async () => {
+      at(AS_OF - 60);
+      const { preview: p } = await preview({ agreement: economics.examplePrintAndMail() });
+      expect(p.status).toBe("not-acceptable-now");
+      expect(p.terms!.timing).toContain("which has not come yet");
+    });
+
+    it("a template is dated now, so it stays acceptable a year on (its licenses and pins move with it)", async () => {
+      const later = AS_OF + 400 * 86_400;
+      at(later);
+      for (const t of economics.AGREEMENT_TEMPLATES) {
+        const { preview: p } = await preview({ templateId: t.templateId });
+        expect([t.templateId, p.status]).toEqual([t.templateId, "fundable"]);
+        expect(p.terms!.asOf).toBe(new Date(later * 1000).toISOString());
+        expect(p.terms!.deadline).toMatch(/^The offer expires at /);
+        expect(p.terms!.acceptableNow).toBe(true);
+      }
+    });
   });
 
   it("configured forbidden recipients are enforced", async () => {

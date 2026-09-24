@@ -10,6 +10,7 @@
 
 import { cmpStr } from "./hash.js";
 import { snapshotJson } from "./input.js";
+import { DEFAULT_MAX_AGREEMENT_AGE_SECONDS } from "./bind.js";
 import type { CompileResult, CompiledEconomics } from "./compile.js";
 import type { Refusal, RefusalCode } from "./refusals.js";
 import type { ScenarioResult } from "./simulate.js";
@@ -106,7 +107,13 @@ export interface EconomicPreviewDTO {
   schema: "pcc.economic-preview.v1";
   /** A prediction (Layer C). Accepting binds `agreement.agreementHash`; nothing here is a deal. */
   layer: "C";
-  status: "fundable" | "refused";
+  /**
+   * fundable: it compiles, and (when the server's clock was given) it can be accepted now.
+   * not-acceptable-now: it compiles, but the seam would refuse it at this moment: its offer deadline has
+   * passed, or it was priced too long ago or for a moment still to come (`terms.timing` says which).
+   * refused: it does not compile.
+   */
+  status: "fundable" | "not-acceptable-now" | "refused";
   headline: string;
   agreement: {
     agreementId: string | null;
@@ -126,7 +133,18 @@ export interface EconomicPreviewDTO {
   rights: Array<{ license: string; licensor: string; class: string; attributionRequired: boolean; validUntil: string | null; authority: string }>;
   rates: Array<{ clause: string; percent: string; verified: boolean; note: string }>;
   notOwed: Array<{ clause: string; why: string }>;
-  terms: { asOf: string; acceptBy: string | null; changePolicy: string; supersedes: string | null } | null;
+  terms: {
+    asOf: string;
+    acceptBy: string | null;
+    /** The deadline in words, in the right tense for the server's clock. */
+    deadline: string;
+    /** Whether it can be accepted at the server's clock; null when no clock was given. */
+    acceptableNow: boolean | null;
+    /** Why it cannot be accepted now, or null. */
+    timing: string | null;
+    changePolicy: string;
+    supersedes: string | null;
+  } | null;
   moneyState: { reserved: Money | null; paid: Money | null; note: string };
   scenarios: ScenarioView[];
   refusals: Array<{ code: RefusalCode; path: string[]; explanation: string }>;
@@ -260,6 +278,41 @@ export interface PreviewOptions {
   /** Whether the fee in the agreement was checked against the server's own fee (compile option `fee`). */
   feeVerified: boolean;
   scenarios?: readonly ScenarioResult[];
+  /**
+   * The server's clock, in unix seconds. With it, the preview applies the seam's two timing rules
+   * (`netSplitterFor`): the agreement must be priced within [now - maxAgreementAgeSeconds, now], and its
+   * offer deadline must not have passed. Without it, the deadline is shown but not judged.
+   */
+  now?: number;
+  /** The oldest pricing the seam accepts; default DEFAULT_MAX_AGREEMENT_AGE_SECONDS (one day). */
+  maxAgreementAgeSeconds?: number;
+}
+
+function utc(unixSeconds: number): string {
+  return `${isoTime(unixSeconds).slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function duration(seconds: number): string {
+  if (seconds % 86_400 === 0) return seconds === 86_400 ? "a day" : `${seconds / 86_400} days`;
+  if (seconds % 3_600 === 0) return seconds === 3_600 ? "an hour" : `${seconds / 3_600} hours`;
+  return `${seconds} seconds`;
+}
+
+/** The seam's timing rules at the server's clock, in its order: the pricing window, then the deadline. */
+function timingAt(ag: EconomicAgreement, options: PreviewOptions): { deadline: string; acceptableNow: boolean | null; timing: string | null } {
+  const acceptBy = ag.terms.acceptBy;
+  const now = options.now;
+  if (now === undefined) {
+    return { deadline: acceptBy === null ? "The offer has no deadline." : `The offer's deadline is ${utc(acceptBy)}.`, acceptableNow: null, timing: null };
+  }
+  const deadline =
+    acceptBy === null ? "The offer has no deadline." : now > acceptBy ? `The offer expired at ${utc(acceptBy)}.` : `The offer expires at ${utc(acceptBy)}.`;
+  const maxAge = options.maxAgreementAgeSeconds ?? DEFAULT_MAX_AGREEMENT_AGE_SECONDS;
+  let timing: string | null = null;
+  if (ag.asOf > now) timing = `It is priced for ${utc(ag.asOf)}, which has not come yet, so it cannot be accepted before then.`;
+  else if (ag.asOf < now - maxAge) timing = `It was priced at ${utc(ag.asOf)}, more than ${duration(maxAge)} ago, so it must be quoted again before it can be accepted.`;
+  else if (acceptBy !== null && now > acceptBy) timing = `This offer expired at ${utc(acceptBy)}, so it can no longer be accepted.`;
+  return { deadline, acceptableNow: timing === null, timing };
 }
 
 /**
@@ -375,11 +428,14 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
 
   const partiesPaid = payees.length;
   const feeText = fee > 0n ? ` ${money(fee, cur).display} of that is PCC's protocol fee (${percentText(c.fee.feeBps)})${options.feeVerified ? "" : ", not yet checked against the fee PCC charges"}.` : "";
+  const deal = (you: string) =>
+    `${you} pay at most ${money(gross, cur).display}.${feeText} The rest, ${money(net, cur).display}, goes to ${partiesPaid} ${partiesPaid === 1 ? "party" : "parties"}, step by step, only as each step is released.`;
+  const timing = timingAt(ag, options);
   return {
     schema: "pcc.economic-preview.v1",
     layer: "C",
-    status: "fundable",
-    headline: `You pay at most ${money(gross, cur).display}.${feeText} The rest, ${money(net, cur).display}, goes to ${partiesPaid} ${partiesPaid === 1 ? "party" : "parties"}, step by step, only as each step is released.`,
+    status: timing.timing === null ? "fundable" : "not-acceptable-now",
+    headline: timing.timing === null ? deal("You") : `${timing.timing} As written, ${deal("you")}`,
     agreement: {
       agreementId: c.agreementId,
       version: c.version,
@@ -450,13 +506,17 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
     terms: {
       asOf: isoTime(c.asOf),
       acceptBy: ag.terms.acceptBy !== null ? isoTime(ag.terms.acceptBy) : null,
+      ...timing,
       changePolicy: "Any change makes a new version, which you would accept again. An accepted version never changes.",
       supersedes: ag.supersedes,
     },
     moneyState: {
       reserved: money(0n, cur),
       paid: money(0n, cur),
-      note: "Nothing is reserved or paid yet. When you accept and fund, each step's price is reserved in escrow, paid out only when that step is released, and refunded if it fails.",
+      note:
+        timing.timing === null
+          ? "Nothing is reserved or paid yet. When you accept and fund, each step's price is reserved in escrow, paid out only when that step is released, and refunded if it fails."
+          : "Nothing can be reserved or paid: this version cannot be accepted now. A new version would have to be offered and accepted.",
     },
     scenarios,
     refusals: [],

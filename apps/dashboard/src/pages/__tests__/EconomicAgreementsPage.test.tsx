@@ -28,6 +28,18 @@ function templatePreview(templateId: string, withScenarios = false) {
 }
 
 describe("EconomicAgreementView", () => {
+  it("an offer the seam would refuse now says so, with the reason in words, not a green Fundable", () => {
+    const ag = economics.examplePrintAndMail();
+    const compiled = economics.compileEconomics(ag);
+    const html = renderToStaticMarkup(
+      <EconomicAgreementView preview={economics.buildEconomicPreview(ag, compiled, { feeVerified: true, now: ag.asOf + 3 * 86_400 })} />,
+    );
+    expect(html).toContain("Cannot be accepted now");
+    expect(html).not.toContain(">Fundable<");
+    expect(html).toContain("The offer expired at 2026-09-22 14:13 UTC.");
+    expect(html).toContain("more than a day ago, so it must be quoted again before it can be accepted.");
+  });
+
   it("shows who gets paid what, when and why, in the server's own words and amounts", () => {
     const html = renderToStaticMarkup(<EconomicAgreementView preview={templatePreview("print-and-mail", true)} />);
     expect(html).toContain("You pay at most 22.00 USDC.");

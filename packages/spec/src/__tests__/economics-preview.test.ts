@@ -211,3 +211,37 @@ describe("a large agreement stays readable, and exact", () => {
     ]);
   });
 });
+
+describe("the seam's timing rules, when the server's clock is given", () => {
+  const ag = examplePrintAndMail();
+  const compiled = compileEconomics(ag);
+  if (!compiled.ok) throw new Error("fixture");
+  const at = (now?: number, maxAgreementAgeSeconds?: number) => buildEconomicPreview(ag, compiled, { feeVerified: true, now, maxAgreementAgeSeconds });
+
+  it("without a clock, the deadline is shown but not judged", () => {
+    const p = at();
+    expect(p.status).toBe("fundable");
+    expect(p.terms!).toMatchObject({ acceptableNow: null, timing: null, deadline: "The offer's deadline is 2026-09-22 14:13 UTC." });
+  });
+
+  it("inside the pricing window and before the deadline, it can be accepted", () => {
+    const p = at(ag.asOf + 60);
+    expect(p.status).toBe("fundable");
+    expect(p.terms!).toMatchObject({ acceptableNow: true, timing: null, deadline: "The offer expires at 2026-09-22 14:13 UTC." });
+    expect(p.headline.startsWith("You pay at most")).toBe(true);
+  });
+
+  it("the pricing window is checked before the deadline, as the seam does, and its length is the seam's", () => {
+    expect(at(ag.asOf + 2 * 86_400).terms!.timing).toContain("more than a day ago");
+    expect(at(ag.asOf + 7_200, 3_600).terms!.timing).toBe("It was priced at 2026-09-21 14:13 UTC, more than an hour ago, so it must be quoted again before it can be accepted.");
+    expect(at(ag.asOf + 86_400, 2 * 86_400).terms!.timing).toBeNull(); // the deadline itself is inclusive
+    expect(at(ag.asOf + 86_401, 2 * 86_400).terms!.timing).toBe("This offer expired at 2026-09-22 14:13 UTC, so it can no longer be accepted.");
+  });
+
+  it("a refused agreement is refused whatever the clock", () => {
+    const bad = examplePrintAndMail();
+    bad.units[0]!.gross = "1";
+    const r = compileEconomics(bad);
+    expect(buildEconomicPreview(bad, r, { feeVerified: true, now: bad.asOf + 60 }).status).toBe("refused");
+  });
+});

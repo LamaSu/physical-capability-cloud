@@ -12,6 +12,12 @@ import type { economics } from "@pcc/spec";
 
 type Preview = economics.EconomicPreviewDTO;
 
+const STATUS_BADGE: Record<Preview["status"], { color: "green" | "gold" | "red"; label: string }> = {
+  fundable: { color: "green", label: "Fundable" },
+  "not-acceptable-now": { color: "gold", label: "Cannot be accepted now" },
+  refused: { color: "red", label: "Refused" },
+};
+
 const CATEGORY_COLOR: Record<string, "green" | "cyan" | "gold" | "teal"> = {
   provider: "green",
   upstream: "cyan",
@@ -34,7 +40,7 @@ export function EconomicAgreementView({ preview }: { preview: Preview }) {
     <div className="space-y-4" data-testid="economic-agreement-view">
       <GlassPanel padding="md">
         <div className="flex items-center gap-2 mb-2">
-          <GlowBadge color={p.status === "fundable" ? "green" : "red"}>{p.status === "fundable" ? "Fundable" : "Refused"}</GlowBadge>
+          <GlowBadge color={STATUS_BADGE[p.status].color}>{STATUS_BADGE[p.status].label}</GlowBadge>
           <GlowBadge color="gray">Preview, not a deal</GlowBadge>
           {p.protocolFee && !p.protocolFee.verified ? <GlowBadge color="gold">Fee not checked</GlowBadge> : null}
         </div>
@@ -178,7 +184,8 @@ export function EconomicAgreementView({ preview }: { preview: Preview }) {
         <Section title="Expiry and changes">
           <ul className="space-y-1 text-xs text-white/60">
             <li>Priced as of {p.terms.asOf.slice(0, 16).replace("T", " ")} UTC.</li>
-            <li>{p.terms.acceptBy ? `The offer expires at ${p.terms.acceptBy.slice(0, 16).replace("T", " ")} UTC.` : "The offer has no deadline."}</li>
+            <li>{p.terms.deadline}</li>
+            {p.terms.timing ? <li className="text-amber-300" data-testid="timing">{p.terms.timing}</li> : null}
             <li>{p.terms.changePolicy}</li>
           </ul>
         </Section>
