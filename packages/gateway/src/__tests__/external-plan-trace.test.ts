@@ -28,6 +28,7 @@ import {
   planIdForReservation,
   snapshotSubmission,
   submissionDigest,
+  type EconomicsBinding,
   type ExternalPlanSubmission,
   type ReservationRecord,
   type SeamDeps,
@@ -667,5 +668,98 @@ describe("N25 through the seam: the accepted deal seals each node's execution in
     expect(d(withExec({ print: { inputs: { pages: Number.NaN } } }))).toBe(d(withExec({ print: { inputs: { pages: Infinity } } })));
     expect(d(withExec({ print: { inputs: { pages: Number.NaN } } }))).not.toBe(d(withExec({ print: { inputs: { pages: 2 } } })));
     expect(d(withExec())).toBe(d(withExec())); // deterministic
+  });
+});
+
+describe("R15 through the seam (economics option b: royalties on top): the agreement grosses units up; the reservation covers it", () => {
+  const LICENSOR = A("c1");
+  const HASH = (b: string) => `0x${b.repeat(32)}`;
+  /** A stand-in for economics' netSplitterFor: the licensor gets part of the gross-up; legs conserve n exactly. */
+  const standInSplit: EconomicsBinding["splitNet"] = (units) => ({
+    ok: true,
+    agreementHash: HASH("a1"),
+    economicTermsHash: HASH("e1"),
+    rightsTermsHash: HASH("f1"),
+    units: units.map((u) => {
+      const royalty = (u.g - u.quote) / 2n;
+      return {
+        unitRef: u.nodeId,
+        gross: u.g.toString(),
+        fee: u.f.toString(),
+        net: u.n.toString(),
+        payouts: royalty > 0n
+          ? [{ recipient: u.payoutAddress, amount: (u.n - royalty).toString() }, { recipient: LICENSOR, amount: royalty.toString() }]
+          : [{ recipient: u.payoutAddress, amount: u.n.toString() }],
+      };
+    }),
+  });
+  const econ = (gross: Record<string, bigint>, over: Partial<EconomicsBinding> = {}): EconomicsBinding => ({ unitGross: () => ({ ok: true, gross }), splitNet: standInSplit, ...over });
+  const withEcon = (economics: unknown) => ({ ...world().deps, economics }) as SeamDeps;
+
+  it("each unit's gross is the agreement's; the operator's live quote reaches the splitter; the deal seals the agreementHash and the royalty legs", () => {
+    const seen: Array<{ nodeId: string; quote: bigint; g: bigint }> = [];
+    const binding = econ({ print: 7_000_000n, mail: 3_250_000n }, {
+      splitNet: (units) => {
+        for (const u of units) seen.push({ nodeId: u.nodeId, quote: u.quote, g: u.g });
+        return standInSplit(units);
+      },
+    });
+    const r = acceptExternalPlan(agentDag(), CTX, withEcon(binding));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(seen).toEqual([
+      { nodeId: "print", quote: 6_500_000n, g: 7_000_000n },
+      { nodeId: "mail", quote: 3_250_000n, g: 3_250_000n },
+    ]);
+    expect(r.plan.totalObligationBaseUnits).toBe(10_250_000n);
+    expect(r.plan.agreementHash).toBe(HASH("a1"));
+    const printUnit = r.plan.jobs.flatMap((j) => j.units).find((u) => u.g === 7_000_000n)!;
+    expect(printUnit.payouts.map((p) => p.recipient)).toEqual([OP_PRINT, LICENSOR]);
+    expect(printUnit.payouts.reduce((a, p) => a + p.amount, 0n)).toBe(printUnit.n);
+  });
+
+  it("refused at the economics stage, before the compile: an agreement refusal, an unreadable answer, a missing unit gross, a gross below the quote", () => {
+    const boom = () => {
+      throw new Error("x");
+    };
+    const cases: Array<[unknown, unknown]> = [
+      [econ({}, { unitGross: () => ({ ok: false, code: "economics:SCHEMA_INVALID" }) }), { stage: "economics", reason: "agreement-refused", code: "economics:SCHEMA_INVALID" }],
+      [econ({}, { unitGross: () => null as never }), { stage: "economics", reason: "agreement-unreadable" }],
+      [econ({}, { unitGross: () => ({ ok: true, gross: "x" }) as never }), { stage: "economics", reason: "agreement-unreadable" }],
+      [econ({}, { unitGross: () => Object.defineProperty({ ok: true }, "gross", { get: boom }) as never }), { stage: "economics", reason: "agreement-unreadable" }],
+      [econ({ print: 7_000_000n }), { stage: "economics", nodeId: "mail", reason: "unit-gross-missing" }],
+      [econ({ print: 7_000_000n, mail: 3_000_000 as unknown as bigint }), { stage: "economics", nodeId: "mail", reason: "unit-gross-missing" }],
+      [econ({ print: 6_499_999n, mail: 3_250_000n }), { stage: "economics", nodeId: "print", reason: "quote-not-covered" }],
+    ];
+    for (const [binding, expected] of cases) {
+      const r = acceptExternalPlan(agentDag(), CTX, withEcon(binding));
+      expect(r.ok === false && r.refusal).toEqual(expected);
+    }
+  });
+
+  it("the reservation must cover the GROSSED-UP total, not the operators' quotes", () => {
+    const r = acceptExternalPlan(agentDag(), CTX, withEcon(econ({ print: 15_000_000n, mail: 6_000_000n })));
+    expect(r.ok === false && r.refusal.stage === "compile" && r.refusal.violations.map((v) => v.code)).toEqual(["obligation-exceeds-reservation"]);
+  });
+
+  it("economics wiring that is not { unitGross, splitNet } functions is a wiring fault; a method-style binding keeps its receiver and is called once", () => {
+    for (const bad of [null, 1, {}, { unitGross: () => ({ ok: true, gross: {} }) }, { splitNet: standInSplit }]) {
+      expect(() => acceptExternalPlan(agentDag(), CTX, withEcon(bad))).toThrow(TypeError);
+    }
+    class Binding {
+      calls = { unitGross: 0, splitNet: 0 };
+      constructor(private readonly gross: Record<string, bigint>) {}
+      unitGross() {
+        this.calls.unitGross++;
+        return { ok: true as const, gross: this.gross };
+      }
+      splitNet(units: Parameters<EconomicsBinding["splitNet"]>[0]) {
+        this.calls.splitNet++;
+        return standInSplit(units);
+      }
+    }
+    const b = new Binding({ print: 7_000_000n, mail: 3_250_000n });
+    expect(acceptExternalPlan(agentDag(), CTX, withEcon(b)).ok).toBe(true);
+    expect(b.calls).toEqual({ unitGross: 1, splitNet: 1 });
   });
 });
