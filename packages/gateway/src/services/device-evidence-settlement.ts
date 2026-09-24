@@ -48,6 +48,7 @@ import {
   parseEd25519SignatureHex,
   signingPreimage,
   verifyEvidenceSubjectBinding,
+  type EvidenceEvent,
   type EvidenceSubject,
   type RegisteredSigner,
   type SessionKeyAuthorization,
@@ -483,46 +484,49 @@ export async function resolveSettlementEvidence(
   }
   let firstFailure: string | undefined;
   for (const candidate of candidates) {
-    const failure = await deviceAnchorFailure(candidate, input);
-    if (failure === null) {
+    const anchor = await verifyDeviceAnchor(candidate, input);
+    if (anchor.ok) {
       return {
         source: "device",
         bundleHash: candidate.bundleHash,
         kernelSignature: candidate.kernelSignature,
         assuranceTier: candidate.assuranceTier,
         ...(candidate.bundleId !== undefined ? { bundleId: candidate.bundleId } : {}),
-        ...(candidate.events !== undefined ? { events: candidate.events } : {}),
+        // The binding's canonical snapshots, never the caller's objects: whatever
+        // is evaluated or archived downstream is exactly what was hashed.
+        events: anchor.events,
         ...(candidate.sessionKeyAuthorization
           ? { sessionKeyAuthorization: candidate.sessionKeyAuthorization }
           : {}),
       };
     }
-    if (firstFailure === undefined) firstFailure = failure;
+    if (firstFailure === undefined) firstFailure = anchor.reason;
   }
   return { ...input.fallback, source: "gateway-fallback", reason: firstFailure };
 }
 
 /**
- * Why a device bundle may not anchor settlement, or null when it may. Both legs
- * must pass: the signed digest opens to events that commit this job and the
- * kernel that accepted it (LO-EV-9), and the signature over that digest
- * verifies against the kernel's registered signer. The delegation scope is
- * checked against the subject's job, never a separately supplied id.
+ * Whether a device bundle may anchor settlement. Both legs must pass: the
+ * signed digest opens to events that commit this job and the kernel that
+ * accepted it (LO-EV-9), and the signature over that digest verifies against
+ * the kernel's registered signer. The delegation scope is checked against the
+ * subject's job, never a separately supplied id. On success it returns the
+ * binding's canonical event snapshots.
  */
-async function deviceAnchorFailure(
+async function verifyDeviceAnchor(
   slot: SettlementEvidenceSlot,
   input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519">,
-): Promise<string | null> {
-  if (!slot.subject) return "missing-subject";
+): Promise<{ ok: true; events: EvidenceEvent[] } | { ok: false; reason: string }> {
+  if (!slot.subject) return { ok: false, reason: "missing-subject" };
   if (slot.contractId !== undefined && slot.contractId !== slot.subject.jobId) {
-    return "contract-subject-mismatch";
+    return { ok: false, reason: "contract-subject-mismatch" };
   }
   const binding = await verifyEvidenceSubjectBinding({
     bundleHash: slot.bundleHash,
     events: slot.events ?? [],
     subject: slot.subject,
   });
-  if (!binding.ok) return binding.reason;
+  if (!binding.ok) return { ok: false, reason: binding.reason };
   const verified = await verifyDeviceSignedEvidence({
     signature: slot.kernelSignature,
     bundleHash: slot.bundleHash,
@@ -533,7 +537,9 @@ async function deviceAnchorFailure(
     contractId: slot.subject.jobId,
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
-  return verified.ok ? null : (verified.reason ?? "verify-failed");
+  return verified.ok
+    ? { ok: true, events: binding.events }
+    : { ok: false, reason: verified.reason ?? "verify-failed" };
 }
 
 // ── Recovery: re-verify the pinned settlement anchor ────────────────────────
@@ -574,7 +580,7 @@ export async function verifyPinnedSettlementEvidence(input: {
   if (row.jobId !== input.jobId) return { ok: false, reason: "pinned-evidence-job-mismatch" };
   if (row.kernelId !== input.kernelId) return { ok: false, reason: "pinned-evidence-kernel-mismatch" };
   if (isDeviceSignedSignature(row.kernelSignature)) {
-    const failure = await deviceAnchorFailure(
+    const anchor = await verifyDeviceAnchor(
       {
         bundleHash: row.bundleHash,
         kernelSignature: row.kernelSignature,
@@ -588,7 +594,7 @@ export async function verifyPinnedSettlementEvidence(input: {
         ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
       },
     );
-    return failure === null ? { ok: true } : { ok: false, reason: failure };
+    return anchor.ok ? { ok: true } : { ok: false, reason: anchor.reason };
   }
   const envelope = buildCanonicalEvidenceEnvelope(
     {

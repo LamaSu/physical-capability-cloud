@@ -25,6 +25,14 @@
  *   7. output, only when the subject names one: at least one event commits
  *      `payload.outputHash`, and every `payload.outputHash` equals it.
  *
+ * EVALUATE ONLY WHAT YOU HASHED. Steps 5-7 read the canonical snapshot of each
+ * event's hashed content (the JSON text `hashEvent` hashes, parsed back), with
+ * own-property reads, never the live object. A property the hash skipped (a
+ * non-enumerable or inherited `jobId`, a getter that answers differently the
+ * second time) therefore cannot bind a subject. The result returns those
+ * snapshots, and a consumer that evaluates the events further (levels,
+ * admission) must evaluate them, not its own copies.
+ *
  * The subject fields are the ones the incumbent producers already hash:
  * kernel-sdk's `execution_started` / `execution_completed` commit
  * `payload.jobId`, `payload.kernelId` and `payload.outputHash`, and every event
@@ -37,7 +45,7 @@
  * registered-key check). Neither leg is sufficient alone.
  */
 
-import { hashBundle, hashEvent } from "../util/canonical.js";
+import { canonicalize, hashBundle, sha256 } from "../util/canonical.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 import { isTaggedDigest } from "./signing-preimage.js";
 
@@ -68,7 +76,8 @@ export type EvidenceSubjectBindingErrorCode =
   | "output-mismatch";
 
 export type EvidenceSubjectBindingResult =
-  | { ok: true }
+  /** `events`: the verified canonical snapshots, in input order (see the header). */
+  | { ok: true; events: EvidenceEvent[] }
   | { ok: false; reason: EvidenceSubjectBindingErrorCode; eventIndex?: number };
 
 export interface EvidenceSubjectBindingInput {
@@ -85,6 +94,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+/** An own property only: never one a prototype supplies. */
+function own(obj: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
 }
 
 /**
@@ -123,25 +137,37 @@ export async function verifyEvidenceSubjectBinding(
     ) {
       return { ok: false, reason: "malformed-event", eventIndex: i };
     }
-    const event = e as unknown as EvidenceEvent;
-    const recomputed = await hashEvent({
-      type: event.type,
-      timestamp: event.timestamp,
-      source: event.source,
-      payload: event.payload,
-    });
-    if (recomputed !== event.hash) {
+    // Hash exactly what hashEvent hashes, and keep that text as the snapshot the
+    // checks below read. A value canonicalize refuses cannot be evidence.
+    let text: string;
+    try {
+      text = canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload });
+    } catch {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    if ((await sha256(text)) !== e.hash) {
       return { ok: false, reason: "event-hash-mismatch", eventIndex: i };
     }
-    events.push(event);
+    const snapshot = JSON.parse(text) as Record<string, unknown>;
+    if (!isPlainObject(snapshot.source) || !isPlainObject(snapshot.payload)) {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    events.push({
+      ...snapshot,
+      ...(typeof e.id === "string" ? { id: e.id } : {}),
+      hash: e.hash,
+    } as unknown as EvidenceEvent);
   }
   if ((await hashBundle(events)) !== input.bundleHash) {
     return { ok: false, reason: "bundle-hash-mismatch" };
   }
 
+  const payloadOf = (i: number) => events[i]!.payload as Record<string, unknown>;
+  const sourceOf = (i: number) => events[i]!.source as unknown as Record<string, unknown>;
+
   let jobCommitted = false;
   for (let i = 0; i < events.length; i++) {
-    const committed = events[i]!.payload.jobId;
+    const committed = own(payloadOf(i), "jobId");
     if (committed === undefined) continue;
     if (committed !== subject.jobId) return { ok: false, reason: "job-mismatch", eventIndex: i };
     jobCommitted = true;
@@ -149,11 +175,11 @@ export async function verifyEvidenceSubjectBinding(
   if (!jobCommitted) return { ok: false, reason: "job-not-committed" };
 
   for (let i = 0; i < events.length; i++) {
-    const { source, payload } = events[i]!;
-    if (source.kernelId !== subject.kernelId) {
+    if (own(sourceOf(i), "kernelId") !== subject.kernelId) {
       return { ok: false, reason: "kernel-mismatch", eventIndex: i };
     }
-    if (payload.kernelId !== undefined && payload.kernelId !== subject.kernelId) {
+    const payloadKernel = own(payloadOf(i), "kernelId");
+    if (payloadKernel !== undefined && payloadKernel !== subject.kernelId) {
       return { ok: false, reason: "kernel-mismatch", eventIndex: i };
     }
   }
@@ -161,7 +187,7 @@ export async function verifyEvidenceSubjectBinding(
   if (subject.outputHash !== undefined) {
     let outputCommitted = false;
     for (let i = 0; i < events.length; i++) {
-      const committed = events[i]!.payload.outputHash;
+      const committed = own(payloadOf(i), "outputHash");
       if (committed === undefined) continue;
       if (committed !== subject.outputHash) {
         return { ok: false, reason: "output-mismatch", eventIndex: i };
@@ -171,5 +197,5 @@ export async function verifyEvidenceSubjectBinding(
     if (!outputCommitted) return { ok: false, reason: "output-not-committed" };
   }
 
-  return { ok: true };
+  return { ok: true, events };
 }

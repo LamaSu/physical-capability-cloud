@@ -530,6 +530,25 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
     expect(own).toMatchObject({ source: "device", bundleHash: a.bundleHash });
   });
 
+  it("the anchor carries the binding's canonical snapshots, never the caller's objects", async () => {
+    const a = await boundDeviceEvidence({ jobId: "job-a" });
+    const slot = a.slot();
+    const live = slot.events![0] as Record<string, unknown>;
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: slot,
+      registeredSigner: ed25519Signer(a.keyPair.publicKey),
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("device");
+    const anchored = decision.events as Record<string, unknown>[];
+    expect(anchored).toEqual(JSON.parse(JSON.stringify(slot.events)));
+    expect(anchored[0]).not.toBe(live);
+    // A later change to the caller's copy cannot reach what was verified.
+    (live.payload as Record<string, unknown>).tampered = true;
+    expect(anchored[0]!.payload).not.toHaveProperty("tampered");
+  });
+
   it("evidence for node A cannot be substituted for node B", async () => {
     const nodeA = nacl.sign.keyPair();
     const nodeB = nacl.sign.keyPair();
