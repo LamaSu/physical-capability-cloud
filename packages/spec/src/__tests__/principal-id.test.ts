@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
+import vectors from "../evidence/principal-id.vectors.json" with { type: "json" };
 import {
   COMPROMISED_DEVICE_PUBLIC_KEYS,
   PRINCIPAL_ID_CONTRACT,
@@ -129,5 +130,25 @@ describe("principal ids — the bytes32 words of a funded authorizedTuples tripl
     expect(() => principalTupleWord("device", KEY)).toThrow(PrincipalIdError);
     expect(() => principalTupleWord("kernel", "")).toThrow(PrincipalIdError);
     expect(() => principalTupleWord("device", `ed25519:${LEAKED}`)).toThrow(PrincipalIdError);
+  });
+});
+
+describe("principal ids — the pinned vectors (principal-id.vectors.json, mirrored by the oracle)", () => {
+  it("reproduces every tuple word and tuple", () => {
+    for (const v of vectors.words) {
+      expect(principalTupleWord(v.kind as "operator" | "kernel" | "device", v.id), v.id).toBe(v.word);
+    }
+    for (const t of vectors.tuples) {
+      expect(authorizedTuple(t.operatorPrincipalId, t.kernelId, t.devicePrincipalId)).toEqual(t.words);
+    }
+    expect(vectors.words.find((v) => v.id === "a")!.word).toBe(
+      "0x3ac225168df54212a25c1c01fd35bebfea408fdac2e31ddd6f80a4bbf9a5f1cb",
+    );
+  });
+
+  it("refuses every refused vector", () => {
+    for (const r of vectors.refused) {
+      expect(() => principalTupleWord(r.kind as "operator" | "kernel" | "device", r.id), r.why).toThrow(PrincipalIdError);
+    }
   });
 });
