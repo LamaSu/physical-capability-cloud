@@ -422,6 +422,18 @@ describe("PX-4 review #2524, regression: the watermark and the metadata line sur
     s.close();
   });
 
+  it("once a timed datum is shown, an UNTIMED update cannot replace it (its order is unknown)", async () => {
+    const s = scene([
+      { status: 200, json: { progress: 80, asOf: iso(T0 - 1_000) } },
+      { status: 200, json: { progress: 10 } }, // no source time: could be an old cached copy
+    ], T0);
+    s.deliver(statManifest); await s.settle();
+    await s.nextPoll();
+    expect(value(s)).toBe("80");
+    expect(s.stat().getAttribute("data-as-of")).toBe(iso(T0 - 1_000));
+    s.close();
+  });
+
   it("a resume re-checks freshness immediately", async () => {
     const m = JSON.parse(JSON.stringify(statManifest)); m.sections[0].windows[1].binding.pollMs = 3_600_000;
     const s = scene([{ status: 200, json: { progress: 3, asOf: iso(T0 - 10_000) } }, { status: 503 }], T0);
