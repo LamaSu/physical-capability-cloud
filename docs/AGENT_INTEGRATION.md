@@ -202,9 +202,9 @@ A provider that is not **fully** configured on the gateway answers **503 `not_co
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/rewards/*` | DePIN epochs, certificates, claims, treasury. |
+| GET | `/api/rewards/*` | DePIN epochs, kernel rewards and claims, with `/api/certificates*` and `/api/treasury/summary`. **501 `not_available` outside demo mode**: their data was fixtures (N34). |
 | GET/POST | `/api/ip/*` | Story Protocol IP registration, royalties, lineage, revenue splits. |
-| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. |
+| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. Epoch distribution (`POST /api/swf/epochs/:epochId/distribute`) always answers 501 `not_available`, with no demo path: per-epoch contribution scores are not computed, so a distribution would share the fund out on random numbers, and the SWF's money routes stay disabled (operator item 69). |
 | GET/POST | `/api/csd/*` | Capability StructureDefinition CRUD (FHIR-inspired schemas). |
 | GET/POST | `/api/bounty/*` | Demand signals, bounties, leaderboard. |
 | GET/POST | `/api/pool/*` | Investment pools, staking, earnings. |
@@ -227,13 +227,15 @@ A provider that is not **fully** configured on the gateway answers **503 `not_co
 | GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
-| GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
-| GET/POST | `/api/spaces/*` | Equipment hosting spaces. |
-| GET/POST | `/api/marketplace/*` | Capability marketplace listings. |
-| GET/POST | `/api/discover/*` | Device discovery (mDNS/IPP) + auto-onboarding. |
-| GET/POST | `/api/protocols/*` | Protocol templates (DAG workflows). |
-| GET/POST | `/api/orchestrator/*` | Multi-instrument transfer graphs. |
-| GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
+| GET/POST | `/api/logistics/*` | Shipments, bookings, installations. **501 `not_available` outside demo mode** (the family is retired, carrier #2922). A job's shipment: `GET /api/carrier/shipments/:jobId`. |
+| GET/POST | `/api/spaces/*` | Equipment hosting spaces. **501 `not_available` outside demo mode**. |
+| GET/POST | `/api/marketplace/*` | Capability marketplace listings. Listings, orders, classes and demand-supply: **501 `not_available` outside demo mode**. `POST /api/marketplace/roi` and `GET /api/marketplace/categories` are live. |
+| GET/POST | `/api/discover/*` | Device discovery (mDNS/IPP) + auto-onboarding. `scan` and `onboard`: **501 `not_available` outside demo mode** (the gateway has no local network scanner). `generate-csd` is live. |
+| GET/POST | `/api/protocols/*` | Protocol templates (DAG workflows). **501 `not_available` outside demo mode**, with `/api/protocol-runs/*`, `/api/automation-status/*` and `/api/transfer-agents`: fixtures, to wire or retire. |
+| GET/POST | `/api/orchestrator/*` | Multi-instrument transfer graphs. **501 `not_available` outside demo mode**: fixtures, to wire or retire. |
+| GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample) created through the API. A demo batch exists only in demo mode. |
+
+**Demo-only routes (board N34).** The routes marked 501 above answer `{error: "not_available", message, see}` unless the gateway runs with `PCC_DEMO_ROUTES=true` (demo deployments only; ignored under `NODE_ENV=production`). In demo mode they answer examples marked `mock: true, demo: true` with the header `x-pcc-demo: true`. Follow a refusal's `see` pointers to the live routes. The agent context pack (`/agent-context-pack`) lists each such route under "Not available on this gateway (demo only)", and `/agent-context-pack.json` lists them in `demoOnlyEndpoints`.
 
 ---
 
@@ -702,8 +704,8 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 | 9 | `pcc_build_contract` | Build contract ready for escrow |
 | 10 | `pcc_list_escrows` | List escrow contracts |
 | 11 | `pcc_list_evidence` | List evidence bundles |
-| 12 | `pcc_list_protocols` | List workflow templates |
-| 13 | `pcc_depin_stats` | DePIN rewards, certificates, treasury |
+| 12 | `pcc_list_protocols` | List workflow templates (501 `not_available` outside demo mode) |
+| 13 | `pcc_depin_stats` | DePIN rewards, certificates, treasury (501 `not_available` outside demo mode) |
 | 14 | `pcc_subnet_status` | Agent network status |
 | 15 | `pcc_get_agent_identity` | ERC-8004 identity for kernel/agent |
 | 16 | `pcc_get_reputation` | Reputation scores by agent/tag |
@@ -723,8 +725,8 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 | 30 | `pcc_csd_list` | List CSD documents |
 | 31 | `pcc_csd_get` | Get CSD by URI |
 | 32 | `pcc_csd_register` | Register a CSD document |
-| 33 | `pcc_discover_scan` | Scan network for devices (mDNS/IPP) |
-| 34 | `pcc_discover_onboard` | Discover, generate CSD, register in one call |
+| 33 | `pcc_discover_scan` | Scan network for devices (mDNS/IPP) (501 `not_available` outside demo mode) |
+| 34 | `pcc_discover_onboard` | Discover, generate CSD, register in one call (501 `not_available` outside demo mode) |
 | 35 | `pcc_ip_register_capability` | Register CSD as Story Protocol IP |
 | 36 | `pcc_ip_revenue_snapshot` | IP Royalty Vault balance |
 | 37 | `pcc_ip_claim` | Claim accumulated royalties |

@@ -10,6 +10,7 @@ import { SensorPipeline, BatchTracker, EncryptionService, createLitEncryptionSer
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
+import { isDemoRoutesOn } from "./config/demo-routes.js";
 
 // ── Sensor Pipeline ─────────────────────────────────────────────────
 
@@ -126,44 +127,49 @@ batchTracker.onBatchEvent((event) => {
   );
 });
 
-// Seed demo batch
-const demoBatch = batchTracker.createBatch("kernel-sf", "dev-hplc-01", "cap-hplc", {
-  method: "HPLC_RP_C18_gradient_30min",
-  columnTemp: 25,
-});
-batchTracker.addSample(demoBatch.id, {
-  position: "A1",
-  jobId: "job-010",
-  stepId: "step-1",
-  userId: "0x1234567890abcdef1234567890abcdef12345678",
-  sampleLabel: "Sample Alpha",
-  sampleType: "sample",
-});
-batchTracker.addSample(demoBatch.id, {
-  position: "A2",
-  jobId: "job-011",
-  stepId: "step-1",
-  userId: "0xabcdef1234567890abcdef1234567890abcdef12",
-  sampleLabel: "Sample Beta",
-  sampleType: "sample",
-});
-batchTracker.addSample(demoBatch.id, {
-  position: "A3",
-  jobId: "job-012",
-  stepId: "step-1",
-  userId: "0x9876543210fedcba9876543210fedcba98765432",
-  sampleLabel: "Sample Gamma",
-  sampleType: "sample",
-});
-batchTracker.seal(demoBatch.id);
-batchTracker.start(demoBatch.id);
-// Complete first slot
-const firstSlot = batchTracker.getBatch(demoBatch.id)!.slots[0];
-batchTracker.updateSlotStatus(demoBatch.id, firstSlot.id, "acquiring");
-batchTracker.completeSlot(demoBatch.id, firstSlot.id, "sha256:abc123def456" as any, "results/batch/A1.json");
-// Second slot acquiring
-const secondSlot = batchTracker.getBatch(demoBatch.id)!.slots[1];
-batchTracker.updateSlotStatus(demoBatch.id, secondSlot.id, "acquiring");
+// A demo HPLC batch (made-up samples, wallets and result hash), seeded ONLY in demo mode
+// (PCC_DEMO_ROUTES=true, never under NODE_ENV=production). Board N34: it used to be seeded into
+// every gateway's tracker, so /api/batches* served it as live data. Its params say demo: true.
+if (isDemoRoutesOn()) {
+  const demoBatch = batchTracker.createBatch("kernel-sf", "dev-hplc-01", "cap-hplc", {
+    method: "HPLC_RP_C18_gradient_30min",
+    columnTemp: 25,
+    demo: true,
+  });
+  batchTracker.addSample(demoBatch.id, {
+    position: "A1",
+    jobId: "job-010",
+    stepId: "step-1",
+    userId: "0x1234567890abcdef1234567890abcdef12345678",
+    sampleLabel: "Sample Alpha",
+    sampleType: "sample",
+  });
+  batchTracker.addSample(demoBatch.id, {
+    position: "A2",
+    jobId: "job-011",
+    stepId: "step-1",
+    userId: "0xabcdef1234567890abcdef1234567890abcdef12",
+    sampleLabel: "Sample Beta",
+    sampleType: "sample",
+  });
+  batchTracker.addSample(demoBatch.id, {
+    position: "A3",
+    jobId: "job-012",
+    stepId: "step-1",
+    userId: "0x9876543210fedcba9876543210fedcba98765432",
+    sampleLabel: "Sample Gamma",
+    sampleType: "sample",
+  });
+  batchTracker.seal(demoBatch.id);
+  batchTracker.start(demoBatch.id);
+  // Complete first slot
+  const firstSlot = batchTracker.getBatch(demoBatch.id)!.slots[0];
+  batchTracker.updateSlotStatus(demoBatch.id, firstSlot.id, "acquiring");
+  batchTracker.completeSlot(demoBatch.id, firstSlot.id, "sha256:abc123def456" as any, "results/batch/A1.json");
+  // Second slot acquiring
+  const secondSlot = batchTracker.getBatch(demoBatch.id)!.slots[1];
+  batchTracker.updateSlotStatus(demoBatch.id, secondSlot.id, "acquiring");
+}
 
 // ── Encryption Service ──────────────────────────────────────────────
 

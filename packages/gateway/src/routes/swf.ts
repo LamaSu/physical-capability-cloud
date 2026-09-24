@@ -145,35 +145,24 @@ export async function swfRoutes(app: FastifyInstance) {
     return reply.code(201).send({ epoch });
   });
 
-  app.post<{ Params: { epochId: string } }>(
-    "/api/swf/epochs/:epochId/distribute",
-    async (req, reply) => {
-      try {
-        // For mock purposes, generate scores from all active participants
-        const participants = swfService.listParticipants({ status: "active" });
-        if (participants.length > 0) {
-          swfService.calculateContributionScores(
-            req.params.epochId,
-            participants.map((p) => ({
-              participantId: p.id,
-              jobCount: Math.floor(Math.random() * 50),
-              reputation: Math.floor(Math.random() * 1000),
-              uptimeOrActivity: Math.floor(Math.random() * 100),
-              tenureDays: Math.floor(
-                (Date.now() - new Date(p.registeredAt).getTime()) / 86_400_000,
-              ),
-              votedThisEpoch: Math.random() > 0.5,
-            })),
-          );
-        }
-
-        const epoch = swfService.distributeEpoch(req.params.epochId);
-        return { epoch };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(409).send({ error: "conflict", message });
-      }
-    },
+  // Distributing an epoch divides its dividend pool by each participant's contribution
+  // score, and nothing computes a participant's per-epoch contribution (its jobs, reputation,
+  // activity and votes in the epoch; jobs and votes are recorded, the per-epoch score is not).
+  // This route drew those inputs from Math.random() and then DISTRIBUTED the epoch on them: a
+  // write that shared the fund out by chance. Boards N34 and N46 (money floor): it answers 501
+  // not_available BEFORE anything is read, scored or written, so the epoch is left exactly as it
+  // was. There is no demo path: the SWF stays a design artifact and its money routes stay 501
+  // (steward ruling, operator item 69; economics #3315).
+  app.post<{ Params: { epochId: string } }>("/api/swf/epochs/:epochId/distribute", async (_req, reply) =>
+    reply.code(501).send({
+      error: "not_available",
+      message:
+        "Per-epoch contribution scores (each participant's jobs, reputation, activity and votes in this epoch) " +
+        "are not computed on this gateway, " +
+        "so the epoch was not scored or distributed: without them, every participant's share would come " +
+        "from random numbers.",
+      see: ["GET /api/swf/epochs/:epochId", "GET /api/swf/accruals"],
+    }),
   );
 
   // ── Accruals ──────────────────────────────────────────────────

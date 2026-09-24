@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
 import { discoverRoutes } from "../routes/discover.js";
@@ -38,35 +38,19 @@ describe("Auto-Discovery API", () => {
   });
 
   // ── POST /api/discover/scan ──────────────────────────────────────
+  // N34: bonjour-service is not installed and this gateway has no mDNS, so nothing can
+  // be discovered. The route used to return two example printers as found devices.
 
   describe("POST /api/discover/scan", () => {
-    it("returns mock printers when no real mDNS devices are present", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/scan",
-        payload: {},
-      });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(Array.isArray(body.devices)).toBe(true);
-      // Should find at least one mock printer
-      expect(body.devices.length).toBeGreaterThan(0);
+    afterEach(() => {
+      delete process.env.PCC_DEMO_ROUTES;
     });
 
-    it("each discovered device has protocol, name, uri, makeModel, capabilities", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/scan",
-        payload: { protocols: ["ipp"] },
-      });
-      const body = res.json();
-      for (const device of body.devices) {
-        expect(device.protocol).toBe("ipp");
-        expect(typeof device.name).toBe("string");
-        expect(typeof device.uri).toBe("string");
-        expect(typeof device.makeModel).toBe("string");
-        expect(device.capabilities).toBeDefined();
-      }
+    it("NEGATIVE (N34): with no mDNS it answers 501 not_available, never example printers", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/discover/scan", payload: {} });
+      expect(res.statusCode).toBe(501);
+      expect(res.json()).toMatchObject({ error: "not_available" });
+      expect(res.body).not.toMatch(/Canon|HP ENVY|192\.168\.1\./);
     });
 
     it("returns empty devices array when no matching protocols are requested", async () => {
@@ -80,24 +64,21 @@ describe("Auto-Discovery API", () => {
       expect(body.devices).toHaveLength(0);
     });
 
-    it("accepts default empty body", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/scan",
-        payload: {},
-      });
+    it("in demo mode returns the example printers, marked mock/demo", async () => {
+      process.env.PCC_DEMO_ROUTES = "true";
+      const res = await app.inject({ method: "POST", url: "/api/discover/scan", payload: { protocols: ["ipp"], timeoutMs: 100 } });
       expect(res.statusCode).toBe(200);
-    });
-
-    it("accepts timeoutMs parameter", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/scan",
-        payload: { protocols: ["ipp"], timeoutMs: 100 },
-      });
-      expect(res.statusCode).toBe(200);
+      expect(res.headers["x-pcc-demo"]).toBe("true");
       const body = res.json();
-      expect(Array.isArray(body.devices)).toBe(true);
+      expect(body).toMatchObject({ mock: true, demo: true });
+      expect(body.devices.length).toBeGreaterThan(0);
+      for (const device of body.devices) {
+        expect(device.protocol).toBe("ipp");
+        expect(typeof device.name).toBe("string");
+        expect(typeof device.uri).toBe("string");
+        expect(typeof device.makeModel).toBe("string");
+        expect(device.capabilities).toBeDefined();
+      }
     });
   });
 
@@ -212,74 +193,48 @@ describe("Auto-Discovery API", () => {
   // ── POST /api/discover/onboard ───────────────────────────────────
 
   describe("POST /api/discover/onboard", () => {
-    it("runs full pipeline and returns device, csd, registered", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/onboard",
-        payload: { timeoutMs: 100 },
-      });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.device).toBeDefined();
-      expect(body.csd).toBeDefined();
-      expect(body.registered).toBe(true);
+    afterEach(() => {
+      delete process.env.PCC_DEMO_ROUTES;
     });
 
-    it("returned device has expected shape", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/onboard",
-        payload: {},
-      });
+    it("NEGATIVE (N34): with no mDNS it answers 501 and registers nothing", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/discover/onboard", payload: { timeoutMs: 100 } });
+      expect(res.statusCode).toBe(501);
+      expect(res.json().error).toBe("not_available");
+      const list = (await app.inject({ method: "GET", url: "/api/csd" })).json();
+      expect(list.csds.filter((c: { url: string }) => c.url.includes("ipp-2d-print"))).toEqual([]);
+    });
+
+    it("NEGATIVE (N34): demo mode shows the would-be device and CSD, marked, and registers NOTHING", async () => {
+      process.env.PCC_DEMO_ROUTES = "true";
+      const res = await app.inject({ method: "POST", url: "/api/discover/onboard", payload: {} });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["x-pcc-demo"]).toBe("true");
       const body = res.json();
-      const { device } = body;
+      expect(body).toMatchObject({ registered: false, mock: true, demo: true });
+      const { device, csd } = body;
       expect(typeof device.protocol).toBe("string");
       expect(typeof device.name).toBe("string");
       expect(typeof device.uri).toBe("string");
       expect(typeof device.makeModel).toBe("string");
       expect(device.capabilities).toBeDefined();
-    });
-
-    it("returned CSD is valid (has url, version, pricing)", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/discover/onboard",
-        payload: {},
-      });
-      const body = res.json();
-      const { csd } = body;
       expect(csd.url).toBeDefined();
       expect(csd.version).toMatch(/^\d+\.\d+\.\d+$/);
       expect(csd.pricing.basePrice).toBeDefined();
       expect(csd.pricing.currency).toBeDefined();
+      const list = (await app.inject({ method: "GET", url: "/api/csd" })).json();
+      expect(list.csds.find((c: { url: string }) => c.url === csd.url)).toBeUndefined();
     });
 
-    it("onboarded CSD appears in GET /api/csd after onboard", async () => {
-      const onboardRes = await app.inject({
-        method: "POST",
-        url: "/api/discover/onboard",
-        payload: {},
-      });
-      const { csd } = onboardRes.json();
-
-      const listRes = await app.inject({ method: "GET", url: "/api/csd" });
-      const listBody = listRes.json();
-      const found = listBody.csds.find(
-        (c: { url: string }) => c.url === csd.url,
-      );
-      expect(found).toBeDefined();
-    });
-
-    it("selecting a specific deviceUri onboards that device", async () => {
-      // Mock printers include Canon and HP at these URIs
+    it("in demo mode a specific deviceUri selects that example device", async () => {
+      process.env.PCC_DEMO_ROUTES = "true";
       const res = await app.inject({
         method: "POST",
         url: "/api/discover/onboard",
         payload: { deviceUri: "ipp://192.168.1.50/ipp/print" },
       });
       expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.device.uri).toBe("ipp://192.168.1.50/ipp/print");
+      expect(res.json().device.uri).toBe("ipp://192.168.1.50/ipp/print");
     });
   });
 });
@@ -355,9 +310,14 @@ describe("Auto-Discovery — evidence primitives + eligibility", () => {
     expect(computeCsdEligibility(legacyFreeText).eligibleTier).toBe(0);
   });
 
-  it("onboarded CSD (full pipeline) is tier-1 eligible", async () => {
-    const res = await app.inject({ method: "POST", url: "/api/discover/onboard", payload: {} });
-    const { csd } = res.json();
-    expect(computeCsdEligibility(csd).eligibleTier).toBe(1);
+  it("the CSD the onboarding pipeline generates is tier-1 eligible (demo mode, nothing registered)", async () => {
+    process.env.PCC_DEMO_ROUTES = "true";
+    try {
+      const res = await app.inject({ method: "POST", url: "/api/discover/onboard", payload: {} });
+      const { csd } = res.json();
+      expect(computeCsdEligibility(csd).eligibleTier).toBe(1);
+    } finally {
+      delete process.env.PCC_DEMO_ROUTES;
+    }
   });
 });

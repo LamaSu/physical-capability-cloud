@@ -104,3 +104,20 @@ describe("decorateWithReportHint (onSend — covers explicitly-sent 5xx, review 
     expect(decorateWithReportHint(p, { statusCode: 500, contentType: json, url: "/api/feedback", method: "POST" })).toBe(p);
   });
 });
+
+describe("intentional refusals carry no report_hint (N34 / N48)", () => {
+  it("a 501 not_available or 503 not_configured is not a bug to report", () => {
+    expect(buildReportHint({ url: "/api/logistics/providers", method: "GET", statusCode: 501, errorCode: "not_available" })).toBeNull();
+    expect(buildReportHint({ url: "/api/fiat-ramp/wise/payout", method: "POST", statusCode: 503, errorCode: "not_configured" })).toBeNull();
+    const body = JSON.stringify({ error: "not_available", message: "x", see: [] });
+    expect(
+      decorateWithReportHint(body, { statusCode: 501, contentType: "application/json", url: "/api/spaces", method: "GET" }),
+    ).toBe(body);
+  });
+
+  it("NEGATIVE: any other 5xx still carries the hint, including a code that only resembles one", () => {
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 501, errorCode: "not_implemented" })).not.toBeNull();
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 503, errorCode: "NOT_CONFIGURED" })).not.toBeNull();
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 500, errorCode: null })).not.toBeNull();
+  });
+});

@@ -6,6 +6,7 @@ import type {
   DePINRewardClaim,
   TreasuryBalance,
 } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Mock Data — DePIN Economics
@@ -168,10 +169,54 @@ const mockTreasury: TreasuryBalance = {
 };
 
 // ---------------------------------------------------------------------------
+// No fixture in production (board N34, the server side of PX-3)
+// ---------------------------------------------------------------------------
+//
+// Every route below answers from the fixtures above: invented epochs, kernel scores
+// and reward amounts, claims (one with a made-up transaction hash), certificates, a
+// treasury holding 50,000 USDC. POST /claims said created:true and POST
+// /certificates/mint said minted:true, and neither recorded or minted anything.
+// So the plugin is gated as a whole: unless PCC_DEMO_ROUTES=true, every route here
+// answers 501 not_available. There is no real source for any of it on this gateway, so
+// `see` is empty. In demo the old answers stay, each marked mock/demo.
+
+const NOTHING_RETURNED = "so nothing is returned rather than an example.";
+
+/** The refusal for each route, keyed "METHOD /path" as registered. */
+const NOT_RECORDED: Record<string, string> = {
+  "GET /api/rewards/epochs": `DePIN reward epochs are not recorded on this gateway, ${NOTHING_RETURNED}`,
+  "GET /api/rewards/epochs/:epochId": `DePIN reward epochs are not recorded on this gateway, ${NOTHING_RETURNED}`,
+  "GET /api/rewards/kernels/:kernelId": `Kernel reward history is not recorded on this gateway, ${NOTHING_RETURNED}`,
+  "POST /api/rewards/claims": "DePIN reward claims are not recorded on this gateway, so no claim was created.",
+  "GET /api/rewards/claims/:claimId": `DePIN reward claims are not recorded on this gateway, ${NOTHING_RETURNED}`,
+  "GET /api/certificates": `Capability certificates are not recorded on this gateway, ${NOTHING_RETURNED}`,
+  "GET /api/certificates/:certId": `Capability certificates are not recorded on this gateway, ${NOTHING_RETURNED}`,
+  "POST /api/certificates/mint": "Capability certificates are not recorded on this gateway, so nothing was minted.",
+  "GET /api/treasury/summary": `Treasury balances and proposals are not recorded on this gateway, ${NOTHING_RETURNED}`,
+};
+/** For a route added later without its own line above: still refused, never served. */
+const NOT_RECORDED_FALLBACK = `DePIN rewards, certificates and treasury data are not recorded on this gateway, ${NOTHING_RETURNED}`;
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 export async function rewardRoutes(app: FastifyInstance) {
+  // The one gate for every route in this plugin. It is encapsulated: this plugin is a
+  // plain async function (not wrapped with fastify-plugin), so the hook runs only for the
+  // routes declared here, never another plugin's. It runs after the root API-key gate (a
+  // caller without a key still gets 401) and before the body is parsed, so a refused POST
+  // creates, mints and records nothing.
+  app.addHook("onRequest", async (req, reply) => {
+    if (isDemoRoutesOn()) return;
+    const method = req.method === "HEAD" ? "GET" : req.method;
+    return reply.status(501).send({
+      error: "not_available",
+      message: NOT_RECORDED[`${method} ${req.routeOptions.url}`] ?? NOT_RECORDED_FALLBACK,
+      see: [],
+    });
+  });
+
   // ── Epochs ────────────────────────────────────────────────────
 
   app.get<{ Querystring: { status?: string } }>(
@@ -181,7 +226,7 @@ export async function rewardRoutes(app: FastifyInstance) {
       if (req.query.status) {
         epochs = epochs.filter((e) => e.status === req.query.status);
       }
-      return { epochs, total: epochs.length };
+      return markDemo("demo", { epochs, total: epochs.length });
     },
   );
 
@@ -190,9 +235,9 @@ export async function rewardRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const epoch = mockEpochs.find((e) => e.id === req.params.epochId);
       if (!epoch) {
-        return reply.code(404).send({ error: "not_found", message: "Epoch not found" });
+        return reply.code(404).send(markDemo("demo", { error: "not_found", message: "Epoch not found" }));
       }
-      return { epoch };
+      return markDemo("demo", { epoch });
     },
   );
 
@@ -214,7 +259,7 @@ export async function rewardRoutes(app: FastifyInstance) {
           });
         }
       }
-      return { kernelId: req.params.kernelId, history, totalEarned: history.reduce((s, h) => s + parseFloat(h.reward), 0).toFixed(6) };
+      return markDemo("demo", { kernelId: req.params.kernelId, history, totalEarned: history.reduce((s, h) => s + parseFloat(h.reward), 0).toFixed(6) });
     },
   );
 
@@ -223,10 +268,10 @@ export async function rewardRoutes(app: FastifyInstance) {
   app.post("/api/rewards/claims", async (req, reply) => {
     const body = (req.body ?? {}) as { kernelId?: string; epochId?: string; amount?: string; chain?: string };
     if (!body.kernelId || !body.epochId || !body.amount) {
-      return reply.code(400).send({ error: "bad_request", message: "kernelId, epochId, and amount are required" });
+      return reply.code(400).send(markDemo("demo", { error: "bad_request", message: "kernelId, epochId, and amount are required" }));
     }
     const id = `claim_${Date.now().toString(36)}`;
-    return reply.code(201).send({
+    return reply.code(201).send(markDemo("demo", {
       created: true,
       claim: {
         id,
@@ -236,7 +281,7 @@ export async function rewardRoutes(app: FastifyInstance) {
         chain: body.chain ?? "base",
         status: "pending",
       } satisfies DePINRewardClaim,
-    });
+    }));
   });
 
   app.get<{ Params: { claimId: string } }>(
@@ -244,9 +289,9 @@ export async function rewardRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const claim = mockClaims.find((c) => c.id === req.params.claimId);
       if (!claim) {
-        return reply.code(404).send({ error: "not_found", message: "Claim not found" });
+        return reply.code(404).send(markDemo("demo", { error: "not_found", message: "Claim not found" }));
       }
-      return { claim };
+      return markDemo("demo", { claim });
     },
   );
 
@@ -262,7 +307,7 @@ export async function rewardRoutes(app: FastifyInstance) {
       if (req.query.status) {
         certs = certs.filter((c) => c.status === req.query.status);
       }
-      return { certificates: certs, total: certs.length };
+      return markDemo("demo", { certificates: certs, total: certs.length });
     },
   );
 
@@ -271,9 +316,9 @@ export async function rewardRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const cert = mockCertificates.find((c) => c.id === req.params.certId);
       if (!cert) {
-        return reply.code(404).send({ error: "not_found", message: "Certificate not found" });
+        return reply.code(404).send(markDemo("demo", { error: "not_found", message: "Certificate not found" }));
       }
-      return { certificate: cert };
+      return markDemo("demo", { certificate: cert });
     },
   );
 
@@ -285,10 +330,10 @@ export async function rewardRoutes(app: FastifyInstance) {
       metadata?: Record<string, unknown>;
     };
     if (!body.kernelDid || !body.capabilityType) {
-      return reply.code(400).send({ error: "bad_request", message: "kernelDid and capabilityType are required" });
+      return reply.code(400).send(markDemo("demo", { error: "bad_request", message: "kernelDid and capabilityType are required" }));
     }
     const id = `cnft_${Date.now().toString(36)}`;
-    return reply.code(201).send({
+    return reply.code(201).send(markDemo("demo", {
       minted: true,
       certificate: {
         id,
@@ -303,17 +348,17 @@ export async function rewardRoutes(app: FastifyInstance) {
         leafIndex: mockCertificates.length,
         assetId: `Asset${id}`,
       },
-    });
+    }));
   });
 
   // ── Treasury ──────────────────────────────────────────────────
 
   app.get("/api/treasury/summary", async () => {
-    return {
+    return markDemo("demo", {
       treasury: mockTreasury,
       proposals: [],
       proposalCount: 0,
       approvedTotal: "0.00",
-    };
+    });
   });
 }

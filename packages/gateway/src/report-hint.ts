@@ -38,6 +38,15 @@ export interface BuildReportHintArgs {
 const FEEDBACK_PATH_RE = /^\/api\/feedback(\/|$)/;
 
 /**
+ * Error codes of documented, INTENTIONAL refusals, which are not failures:
+ *   not_available   the route has no real source, so it refuses instead of serving
+ *                   fixtures (501; board N34)
+ *   not_configured  the provider is not configured on this gateway (503; board N48)
+ * Telling an agent to report them as bugs would be noise: nothing is broken.
+ */
+export const INTENTIONAL_REFUSAL_CODES: ReadonlySet<string> = new Set(["not_available", "not_configured"]);
+
+/**
  * Build the report_hint for a failing request, or `null` when the status is not
  * report-worthy. Only real HTTP 5xx (500..599) are decorated: 4xx are client-fixable
  * (bad request, wrong media type, not-found) and nudging an agent to report its own
@@ -49,6 +58,7 @@ export function buildReportHint(args: BuildReportHintArgs): ReportHint | null {
   if (!Number.isFinite(args.statusCode) || args.statusCode < 500 || args.statusCode >= 600) return null;
   const endpoint = args.url.split("?")[0];
   if (FEEDBACK_PATH_RE.test(endpoint)) return null;
+  if (args.errorCode != null && INTENTIONAL_REFUSAL_CODES.has(args.errorCode)) return null;
   return {
     tool: "pcc_report",
     how: "POST /api/feedback",
