@@ -1,23 +1,59 @@
+/**
+ * System Dashboard: what the gateway reports about its own state, read from
+ * GET /api/telemetry/system (packages/gateway/src/routes/status.ts).
+ *
+ * That route returns raw lists and a few settings: the kernel registry, the
+ * job facade's first page of jobs, evidence bundles, machine registrations,
+ * capability records, the in-process agent bus's conversations and recent
+ * messages, recent audit entries, some environment variables and the process
+ * uptime. This page used to expect another shape (protocol fees, escrow
+ * volume, chain deployments, DHT peers, route and test counts, IPFS and ZK
+ * totals, NEAR intents, sponsor statuses). A live answer crashed it
+ * (`protocol` of undefined), and a failed read showed built-in defaults as the
+ * platform's state: "347 routes", "3300 tests", a 1.50% fee, 154 agent tools
+ * and a Base Sepolia contract.
+ *
+ * It now shows only what the route returns, as counts over those lists:
+ *   - jobs: the route passes on the facade's first 50 jobs without a total, so
+ *     a full page is shown as a lower bound ("50+");
+ *   - an empty list reads "the report lists no ...": the route also sends an
+ *     empty list when its database read fails, and no conversations when the
+ *     agent bus isn't running;
+ *   - devices are not shown: kernel list entries carry no devices, so the
+ *     route's device list is always empty;
+ *   - audit entries are not shown: they carry client IPs and no timestamps.
+ * What the route doesn't report is marked not live. A failed read shows as
+ * unavailable, or as stale over earlier data. In demo mode (lib/demo-mode.ts)
+ * the prototype renders sample values under a DemoBanner.
+ */
+
 import React from "react";
 import { GlassPanel } from "@pcc/ui";
-import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { useUIStore } from "../stores/ui-store.js";
+import { apiGet } from "../lib/api.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import { formatCount, isActiveJob, isKernelOnline, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
+import type { JobDTO, KernelDTO } from "../types/dto.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+import { NotLiveState, DemoBanner } from "../components/DemoState.js";
+import { demoSystemTelemetry } from "../demo/SystemDashboardPage.fixtures.js";
 
 // ---------------------------------------------------------------------------
-// Types — mirrors /api/telemetry/system response shape
+// Prototype types: the shape the demo cards were drawn for. /api/telemetry/system
+// does not return it; only the demo fixtures (src/demo/) use it.
 // ---------------------------------------------------------------------------
 
-type SponsorStatus = "active" | "mock" | "disabled" | "pending" | "not-deployed";
+export type SponsorStatus = "active" | "mock" | "disabled" | "pending" | "not-deployed";
 
-interface ChainInfo {
+export interface ChainInfo {
   name: string;
   contractAddress: string | null;
   status: "active" | "pending" | "unavailable";
   explorerUrl?: string;
 }
 
-interface SystemPayload {
+export interface PrototypeSystemPayload {
   timestamp: string;
 
   // Row 1: Protocol Economics
@@ -98,15 +134,115 @@ interface SystemPayload {
 }
 
 // ---------------------------------------------------------------------------
-// API fetch
+// Live report: GET /api/telemetry/system
 // ---------------------------------------------------------------------------
 
-async function fetchSystemTelemetry(): Promise<SystemPayload> {
-  const res = await fetch("/api/telemetry/system", {
-    headers: { ...getAuthHeaders() },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<SystemPayload>;
+/**
+ * What the route returns (routes/status.ts). Only `db` is required: a body
+ * without it is not a system report. Everything else is read defensively.
+ */
+interface SystemReport {
+  timestamp?: unknown;
+  uptime_seconds?: unknown;
+  response_ms?: unknown;
+  db: {
+    kernels?: unknown;
+    jobs?: unknown;
+    evidence?: unknown;
+    registrations?: unknown;
+    capabilities?: unknown;
+  };
+  agents?: unknown;
+  env?: unknown;
+}
+
+/** The route asks the agent bus for at most this many recent messages (routes/status.ts). */
+const RECENT_MESSAGES_LIMIT = 100;
+
+/** The environment variables the route reports, in display order. */
+const ENV_KEYS = [
+  "PCC_NETWORK",
+  "NODE_ENV",
+  "EVIDENCE_STORAGE",
+  "STORACHA_SPACE_DID",
+  "LIT_PROTOCOL_REAL",
+  "STARKNET_ACCOUNT_ADDRESS",
+  "ESCROW_CONTRACT_ADDRESS",
+] as const;
+
+const NOT_REPORTED = "Not reported";
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+async function fetchSystemReport(): Promise<SystemReport> {
+  const body = await apiGet<unknown>("/telemetry/system");
+  if (!isRecord(body) || !isRecord(body.db)) {
+    throw new Error("The gateway's answer wasn't a system report.");
+  }
+  return body as unknown as SystemReport;
+}
+
+/** The list the report sent, or null when it sent none. */
+function listOf(v: unknown): unknown[] | null {
+  return Array.isArray(v) ? v : null;
+}
+
+/** A non-empty string field of a list entry. */
+function textField(row: unknown, key: string): string | undefined {
+  if (!isRecord(row)) return undefined;
+  const v = row[key];
+  return typeof v === "string" && v !== "" ? v : undefined;
+}
+
+/** How many entries carry each value of `key`, most common first; entries without one count as "unknown". */
+function countBy(rows: unknown[], key: string): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const value = textField(row, key) ?? "unknown";
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+/** The number of distinct non-empty values of `key`. */
+function distinct(rows: unknown[], key: string): number {
+  return new Set(rows.map((row) => textField(row, key)).filter((v) => v !== undefined)).size;
+}
+
+/** The latest valid time among the entries' `key`, or null. */
+function latestTime(rows: unknown[], key: string): Date | null {
+  let latest: Date | null = null;
+  for (const row of rows) {
+    const text = textField(row, key);
+    if (!text) continue;
+    const d = new Date(text);
+    if (Number.isNaN(d.getTime())) continue;
+    if (!latest || d > latest) latest = d;
+  }
+  return latest;
+}
+
+function reportedTime(ts: unknown): string | null {
+  if (typeof ts !== "string") return null;
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleTimeString();
+}
+
+function finiteNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** An environment value as reported: null means unset; a missing key means the route didn't say. */
+function envValue(env: Record<string, unknown>, key: string): string {
+  if (!Object.prototype.hasOwnProperty.call(env, key)) return NOT_REPORTED;
+  const v = env[key];
+  if (v === null) return "Not set";
+  if (typeof v !== "string" || v === "") return NOT_REPORTED;
+  // The route reports only whether the Starknet account is set, not the address.
+  if (key === "STARKNET_ACCOUNT_ADDRESS" && v === "set") return "Set";
+  return v.length > 24 ? truncateAddr(v) : v;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +338,7 @@ function JobBadge({
   label,
   color,
 }: {
-  count: number;
+  count: React.ReactNode;
   label: string;
   color: BadgeColor;
 }) {
@@ -219,6 +355,29 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <h2 className="text-[10px] font-semibold text-white/30 uppercase tracking-widest mb-3">
       {children}
     </h2>
+  );
+}
+
+function RefreshButton({ onClick, fetching }: { onClick: () => void; fetching: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={fetching}
+      className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-white/[0.1] bg-white/[0.04] text-xs text-white/50 hover:text-white/80 hover:bg-white/[0.07] hover:border-white/[0.15] transition-all disabled:opacity-40"
+    >
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 12 12"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        className={fetching ? "animate-spin" : ""}
+      >
+        <path d="M10 6A4 4 0 112 6M10 6V3M10 6H7" />
+      </svg>
+      {fetching ? "Refreshing…" : "Refresh"}
+    </button>
   );
 }
 
@@ -259,10 +418,396 @@ function CardSkeleton() {
 }
 
 // ---------------------------------------------------------------------------
+// Live cards: counts over the lists /api/telemetry/system returns
+// ---------------------------------------------------------------------------
+
+function LiveCard({
+  title,
+  subtitle,
+  note,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  note?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <GlassPanel padding="lg">
+      <div className="space-y-4">
+        <div>
+          <h3 className="text-sm font-bold text-white/85 tracking-wide">{title}</h3>
+          <p className="text-[11px] text-white/35 mt-0.5">{subtitle}</p>
+        </div>
+        {children}
+        {note && (
+          <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">{note}</div>
+        )}
+      </div>
+    </GlassPanel>
+  );
+}
+
+/** A list the report sent empty. The route also sends empty lists when its read failed, so this says only what the report lists. */
+function ListsNone({ what }: { what: string }) {
+  return (
+    <p data-live-state="empty" className="text-xs text-white/45 leading-relaxed">
+      The report lists no {what}.
+    </p>
+  );
+}
+
+/** A section the report left out: not zero, not empty. */
+function NotInReport({ what }: { what: string }) {
+  return <p className="text-xs text-white/45 leading-relaxed">The report didn't include {what}.</p>;
+}
+
+function KernelsCard({ kernels }: { kernels: unknown[] | null }) {
+  let body: React.ReactNode;
+  if (kernels === null) {
+    body = <NotInReport what="the kernel list" />;
+  } else if (kernels.length === 0) {
+    body = <ListsNone what="kernels" />;
+  } else {
+    const online = kernels.filter(
+      (k) => isRecord(k) && isKernelOnline({ status: k.status as KernelDTO["status"], isStale: k.isStale === true }),
+    ).length;
+    const stale = kernels.filter((k) => isRecord(k) && k.status === "online" && k.isStale === true).length;
+    const otherStatuses = countBy(
+      kernels.filter((k) => textField(k, "status") !== "online"),
+      "status",
+    );
+    body = (
+      <>
+        <div className="flex gap-4">
+          <BigNumber value={kernels.length} label="Registered" />
+          <BigNumber value={online} label="Online" />
+          <BigNumber value={distinct(kernels, "operatorAddress")} label="Operators" />
+        </div>
+        <div className="space-y-2 pt-1 border-t border-white/[0.06]">
+          <MetricRow label="Online, Stale Heartbeat" value={stale} mono />
+          <MetricRow
+            label="Other Statuses"
+            value={otherStatuses.length > 0 ? otherStatuses.map(([s, n]) => `${s} ${n}`).join(" · ") : "None"}
+          />
+        </div>
+      </>
+    );
+  }
+  return (
+    <LiveCard
+      title="Kernels"
+      subtitle="Sites in the kernel registry"
+      note="Online means status online with a fresh heartbeat. Operators are distinct operator addresses."
+    >
+      {body}
+    </LiveCard>
+  );
+}
+
+function JobsCard({ jobs }: { jobs: unknown[] | null }) {
+  let body: React.ReactNode;
+  let note = "Active means pending, queued, in progress or paused.";
+  if (jobs === null) {
+    body = <NotInReport what="the job list" />;
+  } else if (jobs.length === 0) {
+    body = <ListsNone what="jobs" />;
+  } else {
+    const atLeast = mayBeTruncated(jobs);
+    const statusOf = (j: unknown) => textField(j, "status") ?? "";
+    const active = jobs.filter((j) => isActiveJob({ status: statusOf(j) as JobDTO["status"] })).length;
+    const completed = jobs.filter((j) => statusOf(j) === "completed").length;
+    const failed = jobs.filter((j) => statusOf(j) === "failed").length;
+    const cancelled = jobs.filter((j) => statusOf(j) === "cancelled").length;
+    const other = jobs.length - active - completed - failed - cancelled;
+    if (atLeast) {
+      note = `The report includes only the gateway's first ${JOBS_PAGE_SIZE} jobs, so these counts are lower bounds. ${note}`;
+    }
+    body = (
+      <>
+        <BigNumber value={formatCount(jobs.length, atLeast)} label="Jobs" />
+        <div className="flex flex-wrap gap-2 justify-start">
+          <JobBadge count={formatCount(active, atLeast)} label="Active" color="blue" />
+          <JobBadge count={formatCount(completed, atLeast)} label="Done" color="green" />
+          <JobBadge count={formatCount(failed, atLeast)} label="Failed" color="red" />
+          <JobBadge count={formatCount(cancelled, atLeast)} label="Cancelled" color="white" />
+          {other > 0 && <JobBadge count={formatCount(other, atLeast)} label="Other" color="white" />}
+        </div>
+      </>
+    );
+  }
+  return (
+    <LiveCard title="Jobs" subtitle="Execution state" note={note}>
+      {body}
+    </LiveCard>
+  );
+}
+
+function GatewayReportCard({ report }: { report: SystemReport }) {
+  const uptime = finiteNumber(report.uptime_seconds);
+  const took = finiteNumber(report.response_ms);
+  return (
+    <LiveCard title="Gateway" subtitle="The process that answered this report">
+      <div className="flex gap-4">
+        <BigNumber value={uptime !== null && uptime >= 0 ? formatUptime(uptime) : "—"} label="Uptime" />
+        <BigNumber value={took !== null ? `${took} ms` : "—"} label="Report Took" />
+      </div>
+      <div className="space-y-2 pt-1 border-t border-white/[0.06]">
+        <MetricRow label="Reported At" value={reportedTime(report.timestamp) ?? NOT_REPORTED} />
+      </div>
+    </LiveCard>
+  );
+}
+
+function CapabilitiesCard({ capabilities }: { capabilities: unknown[] | null }) {
+  let body: React.ReactNode;
+  if (capabilities === null) {
+    body = <NotInReport what="the capability list" />;
+  } else if (capabilities.length === 0) {
+    body = <ListsNone what="capabilities" />;
+  } else {
+    body = (
+      <div className="flex gap-4">
+        <BigNumber value={capabilities.length} label="Records" />
+        <BigNumber value={distinct(capabilities, "type")} label="Types" />
+        <BigNumber value={distinct(capabilities, "kernelId")} label="Kernels" />
+      </div>
+    );
+  }
+  return (
+    <LiveCard
+      title="Capabilities"
+      subtitle="Capability records"
+      note="Every capability row, including ones the catalog hides after their kernel's heartbeat expired."
+    >
+      {body}
+    </LiveCard>
+  );
+}
+
+function RegistrationsCard({ registrations }: { registrations: unknown[] | null }) {
+  let body: React.ReactNode;
+  if (registrations === null) {
+    body = <NotInReport what="the registration list" />;
+  } else if (registrations.length === 0) {
+    body = <ListsNone what="machine registrations" />;
+  } else {
+    body = (
+      <>
+        <BigNumber value={registrations.length} label="Registrations" />
+        <div className="space-y-2 pt-1 border-t border-white/[0.06]">
+          {countBy(registrations, "status").map(([status, n]) => (
+            <MetricRow key={status} label={status} value={n} mono />
+          ))}
+        </div>
+      </>
+    );
+  }
+  return (
+    <LiveCard title="Machine Registrations" subtitle="Onboarding submissions, by status">
+      {body}
+    </LiveCard>
+  );
+}
+
+function EvidenceCard({ evidence }: { evidence: unknown[] | null }) {
+  let body: React.ReactNode;
+  if (evidence === null) {
+    body = <NotInReport what="the evidence list" />;
+  } else if (evidence.length === 0) {
+    body = <ListsNone what="evidence bundles" />;
+  } else {
+    const byTier = new Map<string, number>();
+    for (const bundle of evidence) {
+      const tier = isRecord(bundle) ? bundle.assuranceTier : undefined;
+      const label = typeof tier === "number" && Number.isInteger(tier) ? `Tier ${tier}` : "Tier unknown";
+      byTier.set(label, (byTier.get(label) ?? 0) + 1);
+    }
+    const latest = latestTime(evidence, "createdAt");
+    body = (
+      <>
+        <BigNumber value={evidence.length} label="Bundles" />
+        <div className="space-y-2 pt-1 border-t border-white/[0.06]">
+          {[...byTier.entries()]
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([tier, n]) => (
+              <MetricRow key={tier} label={tier} value={n} mono />
+            ))}
+          <MetricRow label="Latest" value={latest ? latest.toLocaleString() : NOT_REPORTED} />
+        </div>
+      </>
+    );
+  }
+  return (
+    <LiveCard title="Evidence" subtitle="Evidence bundles, by assurance tier">
+      {body}
+    </LiveCard>
+  );
+}
+
+function AgentBusCard({ agents }: { agents: unknown }) {
+  const conversations = isRecord(agents) ? listOf(agents.conversations) : null;
+  const messages = isRecord(agents) ? listOf(agents.recentMessages) : null;
+  let body: React.ReactNode;
+  if (conversations === null && messages === null) {
+    body = <NotInReport what="agent activity" />;
+  } else if ((conversations?.length ?? 0) === 0 && (messages?.length ?? 0) === 0) {
+    body = <ListsNone what="agent conversations" />;
+  } else {
+    const latest = messages ? latestTime(messages, "timestamp") : null;
+    body = (
+      <>
+        <div className="flex gap-4">
+          <BigNumber value={conversations ? conversations.length : "—"} label="Conversations" />
+          <BigNumber
+            value={conversations ? conversations.filter((c) => textField(c, "status") === "active").length : "—"}
+            label="Active"
+          />
+          <BigNumber
+            value={messages ? formatCount(messages.length, messages.length >= RECENT_MESSAGES_LIMIT) : "—"}
+            label="Recent Messages"
+          />
+        </div>
+        <div className="space-y-2 pt-1 border-t border-white/[0.06]">
+          <MetricRow label="Latest Message" value={latest ? latest.toLocaleString() : NOT_REPORTED} />
+        </div>
+      </>
+    );
+  }
+  return (
+    <LiveCard
+      title="Agent Bus"
+      subtitle="The gateway's in-process agent conversations"
+      note={`Recent messages are the latest ${RECENT_MESSAGES_LIMIT} at most. The report lists no conversations also when the gateway's agent bus isn't running.`}
+    >
+      {body}
+    </LiveCard>
+  );
+}
+
+function ConfigurationCard({ env }: { env: unknown }) {
+  return (
+    <LiveCard
+      title="Configuration"
+      subtitle="Environment settings the gateway reports"
+      note="Not set means the variable is unset on the gateway. Not reported means the report left it out."
+    >
+      {isRecord(env) ? (
+        <div className="space-y-2">
+          {ENV_KEYS.map((key) => (
+            <MetricRow key={key} label={key} value={envValue(env, key)} mono />
+          ))}
+        </div>
+      ) : (
+        <NotInReport what="the environment settings" />
+      )}
+    </LiveCard>
+  );
+}
+
+function LiveRows({ report }: { report: SystemReport }) {
+  const { db } = report;
+  return (
+    <>
+      <div>
+        <SectionLabel>Infrastructure</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <KernelsCard kernels={listOf(db.kernels)} />
+          <JobsCard jobs={listOf(db.jobs)} />
+          <GatewayReportCard report={report} />
+        </div>
+      </div>
+
+      <div>
+        <SectionLabel>Registry and Evidence</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <CapabilitiesCard capabilities={listOf(db.capabilities)} />
+          <RegistrationsCard registrations={listOf(db.registrations)} />
+          <EvidenceCard evidence={listOf(db.evidence)} />
+        </div>
+      </div>
+
+      <div>
+        <SectionLabel>Agents and Configuration</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <AgentBusCard agents={report.agents} />
+          <ConfigurationCard env={report.env} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function LiveRowsSkeleton() {
+  return (
+    <>
+      {[3, 3, 2].map((n, row) => (
+        <div key={row} className={`grid grid-cols-1 ${n === 3 ? "md:grid-cols-3" : "md:grid-cols-2"} gap-4`}>
+          {[...Array(n)].map((_, i) => <CardSkeleton key={i} />)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** The prototype's figures that no field of /api/telemetry/system carries. */
+function NotLiveSections() {
+  return (
+    <>
+      <div>
+        <SectionLabel>Protocol Economics</SectionLabel>
+        <GlassPanel padding="lg">
+          <NotLiveState
+            what="Protocol economics"
+            detail="The system report (/api/telemetry/system) doesn't include protocol fees, escrow volume or marketplace totals, so none are shown here."
+            hasDemo
+          />
+        </GlassPanel>
+      </div>
+
+      <div>
+        <SectionLabel>Chains, Network and Data Stack</SectionLabel>
+        <GlassPanel padding="lg">
+          <NotLiveState
+            what="The chain and data-stack overview"
+            detail="The system report doesn't include chain deployments, DHT peers, capability announcements, the gateway's version or route and test counts, IPFS uploads, ZK proofs, encryption counts, NEAR intents, or the agent package's version and tool count."
+            hasDemo
+          />
+        </GlassPanel>
+      </div>
+    </>
+  );
+}
+
+/** Sponsor integration status lives on its own page, read from /api/status/integrations. */
+function SponsorLinkStrip() {
+  return (
+    <GlassPanel padding="md">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+        <span className="text-[10px] text-white/30 uppercase tracking-widest flex-shrink-0">
+          Sponsor Integrations
+        </span>
+        <span className="text-xs text-white/40">
+          How each integration is configured, as the gateway reports it, is on the Sponsor Integrations page.
+        </span>
+        <a
+          href="/sponsors"
+          className="ml-auto text-[10px] text-teal-400/60 hover:text-teal-300 transition-colors flex-shrink-0"
+        >
+          Details
+          <span className="ml-1">→</span>
+        </a>
+      </div>
+    </GlassPanel>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prototype cards (demo mode only)
 // Row 1: Protocol Economics
 // ---------------------------------------------------------------------------
 
-function ProtocolFeeCard({ data }: { data: SystemPayload }) {
+function ProtocolFeeCard({ data }: { data: PrototypeSystemPayload }) {
   const feePct = (data.protocol.feeBps / 100).toFixed(2);
   return (
     <GlassPanel padding="lg">
@@ -291,7 +836,7 @@ function ProtocolFeeCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function EscrowActivityCard({ data }: { data: SystemPayload }) {
+function EscrowActivityCard({ data }: { data: PrototypeSystemPayload }) {
   return (
     <GlassPanel padding="lg">
       <div className="space-y-4">
@@ -314,7 +859,7 @@ function EscrowActivityCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function MarketplaceCard({ data }: { data: SystemPayload }) {
+function MarketplaceCard({ data }: { data: PrototypeSystemPayload }) {
   return (
     <GlassPanel padding="lg">
       <div className="space-y-4">
@@ -338,7 +883,7 @@ function MarketplaceCard({ data }: { data: SystemPayload }) {
 }
 
 // ---------------------------------------------------------------------------
-// Row 2: Infrastructure
+// Row 2: Infrastructure (prototype)
 // ---------------------------------------------------------------------------
 
 const CHAIN_EXPLORER: Record<string, string> = {
@@ -347,7 +892,7 @@ const CHAIN_EXPLORER: Record<string, string> = {
   Starknet: "https://sepolia.starkscan.co",
 };
 
-function MultiChainCard({ data }: { data: SystemPayload }) {
+function MultiChainCard({ data }: { data: PrototypeSystemPayload }) {
   return (
     <GlassPanel padding="lg">
       <div className="space-y-4">
@@ -411,7 +956,7 @@ function MultiChainCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function OperatorNetworkCard({ data }: { data: SystemPayload }) {
+function OperatorNetworkCard({ data }: { data: PrototypeSystemPayload }) {
   const { operators } = data;
   return (
     <GlassPanel padding="lg">
@@ -442,7 +987,7 @@ function OperatorNetworkCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function GatewayCard({ data }: { data: SystemPayload }) {
+function GatewayCard({ data }: { data: PrototypeSystemPayload }) {
   const { gateway } = data;
   return (
     <GlassPanel padding="lg">
@@ -468,10 +1013,10 @@ function GatewayCard({ data }: { data: SystemPayload }) {
 }
 
 // ---------------------------------------------------------------------------
-// Row 3: Sovereign Data Stack
+// Row 3: Sovereign Data Stack (prototype)
 // ---------------------------------------------------------------------------
 
-function EvidencePipelineCard({ data }: { data: SystemPayload }) {
+function EvidencePipelineCard({ data }: { data: PrototypeSystemPayload }) {
   const { evidence } = data;
   return (
     <GlassPanel padding="lg">
@@ -493,7 +1038,7 @@ function EvidencePipelineCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function StorageCard({ data }: { data: SystemPayload }) {
+function StorageCard({ data }: { data: PrototypeSystemPayload }) {
   const { storage } = data;
   const storageModeColor =
     storage.storageMode === "storacha"
@@ -540,7 +1085,7 @@ function StorageCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function NearIntentsCard({ data }: { data: SystemPayload }) {
+function NearIntentsCard({ data }: { data: PrototypeSystemPayload }) {
   const { near } = data;
   return (
     <GlassPanel padding="lg">
@@ -567,10 +1112,10 @@ function NearIntentsCard({ data }: { data: SystemPayload }) {
 }
 
 // ---------------------------------------------------------------------------
-// Row 4: Agent Layer
+// Row 4: Agent Layer (prototype)
 // ---------------------------------------------------------------------------
 
-function AgentPackageCard({ data }: { data: SystemPayload }) {
+function AgentPackageCard({ data }: { data: PrototypeSystemPayload }) {
   const { agentPackage } = data;
   return (
     <GlassPanel padding="lg">
@@ -597,7 +1142,7 @@ function AgentPackageCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function A2AActivityCard({ data }: { data: SystemPayload }) {
+function A2AActivityCard({ data }: { data: PrototypeSystemPayload }) {
   const { a2a } = data;
   return (
     <GlassPanel padding="lg">
@@ -618,7 +1163,7 @@ function A2AActivityCard({ data }: { data: SystemPayload }) {
   );
 }
 
-function JobsCard({ data }: { data: SystemPayload }) {
+function PrototypeJobsCard({ data }: { data: PrototypeSystemPayload }) {
   const { jobs } = data;
   return (
     <GlassPanel padding="lg">
@@ -642,10 +1187,10 @@ function JobsCard({ data }: { data: SystemPayload }) {
 }
 
 // ---------------------------------------------------------------------------
-// Sponsor status strip
+// Sponsor status strip (prototype)
 // ---------------------------------------------------------------------------
 
-const SPONSOR_LABELS: Record<keyof SystemPayload["sponsors"], string> = {
+const SPONSOR_LABELS: Record<keyof PrototypeSystemPayload["sponsors"], string> = {
   storacha: "Storacha",
   starknet: "Starknet",
   lit: "Lit Protocol",
@@ -653,7 +1198,7 @@ const SPONSOR_LABELS: Record<keyof SystemPayload["sponsors"], string> = {
   near: "NEAR",
 };
 
-const SPONSOR_LINKS: Record<keyof SystemPayload["sponsors"], string> = {
+const SPONSOR_LINKS: Record<keyof PrototypeSystemPayload["sponsors"], string> = {
   storacha: "/sponsors",
   starknet: "/sponsors",
   lit: "/sponsors",
@@ -661,7 +1206,7 @@ const SPONSOR_LINKS: Record<keyof SystemPayload["sponsors"], string> = {
   near: "/sponsors",
 };
 
-function SponsorStatusStrip({ sponsors }: { data: SystemPayload; sponsors: SystemPayload["sponsors"] }) {
+function SponsorStatusStrip({ sponsors }: { data: PrototypeSystemPayload; sponsors: PrototypeSystemPayload["sponsors"] }) {
   const statusToColor = (s: SponsorStatus): BadgeColor => {
     if (s === "active") return "green";
     if (s === "mock") return "yellow";
@@ -675,7 +1220,7 @@ function SponsorStatusStrip({ sponsors }: { data: SystemPayload; sponsors: Syste
         <span className="text-[10px] text-white/30 uppercase tracking-widest flex-shrink-0">
           Sponsor Integrations
         </span>
-        {(Object.keys(sponsors) as Array<keyof SystemPayload["sponsors"]>).map((key) => (
+        {(Object.keys(sponsors) as Array<keyof PrototypeSystemPayload["sponsors"]>).map((key) => (
           <a
             key={key}
             href={SPONSOR_LINKS[key]}
@@ -697,39 +1242,6 @@ function SponsorStatusStrip({ sponsors }: { data: SystemPayload; sponsors: Syste
 }
 
 // ---------------------------------------------------------------------------
-// Fallback placeholder data (shown when endpoint not available yet)
-// ---------------------------------------------------------------------------
-
-function makeFallbackData(): SystemPayload {
-  return {
-    timestamp: new Date().toISOString(),
-    protocol: { feeBps: 150, feeRecipient: "0x0000000000000000000000000000000000000000", totalFeesCollected: "0.00" },
-    escrow: { totalEscrows: 0, totalVolume: "0.00" },
-    marketplace: { listingsCount: 0, orderCount: 0, categoryCount: 0 },
-    chains: [
-      { name: "Base Sepolia", contractAddress: "0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454", status: "active" },
-      { name: "Flow EVM", contractAddress: null, status: "pending" },
-      { name: "Starknet", contractAddress: null, status: "pending" },
-    ],
-    operators: { registered: 0, activeKernels: 0, dhtPeers: 0, capabilityAnnouncements: 0 },
-    gateway: { routeCount: 347, testCount: 3300, version: "2.0.0", uptimeSeconds: 0 },
-    evidence: { bundlesStored: 0, bundlesEncrypted: 0, ipfsUploads: 0, zkProofsAnchored: 0 },
-    storage: { storageMode: "mock", encryptionMode: "mock" },
-    near: { quotes: 0, intentsSubmitted: 0, status: "mock" },
-    agentPackage: { version: "2.0.0", toolCount: 154, lastUpdated: null },
-    a2a: { conversations: 0, intentsProcessed: 0, toolCalls: 0 },
-    jobs: { total: 0, pending: 0, active: 0, completed: 0, failed: 0 },
-    sponsors: {
-      storacha: "mock",
-      starknet: "not-deployed",
-      lit: "disabled",
-      flow: "pending",
-      near: "mock",
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
 
@@ -737,22 +1249,28 @@ export function SystemDashboardPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   React.useEffect(() => {
-    setPageMeta("System Dashboard", "Mission control — full operational overview at a glance");
+    setPageMeta("System Dashboard", "Mission control: what the gateway reports about its own state");
   }, [setPageMeta]);
 
+  // Sample values render only when the viewer asked for a demo (lib/demo-mode.ts).
+  return isDemoMode() ? <SystemDashboardDemo /> : <SystemDashboardLive />;
+}
+
+// ── Live: /api/telemetry/system, and what it doesn't report ─────────────────
+
+function SystemDashboardLive() {
   const query = useQuery({
-    queryKey: ["system", "dashboard"],
-    queryFn: fetchSystemTelemetry,
+    queryKey: ["telemetry", "system"],
+    queryFn: fetchSystemReport,
     refetchInterval: 15_000,
     staleTime: 10_000,
     retry: 2,
   });
 
-  // Use actual data when available, fall back to placeholder data on error
-  const data: SystemPayload = query.data ?? makeFallbackData();
-  const isLoading = query.isLoading;
-  const isError = query.isError;
-  const usingFallback = !query.data;
+  // react-query never stores undefined, so stored data means the gateway answered with a report.
+  const report = query.data;
+  const retry = () => void query.refetch();
+  const reportedAt = report ? reportedTime(report.timestamp) : null;
 
   return (
     <div className="space-y-5">
@@ -761,114 +1279,107 @@ export function SystemDashboardPage() {
         <div>
           <h1 className="text-base font-semibold text-white/80">System Dashboard</h1>
           <p className="text-xs text-white/35 mt-0.5">
-            Mission control — full operational overview of the PCC platform
+            What the gateway reports about its registry, jobs, evidence, agents and configuration
           </p>
         </div>
-        <button
-          onClick={() => void query.refetch()}
-          disabled={query.isFetching}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-white/[0.1] bg-white/[0.04] text-xs text-white/50 hover:text-white/80 hover:bg-white/[0.07] hover:border-white/[0.15] transition-all disabled:opacity-40"
-        >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 12 12"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            className={query.isFetching ? "animate-spin" : ""}
-          >
-            <path d="M10 6A4 4 0 112 6M10 6V3M10 6H7" />
-          </svg>
-          {query.isFetching ? "Refreshing…" : "Refresh"}
-        </button>
+        <RefreshButton onClick={retry} fetching={query.isFetching} />
       </div>
 
-      {/* Error / fallback banner */}
-      {isError && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500/[0.06] border border-amber-500/20 text-xs text-amber-400/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400/60" />
-          {`/api/telemetry/system not available — showing static defaults. The endpoint is still being deployed.`}
-        </div>
+      {/* A failed refresh keeps the last report on screen, labelled with its time */}
+      {report && query.isError && (
+        <StaleNotice what="the system report" updatedAt={query.dataUpdatedAt} onRetry={retry} />
       )}
 
-      {/* ── Row 1: Protocol Economics ── */}
-      <div>
-        <SectionLabel>Protocol Economics</SectionLabel>
-        {isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...Array(3)].map((_, i) => <CardSkeleton key={i} />)}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <ProtocolFeeCard data={data} />
-            <EscrowActivityCard data={data} />
-            <MarketplaceCard data={data} />
-          </div>
-        )}
-      </div>
-
-      {/* ── Row 2: Infrastructure ── */}
-      <div>
-        <SectionLabel>Infrastructure</SectionLabel>
-        {isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...Array(3)].map((_, i) => <CardSkeleton key={i} />)}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <MultiChainCard data={data} />
-            <OperatorNetworkCard data={data} />
-            <GatewayCard data={data} />
-          </div>
-        )}
-      </div>
-
-      {/* ── Row 3: Sovereign Data Stack ── */}
-      <div>
-        <SectionLabel>Sovereign Data Stack</SectionLabel>
-        {isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...Array(3)].map((_, i) => <CardSkeleton key={i} />)}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <EvidencePipelineCard data={data} />
-            <StorageCard data={data} />
-            <NearIntentsCard data={data} />
-          </div>
-        )}
-      </div>
-
-      {/* ── Row 4: Agent Layer ── */}
-      <div>
-        <SectionLabel>Agent Layer</SectionLabel>
-        {isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[...Array(3)].map((_, i) => <CardSkeleton key={i} />)}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <AgentPackageCard data={data} />
-            <A2AActivityCard data={data} />
-            <JobsCard data={data} />
-          </div>
-        )}
-      </div>
-
-      {/* ── Sponsor Status Strip ── */}
-      {!isLoading && (
-        <SponsorStatusStrip data={data} sponsors={data.sponsors} />
+      {report ? (
+        <LiveRows report={report} />
+      ) : query.isError ? (
+        <GlassPanel padding="lg">
+          <UnavailableState what="the system report" error={query.error} onRetry={retry} />
+        </GlassPanel>
+      ) : (
+        <LiveRowsSkeleton />
       )}
+
+      <NotLiveSections />
+
+      <SponsorLinkStrip />
 
       {/* Footer */}
       <p className="text-[11px] text-white/20 text-center pb-2">
         Sourced from{" "}
         <span className="font-mono text-white/30">/api/telemetry/system</span>
-        {usingFallback
-          ? " — endpoint pending deployment, showing defaults"
-          : ` — last updated ${new Date(data.timestamp).toLocaleTimeString()}`}
-        {" "}· auto-refreshes every 15s
+        {reportedAt ? `, reported at ${reportedAt}` : ""}; refreshes every 15s. Counts are over the lists in
+        that report: it includes at most {JOBS_PAGE_SIZE} jobs, and it sends an empty list both when there
+        are none and when its database read failed.
+      </p>
+    </div>
+  );
+}
+
+// ── Demo: the prototype with sample values, under a DemoBanner ──────────────
+
+function SystemDashboardDemo() {
+  const data = React.useMemo(() => demoSystemTelemetry(), []);
+
+  return (
+    <div className="space-y-5">
+      <DemoBanner what="System dashboard" />
+
+      {/* Header row */}
+      <div>
+        <h1 className="text-base font-semibold text-white/80">System Dashboard</h1>
+        <p className="text-xs text-white/35 mt-0.5">
+          Mission control — full operational overview of the PCC platform
+        </p>
+      </div>
+
+      {/* ── Row 1: Protocol Economics ── */}
+      <div>
+        <SectionLabel>Protocol Economics</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <ProtocolFeeCard data={data} />
+          <EscrowActivityCard data={data} />
+          <MarketplaceCard data={data} />
+        </div>
+      </div>
+
+      {/* ── Row 2: Infrastructure ── */}
+      <div>
+        <SectionLabel>Infrastructure</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <MultiChainCard data={data} />
+          <OperatorNetworkCard data={data} />
+          <GatewayCard data={data} />
+        </div>
+      </div>
+
+      {/* ── Row 3: Sovereign Data Stack ── */}
+      <div>
+        <SectionLabel>Sovereign Data Stack</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <EvidencePipelineCard data={data} />
+          <StorageCard data={data} />
+          <NearIntentsCard data={data} />
+        </div>
+      </div>
+
+      {/* ── Row 4: Agent Layer ── */}
+      <div>
+        <SectionLabel>Agent Layer</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <AgentPackageCard data={data} />
+          <A2AActivityCard data={data} />
+          <PrototypeJobsCard data={data} />
+        </div>
+      </div>
+
+      {/* ── Sponsor Status Strip ── */}
+      <SponsorStatusStrip data={data} sponsors={data.sponsors} />
+
+      {/* Footer */}
+      <p className="text-[11px] text-white/20 text-center pb-2">
+        Sample values, not read from{" "}
+        <span className="font-mono text-white/30">/api/telemetry/system</span>.
       </p>
     </div>
   );
