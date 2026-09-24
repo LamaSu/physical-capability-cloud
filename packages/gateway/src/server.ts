@@ -41,6 +41,7 @@ import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { composeRoutes } from "./routes/compose.js";
 import { agentPlanRoutes } from "./routes/agent-plans.js";
+import { reservationRoutes } from "./routes/reservations.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
 import { skillsRoutes } from "./routes/skills.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
@@ -690,6 +691,9 @@ export async function createGateway(port = 3200) {
   // default-denies it) and answers 503 until the R13 store, #349, the evidence map, the fee policy and
   // escrow's encoder are wired.
   await app.register(agentPlanRoutes);
+  // R13: issue and read one-use budget reservations. Money-path (default-deny); 503 until the store
+  // (operator decision #2240), an exact request ceiling and the payer-wallet binding exist.
+  await app.register(reservationRoutes);
   // D2 compiler-ABI: GET /api/compose/registry-snapshot(/:registryDigest). Static
   // path so find-my-way prefers it over composeRoutes' parametric /api/compose/:id.
   await app.register(registrySnapshotRoutes);
