@@ -97,6 +97,28 @@ describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
     expect(s.mount.querySelector(".pcc-invalid")).not.toBeNull();
     s.close();
   });
+  it("ignores a valid tool-result delivered BEFORE the init handshake (D14); the same result after init renders", () => {
+    // D14 (aeo #2365): spec order is initialize -> initialized -> tool-result. The pcc-ui view pins it with
+    // its lifecycle state machine (mcp-app-view-lifecycle.test.ts); this pins the IR kit's own gate.
+    const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p class="pcc-invalid">waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
+    const w: any = dom.window;
+    const posted: any[] = [];
+    w.parent.postMessage = (m: any) => posted.push(m);
+    w.__PCC_IR_ORIGIN__ = "https://capability.network";
+    w.fetch = () => Promise.reject(new Error("no fetch in test"));
+    w.eval(KIT);
+    const result = () => w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(w.JSON.stringify(validManifest)) } } } }));
+    const mount = w.document.getElementById("pcc-ir-root");
+    result(); // before the host answered ui/initialize
+    expect(mount.textContent).toContain("waiting");
+    expect(mount.textContent).not.toContain("hello");
+    expect(posted.some((m) => m && m.method === "ui/notifications/initialized")).toBe(false);
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } }));
+    expect(posted.some((m) => m && m.method === "ui/notifications/initialized")).toBe(true);
+    result(); // after init: the same result renders
+    expect(mount.textContent).toContain("hello <b>not-html</b>");
+    w.close();
+  });
   it("ignores a non-parent message source (stays waiting)", () => {
     const s = boot({ badSource: true }); s.deliver(validManifest);
     expect(s.mount.textContent).toContain("waiting");
