@@ -916,7 +916,7 @@ PCC operates across four chains with distinct roles:
 
 **Arkhai / Alkahest**: Conditional peer-to-peer escrow with EAS (Ethereum Attestation Service) attestations. PCC maps each milestone to an Alkahest obligation — the buyer locks tokens with a demand (evidence requirements for that assurance tier), the operator fulfills by producing an evidence attestation, and the arbiter (PCC's verification layer) validates the result. If valid, escrow releases to the operator. If expired, funds return to the buyer. This provides a second escrow primitive alongside the native `MilestoneEscrow`, with boolean-native settlement semantics built on attestations rather than contract state.
 
-x402 (HTTP 402 Payment Required) handles per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup.
+*Roadmap:* x402 (HTTP 402 Payment Required) per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup. The payment gate is not yet active on the gateway's routes.
 
 ### 15.4 Dashboard
 

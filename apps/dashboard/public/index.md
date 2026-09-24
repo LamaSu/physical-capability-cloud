@@ -20,7 +20,7 @@ Connect a machine or service through the local Shop Kernel, validate its adapter
 
 ## Settlement and evidence
 
-Jobs are priced per outcome rather than by subscription. PCC's implemented settlement flow uses x402 and USDC milestone escrow on Base Sepolia, and the protocol charges 2.35% when settlement occurs. Base Sepolia is a test network. Evidence requirements are part of the capability contract; on-chain state stores hashes or commitments, not raw evidence.
+Jobs are priced per outcome rather than by subscription. PCC's implemented settlement flow uses USDC milestone escrow on Base Sepolia, and the protocol charges 2.35% when settlement occurs. Base Sepolia is a test network. Evidence requirements are part of the capability contract; on-chain state stores hashes or commitments, not raw evidence.
 
 ## Trust and community
 
