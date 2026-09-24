@@ -335,6 +335,23 @@ function isRow(row: unknown): row is { id: string } {
   return typeof row === "object" && row !== null && isId((row as { id?: unknown }).id);
 }
 
+/**
+ * A plain copy of a live tier list, or null when it is malformed: not an array, empty, implausibly
+ * long, holed (`every` would skip a hole), or holding anything but integers 0..3. Read by index, never
+ * through the row's own methods, and copied, so the digest and the tier check see the same values.
+ */
+function liveTiers(x: unknown): number[] | null {
+  if (!Array.isArray(x) || x.length === 0 || x.length > 16) return null;
+  const out: number[] = [];
+  for (let i = 0; i < x.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(x, i)) return null;
+    const t: unknown = x[i];
+    if (typeof t !== "number" || !Number.isInteger(t) || t < 0 || t > 3) return null;
+    out.push(t);
+  }
+  return out;
+}
+
 function visibleTo(cap: LiveCapability, opts: RevalidationOpts): boolean {
   return cap.tenantId === undefined || cap.tenantId === null || cap.tenantId === (opts.tenantId ?? null);
 }
@@ -360,10 +377,8 @@ function judge(
   }
   // Tiers are NEVER defaulted. The decomposer's `?? [0, 1]` would sell tier 1 on a row that offers
   // nothing; SQL NOT NULL does not validate the JSON inside the column (cross-family review, #355).
-  const tiers = cap.assuranceTiers;
-  if (!Array.isArray(tiers) || tiers.length === 0 || !tiers.every((t) => Number.isInteger(t) && t >= 0 && t <= 3)) {
-    return { nodeId, status: "unavailable", reason: "malformed-tiers" };
-  }
+  const tiers = liveTiers(cap.assuranceTiers);
+  if (!tiers) return { nodeId, status: "unavailable", reason: "malformed-tiers" };
   const priced = livePrice(cap);
   if (!priced.ok) return { nodeId, status: "unpriceable", reason: priced.reason };
 
