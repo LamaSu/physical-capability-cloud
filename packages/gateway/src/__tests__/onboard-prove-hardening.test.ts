@@ -365,6 +365,51 @@ describe("/prove hardening (WP-B)", () => {
     expect(auditRows(regId).filter((r) => r.eventType === "operator.proof_submitted")).toHaveLength(0);
   });
 
+  // ── L2: the stored record always re-verifies against its digest ───────────
+
+  /** POST a raw JSON body (JSON numbers like 1e400 cannot be written as JS values). */
+  function proveRaw(regId: string, json: string) {
+    return app.inject({
+      method: "POST",
+      url: `/api/onboard/registrations/${regId}/prove`,
+      headers: { "x-test-operator": OWNER, "content-type": "application/json" },
+      payload: json,
+    });
+  }
+
+  /** The record in the description and in the audit row both hash to the recorded evidenceDigest. */
+  function expectRecordReverifies(regId: string) {
+    const record = proofRecord(regId);
+    const rehash = (value: unknown) => "sha256:" + createHash("sha256").update(canonicalize(value)).digest("hex");
+    expect(rehash(record.evidence)).toBe(record.evidenceDigest);
+    const audit = auditRows(regId).filter((r) => r.eventType === "operator.proof_submitted").at(-1)!;
+    const metadata = audit.metadata as { evidence: unknown; evidenceDigest: string };
+    expect(metadata.evidenceDigest).toBe(record.evidenceDigest);
+    expect(rehash(metadata.evidence)).toBe(record.evidenceDigest);
+  }
+
+  it("every stored record re-verifies against its evidenceDigest: non-finite numbers are refused, never stored", async () => {
+    const ts = recent();
+    const bodies: Array<[string, string, boolean]> = [
+      ["finite extremes", `{"evidence":{"deviceHealth":{"status":"idle","model":"M","big":1e308,"tiny":5e-324,"neg":-0,"exp":1e21,"int":9007199254740993}}}`, true],
+      ["1e400 in deviceHealth (review probe P6)", `{"evidence":{"deviceHealth":{"status":"idle","model":"M","temp":1e400}}}`, false],
+      ["-1e400 in an event payload", `{"evidence":{"bundleHash":"${BUNDLE_HASH}","events":[{"type":"execution_completed","timestamp":"${ts}","payload":{"drift":-1e400}}]}}`, false],
+    ];
+    const regId = await register(app);
+    for (const [label, json, accepted] of bodies) {
+      const before = stored(regId);
+      const res = await proveRaw(regId, json);
+      if (res.statusCode === 200) expectRecordReverifies(regId);
+      expect({ label, status: res.statusCode }).toEqual({ label, status: accepted ? 200 : 400 });
+      if (!accepted) {
+        expect(res.json().error).toBe("non_finite_number");
+        expect(stored(regId).status).toBe(before.status);
+        expect(stored(regId).description ?? null).toBe(before.description ?? null);
+      }
+    }
+    expect(auditRows(regId).filter((r) => r.eventType === "operator.proof_submitted")).toHaveLength(1);
+  });
+
   // ── B3: a prove racing an approval ────────────────────────────────────────
 
   it("a prove that loses the race to an approval is 409 and does not replace the approved evidence", async () => {

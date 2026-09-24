@@ -172,6 +172,18 @@ describe("validateEvidenceShape — bounds checked before any decode", () => {
     const r = validateEvidenceShape({ photoBase64: "data:image/png;base64," + b64(makePng(16, 16)) });
     expect(r.ok && r.value.photo?.declaredFormat).toBe("png");
   });
+
+  // L2: a non-finite number canonicalizes as "Infinity"/"NaN" but is stored as
+  // null, so the stored record would not re-verify against its digest.
+  it("rejects non-finite numbers anywhere in events or deviceHealth", () => {
+    const nonFinite = { status: 400, error: "non_finite_number" };
+    expect(shapeError({ deviceHealth: { status: "idle", model: "M", temp: Infinity } })).toEqual(nonFinite);
+    expect(shapeError({ deviceHealth: { status: "idle", model: "M", sensors: [{ reading: [1, -Infinity] }] } })).toEqual(nonFinite);
+    expect(shapeError({ events: [ev({ payload: { pages: NaN } })] })).toEqual(nonFinite);
+    expect(shapeError({ events: [ev({ source: { deviceId: "d", drift: { ppm: -Infinity } } })] })).toEqual(nonFinite);
+    // Finite extremes are fine.
+    expect(shapeError({ deviceHealth: { status: "idle", model: "M", big: 1e308, tiny: 5e-324, neg: -0, exp: 1e21 } })).toBeNull();
+  });
 });
 
 describe("inspectPhoto — magic bytes and header dimensions", () => {

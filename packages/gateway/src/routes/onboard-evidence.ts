@@ -134,6 +134,26 @@ function exceedsDepth(value: unknown, limit: number): boolean {
   return false;
 }
 
+/**
+ * True if `value` contains a number that is not finite (NaN, ±Infinity; JSON
+ * like 1e400 parses to Infinity). Such a number canonicalizes as "Infinity"
+ * but is stored as null, so the stored record would not re-verify against its
+ * digest. Iterative; call it only on a value whose depth is already bounded.
+ */
+function containsNonFiniteNumber(value: unknown): boolean {
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (typeof v === "number") {
+      if (!Number.isFinite(v)) return true;
+      continue;
+    }
+    if (typeof v !== "object" || v === null) continue;
+    for (const child of Array.isArray(v) ? v : Object.values(v as Record<string, unknown>)) stack.push(child);
+  }
+  return false;
+}
+
 /** UTF-8 size of the JSON serialization, or null if it cannot be serialized (e.g. nesting too deep for the stack). */
 function serializedBytes(value: unknown): number | null {
   try {
@@ -201,6 +221,9 @@ export function validateEvidenceShape(evidence: unknown): Checked<ValidatedEvide
     if (exceedsDepth(events, EVIDENCE_MAX_DEPTH)) {
       return reject(400, "invalid_events", `events may be nested at most ${EVIDENCE_MAX_DEPTH} levels deep.`);
     }
+    if (containsNonFiniteNumber(events)) {
+      return reject(400, "non_finite_number", "events may not contain a number that is not finite (NaN, Infinity or -Infinity, e.g. 1e400).");
+    }
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
       if (!isPlainObject(ev)) {
@@ -247,6 +270,9 @@ export function validateEvidenceShape(evidence: unknown): Checked<ValidatedEvide
     }
     if (exceedsDepth(dh, EVIDENCE_MAX_DEPTH)) {
       return reject(400, "invalid_device_health", `deviceHealth may be nested at most ${EVIDENCE_MAX_DEPTH} levels deep.`);
+    }
+    if (containsNonFiniteNumber(dh)) {
+      return reject(400, "non_finite_number", "deviceHealth may not contain a number that is not finite (NaN, Infinity or -Infinity, e.g. 1e400).");
     }
     for (const field of ["status", "model"] as const) {
       const v = dh[field];
