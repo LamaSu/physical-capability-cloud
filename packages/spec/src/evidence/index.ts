@@ -23,6 +23,9 @@ export * from "./primitives.js";
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
 export * from "./eligibility.js";
+// compileTierLadder — a CSD's own per-tier event requirements, the ladder the
+// oracle's /settle tier recompute reads (N19/N33).
+export * from "./tier-ladder.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
