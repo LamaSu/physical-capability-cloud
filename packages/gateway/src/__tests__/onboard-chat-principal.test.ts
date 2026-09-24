@@ -78,9 +78,19 @@ const PKG = {
     tool("waitlist_export", "GET", "/api/admin/waitlist"),
     tool("item_details", "GET", "/api/test/items/{id}/details"),
     tool("generate_ui", "POST", "http://localhost:3200/api/test/whoami"),
+    // WP-D R3: every tool that changes a registration's status, by name or by route.
+    tool("prove_registration", "POST", "/api/onboard/registrations/{registrationId}/prove"),
+    tool("submit_registration_evidence", "POST", "/api/onboard/registrations/{registrationId}/prove"),
+    tool("remove_registration_record", "DELETE", "/api/onboard/registrations/{registrationId}"),
+    tool("registration_step", "POST", "/api/onboard/registrations/{registrationId}/{step}"),
+    tool("delete_registration", "GET", "/api/test/whoami"), // a status tool's name on a harmless route
+    tool("get_registration", "GET", "/api/onboard/registrations/{registrationId}"), // a read: allowed
   ],
 };
 const FORBIDDEN = ["approve_registration", "reject_registration", "activate_registration", "waitlist_export"];
+const REGISTRATION_STATUS = [
+  "prove_registration", "submit_registration_evidence", "remove_registration_record", "registration_step", "delete_registration",
+];
 
 /** Every request the chat dispatched (the chat's own endpoints excluded). */
 interface Dispatched { method: string; url: string; authorization?: string; cookie?: string; ip: string }
@@ -127,9 +137,12 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     }));
     app.get("/api/capabilities/types", async () => ({ types: ["printing"] }));
     // At ac86a404 these registration handlers were ungated; here they just answer.
-    for (const verb of ["approve", "reject", "activate"]) {
-      app.post(`/api/onboard/registrations/:id/${verb}`, async () => ({ ok: true, verb }));
+    for (const verb of ["approve", "reject", "activate", "prove"]) {
+      app.post(`/api/onboard/registrations/:id/${verb}`, async () => ({ ok: true, verb, status: "active" }));
     }
+    app.post("/api/onboard/registrations/:id/:step", async () => ({ ok: true }));
+    app.delete("/api/onboard/registrations/:id", async () => ({ ok: true, status: "deleted" }));
+    app.get("/api/onboard/registrations/:id", async (req) => ({ registration: { id: (req.params as { id: string }).id } }));
     app.get("/api/admin/waitlist", async () => ({ emails: ["someone@example.com"] }));
     app.get("/api/test/items/:id/details", async (req) => ({ id: (req.params as { id: string }).id }));
     app.get("/api/test/details", async () => ({ reached: "a route the template does not name" }));
@@ -288,5 +301,119 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     expect(dispatchedTo("/api/test/details")).toHaveLength(0);
     expect(dispatchedTo("/api/test/whoami")).toHaveLength(0);
     expect(dispatched.filter((d) => d.url.startsWith("/api/test/items/"))).toHaveLength(0);
+  });
+
+  // ── WP-D R3 ─────────────────────────────────────────────────────
+
+  it("prove_registration and every registration-status tool are refused by name and by route, anonymously and with a key", async () => {
+    const { rawKey } = provisionApiKey({ operatorId: "dave@example.com" });
+    // The evidence the chat would have to invent: tier 0 accepts deviceHealth alone.
+    const evidence = { deviceHealth: { status: "idle", model: "X" } };
+    for (const headers of [{}, { authorization: `Bearer ${rawKey}` }]) {
+      llm.responses.push(
+        calls(
+          ["prove_registration", { registrationId: "reg-1", evidence }],
+          ["submit_registration_evidence", { registrationId: "reg-1", evidence }],
+          ["remove_registration_record", { registrationId: "reg-1" }],
+          ["registration_step", { registrationId: "reg-1", step: "prove" }],
+          ["delete_registration"],
+        ),
+        endTurn,
+      );
+      const post = await chat(headers);
+      expect(post.statusCode).toBe(200);
+      const traces = post.json().toolCalls as Array<{ name: string; status: number; result: { error: string } }>;
+      expect(traces.map((t) => t.name)).toEqual(REGISTRATION_STATUS);
+      for (const t of traces) {
+        expect(t.status, t.name).toBe(403);
+        expect(t.result.error, t.name).toBe("tool_not_callable_from_chat");
+      }
+      expect(post.json().pendingActions).toBeUndefined(); // refused outright, never held for confirmation
+    }
+    // Nothing was requested: no registration write, and not the harmless route behind the status tool's name.
+    expect(dispatched.filter((d) => d.url.startsWith("/api/onboard/registrations"))).toEqual([]);
+    expect(dispatchedTo("/api/test/whoami")).toEqual([]);
+    // Never offered to the model; a registration read still is.
+    for (const request of llm.requests) {
+      const offered = (request.tools ?? []).map((t) => t.name);
+      expect(offered).toContain("get_registration");
+      for (const name of REGISTRATION_STATUS) expect(offered).not.toContain(name);
+    }
+  });
+
+  // ── WP-D R5 ─────────────────────────────────────────────────────
+
+  const get = (id: string, headers: Record<string, string> = {}) =>
+    app.inject({ method: "GET", url: `/api/onboard/chat/${id}`, headers });
+  const resume = (id: string, headers: Record<string, string> = {}) =>
+    app.inject({ method: "POST", url: "/api/onboard/chat", payload: { conversationId: id, message: "go on" }, headers });
+
+  it("a signed-in conversation is bound to its principal: GET and resume by anyone else is 404", async () => {
+    const alice = provisionApiKey({ operatorId: "alice@example.com" });
+    const bob = provisionApiKey({ operatorId: "bob@example.com" });
+    const asAlice = { authorization: `Bearer ${alice.rawKey}` };
+    llm.responses.push(calls(["whoami"]), endTurn);
+    const post = await chat(asAlice);
+    expect(post.statusCode).toBe(200);
+    const id = post.json().conversationId as string;
+
+    // The history now holds what Alice's credential read. Nobody else can read it or continue it.
+    for (const headers of [{}, { authorization: `Bearer ${bob.rawKey}` }]) {
+      const res = await get(id, headers);
+      expect(res.statusCode).toBe(404);
+      expect(res.body).not.toContain(alice.record!.id);
+      const before = llm.requests.length;
+      const cont = await resume(id, headers);
+      expect(cont.statusCode).toBe(404);
+      expect(cont.json().error).toBe("conversation_not_found");
+      expect(llm.requests).toHaveLength(before);
+    }
+
+    const own = await get(id, asAlice);
+    expect(own.statusCode).toBe(200);
+    expect(own.body).toContain(alice.record!.id);
+    llm.responses.push(endTurn);
+    expect((await resume(id, asAlice)).statusCode).toBe(200);
+  });
+
+  it("a session's conversation belongs to that wallet session, not to an API key", async () => {
+    const token = randomUUID();
+    const now = Date.now();
+    getRepos().sessions.insert({
+      id: randomUUID(),
+      walletAddress: WALLET,
+      token,
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 3_600_000).toISOString(),
+      lastActiveAt: new Date(now).toISOString(),
+    });
+    const { rawKey } = provisionApiKey({ operatorId: WALLET });
+    llm.responses.push(endTurn);
+    const post = await chat({ cookie: `pcc_session=${app.signCookie(token)}` });
+    const id = post.json().conversationId as string;
+    expect((await get(id, { authorization: `Bearer ${rawKey}` })).statusCode).toBe(404);
+    expect((await get(id)).statusCode).toBe(404);
+    expect((await get(id, { authorization: `Bearer ${token}` })).statusCode).toBe(200);
+    expect((await get(id, { cookie: `pcc_session=${app.signCookie(token)}` })).statusCode).toBe(200);
+  });
+
+  it("an anonymous conversation stays id-only until a signed-in caller continues it, which binds it to them", async () => {
+    const carol = provisionApiKey({ operatorId: "carol@example.com" });
+    const erin = provisionApiKey({ operatorId: "erin@example.com" });
+    const asCarol = { authorization: `Bearer ${carol.rawKey}` };
+    llm.responses.push(endTurn);
+    const id = (await chat()).json().conversationId as string;
+    expect((await get(id)).statusCode).toBe(200); // the id is the capability
+    expect((await get(id, asCarol)).statusCode).toBe(200);
+
+    llm.responses.push(calls(["whoami"]), endTurn);
+    const cont = await resume(id, asCarol);
+    expect(cont.statusCode).toBe(200);
+    // Carol's authenticated read is in the history now, so the id alone no longer opens it.
+    expect((await get(id)).statusCode).toBe(404);
+    expect((await get(id, { authorization: `Bearer ${erin.rawKey}` })).statusCode).toBe(404);
+    const own = await get(id, asCarol);
+    expect(own.statusCode).toBe(200);
+    expect(own.body).toContain(carol.record!.id);
   });
 });
