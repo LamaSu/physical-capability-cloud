@@ -26,6 +26,10 @@ export * from "./is-fabricated.js";
 // inspected_output, the one classification of how strongly evidence shows the
 // work was done (must-close 5).
 export * from "./evidence-level.js";
+// Committed programs per (CSD, tier) + the pre-funding gate: non-zero assurance
+// binds the exact program for its tier, and the program must release on what
+// the tier promises (must-close 6).
+export * from "./committed-program.js";
 export * from "./eligibility.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
