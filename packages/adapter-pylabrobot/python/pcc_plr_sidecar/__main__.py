@@ -19,6 +19,12 @@ from .server import Server
 
 def cli() -> int:
     """CLI entrypoint (also exposed as ``pcc-plr-sidecar`` console script)."""
+    # R39: JSON-RPC owns the real stdout. PLR's chatterbox backend print()s every
+    # op, so any other stdout write goes to stderr instead, where the TS adapter
+    # records it as process_log_summary evidence. A print can never corrupt the
+    # RPC channel.
+    rpc_stdout = sys.stdout
+    sys.stdout = sys.stderr
     # Route Python logs to stderr — the TS adapter parses these for low-
     # severity process_log_summary events while a recording is active.
     logging.basicConfig(
@@ -26,7 +32,7 @@ def cli() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stderr,
     )
-    server = Server()
+    server = Server(stdout=rpc_stdout)
     try:
         asyncio.run(server.serve())
         return 0

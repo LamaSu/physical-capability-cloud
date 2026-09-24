@@ -2,7 +2,7 @@
 
 PCC adapter that bridges the kernel to any [PyLabRobot](https://github.com/PyLabRobot/pylabrobot)-supported lab instrument via a long-running Python sidecar that speaks JSON-RPC 2.0 over stdio.
 
-**Phase 1 scope**: Opentrons OT-2 (+ ChatterboxBackend mock). Phase 2 adds Hamilton STAR / Vantage, Tecan EVO, Opentrons Flex, heater-shakers. Phase 3 adds plate readers, thermocyclers, centrifuges. Phase 4 adds storage hotels + multi-instrument orchestration.
+**Phase 1 scope**: Opentrons OT-2 (+ PLR's `LiquidHandlerChatterboxBackend` digital twin). Phase 2 adds Hamilton STAR / Vantage, Tecan EVO, Opentrons Flex, heater-shakers. Phase 3 adds plate readers, thermocyclers, centrifuges. Phase 4 adds storage hotels + multi-instrument orchestration.
 
 See the authoritative integration spec: `C:\Users\globa\physical-capability-cloud\ai\research\pylabrobot-pcc-integration-2026-05-25.md`.
 
@@ -11,10 +11,10 @@ See the authoritative integration spec: `C:\Users\globa\physical-capability-clou
 ```
 PCC Kernel (Node)              Python sidecar              PLR Backend           Real instrument
 ─────────────────              ──────────────              ───────────           ────────────────
- PyLabRobotAdapter   ────────► SidecarClient   ──stdio──► pcc_plr_sidecar  ────► OpentronsBackend ────► OT-2 (HTTP API)
+ PyLabRobotAdapter   ────────► SidecarClient   ──stdio──► pcc_plr_sidecar  ────► OpentronsOT2Backend ─► OT-2 (HTTP API)
    (TypeScript)                (JSON-RPC 2.0)              Server + Commands       STARBackend     ────► Hamilton STAR (USB)
                                                                                    EVOBackend      ────► Tecan EVO (TCP)
-                                                                                   ChatterboxBackend  ─► (in-memory mock)
+                                                                                   LiquidHandlerChatterboxBackend ─► (in-memory digital twin)
                                                                                    (Phase 1: stub  ────► no-PLR fallback)
 ```
 
@@ -48,7 +48,7 @@ adapter ships with two pieces:
 
    For air-gapped installs, pre-bundle a wheelhouse:
    ```bash
-   pip download -r requirements.txt -d /opt/pcc/wheels
+   pip download "pylabrobot>=0.2.2,<0.3.0" -d /opt/pcc/wheels
    pip install --no-index --find-links=/opt/pcc/wheels pylabrobot
    ```
 
@@ -68,9 +68,9 @@ Register a PLR-driven device via your `KERNEL_CONFIG`:
         "plrBackend": "ot2",
         "backendConfig": {
           "ot2Url": "http://192.168.1.50:31950",
-          "ot2ApiKey": "${OT2_API_KEY}"
+          "deckLayoutPath": "/etc/pcc/decks/ot2-dilution.json"
         },
-        "pythonPath": "auto"
+        "pythonPath": "python3"
       }
     }
   ]
@@ -84,7 +84,7 @@ operator onboarding docs).
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `PCC_PLR_PYTHON_PATH` | `python` | Python interpreter the sidecar runs under |
+| `PCC_PLR_PYTHON_PATH` | `python3` (`python` on Windows) | Python interpreter the sidecar runs under |
 | `PCC_PLR_SIDECAR_TIMEOUT_MS` | `60000` | Default per-RPC timeout |
 
 Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
@@ -94,8 +94,8 @@ Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 
 | Backend       | Config keys                          | Notes |
 |---------------|--------------------------------------|-------|
-| `chatterbox`  | (none)                               | PLR's in-memory mock liquid handler. Always available. Dry-run only. |
-| `ot2`         | `ot2Url`, `ot2ApiKey?`               | Opentrons OT-2 via PLR's `OpentronsBackend`. Requires `[ot2]` extra. |
+| `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only. |
+| `ot2`         | `ot2Url`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required) | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`. Requires the `[ot2]` extra (PLR's own `opentrons` extra). |
 | `stub`        | (none)                               | Pure-stdlib no-PLR fallback. CI + smoke tests use this. Single sub-second simulated run. |
 
 Phase 2 extends with `flex`, `star`, `vantage`, `evo`, `hamilton-hhs`, `inheco-thermoshake`. Phase 3 adds `clariostar`, `cytation5`, `inheco-odtc`, `vspin`. Phase 4 adds `cytomat-2`, `cytomat-6`, `liconic-stx`.
@@ -111,7 +111,7 @@ const adapter = new PyLabRobotAdapter({
   plrBackend: "ot2",
   backendConfig: {
     ot2Url: "http://192.168.1.50:31950",
-    ot2ApiKey: process.env.OT2_API_KEY,
+    deckLayoutPath: "/etc/pcc/decks/ot2-dilution.json", // a serialized PLR OTDeck
   },
   sidecarConfig: {
     pythonPath: "python3",
@@ -130,9 +130,9 @@ const result = await adapter.execute({
     jobId: "job-001",
     protocolSource: "inline-ops",
     protocolInline: [
-      { op: "pickUpTips", channel: 0 },
-      { op: "aspirate", well: "A1", volume_uL: 100, labwareId: "src" },
-      { op: "dispense", well: "B1", volume_uL: 100, labwareId: "dst" },
+      { op: "pickUpTips", tipRack: "tips", tipSpot: "A1", channel: 0 },
+      { op: "aspirate", well: "A1", volume_uL: 100, labwareId: "src", channel: 0 },
+      { op: "dispense", well: "B1", volume_uL: 100, labwareId: "dst", channel: 0 },
       { op: "dropTips", channel: 0 },
     ],
   },
@@ -141,6 +141,26 @@ const result = await adapter.execute({
 console.log("result", result);
 await adapter.dispose();
 ```
+
+### Declared deck and inline ops (status board row R39)
+
+A PLR backend refuses to start without a declared deck: `backendConfig.deckLayout`
+(the output of `deck.serialize()`) or `deckLayoutPath` (a JSON file holding one).
+The layout is data, loaded with `Resource.deserialize(..., allow_marshal=False)`.
+
+Each inline op is one real `LiquidHandler` call, and its evidence event is emitted
+only after the call returns:
+
+| `op` | Fields | Call |
+|---|---|---|
+| `pickUpTips` | `tipRack`, `tipSpot` (e.g. `"A1"`) or `tipColumn` (1 → `A1`), `channel?` | `pick_up_tips([spot])` |
+| `aspirate` / `dispense` | `labwareId`, `well`, `volume_uL` (> 0), `channel?` | `aspirate/dispense([well], vols=[v])` |
+| `dropTips` | `channel?`; optional `tipRack` + `tipSpot`/`tipColumn` | `drop_tips([spot])`, or `return_tips()` |
+
+Failures are loud and typed. A missing resource or well is `-32002`
+(`data.missingResource` / `data.missingItem`, plus `opIndex` and `opsCompleted`).
+A PLR exception is `-32002` with `data.plrException`. A malformed or unknown op is
+`-32602`. An empty op list is `-32602`. A non-inline `protocolSource` is `-32004`.
 
 Mock mode (no Python subprocess — pure synthetic responses):
 
@@ -182,6 +202,13 @@ The script (`scripts/test-plr-ot2.ts`):
 
 See `scripts/test-plr-ot2.ts` for the full reference flow.
 
+> **Known gap (after R39):** the script predates the declared-deck requirement. It
+> sends no `deckLayout`, so the chatterbox and OT-2 paths now refuse it, and it
+> asserts event counts only. Before it can serve as an acceptance test it needs a
+> serialized deck with `tips-300uL`, `src` and `dst`, and assertions on tip and
+> volume state. `python/tests/test_plr_real.py` does this against the genuine
+> library.
+
 ## RPC contract
 
 The sidecar exposes (see `src/protocol.ts`):
@@ -221,7 +248,7 @@ pnpm --filter @pcc/adapter-pylabrobot test
 
 # Python side (36 tests, uses the `stub` backend — no pylabrobot required):
 cd packages/adapter-pylabrobot/python
-PYTHONPATH=. python -m pytest tests/
+PYTHONPATH=. python3 -m pytest tests/   # pytest-asyncio optional; test_plr_real.py skips without pylabrobot
 ```
 
 ## Coexistence with hamilton-adapter

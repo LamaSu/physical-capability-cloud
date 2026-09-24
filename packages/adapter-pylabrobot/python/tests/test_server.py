@@ -33,7 +33,8 @@ class CapturingStdout:
 
 
 @pytest.fixture
-async def server():
+def server():
+    # Plain fixture: it awaits nothing, so it needs no event loop of its own.
     out = CapturingStdout()
     s = Server(stdout=out)
     return s, out

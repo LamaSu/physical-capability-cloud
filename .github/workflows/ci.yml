@@ -81,6 +81,29 @@ jobs:
   # Build a single Docker artifact on every master push.
   # The same SHA-tagged image is later retagged to `staging` and `prod`
   # — build once, deploy many.
+  # R39: the PyLabRobot sidecar's Python suite, run against the PCC-owned fake
+  # PLR in tests/fake_plr. test_plr_real.py skips here: installing the real
+  # pylabrobot is operator decision D1. Only pytest is installed, pinned, with a
+  # read-only token.
+  plr-sidecar-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest (pinned)
+        run: python -m pip install "pytest==9.0.2"
+
+      - name: PLR sidecar tests (fake PLR)
+        working-directory: packages/adapter-pylabrobot/python
+        run: python -m pytest -q
+
   build-image:
     runs-on: ubuntu-latest
     needs: [build-and-test, forge-tests]
