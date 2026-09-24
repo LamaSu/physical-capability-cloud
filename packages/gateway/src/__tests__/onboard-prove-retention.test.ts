@@ -14,7 +14,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { onboardRoutes } from "../routes/onboard.js";
@@ -199,7 +199,7 @@ describe("/prove photo retention is bounded (M4)", () => {
     });
     expect((await prove(app, regId, { photoBase64: b64(PNG_B), deviceHealth: DEVICE_HEALTH })).statusCode).toBe(409);
     expect(storedCids()).toEqual([cid]);
-    expect(readFileSync(shared.pathFor(cid)).equals(PNG_B)).toBe(true);
+    expect(Buffer.from(await shared.get(cid)).equals(PNG_B)).toBe(true);
 
     const other = await register(app);
     const ok = await prove(app, other, { photoBase64: b64(PNG_B), deviceHealth: DEVICE_HEALTH });
