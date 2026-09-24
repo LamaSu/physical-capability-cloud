@@ -25,6 +25,8 @@ import {
 import {
   acceptExternalPlan,
   planIdForReservation,
+  snapshotSubmission,
+  submissionDigest,
   type ExternalPlanSubmission,
   type ReservationRecord,
   type SeamDeps,
@@ -580,5 +582,103 @@ describe("PlanPresentation: the product read model, built only from server truth
     const p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
     expect(p.nodes.map((n) => n.nodeId)).toEqual(["x"]);
     expect(p.edges).toEqual([]);
+  });
+});
+
+describe("seam read-once (the review pattern of #351/#355): every input is read once into owned data", () => {
+  it("a node getter is read once: the program cross-check uses the value that was read", () => {
+    let reads = 0;
+    const dag = agentDag();
+    dag.nodes[1] = Object.defineProperty({ ...dag.nodes[1]! }, "committedProgramHash", {
+      enumerable: true,
+      get: () => (reads++ === 0 ? PROGRAM : `0x${"66".repeat(32)}`),
+    });
+    const r = acceptExternalPlan(dag, CTX, world().deps);
+    expect(reads).toBe(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it("a callback that mutates the caller's submission cannot change the outcome", () => {
+    const baseline = acceptExternalPlan(agentDag(), CTX, world().deps);
+    expect(baseline.ok).toBe(true);
+    const dag = agentDag();
+    const { deps } = world();
+    const sneaky: SeamDeps = {
+      ...deps,
+      loadReservation: (id) => {
+        dag.nodes[1] = { ...dag.nodes[1]!, price: "0.01", committedProgramHash: `0x${"66".repeat(32)}` };
+        dag.edges.length = 0;
+        return deps.loadReservation(id);
+      },
+    };
+    expect(acceptExternalPlan(dag, CTX, sneaky)).toEqual(baseline);
+  });
+
+  it("the reservation record is read once; a malformed record is a typed refusal", () => {
+    let reads = 0;
+    const { deps } = world();
+    const flipping: SeamDeps = {
+      ...deps,
+      loadReservation: (id) => Object.defineProperty({ ...deps.loadReservation(id)! }, "principal", { enumerable: true, get: () => (reads++ === 0 ? CTX.principal : "agent:intruder") }),
+    };
+    expect(acceptExternalPlan(agentDag(), CTX, flipping).ok).toBe(true);
+    expect(reads).toBe(1);
+    for (const bad of [{ expiresAt: "soon" }, { minTier: 7 }, { minTier: "2" }]) {
+      const r = acceptExternalPlan(agentDag(), CTX, world({ reservation: bad as unknown as Partial<ReservationRecord> }).deps);
+      expect(r.ok === false && r.refusal).toEqual({ stage: "reservation", reason: "malformed-reservation" });
+    }
+    const throwing: SeamDeps = { ...deps, loadReservation: () => Object.defineProperty({}, "state", { get: () => { throw new Error("x"); } }) as ReservationRecord };
+    expect(acceptExternalPlan(agentDag(), CTX, throwing)).toMatchObject({ ok: false, refusal: { stage: "reservation", reason: "malformed-reservation" } });
+  });
+
+  it("a dependency that cannot be read, or is not a function, is a defined wiring fault (TypeError)", () => {
+    const { deps } = world();
+    const unreadable = Object.defineProperty({ ...deps }, "evidenceFor", { get: () => { throw new Error("raw"); } }) as SeamDeps;
+    expect(() => acceptExternalPlan(agentDag(), CTX, unreadable)).toThrow(/could not be read/);
+    const badPolicy = { ...deps, policy: Object.defineProperty({}, "feeBps", { get: () => { throw new Error("raw"); } }) } as SeamDeps;
+    expect(() => acceptExternalPlan(agentDag(), CTX, badPolicy)).toThrow(/could not be read/);
+    expect(() => acceptExternalPlan(agentDag(), CTX, { ...deps, evidenceFor: null as unknown as SeamDeps["evidenceFor"] })).toThrow(TypeError);
+  });
+
+  it("method-style dependencies keep their receiver", () => {
+    const { deps } = world();
+    const methods = {
+      ...deps,
+      programs: PROGRAMS,
+      resolveProgram(csd: string, tierKey: string) {
+        return this.programs[`${csd}|${tierKey}`] ?? null;
+      },
+    };
+    expect(acceptExternalPlan(agentDag(), CTX, methods).ok).toBe(true);
+  });
+
+  it("a throwing getter anywhere in the submission is a malformed submission, never an exception", () => {
+    const dag = agentDag() as unknown as Record<string, unknown>;
+    const bad = Object.defineProperty({ ...dag }, "edges", { get: () => { throw new Error("x"); } });
+    let r: SeamResult | undefined;
+    expect(() => {
+      r = acceptExternalPlan(bad as unknown as ExternalPlanSubmission, CTX, world().deps);
+    }).not.toThrow();
+    expect(r).toEqual({ ok: false, refusal: { stage: "submission", reason: "malformed-submission" } });
+  });
+
+  it("every outcome after the snapshot carries the submission digest; it fingerprints the submission exactly", () => {
+    const sub = agentDag();
+    const snap = snapshotSubmission(sub)!;
+    const d = submissionDigest(snap);
+    expect(d).toMatch(/^0x[0-9a-f]{64}$/);
+    const ok = acceptExternalPlan(sub, CTX, world().deps);
+    expect(ok.ok && ok.submissionDigest).toBe(d);
+    expect(ok.ok && ok.verdicts.map((v) => v.status)).toEqual(["current", "current"]);
+    const refused = acceptExternalPlan(sub, { principal: "agent:intruder" }, world().deps);
+    expect(refused.ok === false && refused.submissionDigest).toBe(d);
+    const variants: ExternalPlanSubmission[] = [
+      { ...sub, nodes: [sub.nodes[0]!, { ...sub.nodes[1]!, price: "6.5" }] }, // same amount, different spelling
+      { ...sub, nodes: [sub.nodes[0]!, { ...sub.nodes[1]!, committedProgramHash: null }] }, // absent vs null differ
+      { ...sub, edges: [] },
+      { ...sub, nodes: [...sub.nodes].reverse() }, // order is part of what was submitted
+    ];
+    for (const v of variants) expect(submissionDigest(snapshotSubmission(v)!)).not.toBe(d);
+    expect(submissionDigest(snapshotSubmission(agentDag())!)).toBe(d); // deterministic
   });
 });
