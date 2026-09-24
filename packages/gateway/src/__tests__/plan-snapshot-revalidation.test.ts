@@ -536,3 +536,73 @@ describe("round 3 (astra review of 27a23c6e): claims and live rows are read ONCE
     expect(() => revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...deps([]), csdForType: null as unknown as RevalidationDeps["csdForType"] })).toThrow(TypeError);
   });
 });
+
+describe("round 4 (astra review of 9a6da15a): tenants, wiring, duplicates, receivers, limits", () => {
+  it("distinct object or function tenant values never match (no shared sentinel equality)", () => {
+    for (const [mine, theirs] of [[{}, {}], [() => {}, () => {}], [{}, "t-1"]] as Array<[unknown, unknown]>) {
+      const v = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([cap({ id: "cap-print", tenantId: theirs as string })]), { tenantId: mine as string }));
+      expect(v).toEqual({ nodeId: "a", status: "missing", reason: "capability-not-found" });
+    }
+    // a malformed tenant option still sees PUBLIC rows, never more
+    expect(only(revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([cap({ id: "cap-print" })]), { tenantId: {} as unknown as string })).status).toBe("current");
+  });
+
+  it("a dependency or option that cannot be read is a defined wiring fault (TypeError), never a stray exception", () => {
+    const boom = () => {
+      throw new Error("raw");
+    };
+    const badDeps = Object.defineProperty({ ...deps([]) }, "loadKernels", { get: boom }) as RevalidationDeps;
+    expect(() => revalidatePlanSnapshots([claim({ nodeId: "a" })], badDeps)).toThrow(/could not be read/);
+    const badOpts = Object.defineProperty({}, "tenantId", { get: boom });
+    expect(() => revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([]), badOpts)).toThrow(/could not be read/);
+  });
+
+  it("a duplicate node id is ONE verdict and no load, even when one copy is malformed or unreadable, in either order", () => {
+    const good = claim({ nodeId: "x" });
+    const bad = claim({ nodeId: "x", price: "not-a-price" });
+    const unreadable = Object.defineProperty(claim({ nodeId: "x" }), "price", { enumerable: true, get: () => { throw new Error("x"); } });
+    for (const pair of [[good, bad], [bad, good], [good, unreadable], [unreadable, good]]) {
+      const calls: Calls = { caps: [], kernels: [] };
+      const r = revalidatePlanSnapshots(pair, deps([cap({ id: "cap-print" })], KERNELS, calls));
+      expect(r.verdicts).toEqual([{ nodeId: "x", status: "invalid-claim", reason: "duplicate-node-id" }]);
+      expect(calls.caps).toEqual([]);
+    }
+  });
+
+  it("method-style dependencies keep their receiver", () => {
+    const store = {
+      caps: [cap({ id: "cap-print" })],
+      kernels: KERNELS,
+      loadCapabilities(ids: string[]) {
+        return this.caps.filter((c) => ids.includes(c.id));
+      },
+      loadKernels(ids: string[]) {
+        return this.kernels.filter((k) => ids.includes(k.id));
+      },
+      csdForType(t: string) {
+        return t === PRINT ? this.csd : null;
+      },
+      csd: PRINT,
+    };
+    expect(only(revalidatePlanSnapshots([claim({ nodeId: "a" })], store)).status).toBe("current");
+  });
+
+  it("the product limits hold at their boundary: 1024 claims pass, 1025 are refused; a loader answer over 4096 rows is malformed", () => {
+    const claimsN = (n: number) => Array.from({ length: n }, (_, i) => claim({ nodeId: `n${i}` }));
+    const at = revalidatePlanSnapshots(claimsN(1024), deps([cap({ id: "cap-print" })]));
+    expect(at.ok).toBe(true);
+    expect(at.verdicts).toHaveLength(1024);
+    expect(revalidatePlanSnapshots(claimsN(1025), deps([cap({ id: "cap-print" })]))).toEqual({
+      ok: false,
+      verdicts: [{ nodeId: "<claims>", status: "invalid-claim", reason: "too-many-claims" }],
+    });
+    const padded = (n: number): LiveCapability[] => [cap({ id: "cap-print" }), ...Array.from({ length: n - 1 }, (_, i) => cap({ id: `pad-${i}` }))];
+    const d = deps([]);
+    expect(only(revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...d, loadCapabilities: () => padded(4096), loadKernels: () => KERNELS })).status).toBe("current");
+    expect(only(revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...d, loadCapabilities: () => padded(4097), loadKernels: () => KERNELS }))).toEqual({
+      nodeId: "a",
+      status: "unavailable",
+      reason: "malformed-live-row",
+    });
+  });
+});

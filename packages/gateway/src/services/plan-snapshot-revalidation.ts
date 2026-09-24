@@ -185,7 +185,8 @@ export type NodeVerdict =
         | "malformed-kernel-id"
         | "malformed-operator"
         | "malformed-cross-check"
-        | "unreadable-claim";
+        | "unreadable-claim"
+        | "too-many-claims";
     };
 
 export interface RevalidationResult {
@@ -255,6 +256,7 @@ function listOnce(x: unknown, max: number): unknown[] | null {
   return out;
 }
 
+/** Product limits (not ABI): at most 1024 claims per plan (the compiler's node cap) and 4096 rows per loader answer. */
 const MAX_CLAIMS = 1024;
 const MAX_ROWS = 4096;
 
@@ -291,13 +293,13 @@ function claimError(f: Record<string, unknown>): InvalidClaimReason | null {
 }
 
 /** Read one claim once. Never throws: a getter that throws makes the claim unreadable. */
-function readClaim(raw: unknown): { ok: true; claim: Claim } | { ok: false; nodeId: string; reason: InvalidClaimReason } {
+function readClaim(raw: unknown): { ok: true; claim: Claim } | { ok: false; nodeId: string; idKnown: boolean; reason: InvalidClaimReason } {
   let nodeId: unknown;
   try {
-    if (typeof raw !== "object" || raw === null) return { ok: false, nodeId: "<undefined>", reason: "malformed-node-id" };
+    if (typeof raw !== "object" || raw === null) return { ok: false, nodeId: "<undefined>", idKnown: false, reason: "malformed-node-id" };
     const c = raw as Record<string, unknown>;
     nodeId = leaf(c.nodeId);
-    if (!isId(nodeId)) return { ok: false, nodeId: typeof nodeId === "string" ? nodeId : `<${typeof nodeId}>`, reason: "malformed-node-id" };
+    if (!isId(nodeId)) return { ok: false, nodeId: typeof nodeId === "string" ? nodeId : `<${typeof nodeId}>`, idKnown: false, reason: "malformed-node-id" };
     const f: Record<string, unknown> = {
       capabilityId: leaf(c.capabilityId),
       price: leaf(c.price),
@@ -310,7 +312,7 @@ function readClaim(raw: unknown): { ok: true; claim: Claim } | { ok: false; node
       matchedCapabilityDigest: leaf(c.matchedCapabilityDigest),
     };
     const bad = claimError(f);
-    if (bad) return { ok: false, nodeId, reason: bad };
+    if (bad) return { ok: false, nodeId, idKnown: true, reason: bad };
     const claim: Claim = {
       nodeId,
       capabilityId: f.capabilityId as string,
@@ -326,7 +328,7 @@ function readClaim(raw: unknown): { ok: true; claim: Claim } | { ok: false; node
     if (f.matchedCapabilityDigest !== undefined) claim.matchedCapabilityDigest = f.matchedCapabilityDigest as string;
     return { ok: true, claim };
   } catch {
-    return { ok: false, nodeId: isId(nodeId) ? nodeId : "<unreadable>", reason: "unreadable-claim" };
+    return { ok: false, nodeId: isId(nodeId) ? nodeId : "<unreadable>", idKnown: isId(nodeId), reason: "unreadable-claim" };
   }
 }
 
@@ -466,33 +468,60 @@ export function revalidatePlanSnapshots(
   deps: RevalidationDeps,
   opts: RevalidationOpts = {},
 ): RevalidationResult {
-  // Dependencies and options, read once, before any claim (a callback cannot swap them later).
-  const loadCapabilities = deps.loadCapabilities;
-  const loadKernels = deps.loadKernels;
-  const csdForType = deps.csdForType;
-  if (typeof loadCapabilities !== "function" || typeof loadKernels !== "function" || typeof csdForType !== "function") {
+  // Dependencies and options, read once, before any claim (a callback cannot swap them later). They
+  // are server wiring: if they cannot be read, or are not functions, that is a wiring fault, reported
+  // as a TypeError — the ONLY exception this service raises itself. A malformed tenant option means
+  // "no tenant": public rows only, never more.
+  let loadCapabilities: unknown;
+  let loadKernels: unknown;
+  let csdForTypeFn: unknown;
+  let tenantRaw: unknown;
+  try {
+    loadCapabilities = deps.loadCapabilities;
+    loadKernels = deps.loadKernels;
+    csdForTypeFn = deps.csdForType;
+    tenantRaw = leaf(opts?.tenantId ?? null);
+  } catch {
+    throw new TypeError("revalidatePlanSnapshots: RevalidationDeps or opts could not be read (a wiring fault)");
+  }
+  if (typeof loadCapabilities !== "function" || typeof loadKernels !== "function" || typeof csdForTypeFn !== "function") {
     throw new TypeError("revalidatePlanSnapshots: loadCapabilities, loadKernels and csdForType must be functions");
   }
-  const tenantId = leaf(opts?.tenantId ?? null);
+  const tenantId = typeof tenantRaw === "string" ? tenantRaw : null;
+  // Called with `deps` as the receiver, so method-style dependencies keep their `this`.
+  const csdForType = (type: string): unknown => Reflect.apply(csdForTypeFn as (t: string) => unknown, deps, [type]);
 
   const verdicts: NodeVerdict[] = [];
-  const read = (() => {
-    try {
-      return listOnce(claims, MAX_CLAIMS);
-    } catch {
-      return null;
+  let read: unknown[] | null = null;
+  let overCap = false;
+  try {
+    if (Array.isArray(claims)) {
+      const n: unknown = claims.length;
+      if (typeof n === "number" && Number.isInteger(n) && n > MAX_CLAIMS) overCap = true;
+      else read = listOnce(claims, MAX_CLAIMS);
     }
-  })();
-  if (!read) return { ok: false, verdicts: [{ nodeId: "<claims>", status: "invalid-claim", reason: "unreadable-claim" }] };
+  } catch {
+    read = null;
+  }
+  if (!read) {
+    return { ok: false, verdicts: [{ nodeId: "<claims>", status: "invalid-claim", reason: overCap ? "too-many-claims" : "unreadable-claim" }] };
+  }
 
   // Node identity first, on the COPIES: a malformed or duplicated node id gets one verdict and nothing else.
+  // Duplicates are counted across EVERY claim whose node id was read, valid or not, so one node id
+  // never gets two verdicts (astra round 4).
   const parsed = read.map(readClaim);
+  const idOf = (r: ReturnType<typeof readClaim>): string | null => (r.ok ? r.claim.nodeId : r.idKnown ? r.nodeId : null);
   const counts = new Map<string, number>();
-  for (const r of parsed) if (r.ok) counts.set(r.claim.nodeId, (counts.get(r.claim.nodeId) ?? 0) + 1);
+  for (const r of parsed) {
+    const id = idOf(r);
+    if (id !== null) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
   const valid: Claim[] = [];
   for (const r of parsed) {
+    const id = idOf(r);
+    if (id !== null && counts.get(id)! > 1) continue;
     if (!r.ok) verdicts.push({ nodeId: r.nodeId, status: "invalid-claim", reason: r.reason });
-    else if (counts.get(r.claim.nodeId)! > 1) continue;
     else valid.push(r.claim);
   }
   for (const [id, n] of counts) if (n > 1) verdicts.push({ nodeId: id, status: "invalid-claim", reason: "duplicate-node-id" });
@@ -503,13 +532,13 @@ export function revalidatePlanSnapshots(
   const caps = new Map<string, CapRow>();
   const capIds = [...new Set(valid.map((c) => c.capabilityId))].sort();
   const requested = new Set(capIds);
-  const capRows = capIds.length > 0 ? readRows(loadCapabilities(capIds), readCapRow) : [];
+  const capRows = capIds.length > 0 ? readRows(Reflect.apply(loadCapabilities, deps, [capIds]), readCapRow) : [];
   for (const row of capRows ?? []) {
     if (requested.has(row.id) && !caps.has(row.id) && visibleTo(row, tenantId)) caps.set(row.id, row);
   }
   const kernels = new Map<string, KernelRow>();
   const kernelIds = [...new Set([...caps.values()].map((r) => r.kernelId).filter(isId))].sort();
-  const kernelRows = kernelIds.length > 0 ? readRows(loadKernels(kernelIds), readKernelRow) : [];
+  const kernelRows = kernelIds.length > 0 ? readRows(Reflect.apply(loadKernels, deps, [kernelIds]), readKernelRow) : [];
   for (const row of kernelRows ?? []) if (!kernels.has(row.id)) kernels.set(row.id, row);
 
   for (const c of valid) {
@@ -524,14 +553,17 @@ export function revalidatePlanSnapshots(
   return { ok: verdicts.length > 0 && verdicts.every((v) => v.status === "current"), verdicts };
 }
 
-function visibleTo(row: CapRow, tenantId: unknown): boolean {
-  return row.tenantId === undefined || row.tenantId === null || row.tenantId === tenantId;
+/** Public rows are visible to all; a scoped row only to its own tenant, compared as STRINGS (a malformed tenant matches nothing). */
+function visibleTo(row: CapRow, tenantId: string | null): boolean {
+  const t = row.tenantId;
+  if (t === undefined || t === null) return true;
+  return typeof t === "string" && tenantId !== null && t === tenantId;
 }
 
 function judge(
   c: Claim,
   cap: CapRow | undefined,
-  csdForType: (type: string) => string | null,
+  csdForType: (type: string) => unknown,
   kernels: Map<string, KernelRow>,
 ): NodeVerdict {
   const nodeId = c.nodeId;
