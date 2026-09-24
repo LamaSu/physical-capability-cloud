@@ -320,9 +320,10 @@ function saveConversation(record: ConversationRecord): void {
  * (`Authorization: Bearer pcc_…`) first, then a SIWE session (the pcc_session
  * cookie, then `Bearer <session token>`). A session found in the cookie is
  * forwarded as `Bearer <that session's token>`, which resolveSession accepts for
- * the same session, so no cookie jar is replayed. An Authorization header that
- * is present but resolves to nobody returns null (refused, 401): it never
- * silently becomes anonymous. A stale cookie on its own leaves the chat anonymous.
+ * the same session, so no cookie jar is replayed. When an Authorization header
+ * is present and nothing resolves, the result is null (refused, 401): a presented
+ * credential never silently becomes anonymous. A stale cookie on its own leaves
+ * the chat anonymous, so an ambient browser cookie cannot lock a user out.
  */
 function resolveChatPrincipal(req: FastifyRequest): ChatPrincipal | null {
   const authorization = req.headers.authorization;
