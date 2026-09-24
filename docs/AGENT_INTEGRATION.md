@@ -112,6 +112,23 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
 
+### Operator Work
+
+Scoped to your kernels (kernels whose `operatorAddress` is your API key's operator id or your wallet). Every field is assigned by the gateway; a source that could not be read, or cannot be tied to you yet, is reported in `sources` instead of appearing as an empty list.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/operator/work` | Your work: open job offers for your capability types, offers your kernels claimed, your kernels' jobs and pending approvals. Returns `OperatorWorkDTO` `{schemaId, asOf, kernels, items, total, truncated, sources}`; each item has `phase` + `phaseSource` (who asserted it), `pay` with its `funding` (`escrowed`, `declared_unfunded`, `simulated` or `unknown`; a declared price is never income), and `actions[]` with the route to call. `?limit=` 1-500 (default 200). |
+| GET | `/api/operator/income` | What the escrow records show for your kernels' jobs. Returns `OperatorIncomeDTO` `{rows, totalsByStatus, uncountedRows, historyAvailable: false, reasonIfNot}`; totals are sums of rows only, and no gateway record makes a payout `paid`. |
+
+### Product Home
+
+Platform-wide facts for a home page or status bar, each from a named gateway source. A section whose records could not be read is `{state: "unavailable", reason}`, never a zero.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/product/home` | Returns `ProductHomeDTO` `{schemaId, asOf, kernels, capabilities, jobs, settlementNetwork, escrowHeld}`. `kernels`: `online` / `stale` / `other` by the kernel read model's heartbeat rule (stated in `rule`). `capabilities`: listed capabilities and how many sit on an online kernel, `byType`; a listing is not a promise of capacity. `jobs`: counts `byPhase` (execution phases) and `active` (known and not finished). `settlementNetwork`: the network this gateway is configured for (`basis: "gateway_config"`), not proof that an escrow lives there. `escrowHeld`: sums of milestone amounts in held states per currency, in base units, mock escrows excluded; `confirmation: "record_only"` (no chain read). Under `TENANT_ENFORCE`, job counts are your tenant's and `escrowHeld` is unavailable (escrow records carry no tenant). `cache-control: no-store`. |
+
 ### Escrow & Settlement
 
 | Method | Endpoint | Description |

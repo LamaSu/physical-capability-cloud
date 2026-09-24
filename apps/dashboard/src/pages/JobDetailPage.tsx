@@ -1,176 +1,317 @@
 import React from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import {
-  GlassPanel, StatusChip, AmountDisplay, TierBadge, ProgressArc,
-  DataCell, HashDisplay, AddressDisplay, EvidenceTimeline, TierRequirementsList,
-  MilestoneTimeline, IPFSLink, DIDBadge, ChainTxLink,
-} from "@pcc/ui";
-import type { EvidenceEvent, AssuranceTier, PointMap3DTrace } from "@pcc/spec";
-import { DEFAULT_TIER_REQUIREMENTS } from "@pcc/spec";
+import { GlassPanel, StatusChip, DataCell, HashDisplay, AddressDisplay, GlowBadge, LoadingShell } from "@pcc/ui";
+import type { JobExecutionDTO } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
-import { mockJobs, jobMeta, mockEscrows } from "../api/mock-data.js";
-import { PointMap3DViewer } from "../components/viewer/index.js";
-import { makeDemoPointMap3DTrace } from "../components/viewer/fixtures.js";
+import { useJobExecution } from "../api/hooks/use-pcc-data.js";
+import { ApiError } from "../api/gateway.js";
+import {
+  PHASE_VIEW,
+  PAYOUT_VIEW,
+  SOURCE_LABEL,
+  NOTICE_TEXT,
+  settlementLinkText,
+  payoutBasisText,
+  recordStatusBadge,
+  freshness,
+  evidenceSummaryText,
+  jobTitle,
+} from "../lib/job-execution-view.js";
 
-// Mock evidence events for the detail view
-const mockEvidence: EvidenceEvent[] = [
-  { id: "ev-1", type: "gcode_received", timestamp: "2026-03-03T13:00:01Z", source: { deviceId: "dev-prusa", deviceType: "controller", kernelId: "kernel-nyc" }, payload: { fileSize: 1240000 }, hash: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" as `sha256:${string}` },
-  { id: "ev-2", type: "gcode_hash_verified", timestamp: "2026-03-03T13:00:02Z", source: { deviceId: "dev-prusa", deviceType: "controller", kernelId: "kernel-nyc" }, payload: { match: true }, hash: "sha256:b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3" as `sha256:${string}` },
-  { id: "ev-3", type: "execution_started", timestamp: "2026-03-03T13:00:05Z", source: { deviceId: "dev-prusa", deviceType: "controller", kernelId: "kernel-nyc" }, payload: { estimatedMinutes: 180 }, hash: "sha256:c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" as `sha256:${string}` },
-  { id: "ev-4", type: "power_profile_sample", timestamp: "2026-03-03T13:30:00Z", source: { deviceId: "dev-power", deviceType: "power_monitor", kernelId: "kernel-nyc" }, payload: { watts: 125, duration: 1800 }, hash: "sha256:d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5" as `sha256:${string}` },
-  { id: "ev-5", type: "camera_snapshot", timestamp: "2026-03-03T14:00:00Z", source: { deviceId: "dev-cam-1", deviceType: "camera", kernelId: "kernel-nyc" }, payload: { resolution: "1920x1080" }, hash: "sha256:e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6" as `sha256:${string}` },
-  { id: "ev-6", type: "execution_progress", timestamp: "2026-03-03T14:30:00Z", source: { deviceId: "dev-prusa", deviceType: "controller", kernelId: "kernel-nyc" }, payload: { progress: 67, layer: 134, totalLayers: 200 }, hash: "sha256:f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1" as `sha256:${string}` },
-];
-
-const jobStatusToPulse: Record<string, "online" | "executing" | "completed" | "failed" | "offline"> = {
-  queued: "online",
-  preparing: "executing",
-  executing: "executing",
-  collecting_evidence: "executing",
-  completed: "completed",
-  failed: "failed",
-  cancelled: "offline",
-};
-
+/**
+ * Job detail: a projection of the gateway's JobExecutionDTO (GET /api/jobs/:jobId/execution).
+ *
+ * Every value on this page comes from that read model. There are no fixtures and no
+ * fallbacks. A job that cannot be read says so, and a read that is too old, or whose
+ * refresh failed, is visibly marked stale. The four panels are independent: work
+ * reported complete is not payment, and evidence received is not verification. Only the
+ * payout badge can be green; the recorded escrow and milestone statuses are neutral text.
+ */
 export function JobDetailPage() {
   const { jobId } = useParams();
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-
-  const job = mockJobs.find((j) => j.id === jobId);
-  const meta = jobId ? jobMeta[jobId] : undefined;
-  const escrow = mockEscrows.find((e: any) => (e.milestones ?? []).some((m: any) => m.stepId === job?.stepId));
-
-  // Streaming-3D trace for this job's evidence. Real wiring (Phase 2 of the
-  // LingBot rollout) will fetch this off the gateway / IPFS — for now we
-  // gate on a "Load trace" button that synthesizes a deterministic fixture.
-  const [pointMaps3D, setPointMaps3D] = React.useState<PointMap3DTrace | null>(null);
-  const handleLoadTrace = React.useCallback(() => {
-    setPointMaps3D(makeDemoPointMap3DTrace(jobId ? jobId.length + 11 : 7));
-  }, [jobId]);
+  const { data, error, isLoading, isFetching, refetch } = useJobExecution(jobId);
 
   React.useEffect(() => {
-    setPageMeta(meta?.name ?? `Job ${jobId}`, "Job progress, evidence, and escrow details");
-  }, [setPageMeta, meta, jobId]);
+    setPageMeta(
+      data ? jobTitle(data) : `Job ${jobId ?? ""}`,
+      "What the executor reported, the evidence held, and what the settlement record says",
+    );
+  }, [setPageMeta, data, jobId]);
 
-  if (!job) {
+  const back = (
+    <button onClick={() => navigate("/jobs")} className="text-xs text-white/30 hover:text-white/50 mb-2">
+      ← Back to jobs
+    </button>
+  );
+
+  if (isLoading) return <LoadingShell rows={6} />;
+
+  if (!data) {
+    const status = error instanceof ApiError ? error.status : null;
+    const notFound = status === 404;
+    const signedOut = status === 401;
     return (
       <GlassPanel padding="lg">
-        <div className="text-center py-8 text-white/40">
-          Job not found
-          <button onClick={() => navigate("/jobs")} className="block mx-auto mt-2 text-green-400/70 text-sm">← Back to jobs</button>
+        {back}
+        <div role="alert" className="text-center py-8">
+          <div className="text-white/70">
+            {notFound ? "Job not found" : signedOut ? "Sign in to see this job" : "Job details are unavailable right now"}
+          </div>
+          <p className="text-xs text-white/40 mt-2">
+            {notFound
+              ? `No job with id ${jobId} exists, or it is not visible to you.`
+              : signedOut
+                ? "Only the job's buyer, its operator, or an admin can read it."
+                : "The gateway could not be read. Nothing is shown until it can be."}
+          </p>
+          {!notFound && !signedOut && (
+            <button onClick={() => refetch()} className="mt-3 text-xs text-teal-300/80 hover:text-teal-300">
+              Try again
+            </button>
+          )}
         </div>
       </GlassPanel>
     );
   }
 
-  const tierReqs = meta ? DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === meta.tier) : undefined;
+  const phase = PHASE_VIEW[data.execution.phase];
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <button onClick={() => navigate("/jobs")} className="text-xs text-white/30 hover:text-white/50 mb-2">← Back to jobs</button>
-          <h2 className="text-xl font-semibold text-white/90">{meta?.name ?? job.id}</h2>
+          {back}
+          <h2 className="text-xl font-semibold text-white/90">{jobTitle(data)}</h2>
           <div className="flex items-center gap-3 mt-1">
-            <span className="text-xs text-white/30 font-mono">{job.id}</span>
-            {meta && <TierBadge tier={meta.tier} />}
+            <span className="text-xs text-white/30 font-mono">{data.job.jobId}</span>
+            {data.job.contractedTier !== null && (
+              <span className="text-xs text-white/40">Contracted assurance tier {data.job.contractedTier}</span>
+            )}
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          {meta && <AmountDisplay amount={meta.amount} size="lg" glow />}
-          <StatusChip status={jobStatusToPulse[job.status] ?? "offline"} label={job.status.replace(/_/g, " ")} />
-        </div>
+        <StatusChip status={phase.pulse} label={phase.label} />
       </div>
 
-      {/* KPI row */}
-      <div className="grid grid-cols-4 gap-4">
+      <Freshness asOf={data.asOf} terminal={data.execution.terminal} refreshFailed={!!error} refreshing={isFetching} />
+
+      {data.notices.length > 0 && (
         <GlassPanel padding="md">
-          <DataCell label="Progress" value={<ProgressArc progress={job.progress} size={56} />} />
+          <ul role="status" className="space-y-1 text-xs text-gold-300">
+            {data.notices.map((n) => (
+              <li key={n}>⚠ {NOTICE_TEXT[n]}</li>
+            ))}
+          </ul>
         </GlassPanel>
-        <GlassPanel padding="md">
-          <DataCell label="Kernel" value={meta?.kernelName ?? job.capabilityId} sub={job.capabilityId} />
-        </GlassPanel>
-        <GlassPanel padding="md">
-          <DataCell label="Evidence Events" value={mockEvidence.length} sub={`${mockEvidence.length} collected`} mono />
-        </GlassPanel>
-        <GlassPanel padding="md">
-          <DataCell label="Started" value={job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : "Pending"} mono />
-        </GlassPanel>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <ExecutionPanel data={data} />
+        <SettlementPanel data={data} />
+        <EvidencePanel data={data} />
+        <VerificationPanel data={data} />
       </div>
 
-      <div className="grid grid-cols-3 gap-6">
-        {/* Evidence Timeline */}
-        <div className="col-span-2 space-y-4">
-          <GlassPanel padding="lg">
-            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">Evidence Timeline</h3>
-            <EvidenceTimeline events={mockEvidence} />
-          </GlassPanel>
-
-          {/* Streaming-3D trace viewer (LingBot point map + camera path). */}
-          <GlassPanel padding="md">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-[10px] text-white/30 uppercase tracking-wider">Streaming 3D Trace</h3>
-              {!pointMaps3D && (
-                <button
-                  type="button"
-                  onClick={handleLoadTrace}
-                  className="px-2.5 py-1 rounded-md text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25 transition-all"
-                >
-                  Load demo trace
-                </button>
-              )}
-            </div>
-            <PointMap3DViewer trace={pointMaps3D} title="LingBot point map" height={300} />
-          </GlassPanel>
-
-          {/* Sovereign Infrastructure */}
-          <GlassPanel padding="md">
-            <h3 className="text-[10px] text-white/30 uppercase tracking-wider mb-3">Sovereign Infrastructure</h3>
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="space-y-2">
-                <div className="text-white/40">Kernel Identity</div>
-                <DIDBadge did="did:pcc:kernel:kernel-nyc" />
-              </div>
-              <div className="space-y-2">
-                <div className="text-white/40">Evidence Archive (IPFS)</div>
-                <IPFSLink cid="bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi" />
-              </div>
-              <div className="space-y-2">
-                <div className="text-white/40">On-Chain Commitment</div>
-                <ChainTxLink txHash="0x7f3c2a8d9e4b1f6c5a3d8e7f2b1c4a9d8e7f6c5a3b2d1e4f7a8c9d0b3e6f1a2" chain="base-sepolia" />
-              </div>
-              <div className="space-y-2">
-                <div className="text-white/40">Settlement</div>
-                <ChainTxLink txHash="5UfVcNs5rMb8T4kM3F7JzXW9PkBH2hCf9nKvR8YwLpD7" chain="solana-devnet" />
-              </div>
-            </div>
-          </GlassPanel>
-        </div>
-
-        {/* Right column */}
-        <div className="space-y-4">
-          {/* Tier Requirements */}
-          {tierReqs && (
-            <GlassPanel padding="md">
-              <TierRequirementsList requirements={tierReqs} events={mockEvidence} />
-            </GlassPanel>
-          )}
-
-          {/* Escrow milestone */}
-          {escrow && (
-            <GlassPanel padding="md">
-              <h3 className="text-[10px] text-white/30 uppercase tracking-wider mb-3">Escrow</h3>
-              <MilestoneTimeline milestones={escrow.milestones} />
-              <div className="mt-3 pt-3 border-t border-white/[0.06] flex items-center justify-between">
-                <span className="text-xs text-white/30">Total Escrowed</span>
-                <AmountDisplay amount={escrow.totalAmount} size="sm" />
-              </div>
-            </GlassPanel>
-          )}
-        </div>
-      </div>
+      <InspectPanel data={data} />
     </div>
+  );
+}
+
+function when(iso: string | null): string {
+  return iso ? new Date(iso).toLocaleString() : "not recorded";
+}
+
+function Freshness({
+  asOf,
+  terminal,
+  refreshFailed,
+  refreshing,
+}: {
+  asOf: string;
+  terminal: boolean;
+  refreshFailed: boolean;
+  refreshing: boolean;
+}) {
+  // Re-evaluate the age every few seconds, so a read that stops refreshing goes stale on
+  // screen even when nothing else re-renders the page.
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+  const f = freshness(asOf, now, terminal, refreshFailed);
+  return (
+    <div className="text-[11px] text-white/35">
+      Read {new Date(asOf).toLocaleString()}
+      {f.reason === "refresh_failed" ? (
+        <span className="text-gold-300"> · The latest refresh failed; this is the last successful read.</span>
+      ) : f.reason === "too_old" ? (
+        <span className="text-gold-300"> · This read is out of date; it has not been refreshed recently.</span>
+      ) : refreshing ? (
+        <span> · Refreshing…</span>
+      ) : null}
+    </div>
+  );
+}
+
+function PanelTitle({ children, source }: { children: React.ReactNode; source: string }) {
+  return (
+    <div className="mb-3">
+      <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">{children}</h3>
+      <div className="text-[10px] text-white/25">Source: {source}</div>
+    </div>
+  );
+}
+
+function ExecutionPanel({ data }: { data: JobExecutionDTO }) {
+  const e = data.execution;
+  return (
+    <GlassPanel padding="lg">
+      <PanelTitle source={SOURCE_LABEL[e.source]}>Work</PanelTitle>
+      <div className="grid grid-cols-2 gap-4">
+        <DataCell label="Status" value={PHASE_VIEW[e.phase].label} />
+        <DataCell
+          label="Reported progress"
+          value={e.progressPercent !== null ? `${e.progressPercent}%` : "none reported"}
+          mono
+        />
+        <DataCell label="Executor" value={data.job.kernelName ?? data.job.kernelId} sub={data.job.kernelId} />
+        <DataCell label="Completed" value={when(e.completedAt)} />
+        <DataCell label="Job created" value={when(data.job.createdAt)} />
+      </div>
+    </GlassPanel>
+  );
+}
+
+function SettlementPanel({ data }: { data: JobExecutionDTO }) {
+  const s = data.settlement;
+  const payout = PAYOUT_VIEW[s.payout];
+  const linkText = settlementLinkText(s);
+  const basis = payoutBasisText(s);
+  const r = s.record;
+  return (
+    <GlassPanel padding="lg">
+      <PanelTitle source={SOURCE_LABEL[s.source]}>Payment</PanelTitle>
+      <div className="flex items-center gap-2 mb-2">
+        <GlowBadge color={payout.color}>{payout.label}</GlowBadge>
+      </div>
+      {basis && <div className="text-xs text-white/40 mb-3">{basis}</div>}
+      {linkText && <div className="text-xs text-white/50">{linkText}</div>}
+      {r && (
+        <div className="grid grid-cols-2 gap-4 mt-2">
+          {r.milestone && (
+            <DataCell
+              label="This job's milestone (record)"
+              value={<RecordBadge {...recordStatusBadge(r.milestone.status, r.simulated)} />}
+              sub={`${r.milestone.amount} ${r.escrowTotal.currency} (recorded, not paid)`}
+            />
+          )}
+          <DataCell
+            label="Escrow (record)"
+            value={<RecordBadge {...recordStatusBadge(r.escrow, r.simulated)} />}
+            sub={`${r.escrowTotal.amount} ${r.escrowTotal.currency} total (recorded)`}
+          />
+          {r.milestone?.challengeWindowEnd && (
+            <DataCell label="Challenge window ends" value={when(r.milestone.challengeWindowEnd)} />
+          )}
+          <DataCell label="Deadline" value={when(r.deadline)} />
+        </div>
+      )}
+    </GlassPanel>
+  );
+}
+
+/** A recorded status: always neutral (see recordStatusBadge). */
+function RecordBadge({ color, label }: { color: "green" | "gold" | "red" | "gray"; label: string }) {
+  return <GlowBadge color={color}>{label}</GlowBadge>;
+}
+
+function EvidencePanel({ data }: { data: JobExecutionDTO }) {
+  const e = data.evidence;
+  return (
+    <GlassPanel padding="lg">
+      <PanelTitle source={SOURCE_LABEL[e.source]}>Evidence</PanelTitle>
+      <div className="text-xs text-white/60 mb-3">{evidenceSummaryText(e)}</div>
+      {(e.fabricatedEventCount ?? 0) > 0 && (
+        <div className="text-xs text-gold-300 mb-3">
+          {e.fabricatedEventCount} of {e.eventCount} events are from simulated or mock sources.
+        </div>
+      )}
+      {e.bundles.length > 0 && (
+        <ul className="space-y-2">
+          {e.bundles.map((b) => (
+            <li key={b.bundleId} className="flex items-center justify-between gap-3 text-xs">
+              <span className="text-white/50">{when(b.storedAt)}</span>
+              <span className="text-white/40">
+                {b.eventCount} event{b.eventCount === 1 ? "" : "s"} · claims tier {b.claimedTier}
+              </span>
+              <HashDisplay hash={b.bundleHash} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {e.truncated && <div className="text-[11px] text-white/30 mt-2">Showing the newest {e.bundles.length} of {e.bundleCount}.</div>}
+    </GlassPanel>
+  );
+}
+
+function VerificationPanel({ data }: { data: JobExecutionDTO }) {
+  const v = data.verification;
+  const cc = v.captureChecks;
+  return (
+    <GlassPanel padding="lg">
+      <PanelTitle source={SOURCE_LABEL[cc.source]}>Verification</PanelTitle>
+      <div className="text-xs text-white/60 mb-3">No outcome verification is published for this job.</div>
+      <div className="text-xs text-white/50">
+        {cc.state === "unavailable"
+          ? "Capture checks could not be read."
+          : cc.state === "none"
+            ? "No capture checks are recorded."
+            : `Capture checks: ${cc.pass} passed · ${cc.partial} partial · ${cc.fail} failed${cc.unrecognized ? ` · ${cc.unrecognized} unrecognized` : ""}`}
+      </div>
+      <div className="text-[10px] text-white/25 mt-2">
+        A capture check grades a photo or recording's authenticity class. It does not verify the job outcome
+        or release payment.
+      </div>
+    </GlassPanel>
+  );
+}
+
+function InspectPanel({ data }: { data: JobExecutionDTO }) {
+  const r = data.settlement.record;
+  const rows: Array<[string, React.ReactNode]> = [
+    ["schema", data.schemaId],
+    ["job id", data.job.jobId],
+    ["step id", data.job.stepId],
+    ["capability id", data.job.capabilityId],
+    ["kernel id", data.job.kernelId],
+    ["job row status", data.execution.sourceStatus],
+    ["settlement link", `${data.settlement.link}${data.settlement.linkBasis ? ` (${data.settlement.linkBasis})` : ""}`],
+  ];
+  if (r) {
+    rows.push(
+      ["escrow id", r.escrowId],
+      ["escrow contract", r.simulated ? `${r.contractAddress} (simulated)` : <AddressDisplay address={r.contractAddress} />],
+      ["escrow record status", r.escrow.sourceStatus],
+      ["milestone match", r.milestoneMatch],
+    );
+    if (r.milestone) rows.push(["milestone record status", r.milestone.status.sourceStatus]);
+  }
+  return (
+    <GlassPanel padding="md">
+      <details>
+        <summary className="text-[10px] text-white/30 uppercase tracking-wider cursor-pointer">Inspect raw record</summary>
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 mt-3 text-xs">
+          {rows.map(([k, v]) => (
+            <React.Fragment key={k}>
+              <dt className="text-white/30">{k}</dt>
+              <dd className="text-white/60 font-mono break-all">{v}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      </details>
+    </GlassPanel>
   );
 }

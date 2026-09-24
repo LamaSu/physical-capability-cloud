@@ -1,4 +1,5 @@
 import { getAuthHeaders } from "../stores/auth-store.js";
+import type { JobExecutionDTO } from "@pcc/spec";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -10,11 +11,26 @@ import type {
   DriftAlertDTO,
   EvidenceSummaryDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../types/dto.js";
 
 const BASE_URL = "/api";
 
 let sessionId: string | undefined;
+
+/**
+ * A non-2xx gateway response. Keeps the HTTP status so a page can tell "this does not
+ * exist" (404) from "this could not be read right now" (401, 5xx, network): the two must
+ * never render the same way.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, statusText: string) {
+    super(`API error: ${status} ${statusText}`);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
@@ -29,7 +45,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, res.statusText);
   }
 
   // Capture session ID from response if returned
@@ -39,9 +55,24 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/**
+ * GET /api/jobs. `jobs` is the original envelope; newer gateways also send collection-v1
+ * `items`, the paging fields (`total` counts ALL matching jobs) and `asOf` (read time).
+ */
+export interface JobListResponse {
+  jobs: JobDTO[];
+  items?: JobDTO[];
+  total?: number;
+  offset?: number;
+  limit?: number;
+  hasMore?: boolean;
+  asOf?: string;
+}
+
 export const api = {
   // Health
-  health: () => fetchAPI<{ status: string }>("/health"),
+  /** commit/commitSource arrive with N5 (#369); older gateways omit them. */
+  health: () => fetchAPI<{ status: string; commit?: string | null; commitSource?: string }>("/health"),
 
   // ── Capabilities ─────────────────────────────────────────────────────────
 
@@ -110,7 +141,7 @@ export const api = {
     if (params?.offset != null) qs.set("offset", String(params.offset));
     if (params?.limit != null) qs.set("limit", String(params.limit));
     const query = qs.toString() ? `?${qs.toString()}` : "";
-    return fetchAPI<{ jobs: JobDTO[] }>(`/jobs${query}`);
+    return fetchAPI<JobListResponse>(`/jobs${query}`);
   },
 
   /**
@@ -119,6 +150,13 @@ export const api = {
    */
   getJob: (jobId: string) =>
     fetchAPI<{ job: JobDetailDTO; evidence: EvidenceSummaryDTO[] }>(`/jobs/${jobId}`),
+
+  /**
+   * Product read model for one job (PX-6): execution / evidence / verification /
+   * settlement axes, each with its source. Route: GET /api/jobs/:jobId/execution.
+   */
+  getJobExecution: (jobId: string) =>
+    fetchAPI<JobExecutionDTO>(`/jobs/${encodeURIComponent(jobId)}/execution`),
 
   /**
    * Get drift alerts for a job.
@@ -165,6 +203,14 @@ export const api = {
   /** Get a single escrow by ID or on-chain address. */
   getEscrow: (escrowId: string) =>
     fetchAPI<{ escrow: unknown; source: "on-chain" | "db" }>(`/escrow/${escrowId}`),
+
+  // ── Account ───────────────────────────────────────────────────────────────
+
+  /** Where the calling key's operator stands: identity, scopes, keys, work. */
+  getAgentMe: () => fetchAPI<AgentMeDTO>("/agent/me"),
+
+  /** ProductHomeDTO (readmodels #409); checked by lib/product-home.ts. */
+  getProductHome: () => fetchAPI<unknown>("/product/home"),
 
   // ── Agents ────────────────────────────────────────────────────────────────
 

@@ -16,7 +16,10 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../gateway.js";
+import type { JobExecutionDTO } from "@pcc/spec";
+import { api, ApiError } from "../gateway.js";
+import { JOB_EXECUTION_REFRESH_MS, JOB_EXECUTION_TERMINAL_REFRESH_MS } from "../../lib/job-execution-view.js";
+import { parseProductHome } from "../../lib/product-home.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -28,6 +31,7 @@ import type {
   ComplianceReportDTO,
   DriftAlertDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../../types/dto.js";
 
 // ---------------------------------------------------------------------------
@@ -96,8 +100,10 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
     queryKey: ["jobs", params],
     queryFn: async () => {
       const res = await api.getJobs(params);
-      // Route wraps result in { jobs: [...] } for backward compat.
-      return res.jobs ?? [];
+      // Route wraps result in { jobs: [...] } for backward compat. A response without that
+      // array is an error, never an empty list (absence is not evidence).
+      if (!Array.isArray(res?.jobs)) throw new Error("unexpected response shape from /api/jobs");
+      return res.jobs;
     },
     retry: 1,
     staleTime: 10_000,
@@ -105,16 +111,21 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
 }
 
 /**
- * Single job detail with timeline, evidence bundles, and optional escrow.
- * Route: GET /api/jobs/:jobId → { job: JobDetailDTO, evidence: EvidenceSummaryDTO[] }
- * Returns the full { job, evidence } shape — callers destructure as needed.
+ * Product read model for one job (PX-6). Route: GET /api/jobs/:jobId/execution.
+ * Always polls: every 15s while the work is in motion, every 60s once it is finished,
+ * because finishing the work never makes the money final. A 404 or 401 is final (no
+ * retry); any other failure is retried once and then surfaces as an error. It never
+ * falls back to fixtures.
  */
-export function useJob(jobId: string | undefined) {
-  return useQuery<{ job: JobDetailDTO; evidence: EvidenceSummaryDTO[] }>({
-    queryKey: ["job", jobId],
-    queryFn: () => api.getJob(jobId!),
+export function useJobExecution(jobId: string | undefined) {
+  return useQuery<JobExecutionDTO>({
+    queryKey: ["jobExecution", jobId],
+    queryFn: () => api.getJobExecution(jobId!),
     enabled: !!jobId,
-    retry: 1,
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && (error.status === 404 || error.status === 401)) && failureCount < 1,
+    refetchInterval: (query) =>
+      query.state.data?.execution.terminal ? JOB_EXECUTION_TERMINAL_REFRESH_MS : JOB_EXECUTION_REFRESH_MS,
   });
 }
 
@@ -151,8 +162,10 @@ export function useKernels(params?: { status?: string }) {
     queryKey: ["kernels", params],
     queryFn: async () => {
       const res = await api.getKernels(params);
-      // Route wraps result in { kernels: [...] } for backward compat.
-      return res.kernels ?? [];
+      // Route wraps result in { kernels: [...] } for backward compat. A response without that
+      // array is an error, never an empty list: "0 kernels online" would be a guess.
+      if (!Array.isArray(res?.kernels)) throw new Error("unexpected response shape from /api/kernels");
+      return res.kernels;
     },
     retry: 1,
     staleTime: 15_000,
@@ -191,8 +204,10 @@ export function useEscrows(params?: { status?: string }) {
     queryKey: ["escrows", params],
     queryFn: async () => {
       const res = await api.getEscrows(params);
-      // Route wraps result in { escrows: [...] } for backward compat.
-      return res.escrows ?? [];
+      // Route wraps result in { escrows: [...] } for backward compat. A response without that
+      // array is an error, never an empty list.
+      if (!Array.isArray(res?.escrows)) throw new Error("unexpected response shape from /api/escrow");
+      return res.escrows;
     },
     retry: 1,
     staleTime: 10_000,
@@ -244,11 +259,57 @@ export function useSettlementEpochs() {
 // Health
 // ---------------------------------------------------------------------------
 
-export function useGatewayHealth() {
+/**
+ * Gateway liveness (GET /api/health).
+ * `refetchInterval` lets always-visible chrome (the StatusBar) re-check
+ * periodically instead of reporting the state it saw at page load.
+ */
+/**
+ * The platform-wide home facts (GET /api/product/home), counted by the gateway
+ * over its own records: exact totals, not counts over one page. An answer that
+ * isn't a ProductHomeDTO is a failed read.
+ */
+export function useProductHome(options?: { refetchInterval?: number }) {
+  return useQuery({
+    queryKey: ["productHome"],
+    queryFn: async () => parseProductHome(await api.getProductHome()),
+    retry: 1,
+    staleTime: 15_000,
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
+export function useGatewayHealth(options?: { refetchInterval?: number }) {
   return useQuery({
     queryKey: ["health"],
     queryFn: () => api.health(),
     retry: 0,
+    staleTime: 30_000,
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the current API key's operator stands (GET /api/agent/me): identity,
+ * scopes, keys, kernels and in-flight work. Each section reports its own
+ * `unavailable` reason instead of failing the whole answer.
+ */
+export function useAgentMe() {
+  return useQuery<AgentMeDTO>({
+    queryKey: ["agentMe"],
+    queryFn: async () => {
+      const res = await api.getAgentMe();
+      // An answer without the identity block is not an account; treat it as a failed read.
+      if (!res?.identity || !Array.isArray(res.identity.scopes)) {
+        throw new Error("unexpected response shape from /api/agent/me");
+      }
+      return res;
+    },
+    retry: 1,
     staleTime: 30_000,
   });
 }

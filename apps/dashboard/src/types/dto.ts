@@ -11,6 +11,8 @@
  * in the API client (gateway.ts).
  */
 
+import type { ExecutionPhase } from "@pcc/spec";
+
 // ── Primitive aliases (mirrors @pcc/spec) ────────────────────────────────────
 
 export type Id = string;
@@ -109,6 +111,11 @@ export interface JobDTO {
   evidenceCount?: number;
   escrowStatus?: EscrowStatus;
   estimatedCompletion?: Timestamp;
+  /**
+   * Execution phase the gateway read from `status` (exact @pcc/spec table). Says
+   * nothing about evidence, verification or payment. Absent from older gateways.
+   */
+  executionPhase?: ExecutionPhase;
 }
 
 export interface JobTimelineEvent {
@@ -119,6 +126,7 @@ export interface JobTimelineEvent {
     | "evidence_received"
     | "verification_started"
     | "verified"
+    | "completed"
     | "settled"
     | "failed"
     | "disputed";
@@ -229,4 +237,39 @@ export interface EscrowSummaryDTO {
   releasedCount: number;
   disputedCount: number;
   challengeWindowEnd?: Timestamp;
+}
+
+// ── Account DTOs ──────────────────────────────────────────────────────────────
+
+/** A section of GET /api/agent/me that may be missing, with the reason. */
+interface AgentMeSection {
+  /** Set when this section could not be read; the other sections still are. */
+  unavailable?: string;
+}
+
+/**
+ * GET /api/agent/me — where the calling API key's operator stands.
+ * Mirrors packages/gateway/src/routes/agent-introspection.ts; snake_case is
+ * the wire format.
+ */
+export interface AgentMeDTO {
+  ok: boolean;
+  as_of: Timestamp;
+  identity: {
+    operator: string;
+    key_id: Id;
+    key_name: string | null;
+    scopes: string[];
+  };
+  kernels: AgentMeSection & {
+    count: number | null;
+    items: Array<{ id: Id; name: string; status: string; last_heartbeat: Timestamp | null }>;
+  };
+  devices: AgentMeSection & { count: number | null };
+  work: AgentMeSection & {
+    in_flight: number;
+    items: Array<{ id: Id; kernel_id: Id; status: string; progress: number | null }>;
+  };
+  keys: AgentMeSection & { active: number | null; wildcard_keys: number };
+  next: string[];
 }
