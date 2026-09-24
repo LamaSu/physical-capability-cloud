@@ -267,8 +267,12 @@ interface Span {
   end: number;
 }
 
-/** The self-identifying shapes inside the token run [a, b). */
-function addShapeSpans(s: string, a: number, b: number, spans: Span[]): void {
+/**
+ * The self-identifying shapes inside the token run [a, b). With `keepDigests`, a
+ * bare 64-hex value is kept: an owner-only view needs the hashes a human must
+ * check before confirming (WP-D round 4, L3). Every other shape is still removed.
+ */
+function addShapeSpans(s: string, a: number, b: number, spans: Span[], keepDigests = false): void {
   let jwtFrom = a; // every JWT start before this index is known to fail
   let i = a;
   while (i < b) {
@@ -309,7 +313,7 @@ function addShapeSpans(s: string, a: number, b: number, spans: Span[]): void {
       }
     }
     if (c === 77 && !isBase64(prev)) end = Math.max(end, stickyEnd(ED25519_PKCS8_Y, s, i)); // M
-    if (isHexDigit(c) && !isHexDigit(prev)) end = Math.max(end, stickyEnd(HEX_SECRET_Y, s, i));
+    if (!keepDigests && isHexDigit(c) && !isHexDigit(prev)) end = Math.max(end, stickyEnd(HEX_SECRET_Y, s, i));
     if (end > i) {
       spans.push({ start: i, end });
       i = end;
@@ -351,13 +355,13 @@ function addSchemeSpan(s: string, a: number, b: number, spans: Span[]): void {
   }
 }
 
-function addTokenRunSpans(s: string, spans: Span[]): void {
+function addTokenRunSpans(s: string, spans: Span[], keepDigests = false): void {
   TOKEN_RUN_RE.lastIndex = 0;
   for (let m = TOKEN_RUN_RE.exec(s); m !== null; m = TOKEN_RUN_RE.exec(s)) {
     const a = m.index;
     const b = a + m[0].length;
     if (b - a >= MIN_SCHEME_RUN) addSchemeSpan(s, a, b, spans);
-    if (b - a >= MIN_SHAPE_RUN) addShapeSpans(s, a, b, spans);
+    if (b - a >= MIN_SHAPE_RUN) addShapeSpans(s, a, b, spans, keepDigests);
   }
 }
 
@@ -406,13 +410,13 @@ function addPemSpans(s: string, spans: Span[]): void {
 }
 
 /** Replace every credential-shaped substring of `s`, reporting each secret removed. */
-function scrubShapes(s: string, report: (secret: string) => void): string {
+function scrubShapes(s: string, report: (secret: string) => void, keepDigests = false): string {
   if (s.length === 0) return s;
   const spans: Span[] = [];
   addPemSpans(s, spans);
   addUserinfoSpans(s, spans);
   addAuthorizationSpans(s, spans);
-  addTokenRunSpans(s, spans);
+  addTokenRunSpans(s, spans, keepDigests);
   if (spans.length === 0) return s;
   spans.sort((x, y) => x.start - y.start);
   let out = "";
@@ -531,7 +535,18 @@ function define(obj: Record<string, unknown>, key: string, value: unknown): void
  * input is never mutated. `onRedact` receives each removed secret. Values that are
  * already redacted are not reported, so a second pass changes and reports nothing.
  */
-export function redactSecretsDeep<T>(value: T, onRedact?: (r: Redaction) => void): T {
+export interface RedactOptions {
+  /**
+   * Keep bare 64-hex values (digests, hashes). ONLY for an owner-only view of
+   * arguments the owner is about to confirm (WP-D round 4, L3). Secret-named
+   * fields and every self-identifying credential shape are still removed, and
+   * anything persisted or sent to a model keeps the default, full redaction.
+   */
+  keepDigests?: boolean;
+}
+
+export function redactSecretsDeep<T>(value: T, onRedact?: (r: Redaction) => void, opts: RedactOptions = {}): T {
+  const keepDigests = opts.keepDigests === true;
   const onPath = new WeakSet<object>();
   let changes = 0; // every replacement, reported or not (cycle and depth cuts too)
   const report = (r: Redaction) => {
@@ -554,7 +569,7 @@ export function redactSecretsDeep<T>(value: T, onRedact?: (r: Redaction) => void
     }
     // Shapes are scrubbed from whatever text is returned, JSON or not: a value the
     // parse dropped or a number is still text a secret can sit in.
-    return scrubShapes(text, (secret) => report({ path, kind: "secret-shaped", value: secret }));
+    return scrubShapes(text, (secret) => report({ path, kind: "secret-shaped", value: secret }), keepDigests);
   };
 
   const walk = (v: unknown, path: string, depth: number, parentKey: string | null): unknown => {
@@ -573,7 +588,7 @@ export function redactSecretsDeep<T>(value: T, onRedact?: (r: Redaction) => void
       const suffixes = new Map<string, number>(); // next #n per colliding key: O(1) per collision
       for (const [rawKey, item] of Object.entries(v as Record<string, unknown>)) {
         // A key can itself be a secret (a map keyed by token): scrub it, keep keys unique.
-        const scrubbed = scrubShapes(rawKey, (secret) => report({ path: `${path}.<key>`, kind: "secret-shaped", value: secret }));
+        const scrubbed = scrubShapes(rawKey, (secret) => report({ path: `${path}.<key>`, kind: "secret-shaped", value: secret }), keepDigests);
         let key = scrubbed;
         if (Object.prototype.hasOwnProperty.call(obj, key)) {
           let n = suffixes.get(scrubbed) ?? 1;

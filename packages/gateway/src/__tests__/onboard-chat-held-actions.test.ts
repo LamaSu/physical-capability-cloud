@@ -84,6 +84,7 @@ const PKG = {
     tool("boom", "POST", "/api/test/boom"),
     tool("public_post", "POST", "/api/marketplace/roi"),
     tool("confirm_via_chat", "POST", "/api/onboard/chat"),
+    tool("submit_evidence_hash", "POST", "/api/test/evidence"),
   ],
 };
 
@@ -429,5 +430,33 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     const again = await chat({ conversationId, confirmActionId: actionId }, alice.headers);
     expect([409, 410]).toContain(again.statusCode);
     expect(counter).toBe(1); // and it never runs twice
+  });
+
+  // ── WP-D round 4, L3: the owner can check what they confirm ────────────────
+  it("[neg] the owner sees the hash they are asked to confirm; secrets stay hidden; the envelope stays fully redacted (L3)", async () => {
+    _forgetHeldActionsForTests();
+    const alice = signedIn("alice-l3@example.com");
+    const HASH = "ab".repeat(32);
+    const PRIV = "0x" + "cd".repeat(32);
+    llm.responses.push(
+      calls(["submit_evidence_hash", { evidenceBundleHash: HASH, address: "0x" + "12".repeat(20), privateKey: PRIV }]),
+      endTurn,
+    );
+    const post = await chat({ message: "submit it" }, alice.headers);
+    expect(post.statusCode).toBe(200);
+    const body = post.json();
+    const view = body.pendingActions[0];
+    expect(view.args.evidenceBundleHash).toBe(HASH); // visible to its owner, so a substituted hash shows
+    expect(view.args.privateKey).toBe("[REDACTED]"); // a secret-named field never is
+    expect(post.body).not.toContain(PRIV.slice(2));
+
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${body.conversationId}`, headers: alice.headers });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().pendingActions[0].args.evidenceBundleHash).toBe(HASH);
+    expect(get.body).not.toContain(PRIV.slice(2));
+
+    // What is persisted keeps the full redaction.
+    expect(persisted(body.conversationId)).not.toContain(HASH);
+    expect(persisted(body.conversationId)).not.toContain(PRIV.slice(2));
   });
 });

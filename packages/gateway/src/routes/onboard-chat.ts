@@ -968,7 +968,17 @@ interface HeldArgsEntry {
   address: string;
   args: Record<string, unknown>;
   expiresAtMs: number;
+  /**
+   * What the OWNER is shown while the action is open (L3): the real target, args
+   * and summary with secrets removed but digests kept, so a substituted hash is
+   * visible before confirming. Kept in memory only, never persisted; the envelope
+   * keeps the fully redacted copy.
+   */
+  view: { target: string; args: Record<string, unknown>; summary: string };
 }
+
+/** Redaction for an owner-only view: secrets removed, digests (bare 64-hex) kept (L3). */
+const OWNER_VIEW = { keepDigests: true } as const;
 
 const heldArgs = new Map<string, HeldArgsEntry>();
 
@@ -1014,13 +1024,16 @@ function describeAction(tool: AgentPackageTool, plan: ToolPlan): string {
 }
 
 function viewAction(a: PendingActionRecord): PendingActionView {
+  // While the action is open its owner sees the live view (digests kept, L3);
+  // otherwise, only the persisted, fully redacted copy exists.
+  const live = heldArgs.get(a.id)?.view;
   return {
     actionId: a.id,
     tool: a.tool,
     method: a.method,
-    target: a.target,
-    args: a.args,
-    summary: a.summary,
+    target: live?.target ?? a.target,
+    args: live?.args ?? a.args,
+    summary: live?.summary ?? a.summary,
     ...(a.bindsTo !== undefined ? { bindsTo: a.bindsTo } : {}),
     expiresAt: a.expiresAt,
   };
@@ -1050,9 +1063,15 @@ function holdAction(
   const now = Date.now();
   const expiresAtMs = now + PENDING_ACTION_TTL_MS;
   const args = JSON.parse(JSON.stringify(input ?? {})) as Record<string, unknown>;
-  const outcome = holdArgs(id, { conversationId: record.id, owner, address, args, expiresAtMs });
-  if (outcome !== "held") return outcome;
   const bindsTo = credentialBinding(tool, args);
+  const bindLine = bindsTo !== undefined ? `Creates a new PCC credential bound to ${bindsTo}. ` : "";
+  const view = {
+    target: redactSecretsDeep(plan.target, undefined, OWNER_VIEW),
+    args: redactSecretsDeep(args, undefined, OWNER_VIEW),
+    summary: bindLine + redactSecretsDeep(describeAction(tool, plan), undefined, OWNER_VIEW),
+  };
+  const outcome = holdArgs(id, { conversationId: record.id, owner, address, args, expiresAtMs, view });
+  if (outcome !== "held") return outcome;
   const summary = redactSecretsDeep(describeAction(tool, plan));
   const action: PendingActionRecord = {
     id,
@@ -1061,7 +1080,7 @@ function holdAction(
     endpoint: tool.endpoint?.path ?? "",
     target: redactSecretsDeep(plan.target),
     args: redactSecretsDeep(args),
-    summary: bindsTo !== undefined ? `Creates a new PCC credential bound to ${bindsTo}. ${summary}` : summary,
+    summary: bindLine + summary,
     ...(bindsTo !== undefined ? { bindsTo } : {}),
     owner,
     createdAt: new Date(now).toISOString(),
