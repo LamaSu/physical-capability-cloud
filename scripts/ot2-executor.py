@@ -18,6 +18,8 @@ import subprocess
 import logging
 import glob as globmod
 import base64
+import ipaddress
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -36,6 +38,49 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("ot2-exec")
+
+# ── N4a start guard ─────────────────────────────────────────────────────
+# This script runs whatever the PCC relay hands it, including a shell-command
+# tool and arbitrary protocol uploads (an Opentrons protocol is Python code).
+# The relay does not yet bind a call to an accepted, funded job with a committed
+# protocol hash, so any holder of a PCC API key (self-service keys are free)
+# could drive this robot. Until that is fixed (status board row N4b), the script
+# refuses to start unless it is run explicitly as an unsafe, local-only tool.
+# See scripts/README-ot2-executor.md.
+
+UNSAFE_LOCAL_FLAG = "--unsafe-local"
+
+
+def _is_local_host(host):
+    """True for loopback, private and link-local IPs, localhost, *.local and bare names."""
+    h = host.lower().rstrip(".")
+    if h == "localhost" or h.endswith(".localhost") or h.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        # A single-label name only resolves on this network; any FQDN counts as public.
+        return "." not in h
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def start_guard(argv, pcc_base, name):
+    """Return None when the script may start, else the reason it must not."""
+    if UNSAFE_LOCAL_FLAG not in argv:
+        return (
+            f"REFUSED: {name} is not safe to run. Any PCC API key holder could make it run "
+            "shell commands and arbitrary protocols on this robot (status board row N4b). "
+            "For development against a gateway on your own machine or private network, "
+            f"re-run with {UNSAFE_LOCAL_FLAG}. See scripts/README-ot2-executor.md."
+        )
+    host = urlparse(pcc_base).hostname or ""
+    if not host or not _is_local_host(host):
+        return (
+            f"REFUSED: {UNSAFE_LOCAL_FLAG} allows only a gateway on this machine or a private "
+            f"network, but PCC_BASE is {pcc_base!r}. Never point {name} at a public PCC gateway."
+        )
+    return None
+
 
 # ── HTTP helpers ────────────────────────────────────────────────────────
 
@@ -523,6 +568,14 @@ def run():
 
 
 if __name__ == "__main__":
+    refusal = start_guard(sys.argv[1:], PCC_BASE, "ot2-executor.py")
+    if refusal:
+        print(refusal, file=sys.stderr)
+        sys.exit(2)
+    log.warning(
+        "UNSAFE LOCAL MODE: every tool call relayed by %s runs on this robot, "
+        "including shell commands (status board row N4b).", PCC_BASE,
+    )
     if not PCC_API_KEY:
         print("ERROR: Set PCC_API_KEY")
         sys.exit(1)

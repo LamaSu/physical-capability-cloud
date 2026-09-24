@@ -18,10 +18,11 @@ import sys
 import os
 import ssl
 import hashlib
+import ipaddress
 import logging
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -41,6 +42,49 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("ot2-agent")
+
+# ── N4a start guard ─────────────────────────────────────────────────────
+# This script runs whatever the PCC relay hands it, including a shell-command
+# tool and arbitrary protocol uploads (an Opentrons protocol is Python code).
+# The relay does not yet bind a call to an accepted, funded job with a committed
+# protocol hash, so any holder of a PCC API key (self-service keys are free)
+# could drive this robot. Until that is fixed (status board row N4b), the script
+# refuses to start unless it is run explicitly as an unsafe, local-only tool.
+# See scripts/README-ot2-executor.md.
+
+UNSAFE_LOCAL_FLAG = "--unsafe-local"
+
+
+def _is_local_host(host):
+    """True for loopback, private and link-local IPs, localhost, *.local and bare names."""
+    h = host.lower().rstrip(".")
+    if h == "localhost" or h.endswith(".localhost") or h.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        # A single-label name only resolves on this network; any FQDN counts as public.
+        return "." not in h
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def start_guard(argv, pcc_base, name):
+    """Return None when the script may start, else the reason it must not."""
+    if UNSAFE_LOCAL_FLAG not in argv:
+        return (
+            f"REFUSED: {name} is not safe to run. Any PCC API key holder could make it run "
+            "shell commands and arbitrary protocols on this robot (status board row N4b). "
+            "For development against a gateway on your own machine or private network, "
+            f"re-run with {UNSAFE_LOCAL_FLAG}. See scripts/README-ot2-executor.md."
+        )
+    host = urlparse(pcc_base).hostname or ""
+    if not host or not _is_local_host(host):
+        return (
+            f"REFUSED: {UNSAFE_LOCAL_FLAG} allows only a gateway on this machine or a private "
+            f"network, but PCC_BASE is {pcc_base!r}. Never point {name} at a public PCC gateway."
+        )
+    return None
+
 
 # ── HTTP helpers (stdlib only) ──────────────────────────────────────────
 
@@ -711,6 +755,18 @@ def daemon_mode():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "interactive"
 
+    # N4a: daemon mode feeds relayed PCC jobs and chat to an LLM that holds a
+    # shell and a self-update tool, so it gets the same start guard.
+    if mode == "daemon":
+        refusal = start_guard(sys.argv[2:], PCC_BASE, "ot2-agent.py daemon")
+        if refusal:
+            print(refusal, file=sys.stderr)
+            sys.exit(2)
+        log.warning(
+            "UNSAFE LOCAL MODE: jobs and chat relayed by %s drive an LLM with a shell "
+            "on this robot (status board row N4b).", PCC_BASE,
+        )
+
     # Only require auth for modes that use Claude
     if mode in ("interactive", "daemon") and not ANTHROPIC_API_KEY and not ANTHROPIC_OAUTH_TOKEN:
         print("ERROR: Set ANTHROPIC_API_KEY environment variable")
@@ -737,7 +793,7 @@ def main():
     elif mode == "health":
         print(json.dumps(health, indent=2))
     else:
-        print(f"Usage: {sys.argv[0]} [interactive|daemon|health]")
+        print(f"Usage: {sys.argv[0]} [interactive|daemon --unsafe-local|health]")
         sys.exit(1)
 
 

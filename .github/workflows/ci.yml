@@ -228,3 +228,13 @@ jobs:
   # workflow_dispatch trigger. That "click to run" is our manual gate:
   # GitHub Free + private repos can't enforce required-reviewer rules on
   # environments, but a manual dispatch requires the same human intent.
+
+  # Board row N4a: the OT-2 executor start guard. Stdlib-only tests: no install step.
+  scripts-python-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OT-2 executor start-guard tests
+        run: python3 -m unittest -v scripts/test_ot2_executor_guard.py
