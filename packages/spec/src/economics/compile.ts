@@ -307,7 +307,7 @@ function duplicates(values: readonly string[]): string[] {
   return [...dup].sort(cmpStr);
 }
 
-type PinStatus = "verified" | "unverifiable" | "no-body";
+type PinStatus = "verified" | "unverifiable" | "no-body" | "not-evaluated";
 
 /**
  * Pinned royalty rates (§2.4). A clause's bps must equal the schedule's rate at the agreement's `asOf`,
@@ -315,6 +315,7 @@ type PinStatus = "verified" | "unverifiable" | "no-body";
  * `evaluatedAt` and `context` are the quoting side's record and are not trusted. A clause that names a
  * rate source and pays in some unit must be verified: without the schedule body, or on a segment that
  * cannot be evaluated exactly, it is refused (RATE_UNVERIFIED), whether or not a license requires it.
+ * A clause that pays in no unit is never evaluated, so its pin is not verified: nothing was compared.
  */
 function checkPins(
   n: EconomicAgreement,
@@ -328,18 +329,20 @@ function checkPins(
   for (const c of n.clauses) {
     if (c.rule.kind !== "percent" || c.rule.rateSource === null) continue;
     const units = selected.get(c.clauseId) ?? [];
+    if (units.length === 0) {
+      status.set(c.clauseId, "not-evaluated");
+      continue;
+    }
     const body = bodies.get(c.rule.rateSource.scheduleHash);
     if (body === undefined) {
       status.set(c.clauseId, "no-body");
-      if (units.length > 0) {
-        out.push(
-          refusal("RATE_UNVERIFIED", `clause "${c.clauseId}" pins a rate from schedule ${c.rule.rateSource.scheduleHash}, which was not supplied to check it`, [
-            "clause",
-            c.clauseId,
-            "rateSource",
-          ]),
-        );
-      }
+      out.push(
+        refusal("RATE_UNVERIFIED", `clause "${c.clauseId}" pins a rate from schedule ${c.rule.rateSource.scheduleHash}, which was not supplied to check it`, [
+          "clause",
+          c.clauseId,
+          "rateSource",
+        ]),
+      );
       continue;
     }
     let unverifiable = false;

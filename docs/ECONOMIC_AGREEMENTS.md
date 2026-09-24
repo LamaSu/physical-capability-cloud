@@ -22,6 +22,7 @@ The reference implementation runs on the server (Node). Product surfaces show re
 - **Label:** human text shown to people. 1 to 200 Unicode code points, in NFC, with no control characters (U+0000–U+001F, U+007F–U+009F) and no unpaired surrogates. Labels are hashed, so a relabelled agreement is a different agreement.
 - **Time:** an integer count of unix seconds, `0 .. 2^53 − 1`.
 - **Unknown fields are rejected.** Every object is closed. A field this document does not define is a schema error, never ignored.
+- **Every field is required.** A field whose type includes `null` must be present, with the value `null`. Only the options (§3) have fields that may be left out.
 - **Order-free input.** Input arrays are sets. The compiler sorts them canonically (§6), so the order an agent happened to emit never changes a hash or a payout.
 - **Bounds and uniqueness** are part of the schema. Every array's length limit is written next to it below. These arrays must not repeat an entry, or the input fails the schema: `appliesTo.units`, `grants.fieldsOfUse`, `grants.regions`, `use.modifies`, the `requirementId`s of one license, and the `party`s of one payee `distribution`. Duplicate ids elsewhere (parties, units, splits, clauses, licenses, and the component refs and measure keys of one unit) are structure refusals (`DUPLICATE_ID`, §3).
 
@@ -103,7 +104,7 @@ Clause {
 
 `Role` is one of the 11 canonical contributor roles in `@pcc/spec` `CONTRIBUTOR_ROLES`: `operator`, `verifier`, `insurer`, `integrator`, `protocol-author`, `model-author`, `dataset-contributor`, `backend-author`, `curator`, `assembler`, `network-treasury`.
 
-**`appliesTo` selects the units a clause pays in.** `units` names them. `allUnits` is every unit. `usingComponent: R` is every unit whose `components` contains `R`. `oncePerAgreementUsing: R` is also every unit that uses `R`, but the clause's amount is owed once for the whole agreement, not once per unit. It is **spread** over those units in proportion to their gross: largest remainder (§4.3) of the amount over the units' `gross` as weights, with ties to the lower `unitRef`. Only a `fixed` or `pass_through` rule has an agreement-level amount, so only those rules may be used with it (schema). Each unit pays its share only if that unit is released. The licensor is therefore paid for exactly the part of the deal that ran, and naming a cheap unit first cannot concentrate the fee on it.
+**`appliesTo` selects the units a clause pays in.** `units` names them. A name that is not a unit of the agreement is refused (`UNKNOWN_REFERENCE`) and selects nothing, so a clause that names only unknown units pays in no unit. `allUnits` is every unit. `usingComponent: R` is every unit whose `components` contains `R`. `oncePerAgreementUsing: R` is also every unit that uses `R`, but the clause's amount is owed once for the whole agreement, not once per unit. It is **spread** over those units in proportion to their gross: largest remainder (§4.3) of the amount over the units' `gross` as weights, with ties to the lower `unitRef`. The weights are each `gross` as written, including one that is refused as `GROSS_OUT_OF_RANGE`; if every weight is 0, every share is 0. Only a `fixed` or `pass_through` rule has an agreement-level amount, so only those rules may be used with it (schema). Each unit pays its share only if that unit is released. The licensor is therefore paid for exactly the part of the deal that ran, and naming a cheap unit first cannot concentrate the fee on it.
 
 These selectors are how **participation** is expressed. A clause that applies only where a component actually runs is owed only in the units that run it, and each such unit pays it only if that unit is released. A declared contributor whose component runs nowhere in the agreement is owed nothing. The compiler reports it as not eligible, not as a payment of zero.
 
@@ -152,7 +153,9 @@ The pinned `bps` must equal every such evaluation, or the refusal is `RATE_PIN_M
 
 Every rate is then clamped to `0..10000`.
 
-A pin is **verified** when the body was supplied and every evaluation was exact and equal. **A clause that names a rate source and pays in at least one unit must be verified**, whether or not a license requires it. If the body is missing, or any unit's segment is unverifiable, the refusal is `RATE_UNVERIFIED` at `["clause", clauseId, "rateSource"]`. An unverifiable rate never produces a payout; a composer who does not claim a schedule's rate simply omits `rateSource`.
+Whether an evaluation is exact depends only on the segment in force at `asOf` and on `rateFacts`, and both are the same for every unit of a clause. A clause's rate is therefore exact in all its units or in none, so `RATE_PIN_MISMATCH` and `RATE_UNVERIFIED` never both apply to one clause.
+
+A pin is **verified** when the clause pays in at least one unit, the body was supplied, and every evaluation was exact and equal. A clause that pays in no unit is never evaluated. Its pin is not verified, even when the body was supplied, because nothing was compared. It is not refused either: it pays nothing. **A clause that names a rate source and pays in at least one unit must be verified**, whether or not a license requires it. If the body is missing, or any unit's segment is unverifiable, the refusal is `RATE_UNVERIFIED` at `["clause", clauseId, "rateSource"]`. An unverifiable rate never produces a payout; a composer who does not claim a schedule's rate simply omits `rateSource`.
 
 ### 2.5 License
 
@@ -212,9 +215,11 @@ As for a license, `outbound.shareAlikeTag` is required exactly when `outbound.cl
 - is anything other than null, a boolean, a number, a string, an array or a plain object (for example a function, a bigint, a Date or a class instance);
 - has an accessor property, a symbol key or a hole in an array;
 - contains itself;
-- nests deeper than 64, has an array longer than 65,536, or has more than 1,000,000 values in all.
+- nests too deep. The input itself is at depth 0, and a value inside an object or array at depth `d` is at depth `d + 1`. An object or array at depth 64 or more is refused; a null, boolean, number or string at depth 64 is not;
+- has an array with more than 65,536 entries;
+- has more than 1,000,000 values in all. Each null, boolean, number, string, array and object counts as one value, including the input itself. Object keys are not values.
 
-A `toJSON` method is never called, and a `__proto__` key is an ordinary key, which the closed schema then refuses. No input and no options make the compiler throw.
+Only an object's own enumerable properties are read, as `JSON.stringify` does. A `toJSON` method is never called, and a `__proto__` key is an ordinary key, which the closed schema then refuses. No input and no options make the compiler throw.
 
 **Options.** Everything that is the server's to say comes in the options, never in the agreement. All fields are optional:
 
@@ -222,8 +227,8 @@ A `toJSON` method is never called, and a `__proto__` key is an ordinary key, whi
 |---|---|
 | `forbiddenRecipients: Address[] (0..64)` | The escrow clone, the settlement token and the factory. The zero address is always forbidden. |
 | `authorityFloor: Authority` | The weakest license authority accepted; the default is `counterparty-accepted`. |
-| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Fields other than `version` and `segments` do not enter the hash, and unknown fields are ignored. Each must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`. |
-| `fee: { feeBps, feeRecipient: Address \| null }` | The fee the server charges. It obeys §2's own rule: a recipient exactly when `feeBps > 0`. |
+| `schedules: RateSchedule[] (0..64)` | Sealed rate-schedule bodies. Each must hash to its own `scheduleHash`. A body is trusted only for the hash it actually has, so listing order never matters. Only `version` and `segments` enter the hash. Unknown fields are dropped before hashing, at every depth: in the body and inside each segment. The registry does the same when it publishes, so an unknown field changes neither the hash nor the rate. The one closed object is a `capture-class-indexed` segment's `byClass`; a key there other than `CC0`..`CC5` is refused. Each body must also be **well formed**:<br>1. No segment follows an open-ended one (`endTime: null`).<br>2. Each segment starts at or after the previous segment's `endTime`.<br>3. A set `endTime` is not before its `startTime`.<br>4. A `linear-decay` segment's `endTime` is after its `startTime`. |
+| `fee: { feeBps: integer 0..1000, feeRecipient: Address \| null }` | The fee the server charges. It obeys §2's own rule: a recipient exactly when `feeBps > 0`. |
 | `rateFacts: { jobsPerDay?: integer >= 0 \| null, captureClass?: "CC0".."CC5" \| null }` | Facts some schedules depend on (§2.4). Each field may be omitted, which means `null`. |
 
 The options are one object, and `null` is not an object. Options that break these rules, including an unknown field or a misspelled authority, are refused as `SCHEMA_INVALID` with path `["options"]`. They are never ignored. `forbiddenRecipients` is a set: a repeat changes nothing.
@@ -259,7 +264,7 @@ There is no partial result.
 | `ECONOMICS_UNDECIDED_OD4` | structure | `["clause", clauseId]` |
 | `INVALID_BOUNDS` | structure | `["clause", clauseId]`, `["license", L, "requirement", requirementId]` |
 | `RATE_PIN_MISMATCH` | structure | `["clause", clauseId, "rateSource"]`: one per clause, whichever units disagree; checked only when no id is duplicated |
-| `RATE_UNVERIFIED` | structure | `["clause", clauseId, "rateSource"]`: a clause that names a rate source and pays in some unit, whose body is missing or whose segment cannot be evaluated exactly (§2.4). It is not reported for a clause that also has `RATE_PIN_MISMATCH`, and is checked only when no id is duplicated. |
+| `RATE_UNVERIFIED` | structure | `["clause", clauseId, "rateSource"]`: a clause that names a rate source and pays in some unit, whose body is missing or whose segment cannot be evaluated exactly (§2.4). It never applies to a clause that has `RATE_PIN_MISMATCH` (§2.4), and it is checked only when no id is duplicated. |
 | `TOO_MANY_ALLOCATIONS` | structure | `[]` (the agreement as a whole); checked only when no id is duplicated and no split is in a cycle |
 | `RIGHTS_UNKNOWN` | rights | `["component", ref]` |
 | `LICENSE_NOT_IN_FORCE`, `AUTHORITY_BELOW_FLOOR` | rights | `["component", ref, L]` |
@@ -428,7 +433,7 @@ CompiledEconomicsV1 {
 - A leg's `attribution` lists its positive allocations. Zero allocations appear only in `zeroLegs`.
 - `rights` lists the licenses of the components some unit uses.
 - `totals.byParty` lists the parties paid a positive total.
-- In a successful result, every rate of a clause that pays in some unit is `verified: true` (anything else was refused). A clause that pays in no unit shows `verified: true` only if its body was supplied.
+- In a successful result, a rate shows `verified: true` exactly when its clause pays in some unit. Such a pin was checked, since anything else was refused. The pin of a clause that pays in no unit was never compared with its schedule (§2.4).
 
 ## 6. Canonical form and hashes
 
