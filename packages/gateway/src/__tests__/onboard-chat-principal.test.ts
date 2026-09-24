@@ -309,7 +309,8 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     const { rawKey } = provisionApiKey({ operatorId: "dave@example.com" });
     // The evidence the chat would have to invent: tier 0 accepts deviceHealth alone.
     const evidence = { deviceHealth: { status: "idle", model: "X" } };
-    for (const headers of [{}, { authorization: `Bearer ${rawKey}` }]) {
+    // Signed in first: that is where the pre-fix code ran prove_registration.
+    for (const headers of [{ authorization: `Bearer ${rawKey}` }, {}]) {
       llm.responses.push(
         calls(
           ["prove_registration", { registrationId: "reg-1", evidence }],
