@@ -15,6 +15,16 @@
  *     and they commit the job and the kernel that accepted it.
  * Neither leg is sufficient alone.
  *
+ * Caller contract for `bundles`: EVERY bundle the accepting kernel stored for
+ * the job, from the job's own store — never a presenter's selection, and never
+ * third-party input. Omitting a bundle hides whatever it reports (a failure,
+ * most importantly), and one unauthenticated or unbound bundle rejects the
+ * whole set. At settlement this is the pinned set (LO-EV-9 R1).
+ *
+ * Events are counted once: after binding proves each event's `hash` equals
+ * hashEvent(event), hash identity is content identity, so a bundle uploaded
+ * twice, or an event listed twice, cannot inflate a sample count.
+ *
  * Then, in order:
  *   1. the profile governs: digest(profile) equals the digest committed at
  *      acceptance (`profileGoverns`), in the 0x commitment family;
@@ -27,16 +37,37 @@
  *      makes the evidence non-authentic, which is stricter than "fabricated
  *      events don't count";
  *   4. device failure and contradiction, under the profile's committed
- *      `onDeviceFailure` / `onContradiction` policies;
+ *      `onDeviceFailure` / `onContradiction` policies. A failure is
+ *      `execution_failed` OR an inspection reporting its own negative verdict
+ *      (`payload.passed` present and not true): completion plus a failure is a
+ *      contradiction, a failure alone is a device failure;
  *   5. level: the strongest level the evidence reaches (`evidenceLevelOfBundle`,
  *      evidence-level.ts — the one classification) must meet the profile's
  *      `acceptanceLevel`, and at least `sampling.minSamples` observations must
- *      come from the PROFILED device, at that level, from a permitted version,
- *      inside the capture window. Shortfalls follow `onMissingData`.
+ *      come from the PROFILED device, at that level, not a failed inspection,
+ *      from a permitted version, inside the capture window. Shortfalls follow
+ *      `onMissingData`.
+ *
+ * Version pins: the evidence carries ONE version field, `source.firmwareVersion`
+ * (adapters put their own version there; some robots put firmware there), so
+ * an observation counts only if its version is in BOTH committed lists — the
+ * only reading that enforces both pins. A profile whose two lists share no
+ * string can never be satisfied and fails closed as unverifiable. Giving each
+ * pin its own wire field (an additive `source.adapterVersion`) is a later,
+ * hash-affecting change.
  *
  * A level says how strong evidence is, not whether the output was good; a
  * numeric tolerance is the pass/fail half and fails closed here until the
- * profile can name where the measured value lives.
+ * profile can name where the measured value lives. An inspection's own
+ * `passed` verdict is honoured (step 4); an inspection with no `passed` field
+ * claims no verdict and still counts.
+ *
+ * Two required profile terms are DESCRIPTIVE in v1, neither evaluated nor
+ * failed closed: `interpretation.evidenceTypeIds` (primitive ids, which the
+ * committed program evaluates, not this check) and `outcome.objectIdentity`
+ * (nothing in the evidence names the object yet; it can later ride LO-EV-9's
+ * `subject.outputHash` when the kinds line up). Both are required fields, so
+ * failing closed on them would make every profile unverifiable.
  */
 
 import { isFabricated } from "./is-fabricated.js";
@@ -46,6 +77,7 @@ import {
   executingDeviceIds,
   meetsEvidenceLevel,
   DEVICE_REPORTED_EVENT_TYPES,
+  INSPECTION_EVENT_TYPES,
   type EvidenceLevel,
 } from "./evidence-level.js";
 import { profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
@@ -102,7 +134,7 @@ export interface ProfileAdmissionInput {
   committedDigest: string;
   /** The job and the kernel that accepted it — from the job record, never from the evidence. */
   subject: EvidenceSubject;
-  /** Every bundle presented for the job. */
+  /** EVERY bundle the accepting kernel stored for the job, from the job's own store (see the caller contract above). */
   bundles: readonly AdmissionBundle[];
   /** The registered-key signature leg. A throw counts as a failed signature. */
   verifyBundleSignature: (bundle: AdmissionBundle) => boolean | Promise<boolean>;
@@ -110,6 +142,14 @@ export interface ProfileAdmissionInput {
 
 const EVENT_TYPES = new Set<string>(EVIDENCE_EVENT_TYPES);
 const COMPLETION_TYPES = new Set<string>(DEVICE_REPORTED_EVENT_TYPES);
+const INSPECTION_TYPES = new Set<string>(INSPECTION_EVENT_TYPES);
+
+/** An inspection reporting its own negative verdict. No `passed` field claims no verdict. */
+function inspectionFailed(event: EvidenceEvent): boolean {
+  if (!INSPECTION_TYPES.has(event.type)) return false;
+  const passed = (event.payload as Record<string, unknown> | undefined)?.passed;
+  return passed !== undefined && passed !== true;
+}
 
 function result(
   decision: ProfileAdmissionDecision,
@@ -136,6 +176,12 @@ function unverifiableTerms(profile: MeasurementProfileV1): string[] {
   }
   if (profile.capture.coverage.policy !== "one-shot") {
     terms.push(`capture.coverage.policy "${profile.capture.coverage.policy}": only "one-shot" is evaluated`);
+  }
+  const firmwarePins = new Set(profile.device.permittedFirmwareVersions);
+  if (!profile.device.permittedAdapterVersions.some((v) => firmwarePins.has(v))) {
+    terms.push(
+      "device version pins: permittedAdapterVersions and permittedFirmwareVersions share no string, and the evidence carries one version field, so no observation can satisfy both",
+    );
   }
   if (!EVENT_TYPES.has(profile.capture.startCondition)) {
     terms.push(`capture.startCondition "${profile.capture.startCondition}" is not an evidence event type`);
@@ -197,6 +243,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   const events: EvidenceEvent[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
     let signed = false;
@@ -216,7 +263,11 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
       return reject("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
     }
-    events.push(...(bundle.events as EvidenceEvent[]));
+    for (const e of bundle.events as EvidenceEvent[]) {
+      if (seen.has(e.hash)) continue;
+      seen.add(e.hash);
+      events.push(e);
+    }
   }
 
   const fabricated = events.filter(isFabricated).length;
@@ -229,23 +280,29 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
 
   const findings: { decision: ProfileAdmissionDecision; reason: ProfileAdmissionReason }[] = [];
   const completed = events.some((e) => COMPLETION_TYPES.has(e.type));
-  const failed = events.some((e) => e.type === "execution_failed");
-  if (completed && failed) {
+  const executionFailed = events.some((e) => e.type === "execution_failed");
+  const failedInspections = events.filter(inspectionFailed).length;
+  const failure = [
+    ...(executionFailed ? ["execution_failed"] : []),
+    ...(failedInspections > 0 ? [`${failedInspections} failed inspection(s)`] : []),
+  ].join(" and ");
+  if (completed && failure) {
     findings.push({
       decision: policyDecision(profile.onContradiction),
-      reason: { code: "contradictory-evidence", detail: "the evidence reports both completion and execution_failed" },
+      reason: { code: "contradictory-evidence", detail: `the evidence reports completion and ${failure}` },
     });
-  } else if (failed) {
+  } else if (failure) {
     findings.push({
       decision: policyDecision(profile.interpretation.onDeviceFailure),
-      reason: { code: "device-failure", detail: "the device reported execution_failed" },
+      reason: { code: "device-failure", detail: `the evidence reports ${failure}` },
     });
   }
 
   const required = profile.interpretation.acceptanceLevel;
   const reached = evidenceLevelOfBundle(events);
   const executing = executingDeviceIds(events);
-  const permitted = new Set([...profile.device.permittedAdapterVersions, ...profile.device.permittedFirmwareVersions]);
+  const adapterPins = new Set(profile.device.permittedAdapterVersions);
+  const firmwarePins = new Set(profile.device.permittedFirmwareVersions);
   const window = captureWindow(profile, events);
 
   let atLevel = 0;
@@ -260,8 +317,9 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       continue;
     }
     atLevel++;
+    if (inspectionFailed(e)) continue;
     const version = e.source.firmwareVersion;
-    if (typeof version !== "string" || !permitted.has(version)) {
+    if (typeof version !== "string" || !adapterPins.has(version) || !firmwarePins.has(version)) {
       unpermittedVersion++;
       continue;
     }
@@ -301,7 +359,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
         detail:
           `${qualifying} qualifying observation(s) from ${profile.device.deviceId}, the profile requires ${profile.measurement.sampling.minSamples}` +
           ` (at ${required}: ${atLevel} from the profiled device, ${otherDevices} from other devices;` +
-          ` excluded: ${unpermittedVersion} unpermitted version, ${outsideWindow} outside the capture window${windowNote})`,
+          ` excluded: ${failedInspections} failed inspection(s), ${unpermittedVersion} unpermitted version, ${outsideWindow} outside the capture window${windowNote})`,
       },
     });
   }

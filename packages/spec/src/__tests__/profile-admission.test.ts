@@ -330,3 +330,73 @@ describe("profile admission — terms this version cannot evaluate fail closed, 
     });
   }
 });
+
+describe("profile admission — review #363 fixes (evidence #2777, probes P1-P3 inverted)", () => {
+  const INSPECT = (payload: Record<string, unknown>, version = CAMERA_VERSION): Draft => ({
+    type: "cv_inspection_result",
+    t: 20,
+    device: CAMERA,
+    version,
+    payload,
+  });
+  const PRINTED = PILOT.slice(0, 2);
+
+  it("P1: the same signed bundle presented twice counts once", async () => {
+    const p = inspectedPageProfile();
+    p.measurement.sampling.minSamples = 2;
+    const b = await toBundle(PILOT);
+    const r = await admit(p, [b, b]);
+    expect(r).toMatchObject({ decision: "reject", qualifyingObservations: 1 });
+    expect(codes(r)).toEqual(["missing-measurements"]);
+  });
+
+  it("P1b: one event listed twice inside one signed bundle counts once", async () => {
+    const p = inspectedPageProfile();
+    p.measurement.sampling.minSamples = 2;
+    const r = await admit(p, [await toBundle([...PILOT, PILOT[2]!])]);
+    expect(r).toMatchObject({ decision: "reject", qualifyingObservations: 1 });
+  });
+
+  it("P2: an inspection reporting passed:false is a failure, never a sample", async () => {
+    const r = await admit(inspectedPageProfile(), [await toBundle([...PRINTED, INSPECT({ passed: false, antiSpoofScore: 0.1 })])]);
+    expect(r).toMatchObject({ decision: "reject", qualifyingObservations: 0 });
+    expect(codes(r)).toEqual(["contradictory-evidence", "missing-measurements"]);
+    expect(r.reasons[1]!.detail).toContain("1 failed inspection(s)");
+  });
+
+  it("a failed inspection with no completion is a device failure", async () => {
+    const r = await admit(inspectedPageProfile(), [await toBundle([PILOT[0]!, INSPECT({ passed: false })])]);
+    expect(codes(r)).toContain("device-failure");
+  });
+
+  it("any non-true passed value is a negative verdict", async () => {
+    const r = await admit(inspectedPageProfile(), [await toBundle([...PRINTED, INSPECT({ passed: "yes" })])]);
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toContain("contradictory-evidence");
+  });
+
+  it("an inspection with no passed field claims no verdict and still counts", async () => {
+    const r = await admit(inspectedPageProfile(), [await toBundle([...PRINTED, INSPECT({ score: 0.97 })])]);
+    expect(r).toMatchObject({ decision: "admit", qualifyingObservations: 1 });
+  });
+
+  it("P3a/P3b: pin lists that share no string can never be satisfied, so the profile fails closed", async () => {
+    const p = inspectedPageProfile();
+    p.device.permittedFirmwareVersions = ["fw-4.0.1"];
+    for (const version of [CAMERA_VERSION, "fw-4.0.1"]) {
+      const r = await admit(p, [await toBundle([...PRINTED, INSPECT({ passed: true }, version)])]);
+      expect(codes(r)).toEqual(["unverifiable-term"]);
+      expect(r.reasons[0]!.detail).toContain("share no string");
+    }
+  });
+
+  it("an observation counts only when its version is in BOTH pin lists", async () => {
+    const p = inspectedPageProfile();
+    p.device.permittedAdapterVersions = ["cam-A", "cam-B"];
+    p.device.permittedFirmwareVersions = ["cam-B", "cam-C"];
+    for (const [version, expected] of [["cam-A", "reject"], ["cam-C", "reject"], ["cam-B", "admit"]] as const) {
+      const r = await admit(p, [await toBundle([...PRINTED, INSPECT({ passed: true }, version)])]);
+      expect(r.decision).toBe(expected);
+    }
+  });
+});
