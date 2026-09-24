@@ -40,6 +40,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalize } from "../util/canonical.js";
+import { EVIDENCE_LEVELS, type EvidenceLevel } from "./evidence-level.js";
 
 /** Domain separator — a profile digest can never collide with another digest. */
 export const MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1";
@@ -52,22 +53,19 @@ export const MEASUREMENT_PROFILE_DIGEST_PATTERN = /^0x[0-9a-f]{64}$/;
 
 /**
  * Which of the memo's three result levels this profile accepts as the proven
- * outcome. Ordered weakest to strongest; never treat one as another.
- *   - `submitted`        the command was accepted (a spool receipt). Proves a
+ * outcome. It IS the evidence contract's `EvidenceLevel` (evidence-level.ts) —
+ * one classification, not a second map. Weakest to strongest:
+ *   - `submitted`        the device took the work (a spool receipt). Proves a
  *                        request was made, never that work happened.
- *   - `device_reported`  the device reported completion. Proves the device said
- *                        so; a device that lies, or a log-summary event with no
- *                        success field, satisfies this.
- *   - `inspected_output` the relevant physical output was observed or measured.
- *                        The only level a sensor-grounded claim may rest on.
+ *   - `device_reported`  the device that did the work reports it finished.
+ *                        Proves the device said so.
+ *   - `inspected_output` the output was observed or measured by a device other
+ *                        than the one that produced it. The only level a
+ *                        sensor-grounded claim may rest on.
  */
-export type AcceptanceLevel = "submitted" | "device_reported" | "inspected_output";
+export type AcceptanceLevel = EvidenceLevel;
 
-export const ACCEPTANCE_LEVELS: readonly AcceptanceLevel[] = [
-  "submitted",
-  "device_reported",
-  "inspected_output",
-] as const;
+export const ACCEPTANCE_LEVELS: readonly AcceptanceLevel[] = EVIDENCE_LEVELS;
 
 export interface ProfileOutcome {
   /** Provider-neutral capability identity, e.g. "document-printing". */
@@ -107,7 +105,12 @@ export interface ProfileMeasurement {
 }
 
 export interface ProfileCapture {
-  /** When capture may begin / must end, as event-type tokens or conditions. */
+  /**
+   * The capture window, as evidence event types. An observation counts only
+   * at or after the earliest `startCondition` event and at or before the
+   * latest `endCondition` event; `endCondition: "open"` sets no end bound.
+   * Admission (profile-admission.ts) fails closed on any other token.
+   */
   startCondition: string;
   endCondition: string;
   coverage: {
@@ -347,9 +350,13 @@ export function computeMeasurementProfileDigest(
   return digestProfile(profile);
 }
 
+/** Why a presented profile does not govern; null when it does. */
+export type ProfileGovernanceCode = "digest-wrong-family" | "profile-invalid" | "digest-mismatch";
+
 /** The outcome of checking a presented profile against a committed digest. */
 export interface ProfileGovernanceResult {
   governs: boolean;
+  code: ProfileGovernanceCode | null;
   /** Digest recomputed from the presented profile. */
   presentedDigest: MeasurementProfileDigest | null;
   reasons: string[];
@@ -371,6 +378,7 @@ export function profileGoverns(
   if (typeof committedDigest !== "string" || !MEASUREMENT_PROFILE_DIGEST_PATTERN.test(committedDigest)) {
     return {
       governs: false,
+      code: "digest-wrong-family",
       presentedDigest: null,
       reasons: [
         `committed digest ${JSON.stringify(committedDigest)} is not a measurement-profile commitment: expected 0x + 64 lowercase hex; a sha256:-tagged value is the evidence-event family`,
@@ -381,6 +389,7 @@ export function profileGoverns(
   if (violations.length > 0) {
     return {
       governs: false,
+      code: "profile-invalid",
       presentedDigest: null,
       reasons: violations.map((x) => `${x.path || "<root>"}: ${x.message}`),
     };
@@ -389,13 +398,14 @@ export function profileGoverns(
   if (presentedDigest !== committedDigest) {
     return {
       governs: false,
+      code: "digest-mismatch",
       presentedDigest,
       reasons: [
         `profile digest mismatch: committed ${committedDigest}, presented ${presentedDigest} — the accepted agreement did not authorize this profile`,
       ],
     };
   }
-  return { governs: true, presentedDigest, reasons: [] };
+  return { governs: true, code: null, presentedDigest, reasons: [] };
 }
 
 /**
