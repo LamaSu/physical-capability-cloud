@@ -271,6 +271,13 @@ describe("gateway unreachable", () => {
     expect(t).not.toContain("No traces recorded yet");
   });
 
+  it("a list holding something that isn't a trace is unavailable, not a crash", async () => {
+    stubFetch({ "/api/traces": { status: 200, body: { traces: [SETTLEMENT_TRACE, { traceId: "half-a-trace" }], total: 2 } } });
+    const t = (await renderPage()).text();
+    expect(t).toContain("Couldn't load traces");
+    expect(t).not.toContain("half-a-t");
+  });
+
   it("a streamed trace does not stand in for a failed read", async () => {
     FakeEventSource.mode = "open";
     stubFetch({});

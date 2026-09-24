@@ -81,13 +81,19 @@ const TRACE_LIMIT = 50;
 const REFRESH_MS = 5_000;
 const TRACES_QUERY_KEY = ["traces", "recent"] as const;
 
+/** The fields the list and waterfall read; anything less is not a trace. */
+function isTrace(value: unknown): value is Trace {
+  const t = value as Partial<Trace> | null;
+  return !!t && typeof t.traceId === "string" && !!t.rootSpan && typeof t.rootSpan.operation === "string" && Array.isArray(t.spans);
+}
+
 async function fetchRecentTraces(): Promise<Trace[]> {
   const res = await apiGet<{ traces?: unknown; total?: number }>(`/traces?limit=${TRACE_LIMIT}`);
   // A 2xx answer without a trace list is a failed read, not an empty one.
-  if (!Array.isArray(res?.traces)) {
+  if (!Array.isArray(res?.traces) || !res.traces.every(isTrace)) {
     throw new Error("The gateway's traces response was not in the expected format.");
   }
-  return res.traces as Trace[];
+  return res.traces;
 }
 
 /** Add or replace a trace by traceId, newest first. */
@@ -574,13 +580,13 @@ function TracesLive() {
 
       source.addEventListener("trace_update", (e: MessageEvent) => {
         if (cancelled) return;
-        let trace: Trace;
+        let trace: unknown;
         try {
-          trace = JSON.parse(e.data) as Trace;
+          trace = JSON.parse(e.data);
         } catch {
           return; // malformed event: skip it
         }
-        if (!trace?.traceId || !trace.rootSpan) return;
+        if (!isTrace(trace)) return;
         // Only while the last read succeeded, so a failing read keeps its stale notice.
         if (queryClient.getQueryState(TRACES_QUERY_KEY)?.status !== "success") return;
         queryClient.setQueryData<Trace[]>(TRACES_QUERY_KEY, (prev) => (prev ? upsertTrace(prev, trace) : prev));
