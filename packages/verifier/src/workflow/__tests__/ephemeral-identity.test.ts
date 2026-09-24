@@ -897,6 +897,23 @@ describe("SessionKeyService", () => {
       ).toThrow("TTL 100000s exceeds maximum 86400s");
     });
 
+    it("rejects a fractional TTL at issue (the signed delegation carries whole seconds)", () => {
+      const { principal, privateKey } = makePrincipal();
+      expect(() =>
+        service.issueSessionKey({ principal, principalPrivateKey: privateKey, ttlSeconds: 1.5 }),
+      ).toThrow("TTL must be a whole number of seconds, got 1.5");
+      const seed = new Uint8Array(32).fill(7);
+      expect(() =>
+        service.deriveSessionKey({
+          parentSeed: seed,
+          path: "m/8004'/84532'/1'/0'",
+          principal,
+          principalPrivateKey: privateKey,
+          ttlSeconds: 2.5,
+        }),
+      ).toThrow("TTL must be a whole number of seconds, got 2.5");
+    });
+
     it("rejects zero TTL", () => {
       const { principal, privateKey } = makePrincipal();
 

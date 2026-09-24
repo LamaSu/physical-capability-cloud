@@ -33,6 +33,7 @@ import {
   verifyDeviceSignedEvidence,
   naclEd25519Verify,
   resolveSettlementEvidence,
+  verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
   machineLogVerifierLive,
   deviceEvidenceSettlementFlagEnabled,
@@ -769,5 +770,183 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
       gateOpen: true,
     });
     expect(none).toMatchObject({ source: "gateway-fallback", reason: "no-device-bundle" });
+  });
+});
+
+// ── Strict transport decoding + conditional-field preservation (R20 review) ──
+//
+// Pre-existing gaps the LO-EV-1 review found in this module: Buffer.from(hex)
+// silently truncated malformed signature and key suffixes, and an empty-string
+// derivationPath was dropped by truthiness although the principal signed it.
+
+describe("device evidence — strict transport decoding (no truncation)", () => {
+  it("a signature or key with a trailing nibble or junk is rejected, not truncated", () => {
+    const dev = realDeviceEvidence();
+    const sig = dev.signature.value;
+    // What the old decoder did: the odd nibble / junk was dropped silently.
+    expect(Buffer.from(sig + "0", "hex").length).toBe(64);
+    expect(Buffer.from(sig + "zz", "hex").length).toBe(64);
+    for (const bad of [sig + "0", sig + "zz", sig.slice(0, -1)]) {
+      expect(naclEd25519Verify(dev.bundleHash, bad, dev.publicKeyHex), bad.length.toString()).toBe(false);
+    }
+    expect(naclEd25519Verify(dev.bundleHash, sig, dev.publicKeyHex + "0")).toBe(false);
+    // The exact-length forms the gateway always accepted still verify.
+    expect(naclEd25519Verify(dev.bundleHash, sig, dev.publicKeyHex)).toBe(true);
+    expect(naclEd25519Verify(dev.bundleHash, `0x${sig.toUpperCase()}`, dev.publicKeyHex.toUpperCase().replace("0X", "0x"))).toBe(true);
+  });
+});
+
+describe("device evidence — an empty derivationPath is part of the signed delegation", () => {
+  it("a delegation signed with derivationPath \"\" verifies (it used to be dropped)", async () => {
+    const principal = nacl.sign.keyPair();
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const body = {
+      sessionId: "session-empty-path",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: { allowedActions: ["evidence_submit"], contractIds: ["job-empty-path"], maxSignatures: 10 },
+      derivationPath: "",
+    };
+    const preimage = new TextDecoder().decode(sessionKeyDelegationPreimage(body));
+    expect(preimage.endsWith(',"derivationPath":""}')).toBe(true);
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(session.publicKey),
+      parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
+    };
+    const bundleHash = `sha256:${"cd".repeat(32)}`;
+    const signature: StoredSignature = {
+      signer: `0x${toHex(session.publicKey).slice(0, 40)}`,
+      algorithm: "ed25519",
+      value: toHex(nacl.sign.detached(signingPreimage(bundleHash), session.secretKey)),
+    };
+    const result = await verifyDeviceSignedEvidence({
+      signature,
+      bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
+      sessionKeyAuthorization: auth,
+      contractId: "job-empty-path",
+    });
+    expect(result).toMatchObject({ ok: true });
+  });
+});
+
+// ── LO-EV-9 review R1: re-verifying the pinned settlement anchor on recovery ──
+
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
+
+describe("verifyPinnedSettlementEvidence — what recovery may settle on", () => {
+  async function deviceRow(jobId = SUBJECT_JOB, kernelId = SUBJECT_KERNEL) {
+    const dev = await boundDeviceEvidence({ jobId, kernelId });
+    const row = {
+      id: "ev-relayed-1",
+      jobId,
+      stepId: "operator-relay",
+      kernelId,
+      assuranceTier: 0,
+      createdAt: "2026-09-24T12:00:00.000Z",
+      bundleHash: dev.bundleHash,
+      kernelSignature: dev.signature,
+    };
+    return { dev, row, signer: ed25519Signer(dev.keyPair.publicKey) };
+  }
+
+  function gatewayRow(events: Array<Record<string, unknown>> = []) {
+    const meta = {
+      id: "bundle-gw-1",
+      jobId: SUBJECT_JOB,
+      stepId: "step-1",
+      kernelId: SUBJECT_KERNEL,
+      assuranceTier: 0,
+      createdAt: "2026-09-24T12:00:00.000Z",
+      kernelSignature: { signer: ZERO_ADDRESS, algorithm: "ed25519", value: "gateway-auto-sign" },
+    };
+    const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta, events as never)).digest("hex")}`;
+    return { ...meta, bundleHash };
+  }
+
+  it("a device anchor that still binds and verifies may be settled", async () => {
+    const { dev, row, signer } = await deviceRow();
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("a device anchor whose stored events were altered may not", async () => {
+    const { dev, row, signer } = await deviceRow();
+    const altered = dev.events.map((e, i) => (i === 0 ? { ...e, payload: { ...e.payload, extra: 1 } } : e));
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: altered,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: false, reason: "event-hash-mismatch" });
+  });
+
+  it("a device anchor is re-checked against the kernel's registered key", async () => {
+    const { dev, row } = await deviceRow();
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: ed25519Signer(nacl.sign.keyPair().publicKey),
+      }),
+    ).toEqual({ ok: false, reason: "signature-invalid" });
+  });
+
+  it("a row for another job or another kernel may not be settled for this one", async () => {
+    const { dev, row, signer } = await deviceRow();
+    const base = { events: dev.events, registeredSigner: signer };
+    expect(
+      await verifyPinnedSettlementEvidence({ ...base, jobId: "job-other", kernelId: SUBJECT_KERNEL, row }),
+    ).toEqual({ ok: false, reason: "pinned-evidence-job-mismatch" });
+    expect(
+      await verifyPinnedSettlementEvidence({ ...base, jobId: SUBJECT_JOB, kernelId: "kernel-other", row }),
+    ).toEqual({ ok: false, reason: "pinned-evidence-kernel-mismatch" });
+  });
+
+  it("a gateway anchor must recompute from its stored envelope", async () => {
+    const events = [
+      { id: "e1", type: "execution_completed", timestamp: "t", source: { deviceId: "gateway", deviceType: "controller", kernelId: SUBJECT_KERNEL }, payload: { toolCallCount: 1 }, hash: "sha256:" + "0".repeat(64) },
+    ];
+    const row = gatewayRow(events);
+    const base = { jobId: SUBJECT_JOB, kernelId: SUBJECT_KERNEL, registeredSigner: null };
+    expect(await verifyPinnedSettlementEvidence({ ...base, row, events })).toEqual({ ok: true });
+    const altered = [{ ...events[0]!, payload: { toolCallCount: 2 } }];
+    expect(await verifyPinnedSettlementEvidence({ ...base, row, events: altered })).toEqual({
+      ok: false,
+      reason: "pinned-evidence-hash-mismatch",
+    });
+    expect(await verifyPinnedSettlementEvidence({ ...base, row: { ...row, bundleHash: "sha256:trapped" }, events })).toEqual({
+      ok: false,
+      reason: "pinned-evidence-hash-mismatch",
+    });
+  });
+
+  it("no pinned row, no settlement", async () => {
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row: undefined,
+        events: [],
+        registeredSigner: null,
+      }),
+    ).toEqual({ ok: false, reason: "no-pinned-evidence" });
   });
 });

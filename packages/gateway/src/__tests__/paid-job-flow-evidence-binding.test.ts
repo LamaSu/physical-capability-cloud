@@ -19,7 +19,8 @@ import { negotiationRoutes } from "../routes/negotiation.js";
 import { ot2RelayRoutes } from "../routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
-import { initStore, closeStore, getRepos } from "../db.js";
+import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -128,7 +129,7 @@ function storeRelayedBundle(
   jobId: string,
   kernelId: string,
   bundle: Awaited<ReturnType<typeof signedBundle>>,
-) {
+): string {
   const repos = getRepos();
   const bundleId = `ev-relayed-${++rowSeq}`;
   repos.evidence.insert({
@@ -152,6 +153,7 @@ function storeRelayedBundle(
       hash: ev.hash,
     })),
   );
+  return bundleId;
 }
 
 async function complete(app: FastifyInstance, jobId: string) {
@@ -219,5 +221,128 @@ describe("LO-EV-9 — /complete binds device evidence to the accepted job and ke
 
     const settled = await complete(app, jobB);
     expect(settled.evidenceHash).toBe(bundleB.bundleHash);
+  });
+});
+
+// ── LO-EV-9 review R1: recovery settles only the pinned, re-verified anchor ──
+
+function resume(app: FastifyInstance, jobId: string) {
+  return app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+}
+
+/** A failure after evidence was written leaves the job resumable. */
+function trapAfterEvidence(jobId: string) {
+  getRepos().jobs.updateStatus(jobId, "evidence_submitted");
+}
+
+function tamperFirstEvent(bundleId: string) {
+  const [first] = getRepos().evidence.findEventsByBundle(bundleId);
+  getStore()
+    .db.update(schema.evidenceEvents)
+    .set({ payload: { ...(first!.payload as Record<string, unknown>), tampered: true } })
+    .where(eq(schema.evidenceEvents.id, first!.id))
+    .run();
+}
+
+describe("LO-EV-9 review R1 — /resume-settlement settles the pinned, re-verified anchor", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  it("/complete pins the verified device row itself as the settlement anchor", async () => {
+    const node = nacl.sign.keyPair();
+    registerKey("kernel-nyc", node);
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-pin");
+    const bundle = await signedBundle(jobId, "kernel-nyc", node);
+    const deviceRowId = storeRelayedBundle(jobId, "kernel-nyc", bundle);
+
+    const settled = await complete(app, jobId);
+    expect(settled.evidenceHash).toBe(bundle.bundleHash);
+    const job = getRepos().jobs.findById(jobId)!;
+    expect(job.evidenceBundleId).toBe(deviceRowId);
+    // The gateway's own record is stored under its OWN hash, not the device digest.
+    const rows = getRepos().evidence.findByJob(jobId);
+    const gatewayRow = rows.find((r) => r.id !== deviceRowId)!;
+    expect(gatewayRow.bundleHash).not.toBe(bundle.bundleHash);
+  });
+
+  it("a replayed row appended after completion is not what recovery settles on", async () => {
+    const node = nacl.sign.keyPair();
+    registerKey("kernel-nyc", node);
+    const jobA = await createJob(app, "kernel-nyc", "user-agent-resume-a");
+    const jobB = await createJob(app, "kernel-nyc", "user-agent-resume-b");
+    const bundleB = await signedBundle(jobB, "kernel-nyc", node);
+    const pinnedId = storeRelayedBundle(jobB, "kernel-nyc", bundleB);
+    await complete(app, jobB);
+    trapAfterEvidence(jobB);
+
+    // Job A's genuine bundle, relayed under job B AFTER completion: the latest row.
+    const bundleA = await signedBundle(jobA, "kernel-nyc", node);
+    storeRelayedBundle(jobB, "kernel-nyc", bundleA);
+
+    const res = await resume(app, jobB);
+    expect(res.statusCode).toBe(200);
+    // Recovery selected the pinned row (before this fix: the latest row, job A's).
+    expect(res.json().evidenceBundleId).toBe(pinnedId);
+    expect(getRepos().evidence.findById(pinnedId)!.bundleHash).toBe(bundleB.bundleHash);
+  });
+
+  it("recovery refuses a pinned device anchor whose stored events were altered", async () => {
+    const node = nacl.sign.keyPair();
+    registerKey("kernel-nyc", node);
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-tamper-dev");
+    const pinnedId = storeRelayedBundle(jobId, "kernel-nyc", await signedBundle(jobId, "kernel-nyc", node));
+    await complete(app, jobId);
+    trapAfterEvidence(jobId);
+    tamperFirstEvent(pinnedId);
+
+    const res = await resume(app, jobId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe("event-hash-mismatch");
+    expect(getRepos().jobs.findById(jobId)!.status).toBe("evidence_submitted");
+  });
+
+  it("recovery refuses a gateway anchor whose stored envelope no longer hashes to it", async () => {
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-tamper-gw");
+    const done = await complete(app, jobId); // no device evidence: the gateway anchor
+    const pinnedId = getRepos().jobs.findById(jobId)!.evidenceBundleId!;
+    expect(getRepos().evidence.findById(pinnedId)!.bundleHash).toBe(done.evidenceHash);
+    trapAfterEvidence(jobId);
+    tamperFirstEvent(pinnedId);
+
+    const res = await resume(app, jobId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe("pinned-evidence-hash-mismatch");
+  });
+
+  it("recovery refuses when nothing is pinned, even if evidence rows exist", async () => {
+    const node = nacl.sign.keyPair();
+    registerKey("kernel-nyc", node);
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-unpinned");
+    storeRelayedBundle(jobId, "kernel-nyc", await signedBundle(jobId, "kernel-nyc", node));
+    getRepos().jobs.update(jobId, { evidenceBundleId: null, status: "evidence_submitted" } as any);
+
+    const res = await resume(app, jobId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe("no-pinned-evidence");
+  });
+
+  it("an untouched gateway anchor still recovers (the ordinary trapped-completion path)", async () => {
+    const jobId = await createJob(app, "kernel-nyc", "user-agent-gw-ok");
+    const done = await complete(app, jobId);
+    trapAfterEvidence(jobId);
+    const res = await resume(app, jobId);
+    expect(res.statusCode).toBe(200);
+    const pinnedId = getRepos().jobs.findById(jobId)!.evidenceBundleId!;
+    expect(res.json().evidenceBundleId).toBe(pinnedId);
+    expect(getRepos().evidence.findById(pinnedId)!.bundleHash).toBe(done.evidenceHash);
   });
 });
