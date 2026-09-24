@@ -16,30 +16,65 @@ import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
 
 /**
+ * Raised when a value has no JSON form. Its canonical text could not survive
+ * JSON transport or be reproduced by a non-JavaScript consumer, so a hash over
+ * it could never be verified anywhere else.
+ */
+export class NonCanonicalValueError extends Error {
+  readonly path: string;
+  constructor(path: string, what: string) {
+    super(`canonicalize: ${what} at ${path} has no JSON form; refusing to hash it`);
+    this.name = "NonCanonicalValueError";
+    this.path = path;
+  }
+}
+
+/**
  * Canonicalize any value to a deterministic JSON string.
  * Keys sorted lexicographically at all depths.
+ *
+ * Only JSON values are accepted: strings, finite numbers, booleans, null,
+ * arrays and plain objects (undefined object members are omitted, and an
+ * undefined array element is null, as in JSON). Anything else — NaN, Infinity,
+ * a bigint, a function, a symbol, a Date, a Map or any other non-plain object —
+ * throws NonCanonicalValueError instead of producing text only this function
+ * could reproduce.
  */
 export function canonicalize(value: unknown): string {
+  return canonicalizeAt(value, "$");
+}
+
+function canonicalizeAt(value: unknown, path: string): string {
   if (value === null || value === undefined) {
     return "null";
   }
   if (typeof value === "string") {
     return JSON.stringify(value);
   }
-  if (typeof value === "number" || typeof value === "boolean") {
+  if (typeof value === "boolean") {
+    return String(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new NonCanonicalValueError(path, String(value));
     return String(value);
   }
   if (Array.isArray(value)) {
-    return "[" + value.map(canonicalize).join(",") + "]";
+    return "[" + value.map((v, i) => canonicalizeAt(v, `${path}[${i}]`)).join(",") + "]";
   }
   if (typeof value === "object") {
-    const keys = Object.keys(value as Record<string, unknown>).sort();
-    const pairs = keys
-      .filter((k) => (value as Record<string, unknown>)[k] !== undefined)
-      .map((k) => JSON.stringify(k) + ":" + canonicalize((value as Record<string, unknown>)[k]));
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      const name = (value as { constructor?: { name?: string } }).constructor?.name ?? "non-plain";
+      throw new NonCanonicalValueError(path, `a ${name} object`);
+    }
+    const record = value as Record<string, unknown>;
+    const pairs = Object.keys(record)
+      .sort()
+      .filter((k) => record[k] !== undefined)
+      .map((k) => JSON.stringify(k) + ":" + canonicalizeAt(record[k], `${path}.${k}`));
     return "{" + pairs.join(",") + "}";
   }
-  return String(value);
+  throw new NonCanonicalValueError(path, `a ${typeof value}`);
 }
 
 /**

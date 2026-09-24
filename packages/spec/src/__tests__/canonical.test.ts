@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canonicalize, sha256, hashEvent, hashBundle, verifyEventHash, verifyBundleHash } from "../util/canonical.js";
+import { NonCanonicalValueError, canonicalize, sha256, hashEvent, hashBundle, verifyEventHash, verifyBundleHash } from "../util/canonical.js";
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256, Signature } from "../types/common.js";
 
@@ -150,5 +150,53 @@ describe("hashBundle / verifyBundleHash", () => {
     const h1 = await hashBundle([evA, evB]);
     const h2 = await hashBundle([evB, evA]);
     expect(h1).toBe(h2);
+  });
+});
+
+describe("canonicalize — only JSON values have a canonical form", () => {
+  // Each of these used to produce text no JSON consumer could reproduce
+  // (cross-repo byte test, crossrepo-accepted-bundle-v1.json "nonJson").
+  const refused: Array<[string, unknown, string]> = [
+    ["NaN", { x: Number.NaN }, "$.x"],
+    ["Infinity", { x: Number.POSITIVE_INFINITY }, "$.x"],
+    ["-Infinity", [1, Number.NEGATIVE_INFINITY], "$[1]"],
+    ["bigint", { n: BigInt(10) }, "$.n"],
+    ["Date", { at: new Date(0) }, "$.at"],
+    ["Map", { m: new Map([["a", 1]]) }, "$.m"],
+    ["Set", { s: new Set([1]) }, "$.s"],
+    ["function", { f: () => 1 }, "$.f"],
+    ["symbol", { s: Symbol("s") }, "$.s"],
+    ["typed array", { b: new Uint8Array([1, 2]) }, "$.b"],
+    ["class instance", { c: new (class Point { x = 1; })() }, "$.c"],
+  ];
+  for (const [name, value, path] of refused) {
+    it(`refuses ${name} and names where it is`, () => {
+      let err: unknown;
+      try {
+        canonicalize(value);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(NonCanonicalValueError);
+      expect((err as NonCanonicalValueError).path).toBe(path);
+    });
+  }
+
+  it("still accepts every JSON value, byte-identical to before", () => {
+    const value = {
+      s: "é\u0000\"",
+      n: -0,
+      f: 1.5,
+      e: 1e21,
+      t: true,
+      z: null,
+      a: [1, undefined, { b: 2 }],
+      skip: undefined,
+      o: Object.assign(Object.create(null), { k: "v" }),
+    };
+    expect(canonicalize(value)).toBe(
+      '{"a":[1,null,{"b":2}],"e":1e+21,"f":1.5,"n":0,"o":{"k":"v"},"s":"é\\u0000\\"","t":true,"z":null}',
+    );
+    expect(JSON.parse(canonicalize(value))).toEqual(JSON.parse(JSON.stringify(value)));
   });
 });
