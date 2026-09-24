@@ -6,7 +6,13 @@
  * endpointScopes table (cached 5 minutes) with hardcoded defaults as fallback.
  *
  * Behaviour:
- *   - Wildcard scope ("*") grants access to all endpoints.
+ *   - Wildcard scope ("*") grants every NON-MONEY-WRITE, NON-ADMIN endpoint.
+ *     It is NOT money authority and NOT admin authority: a money write needs an
+ *     explicit MONEY_SCOPES entry and /api/admin/** needs an explicit "admin"
+ *     scope, whatever else the key holds (see the migration note below).
+ *   - The admin namespace (/api/admin/**) is enforced IN THE HOOK, independent
+ *     of the rule table and of pattern precedence: explicit "admin", and a
+ *     principal with no API key (a SIWE session) is refused there.
  *   - MONEY-PATH routes (MONEY_PATH_PREFIXES) are DEFAULT-DENY for MUTATING
  *     methods (POST/PUT/PATCH/DELETE): if no requirement matches, access is
  *     REFUSED. A new money-moving route is therefore closed the moment it is
@@ -41,13 +47,22 @@
  * completing self-service signup — see PCC_SETTLEMENT_OPERATORS in
  * routes/provision.ts.
  *
- * ── The remaining gap (coord #615), deliberately still open ───────
+ * ── MIGRATION NOTE: legacy wildcard keys (coord #615, MUST-CLOSE 7) ─
  * Keys minted BEFORE self-service provisioning was narrowed still hold
- * scopes:["*"], and the wildcard short-circuit below still grants those keys
- * everything regardless of the rules here. That migration is a separate,
- * operator-owned decision (some wildcard keys back live integrations); this
- * file does not force it. GET /api/admin/keys/wildcard-audit reports which keys
- * are still affected. New keys are no longer minted with "*".
+ * scopes:["*"] (at the time of writing, every live production key). They used
+ * to short-circuit this whole layer, money path and admin namespace included —
+ * i.e. every live key could move money. That short-circuit is now narrowed:
+ *   - an old wildcard key KEEPS every non-money-write, non-admin route (so
+ *     existing integrations keep working — including rule-table requirements
+ *     such as money-path READ rules, which bind explicit-scope keys only);
+ *   - it LOSES money writes (needs an explicit `settlement`/`admin` key) and
+ *     the whole /api/admin/** namespace (needs an explicit `admin` key).
+ * The holder of a wildcard key that needs money or admin authority must be
+ * RE-ISSUED an explicit key. This code does NOT make old wildcard keys
+ * disappear: they keep their non-money access until they are REVOKED, and
+ * revocation is the operator's call — see docs/security/WILDCARD_KEY_ROTATION.md.
+ * GET /api/admin/keys/wildcard-audit lists the keys still holding "*". New keys
+ * can no longer be minted with "*" at all (auth/api-key-auth.ts refuses it).
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -86,16 +101,49 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
   { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin"] },
-  // Fiat-ramp SETUP (non-money — see MONEY_PATH_EXCEPTIONS). An operator sets up
-  // their OWN funding rails; this is not funds movement, so it needs [operator],
-  // NOT [settlement]. More specific than the /api/fiat-ramp/** floor (zero
-  // wildcards), so it is matched first. Finding H2.
-  { method: "POST",   pattern: "/api/fiat-ramp/cdp/wallet",         scopes: ["operator", "admin"] },
-  { method: "POST",   pattern: "/api/fiat-ramp/cdp/provision",      scopes: ["operator", "admin"] },
-  { method: "POST",   pattern: "/api/fiat-ramp/coinbase/onramp",    scopes: ["operator", "admin"] },
+  // Fiat-ramp SETUP routes are NOT listed here any more: they resolve against
+  // FIAT_SETUP_REQUIREMENTS in the hook, independent of this table (see there).
   // Money-path rules are NOT listed here — they are an immutable floor applied
   // on top of whatever this table (or the DB) says. See MONEY_PATH_FLOOR.
 ];
+
+/** The admin namespace root. Everything at or under it is admin-only. */
+const ADMIN_NAMESPACE_ROOT = "/api/admin";
+/** The one scope that is admin authority. `"*"` is NOT admin authority. */
+const ADMIN_SCOPES = ["admin"];
+
+/**
+ * Admin routes whose authentication is an admin SECRET checked in the route
+ * itself AND which api-gate deliberately leaves public — so no API key is ever
+ * attached to them (apiGate returns before resolving a key on a public path)
+ * and requiring an `admin` scope here would make them unreachable for everyone.
+ * "METHOD /path", exact. Keep this list as short as it is.
+ *
+ *   GET /api/admin/feedback — X-Admin-Token === WAITLIST_ADMIN_TOKEN, fails
+ *     closed when the env var is unset (routes/feedback.ts adminOk); listed in
+ *     api-gate PUBLIC_PREFIXES for exactly that reason.
+ *
+ * Every OTHER /api/admin/** route requires an explicit `admin` scope here, on
+ * top of whatever gate the route itself carries.
+ */
+const ADMIN_SECRET_GATED_PUBLIC_ROUTES = new Set(["GET /api/admin/feedback"]);
+
+function isAdminNamespace(path: string): boolean {
+  return path === ADMIN_NAMESPACE_ROOT || path.startsWith(`${ADMIN_NAMESPACE_ROOT}/`);
+}
+
+/**
+ * True when this request must carry an explicit `admin` scope (A3). Decided on
+ * the method + normalized path alone — never on the rule table — so no table
+ * rule, however specific, can open the admin namespace. (Example that used to
+ * work: a DB rule "GET /api/<one-star>/keys/wildcard-audit -> [operator]" has
+ * ONE wildcard, `/api/admin/**` has two, so the precedence sort picked the DB
+ * rule and an operator key read the admin audit — astra MED, #326.)
+ */
+export function isAdminScopedRoute(method: string, path: string): boolean {
+  if (!isAdminNamespace(path)) return false;
+  return !ADMIN_SECRET_GATED_PUBLIC_ROUTES.has(`${method.toUpperCase()} ${path}`);
+}
 
 /**
  * The scopes that authorise funds MOVEMENT. One named constant so the rules and
@@ -124,10 +172,20 @@ const MONEY_PATH_PREFIXES = ["/api/escrow/", "/api/fiat-ramp/", "/api/settlement
  *   - POST /api/fiat-ramp/cdp/wallet      → createWallet(): an UNFUNDED smart wallet
  *   - POST /api/fiat-ramp/cdp/provision   → wallet + a funding-session URL
  *   - POST /api/fiat-ramp/coinbase/onramp → a Coinbase onramp URL (the USER funds)
- * None of these move PCC's USDC; they are operator setup and are gated to
- * [operator] in DEFAULT_SCOPE_REQUIREMENTS below. GRANTING spend authority (POST
- * /api/fiat-ramp/cdp/spend-permission) is deliberately NOT here — issuing a spend
- * permission IS a money-authority act and stays on the settlement floor.
+ * None of these move PCC's USDC; they are operator setup. GRANTING spend
+ * authority (POST /api/fiat-ramp/cdp/spend-permission) is deliberately NOT here —
+ * issuing a spend permission IS a money-authority act and stays on the
+ * settlement floor.
+ *
+ * These resolve against THIS set alone, in the hook — never against the rule
+ * table (astra MED, #326). They used to live in DEFAULT_SCOPE_REQUIREMENTS, so
+ * the moment the governance table had ANY row (which replaces the defaults
+ * wholesale) the setup rules vanished and the `/api/fiat-ramp/**` floor entries
+ * in the table matched instead: an [operator] key got 403 on setup again. As
+ * with money writes and the floor, no table rule can now widen OR tighten them.
+ *
+ * Exemption is METHOD + path: any OTHER mutating method on one of these paths
+ * is an ordinary money write and stays on the floor.
  *
  * The Stripe/Yellowcard webhooks are also NOT exempted, deviating from sol's H2
  * suggestion for a concrete reason: they are RETIRED (410 unless a dev-only legacy
@@ -136,18 +194,55 @@ const MONEY_PATH_PREFIXES = ["/api/escrow/", "/api/fiat-ramp/", "/api/settlement
  * code of a dead endpoint, not a live callback — the public+provider-HMAC
  * end-state belongs with re-enabling them, not here.
  */
-const MONEY_PATH_EXCEPTIONS = new Set([
-  "/api/fiat-ramp/cdp/wallet",
-  "/api/fiat-ramp/cdp/provision",
-  "/api/fiat-ramp/coinbase/onramp",
-]);
+const FIAT_SETUP_REQUIREMENTS: ScopeRequirement[] = [
+  { method: "POST", pattern: "/api/fiat-ramp/cdp/wallet",      scopes: ["operator", "admin"] },
+  { method: "POST", pattern: "/api/fiat-ramp/cdp/provision",   scopes: ["operator", "admin"] },
+  { method: "POST", pattern: "/api/fiat-ramp/coinbase/onramp", scopes: ["operator", "admin"] },
+];
+
+/** Paths of the setup routes above (used to keep table rules for them). */
+const MONEY_PATH_EXCEPTIONS = new Set(FIAT_SETUP_REQUIREMENTS.map((r) => r.pattern));
 
 /** Methods that can move funds. Default-deny applies to these only. */
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+/** Read methods a `"*"`-method money-path table rule keeps governing (A2). */
+const READ_METHODS = ["GET", "HEAD"];
+
+/** Under a money prefix (or its bare root), setup exceptions included. */
+function isUnderMoneyPrefix(path: string): boolean {
+  return MONEY_PATH_PREFIXES.some((p) => path === p.slice(0, -1) || path.startsWith(p));
+}
+
+/** Path-level money test (setup exceptions excluded) — used for rule PATTERNS. */
 function isMoneyPath(path: string): boolean {
   if (MONEY_PATH_EXCEPTIONS.has(path)) return false;
-  return MONEY_PATH_PREFIXES.some((p) => path === p.slice(0, -1) || path.startsWith(p));
+  return isUnderMoneyPrefix(path);
+}
+
+/** Exact method + path match against a fiat-ramp setup route. */
+function fiatSetupRequirement(method: string, path: string): ScopeRequirement | undefined {
+  const m = method.toUpperCase();
+  return FIAT_SETUP_REQUIREMENTS.find((r) => r.method === m && r.pattern === path);
+}
+
+/**
+ * True when this request is a money WRITE: a mutating method under a money
+ * prefix, other than a fiat-ramp SETUP route for its own setup method. Money
+ * writes resolve against MONEY_PATH_FLOOR alone and require an EXPLICIT money
+ * scope — never `"*"`. Exported so agent introspection reports the same thing
+ * this hook enforces.
+ */
+export function isMoneyWriteRequest(method: string, path: string): boolean {
+  const m = method.toUpperCase();
+  if (!MUTATING_METHODS.has(m)) return false;
+  if (fiatSetupRequirement(m, path)) return false;
+  return isUnderMoneyPrefix(path);
+}
+
+/** The explicit scopes a money write needs (DELETE is admin-only). */
+export function moneyWriteScopes(method: string): string[] {
+  return method.toUpperCase() === "DELETE" ? [...MONEY_DELETE_SCOPES] : [...MONEY_SCOPES];
 }
 
 /**
@@ -189,7 +284,7 @@ const MONEY_PATH_FLOOR: ScopeRequirement[] = MONEY_PATH_PREFIXES.flatMap((prefix
  */
 const NON_NEGOTIABLE_RULES: ScopeRequirement[] = [
   ...MONEY_PATH_FLOOR,
-  { method: "*", pattern: "/api/admin/**", scopes: ["admin"] },
+  { method: "*", pattern: "/api/admin/**", scopes: ADMIN_SCOPES },
 ];
 
 // ── Scope Cache ──────────────────────────────────────────────────
@@ -216,13 +311,31 @@ const SCOPE_CACHE_TTL = 300_000; // 5 minutes
  * (bridge #1526) and reproduced before this fix.
  *
  * Ordering alone is not relied upon: money WRITES bypass this table entirely and
- * resolve against the floor directly (see the request hook). This ordering is
- * the belt to that fix's braces, and it covers the admin namespace too.
+ * resolve against the floor directly, and the admin namespace is enforced in
+ * the hook too (see the request hook). This ordering is the belt to those braces.
+ *
+ * WHAT IS DROPPED FROM THE TABLE — only rules that are inert anyway:
+ *   - money-path rules for a MUTATING method: money writes never consult the
+ *     table (they resolve against MONEY_PATH_FLOOR alone), so such a rule could
+ *     only mislead a reader about what is enforced;
+ *   - admin-namespace rules: /api/admin/** is decided in the hook.
+ * WHAT SURVIVES — money-path READ rules (astra HIGH, #326). This used to drop
+ * EVERY rule whose pattern was a money path, although the floor covers writes
+ * only: a governance row like `GET /api/escrow/** -> [auditor, admin]` silently
+ * disappeared and an [operator] key read escrow anyway. A read rule cannot widen
+ * a money WRITE (writes never look here), so it is kept. A `"*"`-method
+ * money-path rule is kept for its READ methods only — its write half never
+ * applied and is not carried into the table.
  */
 function withNonNegotiable(rules: ScopeRequirement[]): ScopeRequirement[] {
-  const rest = rules.filter(
-    (r) => !isMoneyPath(r.pattern) && !r.pattern.startsWith("/api/admin"),
-  );
+  const rest = rules.flatMap((r): ScopeRequirement[] => {
+    if (r.pattern.startsWith(ADMIN_NAMESPACE_ROOT)) return [];
+    if (!isMoneyPath(r.pattern)) return [r];
+    const m = r.method.toUpperCase();
+    if (MUTATING_METHODS.has(m)) return [];
+    if (m === "*") return READ_METHODS.map((method) => ({ ...r, method }));
+    return [r];
+  });
   return [...NON_NEGOTIABLE_RULES.map((r) => ({ ...r })), ...rest];
 }
 
@@ -313,7 +426,8 @@ function matchRoute(
 
 /**
  * Extract scopes from the API key record.
- * Falls back to ["*"] for backwards compatibility when scopes are not set.
+ * Fails CLOSED: a missing key, a DB error, or a scopes value that is not a JSON
+ * array of strings yields NO scopes (it used to fall back to ["*"]).
  */
 function getCallerScopes(req: FastifyRequest): string[] {
   if (!req.apiKeyId) return [];
@@ -359,15 +473,55 @@ function getCallerScopes(req: FastifyRequest): string[] {
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
+/** Most-specific rule first: fewer wildcards = more specific. Stable for ties. */
+function firstMatch(
+  rules: ScopeRequirement[],
+  method: string,
+  path: string,
+): ScopeRequirement | undefined {
+  const sorted = [...rules].sort((a, b) => {
+    const wildA = (a.pattern.match(/\*/g) ?? []).length;
+    const wildB = (b.pattern.match(/\*/g) ?? []).length;
+    return wildA - wildB;
+  });
+  return sorted.find((r) => matchRoute(method, path, r.method, r.pattern));
+}
+
+const DOCS_URL = "https://capability.network/whitepaper.md";
+
+/** Appended to a refusal when the caller holds the legacy wildcard. */
+const WILDCARD_NOT_AUTHORITY =
+  " A legacy wildcard key (scopes [\"*\"]) is not money or admin authority: " +
+  "request a re-issued key carrying the explicit scope.";
+
+function deny(
+  reply: FastifyReply,
+  required: string[],
+  callerScopes: string[],
+  message: string,
+) {
+  return reply.status(403).send({
+    error: "insufficient_scope",
+    message: callerScopes.includes("*") ? message + WILDCARD_NOT_AUTHORITY : message,
+    required_scopes: required,
+    caller_scopes: callerScopes,
+    docs: DOCS_URL,
+  });
+}
+
 async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     // Authorize against the route Fastify MATCHED, never the raw request line —
     // see authPath (finding H1: percent-encoded paths bypassed the raw-URL checks).
     const reqPath = authPath(req);
     if (!reqPath.startsWith("/api/")) return;
+    const method = req.method.toUpperCase();
 
-    const isMoneyWrite =
-      isMoneyPath(reqPath) && MUTATING_METHODS.has(req.method.toUpperCase());
+    // Decided on method + normalized path ONLY — never on the rule table, never
+    // on what the key holds — so neither a table rule nor a wildcard can move
+    // a request out of these two classes.
+    const adminRoute = isAdminScopedRoute(method, reqPath);
+    const isMoneyWrite = isMoneyWriteRequest(method, reqPath);
 
     // A principal with NO API KEY has no scopes at all. The common case is a
     // SIWE session: apiGate accepts it and sets only `req.userId`, never
@@ -381,36 +535,54 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // guard must ship together.
     //
     // Scopes live on API KEYS. A session proves WHO you are; it is not an
-    // authorization to spend. So on a money write, no key => denied. Everything
-    // else keeps the previous behaviour (the global default-deny flip is still
-    // the separate, sweep-gated change described in the header).
+    // authorization to spend, nor to administer. So on a money write OR on the
+    // admin namespace, no key => denied (the admin half is astra MED, #326: a
+    // session used to walk into /api/admin/** because only money writes were
+    // checked here). Everything else keeps the previous behaviour (the global
+    // default-deny flip is still the separate, sweep-gated change described in
+    // the header).
     if (!req.apiKeyId) {
+      if (adminRoute) {
+        return deny(
+          reply,
+          ADMIN_SCOPES,
+          [],
+          "The admin namespace requires an API key carrying the explicit `admin` " +
+            "scope. A SIWE session proves identity but grants no scopes.",
+        );
+      }
       if (!isMoneyWrite) return;
-      return reply.status(403).send({
-        error: "insufficient_scope",
-        message:
-          "Funds movement requires an API key carrying the `settlement` scope. " +
+      return deny(
+        reply,
+        moneyWriteScopes(method),
+        [],
+        "Funds movement requires an API key carrying the `settlement` scope. " +
           "A SIWE session proves identity but grants no scopes — provision a key " +
           "with that session (POST /api/auth/provision) and call this route with it.",
-        required_scopes: MONEY_SCOPES,
-        caller_scopes: [],
-        docs: "https://capability.network/whitepaper.md",
-      });
+      );
     }
 
     ensureScopeCacheReady();
 
     const callerScopes = getCallerScopes(req);
 
-    // Wildcard scope grants access to everything.
+    // ADMIN NAMESPACE — resolved HERE, independent of the table (A3).
     //
-    // KNOWN, DELIBERATE GAP (coord #615): keys minted before self-service
-    // provisioning was narrowed still hold "*", and this short-circuit still
-    // honours them on the money path. Retiring them is an operator rollout
-    // decision — GET /api/admin/keys/wildcard-audit reports which remain.
-    if (callerScopes.includes("*")) return;
+    // Explicit `admin` only. `"*"` does not count (A1). No table rule is
+    // consulted, so pattern precedence cannot open it and a table rule can
+    // neither widen nor tighten it; like money writes, changing who
+    // administers means changing this file.
+    if (adminRoute) {
+      if (ADMIN_SCOPES.some((s) => callerScopes.includes(s))) return;
+      return deny(
+        reply,
+        ADMIN_SCOPES,
+        callerScopes,
+        "The admin namespace requires the explicit `admin` scope.",
+      );
+    }
 
-    // MONEY WRITES RESOLVE AGAINST THE FLOOR ALONE.
+    // MONEY WRITES RESOLVE AGAINST THE FLOOR ALONE — and on EXPLICIT scopes.
     //
     // Not "the floor plus the table, ordered so the floor wins" — that was the
     // previous attempt, and it lost: a persisted "POST /api/** -> operator" has
@@ -420,69 +592,84 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // DB, in the defaults, broad or narrow — can widen who moves money. The only
     // way to change that is to change this file.
     //
+    // `"*"` is not in MONEY_SCOPES and is not honoured here (A1, MUST-CLOSE 7):
+    // it used to short-circuit BEFORE this point, so every live wildcard key
+    // could move money.
+    //
     // Consequence, stated so nobody is surprised: a money write can no longer be
     // TIGHTENED by a DB rule either. Tightening is a real use case, so if it is
     // ever wanted, it belongs here as an explicit intersect step, not as a
     // silent side effect of table precedence.
-    const requirements = isMoneyWrite
-      ? MONEY_PATH_FLOOR
-      : scopeCache.length > 0
-        ? scopeCache
-        : withNonNegotiable(DEFAULT_SCOPE_REQUIREMENTS);
+    if (isMoneyWrite) {
+      const floorRule = firstMatch(MONEY_PATH_FLOOR, method, reqPath);
+      if (!floorRule) {
+        // Unreachable while the floor derives root + subtree for every prefix
+        // and every mutating method; kept so a future edit fails CLOSED.
+        return deny(
+          reply,
+          moneyWriteScopes(method),
+          callerScopes,
+          "This money-path endpoint has no scope requirement configured and is " +
+            "therefore denied by default.",
+        );
+      }
+      if (floorRule.scopes.some((s) => callerScopes.includes(s))) return;
+      return deny(
+        reply,
+        floorRule.scopes,
+        callerScopes,
+        `Funds movement requires one of the following explicit scopes: ${floorRule.scopes.join(", ")}.`,
+      );
+    }
+
+    // LEGACY WILDCARD — non-money-write, non-admin routes only (see the
+    // migration note in the header). Past this point the request is neither a
+    // money write nor in the admin namespace, which is exactly the access an
+    // old wildcard key keeps until it is revoked.
+    if (callerScopes.includes("*")) return;
+
+    // FIAT-RAMP SETUP — resolved against FIAT_SETUP_REQUIREMENTS alone, never
+    // the table (A4). A governance row used to replace the defaults that held
+    // these rules, after which the /api/fiat-ramp/** floor matched and 403'd an
+    // [operator] key on setup.
+    const setupRule = fiatSetupRequirement(method, reqPath);
+    if (setupRule) {
+      if (setupRule.scopes.some((s) => callerScopes.includes(s))) return;
+      return deny(
+        reply,
+        setupRule.scopes,
+        callerScopes,
+        `This endpoint requires one of the following scopes: ${setupRule.scopes.join(", ")}. ` +
+          `Your API key has: ${callerScopes.join(", ") || "none"}.`,
+      );
+    }
+
+    const requirements =
+      scopeCache.length > 0 ? scopeCache : withNonNegotiable(DEFAULT_SCOPE_REQUIREMENTS);
 
     // Find the most-specific matching requirement for this request.
-    // We rank by specificity: fewer wildcards = more specific = checked first.
-    const sorted = [...requirements].sort((a, b) => {
-      const wildA = (a.pattern.match(/\*/g) ?? []).length;
-      const wildB = (b.pattern.match(/\*/g) ?? []).length;
-      return wildA - wildB;
-    });
+    const matchedRequirement = firstMatch(requirements, method, reqPath);
 
-    let matchedRequirement: ScopeRequirement | undefined;
-    for (const req_ of sorted) {
-      if (matchRoute(req.method, reqPath, req_.method, req_.pattern)) {
-        matchedRequirement = req_;
-        break;
-      }
-    }
-
-    // No scope requirement matched.
-    //   - Money path → DENY. An unlisted route under /api/escrow, /api/fiat-ramp
-    //     or /api/settlement is an oversight, and defaulting it open is how funds
-    //     movement ended up reachable by any authenticated key.
-    //   - Everything else → allow, preserving existing behaviour (see the header
-    //     note on why the global flip is a separate, sweep-gated change).
-    if (!matchedRequirement) {
-      const path = reqPath;
-      // Default-deny covers MUTATING methods only. Money-path reads stay open
-      // (the dashboard does GET /api/escrow, and no GET requirement covers it),
-      // because the exposure being closed here is funds MOVEMENT. A read-side
-      // sweep is a separate change with its own compatibility surface.
-      if (!isMoneyPath(path) || !MUTATING_METHODS.has(req.method.toUpperCase())) return;
-
-      return reply.status(403).send({
-        error: "insufficient_scope",
-        message:
-          "This money-path endpoint has no scope requirement configured and is " +
-          "therefore denied by default. If this route is legitimate, add an " +
-          "explicit requirement for it.",
-        required_scopes: MONEY_SCOPES,
-        caller_scopes: callerScopes,
-        docs: "https://capability.network/whitepaper.md",
-      });
-    }
+    // No scope requirement matched → allow, preserving existing behaviour (see
+    // the header note on why the global flip is a separate, sweep-gated
+    // change). Money WRITES never get here (they resolved against the floor
+    // above, default-deny included); money-path READS with no matching rule stay
+    // open — the dashboard does GET /api/escrow — because the exposure being
+    // closed is funds MOVEMENT. A read-side sweep is a separate change with its
+    // own compatibility surface.
+    if (!matchedRequirement) return;
 
     // Check if caller has any of the required scopes
     const hasScope = matchedRequirement.scopes.some((s) => callerScopes.includes(s));
     if (hasScope) return;
 
-    return reply.status(403).send({
-      error: "insufficient_scope",
-      message: `This endpoint requires one of the following scopes: ${matchedRequirement.scopes.join(", ")}. Your API key has: ${callerScopes.join(", ") || "none"}.`,
-      required_scopes: matchedRequirement.scopes,
-      caller_scopes: callerScopes,
-      docs: "https://capability.network/whitepaper.md",
-    });
+    return deny(
+      reply,
+      matchedRequirement.scopes,
+      callerScopes,
+      `This endpoint requires one of the following scopes: ${matchedRequirement.scopes.join(", ")}. ` +
+        `Your API key has: ${callerScopes.join(", ") || "none"}.`,
+    );
   });
 }
 

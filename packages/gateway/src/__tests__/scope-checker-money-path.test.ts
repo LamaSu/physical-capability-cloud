@@ -13,10 +13,12 @@
  *   3. `getCallerScopes` fell back to ["*"] when a key's scopes column was
  *      malformed — a security control failing OPEN to wildcard.
  *
- * This file covers (2) and (3), which live in this middleware. Defect (1) is a
- * provisioning-policy change and is deliberately NOT fixed here — the
- * `wildcard still passes` test below PINS that gap so it cannot be mistaken for
- * closed. Both halves must land for the money path to actually be gated.
+ * This file covers (2) and (3), which live in this middleware. Defect (1) was
+ * closed in two halves: provisioning no longer mints "*" (auth/api-key-auth.ts
+ * refuses it outright), and — for the wildcard keys that ALREADY exist — this
+ * middleware no longer treats "*" as money or admin authority (WP-A A1,
+ * MUST-CLOSE 7). The test that used to PIN "wildcard still passes the money
+ * path" is inverted below (see "legacy wildcard is NOT money/admin authority").
  *
  * The load-bearing assertions are the negative ones: a caller without the
  * required scope must never reach the route handler.
@@ -50,12 +52,24 @@ const { scopeChecker, __resetScopeCacheForTests } = await import(
   "../middleware/scope-checker.js"
 );
 
-/** Build an app with the scope-checker mounted and a key pre-attached. */
-async function buildApp(): Promise<FastifyInstance> {
+/**
+ * Build an app with the scope-checker mounted and a key pre-attached.
+ *
+ * `principal: "session"` stands in for a SIWE session instead: api-gate sets
+ * only `req.userId` for a session, never `req.apiKeyId`.
+ */
+async function buildApp(
+  principal: "key" | "session" = "key",
+): Promise<FastifyInstance> {
   const app = Fastify();
   // Stand in for api-gate, which sets req.apiKeyId on authenticated requests.
   app.addHook("onRequest", async (req) => {
-    (req as unknown as { apiKeyId?: string }).apiKeyId = "key-1";
+    if (principal === "key") {
+      (req as unknown as { apiKeyId?: string }).apiKeyId = "key-1";
+    } else {
+      (req as unknown as { userId?: string }).userId =
+        "0x2222222222222222222222222222222222222222";
+    }
   });
   await app.register(scopeChecker);
 
@@ -77,6 +91,16 @@ async function buildApp(): Promise<FastifyInstance> {
   // an incidental 404.
   app.post("/api/settlement/units/:unitId/close", ok);
   app.post("/api/escrow", ok);
+  // WP-A additions: a money-path READ with a param (A2), a money DELETE (A1),
+  // a fiat-ramp SETUP route (A4), a non-GET admin route and the one
+  // admin-secret-gated public admin route (A3), and a table-gated non-money
+  // read (A1: the wildcard keeps it).
+  app.get("/api/escrow/:id", ok);
+  app.delete("/api/escrow/:id", ok);
+  app.post("/api/fiat-ramp/cdp/wallet", ok);
+  app.post("/api/admin/demand/rebuild", ok);
+  app.get("/api/admin/feedback", ok);
+  app.get("/api/audit/stats", ok);
   await app.ready();
   return app;
 }
@@ -413,17 +437,316 @@ describe("scope-checker — money-path authorization", () => {
     });
   });
 
-  describe("KNOWN GAP — pinned, not fixed here", () => {
-    it("wildcard keys STILL pass the money path (provisioning half is unfixed)", async () => {
-      // routes/provision.ts mints scopes:["*"] for every public self-service
-      // caller, so this middleware alone does NOT close the exposure. This test
-      // documents that deliberately: if provisioning is narrowed and this
-      // assertion starts failing, the gap is closed and the test should be
-      // updated to expect 403.
+  // ── WP-A A1 (MUST-CLOSE 7): "*" is not money or admin authority ───
+  //
+  // UPDATED, deliberately. This block used to be "KNOWN GAP — pinned, not fixed
+  // here" and asserted that a wildcard key STILL got 200 at POST
+  // /api/fiat-ramp/payout. That was the unsafe behaviour — 80/80 live prod keys
+  // are ["*"], so every live key could move money. Old: expect 200. New: expect
+  // 403. Why: the gap is now closed in this middleware — a money write needs an
+  // EXPLICIT money scope and /api/admin/** an explicit `admin` scope; "*" keeps
+  // every other route so existing integrations keep working.
+  describe("legacy wildcard is NOT money/admin authority (A1)", () => {
+    it("DENIES a wildcard key at fiat payout (was the pinned KNOWN GAP: 200)", async () => {
       keyScopes = JSON.stringify(["*"]);
       const app = await buildApp();
       const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      expect(res.json().required_scopes).toContain("settlement");
+      expect(res.json().required_scopes).not.toContain("*");
+      await app.close();
+    });
+
+    it("DENIES a wildcard key at escrow funding", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      await app.close();
+    });
+
+    it("DENIES a wildcard key a money DELETE (admin-only on the floor)", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "DELETE", url: "/api/escrow/e1" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().required_scopes).toEqual(["admin"]);
+      await app.close();
+    });
+
+    it("DENIES a wildcard key an unlisted money-path write (default-deny still applies)", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/escrow/some-future-route" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("DENIES a wildcard key the admin namespace (GET and non-GET)", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const get = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(get.statusCode).toBe(403);
+      expect(get.json().required_scopes).toEqual(["admin"]);
+      const post = await app.inject({ method: "POST", url: "/api/admin/demand/rebuild" });
+      expect(post.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("says why in the refusal, so an integrator knows to ask for a re-issued key", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.json().message).toMatch(/wildcard/i);
+      await app.close();
+    });
+
+    // Positive controls — the wildcard KEEPS everything that is not a money
+    // write or the admin namespace (existing integrations must keep working).
+    it("still ALLOWS a wildcard key on non-money routes, table-gated ones included", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      expect((await app.inject({ method: "POST", url: "/api/kernels/register" })).statusCode).toBe(200);
+      expect((await app.inject({ method: "POST", url: "/api/contributors/schedule" })).statusCode).toBe(200);
+      // GET /api/audit/* is table-gated to [auditor, admin]; the wildcard keeps it.
+      expect((await app.inject({ method: "GET", url: "/api/audit/stats" })).statusCode).toBe(200);
+      await app.close();
+    });
+
+    it("still ALLOWS a wildcard key money-path READS and fiat-ramp SETUP", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      expect((await app.inject({ method: "GET", url: "/api/escrow" })).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/api/escrow/e1" })).statusCode).toBe(200);
+      expect(
+        (await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/wallet" })).statusCode,
+      ).toBe(200);
+      await app.close();
+    });
+
+    it("an EXPLICIT scope alongside the wildcard is honoured", async () => {
+      keyScopes = JSON.stringify(["*", "settlement"]);
+      let app = await buildApp();
+      expect((await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" })).statusCode).toBe(200);
+      await app.close();
+
+      keyScopes = JSON.stringify(["*", "admin"]);
+      app = await buildApp();
+      expect(
+        (await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" })).statusCode,
+      ).toBe(200);
+      await app.close();
+    });
+
+    it("a DB rule cannot hand the wildcard money authority back", async () => {
+      dbScopeRows = [
+        { method: "*", routePattern: "/api/**", requiredScopes: ["*"] },
+        { method: "POST", routePattern: "/api/fiat-ramp/payout", requiredScopes: ["*"] },
+      ];
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("a percent-encoded money path does not revive the wildcard", async () => {
+      keyScopes = JSON.stringify(["*"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/%70ayout" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+  });
+
+  // ── WP-A A2 (astra HIGH): governance money-READ rules survive ─────
+  //
+  // withNonNegotiable() used to drop EVERY governance row whose pattern was a
+  // money path, although the floor covers WRITES only — so a read rule like
+  // GET /api/escrow/** -> [auditor, admin] silently vanished and any key read.
+  describe("governance money-path READ rules are kept (A2)", () => {
+    it("DENIES an operator key a money-path read the governance table restricts", async () => {
+      dbScopeRows = [
+        { method: "GET", routePattern: "/api/escrow/**", requiredScopes: ["auditor", "admin"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/escrow/123" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      expect(res.json().required_scopes).toEqual(["auditor", "admin"]);
+      await app.close();
+    });
+
+    it("ALLOWS the scope the read rule names", async () => {
+      dbScopeRows = [
+        { method: "GET", routePattern: "/api/escrow/**", requiredScopes: ["auditor", "admin"] },
+      ];
+      keyScopes = JSON.stringify(["auditor"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/escrow/123" });
       expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    it("keeps the READ half of a '*'-method money rule", async () => {
+      dbScopeRows = [
+        { method: "*", routePattern: "/api/escrow/**", requiredScopes: ["auditor", "admin"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/escrow/123" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    // The other half of the requirement: keeping read rules must not let ANY
+    // table rule widen a money WRITE.
+    it("a '*'-method or write rule on a money path still cannot widen a money WRITE", async () => {
+      dbScopeRows = [
+        { method: "*", routePattern: "/api/escrow/**", requiredScopes: ["operator"] },
+        { method: "POST", routePattern: "/api/escrow/**", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      // The read half applies (operator may read) ...
+      expect((await app.inject({ method: "GET", url: "/api/escrow/123" })).statusCode).toBe(200);
+      // ... the write half never does.
+      const write = await app.inject({
+        method: "POST",
+        url: "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund",
+      });
+      expect(write.statusCode).toBe(403);
+      expect(write.json().required_scopes).toContain("settlement");
+      await app.close();
+    });
+  });
+
+  // ── WP-A A3 (astra MED): the admin requirement is independent of ──
+  // pattern precedence, and a session cannot enter the admin namespace.
+  describe("admin namespace is enforced in the hook, not by table precedence (A3)", () => {
+    it("a MORE SPECIFIC DB rule cannot open an admin route to an operator key", async () => {
+      // One wildcard beats `/api/admin/**` (two) in the precedence sort — this
+      // used to return 200.
+      dbScopeRows = [
+        { method: "GET", routePattern: "/api/*/keys/wildcard-audit", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+      expect(res.json().required_scopes).toEqual(["admin"]);
+      await app.close();
+    });
+
+    it("an exact DB rule on the admin route cannot open it either", async () => {
+      dbScopeRows = [
+        { method: "GET", routePattern: "/api/admin/keys/wildcard-audit", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("DENIES a SIWE-session principal (no API key) on /api/admin/**", async () => {
+      const app = await buildApp("session");
+      const get = await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" });
+      expect(get.statusCode).toBe(403);
+      expect(get.json().reached).toBeUndefined();
+      expect(get.json().required_scopes).toEqual(["admin"]);
+      const post = await app.inject({ method: "POST", url: "/api/admin/demand/rebuild" });
+      expect(post.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("a percent-encoded admin path is still the admin namespace", async () => {
+      const app = await buildApp("session");
+      const res = await app.inject({ method: "GET", url: "/api/%61dmin/keys/wildcard-audit" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    // Regression guards on what must NOT change.
+    it("a session still reaches ordinary non-money routes (unchanged)", async () => {
+      const app = await buildApp("session");
+      expect((await app.inject({ method: "POST", url: "/api/kernels/register" })).statusCode).toBe(200);
+      await app.close();
+    });
+
+    it("the admin-SECRET-gated public export (GET /api/admin/feedback) is not scope-gated", async () => {
+      // api-gate leaves this path public and the route checks X-Admin-Token
+      // itself; api-gate never attaches a key there, so requiring a scope would
+      // make it unreachable for everyone.
+      const app = await buildApp("session");
+      expect((await app.inject({ method: "GET", url: "/api/admin/feedback" })).statusCode).toBe(200);
+      await app.close();
+    });
+
+    it("an explicit admin key still reaches every admin route", async () => {
+      dbScopeRows = [
+        { method: "GET", routePattern: "/api/*/keys/wildcard-audit", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["admin"]);
+      const app = await buildApp();
+      expect(
+        (await app.inject({ method: "GET", url: "/api/admin/keys/wildcard-audit" })).statusCode,
+      ).toBe(200);
+      expect((await app.inject({ method: "POST", url: "/api/admin/demand/rebuild" })).statusCode).toBe(200);
+      await app.close();
+    });
+  });
+
+  // ── WP-A A4 (astra MED): setup routes do not regress when the ─────
+  // governance table has rows.
+  describe("fiat-ramp SETUP resolves against its own rule set (A4)", () => {
+    it("an operator key passes setup with an UNRELATED governance row present", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/wallet" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().reached).toBe(true);
+      await app.close();
+    });
+
+    it("... while a true money write is still denied to that operator key", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/kernels/*", requiredScopes: ["operator"] },
+      ];
+      keyScopes = JSON.stringify(["operator"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it("a DB rule cannot WIDEN setup to a key without operator/admin", async () => {
+      dbScopeRows = [
+        { method: "POST", routePattern: "/api/fiat-ramp/cdp/wallet", requiredScopes: ["contributor:read"] },
+      ];
+      keyScopes = JSON.stringify(["contributor:read"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/wallet" });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().required_scopes).toEqual(["operator", "admin"]);
+      await app.close();
+    });
+
+    it("a NON-setup method on a setup path is an ordinary money write", async () => {
+      const app = await buildApp("session");
+      // No key + DELETE under /api/fiat-ramp/ → money write → refused.
+      const res = await app.inject({ method: "DELETE", url: "/api/fiat-ramp/cdp/wallet" });
+      expect(res.statusCode).toBe(403);
       await app.close();
     });
   });

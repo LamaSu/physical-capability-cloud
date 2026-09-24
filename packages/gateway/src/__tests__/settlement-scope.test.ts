@@ -30,7 +30,8 @@ import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { provisionRoutes } from "../routes/provision.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { scopeChecker } from "../middleware/scope-checker.js";
-import { initStore, closeStore } from "../db.js";
+import { generateApiKey } from "../auth/api-key-auth.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 
 vi.mock("../telemetry.js", () => ({ pipelineTelemetry: { emit: vi.fn() } }));
 vi.mock("../services/audit-service.js", () => ({ auditService: { log: vi.fn() } }));
@@ -84,6 +85,8 @@ describe("settlement scope — money authority is separate from operator", () =>
     app.post("/api/kernels/register", ok);
     app.post("/api/capabilities", ok);
     app.post("/api/negotiate/session", ok);
+    // Admin namespace (WP-A A1/A3).
+    app.get("/api/admin/keys/wildcard-audit", ok);
     await app.ready();
   });
 
@@ -421,6 +424,71 @@ describe("settlement scope — money authority is separate from operator", () =>
       });
       expect(res.statusCode).toBe(401);
       expect(JSON.parse(res.body).error).toBe("wallet_not_verified");
+    });
+  });
+
+  // ── WP-A A3: a session cannot enter the admin namespace ───────────
+  describe("a SIWE session alone cannot reach /api/admin/**", () => {
+    it("REFUSES an admin route to a bare session token (real apiGate + scopeChecker)", async () => {
+      const account = privateKeyToAccount(generatePrivateKey());
+      const token = await siweSignIn(account);
+      const res = await app.inject({
+        method: "GET", url: "/api/admin/keys/wildcard-audit",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+    });
+  });
+
+  // ── WP-A A1: a LEGACY wildcard key, end to end ────────────────────
+  //
+  // Keys can no longer be minted with "*", so a legacy key is seeded straight
+  // into the table the way pre-#1099 provisioning left it.
+  describe("a legacy wildcard key (scopes [\"*\"]) through the real gate", () => {
+    function seedLegacyWildcardKey(): string {
+      const { rawKey, keyHash, keyPrefix } = generateApiKey();
+      getRepos().apiKeys.insert({
+        id: `legacy-wc-${Date.now()}-${Math.random()}`,
+        keyHash,
+        keyPrefix,
+        operatorId: `legacy-${Date.now()}-${Math.random()}@example.com`,
+        name: "legacy wildcard",
+        description: null,
+        scopes: JSON.stringify(["*"]),
+        rateLimit: "1000/hour",
+        usageCount: "0",
+        createdAt: new Date().toISOString(),
+        expiresAt: null,
+        metadata: null,
+        publicKey: null,
+      } as never);
+      return rawKey;
+    }
+
+    it("is REFUSED at escrow funding and fiat payout", async () => {
+      const key = seedLegacyWildcardKey();
+      const fund = await call(key, "/api/escrow/chain/0x1111111111111111111111111111111111111111/fund");
+      expect(fund.statusCode).toBe(403);
+      expect(fund.json().reached).toBeUndefined();
+      const payout = await call(key, "/api/fiat-ramp/payout");
+      expect(payout.statusCode).toBe(403);
+      expect(payout.json().reached).toBeUndefined();
+    });
+
+    it("is REFUSED on the admin namespace", async () => {
+      const key = seedLegacyWildcardKey();
+      const res = await app.inject({
+        method: "GET", url: "/api/admin/keys/wildcard-audit",
+        headers: { authorization: `Bearer ${key}` },
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("KEEPS its non-money access (existing integrations keep working)", async () => {
+      const key = seedLegacyWildcardKey();
+      expect((await call(key, "/api/kernels/register")).statusCode).toBe(200);
+      expect((await call(key, "/api/negotiate/session")).statusCode).toBe(200);
     });
   });
 });
