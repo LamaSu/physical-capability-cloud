@@ -11,6 +11,8 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { keccak256, toBytes } from "viem";
+import GOLDEN from "./fixtures/g2-settlement-vector-golden.json";
 import {
   validatePackageBody,
   computePackageBodyHash,
@@ -56,6 +58,12 @@ describe("SIG_DOMAIN_V2", () => {
     // Pinned so a silent domain drift breaks HERE, not at signature-verify time.
     expect(SIG_DOMAIN_V2).toMatch(/^0x[0-9a-f]{64}$/);
     expect(SIG_DOMAIN_V2.length).toBe(66);
+    // The VALUE, not just the shape. The suffix is ":v1" (evidence #1202, oracle
+    // #1414): the "V2" is the raw32 framing, not the domain suffix. A format-only
+    // check let the drifted ":v2" domain (0x1e98b1f8...) through unnoticed.
+    expect(SIG_DOMAIN_V2).toBe(GOLDEN.sigDomain);
+    expect(SIG_DOMAIN_V2).toBe(keccak256(toBytes("PCC:vnext:evidence-package-sig:v1")));
+    expect(SIG_DOMAIN_V2).not.toBe(keccak256(toBytes("PCC:vnext:evidence-package-sig:v2")));
   });
 });
 
@@ -210,11 +218,25 @@ describe("JCS pre-image", () => {
   });
 });
 
-describe("oracle + evidence cross-confirm", () => {
-  it.todo(
-    "packageBodyHash and packageDigestV2 match evidence's re-aligned golden — " +
-      "PENDING: evidence is re-aligning 3 drifted goldens (v2-preview, " +
-      "settlement-vector, sig-golden) onto this single body, then re-cross-" +
-      "confirming with oracle. No golden asserted until that vector lands.",
-  );
+/**
+ * Evidence's re-aligned golden LANDED: the integrated settlement vector
+ * (settlement-vector-golden-mirror.cjs @ 974b3ff1, bulletin #1202). It is a
+ * cross-toolchain check — evidence's mirror hashes with its own string-leaf JCS
+ * and ethers; this side uses @pcc/spec canonicalize and viem. Body values are
+ * SAMPLE values; the structure and the digests are what is being checked.
+ */
+describe("evidence's published settlement-vector golden (#1202, 974b3ff1)", () => {
+  const body = validatePackageBody(JSON.parse(GOLDEN.jcsBody));
+
+  it("JCS(body) is byte-identical to evidence's published pre-image", () => {
+    expect(packageBodyJcs(body)).toBe(GOLDEN.jcsBody);
+  });
+
+  it("packageBodyHash matches the golden under the :v1 signing domain", () => {
+    expect(computePackageBodyHash(body)).toBe(GOLDEN.packageBodyHash);
+  });
+
+  it("packageDigestV2 over the same body matches the golden", () => {
+    expect(packageDigestV2(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
+  });
 });

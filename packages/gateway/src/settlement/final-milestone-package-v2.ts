@@ -33,9 +33,20 @@ import { canonicalize } from "@pcc/spec";
 
 export type Hex = `0x${string}`;
 
-/** keccak256("PCC:vnext:evidence-package-sig:v2") — evidence schema §3. */
+/**
+ * keccak256("PCC:vnext:evidence-package-sig:v1") = 0x74101076…5685 — evidence
+ * schema §3.
+ *
+ * The suffix is `:v1` on purpose. The "V2" in the name is the raw32 FRAMING
+ * (raw32(domain) ‖ u64be(byteLen) ‖ JCS(body)), not the domain suffix. This
+ * constant previously hashed ":v2" (0x1e98b1f8…), copied from an evidence
+ * golden that had drifted; evidence #1202 / oracle #1414 corrected the wire
+ * contract to ":v1". The operator and the kernel sign packageBodyHash, so a
+ * producer on ":v2" yields signatures that verify against nothing. The golden
+ * test pins the value, not just its shape.
+ */
 export const SIG_DOMAIN_V2: Hex = keccak256(
-  toBytes("PCC:vnext:evidence-package-sig:v2"),
+  toBytes("PCC:vnext:evidence-package-sig:v1"),
 );
 
 /** Fixed literals from the schema. Any drift here is a wire break. */

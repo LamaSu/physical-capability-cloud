@@ -27,6 +27,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import GOLDEN from "./fixtures/g2-settlement-vector-golden.json";
 import {
   packageDigestV2,
   packageDigestV2PreImage,
@@ -217,10 +218,18 @@ describe("packageDigestV2 — fails closed on values the canonicalizer is unsafe
   });
 });
 
-describe("packageDigestV2 — oracle cross-confirm", () => {
-  it.todo(
-    "matches the oracle's published golden — PENDING their exact input vector " +
-      "(body + rawSigs) and evidence's authoritative body schema; a golden that " +
-      "agrees only with itself proves nothing",
-  );
+describe("packageDigestV2 — evidence's published golden (#1202, 974b3ff1)", () => {
+  // The input vector (body + rawSigs) and the digest come from evidence's
+  // integrated settlement-vector mirror, computed with a different JCS and hash
+  // toolchain — so agreement here is a cross-check, not self-agreement.
+  it("matches the golden digest over the published body and sample signature set", () => {
+    const body: unknown = JSON.parse(GOLDEN.jcsBody);
+    expect(packageDigestV2(body, GOLDEN.rawSigs)).toBe(GOLDEN.packageDigestV2);
+  });
+
+  it("stays on the golden when the published signatures are reordered and duplicated", () => {
+    const [a, b] = GOLDEN.rawSigs as PackageSignature[];
+    const body: unknown = JSON.parse(GOLDEN.jcsBody);
+    expect(packageDigestV2(body, [b!, a!, b!])).toBe(GOLDEN.packageDigestV2);
+  });
 });
