@@ -78,12 +78,16 @@ function newClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } });
 }
 
+// Condition-based: wait until nothing is fetching on two consecutive ticks. react-query
+// notifies components on a setTimeout(0), so one idle reading can come before the last
+// result has rendered, or before a query that depends on it has started.
 async function settle(client: QueryClient) {
-  for (let i = 0; i < 200; i++) {
+  let idleTicks = 0;
+  for (let i = 0; i < 200 && idleTicks < 2; i++) {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
     });
-    if (client.isFetching() === 0) break;
+    idleTicks = client.isFetching() === 0 ? idleTicks + 1 : 0;
   }
 }
 
