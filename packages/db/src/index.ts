@@ -51,6 +51,21 @@ export type { StoreDB, Repositories };
 export { schema, buildRepositories, createDatabase, migrateDatabase, seedAll };
 // Re-export drizzle-orm operators for gateway routes that need direct table queries
 export { eq, and, or, sql, count, desc, asc } from "drizzle-orm";
+// R13 budget reservations (operator decision #2240): a self-contained store over the raw SQLite
+// handle, so issue and consume each run in ONE immediate transaction.
+export {
+  BudgetReservationStore,
+  BUDGET_RESERVATIONS_DDL,
+  type BudgetReservation,
+  type BudgetReservationState,
+  type ConsumeRefusal,
+  type ConsumeReservationInput,
+  type ConsumeResult,
+  type IssueRefusal,
+  type IssueReservationInput,
+  type IssueResult,
+  type ParentUnitTerms,
+} from "./repositories/budget-reservations.js";
 // Repository interfaces — the public contract for the data access layer
 export type { IRepositories } from "./interfaces/index.js";
 export type {
