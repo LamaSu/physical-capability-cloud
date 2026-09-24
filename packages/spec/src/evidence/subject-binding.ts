@@ -1,0 +1,236 @@
+/**
+ * LO-EV-9 — evidence subject binding (`pcc.evidence.subject-binding.v1`).
+ *
+ * A valid signature over a bundle digest proves who signed which digest. It
+ * does not say which job, node or output that digest is evidence FOR. The
+ * bundle-level `jobId`, `stepId` and `kernelId` fields are not inputs to
+ * `hashBundle`, so they are unsigned labels a relay can rewrite. Checking the
+ * signature alone, a genuine bundle from job A stored against job B settles
+ * job B, and any other tagged digest the node key signs (a log-chain
+ * `entryHash`, for one) passes as a bundle digest.
+ *
+ * The subject is bound only when the verifier opens the signed digest back to
+ * its events and reads the subject out of their hashed content. That is what
+ * `verifyEvidenceSubjectBinding` does. It fails closed, in this order:
+ *
+ *   1. the subject names a job and a kernel;
+ *   2. `bundleHash` is a canonical tagged digest (LO-EV-1);
+ *   3. there is at least one event, and every event is well-formed and
+ *      reproduces its own `hash` (`hashEvent`);
+ *   4. the events reproduce `bundleHash` (`hashBundle`);
+ *   5. job: EVERY event commits `payload.jobId`, equal to the subject's job.
+ *      The kernel signs event by event, and a session delegated for several
+ *      jobs could not attribute a jobless event, so one event naming the job
+ *      is not enough (the oracle enforces the same rule at /settle);
+ *   6. node: every event's `source.kernelId`, and every `payload.kernelId`,
+ *      equals the kernel that accepted the job;
+ *   7. output, only when the subject names one: at least one event commits
+ *      `payload.outputHash`, and every `payload.outputHash` equals it;
+ *   8. settlement unit, only when the subject names one: EVERY event commits
+ *      `payload.settlementUnitId`, equal to the escrow unit being settled. A
+ *      job settles unit by unit (milestones), and `jobId` alone would let
+ *      evidence signed for milestone 3 settle milestone 4 of the same job;
+ *   9. challenge, only when the subject names one: EVERY event commits
+ *      `payload.challengeNonce`, equal to the gateway-issued per-unit nonce the
+ *      package carries as `challengeBinding.nonce`. Evidence made before the
+ *      nonce was issued cannot contain it.
+ * Both unit fields are `0x` + 64 lowercase hex, byte-equal to the settlement
+ * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`.
+ *
+ * EVALUATE ONLY WHAT YOU HASHED. Steps 5-7 read the canonical snapshot of each
+ * event's hashed content (the JSON text `hashEvent` hashes, parsed back), with
+ * own-property reads, never the live object. A property the hash skipped (a
+ * non-enumerable or inherited `jobId`, a getter that answers differently the
+ * second time) therefore cannot bind a subject. The result returns those
+ * snapshots, and a consumer that evaluates the events further (levels,
+ * admission) must evaluate them, not its own copies.
+ *
+ * The subject fields are the ones the incumbent producers already hash:
+ * kernel-sdk's `execution_started` / `execution_completed` commit
+ * `payload.jobId`, `payload.kernelId` and `payload.outputHash`, and every event
+ * carries `source.kernelId`. A producer whose events commit none of them cannot
+ * bind a subject, so its bundles never verify here.
+ *
+ * This is the binding leg only. It never looks at the signature. A consumer
+ * must also verify the signature over `signingPreimage(bundleHash)` against the
+ * node's registered key (gateway `verifyDeviceSignedEvidence`, the oracle's #47
+ * registered-key check). Neither leg is sufficient alone.
+ */
+
+import { canonicalize, hashBundle, sha256 } from "../util/canonical.js";
+import type { EvidenceEvent } from "../types/evidence.js";
+import { isTaggedDigest } from "./signing-preimage.js";
+
+export const EVIDENCE_SUBJECT_BINDING_CONTRACT = "pcc.evidence.subject-binding.v1";
+
+/** The accepted execution unit a bundle must be evidence for. */
+export interface EvidenceSubject {
+  /** The job the evidence must substantiate. */
+  jobId: string;
+  /** The kernel (node) that accepted the job: the job record's `kernelId`,
+   *  never an id supplied alongside the evidence. */
+  kernelId: string;
+  /** Digest of the delivered output, when the consumer holds one. */
+  outputHash?: string;
+  /** The escrow settlement unit (milestone) being settled: `0x` + 64 lowercase
+   *  hex, from the unit record, never from the evidence. */
+  settlementUnitId?: string;
+  /** The gateway-issued challenge nonce for that unit: `0x` + 64 lowercase hex. */
+  challengeNonce?: string;
+}
+
+/** The unit fields' form: `0x` + 64 lowercase hex (a bytes32). */
+export const SUBJECT_UNIT_FIELD_PATTERN = /^0x[0-9a-f]{64}$/;
+
+export type EvidenceSubjectBindingErrorCode =
+  | "malformed-subject"
+  | "malformed-bundle-hash"
+  | "missing-events"
+  | "malformed-event"
+  | "event-hash-mismatch"
+  | "bundle-hash-mismatch"
+  | "job-not-committed"
+  | "job-mismatch"
+  | "kernel-mismatch"
+  | "output-not-committed"
+  | "output-mismatch"
+  | "unit-not-committed"
+  | "unit-mismatch"
+  | "challenge-not-committed"
+  | "challenge-mismatch";
+
+export type EvidenceSubjectBindingResult =
+  /** `events`: the verified canonical snapshots, in input order (see the header). */
+  | { ok: true; events: EvidenceEvent[] }
+  | { ok: false; reason: EvidenceSubjectBindingErrorCode; eventIndex?: number };
+
+export interface EvidenceSubjectBindingInput {
+  /** The digest the signature covers. */
+  bundleHash: string;
+  /** The events presented as the preimage of `bundleHash`, as stored or relayed. */
+  events: readonly unknown[];
+  subject: EvidenceSubject;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** An own property only: never one a prototype supplies. */
+function own(obj: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+}
+
+/**
+ * Check that `bundleHash` opens to `events` and that those events commit the
+ * subject. Never throws; returns the first failure.
+ */
+export async function verifyEvidenceSubjectBinding(
+  input: EvidenceSubjectBindingInput,
+): Promise<EvidenceSubjectBindingResult> {
+  const subject: unknown = input.subject;
+  if (
+    !isPlainObject(subject) ||
+    !isNonEmptyString(subject.jobId) ||
+    !isNonEmptyString(subject.kernelId) ||
+    (subject.outputHash !== undefined && !isNonEmptyString(subject.outputHash)) ||
+    (subject.settlementUnitId !== undefined &&
+      !(typeof subject.settlementUnitId === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.settlementUnitId))) ||
+    (subject.challengeNonce !== undefined &&
+      !(typeof subject.challengeNonce === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.challengeNonce)))
+  ) {
+    return { ok: false, reason: "malformed-subject" };
+  }
+  if (!isTaggedDigest(input.bundleHash)) {
+    return { ok: false, reason: "malformed-bundle-hash" };
+  }
+  if (!Array.isArray(input.events) || input.events.length === 0) {
+    return { ok: false, reason: "missing-events" };
+  }
+
+  const events: EvidenceEvent[] = [];
+  for (let i = 0; i < input.events.length; i++) {
+    const e: unknown = input.events[i];
+    if (
+      !isPlainObject(e) ||
+      !isNonEmptyString(e.type) ||
+      typeof e.timestamp !== "string" ||
+      !isPlainObject(e.source) ||
+      !isPlainObject(e.payload) ||
+      !isTaggedDigest(e.hash)
+    ) {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    // Hash exactly what hashEvent hashes, and keep that text as the snapshot the
+    // checks below read. A value canonicalize refuses cannot be evidence.
+    let text: string;
+    try {
+      text = canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload });
+    } catch {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    if ((await sha256(text)) !== e.hash) {
+      return { ok: false, reason: "event-hash-mismatch", eventIndex: i };
+    }
+    const snapshot = JSON.parse(text) as Record<string, unknown>;
+    if (!isPlainObject(snapshot.source) || !isPlainObject(snapshot.payload)) {
+      return { ok: false, reason: "malformed-event", eventIndex: i };
+    }
+    events.push({
+      ...snapshot,
+      ...(typeof e.id === "string" ? { id: e.id } : {}),
+      hash: e.hash,
+    } as unknown as EvidenceEvent);
+  }
+  if ((await hashBundle(events)) !== input.bundleHash) {
+    return { ok: false, reason: "bundle-hash-mismatch" };
+  }
+
+  const payloadOf = (i: number) => events[i]!.payload as Record<string, unknown>;
+  const sourceOf = (i: number) => events[i]!.source as unknown as Record<string, unknown>;
+
+  for (let i = 0; i < events.length; i++) {
+    const committed = own(payloadOf(i), "jobId");
+    if (committed === undefined) return { ok: false, reason: "job-not-committed", eventIndex: i };
+    if (committed !== subject.jobId) return { ok: false, reason: "job-mismatch", eventIndex: i };
+  }
+
+  for (let i = 0; i < events.length; i++) {
+    if (own(sourceOf(i), "kernelId") !== subject.kernelId) {
+      return { ok: false, reason: "kernel-mismatch", eventIndex: i };
+    }
+    const payloadKernel = own(payloadOf(i), "kernelId");
+    if (payloadKernel !== undefined && payloadKernel !== subject.kernelId) {
+      return { ok: false, reason: "kernel-mismatch", eventIndex: i };
+    }
+  }
+
+  // Optional commitments, checked only when the subject names one. The output
+  // lives on the completion event, so one event committing it suffices; the
+  // unit and its challenge scope every event, like the job.
+  const optional = [
+    ["outputHash", subject.outputHash, "output-not-committed", "output-mismatch", "some"],
+    ["settlementUnitId", subject.settlementUnitId, "unit-not-committed", "unit-mismatch", "every"],
+    ["challengeNonce", subject.challengeNonce, "challenge-not-committed", "challenge-mismatch", "every"],
+  ] as const;
+  for (const [field, expected, notCommitted, mismatch, scope] of optional) {
+    if (expected === undefined) continue;
+    let committedOnce = false;
+    for (let i = 0; i < events.length; i++) {
+      const committed = own(payloadOf(i), field);
+      if (committed === undefined) {
+        if (scope === "every") return { ok: false, reason: notCommitted, eventIndex: i };
+        continue;
+      }
+      if (committed !== expected) return { ok: false, reason: mismatch, eventIndex: i };
+      committedOnce = true;
+    }
+    if (!committedOnce) return { ok: false, reason: notCommitted };
+  }
+
+  return { ok: true, events };
+}

@@ -16,9 +16,14 @@
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
 import {
+  computeLogEntryHash,
   getPrimitive,
+  hashBundle,
+  hashEvent,
   sessionKeyDelegationPreimage,
   signingPreimage,
+  type EvidenceEvent,
+  type EvidenceSubject,
   type SessionKeyAuthorization,
 } from "@pcc/spec";
 import { createKernelHandler } from "@pcc/kernel-sdk";
@@ -28,6 +33,7 @@ import {
   verifyDeviceSignedEvidence,
   naclEd25519Verify,
   resolveSettlementEvidence,
+  verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
   machineLogVerifierLive,
   deviceEvidenceSettlementFlagEnabled,
@@ -65,6 +71,59 @@ const GATEWAY_FALLBACK: SettlementEvidenceSlot = {
   kernelSignature: { signer: ZERO_ADDRESS, algorithm: "ed25519", value: "gateway-auto-sign" },
   assuranceTier: 1,
 };
+
+const SUBJECT_JOB = "job-seam2-subject";
+const SUBJECT_KERNEL = "kernel-seam2-subject";
+
+/** A device bundle as a node relays it (LO-EV-9 shape): events that commit the
+ *  job and the kernel in their hashed content, the bundleHash over them, and
+ *  the signing key's signature over signingPreimage(bundleHash). `slot()`
+ *  presents it to settlement for a subject, by default its own. */
+async function boundDeviceEvidence(
+  opts: { jobId?: string; kernelId?: string; keyPair?: nacl.SignKeyPair } = {},
+) {
+  const jobId = opts.jobId ?? SUBJECT_JOB;
+  const kernelId = opts.kernelId ?? SUBJECT_KERNEL;
+  const keyPair = opts.keyPair ?? nacl.sign.keyPair();
+  const source = { deviceId: `${kernelId}-printer`, deviceType: "controller" as const, kernelId };
+  const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
+    {
+      type: "execution_started",
+      timestamp: "2026-09-24T10:00:00.000Z",
+      source,
+      payload: { jobId, kernelId },
+    },
+    {
+      type: "execution_completed",
+      timestamp: "2026-09-24T10:00:05.000Z",
+      source,
+      payload: { jobId, kernelId, outputHash: `sha256:${"5e".repeat(32)}` },
+    },
+  ];
+  const events: EvidenceEvent[] = await Promise.all(
+    raw.map(async (e, i) => ({ ...e, id: `ev-${i}`, hash: await hashEvent(e) })),
+  );
+  const bundleHash = await hashBundle(events);
+  const signature: StoredSignature = {
+    signer: `0x${toHex(keyPair.publicKey).slice(0, 40)}`,
+    algorithm: "ed25519",
+    value: toHex(nacl.sign.detached(signingPreimage(bundleHash), keyPair.secretKey)),
+  };
+  const publicKeyHex = `0x${toHex(keyPair.publicKey)}`;
+  const slot = (subject: EvidenceSubject = { jobId, kernelId }): SettlementEvidenceSlot => ({
+    bundleHash,
+    kernelSignature: signature,
+    assuranceTier: 0,
+    events,
+    subject,
+  });
+  return { jobId, kernelId, events, bundleHash, signature, publicKeyHex, keyPair, slot };
+}
+
+const ed25519Signer = (publicKey: Uint8Array) => ({
+  algorithm: "ed25519",
+  publicKey: `0x${toHex(publicKey)}`,
+});
 
 // ── 1 & 3. Gate holds / gate untouched (#233) ────────────────────────────────
 
@@ -324,9 +383,9 @@ describe("registeredSignerInputFromColumns", () => {
 
 describe("SEAM-2 wiring — device signature flows to the settlement anchor when the gate is OPEN", () => {
   it("gate open + valid device bundle (mocked passing verifier) → anchors on DEVICE hash+sig", async () => {
-    const dev = realDeviceEvidence();
+    const dev = await boundDeviceEvidence();
     const decision = await resolveSettlementEvidence({
-      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
+      deviceBundle: dev.slot(),
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
       fallback: GATEWAY_FALLBACK,
       verifyEd25519: () => true, // verifier mocked to pass
@@ -339,9 +398,9 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
   });
 
   it("gate open + REAL Ed25519 device bundle + registered signer → anchors on device (end-to-end mechanism)", async () => {
-    const dev = realDeviceEvidence();
+    const dev = await boundDeviceEvidence();
     const decision = await resolveSettlementEvidence({
-      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
+      deviceBundle: dev.slot(),
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
       fallback: GATEWAY_FALLBACK,
       // default verifier = naclEd25519Verify (real crypto)
@@ -352,10 +411,10 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
   });
 
   it("gate open but verify FAILS (wrong key) → falls back to gateway anchor (fails closed)", async () => {
-    const dev = realDeviceEvidence();
+    const dev = await boundDeviceEvidence();
     const other = nacl.sign.keyPair();
     const decision = await resolveSettlementEvidence({
-      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
+      deviceBundle: dev.slot(),
       registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(other.publicKey)}` },
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
@@ -428,6 +487,308 @@ describe("verifyDeviceSignedEvidence — LO-EV-1 signing preimage (negative cont
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
     });
     expect(res).toMatchObject({ ok: true });
+  });
+});
+
+// ── LO-EV-9 evidence subject binding at the settlement seam ──────────────────
+//
+// Each negative first shows that the signature leg ALONE accepts the replayed
+// evidence (it is a genuine signature by the right key), then that settlement
+// refuses it because the signed digest does not open to events committing this
+// job on this job's kernel.
+
+describe("LO-EV-9 — settlement binds device evidence to the accepted job and kernel", () => {
+  it("evidence from job A cannot satisfy job B (same node, genuine signature)", async () => {
+    const a = await boundDeviceEvidence({ jobId: "job-a" });
+    const signer = ed25519Signer(a.keyPair.publicKey);
+    expect(
+      await verifyDeviceSignedEvidence({
+        signature: a.signature,
+        bundleHash: a.bundleHash,
+        registeredSigner: signer,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const replayed = await resolveSettlementEvidence({
+      deviceBundle: a.slot({ jobId: "job-b", kernelId: a.kernelId }),
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(replayed).toMatchObject({
+      source: "gateway-fallback",
+      reason: "job-mismatch",
+      bundleHash: GATEWAY_FALLBACK.bundleHash,
+    });
+
+    const own = await resolveSettlementEvidence({
+      deviceBundle: a.slot(),
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(own).toMatchObject({ source: "device", bundleHash: a.bundleHash });
+  });
+
+  it("the anchor carries the binding's canonical snapshots, never the caller's objects", async () => {
+    const a = await boundDeviceEvidence({ jobId: "job-a" });
+    const slot = a.slot();
+    const live = slot.events![0] as Record<string, unknown>;
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: slot,
+      registeredSigner: ed25519Signer(a.keyPair.publicKey),
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("device");
+    const anchored = decision.events as Record<string, unknown>[];
+    expect(anchored).toEqual(JSON.parse(JSON.stringify(slot.events)));
+    expect(anchored[0]).not.toBe(live);
+    // A later change to the caller's copy cannot reach what was verified.
+    (live.payload as Record<string, unknown>).tampered = true;
+    expect(anchored[0]!.payload).not.toHaveProperty("tampered");
+  });
+
+  it("evidence for node A cannot be substituted for node B", async () => {
+    const nodeA = nacl.sign.keyPair();
+    const nodeB = nacl.sign.keyPair();
+    const fromA = await boundDeviceEvidence({ jobId: "job-shared", kernelId: "kernel-a", keyPair: nodeA });
+
+    // The job was accepted by kernel-b, so kernel-b's registered key is the signer.
+    const substituted = await resolveSettlementEvidence({
+      deviceBundle: fromA.slot({ jobId: "job-shared", kernelId: "kernel-b" }),
+      registeredSigner: ed25519Signer(nodeB.publicKey),
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(substituted).toMatchObject({ source: "gateway-fallback", reason: "kernel-mismatch" });
+
+    // Node A cannot get round that by signing events that claim to be kernel-b:
+    // they bind, but the signature is checked against kernel-b's registered key.
+    const claimsB = await boundDeviceEvidence({ jobId: "job-shared", kernelId: "kernel-b", keyPair: nodeA });
+    const forged = await resolveSettlementEvidence({
+      deviceBundle: claimsB.slot(),
+      registeredSigner: ed25519Signer(nodeB.publicKey),
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(forged).toMatchObject({ source: "gateway-fallback", reason: "signature-invalid" });
+  });
+
+  it("relabelling the stored events cannot move a bundle to another job", async () => {
+    const a = await boundDeviceEvidence({ jobId: "job-a" });
+    const relabelled = a.events.map((e) => ({ ...e, payload: { ...e.payload, jobId: "job-b" } }));
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        ...a.slot({ jobId: "job-b", kernelId: a.kernelId }),
+        events: relabelled,
+      },
+      registeredSigner: ed25519Signer(a.keyPair.publicKey),
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision).toMatchObject({ source: "gateway-fallback", reason: "event-hash-mismatch" });
+  });
+
+  it("a log-chain entry signature cannot anchor settlement", async () => {
+    const node = nacl.sign.keyPair();
+    const signer = ed25519Signer(node.publicKey);
+    const entryHash = await computeLogEntryHash(
+      "print started",
+      "octoprint",
+      "2026-09-24T10:00:01.000Z",
+    );
+    const signature: StoredSignature = {
+      signer: `0x${toHex(node.publicKey).slice(0, 40)}`,
+      algorithm: "ed25519",
+      value: toHex(nacl.sign.detached(signingPreimage(entryHash), node.secretKey)),
+    };
+    // A genuine signature by the registered key over a tagged digest, so the
+    // signature leg alone cannot tell it from a bundle signature.
+    expect(
+      await verifyDeviceSignedEvidence({ signature, bundleHash: entryHash, registeredSigner: signer }),
+    ).toMatchObject({ ok: true });
+
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: entryHash,
+        kernelSignature: signature,
+        assuranceTier: 0,
+        events: [],
+        subject: { jobId: SUBJECT_JOB, kernelId: SUBJECT_KERNEL },
+      },
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision).toMatchObject({ source: "gateway-fallback", reason: "missing-events" });
+  });
+
+  it("a delegation scoped to several jobs does not let job A's bundle settle job B", async () => {
+    const principal = nacl.sign.keyPair();
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const body = {
+      sessionId: "session-multi-contract",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: {
+        allowedActions: ["evidence_submit"],
+        contractIds: ["job-a", "job-b"],
+        maxSignatures: 10,
+      },
+    };
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(session.publicKey),
+      parentSignature: toHex(
+        nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey),
+      ),
+    };
+    const a = await boundDeviceEvidence({ jobId: "job-a", keyPair: session });
+    const signer = ed25519Signer(principal.publicKey);
+
+    // job-b is inside the delegation's scope, so the signature leg accepts it.
+    expect(
+      await verifyDeviceSignedEvidence({
+        signature: a.signature,
+        bundleHash: a.bundleHash,
+        registeredSigner: signer,
+        sessionKeyAuthorization: auth,
+        contractId: "job-b",
+      }),
+    ).toMatchObject({ ok: true });
+
+    const replayed = await resolveSettlementEvidence({
+      deviceBundle: {
+        ...a.slot({ jobId: "job-b", kernelId: a.kernelId }),
+        sessionKeyAuthorization: auth,
+      },
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(replayed).toMatchObject({ source: "gateway-fallback", reason: "job-mismatch" });
+
+    const own = await resolveSettlementEvidence({
+      deviceBundle: { ...a.slot(), sessionKeyAuthorization: auth },
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(own).toMatchObject({ source: "device", bundleHash: a.bundleHash });
+  });
+
+  it("a real kernel-sdk bundle opens to its own events and anchors; for another job it does not", async () => {
+    const principal = nacl.sign.keyPair();
+    const kernelId = "kernel-sdk-subject";
+    const jobId = "job-sdk-subject";
+    const handler = createKernelHandler({
+      manifest: {
+        manifestVersion: "1.0.0",
+        kernelId,
+        name: "Subject Kernel",
+        description: "test",
+        builder: { agentId: "agent:test" },
+        capabilityType: "test.transform",
+        workflowSteps: [],
+        pricing: { currency: "USDC", baseUSD: 0 },
+        maxAssuranceTier: 0,
+        endpointURL: "https://example.test/run",
+        sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
+        status: "pending",
+      } as any,
+      principalKey: {
+        agentId: "eip155:1:0x0000000000000000000000000000000000000001",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+        publicKey: principal.publicKey,
+      },
+      principalPrivateKey: principal.secretKey,
+      execute: async () => ({ ok: true }),
+    });
+    const { evidenceBundle } = await handler({ jobId, input: { value: 1 } });
+    // What the relay stores and /complete reads back: JSON, not live objects.
+    const storedEvents = JSON.parse(JSON.stringify(evidenceBundle.events)) as unknown[];
+    const slot = (subject: EvidenceSubject): SettlementEvidenceSlot => ({
+      bundleHash: evidenceBundle.bundleHash,
+      kernelSignature: evidenceBundle.kernelSignature,
+      assuranceTier: 0,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
+      events: storedEvents,
+      subject,
+    });
+    const signer = ed25519Signer(principal.publicKey);
+
+    const own = await resolveSettlementEvidence({
+      deviceBundle: slot({ jobId, kernelId }),
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(own).toMatchObject({ source: "device", bundleHash: evidenceBundle.bundleHash });
+
+    const other = await resolveSettlementEvidence({
+      deviceBundle: slot({ jobId: "job-sdk-other", kernelId }),
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(other).toMatchObject({ source: "gateway-fallback", reason: "job-mismatch" });
+  });
+
+  it("a device slot with no subject, no events, or a contract id that disagrees never anchors", async () => {
+    const a = await boundDeviceEvidence();
+    const signer = ed25519Signer(a.keyPair.publicKey);
+    const cases: Array<[SettlementEvidenceSlot, string]> = [
+      [{ ...a.slot(), subject: undefined }, "missing-subject"],
+      [{ ...a.slot(), events: undefined }, "missing-events"],
+      [{ ...a.slot(), contractId: "job-elsewhere" }, "contract-subject-mismatch"],
+    ];
+    for (const [deviceBundle, reason] of cases) {
+      const decision = await resolveSettlementEvidence({
+        deviceBundle,
+        registeredSigner: signer,
+        fallback: GATEWAY_FALLBACK,
+        gateOpen: true,
+      });
+      expect(decision, reason).toMatchObject({ source: "gateway-fallback", reason });
+    }
+  });
+
+  it("a replayed row stored first cannot hide the genuine bundle", async () => {
+    const node = nacl.sign.keyPair();
+    const signer = ed25519Signer(node.publicKey);
+    const fromA = await boundDeviceEvidence({ jobId: "job-a", keyPair: node });
+    const forB = await boundDeviceEvidence({ jobId: "job-b", keyPair: node });
+
+    const decision = await resolveSettlementEvidence({
+      deviceBundles: [fromA.slot({ jobId: "job-b", kernelId: fromA.kernelId }), forB.slot()],
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision).toMatchObject({ source: "device", bundleHash: forB.bundleHash });
+
+    const allBad = await resolveSettlementEvidence({
+      deviceBundles: [
+        fromA.slot({ jobId: "job-b", kernelId: fromA.kernelId }),
+        { ...forB.slot(), subject: undefined },
+      ],
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(allBad).toMatchObject({ source: "gateway-fallback", reason: "job-mismatch" });
+
+    const none = await resolveSettlementEvidence({
+      deviceBundles: [],
+      registeredSigner: signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(none).toMatchObject({ source: "gateway-fallback", reason: "no-device-bundle" });
   });
 });
 
@@ -521,5 +882,122 @@ describe("device evidence — derivationPath absent, empty and non-empty, agains
   it("empty: rejected before (bytes differed) and refused now before any signature check", async () => {
     expect(oldGatewayVerifies("")).toBe(false);
     expect(await newGateway("")).toEqual({ ok: false, reason: "session_key_malformed" });
+  });
+});
+
+// ── LO-EV-9 review R1: re-verifying the pinned settlement anchor on recovery ──
+
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { createHash } from "node:crypto";
+
+describe("verifyPinnedSettlementEvidence — what recovery may settle on", () => {
+  async function deviceRow(jobId = SUBJECT_JOB, kernelId = SUBJECT_KERNEL) {
+    const dev = await boundDeviceEvidence({ jobId, kernelId });
+    const row = {
+      id: "ev-relayed-1",
+      jobId,
+      stepId: "operator-relay",
+      kernelId,
+      assuranceTier: 0,
+      createdAt: "2026-09-24T12:00:00.000Z",
+      bundleHash: dev.bundleHash,
+      kernelSignature: dev.signature,
+    };
+    return { dev, row, signer: ed25519Signer(dev.keyPair.publicKey) };
+  }
+
+  function gatewayRow(events: Array<Record<string, unknown>> = []) {
+    const meta = {
+      id: "bundle-gw-1",
+      jobId: SUBJECT_JOB,
+      stepId: "step-1",
+      kernelId: SUBJECT_KERNEL,
+      assuranceTier: 0,
+      createdAt: "2026-09-24T12:00:00.000Z",
+      kernelSignature: { signer: ZERO_ADDRESS, algorithm: "ed25519", value: "gateway-auto-sign" },
+    };
+    const bundleHash = `sha256:${createHash("sha256").update(buildCanonicalEvidenceEnvelope(meta, events as never)).digest("hex")}`;
+    return { ...meta, bundleHash };
+  }
+
+  it("a device anchor that still binds and verifies may be settled", async () => {
+    const { dev, row, signer } = await deviceRow();
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("a device anchor whose stored events were altered may not", async () => {
+    const { dev, row, signer } = await deviceRow();
+    const altered = dev.events.map((e, i) => (i === 0 ? { ...e, payload: { ...e.payload, extra: 1 } } : e));
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: altered,
+        registeredSigner: signer,
+      }),
+    ).toEqual({ ok: false, reason: "event-hash-mismatch" });
+  });
+
+  it("a device anchor is re-checked against the kernel's registered key", async () => {
+    const { dev, row } = await deviceRow();
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: dev.events,
+        registeredSigner: ed25519Signer(nacl.sign.keyPair().publicKey),
+      }),
+    ).toEqual({ ok: false, reason: "signature-invalid" });
+  });
+
+  it("a row for another job or another kernel may not be settled for this one", async () => {
+    const { dev, row, signer } = await deviceRow();
+    const base = { events: dev.events, registeredSigner: signer };
+    expect(
+      await verifyPinnedSettlementEvidence({ ...base, jobId: "job-other", kernelId: SUBJECT_KERNEL, row }),
+    ).toEqual({ ok: false, reason: "pinned-evidence-job-mismatch" });
+    expect(
+      await verifyPinnedSettlementEvidence({ ...base, jobId: SUBJECT_JOB, kernelId: "kernel-other", row }),
+    ).toEqual({ ok: false, reason: "pinned-evidence-kernel-mismatch" });
+  });
+
+  it("a gateway anchor must recompute from its stored envelope", async () => {
+    const events = [
+      { id: "e1", type: "execution_completed", timestamp: "t", source: { deviceId: "gateway", deviceType: "controller", kernelId: SUBJECT_KERNEL }, payload: { toolCallCount: 1 }, hash: "sha256:" + "0".repeat(64) },
+    ];
+    const row = gatewayRow(events);
+    const base = { jobId: SUBJECT_JOB, kernelId: SUBJECT_KERNEL, registeredSigner: null };
+    expect(await verifyPinnedSettlementEvidence({ ...base, row, events })).toEqual({ ok: true });
+    const altered = [{ ...events[0]!, payload: { toolCallCount: 2 } }];
+    expect(await verifyPinnedSettlementEvidence({ ...base, row, events: altered })).toEqual({
+      ok: false,
+      reason: "pinned-evidence-hash-mismatch",
+    });
+    expect(await verifyPinnedSettlementEvidence({ ...base, row: { ...row, bundleHash: "sha256:trapped" }, events })).toEqual({
+      ok: false,
+      reason: "pinned-evidence-hash-mismatch",
+    });
+  });
+
+  it("no pinned row, no settlement", async () => {
+    expect(
+      await verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row: undefined,
+        events: [],
+        registeredSigner: null,
+      }),
+    ).toEqual({ ok: false, reason: "no-pinned-evidence" });
   });
 });
