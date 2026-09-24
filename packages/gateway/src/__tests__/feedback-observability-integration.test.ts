@@ -102,20 +102,29 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     expect(funnel.json().error).toBe("not_enabled");
   });
 
-  it("fails closed without an allowlist: leaked dev opt-in or missing NODE_ENV can't open it (review r-obs #1 + confirm)", async () => {
+  it("fails closed without the admin secret: an allowlisted identity, a leaked dev opt-in or a missing NODE_ENV can't open it (WP-A round 5, #2883)", async () => {
     const url = "/api/admin/observability/feedback";
     try {
-      // (a) missing/misspelled NODE_ENV + no opt-in → denied
+      // (a) missing/misspelled NODE_ENV and no PCC_ADMIN_KEY: 503, the view is disabled.
       process.env.NODE_ENV = "";
       delete process.env.PCC_OBSERVABILITY_DEV_OPEN;
-      expect((await app.inject({ method: "GET", url })).statusCode).toBe(403);
-      // (b) a LEAKED opt-in in production → still denied (dev bypass needs NODE_ENV=development)
+      delete process.env.PCC_ADMIN_KEY;
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(503);
+      // (b) a LEAKED opt-in plus an allowlisted identity in production: still 503.
       process.env.NODE_ENV = "production";
       process.env.PCC_OBSERVABILITY_DEV_OPEN = "true";
-      expect((await app.inject({ method: "GET", url })).statusCode).toBe(403);
+      process.env.PCC_OBSERVABILITY_ADMINS = "anyone";
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(503);
+      // (c) the secret configured: nothing presented is 401, a wrong one 403, the right one 200.
+      process.env.PCC_ADMIN_KEY = "observability-test-admin-secret";
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+      expect((await app.inject({ method: "GET", url, headers: { "x-admin-key": "wrong" } })).statusCode).toBe(403);
+      expect((await app.inject({ method: "GET", url, headers: { "x-admin-key": "observability-test-admin-secret" } })).statusCode).toBe(200);
     } finally {
       process.env.NODE_ENV = "development"; // restore the dev-open combo for the remaining tests
       process.env.PCC_OBSERVABILITY_DEV_OPEN = "true";
+      delete process.env.PCC_OBSERVABILITY_ADMINS;
+      delete process.env.PCC_ADMIN_KEY;
     }
   });
 
