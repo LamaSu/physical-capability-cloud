@@ -170,9 +170,9 @@ describe("NEGATIVE: completed is never paid", () => {
       expect(dto.notices).toEqual(expect.arrayContaining(["job_row_reports_settled", "settlement_row_conflict"]));
       expect(dto.notices).not.toContain("settlement_records_conflict");
     }
-    // Agreement stays paid; the row alone never pays.
+    // Agreement stays a recorded release; the row alone never releases anything.
     const agree = build({ job: job({ status: "settled" }), settlement: { ok: true, value: linked(escrow(), [milestone({ status: "released" })]) } });
-    expect(agree.settlement.payout).toBe("paid");
+    expect(agree.settlement.payout).toBe("reported_released");
     expect(agree.notices).not.toContain("settlement_row_conflict");
   });
 });

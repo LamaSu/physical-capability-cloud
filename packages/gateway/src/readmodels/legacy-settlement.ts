@@ -76,7 +76,11 @@ const HELD_ESCROW_STATUSES = new Set(["funded", "active"]);
  *   unknown                the records cannot say: an ambiguous or conflicting link, no
  *                          milestone for this job, or statuses that contradict each other
  *   simulated              a mock-settlement escrow: no real money exists for this job
- *   settled                this job's milestone record says released (record only)
+ *   settled                a settlement read model confirms this job's release (payout
+ *                          "paid"). The gateway's escrow records never do (PX-1, steward
+ *                          #2490), so today no job reads settled.
+ *   reported_released      this job's milestone record says released; no settlement read
+ *                          confirms it (on a V-next escrow it can mean allocated, not paid)
  *   refunded               this job's milestone record says refunded
  *   funded                 job pending; its escrow record says funded or active
  *   awaiting_settlement    job reported complete; its milestone is recorded and not released
@@ -91,6 +95,7 @@ export function legacySettlementStatus(dto: JobExecutionDTO): string {
   if (s.link === "ambiguous" || s.link === "conflicting") return "unknown";
   if (s.record?.simulated) return "simulated";
   if (s.payout === "paid") return "settled";
+  if (s.payout === "reported_released") return "reported_released";
   if (s.payout === "refunded") return "refunded";
   if (s.link === "linked" && s.payout !== "not_paid") return "unknown";
 
@@ -135,7 +140,10 @@ export interface LegacySettlementClaim {
   status: string;
   /** The job row's own status, as recorded. */
   jobStatus: string;
-  /** True only when this job's own milestone record says released (payout "paid"). */
+  /**
+   * True only when a settlement read model confirms this job's release (payout "paid").
+   * The gateway's escrow records never do: a recorded release is status reported_released.
+   */
   settled: boolean;
   /** The escrow record keeps no release time, so none is reported. */
   settledAt: null;
@@ -242,8 +250,10 @@ export function buildJobSettlementRead(
           challengeWindowEnd: ms.challengeWindowEnd ?? null,
         }))
       : [],
-    // Only this job's released milestone amount; never the escrow total or the quote.
+    // Only a confirmed release's amount; never the escrow total or the quote.
     paidAmount: s.payout === "paid" && milestone ? milestone.amount : null,
+    /** This job's milestone amount when its record says released, unconfirmed: not a payment. */
+    reportedReleasedAmount: s.payout === "reported_released" && milestone ? milestone.amount : null,
     /** The price quoted in the negotiation session: a quote, not a payment. */
     quotedAmount,
     currency: linked ? linked.escrow.currency : quotedCurrency,

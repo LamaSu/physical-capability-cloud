@@ -149,10 +149,10 @@ describe("legacySettlementStatus: money states come only from the settlement rec
     expect(statusOf({ job: job({ status: "settled" }), settlement: ok(linked()) })).toBe("unknown");
   });
 
-  it("settled only when this job's own milestone record says released", () => {
+  it("NEGATIVE (PX-1): a milestone record saying released is reported_released, never settled", () => {
     const s = ok(linked(escrow({ status: "active" }), [milestone({ status: "released" })]));
-    expect(statusOf({ job: job({ status: "completed" }), settlement: s })).toBe("settled");
-    expect(statusOf({ job: job({ status: "settled" }), settlement: s })).toBe("settled");
+    expect(statusOf({ job: job({ status: "completed" }), settlement: s })).toBe("reported_released");
+    expect(statusOf({ job: job({ status: "settled" }), settlement: s })).toBe("reported_released");
   });
 
   it("NEGATIVE: a mock-settlement escrow is simulated at every stage, never funded or settled", () => {
@@ -208,16 +208,19 @@ const jobRead = (over: Partial<JobExecutionSources>, sessions: SessionRead = ONE
 };
 
 describe("GET /api/jobs/:jobId/settlement projection", () => {
-  it("NEGATIVE: paidAmount is only this job's released milestone amount, never the escrow total or the quote", () => {
-    const paid = jobRead({ job: job({ status: "completed" }), settlement: ok(linked(escrow({ status: "active" }), [milestone({ status: "released" })])) });
-    expect(paid.settled).toBe(true);
-    expect(paid.paidAmount).toBe("12.00");
-    expect(paid.payoutConfirmation).toBe("record_only");
-    expect(paid.quotedAmount).toBe("99");
+  it("NEGATIVE: no recorded amount is a paidAmount: not the escrow total, the quote, or a recorded release", () => {
+    const released = jobRead({ job: job({ status: "completed" }), settlement: ok(linked(escrow({ status: "active" }), [milestone({ status: "released" })])) });
+    expect(released.status).toBe("reported_released");
+    expect(released.settled).toBe(false);
+    expect(released.paidAmount).toBeNull();
+    expect(released.reportedReleasedAmount).toBe("12.00");
+    expect(released.payoutConfirmation).toBe("record_only");
+    expect(released.quotedAmount).toBe("99");
 
     const held = jobRead({ job: job({ status: "completed" }), settlement: ok(linked()) });
     expect(held.settled).toBe(false);
     expect(held.paidAmount).toBeNull();
+    expect(held.reportedReleasedAmount).toBeNull();
     expect(held.quotedAmount).toBe("99");
     expect(held.escrow?.totalAmount).toBe("30.00");
 
@@ -225,6 +228,7 @@ describe("GET /api/jobs/:jobId/settlement projection", () => {
     expect(simulated.status).toBe("simulated");
     expect(simulated.settled).toBe(false);
     expect(simulated.paidAmount).toBeNull();
+    expect(simulated.reportedReleasedAmount).toBeNull();
     expect(simulated.simulated).toBe(true);
     expect(simulated.escrow?.simulated).toBe(true);
     expect(simulated.notices).toEqual(expect.arrayContaining(["simulated_settlement", "job_row_reports_settled"]));
@@ -263,7 +267,7 @@ describe("GET /api/jobs/:jobId/settlement projection", () => {
 
   it("NEGATIVE: settledAt is never the job's completion time", () => {
     const r = jobRead({ job: job({ status: "completed", completedAt: "2026-09-21T10:00:00.000Z" }), settlement: ok(linked(escrow(), [milestone({ status: "released" })])) });
-    expect(r.settled).toBe(true);
+    expect(r.status).toBe("reported_released");
     expect(r.settledAt).toBeNull();
     expect(r.asOf).toBe(AS_OF);
   });
@@ -277,11 +281,14 @@ describe("GET /api/settlement/:jobId projection", () => {
     return buildSettlementStatusRead({ ...src.job, evidenceBundleId: "bun-row" }, src, dto);
   };
 
-  it("NEGATIVE: settled is true only for a released milestone record", () => {
+  it("NEGATIVE (PX-1): no gateway record makes settled true, not even a recorded release", () => {
     expect(statusRead({ job: job({ status: "completed" }) }).settled).toBe(false);
     expect(statusRead({ job: job({ status: "settled" }) }).settled).toBe(false);
     expect(statusRead({ job: job({ status: "settled" }), settlement: ok(linked(mock(), [milestone({ status: "released" })])) }).settled).toBe(false);
-    expect(statusRead({ job: job({ status: "completed" }), settlement: ok(linked(escrow(), [milestone({ status: "released" })])) }).settled).toBe(true);
+    const released = statusRead({ job: job({ status: "completed" }), settlement: ok(linked(escrow(), [milestone({ status: "released" })])) });
+    expect(released.settled).toBe(false);
+    expect(released.status).toBe("reported_released");
+    expect(released.payout).toBe("reported_released");
   });
 
   it("reports the job row's status separately as jobStatus", () => {
@@ -372,7 +379,7 @@ describe("the legacy settlement routes on a real store", () => {
     expect(s.payout).toBe("simulated");
   });
 
-  it("a real escrow record with this job's milestone released reads settled on both routes, with the milestone amount", async () => {
+  it("a real escrow record with this job's milestone released reads reported_released on both routes, never settled", async () => {
     const { schema } = await import("@pcc/store");
     const store = getStore();
     store.repos.escrows.insert({
@@ -392,16 +399,17 @@ describe("the legacy settlement routes on a real store", () => {
 
     const { jobs, settlement } = await both("job-f1");
     const j = jobs.json();
-    expect(j.status).toBe("settled");
-    expect(j.settled).toBe(true);
-    expect(j.paidAmount).toBe("12.50");
+    expect(j.status).toBe("reported_released");
+    expect(j.settled).toBe(false);
+    expect(j.paidAmount).toBeNull();
+    expect(j.reportedReleasedAmount).toBe("12.50");
     expect(j.quotedAmount).toBe("31");
     expect(j.payoutConfirmation).toBe("record_only");
     expect(j.settlementLink).toBe("linked");
     expect(j.session.id).toBe("neg-f1");
     const s = settlement.json();
-    expect(s.status).toBe("settled");
-    expect(s.settled).toBe(true);
+    expect(s.status).toBe("reported_released");
+    expect(s.settled).toBe(false);
   });
 
   it("NEGATIVE: seeded job-004 (completed; its escrow has no milestone for its step) is unknown, not settled", async () => {

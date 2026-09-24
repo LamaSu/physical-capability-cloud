@@ -412,7 +412,7 @@ function buildSettlement(
     // The job row saying `settled` while this job's milestone record says not released (or
     // refunded) means one of the two records is wrong. SettlementService.releaseMilestone,
     // for one, updates the job row after an on-chain release and never the milestone
-    // record. So the payout is unknown, never "not paid". The row never makes it "paid".
+    // record. So the payout is unknown, never "not paid". The row never makes it released.
     if ((payout === "not_paid" || payout === "refunded") && normalizeJobRowStatus(job.status) === "settled") {
       payout = "unknown";
       rowConflict = true;
