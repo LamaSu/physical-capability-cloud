@@ -36,9 +36,10 @@ classifies the routes' own bodies (`settlement-read-money-status.test.ts`, #313)
 was never written down. A genuinely settled unit therefore rendered "fields disagree" and never went green. Found by
 checking the real routes; fixed in #313 @7061730a.
 
-**Open for the route owners (gateway, escrow).** The golden matrix (§A of the conformance doc) still says rows 1-5
-have no receipt (404) and rows 6/7 carry `finalState: *_ALLOCATED`. Either the matrix moves to the #667 mapping or the
-routes move to the matrix. Until one of them changes, THIS section is what consumers bind.
+**Resolved by escrow's ruling #3163 (the money-semantics owner): the target is master's routes.**
+- The golden matrix §A is updated to match them; the #667 rows it replaced are superseded.
+- The one additive change: gateway adds the staticcall `unitState` to `/receipt`, so a receipt-only consumer can tell 6 (release decided) from 7 (refund decided).
+- Consumers key that direction off `unitState`, never off `finalState`. #313's classifier already accepts it.
 
 **Serves (read-only, one build, two consumers):** the gen-UI settlement render ("Surface A": value chain + settlement)
 and composition's child-accepts-parent digest check.

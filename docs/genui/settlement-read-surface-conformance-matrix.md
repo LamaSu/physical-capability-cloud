@@ -23,22 +23,29 @@ claim is safe: rule 12 keys `finalState` off `unitState() ∈ {8, 9}`, which sta
 
 ## §A: the 10-state golden (receipt + lifecycle)
 
-> **On master the routes follow escrow's DTO mapping (#667), which differs from rows 1-7 below.** Receipts answer 200 for
-> states 1-5, and states 6/7 carry `finalState: null` with `isAllocated: true` and `phase: "allocated"`. See the
-> contract's "Implemented on master" section for the exact shape consumers bind today.
+**Updated 2026-09-24 per escrow's ruling #3163: the target is master's routes.** The earlier rows (a 404 or "no receipt"
+for states 1-5; `finalState: RELEASE_ALLOCATED` / `REFUND_ALLOCATED` for 6/7, from #667) are SUPERSEDED, for two reasons:
+- 404 must stay the unambiguous "this unit does not exist";
+- `finalState` means TERMINAL (rule 12). A receipt exists from allocation onward while money can still be outstanding.
 
-| unitState | receipt route | finalState | finalizedBlock | lifecycle.phase | presentation (kit) |
-|---|---|---|---|---|---|
-| 0 AWAITING_FUNDING | **unreachable** | n/a | n/a | n/a | **never returned** (see the state-0 note) |
-| 1 FUNDED_ACTIVE | 404 / no receipt | n/a | n/a | `active` | "in progress" |
-| 2 PRIMARY_ASSERTED | 404 / no receipt | n/a | n/a | `contest` | "in a challenge window · closes <windowEndsAt>" |
-| 3 CHALLENGED | 404 / no receipt | n/a | n/a | `contest` | "challenged · appeal decision by <windowEndsAt>" |
-| 4 BACKUP_PENDING | 404 / no receipt | n/a | n/a | `escalation` | "escalated to backup" |
-| 5 BACKUP_ASSERTED | 404 / no receipt | n/a | n/a | `escalation` | "backup asserted" |
-| 6 RELEASE_ALLOCATED | 200 receipt present | `RELEASE_ALLOCATED` | **null** | `allocated` | "release allocated: **payment incomplete**" |
-| 7 REFUND_ALLOCATED | 200 receipt present | `REFUND_ALLOCATED` | **null** | `allocated` | "refund allocated: refund incomplete" |
-| 8 SETTLED_RELEASED | 200 receipt terminal | `SETTLED_RELEASED` | non-null | `settled` | "operator distribution discharged" |
-| 9 SETTLED_REFUNDED | 200 receipt terminal | `SETTLED_REFUNDED` | non-null | `settled` | "**payer refunded: operator NOT paid**" |
+| unitState | /receipt | finalState | isAllocated | finalizedBlock | phase | presentation (kit, #313) |
+|---|---|---|---|---|---|---|
+| 0 AWAITING_FUNDING | **503** (fails closed; never a real unit) | n/a | n/a | n/a | n/a | **never returned** (see the state-0 note) |
+| 1 FUNDED_ACTIVE | 200 | null | false | null | `active` | "active - funds committed, no outcome yet" |
+| 2 PRIMARY_ASSERTED | 200 | null | false | null | `contest` | "primary assertion accepted - not final" |
+| 3 CHALLENGED | 200 | null | false | null | `contest` | "challenged - not final" |
+| 4 BACKUP_PENDING | 200 | null | false | null | `escalation` | "escalated to backup - not final" |
+| 5 BACKUP_ASSERTED | 200 | null | false | null | `escalation` | "backup assertion accepted - not final" |
+| 6 RELEASE_ALLOCATED | 200 | null | **true** | null | `allocated` | "release decided - payout outstanding" |
+| 7 REFUND_ALLOCATED | 200 | null | **true** | null | `allocated` | "refund decided - payer not yet refunded" |
+| 8 SETTLED_RELEASED | 200 | `SETTLED_RELEASED` | false | non-null | `settled` | "released - payout distribution discharged" (the ONLY green) |
+| 9 SETTLED_REFUNDED | 200 | `SETTLED_REFUNDED` | false | non-null | `settled` | "**refunded - payer refunded, payees NOT paid**" |
+
+- **404 `UNKNOWN_UNIT`** is answered only for an unknown unit, and indistinguishably for another tenant's (rule 7).
+- **The 6-vs-7 direction comes from `unitState`, never from `finalState`.**
+  - `/lifecycle` already carries `unitState`. Gateway is adding the staticcall `unitState` to `/receipt` (additive, #3163).
+  - Until then, a `/receipt`-only read of 6/7 shows "outcome decided - not yet paid out", with no direction.
+- **Pinned by** `packages/gateway/src/__tests__/settlement-read-money-status.test.ts` (#313). It classifies the routes' own bodies for states 1-9, and a receipt with `unitState`, with the spec and the shipped kit.
 
 Assert per row: `isTerminal == finalState ∈ {SETTLED_RELEASED, SETTLED_REFUNDED}`; `operatorPaid == (finalState == SETTLED_RELEASED)`
 (as a test rule, NOT a DTO boolean); `finalizedBlock` null iff not terminal; the exact `phase`; `windowEndsAt` / `windowKind`
