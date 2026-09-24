@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { canonicalize, economics } from "@pcc/spec";
+import { canonicalize, computeScheduleHash, economics, type RateSchedule } from "@pcc/spec";
 import { configuredProtocolFee, economicsRoutes } from "../routes/economics.js";
 import { closeStore, getRepos, initStore } from "../db.js";
 
@@ -127,6 +127,27 @@ describe("PX-12 economics routes", () => {
     const after = await preview({ agreement: ag });
     expect(after.preview.status).toBe("fundable");
     expect(after.preview.rates[0]!.verified).toBe(true);
+  });
+
+  it("a registry body the compiler cannot use is left out, so the refusal names the clause, not the agreement", async () => {
+    // Sealed before the registry checked number ranges: 2^53 hashes fine, but it is not one number to every reader.
+    const segments = [{ kind: "piecewise-value", startTime: 0, endTime: null, thresholdCents: 2 ** 53, bpsLow: 40, bpsHigh: 40 }];
+    const scheduleHash = computeScheduleHash({ version: 1, segments } as unknown as RateSchedule);
+    getRepos().contributors.publishSchedule({
+      scheduleHash,
+      version: 1,
+      segmentsJson: canonicalize(segments),
+      notes: null,
+      publishedBy: "0x00000000000000000000000000000000009a1a03",
+      publishedAt: "2026-06-01T00:00:00Z",
+    });
+    const ag = economics.exampleSparePrinter();
+    ag.licenses[0]!.requires.payments[0]!.rule = { kind: "percent_by_schedule", scheduleHash, of: "gross", min: null, max: null };
+    const royalty = ag.clauses.find((c) => c.clauseId === "kit-royalty")!;
+    if (royalty.rule.kind !== "percent" || royalty.rule.rateSource === null) throw new Error("fixture");
+    royalty.rule.rateSource.scheduleHash = scheduleHash;
+    const { preview: p } = await preview({ agreement: ag });
+    expect(p.refusals.map((r) => [r.code, r.path])).toEqual([["RATE_UNVERIFIED", ["clause", "kit-royalty", "rateSource"]]]);
   });
 
   it("configured forbidden recipients are enforced", async () => {

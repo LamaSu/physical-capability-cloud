@@ -56,6 +56,7 @@ function money(amount: bigint | string, currency: { code: string; decimals: numb
  *   margin    — what the composer or assembler keeps
  */
 export type PaymentCategory = "provider" | "upstream" | "fee" | "margin";
+const PAYMENT_CATEGORIES: readonly PaymentCategory[] = ["provider", "upstream", "fee", "margin"];
 
 export const PAYMENT_CATEGORY_LABELS: Readonly<Record<PaymentCategory, string>> = {
   provider: "Doing the work",
@@ -78,7 +79,9 @@ export function categoryOf(clause: Pick<Clause, "role" | "underLicense">): Payme
 }
 
 export interface PreviewLine {
-  unitRef: string;
+  /** The step this line is paid in, or null when the line sums a payment over several steps. */
+  unitRef: string | null;
+  /** The step's label, or "N steps" for a line that sums several. */
   stepLabel: string;
   amount: Money;
   category: PaymentCategory;
@@ -176,6 +179,83 @@ function percentText(bps: number): string {
 
 // ── Builder ──────────────────────────────────────────────────────────────────
 
+/**
+ * The most lines one payee shows. An agreement may pay one party in 256 steps through many splits, which
+ * is tens of thousands of allocations: listing each one would be megabytes that no person can read.
+ */
+export const MAX_LINES_PER_PAYEE = 24;
+
+/**
+ * A payee's lines, readable at any size, and always re-adding exactly to the payee's total:
+ *   1. one line per step and reason, when that fits;
+ *   2. else one line per reason, summed over its steps ("256 steps");
+ *   3. else the largest reasons, and the rest summed per kind of payment ("40 more payments").
+ */
+function readableLines(lines: readonly PreviewLine[], cur: { code: string; decimals: number }): PreviewLine[] {
+  const perStep = [...lines].sort((x, y) => cmpStr(x.unitRef ?? "", y.unitRef ?? "") || cmpStr(x.why, y.why));
+  if (perStep.length <= MAX_LINES_PER_PAYEE) return perStep;
+
+  const stepLabels = new Map(perStep.map((l) => [l.unitRef ?? "", l.stepLabel] as const));
+  const over = (steps: ReadonlySet<string>) => (steps.size === 1 ? stepLabels.get([...steps][0]!)! : `${steps.size} steps`);
+  const parts = (joined: Iterable<string>) => [...new Set([...joined].flatMap((x) => x.split("+")).filter((x) => x !== ""))].sort(cmpStr);
+  interface Group {
+    why: string;
+    category: PaymentCategory;
+    amount: bigint;
+    steps: Set<string>;
+    roles: Set<string>;
+    subjects: Set<string>;
+  }
+  const merge = (into: Map<string, Group>, key: string, l: { why: string; category: PaymentCategory; amount: bigint; steps: Iterable<string>; roles: Iterable<string>; subjects: Iterable<string> }) => {
+    const g = into.get(key) ?? { why: l.why, category: l.category, amount: 0n, steps: new Set<string>(), roles: new Set<string>(), subjects: new Set<string>() };
+    g.amount += l.amount;
+    for (const x of l.steps) g.steps.add(x);
+    for (const x of l.roles) g.roles.add(x);
+    for (const x of l.subjects) g.subjects.add(x);
+    into.set(key, g);
+  };
+  const toLine = (g: Group): PreviewLine => ({
+    unitRef: g.steps.size === 1 ? [...g.steps][0]! : null,
+    stepLabel: over(g.steps),
+    amount: money(g.amount, cur),
+    category: g.category,
+    role: parts(g.roles).join("+"),
+    subject: g.subjects.size > 0 ? parts(g.subjects).join("+") : null,
+    why: g.why,
+  });
+  const largestFirst = (x: Group, y: Group) => (x.amount === y.amount ? cmpStr(x.why, y.why) : x.amount > y.amount ? -1 : 1);
+
+  const byReason = new Map<string, Group>();
+  for (const l of perStep) {
+    merge(byReason, `${l.category}\u0000${l.why}`, {
+      why: l.why,
+      category: l.category,
+      amount: BigInt(l.amount.amount),
+      steps: [l.unitRef ?? ""],
+      roles: [l.role],
+      subjects: l.subject === null ? [] : [l.subject],
+    });
+  }
+  const reasons = [...byReason.values()].sort(largestFirst);
+  if (reasons.length <= MAX_LINES_PER_PAYEE) return reasons.map(toLine);
+
+  // Four lines are kept for the rest, one per kind of payment, so the whole never exceeds the limit.
+  const kept = reasons.slice(0, MAX_LINES_PER_PAYEE - PAYMENT_CATEGORIES.length);
+  const rest = new Map<string, Group>();
+  const restCount = new Map<string, number>();
+  for (const g of reasons.slice(kept.length)) {
+    merge(rest, g.category, { ...g, why: "" });
+    restCount.set(g.category, (restCount.get(g.category) ?? 0) + 1);
+  }
+  const tail = [...rest.values()]
+    .map((g) => {
+      const n = restCount.get(g.category)!;
+      return { ...g, why: `${n} more ${n === 1 ? "payment" : "payments"}: ${PAYMENT_CATEGORY_LABELS[g.category]}` };
+    })
+    .sort(largestFirst);
+  return [...kept, ...tail].map(toLine);
+}
+
 export interface PreviewOptions {
   /** Whether the fee in the agreement was checked against the server's own fee (compile option `fee`). */
   feeVerified: boolean;
@@ -243,12 +323,7 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
   };
 
   // Every attributed allocation, once: the payees' lines and the category totals come from the same list.
-  const byCategory = new Map<PaymentCategory, bigint>([
-    ["provider", 0n],
-    ["upstream", 0n],
-    ["fee", 0n],
-    ["margin", 0n],
-  ]);
+  const byCategory = new Map<PaymentCategory, bigint>(PAYMENT_CATEGORIES.map((c) => [c, 0n] as const));
   const linesByParty = new Map<string, PreviewLine[]>();
   const totalByParty = new Map<string, bigint>();
   for (const u of c.units) {
@@ -285,7 +360,7 @@ function fundablePreview(ag: EconomicAgreement, c: CompiledEconomics, options: P
       label: label(partyId),
       kind: partyById.get(partyId)?.kind ?? "person",
       total: money(total, cur),
-      lines: (linesByParty.get(partyId) ?? []).sort((x, y) => cmpStr(x.unitRef, y.unitRef) || cmpStr(x.why, y.why)),
+      lines: readableLines(linesByParty.get(partyId) ?? [], cur),
     }));
 
   const obligations: EconomicPreviewDTO["obligations"] = [];

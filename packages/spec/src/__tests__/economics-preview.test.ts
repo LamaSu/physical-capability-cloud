@@ -7,8 +7,10 @@
 import { describe, expect, it } from "vitest";
 import { compileEconomics } from "../economics/compile.js";
 import { AGREEMENT_TEMPLATES, exampleIncompatibleLicense, examplePrintAndMail, exampleSparePrinter, PRINTER_KIT_SCHEDULE } from "../economics/examples.js";
-import { buildEconomicPreview, formatAmount } from "../economics/preview.js";
+import { buildEconomicPreview, formatAmount, MAX_LINES_PER_PAYEE } from "../economics/preview.js";
 import { simulateEconomics } from "../economics/simulate.js";
+import type { EconomicAgreement } from "../economics/types.js";
+import { a, baseAgreement } from "./economics-helpers.js";
 
 const opts = { schedules: [PRINTER_KIT_SCHEDULE] };
 
@@ -133,5 +135,79 @@ describe("buildEconomicPreview", () => {
     expect(fails!.payer.refunded.display).toBe("8.00 USDC");
     expect(fails!.paid.find((x) => x.partyId === "courier")).toBeUndefined();
     expect(cheap!.reasons[0]).toContain("The payments add up to more than the price");
+  });
+});
+
+describe("a large agreement stays readable, and exact", () => {
+  /** `units` steps; `splits` percent clauses on every step, each paying a split of `members` parties. */
+  function wide(units: number, splits: number, members: number): EconomicAgreement {
+    const parties = [
+      ...baseAgreement().parties,
+      ...Array.from({ length: members }, (_, i) => ({ partyId: `p${i}`, label: `Member ${i}`, kind: "person" as const, payTo: a(0x1000 + i) })),
+    ];
+    const splitDefs = Array.from({ length: splits }, (_, k) => ({
+      splitId: `s${k}`,
+      label: `Pool ${k}`,
+      members: Array.from({ length: members }, (_, i) => ({ to: { party: `p${i}` }, weight: 1 + ((i + k) % 7), role: null, subject: null })),
+    }));
+    const clauses = [
+      ...splitDefs.map((sp, k) => ({
+        clauseId: `c${String(k).padStart(2, "0")}`,
+        label: `Pool ${k} share`,
+        role: "integrator" as const,
+        to: { split: sp.splitId },
+        subject: null,
+        appliesTo: { allUnits: true as const },
+        underLicense: null,
+        rule: { kind: "percent" as const, bps: 10 + k, of: "gross" as const, min: null, max: null, rateSource: null },
+      })),
+      baseAgreement().clauses[0]!,
+    ];
+    const steps = Array.from({ length: units }, (_, u) => ({ unitRef: `u${String(u).padStart(3, "0")}`, label: `Step ${u}`, gross: String(1_000_000_000 + u * 7919), components: [], measures: [] }));
+    return baseAgreement({ parties, splits: splitDefs, clauses, units: steps });
+  }
+
+  const previewOf = (ag: EconomicAgreement) => {
+    const compiled = compileEconomics(ag);
+    if (!compiled.ok) throw new Error(JSON.stringify(compiled.refusals));
+    return { compiled, p: buildEconomicPreview(ag, compiled, { feeVerified: true }) };
+  };
+  const reAdds = (p: ReturnType<typeof buildEconomicPreview>) => {
+    for (const payee of p.payees) {
+      expect(payee.lines.length).toBeLessThanOrEqual(MAX_LINES_PER_PAYEE);
+      expect(payee.lines.reduce((s, l) => s + BigInt(l.amount.amount), 0n)).toBe(BigInt(payee.total.amount));
+    }
+  };
+
+  it("61,696 allocations: each payee shows at most 24 lines that re-add to its total, in well under a megabyte", () => {
+    const { compiled, p } = previewOf(wide(256, 16, 15));
+    expect(compiled.units.reduce((n, u) => n + u.legs.reduce((m, l) => m + l.attribution.length, 0), 0)).toBe(256 * (16 * 15 + 1));
+    reAdds(p);
+    const member = p.payees.find((x) => x.partyId === "p0")!;
+    expect(member.lines.map((l) => l.stepLabel)).toEqual(Array(16).fill("256 steps"));
+    expect(member.lines.every((l) => l.unitRef === null && l.why.startsWith("Pool "))).toBe(true);
+    expect(JSON.stringify(p).length).toBeLessThan(1_000_000);
+  });
+
+  it("more reasons than lines: the largest are kept and the rest summed per kind of payment", () => {
+    const { p } = previewOf(wide(2, 40, 2));
+    reAdds(p);
+    const member = p.payees.find((x) => x.partyId === "p0")!;
+    expect(member.lines).toHaveLength(MAX_LINES_PER_PAYEE - 3);
+    expect(member.lines.at(-1)!.why).toBe("20 more payments: Licenses and contributors");
+    expect(member.lines.at(-1)!.stepLabel).toBe("2 steps");
+  });
+
+  it("a small agreement keeps one line per step and reason", () => {
+    const { p } = previewOf(wide(3, 2, 2));
+    const member = p.payees.find((x) => x.partyId === "p0")!;
+    expect(member.lines.map((l) => [l.unitRef, l.stepLabel])).toEqual([
+      ["u000", "Step 0"],
+      ["u000", "Step 0"],
+      ["u001", "Step 1"],
+      ["u001", "Step 1"],
+      ["u002", "Step 2"],
+      ["u002", "Step 2"],
+    ]);
   });
 });

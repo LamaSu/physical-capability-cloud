@@ -25,7 +25,7 @@ import {
   type CompileOptions,
   type EconomicAgreement,
 } from "@pcc/spec/economics";
-import type { RateSchedule } from "@pcc/spec";
+import { assertScheduleIsWellFormed, computeScheduleHash, type RateSchedule } from "@pcc/spec";
 import { getRepos } from "../db.js";
 
 const MAX_SCHEDULE_LOOKUPS = 64;
@@ -75,7 +75,12 @@ function namedScheduleHashes(agreement: unknown): string[] {
   return [...hashes].slice(0, MAX_SCHEDULE_LOOKUPS);
 }
 
-/** The sealed bodies the registry holds for those hashes. The compiler re-checks each body's hash. */
+/**
+ * The sealed bodies the registry holds for those hashes. A body the compiler could not use (one sealed
+ * before the registry checked number ranges, or a stored copy that no longer hashes to its label) is
+ * left out, so the pin it would verify is refused at its own clause (RATE_UNVERIFIED), instead of the
+ * server's bad record refusing the whole agreement as malformed options. The compiler re-checks both.
+ */
 function sealedSchedules(hashes: readonly string[]): RateSchedule[] {
   const out: RateSchedule[] = [];
   let repos: ReturnType<typeof getRepos>;
@@ -88,15 +93,18 @@ function sealedSchedules(hashes: readonly string[]): RateSchedule[] {
     const record = repos.contributors.getSchedule(h);
     if (!record) continue;
     try {
-      out.push({
+      const body = {
         scheduleHash: record.scheduleHash,
         version: record.version,
         segments: JSON.parse(record.segmentsJson),
         ...(record.notes !== null ? { notes: record.notes } : {}),
         publishedAt: record.publishedAt,
-      } as RateSchedule);
+      } as RateSchedule;
+      assertScheduleIsWellFormed(body);
+      if (computeScheduleHash(body).toLowerCase() !== record.scheduleHash.toLowerCase()) continue;
+      out.push(body);
     } catch {
-      // A corrupt stored body is skipped; the pin it would verify stays unverified.
+      // A corrupt or unusable stored body is skipped; the pin it would verify stays unverified.
     }
   }
   return out;
