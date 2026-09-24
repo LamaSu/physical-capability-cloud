@@ -21,8 +21,8 @@
  * reserving case-insensitively is a superset of every reader — never narrower.
  *
  * The same paths also enforce IDENTITY BINDING (WP-A fold F3, below): an
- * operatorId that already has a key or owns a kernel / registration / job
- * offer cannot be claimed by anyone but itself.
+ * operatorId that has, or ever had, a key, or owns a kernel / registration /
+ * job offer / UI artifact, cannot be claimed by anyone but itself.
  */
 
 import type { FastifyRequest } from "fastify";
@@ -103,13 +103,48 @@ export const IDENTITY_RESERVED_RESPONSE = {
 //
 // Rule, on the UNVERIFIED email paths (POST /api/auth/provision {email},
 // POST /api/contributors/quickstart): an operatorId that is already CLAIMED —
-// it has ANY unrevoked API key, or owns a kernel, a machine registration, or a
-// job offer (as poster) — is refused with 409 `identity_claimed`, UNLESS the
-// request is authenticated AS that operatorId (a valid Bearer API key whose
-// operatorId matches). Then the additional key is minted with scopes never
-// wider than the caller's own (callerMayDelegate). Matching is trimmed and
-// case-insensitive everywhere. The refusal never says WHICH resource matched.
-// The wallet path is unaffected: it is SIWE-gated (proof of control).
+// it has, or ever had, an API key (revoked and expired keys included), or owns
+// a kernel, a machine registration, a job offer (as poster) or a UI artifact —
+// is refused with 409 `identity_claimed`, UNLESS the request is authenticated
+// AS that operatorId (a valid Bearer API key whose operatorId matches). Then
+// the additional key is minted with scopes never wider than the caller's own
+// (callerMayDelegate). Matching is trimmed and case-insensitive everywhere
+// (normalizeIdentity on both sides). The refusal never says WHICH resource
+// matched. The wallet path is unaffected: it is SIWE-gated (proof of control).
+//
+// ONCE ISSUED, AN IDENTITY STAYS BOUND (repair R2). Revoking an identity's
+// last key does NOT release it: resources keyed on that operatorId outlive
+// the key (artifacts, request-node assignments, support threads, diagnostics
+// listings, ...), and a stranger who re-claimed the id would inherit them all —
+// while the real owner was locked out. The A10 revocation campaign revokes
+// test, expired and dormant keys without re-issue, which would have released
+// exactly those identities. Re-issue for a holder with no valid key goes
+// through a still-valid key of the same identity (Bearer), SIWE (a wallet
+// identity), or the operator (out-of-band) — never through a typed email.
+//
+// Which owner tables are consulted (R2 asked for every operatorId-owned store
+// the reviewer named, where the lookup is a cheap indexed one):
+//   - api_keys.operator_id (ANY row), shop_kernels.operator_address,
+//     machine_registrations (tenant_id, operator.walletAddress/email),
+//     job_offers.poster_did (+ the in-memory offer store) — F3;
+//   - ui_artifacts.owner — R2: a scalar owner column with its own index
+//     (ui_artifacts_owner_idx), which also covers the pcc_norm scan.
+// Deliberately NOT consulted:
+//   - capability_requests: a request node's owner is
+//     capability_dag[*].assignedOperator, inside a JSON array — no column, no
+//     index; the lookup would json_each-parse every request's DAG. A node is
+//     assigned to the calling key's own operatorId (bound for good by its
+//     api_keys row) unless a BROKER_OPERATORS caller names another id. The
+//     scalar requester_email/requester_wallet are body-supplied and authorize
+//     nothing, so matching them would only let anyone block a signup.
+//   - support threads (routes/support-messages.ts): an in-memory array (<=200,
+//     gone on restart), not a table. A thread's owner is always its
+//     authenticated creator: a key's operatorId (bound by its api_keys row) or
+//     a SIWE address (never email-shaped, so the email paths cannot mint it).
+//   - diagnostics uploads (routes/diagnostic-logs.ts): an in-memory array
+//     (<=100, 72h), not a table, and no authenticated owner is recorded — the
+//     only owner-like field is the body-supplied kernelId. Matching it would
+//     let any key holder reserve an arbitrary email for 72h.
 //
 // Fails CLOSED: if the lookup itself errors, the identity is treated as
 // claimed — an unanswerable ownership question grants nothing.
@@ -151,8 +186,10 @@ function rawSqlite(): RawSqlite {
 // machine_registrations.operator is JSON: CASE (evaluated lazily, unlike AND)
 // guards json_extract, so one malformed row cannot make every lookup throw.
 const CLAIM_QUERIES: ReadonlyArray<{ sql: string; params: number }> = [
+  // ANY key row, revoked or expired included: once issued, an identity stays
+  // bound (R2). There is no revoked_at filter on purpose.
   {
-    sql: "SELECT 1 FROM api_keys WHERE revoked_at IS NULL AND pcc_norm(operator_id) = ? LIMIT 1",
+    sql: "SELECT 1 FROM api_keys WHERE pcc_norm(operator_id) = ? LIMIT 1",
     params: 1,
   },
   {
@@ -170,13 +207,17 @@ const CLAIM_QUERIES: ReadonlyArray<{ sql: string; params: number }> = [
     sql: "SELECT 1 FROM job_offers WHERE pcc_norm(poster_did) = ? LIMIT 1",
     params: 1,
   },
+  {
+    sql: "SELECT 1 FROM ui_artifacts WHERE pcc_norm(owner) = ? LIMIT 1",
+    params: 1,
+  },
 ];
 
 /**
  * True when `operatorId` (trimmed, case-insensitive — normalizeIdentity on both
- * sides) already has an unrevoked API key, or owns a kernel, a machine
- * registration or a job offer. Errors count as claimed (fail closed). An empty
- * id is never claimed.
+ * sides) has, or ever had, an API key (revoked and expired included), or owns
+ * a kernel, a machine registration, a job offer or a UI artifact. Errors count
+ * as claimed (fail closed). An empty id is never claimed.
  */
 export function isClaimedIdentity(operatorId: string): boolean {
   const needle = normalizeIdentity(operatorId);
@@ -259,10 +300,11 @@ export function parseStoredScopes(raw: string | null | undefined): string[] {
 export const IDENTITY_CLAIMED_RESPONSE = {
   error: "identity_claimed",
   message:
-    "This identity already belongs to an existing operator. To add a key for " +
-    "it, call this endpoint authenticated as that operator (Authorization: " +
-    "Bearer <one of its API keys>). A wallet identity can be provisioned after " +
-    "proving control with SIWE.",
+    "This identity already belongs to an existing operator and cannot be " +
+    "claimed through unverified self-service. If it is yours: call this " +
+    "endpoint authenticated as it (Authorization: Bearer <one of its valid API " +
+    "keys>), prove a wallet identity with SIWE, or ask the PCC operator to " +
+    "issue the key.",
 } as const;
 
 /** 403 body when the caller's own key holds none of the scopes being minted. */

@@ -49,7 +49,7 @@ note), `packages/gateway/src/auth/api-key-auth.ts` (`assertMintableScopes`),
 | `GET /api/admin/waitlist`, `/api/admin/beta-apply` | any key or session, plus `X-Admin-Token` | explicit `admin` key plus `X-Admin-Token` |
 | `GET /api/admin/feedback` | `X-Admin-Token` only (public in api-gate) | unchanged |
 | Self-service `POST /api/auth/provision {email}` for an email on an admin allowlist | 201, a key the allowlist trusts | 403 `identity_reserved` |
-| Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that already has a key, or owns a kernel, a machine registration or a job offer | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its keys>`); the new key is then no wider than the caller's |
+| Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that has, or ever had, a key (revoked and expired keys included), or owns a kernel, a machine registration, a job offer or a UI artifact | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its valid keys>`); the new key is then no wider than the caller's |
 | Mutating `/api/operator/**` (e-stop/resume, approvals, policy, diagnostics, support, the pcc-node relay) | any key or session | explicit `operator` or `admin` scope; a wildcard key is refused; a session is refused |
 
 The allowlists that `identity_reserved` protects are listed in
@@ -216,11 +216,12 @@ Identities on an admin allowlist get `403 identity_reserved` on the email paths
 by design. Their keys are issued out-of-band. If their allowlist entry is a
 wallet, they can use SIWE instead.
 
-**Identity binding (WP-A fold F3).** An email identity that already has a key
-cannot be claimed again by an anonymous caller: `POST /api/auth/provision
-{email}` answers `409 identity_claimed`. A holder re-issues by calling it
-**authenticated as themselves**: `Authorization: Bearer <their current key>`
-with `{"email": "<their operator_id>"}`. The new key keeps the same
+**Identity binding (WP-A fold F3).** An email identity that has, or ever had,
+a key cannot be claimed again by an anonymous caller: `POST /api/auth/provision
+{email}` answers `409 identity_claimed`. Revoking its keys does not release it
+(Step 5). A holder re-issues by calling it **authenticated as themselves**:
+`Authorization: Bearer <their current, valid key>` with
+`{"email": "<their operator_id>"}`. The new key keeps the same
 `operator_id` and is never wider than the key that asked for it. A wildcard key
 can delegate only the contributor scopes this way (through
 `/api/contributors/quickstart`), never `operator`, `settlement` or `admin`: a
@@ -257,6 +258,24 @@ There are two ways to revoke:
 Revocation takes effect on the next request. Every request resolves its key
 with `findActiveByHash`, which filters `revoked_at IS NULL`. There is no key
 cache to wait out.
+
+**Revoking a key does not free its identity.** An `operator_id` that was ever
+issued a key stays bound to it. After its last key is revoked, or has expired,
+an anonymous `POST /api/auth/provision {email}` or `POST
+/api/contributors/quickstart` for that email still gets `409 identity_claimed`.
+So revoking test, expired and dormant keys without re-issuing them does **not**
+hand those identities to whoever types the email next. Everything keyed on the
+`operator_id` stays with it: kernels, artifacts, request-node assignments,
+support threads. The cost is on the holder's side. A holder with no valid key
+left can get a new one only through:
+
+- another still-valid key of the same identity (`Authorization: Bearer`, Step 4);
+- SIWE, for a wallet identity;
+- you, out-of-band: Step 0, option (b), with the narrow scopes from Step 4.
+
+Say this in the Step 3 notice. Re-issue **before** revoking whenever the holder
+still needs access: once their last valid key is gone, only you (or SIWE, for a
+wallet identity) can issue them another.
 
 ## Step 6: Verify
 

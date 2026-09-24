@@ -7,8 +7,9 @@
  * ids are public. POST /api/auth/provision {email} and POST
  * /api/contributors/quickstart minted a key for ANY typed email — so anyone
  * could mint a key AS an existing operator and pass that operator's ownership
- * checks. Now an operatorId that is already claimed (an unrevoked key, or a
- * kernel / machine registration / job offer it owns) is refused with 409
+ * checks. Now an operatorId that is already claimed (any key it was ever
+ * issued, revoked or expired included — repair R2 — or a kernel / machine
+ * registration / job offer / UI artifact it owns) is refused with 409
  * `identity_claimed`, unless the caller is authenticated AS that operatorId —
  * and then the extra key is no wider than the caller's own. Matching is
  * trimmed + case-insensitive; the refusal never says which resource matched.
@@ -20,7 +21,7 @@ import cookie from "@fastify/cookie";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { provisionRoutes } from "../routes/provision.js";
 import { contributorRoutes } from "../routes/contributors.js";
-import { initStore, closeStore, getRepos } from "../db.js";
+import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { provisionApiKey, generateApiKey } from "../auth/api-key-auth.js";
 import { initJobOffersStore, _resetJobOffersStoreForTests } from "../services/job-offers-store.js";
 import { ADMIN_IDENTITY_ALLOWLIST_ENV_VARS } from "../auth/reserved-identities.js";
@@ -140,7 +141,7 @@ async function seedOffer(poster: string): Promise<void> {
 }
 
 /** Insert a key row directly (e.g. a legacy wildcard key, which can no longer be minted). */
-function seedRawKey(operatorId: string, scopes: string[]): string {
+function seedRawKey(operatorId: string, scopes: string[], extra: { expiresAt?: string } = {}): string {
   const { rawKey, keyHash, keyPrefix } = generateApiKey();
   getRepos().apiKeys.insert({
     id: `key-${++seq}`,
@@ -151,8 +152,18 @@ function seedRawKey(operatorId: string, scopes: string[]): string {
     rateLimit: "1000/hour",
     usageCount: "0",
     createdAt: new Date().toISOString(),
+    ...(extra.expiresAt ? { expiresAt: extra.expiresAt } : {}),
   } as never);
   return rawKey;
+}
+
+/** A saved UI artifact (ui_artifacts row) owned by `owner`, with no key behind it. */
+function seedArtifact(owner: string): void {
+  const id = `art-${++seq}`;
+  const now = new Date().toISOString();
+  (getStore().db as unknown as { $client: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).$client
+    .prepare("INSERT INTO ui_artifacts (id, slug, owner, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(id, `slug-${id}`, owner, now, now, JSON.stringify({ id, owner }));
 }
 
 describe("F3 — provision {email}: an identity that already exists cannot be claimed", () => {
@@ -277,11 +288,63 @@ describe("F3 — provision {email}: an identity that already exists cannot be cl
     expect(res.json().operator_id).toBe(id);
   });
 
-  it("only UNREVOKED keys claim an identity (a fully revoked, resource-less id is free again)", async () => {
+  // WP-A repair R2. Old assertion: "only UNREVOKED keys claim an identity (a
+  // fully revoked, resource-less id is free again)" -> 201 after revoking.
+  // New: 409, nothing minted. Why: resources keyed on the operatorId outlive
+  // its keys, so a stranger re-claiming a revoked identity inherited them and
+  // locked the owner out — and the A10 campaign revokes many keys without
+  // re-issue. Once issued, an identity stays bound.
+  it("a REVOKED key still binds its identity for good (409, nothing minted)", async () => {
     const id = fresh("revoked");
     const first = await provision(id);
     getRepos().apiKeys.revoke(first.json().key_id);
-    expect((await provision(id)).statusCode).toBe(201);
+    const res = await provision(id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("identity_claimed");
+    expect(res.json().api_key).toBeUndefined();
+    expect(keysOf(id)).toHaveLength(0); // no active key: the revoked one is not listed, nothing new was minted
+  });
+
+  it("…including its case variants", async () => {
+    const id = fresh("revoked-variant");
+    const first = await provision(id);
+    getRepos().apiKeys.revoke(first.json().key_id);
+    expect((await provision(` ${id.toUpperCase()} `)).statusCode).toBe(409);
+  });
+
+  it("a revoked key is not a Bearer for its identity: presenting it still gets 409", async () => {
+    const id = fresh("revoked-bearer");
+    const first = await provision(id);
+    const oldKey = first.json().api_key as string;
+    getRepos().apiKeys.revoke(first.json().key_id);
+    const res = await provision(id, oldKey);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().api_key).toBeUndefined();
+  });
+
+  it("an EXPIRED key binds its identity too (regression guard)", async () => {
+    const id = fresh("expired");
+    seedRawKey(id, ["operator"], { expiresAt: new Date(Date.now() - 60_000).toISOString() });
+    expect((await provision(id)).statusCode).toBe(409);
+  });
+
+  it("the holder of a still-valid key re-issues after revoking another (201, same identity)", async () => {
+    const id = fresh("reissue");
+    const a = await provision(id);
+    const b = await provision(id, a.json().api_key as string);
+    expect(b.statusCode).toBe(201);
+    getRepos().apiKeys.revoke(a.json().key_id);
+    const c = await provision(id, b.json().api_key as string);
+    expect(c.statusCode).toBe(201);
+    expect(c.json().operator_id).toBe(id);
+  });
+
+  it("an identity that owns a UI ARTIFACT (no key) is claimed, case variants too (409)", async () => {
+    const owner = fresh("artifact-owner");
+    seedArtifact(owner);
+    expect((await provision(owner)).statusCode).toBe(409);
+    expect((await provision(owner.toUpperCase())).statusCode).toBe(409);
+    expect(keysOf(owner)).toHaveLength(0);
   });
 });
 
@@ -356,6 +419,16 @@ describe("F3 — contributors quickstart: the same binding", () => {
     expect(res.json().error).toBe("identity_claimed");
     expect(res.json().walletAddress).toBeUndefined();
     expect(keysOf(victim)).toHaveLength(1);
+  });
+
+  it("an identity whose only key is REVOKED -> 409 (R2: once issued, bound for good)", async () => {
+    const victim = fresh("qs-revoked");
+    const first = await provision(victim);
+    getRepos().apiKeys.revoke(first.json().key_id);
+    const res = await quickstart(victim);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().walletAddress).toBeUndefined();
+    expect(keysOf(victim)).toHaveLength(0);
   });
 
   it("victim OWNS A KERNEL -> 409; whitespace/case variant -> 409", async () => {
