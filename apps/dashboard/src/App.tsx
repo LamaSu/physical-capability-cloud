@@ -1,7 +1,7 @@
 import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
+import { AppShell, Sidebar, TopBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore } from "./stores/auth-store.js";
@@ -13,6 +13,7 @@ import { WalletProvider } from "./providers/WalletProvider.js";
 import { ConnectWallet } from "./components/ConnectWallet.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { ModeToggle } from "./components/ModeToggle.js";
+import { LiveStatusBar } from "./components/LiveStatusBar.js";
 import { Sentry } from "./lib/telemetry.js";
 import { usePageTracking } from "./hooks/use-page-tracking.js";
 import { SpatialApp } from "./SpatialApp.js";
@@ -197,7 +198,7 @@ function DashboardShell() {
             actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
           />
         }
-        statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
+        statusBar={<LiveStatusBar />}
       >
         <PageTransition>
           <Suspense fallback={<PageLoader />}>
