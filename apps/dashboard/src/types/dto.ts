@@ -11,6 +11,8 @@
  * in the API client (gateway.ts).
  */
 
+import type { ExecutionPhase } from "@pcc/spec";
+
 // ── Primitive aliases (mirrors @pcc/spec) ────────────────────────────────────
 
 export type Id = string;
@@ -109,6 +111,11 @@ export interface JobDTO {
   evidenceCount?: number;
   escrowStatus?: EscrowStatus;
   estimatedCompletion?: Timestamp;
+  /**
+   * Execution phase the gateway read from `status` (exact @pcc/spec table). Says
+   * nothing about evidence, verification or payment. Absent from older gateways.
+   */
+  executionPhase?: ExecutionPhase;
 }
 
 export interface JobTimelineEvent {
@@ -119,6 +126,7 @@ export interface JobTimelineEvent {
     | "evidence_received"
     | "verification_started"
     | "verified"
+    | "completed"
     | "settled"
     | "failed"
     | "disputed";

@@ -17,3 +17,11 @@ export * from "./evidence/index.js";
 // ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
 // (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
 export * from "./payouts.js";
+// Canonical money-status display map (browser-safe) — the ONE exact escrow /
+// settlement state -> tone + honest label table every surface renders from.
+export * from "./money/money-status.js";
+// Product read models (browser-safe): typed DTOs product surfaces project without
+// inferring meaning. JobExecutionDTO first (PX-6).
+export * from "./readmodels/job-execution.js";
+export * from "./readmodels/operator-work.js";
+export * from "./readmodels/product-home.js";

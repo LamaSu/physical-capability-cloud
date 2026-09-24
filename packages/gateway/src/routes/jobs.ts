@@ -1,9 +1,16 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
+import {
+  authorizeJobRead,
+  buildJobExecutionDTO,
+  loadJobExecutionSources,
+  type JobExecutionRepos,
+  type JobRow,
+} from "../readmodels/job-execution.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -26,6 +33,7 @@ export async function jobRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
     async (req, reply) => {
+      const asOf = new Date().toISOString();
       // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true.
       // Default OFF preserves cross-tenant listing (today's behavior).
       const tOpts = tenantOpts(req as any);
@@ -39,8 +47,11 @@ export async function jobRoutes(app: FastifyInstance) {
         { offset: req.query.offset, limit: req.query.limit },
       );
       if (result.success) {
-        // Backward-compatible envelope: { jobs } — same shape clients expect
-        return { jobs: result.data.items };
+        // Backward-compatible envelope: { jobs }, plus collection-v1 `items` (the closed
+        // render IR's list shape), the page (`total` is ALL matching jobs, not the page
+        // length) and `asOf` = when the gateway read the rows.
+        const { items, total, offset, limit, hasMore } = result.data;
+        return { jobs: items, items, total, offset, limit, hasMore, asOf };
       }
       return sendResult(reply, result);
     },
@@ -58,6 +69,71 @@ export async function jobRoutes(app: FastifyInstance) {
       return { job, evidence: evidenceBundles };
     }
     return sendResult(reply, result);
+  });
+
+  /**
+   * Product read model for one job (PX-6): JobExecutionDTO from @pcc/spec.
+   * Four independent axes (execution, evidence, verification, settlement), each
+   * naming its source; nothing is inferred across axes, and a source that cannot be
+   * read is reported `unavailable`, never defaulted.
+   *
+   * Object-authorized before any axis is read (authorizeJobRead): an admin, the job's
+   * kernel operator, or its recorded buyer. Anonymous callers get 401; anyone else gets
+   * 404 (no existence oracle), whatever TENANT_ENFORCE says. Under TENANT_ENFORCE a job
+   * of another tenant is also a 404.
+   */
+  app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/execution", async (req, reply) => {
+    const asOf = new Date().toISOString();
+    const notFound = () =>
+      reply.code(404).send({ error: "not_found", message: `job '${req.params.jobId}' not found` });
+    let store;
+    let job: JobRow | undefined;
+    try {
+      store = getStore();
+      job = store.repos.jobs.findById(req.params.jobId) as JobRow | undefined;
+    } catch (error) {
+      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: job row read failed");
+      return reply.code(503).send({
+        error: "read_model_unavailable",
+        message: "The job record could not be read. Try again shortly.",
+      });
+    }
+    if (!job) return notFound();
+
+    const tenant = tenantOpts(req as any);
+    if (tenant && (job.tenantId ?? null) !== tenant.tenantId) return notFound();
+
+    const principal = ((req as any).operatorId ?? (req as any).userId ?? null) as string | null;
+    const adminHeader = req.headers["x-admin-key"];
+    let decision;
+    try {
+      decision = authorizeJobRead(
+        job,
+        { principal, adminKey: typeof adminHeader === "string" ? adminHeader : null },
+        store.repos as unknown as JobExecutionRepos,
+        store.db,
+      );
+    } catch (error) {
+      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: authorization read failed");
+      return reply.code(503).send({
+        error: "read_model_unavailable",
+        message: "The job record could not be read. Try again shortly.",
+      });
+    }
+    if (!decision.allow) {
+      if (decision.reason === "unauthenticated") {
+        return reply.code(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
+      }
+      return notFound();
+    }
+
+    const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
+      tenant,
+      onReadError: (source, error) =>
+        req.log.warn({ jobId: req.params.jobId, source, err: error }, "job execution read model: source read failed"),
+    });
+    reply.header("cache-control", "no-store");
+    return buildJobExecutionDTO(sources, asOf);
   });
 
   /**
