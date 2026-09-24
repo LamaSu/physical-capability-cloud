@@ -593,12 +593,16 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
   // ── v1.5-industrial cut — #52-#55 (Family L + Family C) ─────────────
   // Design: ai/research/pcc-evidence-vocab-sensor-machinelog.md §4/§6. These bind
   // ALREADY-BUILT machinery (drift-detector + LogCaptureService.verifyChain,
-  // extracted to evidence/verifiers/). verifierStatus is "stub" for ALL FOUR: the
-  // predicate machinery is live/extracted, but the ORACLE-side PrimitiveVerifier
-  // binding is the settlement lane's work (§8), so each fails CLOSED under
-  // requireImplementedVerifier until that binding ships (see oracle-binding.ts).
-  // "stub" is what keeps the fail-closed invariant honest — marking them "live"
-  // would let a CSD settle a machine log the oracle cannot yet authenticate.
+  // extracted to evidence/verifiers/). Binding status (sensors lane, bus #2063):
+  // #52 machine.execution_log now HAS a real PrimitiveVerifier binding —
+  // `makeExecutionLogVerifier` in oracle-binding.ts wrapping verifyLogChain —
+  // but verifierStatus stays "stub" until a production consumer actually RUNS
+  // it ("live" = machinery exists and runs today; no public consumer wires the
+  // industrial verifier map yet, so it still fails CLOSED under
+  // requireImplementedVerifier — which is the honest state). #53-#55 remain
+  // interface-only stubs. Marking any of them "live" before a consumer runs the
+  // binding would let a CSD settle a record the settlement path cannot yet
+  // authenticate.
 
   // #52 — Family L (record). THE core C.4/C.5 machine-log proof object; emit-side
   // + predicate LIVE (LogCaptureService.verifyChain). Core claim is B1 (chain
