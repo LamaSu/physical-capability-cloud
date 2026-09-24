@@ -16,13 +16,17 @@ import { dashboardManifestToIr } from "./dashboard-ir.js";
 
 const ROUTES = join(dirname(fileURLToPath(import.meta.url)), "..", "routes");
 // Detail templates in BIND_POLICY that take a `:seg` id, keyed by the window kind that binds them.
+// NOTE: settlement + escrow + evidence are intentionally ABSENT — settlement/escrow are money
+// routes removed from `metric` (a manifest-labelled scalar there = a fake receipt), the receipt
+// window is now a STATIC pointer that binds no route, and evidence returns a bundle COLLECTION.
+// Their unbindability by any id-taking kind is proven by the explicit negative controls below.
 const PREFIX_KIND: Record<string, string> = {
-  capabilities: "capability", settlement: "receipt", evidence: "receipt",
-  jobs: "metric", kernels: "metric", escrow: "metric",
+  capabilities: "capability",
+  jobs: "metric", kernels: "metric",
 };
 // A window of `kind` binding to `path` (metric/receipt/capability are the id-taking kinds).
 function windowFor(kind: string, path: string): any {
-  if (kind === "metric") return { kind, label: "L", select: "u", binding: { path } };
+  if (kind === "metric") return { kind, label: "L", select: "status", binding: { path } }; // "status" is an allowlisted metric selector
   return { kind, binding: { path } };
 }
 const manifest = (win: any) => ({ csd: "x", title: "t", sections: [{ windows: [win] }] });
@@ -63,13 +67,20 @@ assert.equal(leaks.length, 0, `${leaks.length} route-collision leak(s)`);
 // test isn't vacuously rejecting everything).
 const controls: Array<[string, string]> = [
   ["capability", "/api/capabilities/cap-1"],
-  ["receipt", "/api/settlement/job-1"],
-  ["metric", "/api/jobs/job-1"],
+  ["metric", "/api/jobs/job-1/status"], // jobs/:id DETAIL removed from metric; /status is the allowed shape
   ["metric", "/api/kernels/kernel_1"],
 ];
 for (const [kind, path] of controls) {
   const r = dashboardManifestToIr(manifest(windowFor(kind, path)));
   assert.ok(r.ok, `positive control should accept ${kind} → ${path}: ${JSON.stringify(r)}`);
+  passed++;
+}
+// Negative controls: the money routes are NOT metric-bindable (a manifest-labelled scalar over
+// settlement/escrow state would paint a fake "Payment received"). Settlement data is shown only
+// through the fixed static settlement-record pointer.
+for (const money of ["/api/settlement/job-1", "/api/escrow/e1"]) {
+  const r = dashboardManifestToIr(manifest(windowFor("metric", money)));
+  assert.ok(!r.ok, `metric must REJECT money route ${money} (not metric-bindable)`);
   passed++;
 }
 console.log(`  ok   every static sibling rejected; ${controls.length} id-shaped controls accepted`);

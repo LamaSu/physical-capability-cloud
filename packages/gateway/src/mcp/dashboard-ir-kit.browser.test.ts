@@ -23,7 +23,7 @@ const validManifest = {
   csd: "pcc://artifacts/dashboard/v1", title: "Ops",
   sections: [{ heading: "Sec A", windows: [
     { kind: "note", text: "hello <b>not-html</b>" },
-    { kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } },
+    { kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } },
   ] }],
 };
 
@@ -79,7 +79,7 @@ describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
   it("renders a valid projected manifest as inert text (no <b>/script/iframe)", () => {
     const s = boot(); s.deliver(validManifest);
     expect(s.mount.textContent).toContain("Ops");
-    expect(s.mount.textContent).toContain("Balance");
+    expect(s.mount.textContent).toContain("Progress");
     expect(s.mount.textContent).toContain("hello <b>not-html</b>");
     expect(s.mount.querySelector("b")).toBeNull();
     expect(s.mount.querySelector("script")).toBeNull();

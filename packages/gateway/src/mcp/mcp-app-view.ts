@@ -1920,3 +1920,61 @@ export function handleRenderDashboardTool(rawArguments: unknown) {
     ],
   };
 }
+
+// ---------------------------------------------------------------------------
+// render_pcc_dashboard_ir — the Phase-B CLOSED-IR render tool. Same input schema,
+// but the handler PROJECTS the manifest (projectDashboardForMcpApp) server-side —
+// the "server projection for hygiene" seam — and delivers the PROJECTED manifest to
+// the B view (dashboard-ir-browser-entry), whose adapter+validator are the
+// authoritative boundary. Delivering the RAW manifest to B would fail-closed on
+// legitimate action/form/approval windows, since the closed adapter expects the
+// projected (stripped) shape. Additive: exists ALONGSIDE render_pcc_dashboard; the
+// repoint that makes B the default render path is a later gated change.
+// ---------------------------------------------------------------------------
+export const RENDER_IR_DASHBOARD_TOOL_NAME = "render_pcc_dashboard_ir";
+
+export function buildRenderIrDashboardTool(): Tool {
+  return {
+    name: RENDER_IR_DASHBOARD_TOOL_NAME,
+    description:
+      "Compose a live PCC dashboard rendered through the closed, PCC-owned IR (read-only). Pass a " +
+      "DashboardManifest; it renders as an interactive MCP App via the audited closed-IR render path.",
+    inputSchema: readDashboardManifestJsonSchema() as unknown as Tool["inputSchema"],
+    outputSchema: RENDER_OUTPUT_SCHEMA as unknown as Tool["outputSchema"],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: MCP_APP_RENDER_IR_URI } },
+  };
+}
+
+export function handleRenderIrDashboardTool(rawArguments: unknown) {
+  const parsed = DashboardManifestSchema.safeParse(rawArguments);
+  if (!parsed.success) {
+    const detail = parsed.error.errors
+      .map((e) => `${e.path.length ? e.path.join(".") : "(root)"}: ${e.message}`)
+      .join("; ");
+    return toolErrorResult(`Invalid DashboardManifest — ${detail}`);
+  }
+  if (containsApiKey(parsed.data)) {
+    return toolErrorResult(
+      "Refused: the manifest must not contain an API key (pcc_live_/pcc_test_ substring) — it would travel with the rendered dashboard.",
+    );
+  }
+  // Server-side projection to the closed shape (the browser adapter re-derives + validates it).
+  const projected = projectDashboardForMcpApp(parsed.data);
+  if (projected === null) {
+    return toolErrorResult("Refused: the manifest could not be projected to the closed render shape.");
+  }
+  const sectionCount = Array.isArray((projected as { sections?: unknown }).sections)
+    ? ((projected as { sections: unknown[] }).sections).length
+    : 0;
+  return {
+    _meta: { ui: { resourceUri: MCP_APP_RENDER_IR_URI } },
+    structuredContent: { manifest: projected },
+    content: [
+      {
+        type: "text" as const,
+        text: `Rendered a PCC dashboard (closed IR): ${parsed.data.title} — ${sectionCount} section${sectionCount === 1 ? "" : "s"}.`,
+      },
+    ],
+  };
+}

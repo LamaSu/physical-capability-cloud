@@ -80,7 +80,7 @@ const RESERVED_EXACT: ReadonlySet<string> = new Set([
   "/api/jobs/submit", "/api/jobs/submit-from-discovery",
   "/api/kernels/marketplace", "/api/kernels/register", "/api/escrow/chain",
 ]);
-type BindSchema = "receipt";
+export type BindSchema = "capability-summary-v1" | "run-summary-v1";
 interface BindPolicy {
   routes: RegExp[];
   needsSelect?: boolean;
@@ -90,21 +90,36 @@ interface BindPolicy {
 }
 const BIND_POLICY: Record<string, BindPolicy> = {
   // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
+  // Only NON-money, non-settlement-timestamp scalar routes are allowed. REMOVED:
+  //  - /api/settlement/:, /api/escrow/: (settlement/payment STATE → "Payment received");
+  //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
+  //    manifest could label it "Payment received");
+  //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
+  // jobs/:id/status + kernels/:id expose no money amount / settlement timestamp. The real
+  // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
+  // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
   metric: {
-    routes: [
-      route("/api/fiat-ramp/cdp/wallet/:/balance"),
-      route("/api/jobs/:"), route("/api/jobs/:/status"),
-      route("/api/escrow/:"), route("/api/settlement/:"), route("/api/kernels/:"),
-    ],
+    routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
     needsSelect: true,
   },
-  capability: { routes: [route("/api/capabilities/:")] }, // ID_SEG excludes types/templates/search/graph-*
-  receipt: { routes: [route("/api/settlement/:"), route("/api/evidence/:")], schema: "receipt" },
+  // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
+  // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
+  capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" }, // ID_SEG excludes types/templates/search/graph-*
+  // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
+  // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
+  // endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+  // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
+  // assert a settlement that never occurred. The authoritative receipt is the out-of-band
+  // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
   list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+  // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
+  // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
+  // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
   run: {
     routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
     sse: [route("/sse/stream/job/:")],
     correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
+    schema: "run-summary-v1",
   },
   // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
 };
@@ -192,6 +207,45 @@ function isCredentialName(k: string): boolean {
   const n = k.toLowerCase().replace(/[_\-\s]/g, "");
   if (CRED_EXACT.has(n)) return true;
   return CRED_SUBSTR.some((t) => n.includes(t));
+}
+// PCC-OWNED metric PROFILE (sol finding 3 durable fix + envelope correctness). Per metric
+// route, the allowlisted selectors → { PCC label, actual SOURCE path in that route's response
+// envelope }. PCC owns the label so a manifest can never frame a scalar as a payment/settlement
+// ("Payment received", "Funds received at"); and only these selectors are bindable, so a money
+// amount or settlement/heartbeat timestamp (usdc, lastHeartbeat, updatedAt, totalAmount) is not
+// selectable at all. A closed (route, selector) map beats a denylist (which leaks "Disbursement
+// time"). The `source` handles per-route unwrapping: GET /api/kernels/:id returns { kernel: … },
+// so "reputation" reads "kernel.reputation" — else the metric would bind but stay inert.
+// validateIr MIRRORS this (stat label + bind.select-as-source must match a profile entry).
+interface MetricField { label: string; source: string }
+const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
+  { route: route("/api/jobs/:/status"), fields: { // top-level envelope
+    status: { label: "Status", source: "status" },
+    progress: { label: "Progress", source: "progress" },
+  } },
+  { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
+    status: { label: "Status", source: "kernel.status" },
+    reputation: { label: "Reputation", source: "kernel.reputation" },
+    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
+    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
+    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
+    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" },
+  } },
+];
+/** Adapter side: (route, logical selector) → the field profile (label + real source), or null. */
+function metricFieldForSelect(path: string, select: unknown): MetricField | null {
+  if (typeof select !== "string") return null;
+  for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
+  return null;
+}
+/** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
+function metricLabelForSource(path: string, source: unknown): string | null {
+  if (typeof source !== "string") return null;
+  for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
+    return null;
+  }
+  return null;
 }
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */
@@ -296,21 +350,31 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
     case "metric":
       // `format` intentionally NOT accepted (see file header). select is top-level + required.
       if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
-      { const label = strictStr(w.label, LIM.title); if (label === null) return { ok: false, reason: "metric.label" };
-        if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
-        const b = mapBind(w.binding, "metric", w.select); if (!b.ok) return b;
+      { // The manifest `label` is ACCEPTED but IGNORED — PCC OWNS the metric label, derived from
+        // the (route, selector) PROFILE. Only allowlisted infra/execution selectors bind, and
+        // bind.select is rewritten to the REAL source path (envelope-aware, e.g. kernel.reputation)
+        // so the metric actually populates. `format` NOT accepted.
+        const bpath = isPlain(w.binding) ? (w.binding as Record<string, unknown>).path : undefined;
+        const field = typeof bpath === "string" ? metricFieldForSelect(bpath, w.select) : null;
+        if (!field) return { ok: false, reason: "metric (route, select) not an allowlisted metric field" };
+        const b = mapBind(w.binding, "metric", field.source); if (!b.ok) return b; // bind.select = REAL source path
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-        return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind, untrusted: true } }; }
+        return { ok: true, node: { type: "stat", id, props: { label: field.label }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
     case "capability":
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
       { const b = mapBind(w.binding, "capability"); if (!b.ok) return b;
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         return { ok: true, node: { type: "card", id, props: { kind: "capability" }, bind: b.bind } }; }
     case "receipt":
+      // STATIC settlement-record POINTER — no live bind (accepts + ignores a binding, like
+      // `approval`). A public read GET can neither reach settlement (auth-gated) nor prove a
+      // job status is a settlement event; the endpoint even reports `settled` for a merely
+      // completed job and exposes the PHYSICAL completion time as `settledAt`. So B renders
+      // ONLY the fixed read-only heading + "not proof of payment" pointer to the
+      // authoritative out-of-band Surface-B signed receipt — no fetched, mislabellable data.
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "receipt extra key" };
-      { const b = mapBind(w.binding, "receipt"); if (!b.ok) return b;
-        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-        return { ok: true, node: { type: "receipt", id, bind: b.bind } }; }
+      if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "receipt.binding shape" };
+      return { ok: true, node: { type: "receipt", id } };
     case "list":
       if (!onlyKeys(w, ["kind", "binding", "item", "limit"])) return { ok: false, reason: "list extra key" };
       { const b = mapBind(w.binding, "list"); if (!b.ok) return b;
@@ -421,9 +485,9 @@ const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
   section: { noBind: true, parentOf: ["heading", "text", "stat", "card", "receipt", "list", "grid", "approval-notice", "plan", "form-summary"] },
   heading: { props: { level: "level", text: "s400" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
   text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
-  stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
+  stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, childless: true }, // label is PCC-owned (not prose) — mirrored below
   card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
-  receipt: { bindKey: "receipt", needsBind: true, childless: true },
+  receipt: { noBind: true, childless: true }, // STATIC settlement-record pointer — no bind, no props, no children
   list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
   badge: { props: { text: "s400", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
   grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"], minChildren: 1, maxChildren: LIM.fields },
@@ -488,6 +552,16 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
       if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;
+    // stat (metric) label is PCC-OWNED — must equal the fixed label for its ALLOWLISTED
+    // selector (mirror of the adapter; a directly-constructed IR cannot invent a label like
+    // "Payment received" or select a non-allowlisted / money / timestamp scalar).
+    if (n.type === "stat") {
+      const src = (n.bind as { select?: unknown } | undefined)?.select;
+      const bpath = (n.bind as { path?: unknown } | undefined)?.path;
+      const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
+      if (expected === null) return "stat (route, source) not an allowlisted metric field";
+      if ((n.props as { label?: unknown } | undefined)?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+    }
     // prose provenance
     if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
     if (!spec.prose && n.untrusted !== undefined) return `non-prose ${n.type} marked untrusted`;

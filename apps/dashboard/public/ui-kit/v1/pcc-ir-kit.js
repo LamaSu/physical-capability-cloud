@@ -82,25 +82,37 @@
   ]);
   var BIND_POLICY = {
     // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
+    // Only NON-money, non-settlement-timestamp scalar routes are allowed. REMOVED:
+    //  - /api/settlement/:, /api/escrow/: (settlement/payment STATE → "Payment received");
+    //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
+    //    manifest could label it "Payment received");
+    //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
+    // jobs/:id/status + kernels/:id expose no money amount / settlement timestamp. The real
+    // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
+    // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
     metric: {
-      routes: [
-        route("/api/fiat-ramp/cdp/wallet/:/balance"),
-        route("/api/jobs/:"),
-        route("/api/jobs/:/status"),
-        route("/api/escrow/:"),
-        route("/api/settlement/:"),
-        route("/api/kernels/:")
-      ],
+      routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
       needsSelect: true
     },
-    capability: { routes: [route("/api/capabilities/:")] },
+    // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
+    // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
+    capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
     // ID_SEG excludes types/templates/search/graph-*
-    receipt: { routes: [route("/api/settlement/:"), route("/api/evidence/:")], schema: "receipt" },
+    // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
+    // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
+    // endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+    // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
+    // assert a settlement that never occurred. The authoritative receipt is the out-of-band
+    // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
     list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+    // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
+    // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
+    // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
     run: {
       routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
       sse: [route("/sse/stream/job/:")],
-      correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") }
+      correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
+      schema: "run-summary-v1"
     }
     // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
   };
@@ -184,6 +196,35 @@
     const n = k.toLowerCase().replace(/[_\-\s]/g, "");
     if (CRED_EXACT.has(n)) return true;
     return CRED_SUBSTR.some((t) => n.includes(t));
+  }
+  var METRIC_PROFILE = [
+    { route: route("/api/jobs/:/status"), fields: {
+      // top-level envelope
+      status: { label: "Status", source: "status" },
+      progress: { label: "Progress", source: "progress" }
+    } },
+    { route: route("/api/kernels/:"), fields: {
+      // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
+      status: { label: "Status", source: "kernel.status" },
+      reputation: { label: "Reputation", source: "kernel.reputation" },
+      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
+      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
+      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
+      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" }
+    } }
+  ];
+  function metricFieldForSelect(path, select) {
+    if (typeof select !== "string") return null;
+    for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
+    return null;
+  }
+  function metricLabelForSource(path, source) {
+    if (typeof source !== "string") return null;
+    for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
+      return null;
+    }
+    return null;
   }
   function isOpDescriptor(v) {
     if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
@@ -287,14 +328,15 @@
       case "metric":
         if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
         {
-          const label = strictStr(w.label, LIM.title);
-          if (label === null) return { ok: false, reason: "metric.label" };
-          if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
-          const b = mapBind(w.binding, "metric", w.select);
+          const bpath = isPlain(w.binding) ? w.binding.path : void 0;
+          const field = typeof bpath === "string" ? metricFieldForSelect(bpath, w.select) : null;
+          if (!field) return { ok: false, reason: "metric (route, select) not an allowlisted metric field" };
+          const b = mapBind(w.binding, "metric", field.source);
           if (!b.ok) return b;
           if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-          return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind, untrusted: true } };
+          return { ok: true, node: { type: "stat", id, props: { label: field.label }, bind: b.bind } };
         }
+      // PCC-owned label → NOT untrusted
       case "capability":
         if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
         {
@@ -305,12 +347,8 @@
         }
       case "receipt":
         if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "receipt extra key" };
-        {
-          const b = mapBind(w.binding, "receipt");
-          if (!b.ok) return b;
-          if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-          return { ok: true, node: { type: "receipt", id, bind: b.bind } };
-        }
+        if (w.binding !== void 0 && !isPlain(w.binding)) return { ok: false, reason: "receipt.binding shape" };
+        return { ok: true, node: { type: "receipt", id } };
       case "list":
         if (!onlyKeys(w, ["kind", "binding", "item", "limit"])) return { ok: false, reason: "list extra key" };
         {
@@ -440,9 +478,11 @@
     section: { noBind: true, parentOf: ["heading", "text", "stat", "card", "receipt", "list", "grid", "approval-notice", "plan", "form-summary"] },
     heading: { props: { level: "level", text: "s400" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
     text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
-    stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
+    stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, childless: true },
+    // label is PCC-owned (not prose) — mirrored below
     card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
-    receipt: { bindKey: "receipt", needsBind: true, childless: true },
+    receipt: { noBind: true, childless: true },
+    // STATIC settlement-record pointer — no bind, no props, no children
     list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
     badge: { props: { text: "s400", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
     grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"], minChildren: 1, maxChildren: LIM.fields },
@@ -517,6 +557,13 @@
         if (reason) return `bind: ${reason}`;
         if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget";
       } else if (spec.needsBind) return `${n.type} requires a bind`;
+      if (n.type === "stat") {
+        const src = n.bind?.select;
+        const bpath = n.bind?.path;
+        const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
+        if (expected === null) return "stat (route, source) not an allowlisted metric field";
+        if (n.props?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+      }
       if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
       if (!spec.prose && n.untrusted !== void 0) return `non-prose ${n.type} marked untrusted`;
       if (spec.childless) {
@@ -568,17 +615,23 @@
     invalid: "pcc-invalid",
     value: "pcc-value",
     row: "pcc-row",
-    meta: "pcc-meta"
+    meta: "pcc-meta",
+    note: "pcc-note",
+    schemaCard: "pcc-schema-card",
+    field: "pcc-fieldlabel"
   };
-  function readSelector(obj, sel) {
+  function readOwnPath(obj, sel) {
     let cur = obj;
-    const segs = sel.split(".");
-    for (const seg of segs) {
-      if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return "";
-      if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return "";
-      if (!Object.prototype.hasOwnProperty.call(cur, seg)) return "";
+    for (const seg of sel.split(".")) {
+      if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return void 0;
+      if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return void 0;
+      if (!Object.prototype.hasOwnProperty.call(cur, seg)) return void 0;
       cur = cur[seg];
     }
+    return cur;
+  }
+  function readSelector(obj, sel) {
+    const cur = readOwnPath(obj, sel);
     if (typeof cur === "string") return cur;
     if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
     if (typeof cur === "boolean") return String(cur);
@@ -590,8 +643,81 @@
     if (text !== void 0) n.textContent = text;
     return n;
   }
+  var UNAVAILABLE = "\u2014";
+  var SCHEMA_FIELDS = Object.freeze({
+    "capability-summary-v1": Object.freeze({
+      heading: "Capability",
+      fields: Object.freeze([
+        { label: "Name", key: "name" },
+        { label: "Type", key: "type" },
+        { label: "Base cost", key: "pricing.baseCost" },
+        { label: "Currency", key: "pricing.currency" },
+        { label: "Assurance tiers", key: "assuranceTiers", list: true },
+        { label: "Available", key: "available", bool: true }
+      ])
+    }),
+    "run-summary-v1": Object.freeze({
+      heading: "Run",
+      // Dual-shape: the /status route returns top-level status/progress; the /jobs/:id detail
+      // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
+      // keys (NOT a manifest selector); first present wins.
+      fields: Object.freeze([
+        { label: "Status", key: ["status", "job.status"] },
+        { label: "Progress", key: ["progress", "job.progress"] }
+      ])
+    })
+  });
+  var SETTLEMENT_NOTICE = Object.freeze({
+    heading: "Settlement record (read-only)",
+    note: "Not proof of payment; verify on the authenticated PCC surface."
+  });
+  function readField(data, f) {
+    const keys = Array.isArray(f.key) ? f.key : [f.key];
+    if (f.list) {
+      for (const k of keys) {
+        const arr = readOwnPath(data, k);
+        if (!Array.isArray(arr)) continue;
+        const parts = [];
+        for (const x of arr) {
+          if (typeof x === "string" && x.length > 0) parts.push(x);
+          else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
+          else if (typeof x === "boolean") parts.push(String(x));
+        }
+        if (parts.length) return parts.join(", ");
+      }
+      return UNAVAILABLE;
+    }
+    for (const k of keys) {
+      const v = readSelector(data, k);
+      if (v === "") continue;
+      if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
+      return v;
+    }
+    return UNAVAILABLE;
+  }
+  function bindSchemaCard(schema, data, slots) {
+    const spec = SCHEMA_FIELDS[schema];
+    if (!spec) return;
+    spec.fields.forEach((f, i) => {
+      const slot = slots[i];
+      if (slot) slot.textContent = readField(data, f);
+    });
+  }
   function paintChildren(doc, node, into) {
     if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
+  }
+  function paintSchemaCard(doc, rootCls, schema) {
+    const spec = SCHEMA_FIELDS[schema];
+    const e = el(doc, rootCls + " " + CLS.schemaCard);
+    e.appendChild(el(doc, CLS.heading, spec.heading));
+    if (spec.note) e.appendChild(el(doc, CLS.note, spec.note));
+    for (const f of spec.fields) {
+      const row = el(doc, CLS.row);
+      row.appendChild(el(doc, CLS.field, f.label));
+      row.appendChild(el(doc, CLS.value, UNAVAILABLE, true));
+      e.appendChild(row);
+    }
+    return e;
   }
   var PAINTERS = Object.freeze({
     root: (d, n) => {
@@ -608,14 +734,20 @@
     text: (d, n) => el(d, CLS.text, String(n.props?.text ?? ""), n.untrusted),
     stat: (d, n) => {
       const e = el(d, CLS.stat);
-      e.appendChild(el(d, CLS.heading, String(n.props?.label ?? ""), true));
-      e.appendChild(el(d, CLS.value, "", true));
+      e.appendChild(el(d, CLS.heading, String(n.props?.label ?? "")));
+      e.appendChild(el(d, CLS.value, UNAVAILABLE, true));
       return e;
     },
-    card: (d, n) => el(d, CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap")),
+    card: (d, n) => {
+      const rootCls = CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap");
+      const schema = n.bind?.schema;
+      if (schema === "capability-summary-v1" || schema === "run-summary-v1") return paintSchemaCard(d, rootCls, schema);
+      return el(d, rootCls);
+    },
     receipt: (d) => {
       const e = el(d, CLS.receipt);
-      e.appendChild(el(d, CLS.value, "", true));
+      e.appendChild(el(d, CLS.heading, SETTLEMENT_NOTICE.heading));
+      e.appendChild(el(d, CLS.note, SETTLEMENT_NOTICE.note));
       return e;
     },
     list: (d) => {
@@ -959,17 +1091,17 @@
   var liveDoc = null;
   var liveRoot = null;
   function collectBound(doc) {
-    const stats = [], lists = [], receipts = [];
+    const stats = [], lists = [], schemaCards = [];
     const walk = (n) => {
       if (n.bind) {
         if (n.type === "stat") stats.push(n);
         else if (n.type === "list") lists.push(n);
-        else if (n.type === "receipt") receipts.push(n);
+        else if (n.type === "card") schemaCards.push(n);
       }
       if (n.children) for (const c of n.children) walk(c);
     };
     walk(doc.root);
-    return { stats, lists, receipts };
+    return { stats, lists, schemaCards };
   }
   function startBinds(doc, root) {
     const origin = pccApiOrigin();
@@ -997,28 +1129,30 @@
           release();
         }
       },
-      // NO openSse: SSE transport intentionally absent (run cards are unbound below).
+      // NO openSse: SSE transport intentionally absent — run cards bind via GET poll only.
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (h) => clearTimeout(h),
       makeSignal: () => gen.signal
     };
-    const { stats, lists, receipts } = collectBound(doc);
+    const { stats, lists, schemaCards } = collectBound(doc);
     const byClass = (cls) => Array.from(root.querySelectorAll("." + cls));
-    const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), receiptEls = byClass("pcc-receipt");
+    const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), schemaEls = byClass("pcc-schema-card");
     const push = (h) => boundHandles.push(h);
     stats.forEach((node, i) => {
       const el2 = statEls[i];
       const slot = el2?.querySelector(".pcc-value");
       if (slot) push(startBind(node, deps, (data) => {
-        slot.textContent = bindScalar(node, data);
+        const v = bindScalar(node, data);
+        slot.textContent = v !== "" ? v : "\u2014";
       }));
     });
-    receipts.forEach((node, i) => {
-      const el2 = receiptEls[i];
-      const slot = el2?.querySelector(".pcc-value");
-      if (slot) push(startBind(node, deps, (data) => {
-        slot.textContent = bindScalar(node, data);
-      }));
+    schemaCards.forEach((node, i) => {
+      const el2 = schemaEls[i];
+      if (!el2) return;
+      const schema = node.bind?.schema;
+      if (!schema) return;
+      const slots = Array.from(el2.querySelectorAll(".pcc-value"));
+      push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];

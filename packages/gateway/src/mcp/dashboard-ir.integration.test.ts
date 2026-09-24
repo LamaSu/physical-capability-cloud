@@ -29,7 +29,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   it("happy path: valid artifact projects, adapts, and validates", () => {
     const { projected, ir } = chain(raw([
       { kind: "note", text: "Live ops board" },
-      { kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } },
+      { kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } },
       { kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", meta: ["kernelId", "status"], statusFrom: "status" } },
       { kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/job/j1" }, statusFrom: "status", latestFrom: "latest" },
     ]));
@@ -44,7 +44,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   });
 
   it("metric bound to the DEAD /api/fiat-ramp/wallet/balance route is REJECTED", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/wallet/balance" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "progress", binding: { path: "/api/fiat-ramp/wallet/balance" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -61,7 +61,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
 
   it("binding.query nested-object value survives projection → adapter REJECTS (attributed: has select)", () => {
     // `select` present so the rejection is due to the non-scalar query value, not missing select.
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: { filter: { nested: "x" } } } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", query: { filter: { nested: "x" } } } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -72,9 +72,11 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     if (ir?.ok) { const has = (n: any): boolean => n.type === "badge" || (n.children || []).some(has); expect(has(ir.doc.root)).toBe(true); }
   });
 
-  it("collision route /api/evidence/lit-status as a receipt is REJECTED (Lit status ≠ receipt)", () => {
-    const { projected, ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }]));
-    expect(projected === null || ir?.ok === false).toBe(true);
+  it("receipt with an evidence binding is a STATIC pointer — binding ignored, nothing fetched (no leak)", () => {
+    // Former "leak" case: a static settlement-record pointer fetches nothing, so an evidence
+    // (or any) binding cannot leak; it renders only the fixed read-only pointer.
+    const { ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }]));
+    expect(ir?.ok).toBe(true);
   });
 
   it("collision route /api/capabilities/graph-stats as a capability is REJECTED (id-grammar)", () => {
@@ -83,7 +85,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   });
 
   it("collision route /api/settlement/status as a metric is REJECTED (attributed: has select)", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/status" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "progress", binding: { path: "/api/settlement/status" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -112,16 +114,15 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     expect(({} as any).polluted).toBeUndefined(); // no global prototype pollution
   });
 
-  // ── Semantic-privilege escalation: a privileged-LOOKING window cannot bind to a
-  //    non-canonical read path even though the path is a perfectly valid /api route.
-  it("receipt window bound to /api/escrow/:id is REJECTED (route allowlist)", () => {
-    const { projected, ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]));
-    // Projection accepts the binding shape; the adapter's per-kind route allowlist refuses it.
-    expect(projected === null || ir?.ok === false).toBe(true);
+  // ── The settlement record is a STATIC pointer: a receipt window accepts + IGNORES any
+  //    binding (like `approval`) and fetches nothing, so no route can leak through it.
+  it("receipt window with an escrow binding is ACCEPTED as a static pointer (binding ignored, no fetch)", () => {
+    const { ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]));
+    expect(ir?.ok).toBe(true);
   });
 
   it("metric bound to a financial-leak route (stripe/credits) is REJECTED (attributed: has select)", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "Credits", select: "u", binding: { path: "/api/fiat-ramp/stripe/credits/u1" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "Credits", select: "progress", binding: { path: "/api/fiat-ramp/stripe/credits/u1" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
