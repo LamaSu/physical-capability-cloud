@@ -136,7 +136,7 @@ describe("buildEvidenceTiersFromEmits — the digital-receipt core is tier-1 eli
 
 describe("adapter default manifests", () => {
   it("ships a manifest for every kernel adapter family", () => {
-    for (const t of ["octoprint", "ipp", "opcua", "sila", "modbus", "generic-http", "mock"]) {
+    for (const t of ["octoprint", "ipp", "opcua", "sila", "modbus", "opentrons", "hamilton", "generic-http", "mock"]) {
       expect(getAdapterManifest(t)).toBeDefined();
       expect(EvidenceEmitterManifestSchema.safeParse(getAdapterManifest(t)).success).toBe(true);
     }
@@ -152,7 +152,7 @@ describe("adapter default manifests", () => {
   });
 
   it("every digital adapter is eligible-by-default at tier 1", () => {
-    for (const t of ["octoprint", "ipp", "opcua", "sila", "modbus", "generic-http"]) {
+    for (const t of ["octoprint", "ipp", "opcua", "sila", "modbus", "opentrons", "hamilton", "generic-http"]) {
       const { evidence, structured } = buildAdapterEvidence(t);
       expect(structured).toBe(true);
       const report = computeCsdEligibility({ url: `pcc://adapter/${t}`, evidence });

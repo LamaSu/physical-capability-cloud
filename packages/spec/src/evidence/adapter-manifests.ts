@@ -1,9 +1,11 @@
 /**
  * Adapter + device-role DEFAULT emitter manifests — the supply-side DATA.
  *
- * One entry per adapter family present in packages/kernel/src/adapters/
- * (octoprint / ipp / opcua / sila / modbus / generic-http / mock) and per
- * evidence-only device ROLE (camera / sensor). Each declares, in the bounded
+ * One entry per machine adapter the kernel's factory registers
+ * (packages/kernel/src/adapter-factory.ts: octoprint / ipp / opcua / sila /
+ * modbus / opentrons / hamilton / generic-http / mock; a kernel test keeps the
+ * two in step) and per evidence-only device ROLE (camera / sensor).
+ * PyLabRobot is not a kernel AdapterType, so it has no entry here. Each declares, in the bounded
  * vocabulary, which primitives that adapter/role can EMIT. Auto-discovery reads
  * these to write structured `evidence.tierN.primitives[]` instead of free-text
  * `required[]`, turning an onboarded device from tier-0-capped into
@@ -90,6 +92,20 @@ export const ADAPTER_DEFAULT_MANIFESTS: Readonly<Record<string, EvidenceEmitterM
 
   // PLC / fieldbus via Modbus.
   modbus: adapterManifest("modbus", [...DIGITAL_RECEIPT_CORE]),
+
+  // Liquid handlers. Both run inside the kernel's job pipeline, so they carry
+  // the receipt core like every kernel-signed connector: the kernel's
+  // EvidenceEmitter signs each job-step bundle (kernel/src/evidence-emitter.ts,
+  // finalize + signFn) and marks mock/simulated events fabricated so they never
+  // satisfy a real tier (same file, the isFabricated handling). Nothing more is
+  // claimed: neither adapter feeds LogCaptureService (only printer-log-adapter
+  // does), so there is no machine.execution_log, and neither emits telemetry.
+  //   - opentrons (kernel/src/opentrons/adapter.ts): real runs emit
+  //     protocol_uploaded and run_action; mock mode reports simulated:true.
+  //   - hamilton (kernel/src/adapters/hamilton-adapter.ts): real runs emit
+  //     execution_started / execution_completed / execution_failed.
+  opentrons: adapterManifest("opentrons", [...DIGITAL_RECEIPT_CORE]),
+  hamilton: adapterManifest("hamilton", [...DIGITAL_RECEIPT_CORE]),
 
   // Arbitrary external HTTP capability. Adds target-system confirmation via the
   // upstream's own channel (api) — a natural fit for HTTP-backed work.
