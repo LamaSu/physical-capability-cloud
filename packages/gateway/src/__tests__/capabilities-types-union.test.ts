@@ -18,10 +18,20 @@ import { getRegisteredTypes } from "@pcc/contract-builder";
 import { capabilityRoutes } from "../routes/capabilities.js";
 import { initStore, closeStore } from "../db.js";
 
+/** Seeded owner (operatorAddress) of kernel-nyc. */
+const NYC_OWNER = "0x1111111111111111111111111111111111111111";
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
   const app = Fastify({ logger: false });
+  // Identity shim standing in for apiGate (carrier.test.ts pattern). WP-C:
+  // POST /api/capabilities is owner-only, so publishing on kernel-nyc is done
+  // as its seeded owner. (Old: the POST carried no identity and was accepted.)
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(capabilityRoutes);
   await app.ready();
   return app;
@@ -48,6 +58,7 @@ describe("GET /api/capabilities/types -- union of templates + catalog + CSD", ()
     const reg = await app.inject({
       method: "POST",
       url: "/api/capabilities",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId: "kernel-nyc", // a seeded kernel
         type: AD_HOC,

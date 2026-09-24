@@ -341,6 +341,65 @@ describe("WP-C announce: owner-only stub", () => {
   });
 });
 
+// ── Extra (beyond the WP-C item list): POST /api/capabilities is owner-only ──
+// apiGate lists "/api/capabilities" in PUBLIC_EXACT with no method guard, so a
+// POST reaches the handler unauthenticated. Without an owner check anyone can
+// list priced capabilities under someone else's kernel and inherit that
+// kernel's ceiling. That is the catalog injection the heartbeat fix closes.
+
+describe("WP-C (extra) capability publish: owner-only", () => {
+  it("[neg] UNAUTHENTICATED POST /api/capabilities -> 401, nothing inserted", async () => {
+    const id = uid("wpc-pub-victim");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      payload: { kernelId: id, type: "wpc-evil", id: `cap-${id}-evil`, assuranceTiers: [3] },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(getRepos().capabilities.findById(`cap-${id}-evil`)).toBeFalsy();
+  });
+
+  it("[neg] NON-owner POST /api/capabilities -> 403, nothing inserted", async () => {
+    const id = uid("wpc-pub-victim2");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asAttacker(),
+      payload: { kernelId: id, type: "wpc-evil", id: `cap-${id}-evil`, assuranceTiers: [3] },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("not_kernel_owner");
+    expect(getRepos().capabilities.findById(`cap-${id}-evil`)).toBeFalsy();
+  });
+
+  it("[neg] POST /api/capabilities for an UNKNOWN kernel -> 404, no orphan listing", async () => {
+    const id = uid("wpc-pub-ghost");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: id, type: "wpc-ghost", id: `cap-${id}-ghost` },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(getRepos().capabilities.findById(`cap-${id}-ghost`)).toBeFalsy();
+  });
+
+  it("the OWNER can publish; the served tiers are clamped to the kernel's ceiling", async () => {
+    const id = uid("wpc-pub-owner");
+    expect((await registerKernel(id)).statusCode).toBe(201);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/capabilities",
+      headers: asOwner(),
+      payload: { kernelId: id, type: "wpc-legit", id: `cap-${id}-legit`, assuranceTiers: [0, 1, 2, 3] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().capability.assuranceTiers).toEqual([0]);
+  });
+});
+
 // ── C2: reads / search / selection use the clamped tiers ────────────────────
 
 describe("WP-C reads: tiers are served clamped to the owning kernel's ceiling", () => {

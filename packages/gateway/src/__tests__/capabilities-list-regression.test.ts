@@ -16,10 +16,20 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { capabilityRoutes } from "../routes/capabilities.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 
+/** Seeded owner (operatorAddress) of kernel-nyc. */
+const NYC_OWNER = "0x1111111111111111111111111111111111111111";
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
   const app = Fastify({ logger: false });
+  // Identity shim standing in for apiGate (carrier.test.ts pattern). WP-C:
+  // POST /api/capabilities is owner-only, so these registrations on
+  // kernel-nyc are made as its seeded owner. (Old: no identity, accepted.)
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(capabilityRoutes);
   await app.ready();
   return app;
@@ -54,6 +64,7 @@ describe("GET /api/capabilities -- list correctness (P0 regression)", () => {
     const registerRes = await app.inject({
       method: "POST",
       url: "/api/capabilities",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         type: "pizza.order",
@@ -101,6 +112,7 @@ describe("GET /api/capabilities?type= -- type-filter (P1 regression)", () => {
     await app.inject({
       method: "POST",
       url: "/api/capabilities",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId: "kernel-nyc",
         type: "courier.dispatch",
