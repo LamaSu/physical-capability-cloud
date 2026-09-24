@@ -16,6 +16,15 @@
  * `authority` is assigned by the server from the source record, never by the
  * producer of the content. Titles are server-templated: requester free text,
  * requester ids and fine-grained locations never appear.
+ *
+ * Demand intelligence stays private: a demand_aggregate carries exactly what
+ * painpoints' toPublicOpportunityAggregate publishes (capability type, demand
+ * band, as-of day). No raw intents, no private priors, no requester
+ * identities, no location, evidence or deadline.
+ *
+ * v0, FROZEN FOR CONSUMERS (steward ruling #3058): adk, readmodels,
+ * operator-ux and refvertical build against this shape. Any change needs
+ * their ack on the bus first; a breaking change is a new version.
  */
 
 import { z } from "zod";
@@ -105,6 +114,10 @@ export const OpportunityDTOSchema = z
       if (!o.demandBand) fail("a demand_aggregate needs a demandBand");
       if (o.reward) fail("a demand_aggregate is a signal and carries no reward");
       if (o.authority !== "derived_signal") fail("a demand_aggregate is a derived_signal");
+      // Only painpoints' public projection fields: nothing more specific leaves the server.
+      if (o.location) fail("a demand_aggregate carries no location");
+      if (o.evidence) fail("a demand_aggregate carries no evidence requirements");
+      if (o.deadline) fail("a demand_aggregate carries no deadline");
     } else if (o.demandBand) {
       fail("only a demand_aggregate carries a demandBand");
     }

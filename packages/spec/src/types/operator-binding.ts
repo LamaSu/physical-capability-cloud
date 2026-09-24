@@ -10,6 +10,14 @@
  * grants authority to move money; the scope checker enforces that (ledger
  * R28), and this field lets a UI say so without inferring it. Execution rights
  * come from the bindings, never from the key's scopes.
+ *
+ * Payout: the payee view is a masked READ of the destination the server
+ * resolves from its own payout-destination store (N21). A binding never sets,
+ * changes or authorizes a payout, and grants no spend authority (R41).
+ *
+ * v0, FROZEN FOR CONSUMERS (steward ruling #3058): adk, readmodels,
+ * operator-ux and refvertical build against this shape. Any change needs
+ * their ack on the bus first; a breaking change is a new version.
  */
 
 import { z } from "zod";

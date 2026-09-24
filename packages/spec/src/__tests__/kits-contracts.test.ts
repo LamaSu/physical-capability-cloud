@@ -103,6 +103,30 @@ describe("Capability Kit identity (computeKitDigest)", () => {
   });
 });
 
+describe("computeKitDigest golden vectors (re-run when the canonicalizer changes: N15 / #359)", () => {
+  // Pinned by hand; the minimal vector was re-derived independently in Python:
+  // json.dumps(obj, sort_keys=True, separators=(",", ":")) -> sha256 matched.
+  it("minimal kit", async () => {
+    const minimal = {
+      schema: "pcc.capability-kit/v1",
+      name: "golden-minimal",
+      version: "0.0.1",
+      parentKitDigest: null,
+      capabilities: [{ csdUrl: "pcc://capabilities/liquid-handling/v1", capabilityContractDigest: H("a") }],
+      artifacts: [{ role: "method", name: "m.py", mediaType: "text/x-python", digest: H("1") }],
+    };
+    expect(await computeKitDigest(minimal)).toBe(
+      "sha256:e05bb524e98ed72c05d56036a1b96a2de5c1cc088fb0661761d867b8accc2527",
+    );
+  });
+
+  it("full lab/workcell kit", async () => {
+    expect(await computeKitDigest(liquidHandlingKit())).toBe(
+      "sha256:50c2a3a84bb9fb663f4491f4f98f64e27fb52fa4613636a78e7ac0f60394d4f8",
+    );
+  });
+});
+
 describe("validateKitCompleteness (reusable kit vs one-off listing)", () => {
   it("accepts a kit another operator could deploy from the manifest alone", () => {
     expect(validateKitCompleteness(liquidHandlingKit())).toEqual({ complete: true, missing: [] });
@@ -237,6 +261,14 @@ describe("OpportunityDTO", () => {
     expect(OpportunityDTOSchema.safeParse({ ...agg, reward: { amount: "1", currency: "USDC", fundingStatus: "unfunded" } }).success).toBe(false);
     expect(OpportunityDTOSchema.safeParse({ ...agg, demandBand: undefined }).success).toBe(false);
     expect(OpportunityDTOSchema.safeParse({ ...agg, authority: "authoritative" }).success).toBe(false);
+  });
+
+  it("a demand aggregate carries only painpoints' public fields: no location, evidence or deadline", () => {
+    const agg = opportunity({ kind: "demand_aggregate", reward: undefined, demandBand: "10-24", authority: "derived_signal" });
+    expect(OpportunityDTOSchema.safeParse(agg).success).toBe(true);
+    expect(OpportunityDTOSchema.safeParse({ ...agg, location: { country: "US" } }).success).toBe(false);
+    expect(OpportunityDTOSchema.safeParse({ ...agg, evidence: { tier: 1, requiredEventClasses: [] } }).success).toBe(false);
+    expect(OpportunityDTOSchema.safeParse({ ...agg, deadline: "2026-10-01T00:00:00Z" }).success).toBe(false);
   });
 
   it("never carries requester data, float amounts, multi-line titles or fine-grained locations", () => {

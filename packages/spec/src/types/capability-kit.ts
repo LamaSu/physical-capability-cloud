@@ -20,6 +20,14 @@
  * The manifest holds content only. Who published it, when, its status and how
  * often it is reused are registry metadata, stamped by the server and never
  * part of the hashed bytes.
+ *
+ * The digest uses @pcc/spec's single canonicalizer (util/canonical.ts), never a
+ * second one. Golden vectors are pinned in kits-contracts.test.ts; re-run them
+ * whenever that canonicalizer changes (N15 / PR #359).
+ *
+ * v0, FROZEN FOR CONSUMERS (steward ruling #3058): adk, readmodels,
+ * operator-ux and refvertical build against this shape. Any change needs
+ * their ack on the bus first; a breaking change is a new version.
  */
 
 import { z } from "zod";
