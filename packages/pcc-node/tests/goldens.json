@@ -237,6 +237,62 @@
       "parent_signature_hex": "dcac6e33ad219381fe1cb44ed23da4eb2f6cde27bd4a96a650db5f1ad9698a55bc6d2793b4e9c4ec4ef7424ff5d26328bff45216621daa5b5c02f82fe2ceb10b",
       "sorted_key_preimage_utf8": "{\"expiresAt\":1727203600,\"issuedAt\":1727200000,\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100},\"sessionId\":\"sesión-ü-日\"}",
       "sorted_key_signature_hex": "f63eb6203cfc2118c0b8b544adebfa822748b4fc1f953ad2cf216354afefce47860792395f833e06cfe0c6090c42fa877fb4aca725cdf02b778a1287c7e9510e"
+    },
+    {
+      "name": "lone_surrogate_strings",
+      "session": {
+        "sessionId": "sess-\ud800-lone",
+        "parentAgentId": "agent-\udfff",
+        "publicKeyHex": "65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3",
+        "issuedAt": 1727200000,
+        "expiresAt": 1727203600,
+        "scope": {
+          "allowedActions": [
+            "evidence_submit",
+            "\udc00-low"
+          ],
+          "contractIds": [
+            "job-😀",
+            "job-\ud800",
+            "job-～"
+          ],
+          "maxSignatures": 100
+        }
+      },
+      "preimage_utf8": "{\"sessionId\":\"sess-\\ud800-lone\",\"parentAgentId\":\"agent-\\udfff\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"\\udc00-low\"],\"contractIds\":[\"job-\\ud800\",\"job-😀\",\"job-～\"],\"maxSignatures\":100}}",
+      "principal_seed_hex": "efbe8d44e83ef771d870d17d719d177c628d9835b7b507d6e27f8dc795c102fb",
+      "principal_public_key_hex": "a58647b810aa1f8b04bb2a7c85d0ead34cbd1c0feb85b091ccf7792dd81451bf",
+      "parent_signature_hex": "828f5ee36126b7aed4b8b6712e9b89ff5348d3698100ffbf156fc1171bb971142050f56d9778d9667d5369ea24fa35b6e2a5cee71dc8fde35998f6cc8c4d600b",
+      "sorted_key_preimage_utf8": "{\"expiresAt\":1727203600,\"issuedAt\":1727200000,\"parentAgentId\":\"agent-\\udfff\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"scope\":{\"allowedActions\":[\"evidence_submit\",\"\\udc00-low\"],\"contractIds\":[\"job-\\ud800\",\"job-😀\",\"job-～\"],\"maxSignatures\":100},\"sessionId\":\"sess-\\ud800-lone\"}",
+      "sorted_key_signature_hex": "0a7a4f60426ac61e0891d374bf5dd12d9bd62a0ffcd8c40c4a2e0bcc4f2ef87afdc653338938452be620179ce240b04a4597d55d351adce8a0fc963317327000"
+    },
+    {
+      "name": "surrogate_in_derivation_path",
+      "session": {
+        "sessionId": "sess-001",
+        "parentAgentId": "eip155:84532:0x1111111111111111111111111111111111111111",
+        "publicKeyHex": "65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3",
+        "issuedAt": 1727200000,
+        "expiresAt": 1727203600,
+        "scope": {
+          "allowedActions": [
+            "workflow_step_complete",
+            "evidence_submit"
+          ],
+          "contractIds": [
+            "job-b",
+            "job-a"
+          ],
+          "maxSignatures": 100
+        },
+        "derivationPath": "m/\ud800/7'"
+      },
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100},\"derivationPath\":\"m/\\ud800/7'\"}",
+      "principal_seed_hex": "efbe8d44e83ef771d870d17d719d177c628d9835b7b507d6e27f8dc795c102fb",
+      "principal_public_key_hex": "a58647b810aa1f8b04bb2a7c85d0ead34cbd1c0feb85b091ccf7792dd81451bf",
+      "parent_signature_hex": "8489ec4f5503ad0d445084ae0d7de86e4090988609234e03cb97e98d8e05da74a70920f86f5f5258795a3fc5bfaeb09afcb2e86cb20b96829554b783079c100f",
+      "sorted_key_preimage_utf8": "{\"expiresAt\":1727203600,\"issuedAt\":1727200000,\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100},\"sessionId\":\"sess-001\"}",
+      "sorted_key_signature_hex": "b69860630a10f76eba32c1264e2acab6545a51a6aabd137ac6d6b0fd060e80209b81d77baa393974878575c183fa0208b563de3d49dfe9c9c0308167d049fc07"
     }
   ],
   "session_revocation": [
@@ -250,6 +306,17 @@
       "preimage_utf8": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000,\"reason\":\"rotated\"}",
       "principal_public_key_hex": "a58647b810aa1f8b04bb2a7c85d0ead34cbd1c0feb85b091ccf7792dd81451bf",
       "parent_signature_hex": "e0691905d4495b252f6e119e1f1981792c3b5c39a0bd191b5be5a9dc33f58460c96d5c29d12b588ab35e8abd4fc5192b1ad3e66f4da6ace065cd07556bf33e02"
+    },
+    {
+      "name": "lone_surrogate_reason",
+      "revocation": {
+        "sessionId": "sess-\ud800",
+        "revokedAt": 1727201000,
+        "reason": "rotated \udfff"
+      },
+      "preimage_utf8": "{\"sessionId\":\"sess-\\ud800\",\"revokedAt\":1727201000,\"reason\":\"rotated \\udfff\"}",
+      "principal_public_key_hex": "a58647b810aa1f8b04bb2a7c85d0ead34cbd1c0feb85b091ccf7792dd81451bf",
+      "parent_signature_hex": "8224423745d168b6cf1259e7d6b71daca5b0a87b78779b9b462596459dae5d37d352dce5d4b80a6d91195369ff78770d866ca502969b85e3c758f78a8d617e05"
     }
   ]
 }
