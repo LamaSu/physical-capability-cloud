@@ -210,6 +210,7 @@ describe("notices", () => {
       "simulated_settlement",
       "unknown_execution_status",
       "settlement_records_conflict",
+      "settlement_row_conflict",
       "settlement_link_conflict",
     ] as const) {
       expect(NOTICE_TEXT[code], code).toBeTruthy();

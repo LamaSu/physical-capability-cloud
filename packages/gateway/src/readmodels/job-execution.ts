@@ -146,7 +146,7 @@ export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): Jo
   const execution = buildExecution(src.job);
   const evidence = buildEvidence(src.evidence);
   const verification = buildVerification(src.captureVerdicts);
-  const { recordsConflict, ...settlement } = buildSettlement(src.job, src.settlement);
+  const { recordsConflict, rowConflict, ...settlement } = buildSettlement(src.job, src.settlement);
 
   const capability = src.capability.ok ? src.capability.value : null;
   const kernel = src.kernel.ok ? src.kernel.value : null;
@@ -171,7 +171,7 @@ export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): Jo
     evidence,
     verification,
     settlement,
-    notices: buildNotices(src.job, execution, evidence, settlement, recordsConflict),
+    notices: buildNotices(src.job, execution, evidence, settlement, recordsConflict, rowConflict),
   };
 }
 
@@ -327,7 +327,7 @@ export function reconcilePayout(
 function buildSettlement(
   job: JobRow,
   read: SourceRead<SettlementSource>,
-): SettlementAxis & { recordsConflict: boolean } {
+): SettlementAxis & { recordsConflict: boolean; rowConflict: boolean } {
   const empty = {
     source: "gateway_escrow_record" as const,
     linkBasis: null,
@@ -338,6 +338,7 @@ function buildSettlement(
     payoutConfirmation: null,
     error: null,
     recordsConflict: false,
+    rowConflict: false,
   };
   if (!read.ok) return { ...empty, link: "unavailable", error: READ_FAILED("settlement store") };
   const s = read.value;
@@ -386,6 +387,7 @@ function buildSettlement(
   let payout: PayoutState = "unknown";
   let payoutBasis: SettlementAxis["payoutBasis"] = null;
   let recordsConflict = false;
+  let rowConflict = false;
   if (simulated) {
     payout = "simulated";
   } else if (record.milestone) {
@@ -393,6 +395,14 @@ function buildSettlement(
     payout = r.payout;
     recordsConflict = r.conflict;
     payoutBasis = "milestone_record";
+    // The job row saying `settled` while this job's milestone record says not released (or
+    // refunded) means one of the two records is wrong. SettlementService.releaseMilestone,
+    // for one, updates the job row after an on-chain release and never the milestone
+    // record. So the payout is unknown, never "not paid". The row never makes it "paid".
+    if ((payout === "not_paid" || payout === "refunded") && normalizeJobRowStatus(job.status) === "settled") {
+      payout = "unknown";
+      rowConflict = true;
+    }
   }
 
   return {
@@ -406,6 +416,7 @@ function buildSettlement(
     payoutConfirmation: payout === "paid" || payout === "refunded" ? "record_only" : null,
     error: null,
     recordsConflict,
+    rowConflict,
   };
 }
 
@@ -415,6 +426,7 @@ function buildNotices(
   evidence: EvidenceAxis,
   settlement: SettlementAxis,
   recordsConflict: boolean,
+  rowConflict: boolean,
 ): JobExecutionNoticeCode[] {
   const notices: JobExecutionNoticeCode[] = [];
   const raw = normalizeJobRowStatus(job.status);
@@ -424,6 +436,7 @@ function buildNotices(
   if ((evidence.fabricatedEventCount ?? 0) > 0) notices.push("fabricated_evidence");
   if (settlement.record?.simulated) notices.push("simulated_settlement");
   if (recordsConflict) notices.push("settlement_records_conflict");
+  if (rowConflict) notices.push("settlement_row_conflict");
   if (settlement.link === "conflicting") notices.push("settlement_link_conflict");
   return notices;
 }
