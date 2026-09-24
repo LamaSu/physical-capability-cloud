@@ -13,6 +13,7 @@ import {
   type AcceptedPlanNode,
   type ProgramGate,
   type CompileViolation,
+  type CompileDeps,
 } from "./accepted-plan-compiler.js";
 import { deriveCompositionCommitment } from "./composition-commitment.js";
 import { acceptedDealDigest, SETTLEMENT_TOKEN_DECIMALS, type NetSplitter } from "./accepted-plan-compiler.js";
@@ -790,6 +791,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
         },
       }) as ReturnType<NetSplitter>;
     const baseline = compileAcceptedPlan(plan({ feeBps: 235, feeRecipient: ADDR("fe") }), { splitNet: tenPercent });
+    expect(baseline.ok).toBe(true); // so two identical refusals cannot satisfy the equality below
     const swapped = compileAcceptedPlan(p, { splitNet: mutate(() => (p.feeRecipient = LICENSOR)) });
     expect(swapped).toEqual(baseline); // the WHOLE plan, digest included, is the untouched baseline
     const q = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
@@ -853,6 +855,7 @@ describe("input snapshot (astra review of 4479b79a): the compiler reads the call
     };
     const r = compileAcceptedPlan(p, { assertProgramForTier: sneaky });
     const baseline = compileAcceptedPlan(plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] }), { assertProgramForTier: gate });
+    expect(baseline.ok).toBe(true);
     expect(r).toEqual(baseline);
   });
 
@@ -991,6 +994,81 @@ describe("input snapshot, round 3 (astra review of ce18cf42): no caller referenc
       p.nodes[0]!.evidenceRequirements[0]!.tier = 3;
       return oneLeg(units);
     };
-    expect(compileAcceptedPlan(p, { splitNet: tampering })).toEqual(compileAcceptedPlan(fresh(), { splitNet: oneLeg }));
+    const baseline = compileAcceptedPlan(fresh(), { splitNet: oneLeg });
+    expect(baseline.ok).toBe(true);
+    expect(compileAcceptedPlan(p, { splitNet: tampering })).toEqual(baseline);
+  });
+});
+
+describe("round 4 (astra review of 0571c00c): dependencies are read once; the answer's scalars are normalized", () => {
+  const oneLeg: NetSplitter = (units) => ({
+    ok: true,
+    economicTermsHash: DIG("e1"),
+    rightsTermsHash: DIG("f1"),
+    units: units.map((u) => ({ unitRef: u.nodeId, gross: String(u.g), fee: String(u.f), net: String(u.n), payouts: [{ recipient: u.payoutAddress, amount: String(u.n) }] })),
+  });
+  const tiered = () => plan({ nodes: [node({ nodeId: "x", tierKey: "tier2", committedProgramHash: PROGRAM_T2 })], edges: [] });
+
+  it("a gate that swaps deps.splitNet for a throwing getter cannot make the compiler throw or change the deal", () => {
+    const baseline = compileAcceptedPlan(tiered(), { assertProgramForTier: gate, splitNet: oneLeg });
+    expect(baseline.ok).toBe(true);
+    const deps: CompileDeps = {
+      splitNet: oneLeg,
+      assertProgramForTier: (a) => {
+        Object.defineProperty(deps, "splitNet", {
+          get() {
+            throw new Error("late dependency read");
+          },
+        });
+        return gate(a);
+      },
+    };
+    let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+    expect(() => {
+      r = compileAcceptedPlan(tiered(), deps);
+    }).not.toThrow();
+    expect(r).toEqual(baseline);
+  });
+
+  it("each dependency slot is read exactly once, even through a getter that changes its answer", () => {
+    let gateReads = 0;
+    let splitReads = 0;
+    const deps = {} as CompileDeps;
+    Object.defineProperty(deps, "assertProgramForTier", { get: () => (gateReads++ === 0 ? gate : undefined) });
+    Object.defineProperty(deps, "splitNet", { get: () => (splitReads++ === 0 ? oneLeg : undefined) });
+    const r = compileAcceptedPlan(tiered(), deps);
+    expect(r.ok).toBe(true);
+    expect([gateReads, splitReads]).toEqual([1, 1]);
+  });
+
+  it("a dependency slot that is present but not a function fails closed", () => {
+    expect(compileAcceptedPlan(tiered(), { assertProgramForTier: gate, splitNet: null as unknown as NetSplitter })).toEqual({
+      ok: false,
+      violations: [{ code: "economics-malformed", detail: "dependency" }],
+    }); // never a silent single-leg default when economics was wired
+    const r = compileAcceptedPlan(tiered(), { assertProgramForTier: {} as unknown as ProgramGate });
+    expect(r.ok === false && r.violations).toEqual([{ code: "program-gate-missing", nodeId: "x" }]);
+  });
+
+  it("an object-valued refusal code is never converted by the caller's own toString", () => {
+    let called = false;
+    const code = { toString: () => ((called = true), "sneaky") };
+    const r = compileAcceptedPlan(plan(), { splitNet: () => ({ ok: false, code }) as unknown as ReturnType<NetSplitter> });
+    expect(r).toEqual({ ok: false, violations: [{ code: "economics-refused", reason: "<object>" }] });
+    expect(called).toBe(false);
+  });
+
+  it("the edges and evidence caps also refuse before reading any element", () => {
+    let reads = 0;
+    const counting = <T extends object>(arr: T[]): T[] =>
+      new Proxy(arr, { get: (t, k, rcv) => (typeof k === "string" && /^[0-9]+$/.test(k) && reads++, Reflect.get(t, k, rcv)) });
+    const edges = counting(Array.from({ length: 4097 }, () => ({ from: "print", to: "mail" })));
+    expect(compileAcceptedPlan(plan({ edges }))).toEqual({ ok: false, violations: [{ code: "invalid-plan-field", field: "edges" }] });
+    const reqs = counting(Array.from({ length: 65 }, (_, i) => ({ requirementId: `r${i}`, evidenceTypeId: `ev.${i}`, tier: 0 })));
+    expect(compileAcceptedPlan(plan({ nodes: [node({ nodeId: "p", evidenceRequirements: reqs })], edges: [] }))).toEqual({
+      ok: false,
+      violations: [{ code: "invalid-plan-field", field: "evidenceRequirements" }],
+    });
+    expect(reads).toBe(0);
   });
 });
