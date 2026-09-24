@@ -24,6 +24,8 @@ import type {
 } from "@pcc/spec";
 import type { IRepositories } from "@pcc/store";
 import { getRepos } from "../db.js";
+import { isReservedDescription } from "./onboard-evidence.js";
+import { ZERO_ADDRESS, bindRegistrationOwner } from "./onboard-owner.js";
 
 /**
  * Z3 — returns repos when the store is initialised, null otherwise (tests /
@@ -354,6 +356,29 @@ export async function wizardRoutes(app: FastifyInstance) {
         });
       }
 
+      // machine-onboarding writes a registration row, the same one
+      // POST /api/onboard/register writes, so it gets the same guards: no
+      // operator text dressed up as a server review record (WP-B round 5,
+      // M1), and the owner is the authenticated caller, never an identity
+      // named in the step data (M3). Checked before the session is claimed,
+      // so a refused completion leaves it in_progress and fixable.
+      let operator: Record<string, unknown> | null = null;
+      if (session.track === "machine-onboarding") {
+        const data = mergeStepData(session);
+        if (isReservedDescription(data.description)) {
+          return reply.code(400).send({
+            error: "reserved_description",
+            message: "Descriptions starting with \"PROOF SUBMITTED:\" or \"PROVED:\" are reserved for server-written review records.",
+          });
+        }
+        const actor = typeof callerId === "string" && callerId.length > 0 ? callerId : null;
+        const owner = bindRegistrationOwner(actor, data.operator);
+        if (!owner.ok) {
+          return reply.code(owner.status).send({ error: owner.error, message: owner.message, ...(owner.field ? { field: owner.field } : {}) });
+        }
+        operator = owner.operator;
+      }
+
       // Z1 — claim the session before the orchestration await so a second
       // concurrent /complete cannot also pass the status checks above.
       if (completingSessions.has(session.id)) {
@@ -370,6 +395,7 @@ export async function wizardRoutes(app: FastifyInstance) {
         const result = await orchestrateCompletion(session, {
           // Wave 4.1 — same tenant backfill as POST /api/onboard/register
           tenantId: (req as any).tenantId ?? null,
+          operator,
         });
 
         const now = new Date().toISOString();
@@ -438,11 +464,26 @@ export async function wizardRoutes(app: FastifyInstance) {
 /** Request-scoped context threaded into orchestration (Wave 4.1 tenancy). */
 interface CompletionContext {
   tenantId: string | null;
+  /**
+   * machine-onboarding: the registration's operator block, already bound to
+   * the authenticated caller (bindRegistrationOwner). null stores the
+   * zero-address placeholder, which nobody can act as.
+   */
+  operator: Record<string, unknown> | null;
+}
+
+/** All step data of a session, later steps overriding earlier ones. */
+function mergeStepData(session: WizardSession): Record<string, unknown> {
+  const allData: Record<string, unknown> = {};
+  for (const step of session.steps) {
+    Object.assign(allData, step.data);
+  }
+  return allData;
 }
 
 async function orchestrateCompletion(
   session: WizardSession,
-  ctx: CompletionContext = { tenantId: null },
+  ctx: CompletionContext = { tenantId: null, operator: null },
 ): Promise<WizardCompletionResult> {
   const executedSteps: WizardCompletionResult["executedSteps"] = [];
 
@@ -529,10 +570,7 @@ async function orchestrateMachineOnboarding(
   executedSteps: WizardCompletionResult["executedSteps"],
   ctx: CompletionContext,
 ): Promise<WizardCompletionResult> {
-  const allData: Record<string, unknown> = {};
-  for (const step of session.steps) {
-    Object.assign(allData, step.data);
-  }
+  const allData = mergeStepData(session);
 
   // Step 1: Validate machine info
   executedSteps.push({
@@ -589,16 +627,13 @@ async function orchestrateMachineOnboarding(
           ? allData.pricing
           : { baseCost: "0", minimum: "0", currency: "USDC" }
       ) as never,
-      operator: (
-        allData.operator && typeof allData.operator === "object"
-          ? allData.operator
-          : {
-              walletAddress: "0x0000000000000000000000000000000000000000",
-              displayName: "Unknown",
-              certifications: [],
-              trainingAcknowledgments: {},
-            }
-      ) as never,
+      // Bound to the authenticated caller in the /complete handler (M3).
+      operator: (ctx.operator ?? {
+        walletAddress: ZERO_ADDRESS,
+        displayName: "Unknown",
+        certifications: [],
+        trainingAcknowledgments: {},
+      }) as never,
       complianceRegulations: Array.isArray(allData.complianceRegulations)
         ? (allData.complianceRegulations as string[]).filter(
             (s) => typeof s === "string" && s.length > 0,
