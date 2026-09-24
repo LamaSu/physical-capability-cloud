@@ -128,6 +128,7 @@ class TestPollPendingJobs:
             calls = poll_pending_jobs("http://pcc", "key", "k1")
         assert len(calls) == 1
         assert calls[0]["id"] == "c1"
+        assert mock_pcc.call_args[0][:2] == ("GET", "/api/relay/k1/tool-call/pending")
 
     def test_returns_empty_on_error(self):
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
@@ -148,7 +149,7 @@ class TestExecuteAndReport:
         adapter.device_type = "test"
         adapter.execute.return_value = json.dumps({"ok": True})
 
-        call = {"id": "c1", "toolName": "test_tool", "toolArgs": {"x": 1}}
+        call = {"id": "c1", "kernelId": "k1", "toolName": "test_tool", "args": {"x": 1}}
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
             mock_pcc.return_value = (200, {})
@@ -158,6 +159,17 @@ class TestExecuteAndReport:
         mock_pcc.assert_called_once()
         post_body = mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
         assert post_body["callId"] == "c1"
+        assert mock_pcc.call_args[0][:2] == ("POST", "/api/relay/k1/tool-result")
+
+    def test_does_not_report_without_a_kernel_id(self):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+
+        with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
+            execute_and_report({"id": "c9", "toolName": "t", "args": {}}, [adapter], "http://pcc", "key")
+
+        mock_pcc.assert_not_called()
 
     def test_falls_through_adapters(self):
         """If first adapter returns 'Unknown tool', try the next."""
@@ -169,7 +181,7 @@ class TestExecuteAndReport:
         adapter2.device_type = "a2"
         adapter2.execute.return_value = json.dumps({"result": "handled"})
 
-        call = {"id": "c2", "toolName": "x", "toolArgs": {}}
+        call = {"id": "c2", "kernelId": "k1", "toolName": "x", "toolArgs": {}}
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
             mock_pcc.return_value = (200, {})
