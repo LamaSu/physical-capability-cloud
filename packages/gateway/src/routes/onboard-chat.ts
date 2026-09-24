@@ -42,14 +42,29 @@
  *
  * MCP install (Approach A) remains the power-user path; this endpoint is
  * the layperson default. See PR body for the A-vs-B decision.
+ *
+ * Secrets (bus #2288, board N9)
+ * -----------------------------
+ * The whole /api/onboard/chat prefix is public, and a tool such as
+ * provision_api_key returns a live key. So:
+ *   - every tool result, tool input and error text is passed through
+ *     redactSecretsDeep() before it enters the history, the model request, the
+ *     database or the GET reply;
+ *   - the secrets removed from THIS request's live tool results go back to the
+ *     caller exactly once, in the POST reply's `revealedSecrets`. They are never
+ *     persisted, never sent to the model and never replayed by GET;
+ *   - conversation ids carry 128 bits of crypto randomness, the id is the only
+ *     credential, and ids in the old guessable format are refused (404).
  */
 
 import type { FastifyInstance } from "fastify";
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
+import { redactSecrets, redactSecretsDeep, type Redaction, type RedactionKind } from "../redaction.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -82,6 +97,14 @@ interface ToolCallTrace {
   status: number;
   result: unknown;
   durationMs: number;
+}
+
+/** A secret removed from one of THIS request's live tool results, shown to the caller once. */
+interface RevealedSecret {
+  tool: string;
+  path: string;
+  kind: RedactionKind;
+  value: string;
 }
 
 interface ConversationRecord {
@@ -167,6 +190,11 @@ export function _resetAgentPackageCache(): void {
   agentPackageCache = null;
 }
 
+/** Install a fixed agent package — for tests only. */
+export function _setAgentPackageForTests(pkg: AgentPackage): void {
+  agentPackageCache = { pkg, loadedAt: Date.now() };
+}
+
 // ── Anthropic SDK loader (lazy + degradable) ───────────────────────
 
 let cachedSdk: Promise<{ ctor: any | null; reason?: string }> | null = null;
@@ -214,8 +242,19 @@ function ensureSchema(): void {
   )`);
 }
 
-function generateConversationId(): string {
-  return `cnv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+/**
+ * `cnv_` + 128 bits from the CSPRNG (22 base64url chars). The id is the only
+ * credential for a conversation, so it must not be guessable.
+ */
+export function generateConversationId(): string {
+  return `cnv_${randomBytes(16).toString("base64url")}`;
+}
+
+const CONVERSATION_ID_RE = /^cnv_[A-Za-z0-9_-]{22}$/;
+
+/** Only current-format ids are served; the old `cnv_<time>_<Math.random>` ids were guessable. */
+function isCurrentConversationId(id: unknown): id is string {
+  return typeof id === "string" && CONVERSATION_ID_RE.test(id);
 }
 
 function loadConversation(id: string): ConversationRecord | null {
@@ -240,7 +279,8 @@ function loadConversation(id: string): ConversationRecord | null {
 
 function saveConversation(record: ConversationRecord): void {
   const { db } = getStore();
-  const msgsJson = JSON.stringify(record.messages);
+  // Defense in depth: nothing secret-shaped is ever written, whatever its source.
+  const msgsJson = JSON.stringify(redactSecretsDeep(record.messages));
   db.run(sql`INSERT INTO onboard_chat_conversations (id, messages, created_at, updated_at)
              VALUES (${record.id}, ${msgsJson}, ${record.createdAt}, ${record.updatedAt})
              ON CONFLICT(id) DO UPDATE SET
@@ -352,11 +392,15 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string } }>(
     "/api/onboard/chat/:id",
     async (req, reply) => {
+      // Legacy guessable ids are unreadable through the API (their rows stay for
+      // the operator's purge: docs/security/ONBOARD_CHAT_SECRET_PURGE.md).
+      if (!isCurrentConversationId(req.params.id)) return reply.status(404).send({ error: "not_found" });
       const record = loadConversation(req.params.id);
       if (!record) return reply.status(404).send({ error: "not_found" });
       return {
         conversationId: record.id,
-        messages: record.messages,
+        // Defense in depth for rows written before redaction existed.
+        messages: redactSecretsDeep(record.messages),
         createdAt: record.createdAt,
         updatedAt: record.updatedAt,
       };
@@ -383,7 +427,11 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
     const now = new Date().toISOString();
     let record: ConversationRecord;
     if (body.conversationId) {
-      const existing = loadConversation(body.conversationId);
+      // Same rule as GET: a legacy guessable id cannot be resumed (resuming would let
+      // a guesser read the history back through the model).
+      const existing = isCurrentConversationId(body.conversationId)
+        ? loadConversation(body.conversationId)
+        : null;
       if (!existing) {
         return reply.status(404).send({ error: "conversation_not_found" });
       }
@@ -450,6 +498,8 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
 
     // ── Multi-turn tool-use loop ────────────────────────────────────
     const toolCalls: ToolCallTrace[] = [];
+    // One-time reveal, keyed by the secret itself so each appears once.
+    const revealed = new Map<string, RevealedSecret>();
     let lastAssistantText = "";
     let turns = 0;
     let totalToolCalls = 0;
@@ -465,10 +515,11 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           max_tokens: 4096,
           system: pkg.system_prompt,
           tools,
-          messages: record.messages,
+          // The model never sees a secret: not from a tool, the user, or a legacy row.
+          messages: redactSecretsDeep(record.messages),
         });
       } catch (err) {
-        const errMsg = (err as Error).message;
+        const errMsg = redactSecrets(String((err as Error)?.message ?? err));
         record.messages.push({
           role: "assistant",
           content: `(LLM call failed: ${errMsg}. Try again or contact support.)`,
@@ -494,15 +545,17 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
         } else if (block.type === "tool_use") {
           calledThisTurn = true;
           totalToolCalls += 1;
+          // Inputs are recorded redacted; the tool itself still receives what the model sent.
+          const safeInput = redactSecretsDeep(block.input);
           if (totalToolCalls > MAX_TOOL_CALLS_PER_TURN) {
             const errResult = { error: "tool_call_budget_exceeded", message: `Hit ${MAX_TOOL_CALLS_PER_TURN} tool calls in one user turn.` };
-            assistantContent.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
+            assistantContent.push({ type: "tool_use", id: block.id, name: block.name, input: safeInput });
             toolResultsForNextTurn.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(errResult) });
             doneReason = "tool_call_budget";
             continue;
           }
 
-          assistantContent.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
+          assistantContent.push({ type: "tool_use", id: block.id, name: block.name, input: safeInput });
 
           const tool = toolByName.get(block.name);
           let status = 404;
@@ -515,11 +568,25 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
             status = exec.status;
             result = exec.result;
           }
-          toolCalls.push({ name: block.name, args: block.input, status, result, durationMs });
+          // Redact before the result goes anywhere: history, model, DB, reply trace.
+          // Success and error bodies alike (an error can echo a key).
+          const removed: Redaction[] = [];
+          const safeResult = redactSecretsDeep(result, (r) => removed.push(r));
+          for (const r of removed) {
+            if (!revealed.has(r.value)) {
+              revealed.set(r.value, { tool: block.name, path: r.path, kind: r.kind, value: r.value });
+            }
+          }
+          toolCalls.push({ name: block.name, args: safeInput, status, result: safeResult, durationMs });
+          const note = removed.length > 0
+            ? `\n[pcc] ${removed.length} secret value(s) in this result were redacted. ` +
+              "They were shown to the user once, directly, outside this conversation. " +
+              "Do not ask the user to paste them into this chat."
+            : "";
           toolResultsForNextTurn.push({
             type: "tool_result",
             tool_use_id: block.id,
-            content: JSON.stringify(result),
+            content: JSON.stringify(safeResult) + note,
           });
         }
       }
@@ -555,11 +622,13 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       conversationId: record.id,
-      assistant: lastAssistantText || "(no text response — see toolCalls for what happened)",
+      assistant: redactSecrets(lastAssistantText) || "(no text response — see toolCalls for what happened)",
       toolCalls,
       done: doneReason === "end_turn",
       doneReason,
       turns,
+      // One-time reveal: present only in this reply, never stored or replayed.
+      ...(revealed.size > 0 ? { revealedSecrets: Array.from(revealed.values()) } : {}),
     };
   });
 }
