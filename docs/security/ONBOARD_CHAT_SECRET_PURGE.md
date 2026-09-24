@@ -30,10 +30,15 @@ anyone who guessed or saw a conversation id could read it through `GET`.
 
 What WP-D changes: new rows are redacted before they are written, and the model
 never sees a secret. Ids now carry 128 random bits, and any id in the old format
-gets 404 from `GET` and from resume. **The code does not delete or rewrite old
-rows**, and it cannot un-send what the model provider already received. That is
-why this runbook exists, and why **every key found must be rotated**, whether or
-not the rows are purged.
+gets 404 from `GET` and from resume. New rows store a JSON envelope in the
+`messages` column, `{"v":1,"owner":…,"messages":[…],"pendingActions":[…]}`.
+`owner` is the sha256 fingerprint of the signed-in principal that owns the
+conversation (null for an anonymous one), and `GET` and resume from any other
+principal get 404. A row whose `messages` column is a bare array has no owner, so
+it is not served either. **The code does not delete or rewrite old rows**, and it
+cannot un-send what the model provider already received. That is why this
+runbook exists, and why **every key found must be rotated**, whether or not the
+rows are purged.
 
 ## Step 0: Preconditions
 
@@ -231,7 +236,9 @@ maintenance window.
 
 **Option B: redact in place, keeping the history.** This uses the gateway's own
 redaction from the built image (`packages/gateway/dist/redaction.js`, which is
-the same code the chat now runs):
+the same code the chat now runs). In an envelope row it redacts only the
+`messages` array: the `owner` fingerprint is 64 hex characters, which is exactly
+a shape the redaction removes, and removing it would orphan the conversation.
 
 ```bash
 PCC_DB=/path/to/pcc.db node --input-type=module <<'JS'
@@ -248,8 +255,11 @@ let changed = 0;
 db.transaction(() => {
   for (const r of rows) {
     let out;
-    try { out = JSON.stringify(redactSecretsDeep(JSON.parse(r.messages))); }
-    catch { out = redactSecretsDeep(r.messages); }
+    try {
+      const parsed = JSON.parse(r.messages);
+      const isEnvelope = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && parsed.v === 1;
+      out = JSON.stringify(isEnvelope ? { ...parsed, messages: redactSecretsDeep(parsed.messages) } : redactSecretsDeep(parsed));
+    } catch { out = redactSecretsDeep(r.messages); }
     if (out !== r.messages) { update.run(out, r.id); changed += 1; }
   }
 })();
@@ -281,9 +291,20 @@ JS
 
 ## Dashboard follow-ups (shell lane, not this runbook)
 
-- The `POST /api/onboard/chat` reply can carry `revealedSecrets` once. The
+- The `POST /api/onboard/chat` reply can carry `revealedSecrets` once, as
+  `[{ tool, path, value }]`. Only credentials the chat's own call just minted
+  are revealed (`provision_api_key` and `redeem_invite`, named fields only). The
   dashboard has to show those values to the user once and never store them.
   Otherwise a key minted in chat is unrecoverable, and the user has to
   provision again.
+- For a signed-in user, every tool call other than a GET is held, not run. The
+  reply carries it in `pendingActions`
+  (`[{ actionId, tool, method, target, args, summary, expiresAt }]`, arguments
+  redacted), and `GET /api/onboard/chat/:id` lists the open ones to their owner.
+  It runs only when the same user sends
+  `POST /api/onboard/chat { conversationId, confirmActionId }` within 10 minutes,
+  once. The reply to that request carries `confirmedAction` and the call in
+  `toolCalls`. Until the dashboard renders `pendingActions` with a confirm
+  button, a signed-in dashboard user cannot complete any write through chat.
 - The chat page footer prints the first 12 characters of the conversation id.
   The id is now the only credential for the conversation.
