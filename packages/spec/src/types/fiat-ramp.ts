@@ -30,6 +30,11 @@ export interface FiatRampSession {
   cryptoAmount?: Amount;
   /** Wallet address for crypto delivery/source */
   walletAddress: Address;
+  /**
+   * The gateway principal that created this session (API key operator id or SIWE
+   * address), when known. The session listing matches it as well as the wallet.
+   */
+  createdBy?: string;
   /** External provider session/reference ID */
   externalId?: string;
   /** Linked PCC escrow ID (if funding an escrow) */
