@@ -156,6 +156,10 @@ ENV PCC_DB_PATH=/app/data/pcc.sqlite
 ENV SERVE_DASHBOARD=true
 ENV DASHBOARD_PATH=/app/apps/dashboard/dist
 
+# Build provenance (N5): CI passes the commit being built; /api/health reports it.
+ARG PCC_BUILD_SHA=""
+ENV PCC_BUILD_SHA=${PCC_BUILD_SHA}
+
 # As root: ensure the (possibly volume-mounted) /app/data is writable by pcc, then drop to pcc.
 ENTRYPOINT ["/bin/sh", "-c", "if [ \"$(id -u)\" = \"0\" ]; then mkdir -p /app/data && chown -R pcc:pcc /app/data && exec gosu pcc \"$@\"; fi; exec \"$@\"", "--"]
 CMD ["node", "packages/gateway/dist/server.js"]
