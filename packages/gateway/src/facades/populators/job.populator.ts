@@ -5,6 +5,7 @@
  * Accepts PopulationContext to batch-load shared data and avoid N+1.
  */
 
+import { executionPhaseOf } from "@pcc/spec";
 import type {
   JobDTO,
   JobDetailDTO,
@@ -96,6 +97,7 @@ export function populateJobDTO(
     evidenceCount: evidenceCount ?? 0,
     escrowStatus: escrowStatus as JobDTO["escrowStatus"],
     estimatedCompletion: undefined,
+    executionPhase: executionPhaseOf(model.status),
   };
 }
 
@@ -200,7 +202,12 @@ function buildTimeline(model: RawJob, evidenceBundles: RawEvidenceBundle[]): Job
     });
   }
 
-  if (model.status === "settled" || model.status === "completed") {
+  // `completed` means the executor finished the work. It is NOT settlement: payment is
+  // a separate fact this row does not carry (the JobExecutionDTO settlement axis reads it
+  // from the escrow record). `settled` is echoed only because the row itself says so.
+  if (model.status === "completed") {
+    events.push({ type: "completed", timestamp: model.completedAt ?? createdAt });
+  } else if (model.status === "settled") {
     events.push({ type: "settled", timestamp: model.completedAt ?? createdAt });
   } else if (model.status === "failed") {
     events.push({ type: "failed", timestamp: model.completedAt ?? createdAt });

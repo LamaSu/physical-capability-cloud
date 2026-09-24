@@ -1,9 +1,14 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
+import {
+  buildJobExecutionDTO,
+  loadJobExecutionSources,
+  type JobExecutionRepos,
+} from "../readmodels/job-execution.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -26,6 +31,7 @@ export async function jobRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
     async (req, reply) => {
+      const asOf = new Date().toISOString();
       // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true.
       // Default OFF preserves cross-tenant listing (today's behavior).
       const tOpts = tenantOpts(req as any);
@@ -39,8 +45,11 @@ export async function jobRoutes(app: FastifyInstance) {
         { offset: req.query.offset, limit: req.query.limit },
       );
       if (result.success) {
-        // Backward-compatible envelope: { jobs } — same shape clients expect
-        return { jobs: result.data.items };
+        // Backward-compatible envelope: { jobs }, plus collection-v1 `items` (the closed
+        // render IR's list shape), the page (`total` is ALL matching jobs, not the page
+        // length) and `asOf` = when the gateway read the rows.
+        const { items, total, offset, limit, hasMore } = result.data;
+        return { jobs: items, items, total, offset, limit, hasMore, asOf };
       }
       return sendResult(reply, result);
     },
@@ -58,6 +67,42 @@ export async function jobRoutes(app: FastifyInstance) {
       return { job, evidence: evidenceBundles };
     }
     return sendResult(reply, result);
+  });
+
+  /**
+   * Product read model for one job (PX-6): JobExecutionDTO from @pcc/spec.
+   * Four independent axes (execution, evidence, verification, settlement), each
+   * naming its source; nothing is inferred across axes, and a source that cannot be
+   * read is reported `unavailable`, never defaulted. Same auth gate as
+   * GET /api/jobs/:jobId. Under TENANT_ENFORCE a job of another tenant is a 404.
+   */
+  app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/execution", async (req, reply) => {
+    const asOf = new Date().toISOString();
+    let sources;
+    try {
+      const store = getStore();
+      sources = loadJobExecutionSources(
+        req.params.jobId,
+        store.repos as unknown as JobExecutionRepos,
+        store.db,
+        {
+          tenant: tenantOpts(req as any),
+          onReadError: (source, error) =>
+            req.log.warn({ jobId: req.params.jobId, source, err: error }, "job execution read model: source read failed"),
+        },
+      );
+    } catch (error) {
+      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: job row read failed");
+      return reply.code(503).send({
+        error: "read_model_unavailable",
+        message: "The job record could not be read. Try again shortly.",
+      });
+    }
+    if (!sources) {
+      return reply.code(404).send({ error: "not_found", message: `job '${req.params.jobId}' not found` });
+    }
+    reply.header("cache-control", "no-store");
+    return buildJobExecutionDTO(sources, asOf);
   });
 
   /**

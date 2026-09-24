@@ -210,6 +210,19 @@ describe("populateJobDetailDTO()", () => {
     expect(settledEvent).toBeDefined();
   });
 
+  it("NEGATIVE: status=completed emits a completed event, never settled (completed is not paid)", () => {
+    const model = makeRawJob({ status: "completed", completedAt: "2026-01-01T15:00:00.000Z" });
+    const dto = populateJobDetailDTO(model, mockKernelMap, mockCapabilityMap, emptyBundles, makeCtx());
+    expect(dto.timeline.find((e) => e.type === "completed")?.timestamp).toBe("2026-01-01T15:00:00.000Z");
+    expect(dto.timeline.some((e) => e.type === "settled")).toBe(false);
+  });
+
+  it("JobDTO carries the server-read execution phase; undocumented statuses are unknown", () => {
+    expect(populateJobDTO(makeRawJob({ status: "in_progress" }), mockKernelMap, mockCapabilityMap, makeCtx()).executionPhase).toBe("running");
+    expect(populateJobDTO(makeRawJob({ status: "settled" }), mockKernelMap, mockCapabilityMap, makeCtx()).executionPhase).toBe("completed");
+    expect(populateJobDTO(makeRawJob({ status: "weird" }), mockKernelMap, mockCapabilityMap, makeCtx()).executionPhase).toBe("unknown");
+  });
+
   it("timeline includes failed event for status=failed", () => {
     const model = makeRawJob({ status: "failed", completedAt: "2026-01-01T14:00:00.000Z" });
     const dto = populateJobDetailDTO(model, mockKernelMap, mockCapabilityMap, emptyBundles, makeCtx());
