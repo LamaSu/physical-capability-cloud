@@ -76,6 +76,35 @@ export function resolveApiKeyFromToken(token: string | undefined | null) {
 }
 
 /**
+ * The wallet an API key PROVES, or null (economics N8 ask, #2888; seam with #385).
+ *
+ * A key's operatorId is only as good as the path that minted it: the email path
+ * asserts an identity, while the SIWE path of /api/auth/provision proves the
+ * wallet with an EIP-4361 signature. That path records the proof in the key's
+ * server-written metadata ({ siweVerified: true, provenAddress }), and only it
+ * does: no route writes caller-supplied metadata onto a key. This accepts the
+ * proof only when it is exactly that shape AND names the key's own operatorId,
+ * so a custodial-quickstart walletAddress, a legacy row, malformed JSON or a
+ * proof for a different identity all give null (fail closed).
+ */
+export function provenWalletOfKey(
+  record: { operatorId?: unknown; metadata?: unknown } | null | undefined,
+): string | null {
+  if (!record || typeof record.operatorId !== "string" || typeof record.metadata !== "string") return null;
+  let meta: unknown;
+  try {
+    meta = JSON.parse(record.metadata);
+  } catch {
+    return null;
+  }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const { siweVerified, provenAddress } = meta as { siweVerified?: unknown; provenAddress?: unknown };
+  if (siweVerified !== true || typeof provenAddress !== "string") return null;
+  if (!/^0x[0-9a-f]{40}$/.test(provenAddress)) return null;
+  return provenAddress === record.operatorId.toLowerCase() ? provenAddress : null;
+}
+
+/**
  * Resolve an API key from the Authorization header.
  * Returns the key record or null.
  *

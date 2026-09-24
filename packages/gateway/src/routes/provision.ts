@@ -275,6 +275,10 @@ export async function provisionRoutes(app: FastifyInstance) {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),
           source: "landing-page",
+          // The SIWE proof travels with the key (auth/api-key-auth.ts
+          // provenWalletOfKey), so an owner check can accept this key as the
+          // proven wallet. Only this branch writes it; the email path never does.
+          ...(siweVerified ? { siweVerified: true, provenAddress: operatorId.toLowerCase() } : {}),
         },
         publicKey: body.publicKey,
       });

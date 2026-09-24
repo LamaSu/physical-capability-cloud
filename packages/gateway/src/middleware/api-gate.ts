@@ -32,7 +32,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { resolveApiKey } from "../auth/api-key-auth.js";
+import { resolveApiKey, provenWalletOfKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { authPath } from "./route-path.js";
 
@@ -213,6 +213,9 @@ async function apiGateImpl(app: FastifyInstance) {
     // gate while still running the real handler (sol #309 H1). See authPath.
     const path = authPath(req);
 
+    // Nothing is proven until a branch below proves it (read with `?? null`).
+    req.provenWallet = null;
+
     // Only gate /api/* routes
     if (!path.startsWith("/api/")) return;
 
@@ -233,6 +236,9 @@ async function apiGateImpl(app: FastifyInstance) {
       req.apiKeyId = apiKey.id;
       req.operatorId = apiKey.operatorId;
       req.userId = apiKey.operatorId as `0x${string}`;
+      // The key is the principal: only a proof minted INTO this key counts,
+      // never a SIWE cookie riding along on the same request.
+      req.provenWallet = provenWalletOfKey(apiKey);
       return;
     }
 
@@ -240,6 +246,7 @@ async function apiGateImpl(app: FastifyInstance) {
     const session = resolveSession(req);
     if (session) {
       req.userId = session.address;
+      req.provenWallet = session.address.toLowerCase();
       return;
     }
 
