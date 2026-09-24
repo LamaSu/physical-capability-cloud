@@ -24,6 +24,7 @@ import { verifyAcceptedAgreement } from "../economics/verify.js";
 import { computeManifestHash, type CompositionManifest } from "../types/composition-manifest.js";
 import { computeScheduleHash, evaluateRateSchedule, type RateSchedule } from "../types/rate-schedule.js";
 import { computeTrainingManifestHash } from "../types/training-manifest.js";
+import { canonicalize } from "../util/canonical.js";
 import { a, baseAgreement, clone } from "./economics-helpers.js";
 
 const WITH_SCHEDULES: CompileOptions = { schedules: [PRINTER_KIT_SCHEDULE] };
@@ -769,5 +770,45 @@ describe("clean-room round 3: schedule bodies, unit selection, the verified flag
     const o = { x: 1 };
     Object.defineProperty(o, "hidden", { value: 2, enumerable: false });
     expect(snapshotJson(o)).toEqual({ ok: true, value: { x: 1 } });
+  });
+});
+
+// ── Clean-room round 3b (spec at 15208e38) ───────────────────────────────────
+
+describe("clean-room round 3b: every number in a schedule body means one value to every reader", () => {
+  /** A body as a server might hold it, sealed under the hash of exactly these numbers. */
+  const sealed = (segment: Record<string, unknown>, version = 1): RateSchedule => {
+    const body = { version, segments: [segment], publishedAt: "2026-06-01T00:00:00Z" };
+    return { ...body, scheduleHash: computeScheduleHash(body as unknown as RateSchedule) } as unknown as RateSchedule;
+  };
+  const optionsRefusal = (s: RateSchedule) => refusals(compileEconomics(printerOn(s, 40), { schedules: [s] }));
+
+  it("P100, P100c: an integer above 2^53 - 1 is refused; JSON 2^53 + 1 reads as 2^53 in JavaScript", () => {
+    const at = (thresholdCents: number) => sealed({ kind: "piecewise-value", startTime: 0, endTime: null, thresholdCents, bpsLow: 40, bpsHigh: 40 });
+    expect(compileEconomics(printerOn(at(2 ** 53 - 1), 40), { schedules: [at(2 ** 53 - 1)] }).ok).toBe(true);
+    expect(optionsRefusal(at(2 ** 53))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+    expect(JSON.parse("9007199254740993")).toBe(2 ** 53);
+  });
+
+  it("P100b: a schedule version above 10^9 is refused", () => {
+    const constant = { kind: "constant", startTime: 0, endTime: null, bps: 40 };
+    expect(compileEconomics(printerOn(sealed(constant, 1e9), 40), { schedules: [sealed(constant, 1e9)] }).ok).toBe(true);
+    expect(optionsRefusal(sealed(constant, 1e9 + 1))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+  });
+
+  it("an infinite scale or decay (JSON 1e400) is an options refusal, where it used to throw out of the compiler", () => {
+    const inf = JSON.parse("1e400") as number;
+    const adoption = sealed({ kind: "adoption-indexed", startTime: 0, endTime: null, scale: inf, floorBps: 0, capBps: 500 });
+    const decay = sealed({ kind: "exponential-decay", startTime: 0, endTime: null, startBps: 500, endBps: 40, decayPerSecond: inf });
+    for (const s of [adoption, decay]) {
+      expect(refusals(compileEconomics(printerOn(s, 40), { schedules: [s], rateFacts: { jobsPerDay: 7 } }))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+    }
+  });
+
+  it("a real number in a schedule body is written as ECMAScript Number.prototype.toString writes it", () => {
+    expect(canonicalize({ a: 1e-9, b: 0.000001, c: 1.5e-7, d: 100.5, e: 1e16, f: 1e21 })).toBe('{"a":1e-9,"b":0.000001,"c":1.5e-7,"d":100.5,"e":10000000000000000,"f":1e+21}');
+    const tiny = sealed({ kind: "exponential-decay", startTime: 0, endTime: null, startBps: 40, endBps: 40, decayPerSecond: 1e-9 });
+    expect(tiny.scheduleHash).toBe(computeScheduleHash({ version: 1, segments: JSON.parse('[{"kind":"exponential-decay","startTime":0,"endTime":null,"startBps":40,"endBps":40,"decayPerSecond":1e-9}]') } as RateSchedule));
+    expect(compileEconomics(printerOn(tiny, 40), { schedules: [tiny] }).ok).toBe(true);
   });
 });
