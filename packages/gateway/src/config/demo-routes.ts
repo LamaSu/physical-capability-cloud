@@ -8,11 +8,13 @@
  * simulated responses are allowed, and every one of them says so (`mock: true`,
  * `demo: true`).
  *
- * Only the literal "true" enables it (same convention as TENANT_ENFORCE). It is read per
- * call, so tests and a runtime change see the current value.
+ * Only the literal "true" enables it (same convention as TENANT_ENFORCE), and NEVER under
+ * NODE_ENV=production (coord-watch #2934): production never serves a simulated answer, so a
+ * stray variable cannot turn one on. It is read per call, so tests and a runtime change see
+ * the current value.
  */
 export function isDemoRoutesOn(): boolean {
-  return process.env.PCC_DEMO_ROUTES === "true";
+  return process.env.PCC_DEMO_ROUTES === "true" && process.env.NODE_ENV !== "production";
 }
 
 /** Marks a simulated response. Live responses pass through unchanged. */

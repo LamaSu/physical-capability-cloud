@@ -4,10 +4,14 @@
  * Wires Stripe (US/EU on-ramp), Yellowcard (emerging market on/off-ramp),
  * and Wise (enterprise fiat payouts) into PCC's settlement flow.
  *
- * All providers run in mock mode unless env vars are set:
- *   STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY
- *   YELLOWCARD_API_KEY, YELLOWCARD_SECRET_KEY
- *   WISE_API_TOKEN, WISE_PROFILE_ID
+ * A provider is live only with its COMPLETE configuration (see providerConfig); anything
+ * less is mock, and a mock provider answers 503 not_configured unless PCC_DEMO_ROUTES is on
+ * (never in production). The gate and the client read the same configuration snapshot:
+ *   STRIPE_SECRET_KEY + STRIPE_PUBLISHABLE_KEY
+ *   YELLOWCARD_API_KEY + YELLOWCARD_SECRET_KEY   (YELLOWCARD_ENVIRONMENT, default sandbox)
+ *   WISE_API_TOKEN + WISE_PROFILE_ID             (WISE_ENVIRONMENT, default sandbox)
+ *   COINBASE_APP_ID
+ *   CDP_API_KEY_ID + CDP_API_KEY_SECRET + CDP_WALLET_SECRET (CDP_NETWORK base = production)
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -29,7 +33,79 @@ import {
 } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
-// Service singletons (lazy-init)
+// Provider configuration: read ONCE, shared by the gate and the client
+// ---------------------------------------------------------------------------
+//
+// coord-watch #2934: the gate used to read the CURRENT env while each client cached its
+// mock setting at first use, so the two could disagree. A key set after a mock client was
+// built made the gate say "live" while the mock ran, with no disclosure; the reverse labelled
+// a real provider call as demo. Now each provider's configuration is snapshotted once, and
+// both the gate (providerMode) and the client constructor read that snapshot. A partial
+// configuration is mock, never a live client with a made-up secret.
+
+type RampProvider = "coinbase" | "stripe" | "yellowcard" | "wise" | "cdp";
+type RampEnvironment = "production" | "sandbox";
+
+interface RampProviderConfig {
+  /** True only with every required setting present. */
+  readonly live: boolean;
+  /** Where a live provider operates; null when not live. A sandbox moves no real money. */
+  readonly environment: RampEnvironment | null;
+  /** The required settings, captured once (only read when live). */
+  readonly values: Readonly<Record<string, string>>;
+}
+
+const REQUIRED: Readonly<Record<RampProvider, readonly string[]>> = {
+  coinbase: ["COINBASE_APP_ID"],
+  stripe: ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY"],
+  yellowcard: ["YELLOWCARD_API_KEY", "YELLOWCARD_SECRET_KEY"],
+  wise: ["WISE_API_TOKEN", "WISE_PROFILE_ID"],
+  cdp: ["CDP_API_KEY_ID", "CDP_API_KEY_SECRET", "CDP_WALLET_SECRET"],
+};
+
+function readProviderConfig(p: RampProvider): RampProviderConfig {
+  const values: Record<string, string> = {};
+  for (const k of REQUIRED[p]) {
+    const v = process.env[k];
+    if (typeof v === "string" && v.trim() !== "") values[k] = v.trim();
+  }
+  const live = REQUIRED[p].every((k) => k in values);
+  if (!live) return Object.freeze({ live: false, environment: null, values: Object.freeze({}) });
+  let environment: RampEnvironment;
+  switch (p) {
+    case "stripe":
+      environment = values.STRIPE_SECRET_KEY!.startsWith("sk_live_") ? "production" : "sandbox";
+      break;
+    case "yellowcard":
+      environment = process.env.YELLOWCARD_ENVIRONMENT === "production" ? "production" : "sandbox";
+      break;
+    case "wise":
+      environment = process.env.WISE_ENVIRONMENT === "production" ? "production" : "sandbox";
+      break;
+    case "cdp":
+      environment = process.env.CDP_NETWORK === "base" ? "production" : "sandbox";
+      break;
+    case "coinbase":
+      environment = "production";
+      break;
+  }
+  return Object.freeze({ live: true, environment, values: Object.freeze(values) });
+}
+
+const providerConfigs = new Map<RampProvider, RampProviderConfig>();
+
+/** The provider's configuration snapshot: read on first use, then fixed for the process. */
+function providerConfig(p: RampProvider): RampProviderConfig {
+  let c = providerConfigs.get(p);
+  if (!c) {
+    c = readProviderConfig(p);
+    providerConfigs.set(p, c);
+  }
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// Service singletons (lazy-init), built from the same snapshot
 // ---------------------------------------------------------------------------
 
 let stripeOnramp: StripeOnrampClient | undefined;
@@ -42,12 +118,12 @@ let wisePayout: WisePayoutService | undefined;
 
 function getStripeOnramp(): StripeOnrampClient {
   if (!stripeOnramp) {
-    const mock = !process.env.STRIPE_SECRET_KEY;
+    const cfg = providerConfig("stripe");
     stripeOnramp = new StripeOnrampClient({
-      secretKey: process.env.STRIPE_SECRET_KEY ?? "sk_test_mock",
-      publishableKey: process.env.STRIPE_PUBLISHABLE_KEY ?? "pk_test_mock",
+      secretKey: cfg.live ? cfg.values.STRIPE_SECRET_KEY! : "sk_test_mock",
+      publishableKey: cfg.live ? cfg.values.STRIPE_PUBLISHABLE_KEY! : "pk_test_mock",
       webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-      mock,
+      mock: !cfg.live,
     });
   }
   return stripeOnramp;
@@ -55,9 +131,10 @@ function getStripeOnramp(): StripeOnrampClient {
 
 function getStripeCredits(): StripeCreditService {
   if (!stripeCredits) {
+    const cfg = providerConfig("stripe");
     stripeCredits = new StripeCreditService({
-      secretKey: process.env.STRIPE_SECRET_KEY ?? "sk_test_mock",
-      mock: !process.env.STRIPE_SECRET_KEY,
+      secretKey: cfg.live ? cfg.values.STRIPE_SECRET_KEY! : "sk_test_mock",
+      mock: !cfg.live,
     });
   }
   return stripeCredits;
@@ -87,12 +164,12 @@ const RETIRED_FIAT_CREDITS_MSG =
 
 function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp; onramp: YellowcardOnramp } {
   if (!ycClient) {
-    const mock = !process.env.YELLOWCARD_API_KEY;
+    const cfg = providerConfig("yellowcard");
     ycClient = new YellowcardClient({
-      apiKey: process.env.YELLOWCARD_API_KEY ?? "yc_mock_key",
-      secretKey: process.env.YELLOWCARD_SECRET_KEY ?? "yc_mock_secret",
-      environment: (process.env.YELLOWCARD_ENVIRONMENT as "sandbox" | "production") ?? "sandbox",
-      mock,
+      apiKey: cfg.live ? cfg.values.YELLOWCARD_API_KEY! : "yc_mock_key",
+      secretKey: cfg.live ? cfg.values.YELLOWCARD_SECRET_KEY! : "yc_mock_secret",
+      environment: cfg.environment ?? "sandbox",
+      mock: !cfg.live,
     });
     ycOfframp = new YellowcardOfframp(ycClient);
     ycOnramp = new YellowcardOnramp(ycClient);
@@ -102,16 +179,22 @@ function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp
 
 function getWise(): { client: WiseClient; payout: WisePayoutService } {
   if (!wiseClient) {
-    const mock = !process.env.WISE_API_TOKEN;
+    const cfg = providerConfig("wise");
     wiseClient = new WiseClient({
-      apiToken: process.env.WISE_API_TOKEN ?? "wise_mock_token",
-      profileId: process.env.WISE_PROFILE_ID,
-      environment: (process.env.WISE_ENVIRONMENT as "sandbox" | "production") ?? "sandbox",
-      mock,
+      apiToken: cfg.live ? cfg.values.WISE_API_TOKEN! : "wise_mock_token",
+      profileId: cfg.live ? cfg.values.WISE_PROFILE_ID : undefined,
+      environment: cfg.environment ?? "sandbox",
+      mock: !cfg.live,
     });
     wisePayout = new WisePayoutService(wiseClient);
   }
   return { client: wiseClient, payout: wisePayout! };
+}
+
+/** The Wise profile a live payout uses; a demo payout runs on the mock client (profile 0). */
+function wiseProfileId(): number {
+  const cfg = providerConfig("wise");
+  return cfg.live ? parseInt(cfg.values.WISE_PROFILE_ID!, 10) : 0;
 }
 
 let cdpWallet: CdpWalletClient | undefined;
@@ -124,12 +207,15 @@ function getCdp(): {
   spendPerm: CdpSpendPermissionService;
 } {
   if (!cdpWallet) {
+    const pc = providerConfig("cdp");
     const cfg = {
-      apiKeyId: process.env.CDP_API_KEY_ID,
-      apiKeySecret: process.env.CDP_API_KEY_SECRET,
-      walletSecret: process.env.CDP_WALLET_SECRET,
+      apiKeyId: pc.live ? pc.values.CDP_API_KEY_ID : undefined,
+      apiKeySecret: pc.live ? pc.values.CDP_API_KEY_SECRET : undefined,
+      walletSecret: pc.live ? pc.values.CDP_WALLET_SECRET : undefined,
       network: (process.env.CDP_NETWORK as "base-sepolia" | "base") ?? "base-sepolia",
       onrampAppId: process.env.CDP_ONRAMP_APP_ID,
+      // Every CDP service runs in the SAME mode as the gate's snapshot.
+      mock: !pc.live,
     };
     cdpWallet = new CdpWalletClient(cfg);
     cdpOnramp = new CdpOnrampClient(cfg);
@@ -204,30 +290,14 @@ function onrampRefusal(walletAddress: string): OnrampRefusal | null {
 // GET /status admitted it. Now an unconfigured provider fails closed (503
 // not_configured) unless PCC_DEMO_ROUTES is on, and then every response says mock/demo.
 
-type RampProvider = "coinbase" | "stripe" | "yellowcard" | "wise" | "cdp";
-
-function providerConfigured(p: RampProvider): boolean {
-  switch (p) {
-    case "coinbase":
-      return !!process.env.COINBASE_APP_ID;
-    case "stripe":
-      return !!process.env.STRIPE_SECRET_KEY;
-    case "yellowcard":
-      return !!process.env.YELLOWCARD_API_KEY;
-    case "wise":
-      // A payout needs the Wise profile too; the old fallback profile 12345 was invented.
-      return !!process.env.WISE_API_TOKEN && !!process.env.WISE_PROFILE_ID;
-    case "cdp":
-      return !getCdp().wallet.isMock;
-  }
-}
-
 /**
- * "live" when the provider is configured; "demo" when it is not but PCC_DEMO_ROUTES is
- * on; otherwise sends 503 not_configured and returns null (the caller must return).
+ * "live" when the provider's configuration snapshot is complete; "demo" when it is not but
+ * PCC_DEMO_ROUTES is on (never in production); otherwise sends 503 not_configured and returns
+ * null (the caller must return). The client the route then uses is built from the SAME
+ * snapshot, so "live" always runs the real client and "demo" always runs the mock.
  */
 function providerMode(reply: FastifyReply, p: RampProvider): "live" | "demo" | null {
-  if (providerConfigured(p)) return "live";
+  if (providerConfig(p).live) return "live";
   if (isDemoRoutesOn()) return "demo";
   void reply.status(503).send({
     error: "not_configured",
@@ -235,6 +305,28 @@ function providerMode(reply: FastifyReply, p: RampProvider): "live" | "demo" | n
     message: `The ${p} provider is not configured on this gateway, so nothing was created or quoted.`,
   });
   return null;
+}
+
+/**
+ * Marks a provider response with what produced it: in demo, mock/demo; live, the
+ * provider's environment, so a sandbox answer is never mistaken for real money moving.
+ */
+function markRamp<T extends object>(mode: "live" | "demo", p: RampProvider, body: T) {
+  if (mode === "demo") return markDemo("demo", body);
+  const environment = providerConfig(p).environment;
+  return environment === "sandbox" ? { ...body, environment, sandbox: true as const } : { ...body, environment };
+}
+
+/** The caller as the API gate resolved it: the key's operator id or the SIWE address. */
+function principalOf(req: { operatorId?: unknown; userId?: unknown }): string | undefined {
+  const p = (req as any).operatorId ?? (req as any).userId;
+  return typeof p === "string" && p.trim() !== "" ? p : undefined;
+}
+
+/** A provider's state for GET /status: from the snapshot, never from current env. */
+function providerStatus(p: RampProvider) {
+  const cfg = providerConfig(p);
+  return { available: cfg.live || isDemoRoutesOn(), mock: !cfg.live, environment: cfg.environment };
 }
 
 export async function fiatRampRoutes(app: FastifyInstance) {
@@ -252,32 +344,25 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     );
   }
 
+  if (process.env.NODE_ENV === "production" && process.env.PCC_DEMO_ROUTES === "true") {
+    app.log.warn("PCC_DEMO_ROUTES=true is ignored in production: providers answer 503 not_configured, never simulated.");
+  }
+
   // ── Status ────────────────────────────────────────────────────────
 
   app.get("/api/fiat-ramp/status", async () => {
     return {
       providers: {
+        // Each entry reads the same configuration snapshot the provider's routes use.
         coinbase: {
-          available: true,
-          mock: !process.env.COINBASE_APP_ID,
+          ...providerStatus("coinbase"),
           capabilities: ["onramp"],
           note: "Primary on-ramp. No merchant account needed. User pays via Coinbase or credit card → USDC on Base.",
         },
-        stripe: {
-          available: true,
-          mock: !process.env.STRIPE_SECRET_KEY,
-          capabilities: ["onramp", "credits"],
-        },
-        yellowcard: {
-          available: true,
-          mock: !process.env.YELLOWCARD_API_KEY,
-          capabilities: ["onramp", "offramp"],
-        },
-        wise: {
-          available: true,
-          mock: !process.env.WISE_API_TOKEN,
-          capabilities: ["payout"],
-        },
+        stripe: { ...providerStatus("stripe"), capabilities: ["onramp", "credits"] },
+        yellowcard: { ...providerStatus("yellowcard"), capabilities: ["onramp", "offramp"] },
+        wise: { ...providerStatus("wise"), capabilities: ["payout"] },
+        cdp: { ...providerStatus("cdp"), capabilities: ["wallet", "provision", "spend-permission"] },
       },
       recommended: "coinbase",
       /** When false, an unconfigured provider answers 503 not_configured instead of simulating. */
@@ -301,7 +386,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const w = await wallet.createWallet();
     if (wallet.isMock) {
       // Never "usable": no key controls a mock address (F6). Reached only in demo mode.
-      return markDemo(mode, {
+      return markRamp(mode, "cdp", {
         walletAddress: w.address,
         network: w.network,
         smartAccount: w.smartAccount,
@@ -310,7 +395,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         note: MOCK_WALLET_NOTE,
       });
     }
-    return markDemo(mode, {
+    return markRamp(mode, "cdp", {
       walletAddress: w.address,
       network: w.network,
       smartAccount: w.smartAccount,
@@ -332,7 +417,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       destinationAddress: w.address,
       presetAmountUSD: body.presetAmountUSD,
     });
-    return markDemo(mode, {
+    return markRamp(mode, "cdp", {
       walletAddress: w.address,
       network: w.network,
       smartAccount: w.smartAccount,
@@ -351,7 +436,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const mode = providerMode(reply, "cdp");
     if (!mode) return reply;
     const { address } = req.params as { address: string };
-    return markDemo(mode, await getCdp().wallet.getBalance(address as `0x${string}`));
+    return markRamp(mode, "cdp", await getCdp().wallet.getBalance(address as `0x${string}`));
   });
 
   app.post("/api/fiat-ramp/cdp/spend-permission", async (req, reply) => {
@@ -371,8 +456,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         .status(400)
         .send({ error: "walletAddress, spender, allowanceUSDC required" });
     }
-    return markDemo(
-      mode,
+    return markRamp(mode, "cdp",
       await getCdp().spendPerm.issue({
         account: body.walletAddress as `0x${string}`,
         spender: body.spender as `0x${string}`,
@@ -387,7 +471,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const mode = providerMode(reply, "cdp");
     if (!mode) return reply;
     const { id } = req.params as { id: string };
-    return markDemo(mode, await getCdp().spendPerm.revoke(id));
+    return markRamp(mode, "cdp", await getCdp().spendPerm.revoke(id));
   });
 
   // ── Coinbase Onramp (PRIMARY — no merchant account needed) ──────
@@ -420,10 +504,24 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const refusal = onrampRefusal(String(body.walletAddress));
     if (refusal) return reply.status(refusal.status).send(refusal.body);
 
-    const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
     const asset = body.asset ?? "USDC";
     const network = body.network ?? "base";
     const fiatCurrency = body.currency ?? "USD";
+    if (mode === "demo") {
+      // Demo: no Coinbase app is configured, so no checkout URL is built at all (it used to
+      // carry a made-up app id). The response says what a live gateway would return.
+      return markRamp(mode, "coinbase", {
+        provider: "coinbase",
+        onrampUrl: null,
+        walletAddress: body.walletAddress,
+        asset,
+        network,
+        fiatCurrency,
+        amount: body.amount ?? null,
+        note: "Demo mode: no Coinbase app is configured, so no checkout URL was built and nothing can be funded.",
+      });
+    }
+    const appId = providerConfig("coinbase").values.COINBASE_APP_ID!;
 
     // Build Coinbase Onramp URL
     // Docs: https://docs.cdp.coinbase.com/onramp/docs/api-initializing
@@ -443,7 +541,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
 
     const onrampUrl = `https://pay.coinbase.com/buy/select-asset?${params.toString()}`;
 
-    return markDemo(mode, {
+    return markRamp(mode, "coinbase", {
       provider: "coinbase",
       onrampUrl,
       walletAddress: body.walletAddress,
@@ -452,10 +550,8 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       fiatCurrency,
       amount: body.amount ?? null,
       instructions: "Open the URL to fund your wallet. Pay with credit card, debit card, or Coinbase account. USDC arrives on Base in ~1 minute.",
-      mock: !process.env.COINBASE_APP_ID,
-      note: process.env.COINBASE_APP_ID
-        ? "Live Coinbase Onramp"
-        : "Simulated: no COINBASE_APP_ID is configured, so this URL will not fund anything.",
+      mock: false,
+      note: "Live Coinbase Onramp",
     });
   });
 
@@ -479,7 +575,14 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const refusal = onrampRefusal(String(wallet));
     if (refusal) return reply.status(refusal.status).send(refusal.body);
 
-    const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
+    if (mode === "demo") {
+      return markRamp(mode, "coinbase", {
+        url: null,
+        wallet,
+        note: "Demo mode: no Coinbase app is configured, so no checkout URL was built.",
+      });
+    }
+    const appId = providerConfig("coinbase").values.COINBASE_APP_ID!;
     const params = new URLSearchParams();
     params.set("appId", appId);
     params.set("defaultAsset", "USDC");
@@ -489,7 +592,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (amount) params.set("presetFiatAmount", amount);
     if (currency) params.set("fiatCurrency", currency);
 
-    return markDemo(mode, {
+    return markRamp(mode, "coinbase", {
       url: `https://pay.coinbase.com/buy/select-asset?${params.toString()}`,
       wallet,
     });
@@ -525,9 +628,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         destinationNetwork: body.destinationNetwork as string | undefined,
         customerEmail: body.customerEmail as string | undefined,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return markDemo(mode, {
+      return markRamp(mode, "stripe", {
         session,
         publishableKey: client.publishableKey,
         provider: "stripe",
@@ -579,6 +683,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!legacyFiatCreditsEnabled()) {
       return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
     }
+    // Even on the dev-only legacy path, a caller reads only its own balance (or an admin any).
+    const principal = ((req as any).operatorId ?? (req as any).userId ?? null) as string | null;
+    const own = typeof principal === "string" && principal.toLowerCase() === req.params.userId.toLowerCase();
+    if (!own && !hasValidAdminKey(req.headers["x-admin-key"])) {
+      return reply.status(404).send({ error: "No credit balance found" });
+    }
     const credits = getStripeCredits();
     const balance = credits.getBalance(req.params.userId);
     if (!balance) {
@@ -596,7 +706,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!mode) return reply;
     const { client } = getYellowcard();
     const channels = await client.getChannels(_req.query.country);
-    return markDemo(mode, { channels });
+    return markRamp(mode, "yellowcard", { channels });
   });
 
   app.get("/api/fiat-ramp/yellowcard/rates", async (_req, reply) => {
@@ -605,7 +715,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!mode) return reply;
     const { client } = getYellowcard();
     const rates = await client.getRates();
-    return markDemo(mode, { rates });
+    return markRamp(mode, "yellowcard", { rates });
   });
 
   // ── Yellowcard: Off-Ramp (operator withdrawal) ────────────────────
@@ -673,9 +783,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         cryptoCurrency: body.cryptoCurrency as string | undefined,
         cryptoNetwork: body.cryptoNetwork as string | undefined,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return markDemo(mode, { ...result, provider: "yellowcard" });
+      return markRamp(mode, "yellowcard", { ...result, provider: "yellowcard" });
     } catch (err) {
       return reply.status(502).send({
         error: "yellowcard_withdraw_failed",
@@ -734,9 +845,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         cryptoCurrency: body.cryptoCurrency as string | undefined,
         cryptoNetwork: body.cryptoNetwork as string | undefined,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return markDemo(mode, { ...result, provider: "yellowcard" });
+      return markRamp(mode, "yellowcard", { ...result, provider: "yellowcard" });
     } catch (err) {
       return reply.status(502).send({
         error: "yellowcard_deposit_failed",
@@ -770,7 +882,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
 
     try {
       const { payout } = getWise();
-      const profileId = parseInt(process.env.WISE_PROFILE_ID ?? "0", 10);
+      const profileId = wiseProfileId();
       const result = await payout.sendPayout({
         profileId,
         sourceAmount: body.sourceAmount as number,
@@ -783,9 +895,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         },
         reference: body.reference as string,
         escrowId: body.escrowId as string | undefined,
+        createdBy: principalOf(req),
       });
 
-      return markDemo(mode, { ...result, provider: "wise" });
+      return markRamp(mode, "wise", { ...result, provider: "wise" });
     } catch (err) {
       return reply.status(502).send({
         error: "wise_payout_failed",
@@ -822,7 +935,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
 
     try {
       const { payout } = getWise();
-      const profileId = parseInt(process.env.WISE_PROFILE_ID ?? "0", 10);
+      const profileId = wiseProfileId();
       const requests = payouts.map((p: unknown) => {
         const item = p as Record<string, unknown>;
         return {
@@ -837,11 +950,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
           },
           reference: item.reference as string,
           escrowId: item.escrowId as string | undefined,
+          createdBy: principalOf(req),
         };
       });
 
       const result = await payout.sendBatch(requests);
-      return markDemo(mode, { ...result, provider: "wise" });
+      return markRamp(mode, "wise", { ...result, provider: "wise" });
     } catch (err) {
       return reply.status(502).send({
         error: "wise_batch_failed",
@@ -929,20 +1043,18 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
 
     if (admin) return { sessions, scope: "all" };
-    const wallet = principal && isAddress(principal, { strict: false }) ? principal.toLowerCase() : null;
-    if (!wallet) {
-      return {
-        sessions: [],
-        scope: "caller_wallet",
-        attributable: false,
-        message:
-          "Ramp sessions are recorded against a wallet address only, and this caller is not identified by one.",
-      };
-    }
+    // A session is the caller's when the caller created it, or when it pays into or out of
+    // the caller's wallet. Sessions created before creators were recorded match by wallet only.
+    const me = String(principal).toLowerCase();
+    const wallet = isAddress(String(principal), { strict: false }) ? me : null;
     return {
-      sessions: sessions.filter((s) => String(s.walletAddress ?? "").toLowerCase() === wallet),
-      scope: "caller_wallet",
-      attributable: true,
+      sessions: sessions.filter(
+        (s) =>
+          String(s.createdBy ?? "").toLowerCase() === me ||
+          (wallet !== null && String(s.walletAddress ?? "").toLowerCase() === wallet),
+      ),
+      scope: "caller",
+      matchedBy: wallet ? ["created_by", "wallet"] : ["created_by"],
     };
   });
 
@@ -1002,25 +1114,33 @@ export async function fiatRampRoutes(app: FastifyInstance) {
           data: mintData,
         });
 
+        // A returned hash means the transaction was SUBMITTED, not that it minted.
         return {
           success: true,
           provider: "faucet",
+          submitted: true,
+          confirmed: false,
           walletAddress: body.walletAddress,
           amount: `${amount}.00`,
           currency: "mUSDC",
           network: "sepolia",
           txHash,
           tokenContract: MOCK_USDC,
-          note: "Testnet mint submitted. Transaction confirming on Sepolia.",
+          note: "Testnet mint transaction submitted; it is not confirmed here. Check the wallet's balance on Sepolia.",
         };
       } catch (err) {
         // A failed mint is a failure. It used to fall through to a mock "success" with a
         // made-up transaction hash.
         console.warn("[faucet] On-chain mint failed:", err instanceof Error ? err.message : err);
+        // A transport failure can come after the transaction reached the network, so the
+        // outcome is unknown: never "nothing was minted", never a made-up success.
         return reply.status(502).send({
           success: false,
           error: "mint_failed",
-          message: "The testnet mint transaction could not be sent. Nothing was minted.",
+          submitted: "unknown",
+          message:
+            "The mint could not be confirmed: the transaction may or may not have been sent. " +
+            "Check the wallet's balance before retrying.",
         });
       }
     }
@@ -1034,7 +1154,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
     // Demo only: nothing is minted, and the response says so. No transaction hash exists.
     return {
-      success: true,
+      success: false,
       provider: "faucet",
       mock: true,
       demo: true,

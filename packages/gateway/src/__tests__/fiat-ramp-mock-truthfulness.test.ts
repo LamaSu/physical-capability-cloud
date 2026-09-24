@@ -16,12 +16,16 @@
  *
  * The routes' CDP client is a module singleton that reads env on first use, so
  * each mode re-imports the route module (vi.resetModules).
+ *
+ * With N48 (#373) merged on top: an unconfigured CDP answers 503 not_configured unless
+ * PCC_DEMO_ROUTES is on, so the mock-wallet body is a DEMO answer (marked mock/demo), and
+ * "configured" means all three CDP credentials. F6's refusals still apply after that gate.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
-const CDP_ENV = ["CDP_API_KEY_ID", "CDP_API_KEY_SECRET", "CDP_WALLET_SECRET", "COINBASE_APP_ID", "CDP_NETWORK"] as const;
+const CDP_ENV = ["CDP_API_KEY_ID", "CDP_API_KEY_SECRET", "CDP_WALLET_SECRET", "COINBASE_APP_ID", "CDP_NETWORK", "PCC_DEMO_ROUTES"] as const;
 const saved: Record<string, string | undefined> = {};
 const REAL_LOOKING = "0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
 const MOCK_MINTED = "0x000000000000000000000000a1b2c3d4e5f60718";
@@ -53,11 +57,21 @@ afterEach(async () => {
 });
 
 describe("F6 — CDP wallet client in MOCK mode (no CDP credentials)", () => {
-  it("POST /cdp/wallet never calls a mock wallet usable", async () => {
+  it("POST /cdp/wallet without demo mode creates nothing (503 not_configured)", async () => {
+    app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/wallet" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ error: "not_configured", provider: "cdp" });
+    expect(res.json().walletAddress).toBeUndefined();
+  });
+
+  it("POST /cdp/wallet in demo mode never calls a mock wallet usable", async () => {
+    process.env.PCC_DEMO_ROUTES = "true";
     app = await buildApp();
     const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/wallet" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
+    expect(body.demo).toBe(true);
     expect(body.mock).toBe(true);
     expect(body.usableNow).toBe(false);
     expect(body.note).toMatch(/MOCK/);
@@ -70,8 +84,7 @@ describe("F6 — CDP wallet client in MOCK mode (no CDP credentials)", () => {
   it("POST /coinbase/onramp REFUSES outright (503) — for any address, including its own mock wallet", async () => {
     process.env.COINBASE_APP_ID = "live-app-id"; // the shell's scenario: onramp configured, CDP not
     app = await buildApp();
-    const minted = (await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/wallet" })).json().walletAddress;
-    for (const walletAddress of [REAL_LOOKING, minted]) {
+    for (const walletAddress of [REAL_LOOKING, MOCK_MINTED]) {
       const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/coinbase/onramp", payload: { walletAddress } });
       expect(res.statusCode, walletAddress).toBe(503);
       expect(res.json().error).toBe("cdp_wallet_mock");
@@ -87,10 +100,12 @@ describe("F6 — CDP wallet client in MOCK mode (no CDP credentials)", () => {
     expect(res.body).not.toContain("pay.coinbase.com");
   });
 
-  it("POST /cdp/provision is honest that the wallet and URL are mock", async () => {
+  it("POST /cdp/provision (demo mode) is honest that the wallet and URL are mock", async () => {
+    process.env.PCC_DEMO_ROUTES = "true";
     app = await buildApp();
     const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/cdp/provision", payload: {} });
     expect(res.statusCode).toBe(200);
+    expect(res.json().demo).toBe(true);
     expect(res.json().mock).toBe(true);
     expect(res.json().instructions).toMatch(/MOCK/);
     expect(res.json().instructions).not.toMatch(/pay once by card/);
@@ -99,9 +114,12 @@ describe("F6 — CDP wallet client in MOCK mode (no CDP credentials)", () => {
 
 describe("F6 — CDP wallet client REAL (credentials present)", () => {
   beforeEach(() => {
-    // Presence of a key id flips the client out of mock mode. No network is
-    // touched: the onramp route only reads isMock and builds a URL.
+    // All three CDP credentials make it live (a key id alone is a partial configuration,
+    // which stays mock). No network is touched: the onramp route only reads isMock and
+    // builds a URL.
     process.env.CDP_API_KEY_ID = "test-cdp-key-id";
+    process.env.CDP_API_KEY_SECRET = "test-cdp-key-secret";
+    process.env.CDP_WALLET_SECRET = "test-cdp-wallet-secret";
     process.env.COINBASE_APP_ID = "live-app-id";
   });
 
