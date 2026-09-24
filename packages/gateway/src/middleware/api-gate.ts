@@ -122,7 +122,12 @@ const PUBLIC_CARRIER_WEBHOOK_PATH = "/api/carrier/webhook/easypost";
 // /api/lob/ is public.
 const PUBLIC_LOB_WEBHOOK_PATH = "/api/lob/webhook";
 
-function isPublicRoute(url: string, method?: string): boolean {
+/**
+ * The gate's public-route predicate. Exported because the onboarding chat
+ * (routes/onboard-chat.ts, WP-D D6) must let an anonymous chat reach exactly the
+ * routes this gate lets through with no credential, and nothing else.
+ */
+export function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;

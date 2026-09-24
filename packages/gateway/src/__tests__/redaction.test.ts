@@ -82,4 +82,23 @@ describe("redactSecrets", () => {
     expect(redactOrNull(null)).toBeNull();
     expect(redactOrNull("pcc_live_XXXXXXXX")).toBe("pcc_live_redacted");
   });
+
+  it("runs in linear time on adversarial public input (WP-D R1: the JWT regex was quadratic)", () => {
+    // /api/feedback is public and bounds each field to 64,000 chars before redaction;
+    // the old JWT regex spent ~1 s on one such field of '-eyJ'. 200 KB here.
+    redactSecrets("warm up eyJhbGciOiJI.eyJzdWIiOiI1NTU.QsWpV7cSignatureHere");
+    for (const unit of ["-eyJ", "-eyJaaaaaa.", "_eyJabcdef.ghijkl.", "-sk-", "Bearer ", "a".repeat(63) + "g"]) {
+      const input = unit.repeat(Math.ceil((200 * 1024) / unit.length));
+      const t0 = performance.now();
+      redactSecrets(input);
+      const ms = performance.now() - t0;
+      expect(ms, `${JSON.stringify(unit)}: ${ms.toFixed(1)} ms`).toBeLessThan(100);
+    }
+  });
+
+  it("still redacts a JWT after '-' or '_' exactly as the regex did", () => {
+    const jwt = "eyJhbGciOiJI.eyJzdWIiOiI1NTU.QsWpV7cSignatureHere";
+    expect(redactSecrets(`x-${jwt} y_${jwt}`)).toBe("x-[redacted-jwt] y_[redacted-jwt]");
+    expect(redactSecrets(`x${jwt}`)).toBe(`x${jwt}`); // an alphanumeric neighbour still shields it
+  });
 });
