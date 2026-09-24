@@ -8,12 +8,19 @@
  * Root cause for both: `KernelFacade.register()` hardcoded the values instead
  * of reading from the input body. CreateKernelInput interface also did not
  * even declare maxAssuranceTier, so TS couldn't catch the silent drop.
+ *
+ * WP-C (assurance ceiling): the submitted tier is still persisted as-is
+ * (c6b48ca1 stays fixed), but only as the operator's CLAIM. The DTO now
+ * serves min(claim, authorized ceiling), and a kernel with no proven signing
+ * key has a ceiling of 0. So the c6b48ca1 cases assert persistence on the
+ * STORED row (the thing c6b48ca1 was about) and assert the served value
+ * separately. An omitted claim now defaults to 0 (was 2).
  */
 
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { kernelRoutes } from "../routes/kernels.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 
 describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", () => {
   let app: FastifyInstance;
@@ -112,9 +119,15 @@ describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", (
     });
     expect(create.statusCode).toBe(201);
 
+    // c6b48ca1: the submitted claim is persisted as-is (not overridden to 2).
+    expect(getRepos().kernels.findById(id)?.maxAssuranceTier).toBe(1);
+
+    // WP-C: the SERVED tier is min(claim, ceiling). There is no proven
+    // signing key here, so the ceiling is 0 and the DTO serves 0.
+    // (Old assertion: DTO === 1. It served the raw claim.)
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
     const body = JSON.parse(get.body) as { kernel: { maxAssuranceTier?: number } };
-    expect(body.kernel.maxAssuranceTier).toBe(1);
+    expect(body.kernel.maxAssuranceTier).toBe(0);
   });
 
   it("[c6b48ca1] persists submitted maxAssuranceTier=0 (the lowest tier — not silently overridden)", async () => {
@@ -131,12 +144,15 @@ describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", (
     });
     expect(create.statusCode).toBe(201);
 
+    // c6b48ca1: the submitted claim is persisted as-is.
+    expect(getRepos().kernels.findById(id)?.maxAssuranceTier).toBe(0);
+
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
     const body = JSON.parse(get.body) as { kernel: { maxAssuranceTier?: number } };
     expect(body.kernel.maxAssuranceTier).toBe(0);
   });
 
-  it("[c6b48ca1] defaults maxAssuranceTier=2 when omitted from input", async () => {
+  it("[WP-C] defaults the maxAssuranceTier CLAIM to 0 when omitted (was 2)", async () => {
     const id = `kernel_test_tier_default_${Date.now()}`;
     const create = await app.inject({
       method: "POST",
@@ -149,8 +165,12 @@ describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", (
     });
     expect(create.statusCode).toBe(201);
 
+    // Old assertion: DTO === 2 (the omitted claim defaulted to 2 and was
+    // served raw). WP-C: an omitted claim defaults to 0, and the served tier
+    // is also capped by the ceiling. An unstated claim grants nothing.
+    expect(getRepos().kernels.findById(id)?.maxAssuranceTier).toBe(0);
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
     const body = JSON.parse(get.body) as { kernel: { maxAssuranceTier?: number } };
-    expect(body.kernel.maxAssuranceTier).toBe(2);
+    expect(body.kernel.maxAssuranceTier).toBe(0);
   });
 });

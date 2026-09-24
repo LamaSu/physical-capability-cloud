@@ -28,6 +28,12 @@ import {
 } from "./populators/kernel.populator.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import {
+  authorizedAssuranceCeiling,
+  clampAssuranceTiers,
+  isAssuranceTier,
+} from "../services/assurance-ceiling.js";
+import { hasRecordedOwner, isKernelOwner } from "../services/kernel-ownership.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -50,9 +56,12 @@ export interface CreateKernelInput {
   location?: string | { lat: number; lng: number };
   physicalAddress?: string;
   /**
-   * Maximum assurance tier the operator claims they can sustain (0-3).
-   * Submitted value is persisted as-is — no silent override. Defaults to 2
-   * when omitted (most operators support tier 0/1/2 evidence by default).
+   * Maximum assurance tier the operator CLAIMS they can sustain (integer 0-3).
+   * Validated when present (anything else -> 400) and stored as-is, but only
+   * as a CLAIM: every read path serves `effectiveMaxAssuranceTier()`, the
+   * claim capped at the kernel's independently authorized ceiling (see
+   * services/assurance-ceiling.ts). Defaults to 0 when omitted. It no longer
+   * defaults to 2: an unstated claim grants nothing.
    */
   maxAssuranceTier?: 0 | 1 | 2 | 3;
   /**
@@ -297,20 +306,27 @@ export class KernelFacade extends BaseFacade {
       const id = body.id || `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const context = this.defaultContext();
 
+      // WP-C: the tier is a CLAIM. When present (on create OR update) it must
+      // be an integer 0..3. A string "3", 2.5, 5, null, etc. is a 400, never a
+      // silent drop and never a stored out-of-range value. Validated before
+      // any read or write.
+      if (body.maxAssuranceTier !== undefined && !isAssuranceTier(body.maxAssuranceTier)) {
+        throw Object.assign(
+          new Error("maxAssuranceTier must be an integer in 0..3"),
+          { name: "BadRequestError", code: "invalid_max_assurance_tier" },
+        );
+      }
+
       const existing = repos.kernels.findById(id);
       if (existing) {
-        const unownedOperatorAddresses = new Set([
-          "",
-          "0x0000000000000000000000000000000000000000",
-        ]);
-        const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
+        const ownerRecorded = hasRecordedOwner(existing);
         // Authorization only — authentication is apiGate's job (POST /api/kernels
         // is Bearer-gated → 401 without a key), so a real request always carries
         // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
         // not mutate someone else's kernel. When actorId is absent (a facade-level
         // unit test with no apiGate wired) there is no owner to check against; the
         // SET-ONCE signer bind still fail-closes via the CAS below.
-        if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
+        if (actorId && ownerRecorded && existing.operatorAddress !== actorId) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
@@ -324,7 +340,7 @@ export class KernelFacade extends BaseFacade {
         // Legacy rows may carry the historical zero-address placeholder rather
         // than an owner. Their first authenticated mutation claims ownership;
         // subsequent heartbeats/profile updates are owner-only like new rows.
-        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
+        if (actorId && !ownerRecorded) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.
@@ -339,7 +355,9 @@ export class KernelFacade extends BaseFacade {
             updates.location = { lat: loc.lat, lng: loc.lng };
           }
         }
-        if (typeof body.maxAssuranceTier === "number") {
+        // Validated above: when present it is an integer 0..3. Stored as the
+        // CLAIM only; reads cap it at the authorized ceiling.
+        if (body.maxAssuranceTier !== undefined) {
           updates.maxAssuranceTier = body.maxAssuranceTier;
         }
         // Heartbeat/profile fields are a normal update. The signing identity is
@@ -420,10 +438,11 @@ export class KernelFacade extends BaseFacade {
         version: "0.1.0",
         reputation: 0,
         totalJobsCompleted: 0,
-        // Fix for coord task c6b48ca1: respect the operator's submitted tier
-        // instead of hardcoding 2. Default to 2 when omitted (most operators
-        // sustain tier 0/1/2 evidence by default).
-        maxAssuranceTier: body.maxAssuranceTier ?? 2,
+        // The operator's submitted tier is stored as a CLAIM (coord c6b48ca1:
+        // never silently overridden). WP-C: an omitted claim defaults to 0,
+        // not 2. What the kernel is SERVED at is
+        // min(claim, authorizedAssuranceCeiling) — see assurance-ceiling.ts.
+        maxAssuranceTier: body.maxAssuranceTier ?? 0,
         // feat/ed25519-keys-and-kernel-ttl — set initial soft expiry.
         // Without this, a registered-but-never-heartbeated kernel would
         // never appear in default listings (sweeper would mark expired
@@ -460,11 +479,26 @@ export class KernelFacade extends BaseFacade {
   /**
    * Handle a heartbeat from a kernel daemon.
    * Updates status, upserts capabilities announced in the heartbeat.
-   * Replaces: POST /api/kernels/:kernelId/heartbeat
+   * Replaces: POST /api/kernels/:kernelId/heartbeat (and backs
+   * POST /api/operator/heartbeat).
+   *
+   * OWNER-ONLY (WP-C). A heartbeat marks a kernel online and can insert
+   * catalog rows, so it is authorized like any other mutation of the kernel:
+   *   - the kernel must exist (404 otherwise); a heartbeat never creates
+   *     capability rows for an unknown kernel id;
+   *   - `actorId` (the route passes apiGate's `operatorId ?? userId`) must be
+   *     the kernel's recorded `operatorAddress`, else 403 `not_kernel_owner`.
+   *     A legacy placeholder owner ("" / zero address) must first be claimed
+   *     through an authenticated register, so it is also 403. A missing actor
+   *     is never the owner (fail closed).
+   * Inserted capability `assuranceTiers` are CLAMPED to the kernel's authorized
+   * ceiling: each value must be an integer 0..3 and <= the ceiling, others are
+   * dropped, and an empty result becomes [0].
    */
   async heartbeat(
     kernelId: string,
     body: HeartbeatInput,
+    actorId?: string,
   ): Promise<Result<HeartbeatResult>> {
     return this.execute("heartbeat", async () => {
       const { status = "online", capabilities } = body ?? {};
@@ -473,43 +507,50 @@ export class KernelFacade extends BaseFacade {
       const validUntil = computeValidUntilIso(nowDate);
       const repos = this.repos;
 
+      const kernel = repos.kernels.findById(kernelId) as any;
+      if (!kernel) {
+        throw new NotFoundError("kernel", kernelId);
+      }
+      if (!isKernelOwner(kernel, actorId)) {
+        throw notKernelOwner(kernelId);
+      }
+      // The authorized ceiling bounds every tier this heartbeat may insert.
+      const ceiling = authorizedAssuranceCeiling(kernel);
+
       // Resurrection detection: compare prior validUntil to "now" — if it
       // had already passed, this heartbeat brings the kernel back from
       // expired status. Emit telemetry so the dashboard can show it.
-      const kernel = repos.kernels.findById(kernelId) as any;
       let resurrected = false;
       let sinceLastHeartbeatSec: number | null = null;
       let wasExpiredForMinutes: number | null = null;
 
-      if (kernel) {
-        const priorHeartbeat = kernel.lastHeartbeat
-          ? Date.parse(kernel.lastHeartbeat as string)
-          : NaN;
-        if (Number.isFinite(priorHeartbeat)) {
-          sinceLastHeartbeatSec = Math.floor((nowDate.getTime() - priorHeartbeat) / 1000);
-        }
-        const priorValidUntil = kernel.validUntil
-          ? Date.parse(kernel.validUntil as string)
-          : NaN;
-        if (Number.isFinite(priorValidUntil) && priorValidUntil < nowDate.getTime()) {
-          resurrected = true;
-          wasExpiredForMinutes = Math.floor(
-            (nowDate.getTime() - priorValidUntil) / 60000,
-          );
-        }
+      const priorHeartbeat = kernel.lastHeartbeat
+        ? Date.parse(kernel.lastHeartbeat as string)
+        : NaN;
+      if (Number.isFinite(priorHeartbeat)) {
+        sinceLastHeartbeatSec = Math.floor((nowDate.getTime() - priorHeartbeat) / 1000);
+      }
+      const priorValidUntil = kernel.validUntil
+        ? Date.parse(kernel.validUntil as string)
+        : NaN;
+      if (Number.isFinite(priorValidUntil) && priorValidUntil < nowDate.getTime()) {
+        resurrected = true;
+        wasExpiredForMinutes = Math.floor(
+          (nowDate.getTime() - priorValidUntil) / 60000,
+        );
+      }
 
-        try {
-          repos.kernels.update(kernelId, {
-            // The sweeper marks expired kernels status=expired; an
-            // incoming heartbeat brings them back online unless the
-            // operator explicitly sent status=offline.
-            status: status === "offline" ? "offline" : "online",
-            lastHeartbeat: now,
-            validUntil,
-          } as any);
-        } catch {
-          // soft fail
-        }
+      try {
+        repos.kernels.update(kernelId, {
+          // The sweeper marks expired kernels status=expired; an
+          // incoming heartbeat brings them back online unless the
+          // operator explicitly sent status=offline.
+          status: status === "offline" ? "offline" : "online",
+          lastHeartbeat: now,
+          validUntil,
+        } as any);
+      } catch {
+        // soft fail
       }
 
       // Upsert capability announcements
@@ -529,7 +570,9 @@ export class KernelFacade extends BaseFacade {
                 name: (cap.name as string) ?? `${capType} — ${kernelId}`,
                 description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
                 materials: (cap.materials as string[]) ?? [],
-                assuranceTiers: (cap.assuranceTiers as number[]) ?? [0, 1],
+                // Claimed tiers are clamped to the kernel's authorized ceiling
+                // (invalid values dropped; nothing left -> [0]).
+                assuranceTiers: clampAssuranceTiers(cap.assuranceTiers ?? [0, 1], ceiling),
                 pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
                 availability: (cap.availability as any) ?? {},
                 location: (cap.location as any) ?? { lat: 0, lng: 0 },
@@ -612,17 +655,37 @@ export class KernelFacade extends BaseFacade {
    * Currently a stub — returns acknowledged without upsert (unlike heartbeat).
    * Replaces: POST /api/kernels/:kernelId/capabilities
    *
+   * OWNER-ONLY (WP-C): the kernel must exist (404) and `actorId` must be its
+   * recorded owner (403 `not_kernel_owner`), the same rule as heartbeat.
+   *
+   * GUARD: this stub must NEVER write tiers, capabilities or devices. The
+   * announced `assuranceTiers` / `maxAssuranceTier` are unverified CLAIMS and
+   * nothing here stores or acts on them. A future implementation must first
+   * verify the announcement signature against the kernel's proven signing key,
+   * and must route every tier it stores through
+   * services/assurance-ceiling.ts (clampAssuranceTiers /
+   * authorizedAssuranceCeiling). It must never persist a claimed tier
+   * directly.
+   *
    * TODO: Implement full announcement verification (Ed25519 signature check
    * on the announcement payload, then upsert capabilities and devices).
    */
   async announceCapabilities(
     kernelId: string,
     body: CapabilityAnnouncementInput,
+    actorId?: string,
   ): Promise<Result<AnnouncementResult>> {
     return this.execute("announceCapabilities", async () => {
+      const kernel = this.repos.kernels.findById(kernelId);
+      if (!kernel) {
+        throw new NotFoundError("kernel", kernelId);
+      }
+      if (!isKernelOwner(kernel, actorId)) {
+        throw notKernelOwner(kernelId);
+      }
       const now = new Date().toISOString();
-      const capabilities = body.capabilities ?? [];
-      const devices = body.devices ?? [];
+      const capabilities = Array.isArray(body?.capabilities) ? body.capabilities : [];
+      const devices = Array.isArray(body?.devices) ? body.devices : [];
 
       return {
         acknowledged: true as const,
@@ -782,6 +845,19 @@ class NotFoundError extends Error {
     super(`${entity} '${id}' not found`);
     this.name = "NotFoundError";
   }
+}
+
+/**
+ * 403 `not_kernel_owner`: the actor is not the kernel's recorded owner (or
+ * the kernel still carries a legacy placeholder owner that must be claimed
+ * through an authenticated register first). BaseFacade maps ForbiddenError to
+ * 403 and keeps the attached code.
+ */
+function notKernelOwner(kernelId: string): Error {
+  return Object.assign(
+    new Error(`Authenticated actor does not own kernel '${kernelId}'`),
+    { name: "ForbiddenError", code: "not_kernel_owner" },
+  );
 }
 
 // ── Lifecycle telemetry ───────────────────────────────────────────────────

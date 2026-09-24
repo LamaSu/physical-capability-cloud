@@ -42,6 +42,13 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+  // Identity shim standing in for apiGate, which attaches `operatorId` in
+  // production (same pattern as carrier.test.ts). WP-C: operator heartbeats
+  // are owner-only, so they are sent as the seeded kernel's owner.
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);
@@ -58,6 +65,11 @@ async function getSeededKernelId(app: FastifyInstance): Promise<string | null> {
   const res = await app.inject({ method: "GET", url: "/api/kernels" });
   const body = res.json();
   return body.kernels?.[0]?.id ?? null;
+}
+
+/** The recorded owner (operatorAddress) of a seeded kernel. */
+function ownerOf(kernelId: string): string {
+  return getRepos().kernels.findById(kernelId)!.operatorAddress;
 }
 
 /** Returns the first queued job ID for a kernel, or null. */
@@ -277,13 +289,14 @@ describe("Operator Relay Routes", () => {
       expect(body.error).toBe("kernelId required");
     });
 
-    it("acknowledges heartbeat for known kernel", async () => {
+    it("acknowledges heartbeat for known kernel (sent by its owner)", async () => {
       const kernelId = await getSeededKernelId(app);
       if (!kernelId) return;
 
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/heartbeat",
+        headers: { "x-test-operator": ownerOf(kernelId) },
         payload: {
           kernelId,
           status: "online",
@@ -296,13 +309,14 @@ describe("Operator Relay Routes", () => {
       expect(body.kernelId).toBe(kernelId);
     });
 
-    it("acknowledges heartbeat with capability announcement", async () => {
+    it("acknowledges heartbeat with capability announcement (sent by its owner)", async () => {
       const kernelId = await getSeededKernelId(app);
       if (!kernelId) return;
 
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/heartbeat",
+        headers: { "x-test-operator": ownerOf(kernelId) },
         payload: {
           kernelId,
           status: "online",
@@ -318,17 +332,37 @@ describe("Operator Relay Routes", () => {
       expect(body.capabilitiesReceived).toBe(2);
     });
 
-    it("accepts unknown kernel gracefully (no 404)", async () => {
+    it("rejects a heartbeat for an unknown kernel with 404 (register first)", async () => {
+      // Old assertion: 200 ("pcc-node may heartbeat before registration"),
+      // and a heartbeat carrying capabilities would have inserted catalog rows
+      // for a kernel id nobody owns. WP-C: the heartbeat facade requires the
+      // kernel to exist. A node registers (POST /api/kernels) with its key
+      // and then heartbeats as that owner.
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/heartbeat",
+        headers: { "x-test-operator": "0x1111111111111111111111111111111111111111" },
         payload: {
           kernelId: "kernel-brand-new-unknown",
           status: "online",
+          capabilities: [{ type: "ghost-capability" }],
         },
       });
-      // Should not 404 — pcc-node may heartbeat before registration
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
+      expect(getRepos().capabilities.findById("cap-kernel-brand-new-unknown-ghost-capability")).toBeFalsy();
+    });
+
+    it("rejects a heartbeat from a non-owner with 403 not_kernel_owner", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/heartbeat",
+        headers: { "x-test-operator": "someone-else" },
+        payload: { kernelId, status: "online" },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("not_kernel_owner");
     });
   });
 

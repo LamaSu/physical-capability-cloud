@@ -32,6 +32,9 @@ const mockConfig: KernelConfig = {
   ],
 };
 
+/** Seeded owner (operatorAddress) of kernel-nyc, the kernel these heartbeats target. */
+const NYC_OWNER = "0x1111111111111111111111111111111111111111";
+
 // ---------------------------------------------------------------------------
 // App builder
 // ---------------------------------------------------------------------------
@@ -44,6 +47,14 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
+  // Identity shim standing in for apiGate, which attaches `operatorId` in
+  // production (same pattern as carrier.test.ts). WP-C: kernel heartbeats are
+  // owner-only, so every heartbeat here is sent as kernel-nyc's seeded owner.
+  // (Old: the heartbeats carried no identity and were accepted for any kernel.)
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);
@@ -76,6 +87,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         status: "online",
@@ -112,6 +124,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
     await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         status: "online",
@@ -123,6 +136,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         status: "online",
@@ -151,6 +165,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         status: "online",
@@ -183,6 +198,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         status: "online",
@@ -205,6 +221,7 @@ describe("Fix 1: Capability auto-registration from heartbeats", () => {
     const res = await app.inject({
       method: "POST",
       url: `/api/kernels/${kernelId}/heartbeat`,
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         status: "online",
         capabilities: [
@@ -252,6 +269,7 @@ describe("Fix 2: Semantic job routing", () => {
     await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: {
         kernelId,
         status: "online",
@@ -420,6 +438,7 @@ describe("Fix 3: Kernel staleness detection", () => {
     const hbRes = await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: { kernelId, status: "online" },
     });
     expect(hbRes.statusCode).toBe(200);
@@ -444,6 +463,7 @@ describe("Fix 3: Kernel staleness detection", () => {
     await app.inject({
       method: "POST",
       url: "/api/operator/heartbeat",
+      headers: { "x-test-operator": NYC_OWNER },
       payload: { kernelId, status: "online" },
     });
 
@@ -509,6 +529,7 @@ describe("Fix 3: Kernel staleness detection", () => {
     const hbRes = await app.inject({
       method: "POST",
       url: `/api/kernels/${kernelId}/heartbeat`,
+      headers: { "x-test-operator": NYC_OWNER },
       payload: { status: "online" },
     });
     expect(hbRes.statusCode).toBe(200);

@@ -17,6 +17,7 @@ import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
+import { requestActor } from "../services/kernel-ownership.js";
 import { v4 as uuidv4 } from "uuid";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
@@ -193,6 +194,13 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * Operator node heartbeat: keeps the kernel marked "online" and
    * optionally re-announces capabilities.
    *
+   * Owner-only (WP-C): same facade rule as POST /api/kernels/:kernelId/heartbeat.
+   * The kernel must exist (404) and the authenticated actor (apiGate
+   * `operatorId ?? userId`) must be its recorded owner (403
+   * `not_kernel_owner`). A pcc-node daemon must therefore heartbeat with the
+   * key that registered its kernel. Announced capability tiers are clamped to
+   * the kernel's authorized ceiling.
+   *
    * Body: { kernelId, status?, capabilities?, timestamp? }
    */
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
@@ -202,7 +210,11 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "kernelId required" });
     }
 
-    const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
+    const result = await kernelFacade.heartbeat(
+      kernelId,
+      { status, capabilities, timestamp },
+      requestActor(req),
+    );
     return sendResult(reply, result);
   });
 

@@ -163,6 +163,54 @@ describe("populateKernelDTO()", () => {
   });
 });
 
+// ── Assurance ceiling (WP-C) ───────────────────────────────────────────────
+
+describe("populateKernelDTO() — maxAssuranceTier is ALWAYS capped at the authorized ceiling", () => {
+  const PROVEN = {
+    signingKeyAlgorithm: "ed25519",
+    signingKeyPublicKey: `0x${"cd".repeat(32)}`,
+  };
+
+  it("serves 0 for a tier-3 claim without a proven signing key, even with a strong record", () => {
+    const model = makeRawKernel({ maxAssuranceTier: 3, reputation: 950, totalJobsCompleted: 127 });
+    expect(populateKernelDTO(model, [], makeCtx()).maxAssuranceTier).toBe(0);
+  });
+
+  it("serves 1 for a tier-3 claim from a proven signer with a fresh record", () => {
+    const model = makeRawKernel({ ...PROVEN, maxAssuranceTier: 3, reputation: 0, totalJobsCompleted: 0 });
+    expect(populateKernelDTO(model, [], makeCtx()).maxAssuranceTier).toBe(1);
+  });
+
+  it("serves the full claim when the ceiling allows it", () => {
+    const model = makeRawKernel({ ...PROVEN, maxAssuranceTier: 3, reputation: 900, totalJobsCompleted: 50 });
+    expect(populateKernelDTO(model, [], makeCtx()).maxAssuranceTier).toBe(3);
+  });
+
+  it("serves a claim BELOW the ceiling as-is", () => {
+    const model = makeRawKernel({ ...PROVEN, maxAssuranceTier: 1, reputation: 900, totalJobsCompleted: 50 });
+    expect(populateKernelDTO(model, [], makeCtx()).maxAssuranceTier).toBe(1);
+  });
+
+  it("the legacy applyColdStartGate flag cannot switch the ceiling off", () => {
+    const model = makeRawKernel({ maxAssuranceTier: 3, reputation: 950, totalJobsCompleted: 127 });
+    expect(populateKernelDTO(model, [], makeCtx({ applyColdStartGate: false })).maxAssuranceTier).toBe(0);
+    expect(populateKernelDTO(model, [], makeCtx({ applyColdStartGate: true })).maxAssuranceTier).toBe(0);
+  });
+
+  it("ignores a caller-supplied reputation cache (authority reads the raw row)", () => {
+    const model = makeRawKernel({ ...PROVEN, maxAssuranceTier: 3, reputation: 0, totalJobsCompleted: 0 });
+    const ctx = makeCtx({ includeReputation: true, reputationCache: new Map([["kernel-001", 1000]]) });
+    const dto = populateKernelDTO(model, [], ctx);
+    expect(dto.reputation).toBe(1000); // display enrichment still honours the cache
+    expect(dto.maxAssuranceTier).toBe(1); // the ceiling does not
+  });
+
+  it("a malformed stored claim serves 0", () => {
+    const model = makeRawKernel({ ...PROVEN, maxAssuranceTier: 7, reputation: 900, totalJobsCompleted: 50 });
+    expect(populateKernelDTO(model, [], makeCtx()).maxAssuranceTier).toBe(0);
+  });
+});
+
 // ── populateKernelHealthSnapshot ───────────────────────────────────────────
 
 describe("populateKernelHealthSnapshot()", () => {
