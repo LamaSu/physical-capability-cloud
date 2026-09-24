@@ -24,6 +24,7 @@ import type {
   DigitalWorkflowStep,
   WorkflowChallenge,
   ExecutionProof,
+  TierEvidenceRequirements,
 } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS, verifyBundleHash, verifyEventHash, ids } from "@pcc/spec";
 import { canonicalize, sha256 } from "@pcc/spec";
@@ -42,6 +43,13 @@ export interface DigitalVerifyOptions {
   executionProof?: ExecutionProof;
   /** Block timestamp to use for challenge age check. Defaults to Date.now()/1000. */
   currentBlockTimestamp?: bigint;
+  /**
+   * The funded capability's tier requirements: its CSD's ladder,
+   * `compileTierLadder(csd).tiers` (@pcc/spec). Defaults to
+   * DEFAULT_TIER_REQUIREMENTS, which is FDM-shaped (gcode_hash_verified at
+   * every tier), so a non-FDM bundle only passes under its own CSD's ladder.
+   */
+  tierRequirements?: readonly TierEvidenceRequirements[];
 }
 
 export class EvidenceVerifier {
@@ -99,9 +107,19 @@ export class EvidenceVerifier {
       });
     }
 
-    // 3. Check tier requirements
-    const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === bundle.assuranceTier);
-    if (tierReq) {
+    // 3. Check tier requirements, under the funded capability's ladder when given
+    const ladder = options?.tierRequirements ?? DEFAULT_TIER_REQUIREMENTS;
+    const tierReq = ladder.find((r) => r.tier === bundle.assuranceTier);
+    if (!tierReq) {
+      // A claimed tier the ladder does not define proves nothing: fail closed.
+      findings.push({
+        evidenceEventId: "",
+        check: "tier_requirement_defined",
+        passed: false,
+        details: `Tier ${String(bundle.assuranceTier)} is not defined by the tier requirements in force`,
+        severity: "critical",
+      });
+    } else {
       const eventTypes = new Set(bundle.events.map((e) => e.type));
       for (const group of tierReq.requiredEventTypes) {
         const found = group.some((t) => eventTypes.has(t));
