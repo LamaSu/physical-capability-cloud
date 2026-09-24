@@ -149,10 +149,13 @@ class PCCGatewayClient:
             "timestamp": time.time(),
         }
         status, resp = self._post("/api/operator/evidence", payload)
-        if status in (200, 201):
+        # Acknowledged only when the gateway says it STORED the bundle: the
+        # relay answers 200 with {"stored": false} when its insert fails
+        # (operator-relay.ts), and that is not a receipt (r31 finding 7).
+        if status in (200, 201) and isinstance(resp, dict) and resp.get("stored") is True:
             log.info(f"Evidence pushed for job {job_id}")
             return True
-        log.warning(f"Evidence push failed HTTP {status}: {resp}")
+        log.warning(f"Evidence for job {job_id} was not stored (HTTP {status}): {resp}")
         return False
 
     def update_job_status(
@@ -167,8 +170,19 @@ class PCCGatewayClient:
             payload["metadata"] = metadata
         http_status, resp = self._patch(f"/api/jobs/{job_id}/status", payload)
         if http_status in (200, 201):
-            log.debug(f"Job {job_id} status -> {status}")
-            return True
+            # Acknowledged only when the returned job carries the status we
+            # asked for (r31 finding 7: bodies used to be ignored).
+            job = resp.get("job") if isinstance(resp, dict) else None
+            if isinstance(job, dict) and job.get("status") == status:
+                log.debug(f"Job {job_id} status -> {status}")
+                return True
+            # The gateway answered but did not record it; the relay must not
+            # be used to force what this route declined.
+            log.warning(
+                f"Job {job_id}: the gateway answered HTTP {http_status} but did not "
+                f"record status {status!r}: {resp}"
+            )
+            return False
         # Try the operator relay endpoint as fallback
         fallback_payload = {
             "jobId": job_id,
@@ -177,8 +191,9 @@ class PCCGatewayClient:
             "metadata": metadata or {},
             "timestamp": time.time(),
         }
-        fb_status, _ = self._post("/api/operator/job-status", fallback_payload)
-        if fb_status in (200, 201):
+        fb_status, fb_resp = self._post("/api/operator/job-status", fallback_payload)
+        # The relay answers 200 {"updated": false} for a job it does not know.
+        if fb_status in (200, 201) and isinstance(fb_resp, dict) and fb_resp.get("updated") is True:
             log.debug(f"Job {job_id} status -> {status} (via relay)")
             return True
         log.warning(f"Job status update failed HTTP {http_status}: {resp}")

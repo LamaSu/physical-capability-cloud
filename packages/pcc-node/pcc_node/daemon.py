@@ -26,6 +26,7 @@ from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
 from .job_executor import JobExecutor
+from .outbox import StatusOutbox
 from .register import register_kernel, announce_capabilities
 from .ws_client import PCCGatewayClient
 
@@ -34,6 +35,8 @@ log = logging.getLogger("pcc-node.daemon")
 # PID file for status checks
 PID_FILE = os.path.expanduser("~/.pcc-node.pid")
 STATE_FILE = os.path.expanduser("~/.pcc-node-state.json")
+# Terminal status reports the gateway has not acknowledged yet (r31 finding 7).
+OUTBOX_FILE = os.path.expanduser("~/.pcc-node/status-outbox.json")
 
 
 def _write_pid():
@@ -237,7 +240,11 @@ def run_daemon(config: NodeConfig):
         poll_interval=config.poll_interval,
     )
 
-    job_executor = JobExecutor(devices=all_devices, gateway_client=gateway_client)
+    job_executor = JobExecutor(
+        devices=all_devices,
+        gateway_client=gateway_client,
+        outbox=StatusOutbox(OUTBOX_FILE),
+    )
 
     # ------------------------------------------------------------------
     # 6. Probe camera
@@ -301,6 +308,13 @@ def run_daemon(config: NodeConfig):
             job_executor.poll_awaiting()
         except Exception as e:
             log.error(f"Completion check failed: {e}")
+
+        # Retry terminal status reports the gateway has not acknowledged.
+        # Guarded on its own for the same reason.
+        try:
+            job_executor.flush_outbox()
+        except Exception as e:
+            log.error(f"Status outbox flush failed: {e}")
 
         try:
             # Poll for queued jobs

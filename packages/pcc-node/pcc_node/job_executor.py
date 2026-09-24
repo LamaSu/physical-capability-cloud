@@ -1445,6 +1445,7 @@ class JobExecutor:
         devices: List[Dict],
         gateway_client=None,
         clock: Optional[Callable[[], float]] = None,
+        outbox: Optional[Any] = None,
     ):
         # Index by id and by protocol for fast lookup
         self._devices_by_id: Dict[str, Dict] = {}
@@ -1459,6 +1460,9 @@ class JobExecutor:
 
         self.gateway = gateway_client
         self._clock: Callable[[], float] = clock or time.monotonic
+        # Durable retry for terminal status reports the gateway did not
+        # acknowledge (outbox.StatusOutbox; r31 finding 7).  None: log only.
+        self.outbox = outbox
 
         # Jobs a device ACCEPTED whose completion is still to be observed, by
         # job id (see poll_awaiting).  IN MEMORY ONLY: a daemon restart forgets
@@ -1515,9 +1519,7 @@ class JobExecutor:
                     "capabilityType": capability_type,
                 }
                 if self.gateway:
-                    self.gateway.update_job_status(
-                        job_id, "failed", {"error": "no_device_found"}
-                    )
+                    self._report_terminal_failure(job_id, {"error": "no_device_found"})
                 return error_result
 
             result = self._execute_on_device(device, job)
@@ -1528,10 +1530,20 @@ class JobExecutor:
             if self.gateway:
                 # Evidence is pushed for every outcome -- a failed run must
                 # still reach the verifier so that it can dispute.
-                self.gateway.push_evidence(job_id, evidence)
+                pushed = self.gateway.push_evidence(job_id, evidence)
 
                 if verdict == RESULT_SUCCESS:
-                    self.gateway.update_job_status(job_id, "completed", result)
+                    # As for device-reported completion: 'completed' whose
+                    # execution_completed was never stored could not settle,
+                    # and pushing the bundle again risks a duplicate.
+                    if pushed:
+                        self._report_terminal(job_id, "completed", result, "device reported success")
+                    else:
+                        log.error(
+                            "Job %s: the device succeeded but the gateway did not store "
+                            "the completion evidence; NOT reporting 'completed' -- the "
+                            "job stays 'running' upstream", job_id,
+                        )
                 elif verdict == RESULT_FAILURE:
                     self._report_terminal_failure(
                         job_id,
@@ -1578,7 +1590,7 @@ class JobExecutor:
             log.error(f"Job {job_id} failed: {e}")
             error_info = {"error": str(e), "status": "failed"}
             if self.gateway:
-                self.gateway.update_job_status(job_id, "failed", error_info)
+                self._report_terminal_failure(job_id, error_info)
             return error_info
 
     def _report_terminal_failure(self, job_id: str, metadata: Dict) -> bool:
@@ -1590,22 +1602,30 @@ class JobExecutor:
         the job non-terminal, which matters beyond this node: the gateway's own
         completion route is gated on the job not already being 'failed'.
 
-        This does NOT close that hole -- it makes it observable rather than
-        silent.  Closing it needs a retry/outbox here or a change on the
-        gateway side, neither of which is in this module's scope.
+        With an outbox the unacknowledged report is queued and retried
+        (flush_outbox); without one it is only logged.
         """
-        acknowledged = bool(
-            self.gateway.update_job_status(job_id, "failed", metadata)
+        return self._report_terminal(job_id, "failed", metadata, metadata.get("error"))
+
+    def _report_terminal(self, job_id: str, status: str, metadata: Dict, reason: Any) -> bool:
+        """Report a terminal status; queue it durably when it is not acknowledged."""
+        acknowledged = bool(self.gateway.update_job_status(job_id, status, metadata))
+        if acknowledged:
+            return True
+        queued = self.outbox is not None and self.outbox.enqueue(job_id, status, metadata)
+        log.error(
+            "Job %s: the gateway did not acknowledge the %r status report (%s); %s",
+            job_id, status, reason,
+            "it is queued and will be retried" if queued
+            else "the job may still look non-terminal upstream",
         )
-        if not acknowledged:
-            log.error(
-                "Job %s: the gateway did not acknowledge the 'failed' status "
-                "report; the job may still look non-terminal upstream "
-                "(reason: %s)",
-                job_id,
-                metadata.get("error"),
-            )
-        return acknowledged
+        return False
+
+    def flush_outbox(self) -> int:
+        """Retry queued terminal reports that are due.  Returns how many landed."""
+        if self.outbox is None or self.gateway is None:
+            return 0
+        return self.outbox.flush(self.gateway.update_job_status)
 
     # ------------------------------------------------------------------
     # Deferred completion tracking
@@ -1868,16 +1888,10 @@ class JobExecutor:
                     job_id, observation.get("reason"),
                 )
                 return
-            if self.gateway.update_job_status(job_id, "completed", result):
+            if self._report_terminal(job_id, "completed", result, observation.get("reason")):
                 log.info(
                     "Job %s completed: the device reported it (%s)",
                     job_id, observation.get("reason"),
-                )
-            else:
-                log.error(
-                    "Job %s: the gateway did not acknowledge the 'completed' "
-                    "status report; the job may still look 'running' upstream "
-                    "(the device reported: %s)", job_id, observation.get("reason"),
                 )
             return
 
