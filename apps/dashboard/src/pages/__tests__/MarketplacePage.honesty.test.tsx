@@ -61,6 +61,16 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  // jsdom has no ResizeObserver, which recharts' ResponsiveContainer needs. The page
+  // draws no chart now; the stub lets this file also render the old, chart-drawing page.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
 });
 
 afterEach(() => {

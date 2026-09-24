@@ -50,10 +50,8 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  // The store outlives a render; start every test from a blank form.
-  useMarketplaceStore.setState({
-    roiInputs: { equipmentCost: "", monthlyCost: "", avgJobValue: "", jobsPerMonth: "" },
-  });
+  // The store outlives a render: start every test from the store's own initial state.
+  useMarketplaceStore.setState(useMarketplaceStore.getInitialState(), true);
 });
 
 afterEach(() => {
