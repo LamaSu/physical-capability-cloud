@@ -328,6 +328,37 @@ describe("N10a: /api/ip/* authorization", () => {
     });
   });
 
+  describe("Story real mode that refuses to execute (N10b's STORY_NOT_EXECUTED) is 501, not a 500", () => {
+    const notExecuted = () => Object.assign(new Error("Story real mode is not executed"), { code: "STORY_NOT_EXECUTED" });
+
+    it("pay answers 501 not_executed", async () => {
+      const ipId = await registerCapabilityIp(app);
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(notExecuted());
+      const res = await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(ipId)}/pay`, headers: as(BUYER), payload: { amount: "1000" } });
+      expect(res.statusCode).toBe(501);
+      expect(res.json<{ error: string }>().error).toBe("not_executed");
+    });
+
+    it("settle-royalties answers 501 when Story executed none of the payments, and says nothing was paid", async () => {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const child = await registerEvidenceIp(app, parent, jobId);
+      owe10Percent(parent, child);
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValue(notExecuted());
+      const res = await app.inject({ method: "POST", url: "/api/ip/settle-royalties", headers: as(BUYER), payload: { jobId, childIpId: child } });
+      expect(res.statusCode).toBe(501);
+      expect(res.json<{ error: string; totalDistributed: string }>()).toMatchObject({ error: "not_executed", totalDistributed: "0" });
+    });
+
+    it("any other Story failure stays a 500 with its own error name", async () => {
+      const ipId = await registerCapabilityIp(app);
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(new Error("rpc down"));
+      const res = await app.inject({ method: "POST", url: `/api/ip/${encodeURIComponent(ipId)}/pay`, headers: as(BUYER), payload: { amount: "1000" } });
+      expect(res.statusCode).toBe(500);
+      expect(res.json<{ error: string }>().error).toBe("pay_royalty_failed");
+    });
+  });
+
   describe("E4: pay and dispute act as the caller, against a recorded IP", () => {
     it("pay: the payer is the caller; another payer is 403, an unknown IP 404, a non-integer amount 400", async () => {
       const ipId = await registerCapabilityIp(app);

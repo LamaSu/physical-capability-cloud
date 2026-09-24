@@ -265,6 +265,22 @@ function requireIpOwner(req: FastifyRequest, reply: FastifyReply, ipId: string):
   return wallet;
 }
 
+/**
+ * Story's real mode refuses operations it cannot execute with `code: "STORY_NOT_EXECUTED"`
+ * (StoryNotExecutedError, pcc-economics N10b). That is an honest "not available", not a server fault:
+ * answer 501 so no client mistakes it for a transient error or for a result.
+ */
+function isStoryNotExecuted(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "STORY_NOT_EXECUTED";
+}
+
+function storyFailure(reply: FastifyReply, err: unknown, error: string) {
+  if (isStoryNotExecuted(err)) {
+    return reply.code(501).send({ error: "not_executed", message: err instanceof Error ? err.message : String(err) });
+  }
+  return reply.code(500).send({ error, message: err instanceof Error ? err.message : String(err) });
+}
+
 /** A positive integer amount in base units, as a canonical decimal string. */
 function isBaseUnitAmount(v: unknown): v is string {
   return typeof v === "string" && /^[1-9][0-9]{0,77}$/.test(v);
@@ -372,10 +388,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return { registration: reg };
       } catch (err) {
-        return reply.code(500).send({
-          error: "registration_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "registration_failed");
       }
     },
   );
@@ -444,10 +457,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return { link };
       } catch (err) {
-        return reply.code(500).send({
-          error: "derivative_registration_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "derivative_registration_failed");
       }
     },
   );
@@ -497,10 +507,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return result;
       } catch (err) {
-        return reply.code(500).send({
-          error: "distribute_royalties_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "distribute_royalties_failed");
       }
     },
   );
@@ -609,10 +616,7 @@ export async function ipRoutes(app: FastifyInstance) {
       try {
         distributions = engine.getRoyaltyDistribution(childIpId, revenue);
       } catch (err) {
-        return reply.code(500).send({
-          error: "settle_royalties_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "settle_royalties_failed");
       }
 
       // Every row reports its own outcome. A failed row fails the request: nothing is swallowed.
@@ -621,6 +625,7 @@ export async function ipRoutes(app: FastifyInstance) {
         | { ipId: string; recipientAddress: string; amount: string; outcome: "failed"; error: string };
       const rows: Row[] = [];
       let totalDistributed = 0n;
+      let notExecuted = 0;
       for (const dist of distributions) {
         if (dist.amount === "0") continue;
         try {
@@ -628,11 +633,16 @@ export async function ipRoutes(app: FastifyInstance) {
           rows.push({ ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount, outcome: "paid", txHash });
           totalDistributed += BigInt(dist.amount);
         } catch (err) {
+          if (isStoryNotExecuted(err)) notExecuted++;
           rows.push({ ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount, outcome: "failed", error: err instanceof Error ? err.message : String(err) });
         }
       }
       const failed = rows.filter((r) => r.outcome === "failed").length;
       const result = { jobId, childIpId, revenue, payerAddress: escrow.payer, distributions: rows, totalDistributed: String(totalDistributed) };
+      if (failed > 0 && failed === rows.length && notExecuted === failed) {
+        // Story's real mode executed none of it: not available, rather than a partial failure.
+        return reply.code(501).send({ error: "not_executed", message: "Story did not execute any royalty payment; nothing was paid.", ...result });
+      }
       if (failed > 0) {
         return reply.code(502).send({
           error: "settlement_incomplete",
@@ -674,10 +684,7 @@ export async function ipRoutes(app: FastifyInstance) {
           directChildren: children,
         };
       } catch (err) {
-        return reply.code(500).send({
-          error: "derivative_tree_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "derivative_tree_failed");
       }
     },
   );
@@ -694,10 +701,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const distributions = engine.getRoyaltyDistribution(ipId, amount);
         return { ipId, amount, distributions };
       } catch (err) {
-        return reply.code(500).send({
-          error: "royalty_distribution_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "royalty_distribution_failed");
       }
     },
   );
@@ -729,10 +733,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const result = await svc.payJobRoyalty(ipId, amount, wallet);
         return result;
       } catch (err) {
-        return reply.code(500).send({
-          error: "pay_royalty_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "pay_royalty_failed");
       }
     },
   );
@@ -768,10 +769,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return result;
       } catch (err) {
-        return reply.code(500).send({
-          error: "claim_revenue_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "claim_revenue_failed");
       }
     },
   );
@@ -787,10 +785,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const snapshot = await svc.getRevenueSnapshot(ipId);
         return snapshot;
       } catch (err) {
-        return reply.code(500).send({
-          error: "revenue_snapshot_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "revenue_snapshot_failed");
       }
     },
   );
@@ -806,10 +801,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const lineage = await svc.getLineage(ipId);
         return { ipId, ...lineage };
       } catch (err) {
-        return reply.code(500).send({
-          error: "lineage_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "lineage_failed");
       }
     },
   );
@@ -843,10 +835,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return { registration: reg };
       } catch (err) {
-        return reply.code(500).send({
-          error: "get_ip_registration_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "get_ip_registration_failed");
       }
     },
   );
@@ -877,10 +866,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const dispute = await svc.raiseDispute(ipId, { hash: evidenceHash, reason });
         return { dispute, raisedBy: wallet };
       } catch (err) {
-        return reply.code(500).send({
-          error: "raise_dispute_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "raise_dispute_failed");
       }
     },
   );
