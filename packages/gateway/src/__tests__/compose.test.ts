@@ -13,6 +13,8 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import nacl from "tweetnacl";
+import { buildEd25519RegistrationProof } from "@pcc/kernel-sdk";
 import {
   composeRoutes,
   executeComposition,
@@ -963,7 +965,14 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
   });
 
   /** Register a kernel + a capability through the REAL facade write path so the
-   *  facade-backed provider can read them back via CapabilityFacade.listByType. */
+   *  facade-backed provider can read them back via CapabilityFacade.listByType.
+   *
+   *  WP-C: the kernel registers WITH a proven ed25519 signing key, as a real
+   *  operator does through kernel-sdk. Its authorized ceiling is then 1 (fresh
+   *  reputation), so the capability's [0,1,2] claim is served as [0,1] and
+   *  meets these tests' minAssuranceTier of 1. (Old: registered with no
+   *  signer, and the raw claim of 2 was selectable. An unsigned kernel now has
+   *  ceiling 0 and is served [0].) */
   async function registerRealCapability(opts: {
     kernelId: string;
     operatorAddress: string;
@@ -971,14 +980,22 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     type: string;
     baseCostUSD: number;
   }): Promise<void> {
+    const kp = nacl.sign.keyPair();
+    const proof = buildEd25519RegistrationProof(opts.kernelId, {
+      algorithm: "ed25519",
+      privateKey: kp.secretKey,
+      expectedPublicKey: Buffer.from(kp.publicKey).toString("hex"),
+    });
     const kernel = await getKernelFacade().register({
       id: opts.kernelId,
       name: `Kernel ${opts.kernelId}`,
       operatorAddress: opts.operatorAddress,
       location: { lat: 37.77, lng: -122.42 },
       maxAssuranceTier: 2,
+      ...proof,
     });
     expect(kernel.success).toBe(true);
+    expect(kernel.success && kernel.data.kernel.signingKey?.algorithm).toBe("ed25519");
 
     const cap = await getCapabilityFacade().create({
       id: opts.capabilityId,

@@ -50,6 +50,11 @@ import {
 } from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  buildAssuranceCeilingMap,
+  ceilingFor,
+  clampAssuranceTiers,
+} from "../services/assurance-ceiling.js";
 import { schema } from "@pcc/store";
 
 // ---------------------------------------------------------------------------
@@ -108,10 +113,20 @@ function agenticEnabled(): boolean {
 /**
  * Build CapabilityLite candidates for the matcher from the live registry.
  * Returns [] if the repo is unreachable — the caller falls back to templates.
+ *
+ * WP-C: `assuranceTiers` are the SERVED tiers, meaning each row's claim clamped
+ * to its kernel's authorized assurance ceiling (same clamp as the capability
+ * DTO). They drive the matched node's evidence depth (`deriveEvidence`) and
+ * the `matchedCapabilityDigest`, so a raw self-declared tier must never reach
+ * them. Kernels are loaded with one batched query. An unknown kernel is ceiling 0.
  */
 function loadCapabilityCandidates(): CapabilityLite[] {
   try {
-    const rows = getRepos().capabilities.findAll();
+    const repos = getRepos();
+    const rows = repos.capabilities.findAll();
+    const ceilings = buildAssuranceCeilingMap(
+      repos.kernels.findByIds([...new Set(rows.map((r) => r.kernelId))]),
+    );
     return rows.map<CapabilityLite>((r) => ({
       id: r.id,
       type: r.type,
@@ -127,7 +142,7 @@ function loadCapabilityCandidates(): CapabilityLite[] {
             minimum: r.pricing.minimum,
           }
         : undefined,
-      assuranceTiers: r.assuranceTiers,
+      assuranceTiers: clampAssuranceTiers(r.assuranceTiers, ceilingFor(ceilings, r.kernelId)),
     }));
   } catch {
     return [];

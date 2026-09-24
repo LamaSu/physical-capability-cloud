@@ -232,7 +232,14 @@ function haversineKm(
  */
 const FACADE_DEFAULT_DURATION_MS = 60 * 60 * 1000; // 1h placeholder
 
-/** Highest assurance tier a capability advertises (0 when none declared). */
+/**
+ * Highest assurance tier a capability advertises (0 when none declared).
+ *
+ * WP-C: on the facade path `tiers` is `CapabilityDTO.assuranceTiers`, which
+ * the capability populator already clamped to the owning kernel's authorized
+ * ceiling (services/assurance-ceiling.ts). Eligibility (`minAssuranceTier`)
+ * and `quality` ranking therefore see the SERVED tier, never the raw claim.
+ */
 function maxAssuranceTier(tiers: readonly number[] | undefined): AssuranceTier {
   if (!tiers || tiers.length === 0) return 0;
   const max = Math.max(...tiers);

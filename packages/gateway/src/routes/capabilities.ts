@@ -676,7 +676,10 @@ export async function capabilityRoutes(app: FastifyInstance) {
 
         "pcc:capabilityType": cap.type,
         "pcc:kernelId": cap.kernelId,
-        "pcc:assuranceTiers": cap.assuranceTiers ?? [0, 1, 2, 3],
+        // The DTO already serves tiers clamped to the kernel's authorized
+        // ceiling (WP-C). If they were ever absent, advertise the floor [0],
+        // never all four tiers.
+        "pcc:assuranceTiers": cap.assuranceTiers ?? [0],
         "pcc:pricing": cap.pricing,
       };
 

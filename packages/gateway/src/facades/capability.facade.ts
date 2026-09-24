@@ -21,6 +21,11 @@ import {
   populateCapabilityDTO,
   populateCapabilityList,
 } from "./populators/capability.populator.js";
+import {
+  buildAssuranceCeilingMap,
+  ceilingFor,
+  clampAssuranceTiers,
+} from "../services/assurance-ceiling.js";
 
 /**
  * Filter expired rows out of a capability list (feat/ed25519-keys-and-kernel-ttl).
@@ -203,11 +208,6 @@ export class CapabilityFacade extends BaseFacade {
           criteria.materials!.some((m) => c.materials.includes(m)),
         );
       }
-      if (criteria.assuranceTier !== undefined) {
-        candidates = candidates.filter((c) =>
-          c.assuranceTiers.includes(criteria.assuranceTier!),
-        );
-      }
       if (criteria.query) {
         const q = criteria.query.toLowerCase();
         candidates = candidates.filter(
@@ -218,9 +218,23 @@ export class CapabilityFacade extends BaseFacade {
         );
       }
 
-      // Load kernels for enrichment
+      // Load kernels (one batched query) for the tier filter and enrichment.
+      const kernelMap = this.loadKernelMap([...new Set(candidates.map((c) => c.kernelId))]);
+
+      // WP-C: filter on the SERVED tiers, meaning the claim clamped to the owning
+      // kernel's authorized ceiling. A row claiming [0,1,2] on a kernel whose
+      // ceiling is 1 does not match assuranceTier=2. The ceiling is evaluated
+      // once per kernel.
+      if (criteria.assuranceTier !== undefined) {
+        const ceilings = buildAssuranceCeilingMap(kernelMap.values());
+        candidates = candidates.filter((c) =>
+          clampAssuranceTiers(c.assuranceTiers, ceilingFor(ceilings, c.kernelId)).includes(
+            criteria.assuranceTier!,
+          ),
+        );
+      }
+
       const kernelIds = [...new Set(candidates.map((c) => c.kernelId))];
-      const kernelMap = this.loadKernelMap(kernelIds);
       context.reputationCache = await this.preloadReputations(kernelIds);
 
       // Filter by reputation if requested
@@ -350,15 +364,22 @@ export class CapabilityFacade extends BaseFacade {
 
   // ── Private Helpers ────────────────────────────────────────────────────
 
+  /**
+   * Batch-load kernels by id with ONE IN-list query (chunked inside the repo),
+   * not one findById per kernel. A kernel missing from the map is treated
+   * downstream as unknown: no enrichment, and an assurance ceiling of 0.
+   */
   private loadKernelMap(kernelIds: string[]): Map<string, any> {
     const map = new Map<string, any>();
-    for (const id of kernelIds) {
-      try {
-        const kernel = this.repos.kernels.findById(id);
-        if (kernel) map.set(id, kernel);
-      } catch {
-        // Non-fatal: capability exists but kernel may have been removed
+    const unique = [...new Set(kernelIds)];
+    if (unique.length === 0) return map;
+    try {
+      for (const kernel of this.repos.kernels.findByIds(unique)) {
+        if (kernel) map.set(kernel.id, kernel);
       }
+    } catch {
+      // Non-fatal: capabilities still render; their kernels count as unknown
+      // (unavailable, assurance ceiling 0 — fail closed).
     }
     return map;
   }
