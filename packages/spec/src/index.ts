@@ -20,3 +20,6 @@ export * from "./payouts.js";
 // Canonical money-status display map (browser-safe) — the ONE exact escrow /
 // settlement state -> tone + honest label table every surface renders from.
 export * from "./money/money-status.js";
+// Product read models (browser-safe): typed DTOs product surfaces project without
+// inferring meaning. JobExecutionDTO first (PX-6).
+export * from "./readmodels/job-execution.js";
