@@ -22,9 +22,8 @@ async function seal(raw: RawEvent[]): Promise<EvidenceEvent[]> {
   );
 }
 
-/** Events shaped like kernel-sdk's job-handler: an input commitment that names
- *  only the kernel, execution_started (job + kernel) and execution_completed
- *  (job + kernel + output). */
+/** Events shaped like kernel-sdk's job-handler: every event names the job and
+ *  the kernel (the binding is per event); execution_completed adds the output. */
 async function kernelSdkShapedBundle(jobId: string, kernelId: string, outputHash = OUTPUT) {
   const source = { deviceId: kernelId, deviceType: "digital_agent" as const, kernelId };
   const events = await seal([
@@ -32,7 +31,7 @@ async function kernelSdkShapedBundle(jobId: string, kernelId: string, outputHash
       type: "gcode_hash_verified",
       timestamp: "2026-09-24T10:00:00.000Z",
       source,
-      payload: { inputHash: "sha256:" + "11".repeat(32), kernelId },
+      payload: { jobId, inputHash: "sha256:" + "11".repeat(32), kernelId },
     },
     {
       type: "execution_started",
@@ -108,7 +107,7 @@ describe("LO-EV-9 required negatives — replay across job, node and output", ()
     expect(await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) })).toEqual({
       ok: false,
       reason: "job-mismatch",
-      eventIndex: 1,
+      eventIndex: 0,
     });
   });
 
@@ -141,7 +140,7 @@ describe("LO-EV-9 required negatives — replay across job, node and output", ()
         events: relabelled,
         subject: subject(JOB_B, NODE_A),
       }),
-    ).toEqual({ ok: false, reason: "event-hash-mismatch", eventIndex: 1 });
+    ).toEqual({ ok: false, reason: "event-hash-mismatch", eventIndex: 0 });
   });
 
   it("relabelled events that are re-hashed no longer open the signed digest", async () => {
@@ -219,7 +218,18 @@ describe("LO-EV-9 fail-closed shapes", () => {
         events,
         subject: subject(JOB_A, NODE_A),
       }),
-    ).toEqual({ ok: false, reason: "job-not-committed" });
+    ).toEqual({ ok: false, reason: "job-not-committed", eventIndex: 0 });
+  });
+
+  it("rejects a bundle in which only some events name the job (the binding is per event)", async () => {
+    const source = { deviceId: NODE_A, deviceType: "controller" as const, kernelId: NODE_A };
+    const events = await seal([
+      { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A } },
+      { type: "workflow_step_completed", timestamp: "2026-09-24T10:00:01.000Z", source, payload: { stepId: "s1" } },
+    ]);
+    expect(
+      await verifyEvidenceSubjectBinding({ bundleHash: await hashBundle(events), events, subject: subject(JOB_A, NODE_A) }),
+    ).toEqual({ ok: false, reason: "job-not-committed", eventIndex: 1 });
   });
 
   it("rejects a bundle that commits two jobs", async () => {
@@ -253,7 +263,7 @@ describe("LO-EV-9 fail-closed shapes", () => {
     const foreign = { deviceId: "probe-7", deviceType: "temperature_sensor" as const, kernelId: NODE_B };
     const events = await seal([
       { type: "execution_started", timestamp: "t", source: own, payload: { jobId: JOB_A } },
-      { type: "temperature_log", timestamp: "t", source: foreign, payload: { celsius: 21.5 } },
+      { type: "temperature_log", timestamp: "t", source: foreign, payload: { jobId: JOB_A, celsius: 21.5 } },
     ]);
     expect(
       await verifyEvidenceSubjectBinding({
@@ -488,12 +498,25 @@ describe("LO-EV-9 settlement-unit and challenge binding (oracle's milestone repl
     expect(await verifyEvidenceSubjectBinding({ ...none, subject: unitSubject(U3) })).toEqual({
       ok: false,
       reason: "unit-not-committed",
+      eventIndex: 0,
     });
     const unitOnly = await milestoneBundle(U3, undefined);
     expect(await verifyEvidenceSubjectBinding({ ...unitOnly, subject: unitSubject(U3, NONCE_3) })).toEqual({
       ok: false,
       reason: "challenge-not-committed",
+      eventIndex: 0,
     });
+  });
+
+  it("a unit carried by only some events is refused: the unit scopes every event", async () => {
+    const source = { deviceId: NODE_A, deviceType: "digital_agent" as const, kernelId: NODE_A };
+    const events = await seal([
+      { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A, settlementUnitId: U3 } },
+      { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A } },
+    ]);
+    expect(
+      await verifyEvidenceSubjectBinding({ bundleHash: await hashBundle(events), events, subject: unitSubject(U3) }),
+    ).toEqual({ ok: false, reason: "unit-not-committed", eventIndex: 1 });
   });
 
   it("a subject that names no unit is unchanged: unit fields in the evidence are ignored", async () => {

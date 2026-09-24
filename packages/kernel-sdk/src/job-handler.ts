@@ -257,10 +257,13 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       timestamp: executionStart,
       source,
       payload: {
+        // Every event names its job (and unit): the binding is per event.
+        jobId: request.jobId,
         description: "Input data committed",
         inputHash,
         kernelId: manifest.kernelId,
         capabilityType: manifest.capabilityType,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -306,9 +309,11 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         timestamp: new Date().toISOString(),
         source,
         payload: {
+          jobId: request.jobId,
           stepId: step.stepId,
           stepType: step.stepType,
           description: step.description,
+          ...unitFields,
         },
         hash: "" as SHA256,
       };

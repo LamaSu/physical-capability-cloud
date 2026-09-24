@@ -18,20 +18,22 @@
  *   3. there is at least one event, and every event is well-formed and
  *      reproduces its own `hash` (`hashEvent`);
  *   4. the events reproduce `bundleHash` (`hashBundle`);
- *   5. job: at least one event commits `payload.jobId`, and every
- *      `payload.jobId` equals the subject's job;
+ *   5. job: EVERY event commits `payload.jobId`, equal to the subject's job.
+ *      The kernel signs event by event, and a session delegated for several
+ *      jobs could not attribute a jobless event, so one event naming the job
+ *      is not enough (the oracle enforces the same rule at /settle);
  *   6. node: every event's `source.kernelId`, and every `payload.kernelId`,
  *      equals the kernel that accepted the job;
  *   7. output, only when the subject names one: at least one event commits
  *      `payload.outputHash`, and every `payload.outputHash` equals it;
- *   8. settlement unit, only when the subject names one: likewise for
- *      `payload.settlementUnitId`, the escrow unit being settled. A job settles
- *      unit by unit (milestones), and `jobId` alone would let evidence signed
- *      for milestone 3 settle milestone 4 of the same job;
- *   9. challenge, only when the subject names one: likewise for
- *      `payload.challengeNonce`, the gateway-issued per-unit nonce the package
- *      carries as `challengeBinding.nonce`. Evidence made before the nonce was
- *      issued cannot contain it.
+ *   8. settlement unit, only when the subject names one: EVERY event commits
+ *      `payload.settlementUnitId`, equal to the escrow unit being settled. A
+ *      job settles unit by unit (milestones), and `jobId` alone would let
+ *      evidence signed for milestone 3 settle milestone 4 of the same job;
+ *   9. challenge, only when the subject names one: EVERY event commits
+ *      `payload.challengeNonce`, equal to the gateway-issued per-unit nonce the
+ *      package carries as `challengeBinding.nonce`. Evidence made before the
+ *      nonce was issued cannot contain it.
  * Both unit fields are `0x` + 64 lowercase hex, byte-equal to the settlement
  * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`.
  *
@@ -191,14 +193,11 @@ export async function verifyEvidenceSubjectBinding(
   const payloadOf = (i: number) => events[i]!.payload as Record<string, unknown>;
   const sourceOf = (i: number) => events[i]!.source as unknown as Record<string, unknown>;
 
-  let jobCommitted = false;
   for (let i = 0; i < events.length; i++) {
     const committed = own(payloadOf(i), "jobId");
-    if (committed === undefined) continue;
+    if (committed === undefined) return { ok: false, reason: "job-not-committed", eventIndex: i };
     if (committed !== subject.jobId) return { ok: false, reason: "job-mismatch", eventIndex: i };
-    jobCommitted = true;
   }
-  if (!jobCommitted) return { ok: false, reason: "job-not-committed" };
 
   for (let i = 0; i < events.length; i++) {
     if (own(sourceOf(i), "kernelId") !== subject.kernelId) {
@@ -210,19 +209,23 @@ export async function verifyEvidenceSubjectBinding(
     }
   }
 
-  // Optional commitments: when the subject names one, some event must commit it
-  // and every event that carries it must agree.
+  // Optional commitments, checked only when the subject names one. The output
+  // lives on the completion event, so one event committing it suffices; the
+  // unit and its challenge scope every event, like the job.
   const optional = [
-    ["outputHash", subject.outputHash, "output-not-committed", "output-mismatch"],
-    ["settlementUnitId", subject.settlementUnitId, "unit-not-committed", "unit-mismatch"],
-    ["challengeNonce", subject.challengeNonce, "challenge-not-committed", "challenge-mismatch"],
+    ["outputHash", subject.outputHash, "output-not-committed", "output-mismatch", "some"],
+    ["settlementUnitId", subject.settlementUnitId, "unit-not-committed", "unit-mismatch", "every"],
+    ["challengeNonce", subject.challengeNonce, "challenge-not-committed", "challenge-mismatch", "every"],
   ] as const;
-  for (const [field, expected, notCommitted, mismatch] of optional) {
+  for (const [field, expected, notCommitted, mismatch, scope] of optional) {
     if (expected === undefined) continue;
     let committedOnce = false;
     for (let i = 0; i < events.length; i++) {
       const committed = own(payloadOf(i), field);
-      if (committed === undefined) continue;
+      if (committed === undefined) {
+        if (scope === "every") return { ok: false, reason: notCommitted, eventIndex: i };
+        continue;
+      }
       if (committed !== expected) return { ok: false, reason: mismatch, eventIndex: i };
       committedOnce = true;
     }
