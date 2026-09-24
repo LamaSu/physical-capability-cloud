@@ -9,9 +9,10 @@
  *     update an existing kernel without an actor), never a pass;
  *   - nothing is written (kernel row, capabilities, policy, approvals, devices,
  *     graph nodes and compose candidates are byte-for-byte unchanged);
- *   - no kernel-owner lookup runs (KernelFacade.getById, which
- *     lookupKernelOwner uses), and no kernel row lookup is keyed on a missing
- *     or empty id.
+ *   - no kernel-owner lookup runs: neither KernelFacade.getById (the shared
+ *     lookupKernelOwner) nor a kernel row read (lookupKernelOwnerRow, which
+ *     WP-C's guard uses). The only row read is register's own read of the
+ *     kernel it was asked to update, keyed on the body's id.
  * A second table sends MALFORMED bodies without an actor: still 401, because
  * the actor is resolved before the body is validated. A positive control sends
  * each well-formed request with the owner's key to the same bare app and gets
@@ -425,22 +426,24 @@ describe("steward rule 7: every WP-C owner guard fails closed without an actor (
 
     expect(res.statusCode).toBe(row.refused);
     expect(snapshot(s)).toBe(before);
-    // No kernel-OWNER lookup at all: the actor is checked before any lookup.
+    // No kernel-owner lookup at all: the actor is checked before any lookup.
+    // The owner check reads the kernel row (lookupKernelOwnerRow), so no
+    // guarded route may read it either. POST /api/kernels is the one
+    // exception: register reads the row it was asked to update (keyed on the
+    // body's id, never on the actor) and then refuses.
     expect(ownerLookupArgs).toEqual([]);
-    // And no kernel row lookup keyed on a missing/empty id.
-    for (const arg of rowLookupArgs) {
-      expect(typeof arg === "string" && arg.length > 0).toBe(true);
-    }
+    expect(rowLookupArgs).toEqual(row.route.startsWith("POST /api/kernels (") ? [s.kernelId] : []);
   });
 
   it.each(MALFORMED)("[neg] no actor + malformed body: $route -> 401 (actor before body validation)", async (row) => {
     const s = seed();
     const before = snapshot(s);
-    const { res, ownerLookupArgs } = await observe(row.method, row.url(s), row.body);
+    const { res, ownerLookupArgs, rowLookupArgs } = await observe(row.method, row.url(s), row.body);
     expect(res.statusCode).toBe(401);
     expect(res.json().error).toBe("api_key_required");
     expect(snapshot(s)).toBe(before);
     expect(ownerLookupArgs).toEqual([]);
+    expect(rowLookupArgs).toEqual([]);
   });
 
   it.each(ROWS)("control: the same request with the OWNER's key -> $ok ($route)", async (row) => {

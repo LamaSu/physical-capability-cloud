@@ -7,7 +7,7 @@
  * lookupKernelOwner + ZERO_ADDRESS + isSamePrincipal from the shared module.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyRequest } from "fastify";
 import {
   checkKernelOwner,
@@ -17,6 +17,7 @@ import {
 import { ZERO_ADDRESS } from "../auth/kernel-operator.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
+import { KernelFacade } from "../facades/index.js";
 
 const OWNER_EVM = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
 
@@ -145,6 +146,26 @@ describe("checkKernelOwner", () => {
         status: 401,
         error: "api_key_required",
       });
+    }
+  });
+
+  // Review round 2 (LOW): the owner check used lookupKernelOwner, i.e.
+  // KernelFacade.getById, which loads every capability, device and job of the
+  // kernel to read one column, and it ran before a non-owner's 403.
+  it("[neg] the owner lookup is ONE kernel-row read: no health snapshot, no job scan, for the owner or a non-owner", async () => {
+    const snapshot = vi.spyOn(KernelFacade.prototype, "getById");
+    const jobScan = vi.spyOn(getRepos().jobs, "findByKernel");
+    const rowRead = vi.spyOn(getRepos().kernels, "findById");
+    try {
+      await expect(checkKernelOwner("op-owner", "guard-owned")).resolves.toMatchObject({ ok: true });
+      await expect(checkKernelOwner("op-attacker", "guard-owned")).resolves.toMatchObject({ status: 403 });
+      expect(snapshot).not.toHaveBeenCalled();
+      expect(jobScan).not.toHaveBeenCalled();
+      expect(rowRead.mock.calls).toEqual([["guard-owned"], ["guard-owned"]]);
+    } finally {
+      snapshot.mockRestore();
+      jobScan.mockRestore();
+      rowRead.mockRestore();
     }
   });
 

@@ -3,10 +3,13 @@
  * predicate in ./kernel-operator.ts (PR #335, copied verbatim; never edit that
  * file here, so the branches merge cleanly).
  *
- * Who owns a kernel, and whether a principal is that owner, is decided ONLY by
- * `lookupKernelOwner` + `ZERO_ADDRESS` + `isSamePrincipal` from
- * ./kernel-operator.ts, the same rule `requireKernelOperator` enforces on the
- * job-claim doors. This file adds exactly three things on top:
+ * Whether a principal owns a kernel is decided ONLY by `ZERO_ADDRESS` +
+ * `isSamePrincipal` from ./kernel-operator.ts over the kernel's recorded
+ * `operatorAddress`, the same rule `requireKernelOperator` enforces on the
+ * job-claim doors. The recorded owner is read with `lookupKernelOwnerRow`
+ * below: `lookupKernelOwner`'s contract (found / not_found / lookup_failed,
+ * never throws) as ONE single-row read (see its comment for why). This file
+ * adds exactly three things on top:
  *
  *   1. A PRESENT actor. The identity is apiGate's (`operatorId ?? userId`).
  *      When apiGate skipped the path because a public allowlist entry is not
@@ -31,9 +34,33 @@
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { getRepos } from "../db.js";
 import { resolveApiKey } from "./api-key-auth.js";
 import { resolveSession } from "./siwe-auth.js";
-import { isSamePrincipal, lookupKernelOwner, ZERO_ADDRESS } from "./kernel-operator.js";
+import { isSamePrincipal, ZERO_ADDRESS, type KernelOwnerLookup } from "./kernel-operator.js";
+
+/**
+ * Who owns `kernelId`: ONE single-row read (repos.kernels.findById).
+ *
+ * Same contract as the shared `lookupKernelOwner` (./kernel-operator.ts, kept
+ * verbatim): the recorded owner, "not_found", or "lookup_failed"; it never
+ * throws. That helper goes through KernelFacade.getById, which builds the
+ * kernel's health snapshot, loading every capability, device and JOB of the
+ * kernel just to read `operatorAddress` (review round 2, LOW). Every WP-C
+ * owner check runs on it, heartbeats included, and it ran BEFORE a non-owner's
+ * 403, so any keyed caller could make the gateway do O(jobs) work per request.
+ * R3 allows this lighter lookup here; the ownership RULE (a placeholder owns
+ * nothing, then isSamePrincipal) is still the shared module's.
+ */
+export function lookupKernelOwnerRow(kernelId: string): KernelOwnerLookup {
+  try {
+    const row = getRepos().kernels.findById(kernelId) as { operatorAddress?: string | null } | null | undefined;
+    if (!row) return { found: false, reason: "not_found" };
+    return { found: true, owner: row.operatorAddress ?? null };
+  } catch {
+    return { found: false, reason: "lookup_failed" };
+  }
+}
 
 /** A usable principal: a string that is not blank. Anything else is no principal. */
 function presentPrincipal(value: unknown): string | undefined {
@@ -86,8 +113,9 @@ const ACTOR_REQUIRED = {
 
 /**
  * Decide whether `actor` may mutate `kernelId`. Never throws. The owner comes
- * from `lookupKernelOwner` (shared module), so an unknown kernel (404) and a
- * failed lookup (502) are told apart, and both refuse.
+ * from `lookupKernelOwnerRow` (lookupKernelOwner's contract, one row), so an
+ * unknown kernel (404) and a failed lookup (502) are told apart, and both
+ * refuse. No actor is a 401 before any lookup.
  */
 export async function checkKernelOwner(
   actor: string | undefined,
@@ -95,7 +123,7 @@ export async function checkKernelOwner(
 ): Promise<KernelOwnerVerdict> {
   const principal = presentPrincipal(actor);
   if (!principal) return ACTOR_REQUIRED;
-  const lookup = await lookupKernelOwner(kernelId);
+  const lookup = lookupKernelOwnerRow(kernelId);
   if (!lookup.found) {
     return lookup.reason === "not_found"
       ? {
