@@ -47,6 +47,27 @@ import {
   type GeoFence,
   type PricingSpec,
 } from "../services/job-offers-store.js";
+import { getRepos } from "../db.js";
+import { authenticatedActor, sameIdentity } from "../auth/actor.js";
+import { authorizeOfferEvent } from "../services/job-offer-authz.js";
+
+export interface JobOffersRoutesOptions {
+  /**
+   * Resolve a kernel's owner (its operatorAddress). Production reads
+   * shop_kernels; tests inject a stub so the routes stay hermetic.
+   */
+  kernelOwnerOf?: (kernelId: string) => string | null;
+}
+
+function kernelOwnerFromStore(kernelId: string): string | null {
+  try {
+    return getRepos().kernels.findById(kernelId)?.operatorAddress ?? null;
+  } catch {
+    // No store (or a store error): nobody provably owns the kernel, so the
+    // ownership check below fails closed.
+    return null;
+  }
+}
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -120,7 +141,9 @@ function validatePricing(p: unknown): p is PricingSpec {
   return true;
 }
 
-export async function jobOffersRoutes(app: FastifyInstance) {
+export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoutesOptions = {}) {
+  const kernelOwnerOf = opts.kernelOwnerOf ?? kernelOwnerFromStore;
+
   // ── GET /api/job-offers/healthz ────────────────────────────────────────
   app.get("/api/job-offers/healthz", async () => {
     const store = getJobOffersStore();
@@ -265,12 +288,28 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { kernelId?: string; claimSignature?: string; etaMin?: number; contact?: string };
   }>("/api/job-offers/:id/claim", async (req, reply) => {
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Claiming requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const b = req.body || {};
     if (!b.kernelId) {
       return reply.code(400).send({ error: "missing_field", required: ["kernelId"] });
     }
+    // The claiming kernel must be registered to the caller. The same answer for
+    // an unknown kernel and someone else's, so the check reveals neither.
+    if (!sameIdentity(kernelOwnerOf(b.kernelId), actor)) {
+      return reply.code(403).send({
+        error: "kernel_not_owned",
+        message: "You can only claim with a kernel registered to your own identity.",
+      });
+    }
     const store = getJobOffersStore();
     const claim: ClaimInput = {
+      operatorId: actor,
       kernelId: b.kernelId,
       claimSignature: b.claimSignature,
       etaMin: b.etaMin,
@@ -304,11 +343,38 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         message: "event (or kind) is required. Common values: acknowledged, in_progress, progress_update, delivered, error, cancelled, note.",
       });
     }
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Posting an offer event requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const store = getJobOffersStore();
+    const offer = store.get(req.params.id);
+    if (!offer) return reply.code(404).send({ error: "not_found" });
+    // The claimant is the authenticated principal recorded at claim time. An
+    // offer claimed before claimant binding falls back to its kernel's owner.
+    const claimant =
+      store.claimantOf(offer.id) ??
+      (offer.claimedByKernelId ? kernelOwnerOf(offer.claimedByKernelId) : null);
+    const decision = authorizeOfferEvent(eventKind, actor, claimant, offer.posterDid);
+    if (!decision.ok) {
+      return reply.code(403).send({
+        error: "forbidden",
+        reason: decision.reason,
+        message:
+          decision.reason === "not_claimed"
+            ? "This event advances an offer and needs a claimant; the offer has none you can act as."
+            : "Only the offer's claimant (or, for non-advancing events, its poster) may post this event.",
+      });
+    }
+    // `by` records the actor's role, never a caller-supplied label or an
+    // identity: the event log is publicly readable.
     const result = store.recordEvent(
-      req.params.id,
+      offer.id,
       eventKind,
-      b.by ?? null,
+      decision.role,
       b.payload ?? null,
       b.note ?? null,
     );

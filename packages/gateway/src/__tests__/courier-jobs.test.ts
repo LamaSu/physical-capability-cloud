@@ -43,12 +43,21 @@ const stubVerify: VerifyFn = async (url) => {
 
 // ── Test app — courier routes only, no apiGate (we trust X-Posted-By) ──────
 
+// x-test-operator stands in for an authenticated API key (req.operatorId).
+// Claims and events require it; X-Posted-By still identifies posters for
+// PATCH/DELETE/heartbeat, as before.
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h !== "") (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(courierJobsRoutes);
   await app.ready();
   return app;
 }
+
+const as = (operatorId: string) => ({ "x-test-operator": operatorId });
 
 // ── Setup / teardown ───────────────────────────────────────────────────────
 
@@ -364,6 +373,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
       });
       const res = await app.inject({
         method: "POST", url: "/api/courier-jobs/j-claim/claim",
+        headers: as("driver7@kits.test"),
         payload: { driverAgent: "driver-7" },
       });
       expect(res.statusCode).toBe(200);
@@ -384,7 +394,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
         payload: { deliveryId: "j-mc", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
       const res = await app.inject({
-        method: "POST", url: "/api/courier-jobs/j-mc/claim", payload: {},
+        method: "POST", url: "/api/courier-jobs/j-mc/claim", headers: as("driver7@kits.test"), payload: {},
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
@@ -398,6 +408,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
     try {
       const res = await app.inject({
         method: "POST", url: "/api/courier-jobs/missing/claim",
+        headers: as("driver7@kits.test"),
         payload: { driverAgent: "d1" },
       });
       expect(res.statusCode).toBe(404);
@@ -415,6 +426,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
       });
       const claims = Array.from({ length: 10 }, (_, i) => app.inject({
         method: "POST", url: "/api/courier-jobs/race/claim",
+        headers: as(`racer${i}@kits.test`),
         payload: { driverAgent: `driver-${i}` },
       }));
       const results = await Promise.all(claims);
@@ -438,21 +450,27 @@ describe("POST /api/courier-jobs/:id/claim", () => {
 // ── POST /api/courier-jobs/:id/events ──────────────────────────────────────
 
 describe("POST /api/courier-jobs/:id/events", () => {
-  it("pickup → status=in_transit, delivered → status=delivered", async () => {
+  it("pickup → status=in_transit, delivered → status=delivered (by the claimant)", async () => {
     const app = await buildApp();
     try {
       await app.inject({
         method: "POST", url: "/api/courier-jobs",
         payload: { deliveryId: "j-ev", pickup: { name: "A" }, dropoff: { name: "B" } },
       });
+      await app.inject({
+        method: "POST", url: "/api/courier-jobs/j-ev/claim",
+        headers: as("driver7@kits.test"), payload: { driverAgent: "d1" },
+      });
       const r1 = await app.inject({
         method: "POST", url: "/api/courier-jobs/j-ev/events",
+        headers: as("driver7@kits.test"),
         payload: { event: "pickup", driverAgent: "d1" },
       });
       expect(r1.statusCode).toBe(200);
       expect(r1.json().status).toBe("in_transit");
       const r2 = await app.inject({
         method: "POST", url: "/api/courier-jobs/j-ev/events",
+        headers: as("driver7@kits.test"),
         payload: { event: "delivered", driverAgent: "d1" },
       });
       expect(r2.statusCode).toBe(200);
@@ -475,6 +493,87 @@ describe("POST /api/courier-jobs/:id/events", () => {
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("invalid_event");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// ── Claimant binding on the legacy shim (kits K0 slice 2) ──────────────────
+
+describe("courier shim: claims and pickup/delivered belong to the authenticated claimant", () => {
+  async function postAndClaim(app: FastifyInstance, id: string) {
+    await app.inject({
+      method: "POST", url: "/api/courier-jobs",
+      headers: { "X-Posted-By": "poster@kits.test", ...as("poster@kits.test") },
+      payload: { deliveryId: id, pickup: { name: "A" }, dropoff: { name: "B" } },
+    });
+    const claim = await app.inject({
+      method: "POST", url: `/api/courier-jobs/${id}/claim`,
+      headers: as("driver7@kits.test"), payload: { driverAgent: "driver-7" },
+    });
+    expect(claim.statusCode).toBe(200);
+  }
+
+  it("refuses an unauthenticated claim (401)", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({
+        method: "POST", url: "/api/courier-jobs",
+        payload: { deliveryId: "cs-anon", pickup: { name: "A" }, dropoff: { name: "B" } },
+      });
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs/cs-anon/claim", payload: { driverAgent: "driver-7" },
+      });
+      expect(res.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a matching driverAgent label grants nothing: a stranger cannot pick up or deliver", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cs-steal");
+      for (const event of ["pickup", "delivered"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/courier-jobs/cs-steal/events",
+          headers: as("attacker@kits.test"), payload: { event, driverAgent: "driver-7" },
+        });
+        expect(res.statusCode).toBe(403);
+      }
+      const job = await app.inject({ method: "GET", url: "/api/courier-jobs/cs-steal" });
+      expect(job.json().job.status).toBe("claimed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses events with no authenticated principal (401)", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cs-noauth");
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs/cs-noauth/events",
+        payload: { event: "delivered", driverAgent: "driver-7" },
+      });
+      expect(res.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("lets the poster cancel; the claimant's identity never appears in public reads", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cs-cancel");
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs/cs-cancel/events",
+        headers: as("poster@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(res.statusCode).toBe(200);
+      const job = await app.inject({ method: "GET", url: "/api/courier-jobs/cs-cancel" });
+      expect(job.body).not.toContain("driver7@kits.test");
     } finally {
       await app.close();
     }

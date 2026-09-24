@@ -127,6 +127,8 @@ export interface ClaimInput {
   driverAgent: string;
   etaMin?: number;
   contact?: string;
+  /** Authenticated claimant (see job-offers-store ClaimInput.operatorId); private. */
+  operatorId?: string;
 }
 
 // ── Shape translators ──────────────────────────────────────────────────────
@@ -335,6 +337,7 @@ export class CourierJobsStore {
   > {
     const result = await getJobOffersStore().claim(id, {
       kernelId: claim.driverAgent,    // v0.2 names this driverAgent
+      operatorId: claim.operatorId,
       etaMin: claim.etaMin,
       contact: claim.contact,
     });

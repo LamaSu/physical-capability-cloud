@@ -34,6 +34,9 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import { authenticatedActor } from "../auth/actor.js";
+import { authorizeOfferEvent } from "../services/job-offer-authz.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -202,12 +205,22 @@ export async function courierJobsRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { driverAgent?: string; etaMin?: number; contact?: string };
   }>("/api/courier-jobs/:id/claim", async (req, reply) => {
+    // driverAgent is only a display label; the claim binds to the
+    // authenticated principal, which alone may later post pickup/delivered.
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Claiming requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const b = req.body || {};
     if (!b.driverAgent) {
       return reply.code(400).send({ error: "missing_field", required: ["driverAgent"] });
     }
     const store = getCourierJobsStore();
     const result = await store.claim(req.params.id, {
+      operatorId: actor,
       driverAgent: b.driverAgent,
       etaMin: b.etaMin,
       contact: b.contact,
@@ -237,11 +250,31 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         valid: [...VALID_EVENT_TYPES],
       });
     }
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Posting a job event requires an authenticated operator (API key or SIWE session).",
+      });
+    }
+    const offer = getJobOffersStore().get(req.params.id);
+    if (!offer) return reply.code(404).send({ error: "not_found" });
+    // pickup/delivered: the authenticated claimant only. cancelled/note: the
+    // claimant or the poster. A body driverAgent grants nothing.
+    const decision = authorizeOfferEvent(
+      b.event,
+      actor,
+      getJobOffersStore().claimantOf(offer.id),
+      offer.posterDid,
+    );
+    if (!decision.ok) {
+      return reply.code(403).send({ error: "forbidden", reason: decision.reason });
+    }
     const store = getCourierJobsStore();
     const result = store.recordEvent(
       req.params.id,
       b.event as "pickup" | "delivered" | "cancelled" | "note",
-      b.driverAgent ?? null,
+      decision.role,
       b.proof ?? null,
       b.note ?? null,
     );
