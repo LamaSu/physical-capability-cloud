@@ -94,12 +94,10 @@ const call = (method: Method, url: string, withKey = false) =>
   });
 
 describe("F5 — writes on 'public' paths now require authentication", () => {
+  // The four marketplace writes F5 first moved to 401 are now retired outright
+  // (410 for every caller, keyed or not) — see the N43 block below.
   it.each<[Method, string]>([
     ["POST", "/api/capabilities"],
-    ["POST", "/api/marketplace/listings"],
-    ["PUT", "/api/marketplace/listings/lst-1"],
-    ["DELETE", "/api/marketplace/listings/lst-1"],
-    ["POST", "/api/marketplace/orders"],
   ])("%s %s without a key -> 401", async (method, url) => {
     const res = await call(method, url);
     expect(res.statusCode).toBe(401);
@@ -125,15 +123,70 @@ describe("F5 — writes on 'public' paths now require authentication", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("control: the same writes pass the gate WITH a key (auth, not a blanket deny)", async () => {
+  it("control: gated writes pass the gate WITH a key (auth, not a blanket deny)", async () => {
     for (const [method, url] of [
       ["POST", "/api/capabilities"],
-      ["PUT", "/api/marketplace/listings/lst-1"],
-      ["POST", "/api/marketplace/orders"],
+      ["POST", "/api/onboard/registrations"],
+      ["POST", "/api/operators/op-1/ratings"],
     ] as Array<[Method, string]>) {
       const res = await call(method, url, true);
       expect(res.statusCode, `${method} ${url}`).toBe(200);
     }
+  });
+});
+
+describe("N43 — retired marketplace writes are denied for every caller (steward #2637)", () => {
+  const RETIRED: Array<[Method, string]> = [
+    ["POST", "/api/marketplace/listings"],
+    ["PUT", "/api/marketplace/listings/lst-1"],
+    ["DELETE", "/api/marketplace/listings/lst-1"],
+    ["POST", "/api/marketplace/orders"],
+  ];
+
+  it.each(RETIRED)("%s %s without a key -> 410, handler never runs", async (method, url) => {
+    const res = await call(method, url);
+    expect(res.statusCode).toBe(410);
+    expect(res.json().error).toBe("marketplace_writes_retired");
+    expect(res.json().reached).toBeUndefined();
+  });
+
+  it.each(RETIRED)("%s %s WITH a key -> 410 (a key does not open a retired write)", async (method, url) => {
+    const res = await call(method, url, true);
+    expect(res.statusCode).toBe(410);
+    expect(res.json().reached).toBeUndefined();
+  });
+
+  it("an ENCODED variant of a retired write is denied too", async () => {
+    const res = await call("PUT", "/api/%6darketplace/listings/lst-1", true);
+    expect(res.statusCode).toBe(410);
+  });
+
+  it("a write route added later under the prefix is denied by default", async () => {
+    const res = await call("POST", "/api/marketplace/anything-new", true);
+    expect(res.statusCode).toBe(410);
+  });
+
+  it("control: marketplace reads and the ROI calculator stay public", async () => {
+    for (const [method, url] of [
+      ["GET", "/api/marketplace/listings"],
+      ["GET", "/api/marketplace/listings/lst-1"],
+      ["HEAD", "/api/marketplace/listings"],
+      ["POST", "/api/marketplace/roi"],
+    ] as Array<[Method, string]>) {
+      const res = await call(method, url);
+      expect(res.statusCode, `${method} ${url}`).toBe(200);
+    }
+  });
+
+  it("isRetiredWrite: only non-GET under the retired prefix, minus public-by-design", async () => {
+    const { isRetiredWrite } = await import("../middleware/api-gate.js");
+    expect(isRetiredWrite("/api/marketplace/listings", "POST")).toBe(true);
+    expect(isRetiredWrite("/api/marketplace/listings/:id", "PATCH")).toBe(true);
+    expect(isRetiredWrite("/api/marketplace/listings", "GET")).toBe(false);
+    expect(isRetiredWrite("/api/marketplace/listings", "HEAD")).toBe(false);
+    expect(isRetiredWrite("/api/marketplace/listings", "OPTIONS")).toBe(false);
+    expect(isRetiredWrite("/api/marketplace/roi", "POST")).toBe(false);
+    expect(isRetiredWrite("/api/capabilities", "POST")).toBe(false);
   });
 });
 

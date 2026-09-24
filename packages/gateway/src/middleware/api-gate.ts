@@ -20,6 +20,15 @@
  *     onRequest hook before this gate runs.
  * __tests__/apigate-public-methods.test.ts pins the ENTIRE public (method,
  * path) set as a snapshot, so any widening shows up as a visible diff.
+ *
+ * ── Retired write surfaces are DENIED for every caller (N43) ────────
+ * /api/marketplace/* is being retired (kits #2523). Its listing and order
+ * writes mutate an in-memory mock with no ownership (PUT/DELETE edit ANY
+ * listing), so a key does not make them safe. The steward ruled (#2637):
+ * default-deny those writes at the gate and build no ownership logic for a
+ * surface that is going away. Every non-GET under the prefix is 410 — keyed or
+ * not, including write routes added later — except the exact public-by-design
+ * computation below (POST /api/marketplace/roi). Reads stay public.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -158,6 +167,22 @@ export function isPublicRoute(url: string, method?: string): boolean {
   );
 }
 
+/** Prefixes whose writes are retired: denied for every caller (N43, steward #2637). */
+const RETIRED_WRITE_PREFIXES: readonly string[] = ["/api/marketplace/"];
+
+/**
+ * True when (method, path) is a write on a retired surface. GET/HEAD/OPTIONS
+ * are never retired writes; an exact public-by-design entry on the prefix
+ * (POST /api/marketplace/roi, pure computation) stays reachable. Exported for tests.
+ */
+export function isRetiredWrite(url: string, method?: string): boolean {
+  const path = url.split("?")[0];
+  const m = (method ?? "").toUpperCase();
+  if (m === "GET" || m === "HEAD" || m === "OPTIONS") return false;
+  if (!RETIRED_WRITE_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
+  return !isPublicRoute(path, m);
+}
+
 /**
  * The public allowlist as stable lines — "<METHOD> <match> <path>" — for the
  * snapshot test (a regex renders as its source). Not used at runtime.
@@ -190,6 +215,14 @@ async function apiGateImpl(app: FastifyInstance) {
 
     // Only gate /api/* routes
     if (!path.startsWith("/api/")) return;
+
+    // Retired write surfaces: denied before authentication, so no key opens them.
+    if (isRetiredWrite(path, req.method)) {
+      return reply.status(410).send({
+        error: "marketplace_writes_retired",
+        message: "Marketplace listing and order writes are retired. Reads remain available.",
+      });
+    }
 
     // Skip public routes
     if (isPublicRoute(path, req.method)) return;
