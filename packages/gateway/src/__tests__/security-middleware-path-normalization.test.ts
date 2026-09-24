@@ -132,11 +132,17 @@ describe("payment gate prices the normalized path", () => {
   const saved = {
     enabled: process.env.PCC_PAYMENT_ENABLED,
     legacy: process.env.PCC_X402_LEGACY,
+    treasury: process.env.PCC_TREASURY_ADDRESS,
   };
   let app: FastifyInstance;
   beforeEach(async () => {
     process.env.PCC_PAYMENT_ENABLED = "true";
     process.env.PCC_X402_LEGACY = "true";
+    // A configured recipient (WP-A fold F1): with none, priced routes are now
+    // refused 503 payments_not_configured instead of being gated on the old
+    // 0x…0001 placeholder. This suite is about PATH normalization, so it
+    // configures a real-looking treasury to exercise the 402 path.
+    process.env.PCC_TREASURY_ADDRESS = "0x1111111111111111111111111111111111111111";
     const { paymentGate } = await import("../middleware/x402-gate.js");
     app = Fastify({ logger: false });
     await paymentGate(app); // hooks on the root: they govern every route
@@ -146,7 +152,11 @@ describe("payment gate prices the normalized path", () => {
   });
   afterEach(async () => {
     await app.close();
-    for (const [k, v] of [["PCC_PAYMENT_ENABLED", saved.enabled], ["PCC_X402_LEGACY", saved.legacy]] as const) {
+    for (const [k, v] of [
+      ["PCC_PAYMENT_ENABLED", saved.enabled],
+      ["PCC_X402_LEGACY", saved.legacy],
+      ["PCC_TREASURY_ADDRESS", saved.treasury],
+    ] as const) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
