@@ -294,56 +294,82 @@
   }
 
   // Status -> semantic pill class (hue = meaning only).
-  // MONEY HONESTY (read-route contract sec A + rule 1): settlement state is mapped by EXACT
+  // MONEY HONESTY (read-route contract sec A + rule 1): money state is mapped by EXACT
   // normalized key, NEVER by substring -- "funded" must not green "refunded"/"underfunded",
   // "releas" must not green "unreleased", "complet" must not green "incomplete". A refund is a
   // FINAL settlement where the operator was NOT paid -> never green. Allocated-not-final and any
-  // unmapped/unknown status FAIL CLOSED to a neutral pill, never "settled". Conformance target:
-  // the sec-A 10-state table + the legacy EscrowSummaryDTO enum.
-  // <status-map v1> -- extracted verbatim by test/status-map.conformance.test.mjs; keep the markers.
+  // unmapped/unknown status FAIL CLOSED to a neutral pill, never "settled".
+  // MONEY_STATUS mirrors the canonical @pcc/spec table (packages/spec/src/money/money-status.ts)
+  // VERBATIM: this vanilla asset has no bundler, so it cannot import it. The CI conformance test
+  // packages/spec/src/__tests__/money-status.conformance.test.ts proves the two tables agree key
+  // for key (same keys, same tone, same label). Edit both, or CI fails.
+  // <status-map v2> -- extracted verbatim by money-status.conformance.test.ts; keep the markers.
   function normStatus(s) {
     return String(s == null ? '' : s).trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   }
   // key -> [pillClass, honest label]. NEVER map a non-release money state to st-settled (green).
-  var SETTLEMENT_STATES = {
-    // V-next sec-A finalState / unitState (the 10-state settlement machine)
-    SETTLED_RELEASED:  ['st-settled',  'operator distribution discharged'],
-    SETTLED_REFUNDED:  ['st-refunded', 'payer refunded - operator NOT paid'],
-    RELEASE_ALLOCATED: ['st-waiting',  'release allocated - payment incomplete'],
-    REFUND_ALLOCATED:  ['st-waiting',  'refund allocated - refund incomplete'],
+  // SETTLED is deliberately absent: it means operator-paid in SettlementResultDTO but BOTH released
+  // and refunded in the V-next phase vocabulary -- a word that can mean "refunded" is never green.
+  var MONEY_STATUS = {
+    // V-next UnitState / finalState (the 10-state settlement machine, contract sec-A)
     AWAITING_FUNDING:  ['st-waiting',  'awaiting funding'],
     FUNDED_ACTIVE:     ['st-running',  'active'],
     PRIMARY_ASSERTED:  ['st-waiting',  'in a challenge window'],
     CHALLENGED:        ['st-waiting',  'challenged - appeal running'],
     BACKUP_PENDING:    ['st-waiting',  'escalated to backup'],
     BACKUP_ASSERTED:   ['st-waiting',  'backup asserted'],
-    // legacy EscrowSummaryDTO status
-    CREATED:   ['st-waiting',  'escrow created - unfunded'],
-    FUNDED:    ['st-waiting',  'funds held - not released'],
-    ACTIVE:    ['st-running',  'active'],
-    COMPLETED: ['st-settled',  'released'],
-    DISPUTED:  ['st-failed',   'disputed'],
-    REFUNDED:  ['st-refunded', 'payer refunded - operator NOT paid']
+    RELEASE_ALLOCATED: ['st-waiting',  'release allocated - payment incomplete'],
+    REFUND_ALLOCATED:  ['st-waiting',  'refund allocated - refund incomplete'],
+    SETTLED_RELEASED:  ['st-settled',  'operator distribution discharged'],
+    SETTLED_REFUNDED:  ['st-refunded', 'payer refunded - operator NOT paid'],
+    // Escrow.status (spec types/settlement.ts)
+    CREATED:    ['st-waiting',  'escrow created - unfunded'],
+    FUNDED:     ['st-waiting',  'funds held - not released'],
+    ACTIVE:     ['st-running',  'active'],
+    COMPLETING: ['st-waiting',  'completing - not yet final'],
+    COMPLETED:  ['st-settled',  'released'],
+    DISPUTED:   ['st-failed',   'disputed'],
+    REFUNDED:   ['st-refunded', 'payer refunded - operator NOT paid'],
+    // EscrowStatus (spec types/common.ts)
+    UNFUNDED:  ['st-waiting',  'unfunded'],
+    LOCKED:    ['st-running',  'funds locked - step in progress'],
+    RELEASING: ['st-waiting',  'releasing - challenge window open, not yet paid'],
+    RELEASED:  ['st-settled',  'payment sent to operator'],
+    SLASHED:   ['st-failed',   'bond slashed'],
+    // Dashboard escrow DTO (apps/dashboard/src/types/dto.ts)
+    PENDING: ['st-waiting', 'pending - not yet funded'],
+    EXPIRED: ['st-failed',  'expired - not released'],
+    // Context-pack escrow summary (gateway routes/context-pack.ts)
+    MILESTONE_MET: ['st-waiting', 'milestone met - release pending']
   };
-  // Generic (non-money) run/action states -- safe to tone by exact key.
+  // Generic (non-money) run/action states -- safe to tone by exact key. NEVER consulted for a
+  // money surface (see moneyStatusClass).
   var GENERIC_STATES = {
     RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
     PENDING: 'st-waiting', QUEUED: 'st-waiting', WAITING: 'st-waiting', PAUSED: 'st-waiting', REVIEW: 'st-waiting', CONFIRM: 'st-waiting', NEEDS_INPUT: 'st-waiting', NEEDS_YOU: 'st-waiting',
     ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
     DONE: 'st-settled', COMPLETE: 'st-settled', OK: 'st-settled', SUCCESS: 'st-settled', SUCCEEDED: 'st-settled', RESOLVED: 'st-settled', READY: 'st-settled'
   };
+  // Generic surfaces (run / list rows): the money table first, then generic run/action states.
   function statusClass(s) {
     var k = normStatus(s);
-    if (Object.prototype.hasOwnProperty.call(SETTLEMENT_STATES, k)) return SETTLEMENT_STATES[k][0];
+    if (Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return MONEY_STATUS[k][0];
     if (Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return GENERIC_STATES[k];
     return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
   }
-  // Honest sec-A direction label for a money status; null for non-settlement/unknown.
+  // MONEY surfaces (receipt / settlement): the money table ONLY. A generic success word ("done",
+  // "success", "ok", "ready") is not a settlement state: an off-schema status on a money response
+  // must never be relabeled as paid. Unmapped -> st-unknown, never green.
+  function moneyStatusClass(s) {
+    var k = normStatus(s);
+    return Object.prototype.hasOwnProperty.call(MONEY_STATUS, k) ? MONEY_STATUS[k][0] : 'st-unknown';
+  }
+  // Honest sec-A direction label for a money status; null for non-money/unknown.
   function settlementLabel(s) {
     var k = normStatus(s);
-    return Object.prototype.hasOwnProperty.call(SETTLEMENT_STATES, k) ? SETTLEMENT_STATES[k][1] : null;
+    return Object.prototype.hasOwnProperty.call(MONEY_STATUS, k) ? MONEY_STATUS[k][1] : null;
   }
-  // </status-map v1>
+  // </status-map v2>
 
   // Pull the first array out of a response (for list windows without a select).
   function firstArray(resp) {
@@ -978,7 +1004,7 @@
       pay.appendChild(el('span', 'pcc-mono', String(e.payee || e.provider || 'payee')));
       wrap._body.appendChild(pay);
       var railRow = el('div', 'pcc-receipt-rail');
-      railRow.appendChild(el('span', 'pcc-pill ' + statusClass(status), String(status)));
+      railRow.appendChild(el('span', 'pcc-pill ' + moneyStatusClass(status), String(status))); // money surface: money table only
       var _slabel = settlementLabel(status);
       if (_slabel) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + _slabel));
       railRow.appendChild(el('span', 'pcc-muted', ' · ' + (e.rail || 'escrow-milestone')));
