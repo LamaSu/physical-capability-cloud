@@ -34,12 +34,8 @@ import { z } from "zod";
 import { getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import {
-  isReservedIdentity,
-  IDENTITY_RESERVED_RESPONSE,
-  isClaimedIdentity,
+  decideUnverifiedIdentity,
   IDENTITY_CLAIMED_RESPONSE,
-  callerApiKey,
-  sameIdentity,
   callerMayDelegate,
   parseStoredScopes,
   NOTHING_TO_DELEGATE_RESPONSE,
@@ -539,29 +535,25 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
 
     // The key minted below is bound to this email as its operatorId, and the
     // email is ASSERTED, not proven — the same unverified-identity path as
-    // POST /api/auth/provision {email}. Refuse an email on any admin allowlist
-    // BEFORE creating a wallet or a key (WP-A A7).
-    if (isReservedIdentity(body.email)) {
-      return reply.code(403).send(IDENTITY_RESERVED_RESPONSE);
-    }
-
-    // IDENTITY BINDING (WP-A fold F3, board N2) — same rule as POST
-    // /api/auth/provision {email}: an email that already names an identity (a
-    // live key, a kernel, a registration, a job offer) can only be used by that
-    // identity itself — a valid Bearer API key whose operatorId matches — and
-    // then the new key is no wider than the caller's own. Checked BEFORE any
-    // wallet or key is created. 409 never says what matched.
+    // POST /api/auth/provision {email}, with the same decision, made BEFORE any
+    // wallet or key is created: an email on an admin allowlist is refused (WP-A
+    // A7); an email that already names an identity (a key ever issued, a
+    // kernel, a registration, a job offer, an artifact) can only be used by
+    // that identity itself — a valid Bearer API key whose operatorId matches —
+    // and then the new key is no wider than the caller's own (F3). Both
+    // refusals are the same 409 (R5), which never says what matched.
     let operatorId = body.email;
     let keyScopes: string[] = [...QUICKSTART_SCOPES];
-    const caller = callerApiKey(req);
-    if (caller && sameIdentity(caller.operatorId, body.email)) {
-      operatorId = caller.operatorId;
-      keyScopes = callerMayDelegate(parseStoredScopes(caller.scopes), keyScopes);
+    const decision = decideUnverifiedIdentity(req, body.email);
+    if (decision.kind === "refuse") {
+      return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
+    }
+    if (decision.kind === "self") {
+      operatorId = decision.caller.operatorId;
+      keyScopes = callerMayDelegate(parseStoredScopes(decision.caller.scopes), keyScopes);
       if (keyScopes.length === 0) {
         return reply.code(403).send(NOTHING_TO_DELEGATE_RESPONSE);
       }
-    } else if (isClaimedIdentity(body.email)) {
-      return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
     }
 
     const adapter = getEmbeddedWalletAdapter();

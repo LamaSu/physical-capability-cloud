@@ -5,7 +5,13 @@
  * new key's operatorId from an email the caller merely TYPED. Routes that
  * authorize by an operatorId allowlist (AUDIT_ADMINS, PCC_DEMAND_ADMINS, ...)
  * then treated that key as the admin. The unverified email paths now refuse any
- * operatorId on any of those allowlists with 403 `identity_reserved`.
+ * operatorId on any of those allowlists — with 409 `identity_claimed`, the SAME
+ * status and body a claimed identity gets (WP-A repair R5). The first version
+ * answered 403 `identity_reserved`, which let anyone enumerate the allowlists.
+ *
+ * Updated assertions (old -> new -> why): every "403 identity_reserved" below
+ * became "409 identity_claimed" — R5, a reserved identity must be
+ * indistinguishable from a claimed one.
  *
  * The wallet path is SIWE-gated on this branch (a bare walletAddress without a
  * matching SIWE session is 401 wallet_not_verified), so a wallet cannot be
@@ -26,6 +32,7 @@ import {
   reservedIdentityAllowlists,
 } from "../auth/reserved-identities.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { generateApiKey } from "../auth/api-key-auth.js";
 
 vi.mock("../telemetry.js", () => ({ pipelineTelemetry: { emit: vi.fn() } }));
 vi.mock("../services/audit-service.js", () => ({ auditService: { log: vi.fn() } }));
@@ -86,11 +93,11 @@ describe("unverified self-service cannot claim an admin identity (A7)", () => {
   const keysFor = (operatorId: string) => getRepos().apiKeys.countByOperator(operatorId);
 
   // ── The spec'd pair ───────────────────────────────────────────────
-  it("REFUSES provision {email} for an AUDIT_ADMINS identity with 403 identity_reserved", async () => {
+  it("REFUSES provision {email} for an AUDIT_ADMINS identity with 409 identity_claimed", async () => {
     process.env.AUDIT_ADMINS = "admin@x.test";
     const res = await provisionEmail("admin@x.test");
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("identity_reserved");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("identity_claimed");
     // Nothing minted — there is no key to misuse.
     expect(keysFor("admin@x.test")).toBe(0);
     // The refusal does not say WHICH allowlist matched.
@@ -111,8 +118,8 @@ describe("unverified self-service cannot claim an admin identity (A7)", () => {
       const email = `reserved-${envName.toLowerCase()}@x.test`;
       process.env[envName] = `other@x.test, ${email}`;
       const res = await provisionEmail(email);
-      expect(res.statusCode).toBe(403);
-      expect(res.json().error).toBe("identity_reserved");
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("identity_claimed");
       expect(keysFor(email)).toBe(0);
     },
   );
@@ -120,9 +127,63 @@ describe("unverified self-service cannot claim an admin identity (A7)", () => {
   it("matches case-insensitively and ignores list whitespace (no casing bypass)", async () => {
     process.env.PCC_DEMAND_ADMINS = "  Ops.Admin@Example.COM ,ops2@example.com";
     const res = await provisionEmail("ops.admin@example.com");
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(409);
     const res2 = await provisionEmail("OPS.ADMIN@EXAMPLE.COM");
-    expect(res2.statusCode).toBe(403);
+    expect(res2.statusCode).toBe(409);
+  });
+
+  // ── R5: reserved and claimed are indistinguishable (no enumeration) ─
+  it("a reserved identity and a claimed identity get the SAME status and body (provision)", async () => {
+    process.env.AUDIT_ADMINS = "admin@x.test";
+    const claimed = `claimed-${Date.now()}@x.test`;
+    expect((await provisionEmail(claimed)).statusCode).toBe(201);
+    const reservedRes = await provisionEmail("admin@x.test");
+    const claimedRes = await provisionEmail(claimed);
+    expect(claimedRes.statusCode).toBe(409);
+    expect(reservedRes.statusCode).toBe(claimedRes.statusCode);
+    expect(reservedRes.body).toBe(claimedRes.body);
+    expect(reservedRes.headers["content-type"]).toBe(claimedRes.headers["content-type"]);
+  });
+
+  it("a reserved identity and a claimed identity get the SAME status and body (quickstart)", async () => {
+    process.env.AUDIT_ADMINS = "admin@x.test";
+    const claimed = `qs-claimed-${Date.now()}@x.test`;
+    expect((await provisionEmail(claimed)).statusCode).toBe(201);
+    const qs = (email: string) =>
+      app.inject({
+        method: "POST",
+        url: "/api/contributors/quickstart",
+        payload: { email, role: "model-author", ratePercent: 1 },
+      });
+    const reservedRes = await qs("admin@x.test");
+    const claimedRes = await qs(claimed);
+    expect(claimedRes.statusCode).toBe(409);
+    expect(reservedRes.statusCode).toBe(claimedRes.statusCode);
+    expect(reservedRes.body).toBe(claimedRes.body);
+  });
+
+  it("A7 holds even for a caller holding a key of the reserved identity: the same 409, nothing minted", async () => {
+    const { rawKey, keyHash, keyPrefix } = generateApiKey();
+    getRepos().apiKeys.insert({
+      id: `admin-self-${Date.now()}`,
+      keyHash,
+      keyPrefix,
+      operatorId: "admin-self@x.test",
+      scopes: JSON.stringify(["operator"]),
+      rateLimit: "1000/hour",
+      usageCount: "0",
+      createdAt: new Date().toISOString(),
+    } as never);
+    process.env.AUDIT_ADMINS = "admin-self@x.test";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/auth/provision",
+      headers: { authorization: `Bearer ${rawKey}` },
+      payload: { email: "admin-self@x.test" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("identity_claimed");
+    expect(keysFor("admin-self@x.test")).toBe(1);
   });
 
   it("an empty or separators-only allowlist reserves nothing", async () => {
@@ -139,8 +200,8 @@ describe("unverified self-service cannot claim an admin identity (A7)", () => {
       url: "/api/contributors/quickstart",
       payload: { email: "admin@x.test", role: "model-author", ratePercent: 1 },
     });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("identity_reserved");
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("identity_claimed");
     expect(keysFor("admin@x.test")).toBe(0);
   });
 

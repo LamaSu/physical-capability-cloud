@@ -14,12 +14,8 @@ import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import {
-  isReservedIdentity,
-  IDENTITY_RESERVED_RESPONSE,
-  isClaimedIdentity,
+  decideUnverifiedIdentity,
   IDENTITY_CLAIMED_RESPONSE,
-  callerApiKey,
-  sameIdentity,
   callerMayDelegate,
   parseStoredScopes,
   NOTHING_TO_DELEGATE_RESPONSE,
@@ -183,27 +179,26 @@ export async function provisionRoutes(app: FastifyInstance) {
           message: "Please provide a valid email address",
         });
       }
-      // The email is ASSERTED, not proven. Several routes authorize by an
-      // operatorId allowlist (AUDIT_ADMINS, PCC_DEMAND_ADMINS, ...), so minting a
-      // key for an allowlisted email would hand that admin identity to anyone who
-      // can type it (WP-A A7). Refuse before anything is minted. The wallet paths
-      // above/below are SIWE-proven and are not restricted by this.
-      if (isReservedIdentity(email)) {
-        return reply.status(403).send(IDENTITY_RESERVED_RESPONSE);
-      }
-      // IDENTITY BINDING (F3, board N2). Ownership checks across the gateway
-      // compare a key's operatorId with a resource's recorded owner, and owner
-      // ids are public — so an asserted email must not name an identity that
-      // already exists (a live key, a kernel, a registration, a job offer).
-      // Only that identity itself may add a key: a valid Bearer API key whose
-      // operatorId matches. The new key then carries the SAME operatorId string
-      // and scopes no wider than the caller's own. 409 never says what matched.
-      const caller = callerApiKey(req);
-      if (caller && sameIdentity(caller.operatorId, email)) {
-        operatorId = caller.operatorId;
-        delegatingScopes = parseStoredScopes(caller.scopes);
-      } else if (isClaimedIdentity(email)) {
+      // The email is ASSERTED, not proven, so before anything is minted:
+      //   - an email on an operatorId allowlist (AUDIT_ADMINS, PCC_DEMAND_ADMINS,
+      //     ...) is refused, or anyone who can type it would hold that admin
+      //     identity (WP-A A7);
+      //   - IDENTITY BINDING (F3, board N2): ownership checks compare a key's
+      //     operatorId with a resource's recorded owner, and owner ids are
+      //     public, so an email that already names an identity (a key ever
+      //     issued, a kernel, a registration, a job offer, an artifact) is
+      //     refused unless the caller is authenticated AS it — a valid Bearer
+      //     API key whose operatorId matches. The new key then carries the SAME
+      //     operatorId string and scopes no wider than the caller's own.
+      // Both refusals are the same 409 (R5), which never says what matched.
+      // The wallet paths above/below are SIWE-proven and not restricted by this.
+      const decision = decideUnverifiedIdentity(req, email);
+      if (decision.kind === "refuse") {
         return reply.status(409).send(IDENTITY_CLAIMED_RESPONSE);
+      }
+      if (decision.kind === "self") {
+        operatorId = decision.caller.operatorId;
+        delegatingScopes = parseStoredScopes(decision.caller.scopes);
       } else {
         operatorId = email;
       }

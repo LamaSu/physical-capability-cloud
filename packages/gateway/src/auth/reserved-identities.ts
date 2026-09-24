@@ -11,9 +11,11 @@
  *
  * ONE list of every such env var lives here, so a new allowlist is reserved by
  * adding it in one place. The unverified email paths refuse to mint a key whose
- * operatorId is on ANY of them (403 `identity_reserved`). Paths that PROVE the
- * identity (a SIWE-verified wallet) are not restricted by this: proving control
- * of the listed wallet is exactly what the allowlist means.
+ * operatorId is on ANY of them — with the same 409 `identity_claimed` answer a
+ * claimed identity gets (repair R5: a distinct answer would let anyone
+ * enumerate the allowlists). Paths that PROVE the identity (a SIWE-verified
+ * wallet) are not restricted by this: proving control of the listed wallet is
+ * exactly what the allowlist means.
  *
  * Matching is trimmed + case-insensitive, and the env is re-read on every call
  * (no import-time freeze), mirroring the allowlist readers themselves. Most of
@@ -76,17 +78,10 @@ export function isReservedIdentity(operatorId: string): boolean {
   return reservedIdentityAllowlists(operatorId).length > 0;
 }
 
-/**
- * The refusal body the unverified paths return. It deliberately does NOT name
- * which allowlist matched.
- */
-export const IDENTITY_RESERVED_RESPONSE = {
-  error: "identity_reserved",
-  message:
-    "This identity is reserved and cannot be claimed through unverified " +
-    "self-service. An administrator's key is issued out-of-band (or, for a " +
-    "wallet identity, provisioned after proving control with SIWE).",
-} as const;
+// A reserved identity is refused with the SAME status and body as a claimed
+// one (409 IDENTITY_CLAIMED_RESPONSE, below) — repair R5. A distinct
+// 403 `identity_reserved` told any anonymous caller which emails sit on an
+// admin allowlist. See decideUnverifiedIdentity.
 
 // ═════════════════════════════════════════════════════════════════════
 // Identity binding — WP-A fold F3 (operator-ux #2389 -> board N2)
@@ -262,6 +257,44 @@ export function callerApiKey(req: FastifyRequest) {
 export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
   const x = normalizeIdentity(a);
   return x.length > 0 && x === normalizeIdentity(b);
+}
+
+type CallerKey = NonNullable<ReturnType<typeof callerApiKey>>;
+
+/** What an unverified email path may do for a requested operatorId. */
+export type UnverifiedIdentityDecision =
+  /** Refuse with 409 IDENTITY_CLAIMED_RESPONSE — reserved and claimed alike. */
+  | { kind: "refuse" }
+  /** The caller is authenticated AS this identity: mint a delegated key. */
+  | { kind: "self"; caller: CallerKey }
+  /** Nobody holds this identity: mint for the requested id. */
+  | { kind: "fresh" };
+
+/**
+ * The ONE decision both unverified email paths (POST /api/auth/provision
+ * {email}, POST /api/contributors/quickstart) make before minting anything:
+ *
+ *   - reserved (on an admin allowlist, A7)  -> refuse, even for a caller that
+ *     holds a key of that very identity: an admin key is issued out-of-band;
+ *   - the caller's valid Bearer key IS this identity (F3) -> self (delegate,
+ *     never wider — callerMayDelegate);
+ *   - claimed (a key was ever issued, or it owns something: F3/R2) -> refuse;
+ *   - otherwise -> fresh.
+ *
+ * Reserved and claimed are refused IDENTICALLY — same status, same body
+ * (repair R5). They used to differ (403 identity_reserved vs 409
+ * identity_claimed), which let an anonymous caller learn which emails sit on
+ * an admin allowlist. The claim lookup also runs for a reserved identity, so
+ * the reserved refusal is not the one answer that never touches the database.
+ */
+export function decideUnverifiedIdentity(req: FastifyRequest, requested: string): UnverifiedIdentityDecision {
+  const reserved = isReservedIdentity(requested);
+  if (!reserved) {
+    const caller = callerApiKey(req);
+    if (caller && sameIdentity(caller.operatorId, requested)) return { kind: "self", caller };
+  }
+  const claimed = isClaimedIdentity(requested);
+  return reserved || claimed ? { kind: "refuse" } : { kind: "fresh" };
 }
 
 /**

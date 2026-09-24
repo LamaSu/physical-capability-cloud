@@ -48,11 +48,11 @@ note), `packages/gateway/src/auth/api-key-auth.ts` (`assertMintableScopes`),
 | `GET /api/admin/keys/wildcard-audit` | `PCC_KEY_ADMINS` identity allowlist | explicit `admin` key **and** `X-Admin-Key: $PCC_ADMIN_KEY` |
 | `GET /api/admin/waitlist`, `/api/admin/beta-apply` | any key or session, plus `X-Admin-Token` | explicit `admin` key plus `X-Admin-Token` |
 | `GET /api/admin/feedback` | `X-Admin-Token` only (public in api-gate) | unchanged |
-| Self-service `POST /api/auth/provision {email}` for an email on an admin allowlist | 201, a key the allowlist trusts | 403 `identity_reserved` |
+| Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an email on an admin allowlist | 201, a key the allowlist trusts | 409 `identity_claimed`, the same status and body as a claimed identity, even with a Bearer key of that identity |
 | Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that has, or ever had, a key (revoked and expired keys included), or owns a kernel, a machine registration, a job offer or a UI artifact | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its valid keys>`); the new key is then no wider than the caller's |
 | Mutating `/api/operator/**` (e-stop/resume, approvals, policy, diagnostics, support, the pcc-node relay) | any key or session | explicit `operator` or `admin` scope; a wildcard key is refused; a session is refused |
 
-The allowlists that `identity_reserved` protects are listed in
+The allowlists this refusal protects are listed in
 `packages/gateway/src/auth/reserved-identities.ts`: `PCC_KEY_ADMINS`,
 `AUDIT_ADMINS`, `PCC_DEMAND_ADMINS`, `PCC_AGGREGATOR_ADMINS`,
 `PCC_TOOL_INDEX_ADMINS`, `PCC_OBSERVABILITY_ADMINS`, `PCC_SETTLEMENT_OPERATORS`
@@ -212,9 +212,11 @@ Issue the narrowest set that covers what the holder actually does:
 | contributor flows | `POST /api/contributors/quickstart` gives the four contributor scopes |
 | admin | out-of-band only: Step 0, option (a) or (b). Nobody self-provisions `admin` |
 
-Identities on an admin allowlist get `403 identity_reserved` on the email paths
-by design. Their keys are issued out-of-band. If their allowlist entry is a
-wallet, they can use SIWE instead.
+Identities on an admin allowlist get `409 identity_claimed` on the email paths
+by design, even when the caller holds one of their keys. The answer is the same
+as for any claimed identity, so it does not reveal who is on an allowlist.
+Their keys are issued out-of-band. If their allowlist entry is a wallet, they
+can use SIWE instead.
 
 **Identity binding (WP-A fold F3).** An email identity that has, or ever had,
 a key cannot be claimed again by an anonymous caller: `POST /api/auth/provision
