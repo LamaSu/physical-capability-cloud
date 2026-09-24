@@ -17,6 +17,10 @@
  *
  * It is a guard, not a proof: a fallback written as a bare object literal
  * inside a catch block is invisible to it, which is why review still matters.
+ * The demo-import check below only asks that a module importing src/demo/
+ * also checks isDemoMode(); it cannot see which branch uses the values. The
+ * per-page honesty tests are what prove each page renders no fixture outside
+ * demo mode.
  * Server-side fabrication (a gateway route returning hard-coded data) is also
  * invisible here; SERVER_FABRICATED records the known cases so they are
  * not silently exempt.
@@ -164,10 +168,20 @@ describe("no production mock (ratchet)", () => {
     }
   });
 
+  it("the demo-import check also sees a dynamic import (self-test)", () => {
+    const rx = /(?:from\s+|import\s*\(\s*)['"][./]+(?:\.\.\/)*demo\//;
+    expect(rx.test('const m = await import("../demo/WalletPage.fixtures.js");')).toBe(true);
+    expect(rx.test('import { DEMO_X } from "../demo/WalletPage.fixtures.js";')).toBe(true);
+    expect(rx.test('import { x } from "../lib/demo-mode.js";')).toBe(false);
+  });
+
   it("fixtures under src/demo/ are imported only by code that checks demo mode", () => {
     const leaks = productionFiles(SRC)
       .map((full) => ({ file: relPath(full), text: readFileSync(full, "utf-8") }))
-      .filter(({ text }) => /from\s+['"][./]+(?:\.\.\/)*demo\//.test(text) && !text.includes("isDemoMode("))
+      .filter(
+        ({ text }) =>
+          /(?:from\s+|import\s*\(\s*)['"][./]+(?:\.\.\/)*demo\//.test(text) && !text.includes("isDemoMode("),
+      )
       .map(({ file }) => file);
     expect(leaks).toEqual([]);
   });
