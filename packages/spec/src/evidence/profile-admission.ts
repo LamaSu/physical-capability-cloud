@@ -162,8 +162,12 @@ function result(
 
 const reject = (code: ProfileAdmissionCode, detail: string) => result("reject", [{ code, detail }]);
 
-/** Terms of a valid profile this version cannot evaluate. */
-function unverifiableTerms(profile: MeasurementProfileV1): string[] {
+/**
+ * Terms of a valid profile this version cannot evaluate. Registration refuses
+ * a profile with any of them (profile-registration.ts), so admission and
+ * registration share one definition.
+ */
+export function unverifiableProfileTerms(profile: MeasurementProfileV1): string[] {
   const terms: string[] = [];
   if (profile.measurement.tolerance !== undefined) {
     terms.push("measurement.tolerance: the profile does not name where the measured value lives");
@@ -233,7 +237,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     return reject(governance.code ?? "profile-invalid", governance.reasons.join("; "));
   }
 
-  const terms = unverifiableTerms(profile);
+  const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
 
   if (!Array.isArray(bundles) || bundles.length === 0) {
