@@ -6,7 +6,8 @@
  * never read the Solidity or this TypeScript. It first reproduced 26 anchors: the repo's cast-computed
  * evidence-commitment golden, CREATE(0xD0, 0), the EIP-712 "Ether Mail" example, the Solidity
  * ABI-spec calldata examples (nested dynamic offsets included), and SHA3-256 against Python's
- * hashlib as a check on its permutation.
+ * hashlib as a check on its permutation. It is committed so the provenance can be checked:
+ * `python3 packages/contracts/test/fixtures/vnext-golden/vnext_golden.py` reproduces every value here.
  *
  * The same literals are asserted in two places:
  *   - `test/VNextAbiFreeze.t.sol`, against the REAL contracts end to end. The factory is deployed at

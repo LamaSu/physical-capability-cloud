@@ -14,7 +14,8 @@
 Both tests assert the *same literals*. An independent implementation computed those literals from this document alone, without reading the Solidity. So the contracts, the TS compiler and this document agree byte for byte.
 
 **Use the compiler; do not re-encode.** `@pcc/contracts/vnext` exports:
-- `compileVNextPolicy`: the whole of §3 in one call. It fails closed on every §5 rule.
+- `compileVNextPolicy`: the whole of §3 in one call. It fails closed on every **static** funding rule (§5.1).
+- `preflightVNextFunding`: the **live** funding prerequisites (§5.2), checked against a chain client. It ends by simulating the exact signed `fund()` from the actual sender. **A successful compile is not proof that a job will fund; a passing preflight is the closest thing to it, and the contract still re-checks everything.**
 - `buildUnitConfig` and `computeFee`: one unit, with the escrow's fee rule and exact conservation.
 - The individual hashes of §3 and §4.
 - The typed data for signing.
@@ -85,9 +86,9 @@ Field order and types are exact. The ABI tuple type is given for each.
 | 7 | `n` | `uint256` | net; `== g - f`, `> 0` |
 | 8 | `feeBps` | `uint16` | `<= 1000` |
 | 9 | `feeRecipient` | `address` | `feeBps > 0`: an allowed recipient (§5). `feeBps == 0`: `f == 0` and `feeRecipient == 0x0` |
-| 10 | `reclaimAt` | `uint256` | absolute unix time; `MIN_RECLAIM_DELAY <= reclaimAt - fundingTime <= MAX_RECLAIM_DELAY` |
+| 10 | `reclaimAt` | `uint256` | absolute unix time; `MIN_RECLAIM_DELAY <= reclaimAt - fundingTime <= MAX_RECLAIM_DELAY`, and `reclaimAt <= 2^64 - 1`: funding narrows it to `uint64` (`ValueOverflow` above), although the ABI field is `uint256` |
 | 11 | `compositionSchemaVersion` | `uint16` | any (0 = not composed); stored, never interpreted |
-| 12 | `compositionRoot` | `bytes32` | any; stored, and equality-checked against the O5 echo at release |
+| 12 | `compositionRoot` | `bytes32` | any; stored, and equality-checked against the verdict's echo when an assertion is **accepted** (`acceptAssertion`), not at release |
 | 13 | `payouts` | `PayoutEntry[]` | 1 to 16 legs; each `amount > 0`; each recipient allowed (§5); **`Σ amount == n` exactly** |
 
 **`PolicyIdentity`**: what the CREATE2 salt commits to and what a clone is initialized with. Tuple type `(address,address,bytes32,bytes32,uint256,bytes32,bytes32)`.
@@ -143,52 +144,67 @@ The escrow computes these itself. A compiler mirrors them to display, verify and
   - `legIndex`: `PRINCIPAL` uses the payout entry's index `j`. The others use fixed values: `FEE` `2^256-1`, `REFUND` `2^256-2`, `BOND` `2^256-3`, `DELAY_COMP` `2^256-4`, `BURN` `2^256-5`.
 - **`evidenceCommitment = keccak256(abi.encode(bytes32 EVIDENCE_COMMITMENT_DOMAIN, uint256 chainId, address escrow, bytes32 settlementUnitId, uint16 compositionSchemaVersion, uint8 packageFormat, bytes32 packageDigest))`.** Seven static words.
   - **`packageFormat` is always `1`** (`EVIDENCE_PACKAGE_FORMAT_V1`). It is the escrow's own commitment-layout label, and `submitEvidence` hardcodes it, so no caller chooses it. It is **not** the evidence package's format. A FinalMilestonePackageV2, whose body says `packageFormat: "2"`, is still committed with label `1`. The body's own format is inside `packageDigest`'s preimage, so the digest already binds it.
-  - An off-chain mirror that uses the body's format produces a commitment the escrow never stores, and every release then reverts `EvidenceBundleMismatch`.
+  - Where it is checked: `acceptAssertion` requires a committed evidence package and the verdict's echo to equal this commitment (`EvidenceBundleMismatch` otherwise). An off-chain mirror that uses the body's format therefore produces a commitment the escrow never stores, and every assertion is refused at acceptance. Tier-0 units never read evidence: they release through buyer approval.
 
 ## 5. Funding rules
 
-A compiler **must fail closed** on every one of these. Each is a `fund()` or `initialize()` revert, so a config that breaks one is a job that can never be funded.
+### 5.1 Static rules: the compiler refuses these
+
+Each is a `fund()` or `initialize()` revert decided by the config's content alone. `compileVNextPolicy` refuses every one, and a config that breaks one can never be funded.
 
 - **Unit count:** `1 <= configs.length <= 16`. The total number of payout legs across the job is `<= 256`. That total can never be exceeded while the per-unit caps hold (16 × 16), but the escrow checks it anyway.
 - **Per unit:**
-  - Every `UnitConfig` rule in §2.
-  - The fee is exactly `f = floor(g * feeBps / 10000)` and `n = g - f`, with no other rounding.
+  - Every `UnitConfig` rule in §2, including the `uint128` bound on `g` and the `uint64` bound on `reclaimAt`.
+  - The fee is exactly `f = floor(g * feeBps / 10000)` and `n = g - f`, with no other rounding. A positive `feeBps` whose fee floors to 0 is legal: it still needs an allowed fee recipient, and creates no fee leg.
   - The payouts **conserve exactly**: `Σ payouts[j].amount == n`. Over-allocation and under-allocation both revert `PayoutSumMismatch`, including a difference of 1 base unit.
   - Unit ids are unique (`DuplicateUnit`).
 - **Allowed recipient:** not `0x0`, not the escrow clone, not the settlement token, not the factory. This applies to every payout recipient, to the fee recipient when `feeBps > 0`, and to the operator. The payer and the operator *may* be payout recipients.
 - **Parties:** the payer is nonzero, and `operator != payer`.
-- **Acceptance:**
-  - `block.timestamp <= expiry`.
-  - Each signature is `<= 1024` bytes.
-  - `policyNonce >= policyNonceFloor[policyKey]`.
-  - No escrow has already been funded for `policyKey`.
+- **Acceptance shape:** each signature is `<= 1024` bytes, and a sender other than the payer must carry the payer's signature (`OnlyPayer`). `checkAcceptance` checks both when it is given the sender.
 - **Calldata:** the complete `fund()` calldata is `<= 26372` bytes. Any config inside the limits above, with signatures of at most 1024 bytes, fits by construction. `encodeFundCalldata` checks it anyway.
+- **Relative to the expected funding time:** `expiry` and every reclaim window are checked against the `fundingTime` the compile is given. The contract checks them against `block.timestamp`, so they are re-checked live (§5.2).
+
+### 5.2 Live prerequisites: only the chain can answer these
+
+A pure compiler cannot see any of these. `preflightVNextFunding` reads each one, then **simulates the exact signed `fund()` from the actual sender**. The simulation is the authority; the named checks only explain a failure.
+
+- The deployment the compile assumed: the chain id, `factory.implementation()`, `factory.predictEscrow(identity)`, and the implementation's settlement token (`USDC()`).
+- The clone: created, `initialized`, not `configurationSealed`, and holding the compiled identity with no accepted policy yet.
+- **Both cohorts enabled.** `fund()` reverts `InvalidOrDisabledCohort` if the primary or the escalation attester is disabled.
+- **The policy generation is live:** `policyNonce >= policyNonceFloor[policyKey]` (not revoked, not superseded), and no escrow has been funded for `policyKey` yet.
+- **The live clock:** `block.timestamp <= expiry`, and every reclaim window holds at the live block time.
+- **Signature validity** for each signer: an EOA uses ECDSA with low `s` and `v ∈ {27, 28}`; a contract account uses ERC-1271, called with the clone as the caller. Only the contract decides this, so the simulation checks it.
+- **The exact pull:** the payer's balance and allowance to the escrow cover `Σ g`, and the token delivers exactly that (fee-on-transfer or short-delivering tokens are refused with `FundingDeltaMismatch`).
+
+State can change between a preflight and the transaction. The contract re-checks everything at execution, and nothing here replaces an on-chain check.
 
 ## 6. Unit states: settled vs refunded
 
 `unitState(unitId)` returns one of the **nine** states 1–9.
 - `0` (`AWAITING_FUNDING`) is the enum's zero value and is never returned: an unfunded or unknown unit id reverts `UnitNotFound()`, and `fund()` writes state 1 in the same transaction that makes the unit exist. **Treat an observed 0 as a read error.**
 
-The money meaning of each state:
+The money meaning of each state, and every way out of it:
 
-| # | State | Money meaning |
-|---|---|---|
-| 0 | `AWAITING_FUNDING` | never returned (see above) |
-| 1 | `FUNDED_ACTIVE` | `G` is committed; no outcome yet |
-| 2 | `PRIMARY_ASSERTED` | a primary verdict was accepted, and its challenge window opened at acceptance. The unit stays here after the window closes, until `finalize` or a challenge moves it |
-| 3 | `CHALLENGED` | a bonded challenge is open, and the appeal window opened with it. The unit stays here until `finalize` or an escalation moves it; an open emergency caps the window |
-| 4 | `BACKUP_PENDING` | the primary lane closed; the backup cohort may assert |
-| 5 | `BACKUP_ASSERTED` | a backup verdict was accepted, and its challenge window opened at acceptance. The unit stays here until `finalize` or a challenge moves it |
-| 6 | `RELEASE_ALLOCATED` | **release decided, payment not complete**: at least one *job* leg could not be pushed and is an outstanding claim; other legs may already be paid |
-| 7 | `REFUND_ALLOCATED` | **refund decided, nothing refunded yet**: the single refund leg (all of `G`) is an outstanding claim |
-| 8 | `SETTLED_RELEASED` | **released**: every principal leg has been paid, and the fee leg when `F > 0` |
-| 9 | `SETTLED_REFUNDED` | **refunded**: `G` has been paid to the payer |
+| # | State | Money meaning | Exits |
+|---|---|---|---|
+| 0 | `AWAITING_FUNDING` | never returned (see above) | — |
+| 1 | `FUNDED_ACTIVE` | `G` is committed; no outcome yet. **The only state in which evidence can be committed** (`submitEvidence`, by the operator, before `reclaimAt`). | `acceptAssertion` (primary, tier ≥ 1, evidence committed) → 2. `invokeBackup` (operator) → 4. `approveByBuyer` (tier 0 only, before `reclaimAt`) → release. `reclaimAfterDeadline` (at or after `reclaimAt`) → refund. `finalize` once an open emergency's review window has passed with no emergency verdict → refund. |
+| 2 | `PRIMARY_ASSERTED` | a primary verdict was accepted, and its challenge window opened at acceptance. The unit stays here after the window closes until something moves it. | `challenge` (payer, inside the window) → 3. `finalize` after the challenge window → release. `resolveEscalation(EMERGENCY)` with a recorded emergency verdict → release (upheld) or refund (overturned). **An open emergency takes precedence:** `finalize` then waits for the emergency deadline, and refunds if no emergency verdict was recorded in time. |
+| 3 | `CHALLENGED` | a bonded challenge is open, and the appeal window opened with it. The unit stays here until something moves it. | `resolveEscalation(APPEAL)` with a recorded appeal verdict → release (upheld) or refund (overturned). `resolveEscalation(EMERGENCY)` (primary lane) → release or refund. `finalize` after the appeal window **with no final appeal verdict recorded** → release (appeal silence). A recorded final verdict blocks that default (`finalize` reverts; use `resolveEscalation`). An open emergency takes precedence, as in state 2. |
+| 4 | `BACKUP_PENDING` | the operator closed the primary lane; the backup cohort may assert. Evidence must already be committed: `submitEvidence` only works in state 1. | `acceptAssertion` (backup) → 5. `finalize` after the assertion cutoff → refund. |
+| 5 | `BACKUP_ASSERTED` | a backup verdict was accepted, and its challenge window opened at acceptance. The unit stays here until something moves it. | `challenge` → 3 (backup lane: appeal only, never an emergency). `finalize` after the challenge window → release. |
+| 6 | `RELEASE_ALLOCATED` | **release decided, payment not complete**: at least one *job* leg could not be pushed and is an outstanding claim; other legs may already be paid | `dischargeClaim` on the last outstanding job claim → 8 |
+| 7 | `REFUND_ALLOCATED` | **refund decided, nothing refunded yet**: the single refund leg (all of `G`) is an outstanding claim | `dischargeClaim` → 9 |
+| 8 | `SETTLED_RELEASED` | **released**: every principal leg has been paid, and the fee leg when `F > 0` | terminal |
+| 9 | `SETTLED_REFUNDED` | **refunded**: `G` has been paid to the payer | terminal |
+
+An **emergency** exists for a primary-lane unit of tier ≥ 1 when the primary cohort was disabled before the unit's release fell due, and the emergency review window ends no later than `reclaimAt`.
 
 - States 1–5 are *live*: money is committed and nothing has been allocated yet.
 - The first allocation takes the unit to 6 or 7 **exactly once**. Every later release or refund attempt on that unit is refused. Usually the revert is `NotActive()`, but `resolveEscalation` can revert `NoEmergency()` or `BadEscalationRole()` before its state check. Treat a unit in state 6–9 as "the outcome already happened", whoever caused it. Never treat a revert reason as that signal.
 - When every leg pays in the allocating transaction, 6 or 7 becomes 8 or 9 in that same transaction. Otherwise `dischargeClaim` pays the outstanding claims, and the last one moves the unit to 8 or 9.
 - *Allocated* is not *settled*: "decided" and "paid" are different states.
-- Bond-family claims (`BOND`, `DELAY_COMP`, `BURN`) do not hold a unit in 6 or 7.
+- Bond-family claims (`BOND`, `DELAY_COMP`, `BURN`) never hold a unit in 6 or 7. They can still be outstanding in the terminal states 8 and 9, and can still be discharged or have their destination rotated there.
 - "Paid" means paid to the claim's destination. The claim owner can rotate that destination (`rotateClaimDestination`).
 
 **Outcome causes.** There are exactly ten paths to an allocation, and each one emits a distinguishing event.
@@ -196,15 +212,15 @@ The money meaning of each state:
 | Outcome | Path | Event |
 |---|---|---|
 | release | `finalize` from 2 or 5 after the challenge window | `Finalized(unitId, true, 0)` (uncontested) |
-| release | `finalize` from 3 after the appeal window (silence) | `Finalized(unitId, true, 1)` |
-| release | `resolveEscalation`, appeal, upheld | `EscalationResolved(unitId, id, 1, true)` |
-| release | `resolveEscalation`, emergency, upheld | `EscalationResolved(unitId, id, 2, true)` |
+| release | `finalize` from 3 after the appeal window, with no final appeal verdict | `Finalized(unitId, true, 1)` (appeal silence) |
+| release | `resolveEscalation`, appeal, upheld (from 3) | `EscalationResolved(unitId, id, 1, true)` |
+| release | `resolveEscalation`, emergency, upheld (from 2 or 3, primary lane) | `EscalationResolved(unitId, id, 2, true)` |
 | release | `approveByBuyer` (tier 0 only, from 1, before `reclaimAt`) | `BuyerApproved(unitId, nonce)` |
 | refund | `finalize` from 4 after the assertion cutoff | `Finalized(unitId, false, 2)` (backup, no release) |
-| refund | `finalize` on emergency silence | `Finalized(unitId, false, 3)` |
+| refund | `finalize` from 1, 2 or 3 after an emergency deadline with no emergency verdict | `Finalized(unitId, false, 3)` (emergency silence) |
 | refund | `reclaimAfterDeadline` from 1 at or after `reclaimAt` | `Finalized(unitId, false, 4)` (deadline reclaim) |
-| refund | `resolveEscalation`, appeal, overturned | `EscalationResolved(unitId, id, 1, false)` |
-| refund | `resolveEscalation`, emergency, overturned | `EscalationResolved(unitId, id, 2, false)` |
+| refund | `resolveEscalation`, appeal, overturned (from 3) | `EscalationResolved(unitId, id, 1, false)` |
+| refund | `resolveEscalation`, emergency, overturned (from 2 or 3, primary lane) | `EscalationResolved(unitId, id, 2, false)` |
 
 Every release path also emits `ReleaseAllocated(unitId, claimCount)`, and every refund path emits `RefundAllocated(unitId, claimCount)`. The operator is paid nothing on any refund path. The TS exports are `VNextFinalizedReason` and `VNextEscalationRole`.
 
@@ -287,7 +303,13 @@ Evidence commitment input for unit 0: `packageDigest = keccak256("pcc:vnext:gold
 
 ### Outputs
 
-These values were computed by an independent clean-room implementation: pure Python standard library, with its own Keccak-256 and ABI encoder, that read only this document. The same literals are asserted against the real contracts (`VNextAbiFreeze.t.sol`) and against the TS compiler (`vnext-compiler.test.ts`). Compilers can import them as `VNEXT_GOLDEN` from `@pcc/contracts/vnext`.
+These values were computed by an independent clean-room implementation that read only this document. It is pure Python standard library, with its own Keccak-256 and ABI encoder, and it is committed so anyone can reproduce them:
+
+```sh
+python3 packages/contracts/test/fixtures/vnext-golden/vnext_golden.py
+```
+
+It first reproduces 26 external anchors (including this repo's `cast`-computed evidence golden, `CREATE(0xD0, 0)`, the EIP-712 "Ether Mail" example, and the Solidity ABI-spec calldata examples). It then prints every value below and writes `vnext-golden-vectors.json` next to itself. The same literals are asserted against the real contracts (`VNextAbiFreeze.t.sol`) and against the TS compiler (`vnext-compiler.test.ts`). Compilers can import them as `VNEXT_GOLDEN` from `@pcc/contracts/vnext`.
 
 | Output | Value |
 |---|---|
@@ -334,16 +356,14 @@ The gate-1 inputs for the last anchor are: `chainId 8453`; escrow `0x00000000000
 
 ## 9. Change control
 
-Any change to §1–§7 does all of the following:
+Changes fall into three classes. They have very different costs, and **a documentation correction must never force a change to correct Solidity or a recomputation of unchanged golden values.**
 
-- moves every predicted escrow address
-- invalidates every acceptance signature
-- fails `VNextAbiFreeze.t.sol` and `vnext-compiler.test.ts`
-
-That is intended. A change requires:
-
-1. Changing the Solidity.
-2. Recomputing the golden outputs **with an implementation other than the contracts** (not by copying `forge` output back into the test).
-3. Updating both pinned literal sets.
-4. Bumping the affected domain tag (`:vN`) so an old builder fails loudly rather than subtly.
-5. Posting the re-pin on the coordination bus to the composition, economics, oracle, evidence and VCR lanes before merge.
+1. **A change to a committed encoding or domain.** This covers any constant, struct, field order or width, preimage, compile-sequence step, or selector in §1–§4 and §7.
+   - It moves predicted escrow addresses, invalidates acceptance signatures, and fails `VNextAbiFreeze.t.sol` and `vnext-compiler.test.ts`. That is intended.
+   - It requires: changing the Solidity; recomputing the golden outputs **with an implementation other than the contracts**, for example by updating the committed generator from this document, never from the Solidity (and never by copying `forge` output back into a test); updating both pinned literal sets; bumping the affected domain tag (`:vN`) so an old builder fails loudly rather than subtly; and posting the re-pin on the coordination bus to the composition, economics, oracle, evidence and VCR lanes before merge.
+2. **A change to contract behavior that commits nothing new.** This covers a funding limit (§5), a check, or a state transition (§6).
+   - It need not change any hash. The calldata bound, for example, feeds no preimage.
+   - It requires: the Solidity change with its own negative tests; the same change to the compiler's §5.1 refusals, or to the preflight's §5.2 checks, with a paired boundary test on each side (`test_Boundary_*` and "boundary parity with fund()"); and a bus post.
+   - Golden values are recomputed only if a committed value actually changed.
+3. **A documentation correction.** Prose that was wrong about correct code.
+   - Fix the text, cite the Solidity it now matches, and change nothing else.
