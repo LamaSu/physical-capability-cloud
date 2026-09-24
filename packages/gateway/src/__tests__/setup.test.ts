@@ -14,7 +14,8 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { setupRoutes } from "../routes/setup.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -105,11 +106,22 @@ async function buildApp(): Promise<FastifyInstance> {
 // Tests
 // ---------------------------------------------------------------------------
 
+// WP-C R3: register-device is owner-only. The seeded kernel-nyc is owned by
+// NYC_OWNER and kernel-sf by SF_OWNER (packages/db seed data).
+const NYC_OWNER = "0x1111111111111111111111111111111111111111";
+const SF_OWNER = "0x2222222222222222222222222222222222222222";
+let nycKey = "";
+let sfKey = "";
+const asNyc = () => ({ authorization: `Bearer ${nycKey}` });
+const asSf = () => ({ authorization: `Bearer ${sfKey}` });
+
 describe("Setup API", () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
     app = await buildApp();
+    nycKey = provisionApiKey({ operatorId: NYC_OWNER, scopes: ["operator"] }).rawKey;
+    sfKey = provisionApiKey({ operatorId: SF_OWNER, scopes: ["operator"] }).rawKey;
   });
 
   afterAll(async () => {
@@ -483,6 +495,7 @@ describe("Setup API", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: {
           kernelId: "kernel-nyc",
           deviceId,
@@ -505,6 +518,7 @@ describe("Setup API", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: {
           kernelId: "kernel-nyc",
           deviceId,
@@ -524,16 +538,22 @@ describe("Setup API", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: { kernelId: "kernel-nyc" },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_required_fields");
     });
 
-    it("returns 400 for unknown kernel", async () => {
+    // WP-C R3: old 400 kernel_not_found -> new 404 kernel_not_found. The
+    // shared ownership check now runs before any write and reports an
+    // unknown kernel as 404, like every other owner-only route. Still a
+    // refusal with the same error code; nothing is written.
+    it("returns 404 for unknown kernel", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: {
           kernelId: "kernel-does-not-exist",
           deviceId: "dev-orphan",
@@ -541,7 +561,7 @@ describe("Setup API", () => {
           adapterType: "mock",
         },
       });
-      expect(res.statusCode).toBe(400);
+      expect(res.statusCode).toBe(404);
       expect(res.json().error).toBe("kernel_not_found");
     });
 
@@ -549,6 +569,7 @@ describe("Setup API", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: {
           kernelId: "kernel-nyc",
           deviceId: "dev-bad-adapter",
@@ -572,6 +593,7 @@ describe("Setup API", () => {
       const first = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload,
       });
       expect(first.statusCode).toBe(201);
@@ -580,6 +602,7 @@ describe("Setup API", () => {
       const second = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload,
       });
       expect(second.statusCode).toBe(200);
@@ -592,6 +615,7 @@ describe("Setup API", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: {
           kernelId: "kernel-nyc",
           deviceId,
@@ -619,6 +643,7 @@ describe("Setup API", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
+        headers: asNyc(),
         payload: {
           kernelId: "kernel-nyc",
           deviceId: `dev-bad-emits-${Date.now()}`,
@@ -629,6 +654,134 @@ describe("Setup API", () => {
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("invalid_emits");
+    });
+  });
+
+  // ── WP-C R3: register-device is owner-only; devices are never re-parented ──
+  // Review round 2 (MEDIUM, probes P4 + P8): only the kernel's existence was
+  // checked, so any key could add devices and cap-<kernelId>-<type> rows to
+  // another operator's kernel, or move another operator's device onto its own
+  // kernel with a rewritten adapterConfig.
+
+  describe("POST /api/setup/register-device — owner-only (WP-C R3)", () => {
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    let n = 0;
+    const unique = (p: string) => `${p}-${Date.now().toString(36)}-${++n}`;
+
+    function device(id: string) {
+      return getRepos().kernels.findDeviceById(id) as { kernelId: string; adapterConfig?: string | null } | undefined;
+    }
+
+    function kernelRow(id: string, operatorAddress: string) {
+      const now = new Date().toISOString();
+      getRepos().kernels.insert({
+        id,
+        name: `R3 ${id}`,
+        operatorAddress,
+        location: { lat: 0, lng: 0 },
+        physicalAddress: "",
+        maxAssuranceTier: 0,
+        publicKey: `0x${"00".repeat(32)}`,
+        reputation: 0,
+        totalJobsCompleted: 0,
+        status: "online",
+        registeredAt: now,
+        lastHeartbeat: now,
+        version: "0.1.0",
+      } as never);
+    }
+
+    function register(headers: Record<string, string>, payload: Record<string, unknown>) {
+      return app.inject({ method: "POST", url: "/api/setup/register-device", headers, payload });
+    }
+
+    it("[neg] P4: a NON-owner cannot add a device or capability rows to another operator's kernel: 403, nothing written", async () => {
+      const deviceId = unique("dev-r3-p4");
+      const res = await register(asSf(), {
+        kernelId: "kernel-nyc",
+        deviceId,
+        type: "machine",
+        adapterType: "generic-http",
+        capabilities: ["r3.evil"],
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("not_kernel_owner");
+      expect(device(deviceId)).toBeFalsy();
+      expect(getRepos().capabilities.findById("cap-kernel-nyc-r3.evil")).toBeFalsy();
+    });
+
+    it("[neg] P8: a NON-owner cannot move another operator's device onto its own kernel: 403, device and adapterConfig unchanged", async () => {
+      const deviceId = unique("dev-r3-p8");
+      const mk = await register(asNyc(), {
+        kernelId: "kernel-nyc",
+        deviceId,
+        type: "machine",
+        adapterType: "generic-http",
+        adapterConfig: { url: "http://10.0.0.5/printer" },
+      });
+      expect(mk.statusCode).toBe(201);
+      const hijack = await register(asSf(), {
+        kernelId: "kernel-sf",
+        deviceId,
+        type: "machine",
+        adapterType: "generic-http",
+        adapterConfig: { url: "http://attacker.example/x" },
+      });
+      expect(hijack.statusCode).toBe(403);
+      expect(hijack.json().error).toBe("not_kernel_owner");
+      const dev = device(deviceId)!;
+      expect(dev.kernelId).toBe("kernel-nyc");
+      expect(String(dev.adapterConfig)).toContain("10.0.0.5");
+      expect(String(dev.adapterConfig)).not.toContain("attacker.example");
+    });
+
+    it("[neg] even the owner of BOTH kernels cannot re-parent a device across kernels: 409, the device stays", async () => {
+      const second = unique("kernel-r3-second");
+      kernelRow(second, NYC_OWNER);
+      const deviceId = unique("dev-r3-move");
+      expect((await register(asNyc(), { kernelId: "kernel-nyc", deviceId, type: "machine", adapterType: "mock" })).statusCode).toBe(201);
+      const move = await register(asNyc(), { kernelId: second, deviceId, type: "machine", adapterType: "mock" });
+      expect(move.statusCode).toBe(409);
+      expect(move.json().error).toBe("device_kernel_mismatch");
+      expect(device(deviceId)!.kernelId).toBe("kernel-nyc");
+    });
+
+    it("[neg] a device whose kernel row is gone has no owner: nobody can adopt it (403)", async () => {
+      const deviceId = unique("dev-r3-orphan");
+      getRepos().kernels.insertDevice({
+        id: deviceId,
+        kernelId: unique("kernel-r3-deleted"),
+        type: "machine",
+        model: "orphan",
+        firmware: "unknown",
+        status: "idle",
+        contributesToCapabilities: [],
+        lastUpdated: new Date().toISOString(),
+        adapterType: "mock",
+        capabilities: [],
+        healthStatus: "healthy",
+      } as never);
+      const res = await register(asNyc(), { kernelId: "kernel-nyc", deviceId, type: "machine", adapterType: "mock" });
+      expect(res.statusCode).toBe(403);
+      expect(device(deviceId)!.kernelId).not.toBe("kernel-nyc");
+    });
+
+    it("[neg] a legacy UNOWNED placeholder kernel accepts no devices: 403, nothing written", async () => {
+      const legacy = unique("kernel-r3-legacy");
+      kernelRow(legacy, ZERO);
+      const deviceId = unique("dev-r3-legacy");
+      const res = await register(asNyc(), { kernelId: legacy, deviceId, type: "machine", adapterType: "mock", capabilities: ["r3.x"] });
+      expect(res.statusCode).toBe(403);
+      expect(device(deviceId)).toBeFalsy();
+      expect(getRepos().capabilities.findById(`cap-${legacy}-r3.x`)).toBeFalsy();
+    });
+
+    it("[neg] NO actor -> 401, nothing written", async () => {
+      const deviceId = unique("dev-r3-anon");
+      const res = await register({}, { kernelId: "kernel-nyc", deviceId, type: "machine", adapterType: "mock", capabilities: ["r3.anon"] });
+      expect(res.statusCode).toBe(401);
+      expect(device(deviceId)).toBeFalsy();
+      expect(getRepos().capabilities.findById("cap-kernel-nyc-r3.anon")).toBeFalsy();
     });
   });
 

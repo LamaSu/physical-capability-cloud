@@ -538,14 +538,34 @@ export async function setupRoutes(app: FastifyInstance) {
   });
 
   // ── POST /api/setup/register-device ──────────────────────────────────────
+  //
+  // OWNER-ONLY (WP-C R3; review round 2, probes P4 + P8). Registering a device
+  // writes a device row AND `cap-<kernelId>-<type>` capability rows under the
+  // kernel, so it is a catalog mutation of that kernel, the same class as
+  // heartbeat and POST /api/capabilities. Before, only the kernel's existence
+  // was checked: any key could add devices and priced capability rows to
+  // another operator's kernel, and could move another operator's existing
+  // device onto its own kernel with a rewritten adapterConfig.
+  //   - the shared ownership check (requireKernelOwner over
+  //     auth/kernel-operator.ts) runs before any write: 401 without an actor,
+  //     404 unknown kernel, 403 not_kernel_owner;
+  //   - an EXISTING device also requires ownership of the kernel it is on now
+  //     (403 otherwise, including an orphan device whose kernel row is gone),
+  //     and is never re-parented across kernels (409 device_kernel_mismatch,
+  //     even when the actor owns both);
+  //   - the audit actor is the authenticated principal.
 
   app.post<{ Body: RegisterDeviceBody }>(
     "/api/setup/register-device",
     async (req, reply) => {
       const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits } =
-        req.body;
+        req.body ?? ({} as Partial<RegisterDeviceBody>);
 
-      if (!kernelId || !deviceId || !type || !adapterType) {
+      if (
+        typeof kernelId !== "string" || !kernelId ||
+        typeof deviceId !== "string" || !deviceId ||
+        !type || !adapterType
+      ) {
         return reply.code(400).send({ error: "missing_required_fields" });
       }
 
@@ -572,6 +592,13 @@ export async function setupRoutes(app: FastifyInstance) {
         validatedEmits = parsed.data;
       }
 
+      // Imported here (not in the file header) to keep this work package's
+      // change inside the register-device handler.
+      const { checkKernelOwner, requireKernelOwner } = await import("../auth/kernel-owner-guard.js");
+      // Ownership BEFORE any write (401 / 404 / 403 / 502 are sent by the guard).
+      const actor = await requireKernelOwner(req, reply, kernelId);
+      if (!actor) return reply;
+
       try {
         const repos = getRepos();
 
@@ -581,9 +608,29 @@ export async function setupRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: "kernel_not_found" });
         }
 
-        // Idempotent upsert — never 409 a re-registration. If the device
-        // exists, update its mutable fields; otherwise insert.
+        // Idempotent upsert — never 409 a re-registration of the SAME device
+        // on the SAME kernel. If the device exists, update its mutable fields;
+        // otherwise insert.
         const existing = repos.kernels.findDeviceById(deviceId);
+        if (existing && existing.kernelId !== kernelId) {
+          // The device is on another kernel. Its current kernel must be the
+          // actor's too (a device whose kernel row is gone has no owner)...
+          const current = await checkKernelOwner(actor, existing.kernelId);
+          if (!current.ok) {
+            return reply.code(403).send({
+              error: "not_kernel_owner",
+              message: `Device '${deviceId}' belongs to a kernel you do not own`,
+              deviceId,
+            });
+          }
+          // ...and even then it is never moved across kernels.
+          return reply.code(409).send({
+            error: "device_kernel_mismatch",
+            message: `Device '${deviceId}' is registered on kernel '${existing.kernelId}'; it cannot be re-parented to '${kernelId}'`,
+            deviceId,
+            kernelId: existing.kernelId,
+          });
+        }
         const now = new Date().toISOString();
         let device: any;
         let action: "created" | "updated";
@@ -671,10 +718,10 @@ export async function setupRoutes(app: FastifyInstance) {
           model,
           action,
           capabilitiesRegistered: capabilities?.length ?? 0,
-        }, (req as any).operatorId ?? (req as any).apiKeyId);
+        }, actor);
         auditService.log({
           eventType: action === "created" ? "device.registered" : "device.updated",
-          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          actor,
           resourceType: "device",
           resourceId: deviceId,
           action: action === "created" ? "create" : "update",
