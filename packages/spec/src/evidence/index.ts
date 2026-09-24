@@ -12,6 +12,8 @@
  *                          adapter/device/process EMITS) + the manifest→CSD
  *                          evidence bridge.
  * - adapter-manifests.ts — default emitter manifests per adapter type + role.
+ * - provenance-plan.ts   — the provenance planner (ADK D2): contract lint ×
+ *                          supply manifests → achievable tier + what unlocks the next.
  *
  * See ai/research/pcc-evidence-vocabulary-v1.md (v1),
  * ai/research/pcc-evidence-vocab-sensor-machinelog.md (v1.5-industrial), and
@@ -27,3 +29,4 @@ export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
 export * from "./adapter-manifests.js";
+export * from "./provenance-plan.js";
