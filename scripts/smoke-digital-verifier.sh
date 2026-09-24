@@ -17,7 +17,8 @@ BRANCH="digital-verifier/foundation"
 GW="https://capability.network"
 ORACLE_TUNNEL="https://refer-proxy-joint-cleaning.trycloudflare.com"
 ORACLE_DIRECT="${ORACLE_DIRECT:-http://localhost:4100}"
-ORACLE_KEY="pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa"
+# N44: from the environment only; never commit a key literal (CI secret scan).
+ORACLE_KEY="${PCC_ORACLE_KEY:-}"
 REPORT_FILE="ai/supervisor/smoke-test-report.json"
 
 # ── State ───────────────────────────────────────────────────────────────────
@@ -52,6 +53,11 @@ skip() {
 
 info() {
   echo -e "  ${CYAN}INFO${NC} $1"
+}
+
+# N44: strip PCC key material from anything printed or written to the report.
+redact() {
+  printf '%s' "$1" | sed -E 's/([Pp][Cc][Cc]_([Ll][Ii][Vv][Ee]|[Tt][Ee][Ss][Tt]|[Oo][Rr][Aa][Cc][Ll][Ee])_)[0-9A-Fa-f]+/\1<redacted>/g'
 }
 
 add_check() {
@@ -183,11 +189,11 @@ if [ "$HEALTH_RESP" = "CURL_ERROR" ]; then
 else
   HEALTH_STATUS=$(echo "$HEALTH_RESP" | jq -r .status 2>/dev/null || echo "")
   if [ "$HEALTH_STATUS" = "ok" ]; then
-    pass "Gateway healthy: $HEALTH_RESP"
-    add_check "gateway-health" "PASS" "$HEALTH_RESP" "$DURATION"
+    pass "Gateway healthy: $(redact "$HEALTH_RESP")"
+    add_check "gateway-health" "PASS" "$(redact "$HEALTH_RESP")" "$DURATION"
   else
-    fail "Gateway unhealthy: $HEALTH_RESP"
-    add_check "gateway-health" "FAIL" "$HEALTH_RESP" "$DURATION"
+    fail "Gateway unhealthy: $(redact "$HEALTH_RESP")"
+    add_check "gateway-health" "FAIL" "$(redact "$HEALTH_RESP")" "$DURATION"
   fi
 
   # Also check setup status
@@ -266,32 +272,39 @@ if [ -z "$ORACLE_HEALTH" ]; then
 else
   ORACLE_STATUS=$(echo "$ORACLE_HEALTH" | jq -r .status 2>/dev/null || echo "")
   if [ "$ORACLE_STATUS" = "ok" ]; then
-    pass "Oracle healthy via $ORACLE_URL_USED: $ORACLE_HEALTH"
+    pass "Oracle healthy via $ORACLE_URL_USED: $(redact "$ORACLE_HEALTH")"
     add_check "oracle-responds" "PASS" "Oracle ok via $ORACLE_URL_USED" "$DURATION"
 
-    # Smoke verify request
-    info "Sending smoke verify request..."
-    VERIFY_RESP=$(curl -sS --max-time 15 -X POST "$ORACLE_URL_USED/verify" \
-      -H "Content-Type: application/json" \
-      -H "x-oracle-key: $ORACLE_KEY" \
-      -d '{
-        "escrowAddress": "0x0000000000000000000000000000000000000000",
-        "jobId": "smoke-test-'"$(date +%s)"'",
-        "kernelId": "kernel-hp-printer",
-        "evidenceHash": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        "assuranceTier": 0,
-        "chainId": 84532
-      }' 2>/dev/null || echo "")
+    # Smoke verify request. It needs PCC_ORACLE_KEY, and a missing key is a
+    # failure: an authenticated check that never ran is not a pass (N44).
+    if [ -z "$ORACLE_KEY" ]; then
+      fail "PCC_ORACLE_KEY not set: the authenticated verify request did not run"
+      add_check "oracle-verify" "FAIL" "PCC_ORACLE_KEY not set; authenticated verify not run" "0"
+      VERIFY_RESP=""
+    else
+      info "Sending smoke verify request..."
+      VERIFY_RESP=$(curl -sS --max-time 15 -X POST "$ORACLE_URL_USED/verify" \
+        -H "Content-Type: application/json" \
+        -H "x-oracle-key: $ORACLE_KEY" \
+        -d '{
+          "escrowAddress": "0x0000000000000000000000000000000000000000",
+          "jobId": "smoke-test-'"$(date +%s)"'",
+          "kernelId": "kernel-hp-printer",
+          "evidenceHash": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+          "assuranceTier": 0,
+          "chainId": 84532
+        }' 2>/dev/null || echo "")
+    fi
     if [ -n "$VERIFY_RESP" ]; then
       VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
       REASON=$(echo "$VERIFY_RESP" | jq -r .result.reason 2>/dev/null || echo "")
-      info "Verify response: verified=$VERIFIED reason=$REASON"
-    else
+      info "Verify response: verified=$VERIFIED reason=$(redact "$REASON")"
+    elif [ -n "$ORACLE_KEY" ]; then
       info "Verify request returned empty (oracle may be processing)"
     fi
   else
-    fail "Oracle returned unexpected status: $ORACLE_HEALTH"
-    add_check "oracle-responds" "FAIL" "Unexpected oracle status: $ORACLE_HEALTH" "$DURATION"
+    fail "Oracle returned unexpected status: $(redact "$ORACLE_HEALTH")"
+    add_check "oracle-responds" "FAIL" "Unexpected oracle status: $(redact "$ORACLE_HEALTH")" "$DURATION"
   fi
 fi
 echo ""
@@ -315,10 +328,10 @@ if [ -z "$PROVISION_RESP" ]; then
 else
   API_KEY=$(echo "$PROVISION_RESP" | jq -r .api_key 2>/dev/null || echo "")
   if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-    fail "API key provision failed: $PROVISION_RESP"
+    fail "API key provision failed: $(redact "$PROVISION_RESP")"
     E2E_OK=false
   else
-    info "Got API key: ${API_KEY:0:20}..."
+    info "Got an API key (value not shown)"
   fi
 fi
 
@@ -366,7 +379,7 @@ if $E2E_OK; then
   if [ "$IS_VALID" = "true" ]; then
     info "API key validated successfully"
   else
-    info "API key validation returned: $VALIDATE_RESP"
+    info "API key validation returned: $(redact "$VALIDATE_RESP")"
   fi
 fi
 

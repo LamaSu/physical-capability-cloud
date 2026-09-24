@@ -19,7 +19,10 @@ if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY"); process.exit(1); }
 
 const GW = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
-const ORACLE_KEY = "pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa";
+// N44: keys come only from the environment. Never commit a key literal:
+// scripts/ci/secret-scan.mjs fails CI on any pcc_live_/pcc_test_/pcc_oracle_ literal.
+const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
+if (!ORACLE_KEY) { console.error("Set PCC_ORACLE_KEY (the oracle x-oracle-key; never hard-code it)"); process.exit(1); }
 const KERNEL = "kernel-nanoclaw";
 
 const account = privateKeyToAccount(PK);
@@ -28,7 +31,10 @@ const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc 
 const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
 
 const log: string[] = [];
-function L(s: string) { console.log(s); log.push(s); }
+// N44: nothing that reaches the console or the report carries PCC key material,
+// whatever a response echoes back.
+const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
+function L(s: string) { const t = redactKeys(s); console.log(t); log.push(t); }
 function SEP() { L("─".repeat(72)); }
 function BIGSEP() { L("═".repeat(72)); }
 

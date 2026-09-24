@@ -32,10 +32,14 @@ if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
   process.exit(1);
 }
 
-const PCCAPIKEY = "pcc_live_97739a42afdfd22db33f75b25bec61daf92ef656b84a6b102a811266c297b63b";
+// N44: keys come only from the environment. Never commit a key literal:
+// scripts/ci/secret-scan.mjs fails CI on any pcc_live_/pcc_test_/pcc_oracle_ literal.
+const PCCAPIKEY = process.env.PCC_API_KEY ?? "";
+if (!PCCAPIKEY) { console.error("Set PCC_API_KEY (a PCC API key; never hard-code one)"); process.exit(1); }
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "http://localhost:4100"; // oracle is on the same Spark host
-const ORACLE_KEY = "pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa";
+const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
+if (!ORACLE_KEY) { console.error("Set PCC_ORACLE_KEY (the oracle x-oracle-key; never hard-code it)"); process.exit(1); }
 const KERNEL = "kernel-hp-printer";
 const PROTOCOL = "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23" as Address;
 const REPO = "/home/ryangeorge/projects/physical-capability-cloud";
@@ -51,7 +55,10 @@ const wallet = createWalletClient({ account, chain: baseSepolia, transport });
 const pub = createPublicClient({ chain: baseSepolia, transport });
 
 const report: string[] = [];
-function L(s: string) { console.log(s); report.push(s); }
+// N44: nothing that reaches the console or the report carries PCC key material,
+// whatever a response echoes back.
+const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
+function L(s: string) { const t = redactKeys(s); console.log(t); report.push(t); }
 function SEP() { L("─".repeat(72)); }
 
 async function writeC(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
@@ -330,4 +337,4 @@ async function main() {
   fs.writeFileSync("/home/ryangeorge/hp-full-chain-report.txt", report.join("\n"));
 }
 
-main().catch(e => { console.error("FAIL:", e); process.exit(1); });
+main().catch(e => { console.error("FAIL:", redactKeys(e instanceof Error ? e.stack ?? e.message : String(e))); process.exit(1); });
