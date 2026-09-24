@@ -95,10 +95,11 @@ async function renderPage(page: React.ReactElement): Promise<string> {
       </QueryClientProvider>,
     );
   });
-  // Let queries (including one retry) settle.
-  for (let i = 0; i < 10; i++) {
+  // Let queries (including one retry) settle. Condition-based, so a loaded
+  // machine or CI runner waits longer instead of asserting on a loading state.
+  for (let i = 0; i < 200; i++) {
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 10));
     });
     if (client.isFetching() === 0) break;
   }
@@ -174,6 +175,36 @@ describe("partial outage", () => {
     expect(t).toContain("job-live-1");
     expect(t).toContain("Some live data couldn't be loaded");
     expect(t).not.toMatch(/0\/0|none registered/);
+  });
+});
+
+describe("responses the pages cannot trust", () => {
+  it("an unexpected /api/kernels shape is unavailable, not 0 kernels", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/jobs": { status: 200, body: { jobs: [{ id: "job-a", status: "queued" }] } },
+      // collection-v1 shape instead of the { kernels } envelope this client reads
+      "/api/kernels": { status: 200, body: { items: [{ id: "k1", status: "online", isStale: false }] } },
+    });
+    const t = await renderPage(<DashboardPage />);
+    expect(t).toContain("Some live data couldn't be loaded");
+    expect(t).not.toMatch(/\b0\/0\b|0\/1|none registered/);
+  });
+
+  it("a full page of jobs is counted as a lower bound, not an exact total", async () => {
+    const jobs = Array.from({ length: 50 }, (_, i) => ({ id: `job-${i}`, status: i < 10 ? "in_progress" : "completed" }));
+    stubFetch({ ...EMPTY, "/api/jobs": { status: 200, body: { jobs } } });
+
+    const dash = await renderPage(<DashboardPage />);
+    expect(dash).toMatch(/Active Jobs\s*10\+/);
+    expect(dash).toContain("40+ completed");
+    expect(dash).toContain("there may be more");
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    const list = await renderPage(<JobsPage />);
+    expect(list).toMatch(/Total Jobs\s*50\+/);
+    expect(list).toContain("Showing the first 50 jobs");
   });
 });
 

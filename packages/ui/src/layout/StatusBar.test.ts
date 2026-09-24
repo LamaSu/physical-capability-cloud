@@ -50,6 +50,12 @@ describe("StatusBar", () => {
     expect(t).toContain("12 active jobs");
   });
 
+  it("renders a count from a possibly truncated list as a lower bound", () => {
+    const t = text({ activeJobs: 12, activeJobsAtLeast: true, networkStatus: "connected" });
+    expect(t).toContain("12+ active jobs");
+    expect(t).not.toMatch(/\b12 active jobs/);
+  });
+
   it("does not claim the gateway is connected by default", () => {
     const t = text();
     expect(t).toContain("Checking gateway");

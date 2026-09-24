@@ -152,8 +152,10 @@ export function useKernels(params?: { status?: string }) {
     queryKey: ["kernels", params],
     queryFn: async () => {
       const res = await api.getKernels(params);
-      // Route wraps result in { kernels: [...] } for backward compat.
-      return res.kernels ?? [];
+      // Route wraps result in { kernels: [...] } for backward compat. A response without that
+      // array is an error, never an empty list: "0 kernels online" would be a guess.
+      if (!Array.isArray(res?.kernels)) throw new Error("unexpected response shape from /api/kernels");
+      return res.kernels;
     },
     retry: 1,
     staleTime: 15_000,
@@ -192,8 +194,10 @@ export function useEscrows(params?: { status?: string }) {
     queryKey: ["escrows", params],
     queryFn: async () => {
       const res = await api.getEscrows(params);
-      // Route wraps result in { escrows: [...] } for backward compat.
-      return res.escrows ?? [];
+      // Route wraps result in { escrows: [...] } for backward compat. A response without that
+      // array is an error, never an empty list.
+      if (!Array.isArray(res?.escrows)) throw new Error("unexpected response shape from /api/escrow");
+      return res.escrows;
     },
     retry: 1,
     staleTime: 10_000,

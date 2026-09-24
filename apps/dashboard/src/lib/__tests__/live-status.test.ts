@@ -36,7 +36,7 @@ describe("deriveLiveStatus", () => {
   it("reports nothing as known while the reads are loading", () => {
     expect(
       deriveLiveStatus({ health: loading(), kernels: loading(), jobs: loading() }),
-    ).toEqual({ networkStatus: "unknown", kernelsOnline: undefined, activeJobs: undefined });
+    ).toEqual({ networkStatus: "unknown", kernelsOnline: undefined, activeJobs: undefined, activeJobsAtLeast: false });
   });
 
   it("shows unavailable, not zero, when the gateway is down", () => {
@@ -92,6 +92,27 @@ describe("deriveLiveStatus", () => {
     });
     expect(props.activeJobs).toBe(4);
     expect(props.kernelsOnline).toBe(0);
+  });
+});
+
+describe("job counts from a full page are lower bounds", () => {
+  const page = (n: number, active: number) =>
+    Array.from({ length: n }, (_, i) => job(i < active ? "in_progress" : "completed"));
+
+  it("a full page (50 rows) makes the active count a lower bound", () => {
+    const props = deriveLiveStatus({ health: ok({ status: "ok" }), kernels: ok([]), jobs: ok(page(50, 10)) });
+    expect(props.activeJobs).toBe(10);
+    expect(props.activeJobsAtLeast).toBe(true);
+  });
+
+  it("a short page is exact", () => {
+    const props = deriveLiveStatus({ health: ok({ status: "ok" }), kernels: ok([]), jobs: ok(page(49, 10)) });
+    expect(props.activeJobs).toBe(10);
+    expect(props.activeJobsAtLeast).toBe(false);
+  });
+
+  it("an unknown count is never marked as a lower bound", () => {
+    expect(deriveLiveStatus({ health: failed(), kernels: failed(), jobs: failed() }).activeJobsAtLeast).toBe(false);
   });
 });
 

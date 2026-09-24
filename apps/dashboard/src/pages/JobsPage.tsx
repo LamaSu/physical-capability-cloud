@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { GlassPanel, DataCell, StatusChip, ProgressArc, EmptyState, LoadingShell } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useJobs } from "../api/hooks/use-pcc-data.js";
-import { isActiveJob } from "../lib/live-status.js";
+import { formatCount, isActiveJob, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
 import { UnavailableState, StaleNotice } from "../components/LiveState.js";
 
 /** Canonical job statuses (types/dto.ts StepStatus) to a pulse; the label always carries the status text. */
@@ -36,6 +36,8 @@ export function JobsPage() {
 
   const activeCount = jobs.filter(isActiveJob).length;
   const completedCount = jobs.filter((j) => j.status === "completed").length;
+  // /api/jobs returns one page and no total: counts over a full page are lower bounds.
+  const truncated = mayBeTruncated(jobs);
 
   return (
     <div className="space-y-6">
@@ -43,9 +45,9 @@ export function JobsPage() {
         <StaleNotice what="jobs" updatedAt={jobsQ.dataUpdatedAt} onRetry={() => void jobsQ.refetch()} />
       )}
       <div className="grid grid-cols-3 gap-4">
-        <GlassPanel padding="md"><DataCell label="Total Jobs" value={jobs.length} mono /></GlassPanel>
-        <GlassPanel padding="md" glow={activeCount > 0 ? "green" : undefined}><DataCell label="Active" value={activeCount} mono /></GlassPanel>
-        <GlassPanel padding="md"><DataCell label="Completed" value={completedCount} mono /></GlassPanel>
+        <GlassPanel padding="md"><DataCell label="Total Jobs" value={formatCount(jobs.length, truncated)} mono /></GlassPanel>
+        <GlassPanel padding="md" glow={activeCount > 0 ? "green" : undefined}><DataCell label="Active" value={formatCount(activeCount, truncated)} mono /></GlassPanel>
+        <GlassPanel padding="md"><DataCell label="Completed" value={formatCount(completedCount, truncated)} mono /></GlassPanel>
       </div>
 
       <GlassPanel padding="lg">
@@ -65,6 +67,11 @@ export function JobsPage() {
           </div>
         </div>
 
+        {truncated && (
+          <p className="text-xs text-white/35 mb-3">
+            Showing the first {JOBS_PAGE_SIZE} jobs the gateway returned; there may be more.
+          </p>
+        )}
         {filtered.length === 0 ? (
           <EmptyState
             title={jobs.length === 0 ? "No jobs yet" : `No ${filter} jobs`}
