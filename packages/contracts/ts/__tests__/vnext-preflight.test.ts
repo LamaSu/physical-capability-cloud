@@ -148,6 +148,22 @@ function chain(over: Partial<Chain> = {}): PublicClient {
 
 const failed = (r: { checks: { name: string; ok: boolean }[] }) => r.checks.filter((c) => !c.ok).map((c) => c.name);
 
+/** Every revert reachable from `fund()` (escrow + factory acceptPolicy + SafeERC20), so a simulation never prints a raw selector. */
+const FUND_PATH_ERRORS = [
+  "NotInitialized", "AlreadySealed", "Reentrancy", "ConfigTooLarge", "SignatureTooLarge", "BadUnitCount", "OnlyPayer",
+  "InvalidOrDisabledCohort", "TierRequestMismatch", "TierOutOfRange", "ValueOverflow", "DuplicateUnit", "BadLegCount",
+  "ZeroPayout", "ForbiddenRecipient", "PayoutSumMismatch", "BadReclaim", "TooManyLegs", "PolicyRootMismatch",
+  "NotThePolicyEscrow", "PolicyExpired", "PolicyNoLongerValid", "JobAlreadyFunded", "BadSignature",
+  "BadOperatorSignature", "BalanceReadFailed", "FundingDeltaMismatch", "SafeERC20FailedOperation",
+];
+
+describe("the escrow ABI subset names every fund()-path revert", () => {
+  it("declares each one", () => {
+    const declared = new Set(VNextSettlementEscrowABI.filter((x) => x.type === "error").map((x) => (x as { name: string }).name));
+    expect(FUND_PATH_ERRORS.filter((e) => !declared.has(e))).toEqual([]);
+  });
+});
+
 describe("preflightVNextFunding", () => {
   it("passes when every live prerequisite holds and the signed fund() simulates", async () => {
     const r = await preflightVNextFunding(chain(), { compiled, acceptance: signed, sender: RELAYER });

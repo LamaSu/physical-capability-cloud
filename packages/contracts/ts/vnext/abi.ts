@@ -58,7 +58,20 @@ export const VNextSettlementEscrowABI = parseAbi([
   "event BuyerApproved(bytes32 indexed unitId, uint256 approvalNonce)",
   "event EscalationResolved(bytes32 indexed unitId, bytes32 indexed adjudicationId, uint8 role, bool upheld)",
   "event ClaimDischarged(bytes32 indexed claimId, bytes32 indexed unitId, address destination, uint256 amount)",
-  // The funding-path reverts a compiler pre-empts (VNextCompileErrorCode names each one).
+  // EVERY revert reachable from fund(), including the factory's acceptPolicy, so a preflight simulation can
+  // name any failure instead of printing a raw selector. The static ones are the reverts a compile pre-empts
+  // (VNextCompileErrorCode names each); the live ones are what preflightVNextFunding surfaces. The V1 fee-schedule
+  // invariants revert with Error(string) reasons ("V1: ..."), which decode without a declaration.
+  "error NotInitialized()",
+  "error AlreadySealed()",
+  "error Reentrancy()",
+  "error InvalidOrDisabledCohort()",
+  "error BalanceReadFailed()",
+  "error FundingDeltaMismatch()",
+  "error PolicyNoLongerValid()",
+  "error JobAlreadyFunded()",
+  "error NotThePolicyEscrow()",
+  "error SafeERC20FailedOperation(address token)",
   "error BadUnitCount()",
   "error BadLegCount()",
   "error TooManyLegs()",
