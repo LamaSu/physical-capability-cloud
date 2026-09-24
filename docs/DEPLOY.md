@@ -79,19 +79,25 @@ The **same Docker manifest** flows through every stage. `:sha`, `:staging`, and 
 
 ```bash
 curl -s https://capability.network/api/health
-# {"status":"ok","timestamp":"…","version":"0.1.0","commit":"<40-char sha>","commitSource":"image_build"}
+# {"status":"ok","timestamp":"…","version":"0.1.0","commit":"<40-char sha>","commitSource":"image_build",
+#  "buildArg":"PCC_BUILD_SHA","deployMetadata":{"railwayGitCommitSha":null}}
 # commit is JSON null (not a string) when commitSource is "unknown"
 ```
 
-| `commitSource` | `commit` is |
+`commit` comes **only** from `/app/BUILD_INFO.json`, a file the Dockerfile writes into the image at build time. No runtime variable can change it, so a service variable set after the build (or a stale one) never shows up as the served commit.
+
+| Field | Meaning |
 |---|---|
-| `image_build` | The SHA baked into the image by CI: the `build-image` job passes `github.sha` as the `PCC_BUILD_SHA` build-arg. `:staging` and `:prod` are retags of that image, so they report the SHA that was built. |
-| `railway_deploy` | Railway's deploy commit (`RAILWAY_GIT_COMMIT_SHA`, set for GitHub-sourced deploys, i.e. today's Dockerfile builds, which do not pass the build-arg). |
-| `unknown` | `null`: neither value is present. The gateway never guesses a SHA. |
+| `commitSource: "image_build"` | `commit` is the full 40-hex SHA recorded in the image. `buildArg` says which build argument supplied it: `PCC_BUILD_SHA` (CI's `build-image` job passes `github.sha`; `:staging` and `:prod` are retags of that image, so they report the SHA that was built) or `RAILWAY_GIT_COMMIT_SHA` (when Railway builds the Dockerfile and supplies it as a build argument). |
+| `commitSource: "unknown"` | `commit` and `buildArg` are `null`: the image recorded no build commit (for example a local build without the build arg). The gateway never guesses a SHA. |
+| `deployMetadata.railwayGitCommitSha` | Railway's **runtime** `RAILWAY_GIT_COMMIT_SHA`, if set. It is deploy metadata, not proof of the code served, so it is never reported as `commit`. |
 
-Only a 7–40 character hex SHA is ever reported; any other value in those variables counts as absent. `version` is a static literal (`"0.1.0"`; release-please does not bump it) and does not identify a deploy. Once Railway serves the GHCR `:prod` image, `commit` after a Deploy to Prod run should equal the SHA you promoted.
+Build rules (Dockerfile, tested by `dockerfile-build-info.test.ts`):
+- Only a full 40-hex SHA is recorded. A 7-character prefix could be ambiguous, and anything else writes no file.
+- If both build arguments are given and differ, **the image build fails** rather than bake a stale commit.
+- `version` is a static literal (`"0.1.0"`; release-please does not bump it) and does not identify a deploy.
 
-`PCC_BUILD_SHA` is set only by CI (the `build-image` build-arg). Never set it as a Railway or other service variable: it takes precedence, so a stale value would be reported as `image_build` and hide the commit actually served.
+Once Railway serves the GHCR `:prod` image, `commit` after a Deploy to Prod run should equal the SHA you promoted.
 
 ## Semver + CHANGELOG automation
 
