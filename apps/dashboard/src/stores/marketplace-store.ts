@@ -17,7 +17,7 @@ interface MarketplaceState {
   updateROIInput: (key: keyof ROIInputs, value: string) => void;
 }
 
-export const EMPTY_ROI_INPUTS: ROIInputs = {
+const EMPTY_ROI_INPUTS: ROIInputs = {
   equipmentCost: "",
   monthlyCost: "",
   avgJobValue: "",

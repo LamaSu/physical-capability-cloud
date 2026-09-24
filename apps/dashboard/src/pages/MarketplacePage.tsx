@@ -34,7 +34,7 @@ export function MarketplacePage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   React.useEffect(() => {
-    setPageMeta("Equipment Marketplace", "Demand, supply, and pricing insights");
+    setPageMeta("Equipment Marketplace", "Match what you do to a template, and plan a return");
   }, [setPageMeta]);
 
   return (

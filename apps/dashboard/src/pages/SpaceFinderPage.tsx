@@ -27,7 +27,7 @@ export function SpaceFinderPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   React.useEffect(() => {
-    setPageMeta("Find a Space", "Browse hosting locations for your machines");
+    setPageMeta("Find a Space", "Hosting locations for your machines");
   }, [setPageMeta]);
 
   return (
