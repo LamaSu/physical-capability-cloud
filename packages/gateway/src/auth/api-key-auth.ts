@@ -153,6 +153,23 @@ export function assertMintableScopes(scopes: unknown): asserts scopes is string[
   }
 }
 
+/**
+ * Parse provisionApiKey's `notAfter` bound. null/undefined = no bound. Anything
+ * else must parse to a real instant: an unreadable bound throws
+ * (`invalid_expiry`) rather than silently becoming "never expires".
+ */
+function expiryBoundMs(notAfter: string | null | undefined): number | null {
+  if (notAfter === undefined || notAfter === null) return null;
+  const ms = typeof notAfter === "string" ? new Date(notAfter).getTime() : Number.NaN;
+  if (!Number.isFinite(ms)) {
+    throw Object.assign(
+      new Error("provisionApiKey: `notAfter` is not a valid timestamp"),
+      { code: "invalid_expiry" },
+    );
+  }
+  return ms;
+}
+
 export function provisionApiKey(opts: {
   operatorId: string;
   name?: string;
@@ -164,6 +181,15 @@ export function provisionApiKey(opts: {
   scopes: string[];
   rateLimit?: string;
   expiresInDays?: number;
+  /**
+   * Absolute upper bound on the new key's expiry (an ISO-8601 timestamp). The
+   * key expires at the EARLIER of this and `expiresInDays`, never later than
+   * `notAfter`. A key minted on another key's authority (the F3 same-identity
+   * path) passes that key's own `expiresAt` here, so a short-lived key cannot
+   * mint a longer-lived one (WP-A repair R4). null/undefined = no bound. An
+   * unparseable value throws (`invalid_expiry`); nothing is persisted.
+   */
+  notAfter?: string | null;
   metadata?: Record<string, unknown>;
   /**
    * Optional caller-provided Ed25519 public key (hex, 64 chars, no 0x).
@@ -181,8 +207,9 @@ export function provisionApiKey(opts: {
   publicKey?: string;
 }): ProvisionResult {
   // Validate BEFORE taking the lock or touching the DB: a refused scope set
-  // must leave no trace.
+  // (or an unreadable expiry bound) must leave no trace.
   assertMintableScopes(opts.scopes);
+  const boundMs = expiryBoundMs(opts.notAfter);
 
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
   if (provisioningLocks.has(opts.operatorId)) {
@@ -219,6 +246,14 @@ export function provisionApiKey(opts: {
     const { rawKey, keyHash, keyPrefix } = generateApiKey();
     const now = new Date();
 
+    // The EARLIER of the relative lifetime and the absolute bound (R4).
+    let expiresMs: number | null = opts.expiresInDays
+      ? now.getTime() + opts.expiresInDays * 86400000
+      : null;
+    if (boundMs !== null && (expiresMs === null || boundMs < expiresMs)) {
+      expiresMs = boundMs;
+    }
+
     const record = repo.insert({
       id: randomUUID(),
       keyHash,
@@ -230,9 +265,7 @@ export function provisionApiKey(opts: {
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),
-      expiresAt: opts.expiresInDays
-        ? new Date(now.getTime() + opts.expiresInDays * 86400000).toISOString()
-        : null,
+      expiresAt: expiresMs === null ? null : new Date(expiresMs).toISOString(),
       metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
       publicKey: storedPublicKeyHex,
     });

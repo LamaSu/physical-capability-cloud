@@ -544,6 +544,8 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     // refusals are the same 409 (R5), which never says what matched.
     let operatorId = body.email;
     let keyScopes: string[] = [...QUICKSTART_SCOPES];
+    // On the same-identity path the new key never outlives the caller's (R4).
+    let notAfter: string | null = null;
     const decision = decideUnverifiedIdentity(req, body.email);
     if (decision.kind === "refuse") {
       return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
@@ -554,6 +556,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
       if (keyScopes.length === 0) {
         return reply.code(403).send(NOTHING_TO_DELEGATE_RESPONSE);
       }
+      notAfter = decision.caller.expiresAt || null; // "" = no expiry, as in the auth check
     }
 
     const adapter = getEmbeddedWalletAdapter();
@@ -579,6 +582,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
         name: body.name ?? body.email,
         description: `Contributor quickstart (${body.role})`,
         scopes: keyScopes,
+        notAfter,
         metadata: {
           flow: "quickstart",
           walletProvider: adapter.providerId,

@@ -473,6 +473,74 @@ describe("F3 — contributors quickstart: the same binding", () => {
   });
 });
 
+// WP-A repair R4. On the same-identity path the new key used to get
+// expiresAt = null whatever the caller's key said, so a key expiring in 60s
+// could mint a permanent one (review round 2, probe P3). It now inherits the
+// caller key's expiry — never a later one.
+describe("R4 — a delegated key never outlives the key that minted it", () => {
+  const inMs = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+  it("provision: a caller key expiring in 60s mints a key expiring at that same instant, not never", async () => {
+    const id = fresh("r4-short");
+    const callerExpiry = inMs(60_000);
+    const key = seedRawKey(id, ["operator"], { expiresAt: callerExpiry });
+    const res = await provision(id, key);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().expires_at).toBe(callerExpiry);
+    expect(getRepos().apiKeys.findById(res.json().key_id)?.expiresAt).toBe(callerExpiry);
+  });
+
+  it("provision: a caller key with a distant expiry passes that bound on as well", async () => {
+    const id = fresh("r4-long");
+    const callerExpiry = inMs(30 * 86_400_000);
+    const key = seedRawKey(id, ["operator"], { expiresAt: callerExpiry });
+    const res = await provision(id, key);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().expires_at).toBe(callerExpiry);
+  });
+
+  it("quickstart: the delegated contributor key expires no later than the caller's", async () => {
+    const id = fresh("r4-qs");
+    const callerExpiry = inMs(60_000);
+    const key = seedRawKey(id, QUICKSTART_SCOPES, { expiresAt: callerExpiry });
+    const res = await quickstart(id, key);
+    expect(res.statusCode).toBe(201);
+    expect(getRepos().apiKeys.findById(res.json().keyId as string)?.expiresAt).toBe(callerExpiry);
+  });
+
+  it("a caller key that never expires still mints a key that never expires (unchanged)", async () => {
+    const id = fresh("r4-none");
+    const first = await provision(id);
+    expect(first.json().expires_at).toBeNull();
+    const res = await provision(id, first.json().api_key as string);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().expires_at).toBeNull();
+  });
+
+  it("provisionApiKey: notAfter caps expiresInDays — the EARLIER bound wins", () => {
+    const soon = inMs(60_000);
+    const a = provisionApiKey({ operatorId: fresh("r4-unit-a"), scopes: ["operator"], expiresInDays: 30, notAfter: soon });
+    expect(a.record?.expiresAt).toBe(soon);
+    const later = inMs(30 * 86_400_000);
+    const b = provisionApiKey({ operatorId: fresh("r4-unit-b"), scopes: ["operator"], expiresInDays: 1, notAfter: later });
+    const bMs = Date.parse(b.record?.expiresAt as string);
+    expect(bMs).toBeLessThan(Date.parse(later));
+    expect(Math.abs(bMs - (Date.now() + 86_400_000))).toBeLessThan(10_000);
+  });
+
+  it("provisionApiKey: an unreadable notAfter throws invalid_expiry and persists nothing", () => {
+    const id = fresh("r4-bad");
+    let code: string | undefined;
+    try {
+      provisionApiKey({ operatorId: id, scopes: ["operator"], notAfter: "not-a-date" });
+    } catch (err) {
+      code = (err as { code?: string }).code;
+    }
+    expect(code).toBe("invalid_expiry");
+    expect(keysOf(id)).toHaveLength(0);
+  });
+});
+
 describe("F3 — fail closed", () => {
   beforeEach(() => vi.restoreAllMocks());
 

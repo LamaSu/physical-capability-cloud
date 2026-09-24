@@ -49,7 +49,7 @@ note), `packages/gateway/src/auth/api-key-auth.ts` (`assertMintableScopes`),
 | `GET /api/admin/waitlist`, `/api/admin/beta-apply` | any key or session, plus `X-Admin-Token` | explicit `admin` key plus `X-Admin-Token` |
 | `GET /api/admin/feedback` | `X-Admin-Token` only (public in api-gate) | unchanged |
 | Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an email on an admin allowlist | 201, a key the allowlist trusts | 409 `identity_claimed`, the same status and body as a claimed identity, even with a Bearer key of that identity |
-| Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that has, or ever had, a key (revoked and expired keys included), or owns a kernel, a machine registration, a job offer or a UI artifact | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its valid keys>`); the new key is then no wider than the caller's |
+| Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that has, or ever had, a key (revoked and expired keys included), or owns a kernel, a machine registration, a job offer or a UI artifact | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its valid keys>`); the new key is then no wider than the caller's and expires no later than it |
 | Mutating `/api/operator/**` (e-stop/resume, approvals, policy, diagnostics, support, the pcc-node relay) | any key or session | explicit `operator` or `admin` scope; a wildcard key is refused; a session is refused |
 
 The allowlists this refusal protects are listed in
@@ -224,8 +224,9 @@ a key cannot be claimed again by an anonymous caller: `POST /api/auth/provision
 (Step 5). A holder re-issues by calling it **authenticated as themselves**:
 `Authorization: Bearer <their current, valid key>` with
 `{"email": "<their operator_id>"}`. The new key keeps the same
-`operator_id` and is never wider than the key that asked for it. A wildcard key
-can delegate only the contributor scopes this way (through
+`operator_id`, is never wider than the key that asked for it, and never outlives
+it: it inherits that key's expiry, so a short-lived key cannot mint a permanent
+one. A wildcard key can delegate only the contributor scopes this way (through
 `/api/contributors/quickstart`), never `operator`, `settlement` or `admin`: a
 wildcard is not operator-control, money or admin authority, so those need the
 paths in the table above. An operator can hold at most 5 non-revoked keys, so

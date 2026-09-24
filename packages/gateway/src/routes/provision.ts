@@ -94,6 +94,11 @@ export async function provisionRoutes(app: FastifyInstance) {
      * (F3): the scopes of the caller's own key, which bound what may be minted.
      */
     let delegatingScopes: string[] | null = null;
+    /**
+     * On that same path, the caller key's own expiry: the new key expires no
+     * later (R4). null = the caller's key does not expire.
+     */
+    let delegatingNotAfter: string | null = null;
 
     // Type guards — prevent object/array/number injection (red team #14, #15)
     if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
@@ -199,6 +204,9 @@ export async function provisionRoutes(app: FastifyInstance) {
       if (decision.kind === "self") {
         operatorId = decision.caller.operatorId;
         delegatingScopes = parseStoredScopes(decision.caller.scopes);
+        // Never outlive the delegating key (R4): a short-lived key must not
+        // mint a permanent one. "" counts as no expiry, as in the auth check.
+        delegatingNotAfter = decision.caller.expiresAt || null;
       } else {
         operatorId = email;
       }
@@ -245,7 +253,8 @@ export async function provisionRoutes(app: FastifyInstance) {
         : ["operator"];
     // An identity adding a key for itself (F3) delegates, and a delegated key is
     // never wider than the delegating one (a legacy "*" cannot delegate
-    // settlement/admin — see callerMayDelegate).
+    // operator/settlement/admin — see callerMayDelegate) and never outlives it
+    // (R4, notAfter below).
     if (delegatingScopes !== null) {
       scopes = callerMayDelegate(delegatingScopes, scopes);
       if (scopes.length === 0) {
@@ -261,6 +270,7 @@ export async function provisionRoutes(app: FastifyInstance) {
           ? `Operator capability: ${body.capability}`
           : undefined,
         scopes,
+        notAfter: delegatingNotAfter,
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),

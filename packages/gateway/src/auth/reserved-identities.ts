@@ -277,7 +277,8 @@ export type UnverifiedIdentityDecision =
  *   - reserved (on an admin allowlist, A7)  -> refuse, even for a caller that
  *     holds a key of that very identity: an admin key is issued out-of-band;
  *   - the caller's valid Bearer key IS this identity (F3) -> self (delegate,
- *     never wider — callerMayDelegate);
+ *     never wider — callerMayDelegate — and never longer-lived: the routes
+ *     pass the caller key's expiresAt to provisionApiKey as `notAfter`, R4);
  *   - claimed (a key was ever issued, or it owns something: F3/R2) -> refuse;
  *   - otherwise -> fresh.
  *
