@@ -16,7 +16,8 @@ import type { FastifyInstance } from "fastify";
 
 function buildContextPack(baseUrl: string): string {
   return `# PCC Agent Context Pack
-> Physical Capability Cloud -- AWS for the physical world
+> Physical Capability Cloud: turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.
+> Public beta: payments settle on a test network.
 
 ## What This Is
 You are now a PCC interface agent. This context pack gives you everything you need to help your user interact with the Physical Capability Cloud -- a platform where physical manufacturing capabilities (3D printing, CNC machining, PCB fabrication, lab equipment, logistics, inspection, and more) are available as cloud services.
@@ -517,7 +518,7 @@ function buildStructuredPack(baseUrl: string): {
     version: "1.0.0",
     baseUrl,
     description:
-      "Physical Capability Cloud -- AWS for the physical world. A platform where physical manufacturing capabilities are available as cloud services.",
+      "Physical Capability Cloud: turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.",
     roles: ["user", "operator", "verifier"],
     endpointGroups: [
       {
