@@ -105,10 +105,15 @@ function prove(app: FastifyInstance, regId: string, body: unknown, operator: str
   });
 }
 
-function admin(app: FastifyInstance, regId: string, action: "approve" | "activate" | "reject", opts: { key?: string; operator?: string } = {}) {
+/**
+ * A review-route call. /approve names the evidence the admin reviewed (M2):
+ * `evidence` is that digest, default "none" (no proof on record).
+ */
+function admin(app: FastifyInstance, regId: string, action: "approve" | "activate" | "reject", opts: { key?: string; operator?: string; evidence?: string } = {}) {
   const headers: Record<string, string> = { "x-test-operator": opts.operator ?? "reviewer@example.com" };
   if (opts.key !== undefined) headers["x-admin-key"] = opts.key;
-  return app.inject({ method: "POST", url: `/api/onboard/registrations/${regId}/${action}`, headers, payload: {} });
+  const payload = action === "approve" ? { expectedEvidenceDigest: opts.evidence ?? "none" } : {};
+  return app.inject({ method: "POST", url: `/api/onboard/registrations/${regId}/${action}`, headers, payload });
 }
 
 const stored = (regId: string) => getRepos().registrations.findById(regId)!;
@@ -356,7 +361,9 @@ describe("/prove hardening (WP-B)", () => {
 
   it("a prove that loses the race to an approval is 409 and does not replace the approved evidence", async () => {
     const regId = await register(app);
-    expect((await prove(app, regId, { evidence: { deviceHealth: DEVICE_HEALTH } })).statusCode).toBe(200);
+    const first = await prove(app, regId, { evidence: { deviceHealth: DEVICE_HEALTH } });
+    expect(first.statusCode).toBe(200);
+    const reviewedDigest: string = first.json().evidenceDigest;
 
     // Hold the second prove inside its (awaited) photo retention step.
     let release!: () => void;
@@ -374,7 +381,7 @@ describe("/prove hardening (WP-B)", () => {
 
     const pending = prove(app, regId, { evidence: { photoBase64: PHOTO, deviceHealth: DEVICE_HEALTH, events: [completion()] } });
     await Promise.race([putCalled, pending]);
-    const approved = await admin(app, regId, "approve", { key: ADMIN_KEY });
+    const approved = await admin(app, regId, "approve", { key: ADMIN_KEY, evidence: reviewedDigest });
     expect(approved.statusCode).toBe(200);
     const approvedDescription = stored(regId).description;
     release();

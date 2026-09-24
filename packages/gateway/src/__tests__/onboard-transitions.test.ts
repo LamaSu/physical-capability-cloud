@@ -78,12 +78,18 @@ async function nextMillisecond(): Promise<void> {
   while (Date.now() === t) await new Promise((r) => setTimeout(r, 1));
 }
 
+/**
+ * An admin-key call. /approve must name the evidence the admin reviewed (M2);
+ * unless a test passes its own expectedEvidenceDigest, approvals here say
+ * "none", which matches a registration with no proof on record.
+ */
 function admin(app: FastifyInstance, regId: string, action: "approve" | "activate" | "reject", payload: Record<string, unknown> = {}) {
+  const body = action === "approve" && !("expectedEvidenceDigest" in payload) ? { expectedEvidenceDigest: "none", ...payload } : payload;
   return app.inject({
     method: "POST",
     url: `/api/onboard/registrations/${regId}/${action}`,
     headers: { "x-admin-key": ADMIN_KEY, "x-test-operator": "reviewer@example.com" },
-    payload,
+    payload: body,
   });
 }
 
@@ -288,6 +294,96 @@ describe("onboarding review transitions are atomic and audited", () => {
     const row = auditRows(regId).find((r) => r.eventType === "operator.approved")!;
     expect(row.metadata).toMatchObject({ evidenceDigest: null, evidenceVerified: false, proofAuditId: null });
     expect(JSON.stringify(auditRows(regId))).not.toContain(FORGED_DIGEST);
+  });
+
+  // ── M2: an approval is bound to the evidence the admin reviewed ─────────
+
+  /** What an admin UI reads before approving: the evidenceDigest of the review record GET serves. */
+  async function reviewedDigest(regId: string): Promise<string> {
+    const res = await app.inject({ method: "GET", url: `/api/onboard/registrations/${regId}`, headers: { "x-test-operator": "reviewer@example.com" } });
+    const description: string = res.json().registration.description;
+    return JSON.parse(description.replace(/^PROOF SUBMITTED: /, "")).evidenceDigest;
+  }
+
+  it("an owner who re-proves between the admin's review and the approve gets nothing approved (409 evidence_changed)", async () => {
+    const regId = await registerOwned(app);
+    expect((await proveAsOwner(regId)).statusCode).toBe(200);
+    const reviewed = await reviewedDigest(regId); // the admin reviews evidence A
+
+    // The owner swaps in evidence B before the admin approves.
+    const swapped = await app.inject({
+      method: "POST",
+      url: `/api/onboard/registrations/${regId}/prove`,
+      headers: { "x-test-operator": OWNER },
+      payload: { evidence: { deviceHealth: { status: "broken", model: "Something Else" } } },
+    });
+    expect(swapped.statusCode).toBe(200);
+    const current: string = swapped.json().evidenceDigest;
+    expect(current).not.toBe(reviewed);
+
+    const res = await admin(app, regId, "approve", { expectedEvidenceDigest: reviewed });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: "evidence_changed", currentEvidenceDigest: current });
+    const stored = getRepos().registrations.findById(regId)!;
+    expect(stored.status).toBe("reviewing");
+    expect(stored.approvedAt ?? null).toBeNull();
+    expect(auditRows(regId).filter((r) => r.eventType === "operator.approved")).toHaveLength(0);
+
+    // Approving what is actually on record works, and the audit says what was approved.
+    expect((await admin(app, regId, "approve", { expectedEvidenceDigest: current })).statusCode).toBe(200);
+    const row = auditRows(regId).find((r) => r.eventType === "operator.approved")!;
+    expect(row.metadata).toMatchObject({ evidenceDigest: current, expectedEvidenceDigest: current, evidenceVerified: true });
+  });
+
+  it("the evidence check runs inside the approval's transaction (a proof landing after the handler's read is caught)", async () => {
+    const regId = await registerOwned(app);
+    const reviewed: string = (await proveAsOwner(regId)).json().evidenceDigest;
+    const later = "sha256:" + "b".repeat(64);
+    // A re-prove's audit row commits between the approve handler's read and its transaction.
+    interposeBeforeWrite(regId, () => {
+      getRepos().auditLog.insert({
+        timestamp: new Date().toISOString(),
+        eventType: "operator.proof_submitted",
+        actor: OWNER,
+        resourceType: "registration",
+        resourceId: regId,
+        action: "prove",
+        metadata: { evidenceDigest: later },
+      });
+    });
+
+    const res = await admin(app, regId, "approve", { expectedEvidenceDigest: reviewed });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: "evidence_changed", currentEvidenceDigest: later });
+    expect(getRepos().registrations.findById(regId)!.status).toBe("reviewing");
+  });
+
+  it('"none" does not approve a registration that has evidence on record', async () => {
+    const regId = await registerOwned(app);
+    const proved = await proveAsOwner(regId);
+    const res = await admin(app, regId, "approve", { expectedEvidenceDigest: "none" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: "evidence_changed", currentEvidenceDigest: proved.json().evidenceDigest });
+    expect(getRepos().registrations.findById(regId)!.status).toBe("reviewing");
+  });
+
+  it.each([
+    ["missing", {}],
+    ["null", { expectedEvidenceDigest: null }],
+    ["a number", { expectedEvidenceDigest: 123 }],
+    ["an object", { expectedEvidenceDigest: { digest: "none" } }],
+  ])("an approve whose expectedEvidenceDigest is %s is 400 and approves nothing", async (_label, payload) => {
+    const regId = await registerOwned(app);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/onboard/registrations/${regId}/approve`,
+      headers: { "x-admin-key": ADMIN_KEY, "x-test-operator": "reviewer@example.com" },
+      payload,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("expected_evidence_digest_required");
+    expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
+    expect(auditRows(regId).filter((r) => r.eventType === "operator.approved")).toHaveLength(0);
   });
 
   it.each(["approve", "activate", "reject"] as const)(

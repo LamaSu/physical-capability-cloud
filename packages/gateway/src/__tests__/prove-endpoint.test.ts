@@ -760,7 +760,15 @@ describe("Prove Endpoint", () => {
         payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
       });
 
-      expect((await post(`/api/onboard/registrations/${regId}/approve`, { adminKey: ADMIN_KEY })).statusCode).toBe(200);
+      // /approve names the evidence it approves (M2), matched against the
+      // latest operator.proof_submitted audit row. auditService is mocked in
+      // this file, so no proof row exists and the matching value is "none";
+      // onboard-transitions.test.ts covers approval against a real proof row.
+      const approve = await post(`/api/onboard/registrations/${regId}/approve`, {
+        adminKey: ADMIN_KEY,
+        payload: { expectedEvidenceDigest: "none" },
+      });
+      expect(approve.statusCode).toBe(200);
       expect((await post(`/api/onboard/registrations/${regId}/activate`, { adminKey: ADMIN_KEY })).statusCode).toBe(200);
       expect(getRepos().registrations.findById(regId)!.status).toBe("active");
     });
@@ -861,7 +869,8 @@ describe("Prove Endpoint", () => {
         process.env.NODE_ENV = nodeEnv;
         const regId = await registerOwned();
 
-        expect((await post(`/api/onboard/registrations/${regId}/approve`)).statusCode).toBe(200);
+        const res = await post(`/api/onboard/registrations/${regId}/approve`, { payload: { expectedEvidenceDigest: "none" } });
+        expect(res.statusCode).toBe(200);
       },
     );
   });

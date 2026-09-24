@@ -187,19 +187,23 @@ interface TransitionContext {
 
 type TransitionFailure =
   | { ok: false; kind: "conflict"; currentStatus: string | null }
+  | { ok: false; kind: "evidence_changed"; currentEvidenceDigest: string | null }
   | { ok: false; kind: "audit_failed" | "db_error"; error: unknown };
 type TransitionOutcome = { ok: true; row: RegistrationRow; pre: RegistrationRow; proof: LatestProof } | TransitionFailure;
 
 /**
  * Apply one status transition atomically with its audit record.
  * `expectedFrom` is the status the handler observed (and already checked
- * against its allowed set); the CAS matches only that status.
+ * against its allowed set); the CAS matches only that status. `guard` runs in
+ * the same transaction, after the status check and before the CAS; a failure
+ * it returns aborts the transition with nothing written.
  */
 function commitTransition(args: {
   id: string;
   expectedFrom: string;
   to: string;
   extra?: { approvedAt?: string; description?: string };
+  guard?: (ctx: TransitionContext) => TransitionFailure | null;
   audit: (ctx: TransitionContext & { post: RegistrationRow }) => AuditEntry;
 }): TransitionOutcome {
   try {
@@ -210,6 +214,8 @@ function commitTransition(args: {
         if (!pre) return { ok: false, kind: "conflict", currentStatus: null };
         if (pre.status !== args.expectedFrom) return { ok: false, kind: "conflict", currentStatus: pre.status };
         const ctx: TransitionContext = { pre, proof: latestProof(repos, pre.id) };
+        const refused = args.guard?.(ctx) ?? null;
+        if (refused) return refused;
         // The CAS itself, kept even though the immediate transaction already
         // excludes every other writer.
         const post = repos.registrations.transitionStatus(args.id, [args.expectedFrom], args.to, args.extra);
@@ -243,6 +249,19 @@ function reviewedEvidenceFields(proof: LatestProof): Record<string, unknown> {
   return { evidenceDigest: proof.evidenceDigest, evidenceVerified: proof.evidenceDigest !== null, proofAuditId: proof.auditId };
 }
 
+/** What an admin sends as expectedEvidenceDigest for a registration with no proof on record. */
+const NO_EVIDENCE = "none";
+
+/**
+ * True when `expected` (from the admin) names the latest screened proof:
+ * its digest, or NO_EVIDENCE when no proof was ever recorded. A proof row
+ * without a well-formed digest matches nothing, so it cannot be approved.
+ */
+function reviewedEvidenceMatches(proof: LatestProof, expected: string): boolean {
+  if (proof.auditId === null) return expected === NO_EVIDENCE;
+  return proof.evidenceDigest !== null && expected === proof.evidenceDigest;
+}
+
 /** Which transition failed, for messages: `verb` ("approve") and `noun` ("approval"). */
 interface TransitionLabel {
   verb: string;
@@ -259,6 +278,15 @@ function sendTransitionFailure(req: FastifyRequest, reply: FastifyReply, failure
       error: "invalid_transition",
       message: `Cannot ${label.verb} this registration from its current status (${failure.currentStatus ?? "missing"}).`,
       currentStatus: failure.currentStatus,
+    });
+  }
+  if (failure.kind === "evidence_changed") {
+    return reply.status(409).send({
+      error: "evidence_changed",
+      message:
+        `The evidence on record is not the evidence you reviewed, so nothing was changed. ` +
+        `Review the current evidence, then ${label.verb} with its evidenceDigest.`,
+      currentEvidenceDigest: failure.currentEvidenceDigest,
     });
   }
   req.log.error({ err: failure.error }, `[onboard] ${label.noun} rolled back (${failure.kind})`);
@@ -432,10 +460,25 @@ export async function onboardRoutes(app: FastifyInstance) {
   });
 
   // ── Approve a registration (admin key required) ──
+  // The approval is bound to the evidence the admin reviewed (M2): the body
+  // must carry expectedEvidenceDigest, the evidenceDigest of the review record
+  // the admin looked at, or "none" for a registration with no submitted
+  // evidence. It is compared with the latest screened proof inside the
+  // transition's transaction, so an owner who re-proves between the admin's
+  // read and this call gets 409 evidence_changed and nothing is approved.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
     // Checked before the lookup so a non-admin learns nothing about which ids exist.
     if (!isOnboardAdmin(req)) {
       return reply.status(403).send({ error: "forbidden", message: "Approving a registration requires the admin key" });
+    }
+    const expectedEvidenceDigest = isPlainObject(req.body) ? req.body.expectedEvidenceDigest : undefined;
+    if (typeof expectedEvidenceDigest !== "string") {
+      return reply.status(400).send({
+        error: "expected_evidence_digest_required",
+        message:
+          `Send expectedEvidenceDigest: the evidenceDigest of the review record you approved, ` +
+          `or "${NO_EVIDENCE}" for a registration with no submitted evidence.`,
+      });
     }
     const reg = getRepos().registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
@@ -449,6 +492,10 @@ export async function onboardRoutes(app: FastifyInstance) {
       expectedFrom: reg.status,
       to: "approved",
       extra: { approvedAt: at },
+      guard: ({ proof }) =>
+        reviewedEvidenceMatches(proof, expectedEvidenceDigest)
+          ? null
+          : { ok: false, kind: "evidence_changed", currentEvidenceDigest: proof.evidenceDigest },
       audit: (ctx) => ({
         eventType: "operator.approved",
         actor: admin.actor,
@@ -458,6 +505,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         metadata: {
           ...transitionAuditFields(ctx, at),
           ...reviewedEvidenceFields(ctx.proof),
+          expectedEvidenceDigest,
           name: ctx.pre.name,
           adminAuth: admin.adminAuth,
           caller: requestCaller(req),
