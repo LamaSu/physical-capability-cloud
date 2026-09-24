@@ -366,15 +366,28 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
   };
 }
 
-/** Verify an EvidenceBundle signature against a known session public key. */
+/**
+ * Verify an EvidenceBundle signature against a known session public key.
+ *
+ * Transport form: the signature value is UNPREFIXED hex, which is what the SDK
+ * signs and what this verifier has always required. A "0x"/"0X"-prefixed
+ * value decoded to 65 bytes before LO-EV-1 and never verified, so it must not
+ * verify now (parseEd25519SignatureHex alone would strip the prefix).
+ *
+ * Deliberate narrowings vs the pre-LO-EV-1 decoder: a value with a trailing
+ * extra nibble (129 hex) used to be truncated to 64 bytes and could verify; it
+ * is now rejected, as is a bundleHash that is not a canonical tagged digest.
+ */
 export function verifyBundleSignature(
   bundle: EvidenceBundle,
   sessionPublicKey: Uint8Array,
 ): boolean {
+  const value: unknown = bundle.kernelSignature?.value;
+  if (typeof value !== "string" || /^0x/i.test(value)) return false;
   try {
     return nacl.sign.detached.verify(
       signingPreimage(bundle.bundleHash),
-      parseEd25519SignatureHex(bundle.kernelSignature.value),
+      parseEd25519SignatureHex(value),
       sessionPublicKey,
     );
   } catch {

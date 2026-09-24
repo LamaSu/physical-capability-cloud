@@ -87,6 +87,12 @@ export class SessionKeyService {
     if (ttl <= 0) {
       throw new Error("TTL must be positive");
     }
+    // issuedAt and expiresAt are signed as JSON integers (LO-EV-1 delegation
+    // preimage), so a fractional TTL cannot produce a verifiable delegation.
+    // Refuse it here, with this message, instead of failing inside the preimage.
+    if (!Number.isSafeInteger(ttl)) {
+      throw new Error(`TTL must be a whole number of seconds, got ${ttl}`);
+    }
 
     // Generate a fresh Ed25519 keypair for the session
     const sessionKeypair = nacl.sign.keyPair();
@@ -197,6 +203,12 @@ export class SessionKeyService {
     }
     if (ttl <= 0) {
       throw new Error("TTL must be positive");
+    }
+    // issuedAt and expiresAt are signed as JSON integers (LO-EV-1 delegation
+    // preimage), so a fractional TTL cannot produce a verifiable delegation.
+    // Refuse it here, with this message, instead of failing inside the preimage.
+    if (!Number.isSafeInteger(ttl)) {
+      throw new Error(`TTL must be a whole number of seconds, got ${ttl}`);
     }
 
     // Derive the child keypair deterministically. This throws on non-hardened

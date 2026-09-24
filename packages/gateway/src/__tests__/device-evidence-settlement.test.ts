@@ -15,7 +15,12 @@
 
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
-import { getPrimitive } from "@pcc/spec";
+import {
+  getPrimitive,
+  sessionKeyDelegationPreimage,
+  signingPreimage,
+  type SessionKeyAuthorization,
+} from "@pcc/spec";
 import { createKernelHandler } from "@pcc/kernel-sdk";
 import {
   isDeviceSignedSignature,
@@ -423,5 +428,66 @@ describe("verifyDeviceSignedEvidence — LO-EV-1 signing preimage (negative cont
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
     });
     expect(res).toMatchObject({ ok: true });
+  });
+});
+
+// ── Strict transport decoding + conditional-field preservation (R20 review) ──
+//
+// Pre-existing gaps the LO-EV-1 review found in this module: Buffer.from(hex)
+// silently truncated malformed signature and key suffixes, and an empty-string
+// derivationPath was dropped by truthiness although the principal signed it.
+
+describe("device evidence — strict transport decoding (no truncation)", () => {
+  it("a signature or key with a trailing nibble or junk is rejected, not truncated", () => {
+    const dev = realDeviceEvidence();
+    const sig = dev.signature.value;
+    // What the old decoder did: the odd nibble / junk was dropped silently.
+    expect(Buffer.from(sig + "0", "hex").length).toBe(64);
+    expect(Buffer.from(sig + "zz", "hex").length).toBe(64);
+    for (const bad of [sig + "0", sig + "zz", sig.slice(0, -1)]) {
+      expect(naclEd25519Verify(dev.bundleHash, bad, dev.publicKeyHex), bad.length.toString()).toBe(false);
+    }
+    expect(naclEd25519Verify(dev.bundleHash, sig, dev.publicKeyHex + "0")).toBe(false);
+    // The exact-length forms the gateway always accepted still verify.
+    expect(naclEd25519Verify(dev.bundleHash, sig, dev.publicKeyHex)).toBe(true);
+    expect(naclEd25519Verify(dev.bundleHash, `0x${sig.toUpperCase()}`, dev.publicKeyHex.toUpperCase().replace("0X", "0x"))).toBe(true);
+  });
+});
+
+describe("device evidence — an empty derivationPath is part of the signed delegation", () => {
+  it("a delegation signed with derivationPath \"\" verifies (it used to be dropped)", async () => {
+    const principal = nacl.sign.keyPair();
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const body = {
+      sessionId: "session-empty-path",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: { allowedActions: ["evidence_submit"], contractIds: ["job-empty-path"], maxSignatures: 10 },
+      derivationPath: "",
+    };
+    const preimage = new TextDecoder().decode(sessionKeyDelegationPreimage(body));
+    expect(preimage.endsWith(',"derivationPath":""}')).toBe(true);
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(session.publicKey),
+      parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
+    };
+    const bundleHash = `sha256:${"cd".repeat(32)}`;
+    const signature: StoredSignature = {
+      signer: `0x${toHex(session.publicKey).slice(0, 40)}`,
+      algorithm: "ed25519",
+      value: toHex(nacl.sign.detached(signingPreimage(bundleHash), session.secretKey)),
+    };
+    const result = await verifyDeviceSignedEvidence({
+      signature,
+      bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
+      sessionKeyAuthorization: auth,
+      contractId: "job-empty-path",
+    });
+    expect(result).toMatchObject({ ok: true });
   });
 });

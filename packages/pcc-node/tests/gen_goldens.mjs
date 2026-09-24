@@ -225,6 +225,25 @@ const SESSION_DELEGATION_FIXTURES = [
   { name: "derived_session", session: { ...SESSION_BASE, derivationPath: "m/44'/60'/0'/0'/7'" } },
   // Non-ASCII pins ensure_ascii=False on the Python side.
   { name: "unicode_session_id", session: { ...SESSION_BASE, sessionId: "sesión-ü-" + CC(0x65e5) } },
+  // Lone UTF-16 surrogates: JSON.stringify escapes them as lowercase \uXXXX,
+  // a valid pair stays one raw character, and scope arrays sort by code units.
+  {
+    name: "lone_surrogate_strings",
+    session: {
+      ...SESSION_BASE,
+      sessionId: "sess-" + CC(0xd800) + "-lone",
+      parentAgentId: "agent-" + CC(0xdfff),
+      scope: {
+        allowedActions: ["evidence_submit", CC(0xdc00) + "-low"],
+        contractIds: ["job-" + CC(0xd83d, 0xde00), "job-" + CC(0xd800), "job-" + CC(0xff5e)],
+        maxSignatures: 100,
+      },
+    },
+  },
+  {
+    name: "surrogate_in_derivation_path",
+    session: { ...SESSION_BASE, derivationPath: "m/" + CC(0xd800) + "/7'" },
+  },
 ];
 
 // The sorted-key (canonicalize) form of a session: NOT the contract. Kept as a
@@ -296,6 +315,10 @@ const goldens = {
   }),
   session_revocation: [
     { name: "rotated", revocation: { sessionId: "sess-001", revokedAt: 1727201000, reason: "rotated" } },
+    {
+      name: "lone_surrogate_reason",
+      revocation: { sessionId: "sess-" + CC(0xd800), revokedAt: 1727201000, reason: "rotated " + CC(0xdfff) },
+    },
   ].map((f) => {
     const preimage = sessionRevocationPreimage(f.revocation);
     return {
