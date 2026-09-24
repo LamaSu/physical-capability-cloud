@@ -1264,6 +1264,15 @@ export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
 <meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
 <meta name="color-scheme" content="dark light">
 <title>PCC Dashboard</title>
+<style>
+/* PX-4 provenance (build-controlled; the design lane owns the final visual language).
+   Authority is DERIVED, never manifest-chosen: agent-authored prose is marked proposed;
+   bound data carries a text "as of" line that says "stale" when it is. */
+.pcc-src-proposed{border-left:2px dashed currentColor;padding-left:6px}
+.pcc-text.pcc-src-proposed::before,.pcc-heading.pcc-src-proposed::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-fresh{font-size:11px;opacity:.7}
+.pcc-stale{opacity:.55}
+</style>
 </head>
 <body>
 <main id="pcc-ir-root">

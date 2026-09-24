@@ -75,13 +75,45 @@ export interface BinderDeps {
   makeSignal: () => unknown;
 }
 
+// ── Provenance freshness (PX-4) ──────────────────────────────────────────────
+/** Max future skew tolerated on a source `asOf`. A timestamp further ahead than this is
+ *  not trusted (it would otherwise "win" forever and freeze the view against later real
+ *  updates), so we fall back to receipt time. */
+export const ASOF_MAX_SKEW_MS = 120_000;
+/** The moment the SOURCE observed this state: an own-property ISO `asOf` on the payload if
+ *  valid and not future-dated beyond the skew, else the receipt time. Always returned
+ *  normalized (toISOString) so comparisons are exact. */
+export function asOfFrom(json: unknown, receivedAtMs: number): string {
+  const fallback = new Date(receivedAtMs).toISOString();
+  if (json === null || typeof json !== "object" || Array.isArray(json)) return fallback;
+  if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return fallback;
+  const raw = (json as Record<string, unknown>).asOf;
+  if (typeof raw !== "string") return fallback;
+  const t = Date.parse(raw);
+  if (!Number.isFinite(t) || t > receivedAtMs + ASOF_MAX_SKEW_MS) return fallback;
+  return new Date(t).toISOString();
+}
+/** Older than the source's freshness budget at `nowMs`. */
+export function isStale(asOfIso: string, maxAgeMs: number, nowMs: number): boolean {
+  const t = Date.parse(asOfIso);
+  return !Number.isFinite(t) || nowMs - t > maxAgeMs;
+}
+/** No-regression rule: an update may replace the shown datum only if it is not OLDER.
+ *  (Equal is accepted: an idempotent refresh.) Reconnects and out-of-order polls can
+ *  therefore never roll authoritative state backwards. */
+export function acceptsNewer(currentAsOf: string | null, incomingAsOf: string): boolean {
+  if (currentAsOf === null) return true;
+  return Date.parse(incomingAsOf) >= Date.parse(currentAsOf);
+}
+
 /**
  * Start binding one node; returns a `{ stop }` handle. GET-only, single channel,
  * bounded, and auto-stopping after the session cap. `onData(json)` hands a validated
- * 200 body to the caller (which routes it to bindScalar/bindListRows). No data is
- * delivered after `stop()`.
+ * clean-200 payload to the painter. `onStale()` (optional) fires when a refresh FAILS,
+ * so the view can mark the last-shown datum stale instead of implying it is current.
+ * No data (and no staleness) is delivered after `stop()`.
  */
-export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void): { stop: () => void } {
+export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: () => void): { stop: () => void } {
   const bind = node.bind;
   let stopped = false;
   let pollTimer: unknown = null;
@@ -101,7 +133,7 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
 
   if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
     const sseUrl = deps.origin + bind.sse;                // sse path already policy-validated
-    sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => stop());
+    sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => { if (!stopped && onStale) onStale(); stop(); });
   } else {
     // ONE in-flight request per bind (the next tick is scheduled only after this one
     // settles — a timer never overlaps its request). Failures back off exponentially
@@ -113,9 +145,9 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
       deps.getJson(url, deps.makeSignal()).then((r) => {
         if (stopped) return;
         if (r.status === 200 && !r.redirected && !r.bytesOver) { fails = 0; onData(r.json); } // consume ONLY a clean same-origin 200
-        else { fails++; }
+        else { fails++; if (onStale) onStale(); } // refresh failed: the shown datum is no longer current
         pollTimer = deps.setTimer(tick, nextDelay());
-      }).catch(() => { if (stopped) return; fails++; pollTimer = deps.setTimer(tick, nextDelay()); });
+      }).catch(() => { if (stopped) return; fails++; if (onStale) onStale(); pollTimer = deps.setTimer(tick, nextDelay()); });
     };
     tick();
   }

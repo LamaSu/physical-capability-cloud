@@ -20,6 +20,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
+import { sourceClassOf } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -33,13 +34,14 @@ export interface RElement {
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fresh" | "stale", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
   plan: "pcc-plan", "form-summary": "pcc-form", "field-label": "pcc-field",
   untrusted: "pcc-untrusted", invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
   note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
+  fresh: "pcc-fresh", stale: "pcc-stale",
 };
 
 /** own-property read via a dotted selector (NO prototype traversal, NO traversal THROUGH
@@ -216,7 +218,25 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
 function paintNode(doc: RDocument, node: IrNode): RElement {
   const p = PAINTERS[node.type];
   if (!p) { return el(doc, CLS.invalid, ""); } // frozen dispatch; unknown type → inert
-  return p(doc, node);
+  const e = p(doc, node);
+  // PX-4 provenance: stamp the DERIVED authority class (never read from the node or the
+  // manifest). Prose → "proposed"; bound data → its registered class; constants → none.
+  const src = sourceClassOf(node);
+  if (src !== null) { e.setAttr("data-source", src); e.className = e.className + " pcc-src-" + src; }
+  return e;
+}
+
+/** PX-4 freshness marker for a BOUND node: sets `data-as-of` and toggles the stale class
+ *  on the host, and writes the human-readable line into `meta` (TEXT ONLY). The line reads
+ *  correctly with no stylesheet ("as of 10:12:33Z", "as of 10:12:33Z · stale"), so a stale
+ *  datum is visibly stale on every host. `asOf` is a normalized ISO string (asOfFrom). */
+export function applyFreshness(host: RElement, meta: RElement, asOf: string, stale: boolean): void {
+  host.setAttr("data-as-of", asOf);
+  const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale).join(" ");
+  host.className = stale ? base + " " + CLS.stale : base;
+  const hhmmss = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})/.exec(asOf);
+  meta.className = CLS.fresh;
+  meta.textContent = "as of " + (hhmmss ? hhmmss[1] + "Z" : "unknown time") + (stale ? " · stale" : "");
 }
 
 /** Paint a validated IrDoc into `mount`. Clears mount, appends title then root. */

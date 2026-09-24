@@ -91,12 +91,15 @@
     // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
     // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
     metric: {
+      sourceClass: "authoritative",
+      schemaId: "metric-scalar-v1",
+      maxAgeMs: 12e4,
       routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
       needsSelect: true
     },
     // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
     // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
-    capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
+    capability: { sourceClass: "authoritative", schemaId: "capability-summary-v1", maxAgeMs: 36e5, routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
     // ID_SEG excludes types/templates/search/graph-*
     // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
     // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
@@ -104,11 +107,14 @@
     // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
     // assert a settlement that never occurred. The authoritative receipt is the out-of-band
     // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
-    list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+    list: { sourceClass: "authoritative", schemaId: "collection-v1", maxAgeMs: 3e5, routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
     // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
     // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
     // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
     run: {
+      sourceClass: "authoritative",
+      schemaId: "run-summary-v1",
+      maxAgeMs: 6e4,
       routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
       sse: [route("/sse/stream/job/:")],
       correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
@@ -491,6 +497,26 @@
     "form-summary": { noBind: true, parentOf: ["field-label"], maxChildren: LIM.fields },
     "field-label": { props: { label: "s400" }, required: ["label"], noBind: true, prose: true, childless: true }
   };
+  function policyKeyOf(node) {
+    const spec = NODE_SCHEMA[node.type];
+    if (!spec || !spec.bindKey) return null;
+    if (node.type === "card") return node.props && node.props.kind === "run" ? "run" : "capability";
+    return spec.bindKey;
+  }
+  function sourceClassOf(node) {
+    const spec = NODE_SCHEMA[node.type];
+    if (!spec) return null;
+    if (spec.prose) return "proposed";
+    const key = policyKeyOf(node);
+    const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
+    return policy ? policy.sourceClass : null;
+  }
+  function provenanceOf(node) {
+    if (!node.bind) return null;
+    const key = policyKeyOf(node);
+    const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : void 0;
+    return policy ? { sourceClass: policy.sourceClass, schemaId: policy.schemaId, maxAgeMs: policy.maxAgeMs } : null;
+  }
   function propType(v, t) {
     switch (t) {
       case "s400":
@@ -552,7 +578,7 @@
       if (n.bind !== void 0) {
         if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
         if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
-        const bk = n.type === "card" ? n.props.kind === "run" ? "run" : "capability" : spec.bindKey;
+        const bk = policyKeyOf(n);
         const reason = bindMatchesPolicy(n.bind, bk);
         if (reason) return `bind: ${reason}`;
         if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget";
@@ -618,7 +644,9 @@
     meta: "pcc-meta",
     note: "pcc-note",
     schemaCard: "pcc-schema-card",
-    field: "pcc-fieldlabel"
+    field: "pcc-fieldlabel",
+    fresh: "pcc-fresh",
+    stale: "pcc-stale"
   };
   function readOwnPath(obj, sel) {
     let cur = obj;
@@ -779,7 +807,21 @@
     if (!p) {
       return el(doc, CLS.invalid, "");
     }
-    return p(doc, node);
+    const e = p(doc, node);
+    const src = sourceClassOf(node);
+    if (src !== null) {
+      e.setAttr("data-source", src);
+      e.className = e.className + " pcc-src-" + src;
+    }
+    return e;
+  }
+  function applyFreshness(host, meta, asOf, stale) {
+    host.setAttr("data-as-of", asOf);
+    const base = host.className.split(" ").filter((c) => c !== "" && c !== CLS.stale).join(" ");
+    host.className = stale ? base + " " + CLS.stale : base;
+    const hhmmss = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})/.exec(asOf);
+    meta.className = CLS.fresh;
+    meta.textContent = "as of " + (hhmmss ? hhmmss[1] + "Z" : "unknown time") + (stale ? " \xB7 stale" : "");
   }
   function renderIrDoc(doc, mount, ir) {
     while (mount.children.length) mount.children.pop();
@@ -853,7 +895,26 @@
     const ms = typeof bind.pollMs === "number" && Number.isFinite(bind.pollMs) ? bind.pollMs : BINDER_LIM.defaultPollMs;
     return Math.max(BINDER_LIM.minPollMs, Math.min(ms, BINDER_LIM.maxPollMs));
   }
-  function startBind(node, deps, onData) {
+  var ASOF_MAX_SKEW_MS = 12e4;
+  function asOfFrom(json, receivedAtMs) {
+    const fallback = new Date(receivedAtMs).toISOString();
+    if (json === null || typeof json !== "object" || Array.isArray(json)) return fallback;
+    if (!Object.prototype.hasOwnProperty.call(json, "asOf")) return fallback;
+    const raw = json.asOf;
+    if (typeof raw !== "string") return fallback;
+    const t = Date.parse(raw);
+    if (!Number.isFinite(t) || t > receivedAtMs + ASOF_MAX_SKEW_MS) return fallback;
+    return new Date(t).toISOString();
+  }
+  function isStale(asOfIso, maxAgeMs, nowMs) {
+    const t = Date.parse(asOfIso);
+    return !Number.isFinite(t) || nowMs - t > maxAgeMs;
+  }
+  function acceptsNewer(currentAsOf, incomingAsOf) {
+    if (currentAsOf === null) return true;
+    return Date.parse(incomingAsOf) >= Date.parse(currentAsOf);
+  }
+  function startBind(node, deps, onData, onStale) {
     const bind = node.bind;
     let stopped = false;
     let pollTimer = null;
@@ -886,7 +947,10 @@
       const sseUrl = deps.origin + bind.sse;
       sse = deps.openSse(sseUrl, (d) => {
         if (!stopped) onData(d);
-      }, () => stop());
+      }, () => {
+        if (!stopped && onStale) onStale();
+        stop();
+      });
     } else {
       let fails = 0;
       const nextDelay = () => Math.min(clampPoll(bind) * Math.pow(2, fails < 6 ? fails : 6), BINDER_LIM.maxPollMs);
@@ -899,11 +963,13 @@
             onData(r.json);
           } else {
             fails++;
+            if (onStale) onStale();
           }
           pollTimer = deps.setTimer(tick, nextDelay());
         }).catch(() => {
           if (stopped) return;
           fails++;
+          if (onStale) onStale();
           pollTimer = deps.setTimer(tick, nextDelay());
         });
       };
@@ -1103,6 +1169,26 @@
     walk(doc.root);
     return { stats, lists, schemaCards };
   }
+  function provenanced(node, el2, paint) {
+    const prov = provenanceOf(node);
+    const metaReal = document.createElement("div");
+    if (el2.parentNode) el2.parentNode.insertBefore(metaReal, el2.nextSibling);
+    const host = wrapEl(el2);
+    const meta = wrapEl(metaReal);
+    let last = null;
+    return {
+      onData: (data) => {
+        const asOf = asOfFrom(data, Date.now());
+        if (!acceptsNewer(last, asOf)) return;
+        last = asOf;
+        paint(data);
+        if (prov) applyFreshness(host, meta, asOf, isStale(asOf, prov.maxAgeMs, Date.now()));
+      },
+      onStale: () => {
+        if (last !== null && prov) applyFreshness(host, meta, last, true);
+      }
+    };
+  }
   function startBinds(doc, root) {
     const origin = pccApiOrigin();
     if (!origin) return;
@@ -1141,10 +1227,13 @@
     stats.forEach((node, i) => {
       const el2 = statEls[i];
       const slot = el2?.querySelector(".pcc-value");
-      if (slot) push(startBind(node, deps, (data) => {
-        const v = bindScalar(node, data);
-        slot.textContent = v !== "" ? v : "\u2014";
-      }));
+      if (el2 && slot) {
+        const pv = provenanced(node, el2, (data) => {
+          const v = bindScalar(node, data);
+          slot.textContent = v !== "" ? v : "\u2014";
+        });
+        push(startBind(node, deps, pv.onData, pv.onStale));
+      }
     });
     schemaCards.forEach((node, i) => {
       const el2 = schemaEls[i];
@@ -1152,16 +1241,18 @@
       const schema = node.bind?.schema;
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
-      push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
+      const pv = provenanced(node, el2, (data) => bindSchemaCard(schema, data, slots));
+      push(startBind(node, deps, pv.onData, pv.onStale));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];
       if (!el2) return;
-      push(startBind(node, deps, (data) => {
+      const pv = provenanced(node, el2, (data) => {
         const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : [];
         el2.replaceChildren();
         bindListRows(rdoc, wrapEl(el2), node, rows);
-      }));
+      });
+      push(startBind(node, deps, pv.onData, pv.onStale));
     });
   }
   function stopBinds() {

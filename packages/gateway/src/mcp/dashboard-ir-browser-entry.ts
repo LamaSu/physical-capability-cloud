@@ -23,11 +23,11 @@
  * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
  * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
  */
-import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
+import { dashboardManifestToIr, validateIr, provenanceOf } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bootIrView, bindScalar, bindListRows, bindSchemaCard } from "./dashboard-ir-renderer.js";
+import { bootIrView, bindScalar, bindListRows, bindSchemaCard, applyFreshness } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
-import { startBind } from "./dashboard-ir-binder.js";
+import { startBind, asOfFrom, isStale, acceptsNewer } from "./dashboard-ir-binder.js";
 import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
 
 const CAP = {
@@ -179,6 +179,29 @@ function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; schemaCar
   walk(doc.root);
   return { stats, lists, schemaCards };
 }
+/** PX-4 provenance gate for one bound node. (1) No regression: an update whose `asOf` is
+ *  OLDER than the one shown is dropped (reconnect / out-of-order safety). (2) Freshness:
+ *  every accepted update stamps "as of HH:MM:SSZ", marked stale past the route's freshness
+ *  budget. (3) A failed refresh marks the shown datum stale. The line lives AFTER the bound
+ *  element because a list repaint replaces its own children. */
+function provenanced(node: IrNode, el: HTMLElement, paint: (data: unknown) => void): { onData: (d: unknown) => void; onStale: () => void } {
+  const prov = provenanceOf(node);
+  const metaReal = document.createElement("div");
+  if (el.parentNode) el.parentNode.insertBefore(metaReal, el.nextSibling);
+  const host = wrapEl(el) as unknown as RElement;
+  const meta = wrapEl(metaReal) as unknown as RElement;
+  let last: string | null = null;
+  return {
+    onData: (data) => {
+      const asOf = asOfFrom(data, Date.now());
+      if (!acceptsNewer(last, asOf)) return; // never roll authoritative state backwards
+      last = asOf;
+      paint(data);
+      if (prov) applyFreshness(host, meta, asOf, isStale(asOf, prov.maxAgeMs, Date.now()));
+    },
+    onStale: () => { if (last !== null && prov) applyFreshness(host, meta, last, true); },
+  };
+}
 function startBinds(doc: IrDoc, root: HTMLElement): void {
   const origin = pccApiOrigin();
   if (!origin) return; // no trusted PCC origin injected → static render, no live binding
@@ -214,7 +237,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   const byClass = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
   const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), schemaEls = byClass("pcc-schema-card");
   const push = (h: { stop: () => void }) => boundHandles.push(h);
-  stats.forEach((node, i) => { const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (slot) push(startBind(node, deps, (data) => { const v = bindScalar(node, data); slot.textContent = v !== "" ? v : "—"; })); }); // "—" on a miss
+  stats.forEach((node, i) => { const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (el && slot) { const pv = provenanced(node, el, (data) => { const v = bindScalar(node, data); slot.textContent = v !== "" ? v : "—"; }); push(startBind(node, deps, pv.onData, pv.onStale)); } }); // "—" on a miss
   // Fixed-schema cards (capability/run/settlement): PCC owns the labels; each value slot
   // ← its ONE fixed key via bindSchemaCard. The manifest supplies NO selector here, so it
   // can neither relabel a field nor surface an off-schema response field.
@@ -222,12 +245,13 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     const el = schemaEls[i]; if (!el) return;
     const schema = node.bind?.schema; if (!schema) return;
     const slots = Array.from(el.querySelectorAll<HTMLElement>(".pcc-value"));
-    push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
+    const pv = provenanced(node, el, (data) => bindSchemaCard(schema, data, slots));
+    push(startBind(node, deps, pv.onData, pv.onStale));
   });
-  lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; push(startBind(node, deps, (data) => {
+  lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; const pv = provenanced(node, el, (data) => {
     const rows = Array.isArray(data) ? data : (data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items) ? (data as { items: unknown[] }).items : []);
     el.replaceChildren(); bindListRows(rdoc, wrapEl(el) as unknown as RElement, node, rows);
-  })); });
+  }); push(startBind(node, deps, pv.onData, pv.onStale)); });
 }
 function stopBinds(): void {
   for (const h of boundHandles) h.stop();
