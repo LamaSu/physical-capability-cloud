@@ -571,7 +571,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     };
     const dup: NetSplitter = (units) => {
       const r = tenPercent(units);
-      return r.ok ? { ...r, units: [...r.units, r.units[0]!] } : r;
+      return r.ok ? { ...r, units: [r.units[0]!, r.units[0]!] } : r; // same cardinality, one ref twice
     };
     expect(withSplit(fee235, drop)).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "unit-set" }] });
     expect(withSplit(fee235, extra)).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "unit-set" }] });
@@ -603,20 +603,148 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     expect(many.ok === false && codes(many)).toEqual(["too-many-payout-legs", "too-many-payout-legs"]);
   });
 
-  it("malformed economics output (no result, a non-boolean ok, bad hashes, non-array units) is refused, never a throw", () => {
-    const outputs = [
-      null,
-      { ok: "yes" },
-      { ...(tenPercent(unitsOf()) as object), economicTermsHash: "0xabc" },
-      { ok: true, units: "x", economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1") },
+  it("malformed economics output is refused, never a throw — bad hashes tested on an otherwise COMPLETE answer", () => {
+    const complete = (units: Parameters<NetSplitter>[0]) => tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+    const cases: Array<[NetSplitter, string]> = [
+      [() => null as unknown as ReturnType<NetSplitter>, "result"],
+      [() => ({ ok: "yes" }) as unknown as ReturnType<NetSplitter>, "result"],
+      [(u) => ({ ...complete(u), economicTermsHash: "0xabc" }), "terms-hash"],
+      [(u) => ({ ...complete(u), rightsTermsHash: DIG("f1") + "\n" }), "terms-hash"],
+      [(u) => ({ ...complete(u), units: "x" as unknown as [] }), "units"],
     ];
-    for (const out of outputs) {
+    for (const [split, detail] of cases) {
       let r: ReturnType<typeof compileAcceptedPlan> | undefined;
       expect(() => {
-        r = withSplit(fee235, () => out as unknown as ReturnType<NetSplitter>);
+        r = withSplit(fee235, split);
       }).not.toThrow();
-      expect(r?.ok).toBe(false);
-      if (r && !r.ok) expect(codes(r)).toEqual(["economics-malformed"]);
+      expect(r).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail }] });
+    }
+  });
+
+  it("astra: a getter that grows the payouts array cannot smuggle a 17th leg past the cap", () => {
+    const grow: NetSplitter = (units) => {
+      const r = tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return {
+        ...r,
+        units: r.units.map((u) => {
+          const legs: Array<{ recipient: string; amount: string }> = [];
+          const first = {
+            get recipient() {
+              for (let i = 0; i < 16; i++) legs.push({ recipient: LICENSOR, amount: "1" }); // grows mid-read
+              return ADDR("a1");
+            },
+            amount: (BigInt(u.net) - 16n).toString(),
+          };
+          legs.push(first as { recipient: string; amount: string });
+          return { ...u, payouts: legs };
+        }),
+      };
+    };
+    const r = withSplit(fee235, grow);
+    expect(r.ok).toBe(false); // only the leg that existed when the length was read is considered: n-16 != n
+    if (!r.ok) expect(codes(r)).toEqual(["payout-sum-mismatch", "payout-sum-mismatch"]);
+  });
+
+  it("astra: a hash getter is read exactly once; the validated value is the sealed value", () => {
+    let reads = 0;
+    const flip: NetSplitter = (units) => {
+      const r = tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return Object.defineProperty({ ...r }, "economicTermsHash", {
+        enumerable: true,
+        get: () => (reads++ === 0 ? DIG("e1") : "invalid"),
+      });
+    };
+    const r = withSplit(fee235, flip);
+    expect(reads).toBe(1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.plan.economicTermsHash).toBe(DIG("e1"));
+  });
+
+  it("astra: throwing getters and proxies in the ANSWER are refused as malformed; a throwing SPLITTER is a server fault and propagates", () => {
+    const boom = () => {
+      throw new Error("boom");
+    };
+    const answers: unknown[] = [
+      Object.defineProperty({}, "ok", { get: boom }),
+      Object.defineProperty({ ok: false }, "code", { get: boom }),
+      new Proxy({}, { get: boom }),
+      { ok: true, economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1"), units: [Object.defineProperty({}, "unitRef", { get: boom })] },
+      { ok: true, economicTermsHash: DIG("e1"), rightsTermsHash: DIG("f1"), units: new Proxy([], { get: (t, k) => (k === "length" ? 2 : boom()) }) },
+    ];
+    for (const a of answers) {
+      let r: ReturnType<typeof compileAcceptedPlan> | undefined;
+      expect(() => {
+        r = withSplit(fee235, () => a as ReturnType<NetSplitter>);
+      }).not.toThrow();
+      expect(r).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "result" }] });
+    }
+    expect(() => withSplit(fee235, boom as unknown as NetSplitter)).toThrow("boom");
+  });
+
+  it("every split term is sealed on its own: rights hash, recipient, amount and leg order each change the digest; unit order does not", () => {
+    const base = withSplit(fee235, tenPercent);
+    if (!base.ok) throw new Error("setup");
+    const digestOf = (split: NetSplitter) => {
+      const r = withSplit(fee235, split);
+      if (!r.ok) throw new Error(JSON.stringify(r.violations));
+      return r.plan.acceptedDealDigest;
+    };
+    const rightsOnly: NetSplitter = (u) => ({ ...(tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>), rightsTermsHash: DIG("f2") });
+    const recipientOnly = tweak((u) => ({ payouts: [u.payouts[0]!, { ...u.payouts[1]!, recipient: ADDR("c2") }] }));
+    const amountOnly = tweak((u) => ({ payouts: [{ ...u.payouts[0]!, amount: (BigInt(u.payouts[0]!.amount) - 1n).toString() }, { ...u.payouts[1]!, amount: (BigInt(u.payouts[1]!.amount) + 1n).toString() }] }));
+    const orderOnly = tweak((u) => ({ payouts: [u.payouts[1]!, u.payouts[0]!] }));
+    const unitsReversed: NetSplitter = (u) => {
+      const r = tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return { ...r, units: [...r.units].reverse() };
+    };
+    for (const s of [rightsOnly, recipientOnly, amountOnly, orderOnly]) expect(digestOf(s)).not.toBe(base.plan.acceptedDealDigest);
+    expect(digestOf(unitsReversed)).toBe(base.plan.acceptedDealDigest);
+  });
+
+  it("net-only drift, a substituted unit, and opposite per-unit errors that would cancel globally are each refused", () => {
+    const n = withSplit(fee235, tweak((u) => ({ net: (BigInt(u.net) + 1n).toString() })));
+    expect(n.ok === false && codes(n)).toEqual(["economics-mismatch", "economics-mismatch"]);
+    const swap: NetSplitter = (units) => {
+      const r = tenPercent(units) as Extract<ReturnType<NetSplitter>, { ok: true }>;
+      return { ...r, units: [r.units[0]!, { ...r.units[1]!, unitRef: "ghost" }] };
+    };
+    expect(withSplit(fee235, swap)).toEqual({ ok: false, violations: [{ code: "economics-malformed", detail: "unit-set" }] });
+    let k = 0;
+    const cancel = tweak((u) => {
+      const d = k++ === 0 ? 1n : -1n; // +1 on the first unit, -1 on the second: the global total still matches
+      return { payouts: [u.payouts[0]!, { ...u.payouts[1]!, amount: (BigInt(u.payouts[1]!.amount) + d).toString() }] };
+    });
+    const c = withSplit(fee235, cancel);
+    expect(c.ok === false && codes(c)).toEqual(["payout-sum-mismatch", "payout-sum-mismatch"]);
+  });
+
+  it("non-canonical, signed, spaced or over-long amount strings are refused (JS `$` does not admit a final newline)", () => {
+    for (const amount of ["-1", "01", "+1", "1e3", " 1", "1 ", "1\n", "1".padEnd(79, "0")]) {
+      const r = withSplit(fee235, tweak((u) => ({ payouts: [...u.payouts, { recipient: LICENSOR, amount }] })));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(codes(r)).toContain("invalid-payout-leg");
+    }
+  });
+
+  it("boundaries are accepted: exactly 16 legs per unit, repeated recipients, and 16 units x 16 legs = 256 legs per job", () => {
+    const sixteen = (units: Parameters<NetSplitter>[0]): ReturnType<NetSplitter> => ({
+      ok: true,
+      economicTermsHash: DIG("e1"),
+      rightsTermsHash: DIG("f1"),
+      units: units.map((u) => ({
+        unitRef: u.nodeId,
+        gross: u.g.toString(),
+        fee: u.f.toString(),
+        net: u.n.toString(),
+        payouts: Array.from({ length: 16 }, (_, i) => ({ recipient: i % 2 ? LICENSOR : u.payoutAddress, amount: (i === 0 ? u.n - 15n : 1n).toString() })),
+      })),
+    });
+    const many = Array.from({ length: MAX_UNITS_PER_JOB }, (_, i) => node({ nodeId: `n${String(i).padStart(2, "0")}`, grossBaseUnits: USDC }));
+    const r = withSplit(plan({ nodes: many, edges: [] }), sixteen);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.plan.jobs).toHaveLength(1);
+      expect(r.plan.jobs[0]!.units.reduce((a, u) => a + u.payouts.length, 0)).toBe(256);
     }
   });
 

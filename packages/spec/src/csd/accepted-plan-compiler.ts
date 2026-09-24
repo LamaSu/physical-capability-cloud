@@ -676,17 +676,102 @@ export function compileAcceptedPlan(input: AcceptedPlanInput, deps: CompileDeps 
   return { ok: true, plan: { ...unsealed, acceptedDealDigest: acceptedDealDigest(unsealed) } };
 }
 
-const BASE_UNITS = /^(0|[1-9][0-9]*)$/;
+/** Integer base units: canonical (no sign, no leading zeros) and at most 78 digits (a uint256 has 78). */
+const BASE_UNITS = /^(0|[1-9][0-9]{0,77})$/;
 
 /** An integer base-unit string as a bigint, or null. */
 function baseUnits(x: unknown): bigint | null {
   return typeof x === "string" && BASE_UNITS.test(x) ? BigInt(x) : null;
 }
 
+/** One payout leg and one unit of a splitter's answer, copied into plain data. */
+interface LegSnapshot {
+  recipient: unknown;
+  amount: unknown;
+}
+interface UnitSnapshot {
+  unitRef: unknown;
+  gross: unknown;
+  fee: unknown;
+  net: unknown;
+  payouts: LegSnapshot[] | "not-array" | { tooMany: number };
+}
+type SplitSnapshot =
+  | { ok: true; economicTermsHash: unknown; rightsTermsHash: unknown; units: Array<UnitSnapshot | null> | "not-array" | "too-many" }
+  | { ok: false; code: unknown }
+  | "malformed";
+
+/** A plain array length, or null for a length that is not a non-negative integer (a proxy can lie). */
+function lengthOf(a: readonly unknown[]): number | null {
+  const n: unknown = a.length;
+  return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/**
+ * Copy a splitter's answer into compiler-owned plain data, reading every property EXACTLY ONCE and
+ * every array's length once, before any validation (cross-family review of af425ede). Getters,
+ * proxies and arrays that grow while being read cannot change what is validated, and validation
+ * cannot see a different value than the one used: only this copy is inspected afterwards. A throw
+ * while reading is a malformed answer, never an exception.
+ */
+function snapshotSplit(res: unknown, maxUnits: number): SplitSnapshot {
+  try {
+    if (typeof res !== "object" || res === null) return "malformed";
+    const r = res as Record<string, unknown>;
+    const ok = r.ok;
+    if (ok === false) return { ok: false, code: r.code };
+    if (ok !== true) return "malformed";
+    const economicTermsHash = r.economicTermsHash;
+    const rightsTermsHash = r.rightsTermsHash;
+    const unitsRaw = r.units;
+    if (!Array.isArray(unitsRaw)) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
+    const unitCount = lengthOf(unitsRaw);
+    if (unitCount === null) return { ok: true, economicTermsHash, rightsTermsHash, units: "not-array" };
+    if (unitCount > maxUnits) return { ok: true, economicTermsHash, rightsTermsHash, units: "too-many" };
+    const units: Array<UnitSnapshot | null> = [];
+    for (let i = 0; i < unitCount; i++) {
+      const u: unknown = unitsRaw[i];
+      if (typeof u !== "object" || u === null) {
+        units.push(null);
+        continue;
+      }
+      const ur = u as Record<string, unknown>;
+      const unitRef = ur.unitRef;
+      const gross = ur.gross;
+      const fee = ur.fee;
+      const net = ur.net;
+      const payoutsRaw = ur.payouts;
+      let payouts: UnitSnapshot["payouts"] = "not-array";
+      if (Array.isArray(payoutsRaw)) {
+        const legCount = lengthOf(payoutsRaw);
+        if (legCount !== null && legCount > MAX_PAYOUT_LEGS_PER_UNIT) payouts = { tooMany: legCount };
+        else if (legCount !== null) {
+          const legs: LegSnapshot[] = [];
+          for (let k = 0; k < legCount; k++) {
+            const leg: unknown = payoutsRaw[k];
+            if (typeof leg !== "object" || leg === null) legs.push({ recipient: undefined, amount: undefined });
+            else {
+              const lr = leg as Record<string, unknown>;
+              legs.push({ recipient: lr.recipient, amount: lr.amount });
+            }
+          }
+          payouts = legs;
+        }
+      }
+      units.push({ unitRef, gross, fee, net, payouts });
+    }
+    return { ok: true, economicTermsHash, rightsTermsHash, units };
+  } catch {
+    return "malformed";
+  }
+}
+
 /**
  * Ask economics to split each unit's net, then hold its answer to this compiler's own numbers:
  * exactly the plan's units, the same gross/fee/net, 1–16 legs to non-zero addresses with positive
- * amounts, and Σ legs === n per unit. Anything else is a violation.
+ * amounts, and Σ legs === n per unit. Anything else is a violation. The splitter itself is trusted
+ * server code: if it THROWS, that is a server fault and propagates, rather than being read as a
+ * refusal. What it RETURNS is untrusted and is only ever inspected through `snapshotSplit`.
  */
 function splitPayouts(
   order: readonly string[],
@@ -704,15 +789,15 @@ function splitPayouts(
       return { nodeId: id, operator: node.operator, payoutAddress: node.payoutAddress, g: e.g, f: e.f, n: e.n };
     }),
   );
-  if (typeof res !== "object" || res === null) return malformed("result");
-  if (res.ok === false) return { ok: false, violations: [{ code: "economics-refused", reason: show(res.code) }] };
-  if (res.ok !== true) return malformed("result");
-  if (!isDigest(res.economicTermsHash) || !isDigest(res.rightsTermsHash)) return malformed("terms-hash");
-  if (!Array.isArray(res.units)) return malformed("units");
-  const byRef = new Map<string, (typeof res.units)[number]>();
-  for (let i = 0; i < res.units.length; i++) {
-    const u = res.units[i];
-    if (typeof u !== "object" || u === null || !isId(u.unitRef) || byRef.has(u.unitRef)) return malformed("unit-ref");
+  const snap = snapshotSplit(res, order.length);
+  if (snap === "malformed") return malformed("result");
+  if (!snap.ok) return { ok: false, violations: [{ code: "economics-refused", reason: show(snap.code) }] };
+  if (!isDigest(snap.economicTermsHash) || !isDigest(snap.rightsTermsHash)) return malformed("terms-hash");
+  if (snap.units === "not-array") return malformed("units");
+  if (snap.units === "too-many") return malformed("unit-set");
+  const byRef = new Map<string, UnitSnapshot>();
+  for (const u of snap.units) {
+    if (u === null || !isId(u.unitRef) || byRef.has(u.unitRef)) return malformed("unit-ref");
     byRef.set(u.unitRef, u);
   }
   if (byRef.size !== order.length || order.some((id) => !byRef.has(id))) return malformed("unit-set");
@@ -725,27 +810,24 @@ function splitPayouts(
     if (baseUnits(u.gross) !== e.g) v.push({ code: "economics-mismatch", nodeId: id, field: "gross" });
     if (baseUnits(u.fee) !== e.f) v.push({ code: "economics-mismatch", nodeId: id, field: "fee" });
     if (baseUnits(u.net) !== e.n) v.push({ code: "economics-mismatch", nodeId: id, field: "net" });
-    const raw: unknown = u.payouts;
-    if (!Array.isArray(raw)) {
+    if (u.payouts === "not-array") {
       v.push({ code: "economics-malformed", detail: `payouts:${id}` });
       continue;
     }
-    if (raw.length > MAX_PAYOUT_LEGS_PER_UNIT) {
-      v.push({ code: "too-many-payout-legs", nodeId: id, count: raw.length });
+    if (!Array.isArray(u.payouts)) {
+      v.push({ code: "too-many-payout-legs", nodeId: id, count: u.payouts.tooMany });
       continue;
     }
     const legs: PayoutEntry[] = [];
-    for (let i = 0; i < raw.length; i++) {
-      const leg: unknown = raw[i];
-      const recipient = typeof leg === "object" && leg !== null ? (leg as { recipient?: unknown }).recipient : undefined;
-      const amount = typeof leg === "object" && leg !== null ? baseUnits((leg as { amount?: unknown }).amount) : null;
-      if (!isNonZeroAddress(recipient) || amount === null || amount <= 0n) {
+    u.payouts.forEach((leg, i) => {
+      const amount = baseUnits(leg.amount);
+      if (!isNonZeroAddress(leg.recipient) || amount === null || amount <= 0n) {
         v.push({ code: "invalid-payout-leg", nodeId: id, index: i });
-        continue;
+        return;
       }
-      legs.push({ recipient, amount });
-    }
-    if (legs.length === raw.length && !payoutsConserve(legs, e.n)) {
+      legs.push({ recipient: leg.recipient, amount });
+    });
+    if (legs.length === u.payouts.length && !payoutsConserve(legs, e.n)) {
       const sum = legs.reduce((acc, p) => acc + p.amount, 0n);
       v.push({ code: "payout-sum-mismatch", nodeId: id, sum: sum.toString(), net: e.n.toString() });
     }
@@ -755,8 +837,8 @@ function splitPayouts(
   return {
     ok: true,
     payouts,
-    economicTermsHash: res.economicTermsHash.toLowerCase() as `0x${string}`,
-    rightsTermsHash: res.rightsTermsHash.toLowerCase() as `0x${string}`,
+    economicTermsHash: snap.economicTermsHash.toLowerCase() as `0x${string}`,
+    rightsTermsHash: snap.rightsTermsHash.toLowerCase() as `0x${string}`,
   };
 }
 
