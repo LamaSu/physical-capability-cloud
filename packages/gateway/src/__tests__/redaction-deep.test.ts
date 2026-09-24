@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { english } from "viem/accounts";
 import {
   redactSecretsDeep,
   isSecretFieldName,
@@ -299,6 +300,79 @@ describe("redactSecretsDeep closes the R6 gaps", () => {
     });
     const { out, seen } = collect(once);
     expect(out).toEqual(once);
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("redactSecretsDeep closes the round-3 coverage gaps (WP-D round 4, L5)", () => {
+  const leaks = (value: unknown, secret: string) => JSON.stringify(redactSecretsDeep(value)).includes(secret);
+
+  it("parses BOM-prefixed JSON (the trimmed text), so a secret field inside it is removed", () => {
+    const text = '﻿{"api_key":"opaque-bom-value"}';
+    expect(leaks(text, "opaque-bom-value")).toBe(false);
+    expect(leaks({ body: text }, "opaque-bom-value")).toBe(false);
+  });
+
+  it.each<[string, string, string]>([
+    ["a secret-named URL query parameter (access_token)", "https://cb.test/return?access_token=opaqueQueryToken123&state=1", "opaqueQueryToken123"],
+    ["a secret-named URL query parameter (api_key)", "GET /v1/items?api_key=opaqueApiKeyValue9&page=2", "opaqueApiKeyValue9"],
+    ["a password=value pair", "login with password=hunter2-correct-horse please", "hunter2-correct-horse"],
+    ["an X-Api-Key header line", "X-Api-Key: opaque-header-key-77\nAccept: */*", "opaque-header-key-77"],
+    ["a Cookie header line", "Cookie: pcc_session=6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60; theme=dark", "6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60"],
+    ["a secret-named JSON fragment inside prose", 'the config is {"api_key":"opaque in prose value"} and more', "opaque in prose value"],
+  ])("removes %s", (_name, text, secret) => {
+    expect(leaks(text, secret)).toBe(false);
+    expect(leaks({ note: text }, secret)).toBe(false);
+  });
+
+  it("keeps what follows a redacted query parameter or header line", () => {
+    expect(redactSecretsDeep("https://cb.test/return?access_token=opaqueQueryToken123&state=1")).toContain("&state=1");
+    expect(redactSecretsDeep("X-Api-Key: opaque-header-key-77\nAccept: */*")).toContain("\nAccept: */*");
+  });
+
+  it("a string session / sessionId / sid is a secret; an object named session is walked, not erased", () => {
+    const uuid = "6f1c2a9e-8b3d-4c5e-9f7a-1b2c3d4e5f60";
+    for (const key of ["session", "sessionId", "sid"]) expect(leaks({ [key]: uuid }, uuid)).toBe(false);
+    const info = { session: { address: "0x" + "12".repeat(20), expiresAt: "2026-09-25T00:00:00Z" } };
+    expect(redactSecretsDeep(info)).toEqual(info);
+  });
+
+  it.each<[string, string]>([
+    ["a GitHub fine-grained PAT", "github_pat_" + "A1b2C3d4E5".repeat(4)],
+    ["a Google API key", "AIza" + "Sy0123456789abcdefghijklmnopqrstuvwxyz".slice(0, 35)],
+    ["an npm token", "npm_" + "a1B2c3D4e5".repeat(4).slice(0, 36)],
+  ])("removes %s in plain text", (_name, token) => {
+    expect(leaks(`see ${token} end`, token)).toBe(false);
+  });
+
+  it("removes a 12- or 24-word BIP-39 seed phrase; keeps 11 words, ordinary prose and a repeated word", () => {
+    const words = english.slice(100, 124);
+    const seed12 = words.slice(0, 12).join(" ");
+    const seed24 = words.join(" ");
+    expect(leaks(`zzqx ${seed12} zzqx`, seed12)).toBe(false);
+    expect(leaks(`backup:\n${seed24}\n`, seed24)).toBe(false);
+    const eleven = words.slice(0, 11).join(" ");
+    expect(redactSecretsDeep(`zzqx ${eleven}.`)).toContain(eleven);
+    const prose = "The operator ships the order today and the buyer confirms the delivery at the dock.";
+    expect(redactSecretsDeep(prose)).toBe(prose);
+    const repeated = "word ".repeat(40);
+    expect(redactSecretsDeep(repeated)).toBe(repeated);
+  });
+
+  it("stays linear on adversarial label and word input", () => {
+    for (const text of ["a=".repeat(200_000), "token:".repeat(100_000), "abandon ".repeat(100_000), '"password":"'.repeat(50_000)]) {
+      const t0 = performance.now();
+      redactSecretsDeep(text);
+      expect(performance.now() - t0).toBeLessThan(1_500);
+    }
+  });
+
+  it("is still idempotent: a second pass over the new detectors' output changes and reports nothing", () => {
+    const once = redactSecretsDeep({
+      note: 'X-Api-Key: abc123def456\n{"password":"p w d"} password=abc see github_pat_' + "x".repeat(30),
+    });
+    const seen: unknown[] = [];
+    expect(redactSecretsDeep(once, (r) => seen.push(r))).toEqual(once);
     expect(seen).toHaveLength(0);
   });
 });

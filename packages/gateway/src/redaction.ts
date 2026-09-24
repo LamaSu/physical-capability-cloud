@@ -20,6 +20,8 @@
  * already proven to fail.
  */
 
+import { english as BIP39_ENGLISH } from "viem/accounts";
+
 const REDACTED = "[redacted]";
 
 // Boundary strategy (review r3 #1 + r4 #1): use a negative lookbehind for an
@@ -175,6 +177,8 @@ const SECRET_NAME_SUFFIXES = [
 ];
 /** Whole names outside the spec list that are secret fields on their own. */
 const SECRET_NAMES = new Set(["credential", "credentials", "cookies", "jwt", "bearer"]);
+/** Names that hold a session TOKEN when their value is a string (PCC SIWE sessions are UUIDs; WP-D round 4, L5). */
+const SESSION_TOKEN_NAMES = new Set(["session", "sessionid", "sid"]);
 
 const normalizeName = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -218,6 +222,7 @@ function isKeyMaterial(v: unknown): boolean {
 function isSecretField(key: string, value: unknown, parentKey: string | null): boolean {
   if (isSecretFieldName(key)) return true;
   const n = normalizeName(key);
+  if (SESSION_TOKEN_NAMES.has(n) && typeof value === "string") return true;
   if (n.length > 1 && n.endsWith("s") && typeof value !== "number" && isSecretFieldName(n.slice(0, -1))) return true;
   if (n === "key" || n === "keys") {
     const parent = parentKey === null ? "" : normalizeName(parentKey);
@@ -251,6 +256,10 @@ const OPENAI_KEY_Y = /sk-[A-Za-z0-9_-]{16,}/y;
 const GITHUB_TOKEN_Y = /gh[po]_[A-Za-z0-9]{20,}/y;
 const SLACK_TOKEN_Y = /xox[baprs]-[A-Za-z0-9-]{10,}/y;
 const AWS_KEY_ID_Y = /AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/y;
+/** L5: GitHub fine-grained PATs, Google API keys and npm tokens. */
+const GITHUB_PAT_Y = /github_pat_[A-Za-z0-9_]{22,}/y;
+const GOOGLE_API_KEY_Y = /AIza[0-9A-Za-z_-]{35}/y;
+const NPM_TOKEN_Y = /npm_[A-Za-z0-9]{36}/y;
 /** A 64-hex value is removed whether it is a private key or a public digest: the two look the same. */
 const HEX_SECRET_Y = /(?:0[xX])?[0-9a-fA-F]{64,}/y;
 /** Ed25519 PKCS#8 DER private key, base64 (what /api/auth/provision mints). Its first 16 DER bytes are fixed. */
@@ -295,13 +304,16 @@ function addShapeSpans(s: string, a: number, b: number, spans: Span[], keepDiges
           end = stickyEnd(WEBHOOK_SECRET_Y, s, i);
           break;
         case 103: // g
-          end = stickyEnd(GITHUB_TOKEN_Y, s, i);
+          end = Math.max(stickyEnd(GITHUB_TOKEN_Y, s, i), stickyEnd(GITHUB_PAT_Y, s, i));
+          break;
+        case 110: // n
+          end = stickyEnd(NPM_TOKEN_Y, s, i);
           break;
         case 120: // x
           end = stickyEnd(SLACK_TOKEN_Y, s, i);
           break;
         case 65: // A
-          end = stickyEnd(AWS_KEY_ID_Y, s, i);
+          end = Math.max(stickyEnd(AWS_KEY_ID_Y, s, i), stickyEnd(GOOGLE_API_KEY_Y, s, i));
           break;
         case 101: // e
           if (i >= jwtFrom) {
@@ -381,6 +393,93 @@ function addAuthorizationSpans(s: string, spans: Span[]): void {
   }
 }
 
+/**
+ * `name: value`, `name=value` and `"name": "value"` where `name` is a secret name
+ * (WP-D round 4, L5). This covers header lines (X-Api-Key: ..., Cookie: ...), URL
+ * query parameters (?access_token=...), key=value pairs (password=...) and secret-
+ * named JSON fragments inside prose. A label is at most 64 characters, so the scan
+ * is linear. The value is:
+ *   - a quoted value: up to its closing quote (escapes skipped, never past a newline);
+ *   - a header-style `:` value of a cookie or api-key header: the rest of the line;
+ *   - otherwise: the token run that follows (so `&next=1` in a URL survives).
+ */
+const SECRET_LABEL_RE = /(?<![A-Za-z0-9_-])(["']?)([A-Za-z][A-Za-z0-9_-]{0,63})\1[ \t]*([:=])[ \t]*(["']?)/g;
+const HEADER_TO_EOL_NAMES = new Set(["cookie", "setcookie", "xapikey", "apikey", "xauthtoken"]);
+/** A value that is already a redaction placeholder: left alone, so a second pass changes nothing. */
+const PLACEHOLDER_VALUE_RE = /^(?:\[REDACTED\]|\[redacted(?:-[a-z]+)?\])$/;
+
+function isSecretLabelName(name: string): boolean {
+  // Authorization labels are addAuthorizationSpans' job: it keeps the scheme word.
+  if (normalizeName(name).endsWith("authorization")) return false;
+  return isSecretFieldName(name) || SESSION_TOKEN_NAMES.has(normalizeName(name));
+}
+
+function addSecretLabelSpans(s: string, spans: Span[]): void {
+  SECRET_LABEL_RE.lastIndex = 0;
+  for (let m = SECRET_LABEL_RE.exec(s); m !== null; m = SECRET_LABEL_RE.exec(s)) {
+    if (!isSecretLabelName(m[2])) continue;
+    const k = m.index + m[0].length;
+    const quote = m[4];
+    let end = k;
+    if (quote) {
+      while (end < s.length && s[end] !== quote && s[end] !== "\n") end += s[end] === "\\" ? 2 : 1;
+      end = Math.min(end, s.length);
+    } else if (m[3] === ":" && HEADER_TO_EOL_NAMES.has(normalizeName(m[2]))) {
+      const eol = s.indexOf("\n", k);
+      end = eol === -1 ? s.length : eol;
+    } else {
+      end = stickyEnd(TOKEN_RUN_Y, s, k);
+    }
+    if (end > k && !PLACEHOLDER_VALUE_RE.test(s.slice(k, end).trim())) spans.push({ start: k, end });
+    if (SECRET_LABEL_RE.lastIndex < end) SECRET_LABEL_RE.lastIndex = end;
+  }
+}
+
+/** BIP-39 English words (viem's list; no new dependency), for the mnemonic detector (L5). */
+const BIP39_WORDS: ReadonlySet<string> = new Set(BIP39_ENGLISH);
+const MNEMONIC_MIN_WORDS = 12;
+/** A seed phrase is random: a run that repeats a few words ("word word word ...") is prose, not a mnemonic. */
+const MNEMONIC_MIN_DISTINCT = 10;
+const WORD_RE = /[A-Za-z]+/g;
+const MNEMONIC_GAP_RE = /^[ \t\r\n,]+$/;
+
+/**
+ * A run of 12 or more BIP-39 words, at least 10 of them distinct, separated only by
+ * whitespace or commas: a seed phrase (L5). Linear.
+ */
+function addMnemonicSpans(s: string, spans: Span[]): void {
+  let runStart = -1;
+  let runEnd = -1;
+  let runLen = 0;
+  let distinct = new Set<string>();
+  const close = () => {
+    if (runLen >= MNEMONIC_MIN_WORDS && distinct.size >= MNEMONIC_MIN_DISTINCT) spans.push({ start: runStart, end: runEnd });
+    runLen = 0;
+    distinct = new Set<string>();
+  };
+  WORD_RE.lastIndex = 0;
+  for (let m = WORD_RE.exec(s); m !== null; m = WORD_RE.exec(s)) {
+    const a = m.index;
+    const b = a + m[0].length;
+    if (m[0].length < 3 || m[0].length > 8 || !BIP39_WORDS.has(m[0].toLowerCase())) {
+      close();
+      continue;
+    }
+    const word = m[0].toLowerCase();
+    if (runLen > 0 && MNEMONIC_GAP_RE.test(s.slice(runEnd, a))) {
+      runEnd = b;
+      runLen += 1;
+    } else {
+      close();
+      runStart = a;
+      runEnd = b;
+      runLen = 1;
+    }
+    if (distinct.size < MNEMONIC_MIN_DISTINCT) distinct.add(word);
+  }
+  close();
+}
+
 /** `://user:password@`: the lookahead-then-backreference cannot backtrack into the userinfo. */
 const URL_USERINFO_RE = /:\/\/(?=([^\s/?#@[\]"'<>`\\]+))\1@/g;
 
@@ -416,6 +515,8 @@ function scrubShapes(s: string, report: (secret: string) => void, keepDigests = 
   addPemSpans(s, spans);
   addUserinfoSpans(s, spans);
   addAuthorizationSpans(s, spans);
+  addSecretLabelSpans(s, spans);
+  addMnemonicSpans(s, spans);
   addTokenRunSpans(s, spans, keepDigests);
   if (spans.length === 0) return s;
   spans.sort((x, y) => x.start - y.start);
@@ -513,16 +614,18 @@ function countParsedMembers(root: object): number {
  * value, so the text holds values the parsed copy does not (WP-D R6).
  */
 function parseEmbeddedJson(s: string): { value: object; lossy: boolean } | undefined {
-  const t = s.trimStart();
+  // Parse the TRIMMED text (L5): trim() also drops a BOM, which JSON.parse rejects,
+  // so a BOM-prefixed {"api_key":"opaque"} used to skip the walk entirely.
+  const t = s.trim();
   if (t[0] !== "{" && t[0] !== "[") return undefined;
   let v: unknown;
   try {
-    v = JSON.parse(s);
+    v = JSON.parse(t);
   } catch {
     return undefined;
   }
   if (v === null || typeof v !== "object") return undefined;
-  return { value: v, lossy: countJsonMembers(s) !== countParsedMembers(v) };
+  return { value: v, lossy: countJsonMembers(t) !== countParsedMembers(v) };
 }
 
 /** Own-property write that also works for a `__proto__` key from JSON.parse. */
