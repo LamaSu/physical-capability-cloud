@@ -32,6 +32,14 @@ describe("BountyService", () => {
   // ── Demand Signals ──────────────────────────────────────────────
 
   describe("demand signals", () => {
+    it("gives every signal a unique random id (no restart-colliding counter)", () => {
+      const a = svc.submitDemand(makeDemandInput());
+      const b = new BountyService().submitDemand(makeDemandInput());
+
+      expect(a.id).toMatch(/^demand-[0-9a-f]{8}-/);
+      expect(a.id).not.toBe(b.id);
+    });
+
     it("should submit a demand signal", () => {
       const signal = svc.submitDemand(makeDemandInput());
       expect(signal.id).toMatch(/^demand-/);
@@ -125,7 +133,8 @@ describe("BountyService", () => {
         expiresInDays: 60,
       });
 
-      expect(bounty.id).toMatch(/^bounty-/);
+      expect(bounty.id).toMatch(/^bounty-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(bounty.fundingStatus).toBe("unfunded");
       expect(bounty.status).toBe("open");
       expect(bounty.bountyReward).toBe(2500);
       expect(bounty.currency).toBe("USDC");
@@ -136,7 +145,39 @@ describe("BountyService", () => {
 
   // ── Auto-Bounty Creation ────────────────────────────────────────
 
-  describe("auto-bounty creation", () => {
+  describe("auto-bounty creation (default: off)", () => {
+    it("never auto-creates a bounty by default, even when every threshold is met", () => {
+      // 3 requesters AND an annual value far above $10K: both triggers fire.
+      for (const r of ["r1", "r2", "r3"]) {
+        svc.submitDemand(makeDemandInput({ requesterId: r, capabilityType: "ebw", estimatedJobValue: 5000, estimatedFrequency: "daily" }));
+      }
+
+      expect(svc.checkAndCreateBounties()).toHaveLength(0);
+      expect(svc.listBounties()).toHaveLength(0);
+    });
+
+    it("stays off for any options value other than an explicit true", () => {
+      const loose = new BountyService({ autoCreateTreasuryBounties: "yes" as unknown as boolean });
+      loose.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 1000, estimatedFrequency: "monthly" }));
+
+      expect(loose.checkAndCreateBounties()).toHaveLength(0);
+    });
+  });
+
+  describe("auto-bounty creation (explicit opt-in, tests/demos only)", () => {
+    beforeEach(() => {
+      svc = new BountyService({ autoCreateTreasuryBounties: true });
+    });
+
+    it("marks every auto-created bounty unfunded: no treasury backs it", () => {
+      svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 1000, estimatedFrequency: "monthly" }));
+
+      const created = svc.checkAndCreateBounties();
+      expect(created).toHaveLength(1);
+      expect(created[0].fundedBy).toBe("treasury");
+      expect(created[0].fundingStatus).toBe("unfunded");
+    });
+
     it("should auto-create bounty when 3+ requesters want the same capability", () => {
       svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "ebw", estimatedJobValue: 100, estimatedFrequency: "monthly" }));
       svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "ebw", estimatedJobValue: 100, estimatedFrequency: "monthly" }));
@@ -514,7 +555,8 @@ describe("BountyService", () => {
   // ── Full Lifecycle ──────────────────────────────────────────────
 
   describe("full lifecycle", () => {
-    it("should complete demand -> auto-bounty -> claim -> verify -> pay", () => {
+    it("should complete demand -> auto-bounty -> claim -> verify -> pay (demo opt-in; moves no money)", () => {
+      svc = new BountyService({ autoCreateTreasuryBounties: true });
       // Step 1: Multiple requesters submit demand for "cryo-em"
       svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 500, estimatedFrequency: "monthly" }));
       svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "cryo-em", estimatedJobValue: 800, estimatedFrequency: "monthly" }));

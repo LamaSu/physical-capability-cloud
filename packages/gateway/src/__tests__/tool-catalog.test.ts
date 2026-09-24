@@ -230,7 +230,7 @@ describe("GET /api/tool-catalog/:id", () => {
 describe("POST /api/tool-catalog/bounty (type-level demand)", () => {
   beforeEach(() => _clearCatalogForTests());
 
-  it("routes a bounty to all tools matching the capability type", async () => {
+  it("returns the matching tools but claims no notification, persistence or funding", async () => {
     const app = makeApp();
     await app.inject({
       method: "POST",
@@ -258,12 +258,40 @@ describe("POST /api/tool-catalog/bounty (type-level demand)", () => {
         budgetUSD: 500,
       },
     });
-    expect(res.statusCode).toBe(201);
+    // 200, not 201: nothing is created.
+    expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.bountyId).toMatch(/^bty_/);
-    expect(body.matchingToolsNotified).toBe(2);
     expect(body.matchingTools.length).toBe(2);
+    // Two tools match, but no maintainer is contacted and nothing is stored or escrowed.
+    expect(body.matchingToolsNotified).toBe(0);
+    expect(body.notified).toBe(false);
+    expect(body.persisted).toBe(false);
+    expect(body.funded).toBe(false);
     expect(body.expiresAt).toBeDefined();
+  });
+
+  it("does not persist the bounty: its id cannot be looked up afterwards", async () => {
+    const app = makeApp();
+    await app.inject({
+      method: "POST",
+      url: "/api/tool-catalog/register",
+      payload: SAMPLE,
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/tool-catalog/bounty",
+      payload: {
+        capabilityType: "lab-automation/v1",
+        description: "Ephemeral.",
+        budgetUSD: 100,
+      },
+    });
+    const lookup = await app.inject({
+      method: "GET",
+      url: `/api/tool-catalog/${res.json().bountyId}`,
+    });
+    expect(lookup.statusCode).toBe(404);
   });
 
   it("filters by preferredMaintainers when supplied", async () => {
@@ -294,8 +322,9 @@ describe("POST /api/tool-catalog/bounty (type-level demand)", () => {
         preferredMaintainers: ["did:erc8004:0xLAMASU"],
       },
     });
-    expect(res.statusCode).toBe(201);
-    expect(res.json().matchingToolsNotified).toBe(1);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().matchingTools.length).toBe(1);
+    expect(res.json().matchingToolsNotified).toBe(0);
   });
 
   it("rejects invalid bounty payload", async () => {
