@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 
 from pcc_node.register import (
+    KernelRegistrationError,
     provision_api_key,
     register_kernel,
     register_devices,
@@ -68,11 +69,51 @@ class TestRegisterKernel:
         assert result["status"] == "registered"
 
     def test_failure(self):
+        """A non-2xx answer raises; it no longer returns an error dict.
+
+        Old: returned ``{"error": ...}``, which callers could not tell apart
+        from a registration record, so ``pcc-node start`` and the daemon both
+        reported "registered" after an HTTP 401 (incident #2984).
+        New: raises KernelRegistrationError carrying the status and body.
+        """
         cfg = NodeConfig(kernel_id="k1", kernel_name="test")
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
             mock_pcc.return_value = (400, {"error": "bad request"})
-            result = register_kernel("http://pcc", "key", cfg)
-        assert "error" in result
+            with pytest.raises(KernelRegistrationError) as err:
+                register_kernel("http://pcc", "key", cfg)
+        assert err.value.kernel_id == "k1"
+        assert err.value.status == 400
+        assert err.value.data == {"error": "bad request"}
+        assert err.value.auth_rejected is False
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_rejected_key(self, status):
+        cfg = NodeConfig(kernel_id="k1", kernel_name="test")
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (status, {"error": "unauthorized"})
+            with pytest.raises(KernelRegistrationError) as err:
+                register_kernel("http://pcc", "bad-key", cfg)
+        assert err.value.status == status
+        assert err.value.auth_rejected is True
+
+    def test_unreachable_gateway(self):
+        cfg = NodeConfig(kernel_id="k1", kernel_name="test")
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (0, {"error": "connection refused"})
+            with pytest.raises(KernelRegistrationError) as err:
+                register_kernel("http://pcc", "key", cfg)
+        assert err.value.status == 0
+        assert err.value.auth_rejected is False
+
+    @pytest.mark.parametrize("status", [0, 202, 204, 301, 400, 401, 404, 500, 503])
+    def test_only_200_or_201_counts_as_registered(self, status, caplog):
+        cfg = NodeConfig(kernel_id="k1", kernel_name="test")
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc, \
+             caplog.at_level("INFO", logger="pcc-node.register"):
+            mock_pcc.return_value = (status, {"id": "k1"})
+            with pytest.raises(KernelRegistrationError):
+                register_kernel("http://pcc", "key", cfg)
+        assert "registered on PCC" not in caplog.text
 
 
 class TestAnnounceCapabilities:

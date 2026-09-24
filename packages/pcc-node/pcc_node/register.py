@@ -16,6 +16,27 @@ from .log_capture import sign_ed25519_utf8, LogSigningRefused
 log = logging.getLogger("pcc-node.register")
 
 
+class KernelRegistrationError(RuntimeError):
+    """The gateway did not confirm the kernel registration.
+
+    Raised for any non-2xx answer, and for status 0 (gateway unreachable).
+    Callers must never report the kernel as registered after this.
+    """
+
+    def __init__(self, kernel_id, status, data):
+        self.kernel_id = kernel_id
+        self.status = status
+        self.data = data
+        super().__init__(
+            f"kernel {kernel_id} was not registered (HTTP {status}): {data}"
+        )
+
+    @property
+    def auth_rejected(self):
+        """True when the gateway rejected the API key itself."""
+        return self.status in (401, 403)
+
+
 def kernel_signing_proof_message(kernel_id):
     """The kernelId-bound registration challenge string.
 
@@ -126,7 +147,14 @@ def register_kernel(pcc_base, api_key, config):
     Returns
     -------
     dict
-        Registration response, or error dict.
+        The gateway's registration response.
+
+    Raises
+    ------
+    KernelRegistrationError
+        If the gateway did not confirm the registration (non-2xx, or
+        unreachable).  There is no error-dict return: a caller that got a
+        value back knows the kernel is registered.
     """
     payload = {
         "id": config.kernel_id,
@@ -145,11 +173,11 @@ def register_kernel(pcc_base, api_key, config):
         api_key=api_key,
     )
 
-    if status in (200, 201):
-        log.info(f"Kernel {config.kernel_id} registered on PCC")
-    else:
+    if status not in (200, 201):
         log.warning(f"Kernel registration failed (HTTP {status}): {data}")
+        raise KernelRegistrationError(config.kernel_id, status, data)
 
+    log.info(f"Kernel {config.kernel_id} registered on PCC")
     return data if isinstance(data, dict) else {"raw": data, "status": status}
 
 

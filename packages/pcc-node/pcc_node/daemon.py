@@ -24,7 +24,11 @@ from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
 from .job_executor import JobExecutor
-from .register import register_kernel, announce_capabilities
+from .register import (
+    KernelRegistrationError,
+    register_kernel,
+    announce_capabilities,
+)
 from .ws_client import PCCGatewayClient
 
 log = logging.getLogger("pcc-node.daemon")
@@ -148,6 +152,12 @@ def run_daemon(config: NodeConfig):
     ----------
     config : NodeConfig
         Fully populated node configuration (must have pcc_api_key set).
+
+    Returns
+    -------
+    bool
+        False if the daemon stopped because the gateway rejected the API key;
+        True after a normal shutdown.
     """
     running = True
 
@@ -201,13 +211,29 @@ def run_daemon(config: NodeConfig):
         log.warning("No devices found -- running in relay-only mode")
 
     # ------------------------------------------------------------------
-    # 3. Register kernel with gateway
+    # 3. Register kernel with gateway. Say "registered" only when the
+    #    gateway confirmed it. A rejected key cannot poll, report or
+    #    heartbeat either, so stop instead of retrying it every few seconds.
     # ------------------------------------------------------------------
+    registered = False
     try:
         register_kernel(config.pcc_base, config.pcc_api_key, config)
+        registered = True
         log.info(f"Kernel {config.kernel_id} registered")
+    except KernelRegistrationError as e:
+        if e.auth_rejected:
+            log.error(
+                f"Kernel {config.kernel_id} NOT registered: the gateway rejected "
+                f"the API key (HTTP {e.status}). Stopping."
+            )
+            _remove_pid()
+            return False
+        log.error(
+            f"Kernel {config.kernel_id} NOT registered (HTTP {e.status}); "
+            "jobs cannot reach this node until it is."
+        )
     except Exception as e:
-        log.warning(f"Kernel registration failed: {e}")
+        log.error(f"Kernel {config.kernel_id} NOT registered: {e}")
 
     # ------------------------------------------------------------------
     # 4. Build capabilities + announce
@@ -282,7 +308,8 @@ def run_daemon(config: NodeConfig):
     camera_cycles = max(1, config.camera_push_interval // max(1, config.poll_interval))
 
     log.info(
-        f"Daemon running. Kernel={config.kernel_id}, "
+        f"Daemon running. Kernel={config.kernel_id} "
+        f"({'registered' if registered else 'NOT registered'}), "
         f"PCC={config.pcc_base}, poll={config.poll_interval}s"
     )
 
@@ -418,3 +445,4 @@ def run_daemon(config: NodeConfig):
     except OSError:
         pass
     log.info(f"Daemon stopped. Jobs completed: {jobs_completed}")
+    return True

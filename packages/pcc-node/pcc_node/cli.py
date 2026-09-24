@@ -29,6 +29,7 @@ from .discovery import (
     DiscoveredDevice,
 )
 from .register import (
+    KernelRegistrationError,
     provision_api_key,
     register_kernel,
     register_devices,
@@ -118,6 +119,18 @@ def _maybe_prompt_diagnostics(config):
             f.write(f"mode={config.diagnostics_mode}\n")
     except OSError:
         pass
+
+
+def _registration_failure_reason(exc, pcc_base):
+    """Why the gateway did not register a kernel, in plain words."""
+    if exc.auth_rejected:
+        return (
+            f"the gateway rejected the API key (HTTP {exc.status}). "
+            "Check PCC_API_KEY or --api-key."
+        )
+    if exc.status == 0:
+        return f"the gateway at {pcc_base} could not be reached."
+    return f"the gateway answered HTTP {exc.status}."
 
 
 def _format_device(dev):
@@ -272,6 +285,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     click.echo(f"  Public key: {public_key[:16]}...")
 
     # Provision API key if missing
+    provisioned_now = False
     if not config.pcc_api_key:
         click.echo("Provisioning API key...")
         config.pcc_api_key = provision_api_key(config.pcc_base)
@@ -279,10 +293,28 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
             raise click.ClickException(
                 "Could not provision API key. Set PCC_API_KEY env var or use --api-key."
             )
+        provisioned_now = True
 
-    # Register kernel
+    # Register kernel. Nothing below may say the node is registered or accepting
+    # jobs unless the gateway confirmed the registration.
     click.echo("Registering on PCC network...")
-    register_kernel(config.pcc_base, config.pcc_api_key, config)
+    try:
+        register_kernel(config.pcc_base, config.pcc_api_key, config)
+    except KernelRegistrationError as exc:
+        saved_note = ""
+        if provisioned_now:
+            # The gateway already minted this key; keep it rather than lose it.
+            try:
+                saved_path = save_config(config, config_file)
+                saved_note = f" The new API key was saved to {saved_path}."
+            except OSError as save_err:
+                saved_note = f" The new API key could NOT be saved: {save_err}."
+        raise click.ClickException(
+            f"Kernel {config.kernel_id} was NOT registered: "
+            f"{_registration_failure_reason(exc, config.pcc_base)} "
+            f"Nothing was started.{saved_note}"
+        )
+    click.echo(f"  Kernel {config.kernel_id} registered.")
 
     # Devices reference the kernel, so register them only after the authenticated
     # kernel registration succeeds.
@@ -333,7 +365,8 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     click.echo("  Press Ctrl+C to stop.")
     click.echo("")
 
-    run_daemon(config)
+    if run_daemon(config) is False:
+        sys.exit(1)
 
 
 @main.command("discover")
@@ -374,6 +407,7 @@ def discover_cmd(subnet, register, pcc_base, api_key):
     if register:
         click.echo("Registering compatible devices with PCC...")
         registered = 0
+        failed = 0
         skipped = 0
         for nd in devices:
             cfg = device_to_adapter_config(nd)
@@ -395,14 +429,24 @@ def discover_cmd(subnet, register, pcc_base, api_key):
                 node_config.pcc_api_key = api_key
             pub_key, _ = load_or_create_keys()
             node_config.public_key = pub_key
-            register_kernel(pcc_base, api_key, node_config)
+            try:
+                register_kernel(pcc_base, api_key, node_config)
+            except KernelRegistrationError as exc:
+                failed += 1
+                click.echo(
+                    f"    NOT registered: {_registration_failure_reason(exc, pcc_base)}"
+                )
+                continue
             registered += 1
+            click.echo(f"    Registered as kernel {node_config.kernel_id}")
 
         click.echo(
             f"\nDiscovered {len(devices)} device(s), "
-            f"registered {registered} "
+            f"registered {registered}, failed {failed} "
             f"({skipped} unknown/low-confidence skipped)"
         )
+        if failed:
+            sys.exit(1)
 
 
 @main.command()
