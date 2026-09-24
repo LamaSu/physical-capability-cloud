@@ -232,6 +232,9 @@ jobs:
   # Board row N4a: the OT-2 executor start guard. Stdlib-only tests: no install step.
   scripts-python-tests:
     runs-on: ubuntu-latest
+    # Installs unpinned PyPI packages, so the token gets read-only access.
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
