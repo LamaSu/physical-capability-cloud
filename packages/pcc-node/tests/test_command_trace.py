@@ -185,7 +185,24 @@ def test_every_event_commits_the_job_kernel_and_protocol_and_hashes_itself():
         assert e["source"] == {"kernelId": KERNEL, "deviceId": DEVICE}
         assert (e["payload"]["jobId"], e["payload"]["kernelId"], e["payload"]["protocolHash"]) == (JOB, KERNEL, PROTOCOL)
         assert e["payload"]["logKind"] == "command_trace"
+        assert e["payload"]["opentronsRunId"] == RUN  # the robot's id never rides as jobId
+        assert "settlementUnitId" not in e["payload"] and "challengeNonce" not in e["payload"]
         assert e["hash"] == hash_event(e)
+
+
+def test_unit_and_challenge_are_stamped_on_every_event_when_issued():
+    unit, nonce = "0x" + "1a" * 32, "0x" + "2b" * 32
+    events = _build(settlement_unit_id=unit, challenge_nonce=nonce)
+    assert all((e["payload"]["settlementUnitId"], e["payload"]["challengeNonce"]) == (unit, nonce) for e in events)
+    assert all(e["hash"] == hash_event(e) for e in events)
+
+
+@pytest.mark.parametrize("bad", ["0x" + "AB" * 32, "0x" + "ab" * 31, "ab" * 32, 7])
+def test_malformed_unit_fields_are_refused(bad):
+    with pytest.raises(CommandTraceError, match="64 lowercase hex"):
+        _build(settlement_unit_id=bad)
+    with pytest.raises(CommandTraceError, match="64 lowercase hex"):
+        _build(challenge_nonce=bad)
 
 
 def test_changing_any_committed_field_changes_the_event_hash():
@@ -223,14 +240,14 @@ GOLDEN_EVENT = {
         "kernelId": KERNEL,
         "protocolHash": PROTOCOL,
         "logKind": "command_trace",
-        "runId": RUN,
+        "opentronsRunId": RUN,
         "volume": 100.0,
         "flowRate": 92.86,
         "note": "µL \"quoted\"",
     },
 }
-GOLDEN_EVENT_HASH = "sha256:68277e12fc6c184ef177df34d5507b5f03d6a7512aefc1ca2bee85700b148eea"
-GOLDEN_BUNDLE_HASH = "sha256:dcf85cb8829a896ac8b3f67b8990f896a96453747f4a0992ac80d8d086bbd086"
+GOLDEN_EVENT_HASH = "sha256:e148d47997822096a97b75399354b19a7048f85ae4f16de2a762dab068745418"
+GOLDEN_BUNDLE_HASH = "sha256:a48620267c3ba64bc97fee9b47fe51c0b6f4e546b8dd23722f094c95bc9e64cf"
 
 
 def test_hash_event_matches_the_typescript_golden():

@@ -10,10 +10,14 @@ into evidence that both checks downstream accept:
   :class:`~pcc_node.log_capture.LogCapture` as a kernel-signed SHA-256 chain with full
   disclosure (``rawContent`` is present, so every ``entryHash`` can be recomputed);
 * the LO-EV-9 subject binding (``verifyEvidenceSubjectBinding`` in @pcc/spec): every
-  event commits ``payload.jobId``, ``payload.kernelId`` and ``payload.protocolHash``,
-  its ``source.kernelId`` is the kernel that accepted the job, and it carries its own
+  event commits ``payload.jobId``, ``payload.kernelId`` and ``payload.protocolHash``
+  (and ``settlementUnitId`` / ``challengeNonce`` when the gateway assigned them), its
+  ``source.kernelId`` is the kernel that accepted the job, and it carries its own
   ``hash`` (``hashEvent``: sha256 over the canonical ``{type, timestamp, source,
   payload}``), so a bundle of these events binds to exactly one job.
+
+``payload.jobId`` is always the PCC job id (evidence's reserved-field rule, bus #3219).
+The robot's own run id travels as ``payload.opentronsRunId``.
 
 This is a pure producer. Fetching is injected, and nothing here signs a bundle or talks
 to the gateway. Input that is incomplete fails closed with :class:`CommandTraceError`:
@@ -22,6 +26,7 @@ type or a time, or a duplicate id. A trace that silently drops commands would pr
 run the robot did not perform.
 """
 
+import re
 from urllib.parse import quote
 
 from .log_capture import canonicalize, sha256_hex
@@ -31,6 +36,8 @@ EVENT_TYPE = "log_hash_chain_entry"
 OT2_API_VERSION = "2"
 DEFAULT_PAGE_LENGTH = 200
 MAX_COMMANDS = 100_000
+# LO-EV-9 unit fields: 0x + 64 lowercase hex (a bytes32), as the gateway issues them.
+_UNIT_FIELD = re.compile(r"^0x[0-9a-f]{64}$")
 
 # The command-summary fields that are the robot's record of the run. Presentation
 # fields (links, notes) are left out so the trace does not change when they do.
@@ -128,13 +135,24 @@ def hash_bundle(events):
 
 
 def build_command_trace_events(
-    commands, capture, *, job_id, kernel_id, device_id, protocol_hash, run_id
+    commands,
+    capture,
+    *,
+    job_id,
+    kernel_id,
+    device_id,
+    protocol_hash,
+    run_id,
+    settlement_unit_id=None,
+    challenge_nonce=None,
 ):
     """One chained, kernel-signed ``log_hash_chain_entry`` event per command.
 
     ``capture`` is a fresh :class:`~pcc_node.log_capture.LogCapture` for this run (its
     chain starts at GENESIS) holding the node's Ed25519 key. ``protocol_hash`` is the
-    content hash of the protocol the job committed to.
+    content hash of the protocol the job committed to. ``run_id`` is the robot's run id.
+    ``settlement_unit_id`` and ``challenge_nonce``, when the gateway issued them for the
+    unit being settled, are stamped on every event, as LO-EV-9 requires.
     """
     for name, value in (
         ("job_id", job_id),
@@ -145,8 +163,22 @@ def build_command_trace_events(
     ):
         if not isinstance(value, str) or not value:
             raise CommandTraceError(f"{name} is required")
+    for name, value in (("settlement_unit_id", settlement_unit_id), ("challenge_nonce", challenge_nonce)):
+        if value is not None and not (isinstance(value, str) and _UNIT_FIELD.match(value)):
+            raise CommandTraceError(f"{name} must be 0x + 64 lowercase hex")
     if not commands:
         raise CommandTraceError("a run with no commands has no trace")
+    binding = {
+        "jobId": job_id,
+        "kernelId": kernel_id,
+        "protocolHash": protocol_hash,
+        "logKind": LOG_KIND,
+        "opentronsRunId": run_id,
+    }
+    if settlement_unit_id is not None:
+        binding["settlementUnitId"] = settlement_unit_id
+    if challenge_nonce is not None:
+        binding["challengeNonce"] = challenge_nonce
 
     source = f"opentrons-run:{run_id}"
     events = []
@@ -163,15 +195,7 @@ def build_command_trace_events(
             redacted=False,
         )
         payload = dict(entry["payload"])
-        payload.update(
-            {
-                "jobId": job_id,
-                "kernelId": kernel_id,
-                "protocolHash": protocol_hash,
-                "logKind": LOG_KIND,
-                "runId": run_id,
-            }
-        )
+        payload.update(binding)
         event = {
             "type": EVENT_TYPE,
             "timestamp": entry["timestamp"],
