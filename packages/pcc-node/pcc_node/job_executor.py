@@ -751,11 +751,10 @@ def build_evidence_bundle(
     job_id: str,
     device: Dict,
     result: Dict,
-    events: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """Construct an evidence bundle from execution result.
 
-    The synthesized event trail branches on :func:`classify_execution_result`
+    The event trail ALWAYS comes from :func:`classify_execution_result`
     (evidence contract sec-10):
 
     * success        -> ``execution_completed``
@@ -766,8 +765,10 @@ def build_evidence_bundle(
     * unclassifiable -> no outcome event at all; the raw result is kept in
       ``bundle["result"]``
 
-    Passing ``events`` explicitly bypasses the branch entirely; that caller
-    escape hatch is unchanged.
+    There is deliberately no caller-supplied ``events`` override any more (r31
+    astra verdict item 6): it let any caller put ``execution_completed`` next
+    to a failed result, emit both terminal events, or emit types outside the
+    closed EVIDENCE_EVENT_TYPES enum.
     """
     now = datetime.now(tz=timezone.utc).isoformat()
     return {
@@ -776,7 +777,7 @@ def build_evidence_bundle(
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": events or _synthesize_events(device, result, now),
+        "events": _synthesize_events(device, result, now),
     }
 
 

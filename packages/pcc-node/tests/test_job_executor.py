@@ -187,12 +187,15 @@ class TestBuildEvidenceBundle:
         assert "execution_failed" in types
         assert "execution_completed" not in types
 
-    def test_custom_events(self):
+    def test_custom_events_are_refused(self):
+        """CHANGED (r31 astra verdict item 6).  Old: test_custom_events asserted
+        that a caller-supplied `custom_event` was emitted verbatim.  The
+        override let any caller emit types outside EVIDENCE_EVENT_TYPES, or
+        execution_completed for a failure, so it no longer exists."""
         device = {"id": "d1"}
         events = [{"type": "custom_event", "timestamp": "now", "payload": {}}]
-        bundle = build_evidence_bundle("j1", device, {}, events=events)
-        assert len(bundle["events"]) == 1
-        assert bundle["events"][0]["type"] == "custom_event"
+        with pytest.raises(TypeError):
+            build_evidence_bundle("j1", device, {}, events=events)
 
 
 # ---------------------------------------------------------------------------
@@ -1108,11 +1111,21 @@ class TestEvidenceBundleOutcomeEvents:
         bundle = build_evidence_bundle("j1", self.DEVICE, IPP_FAIL_TIMEOUT)
         assert bundle["result"] == IPP_FAIL_TIMEOUT
 
-    def test_explicit_events_override_still_bypasses_classification(self):
-        """Caller escape hatch is unchanged -- no classification is applied."""
-        events = [{"type": "custom_event", "timestamp": "now", "payload": {}}]
-        bundle = build_evidence_bundle("j1", self.DEVICE, IPP_FAIL_TIMEOUT, events=events)
-        assert bundle["events"] == events
+    def test_there_is_no_events_override_to_bypass_classification(self):
+        """CHANGED (r31 astra verdict item 6).  Old: asserted that an explicit
+        `events` list bypassed classification ("escape hatch unchanged").  The
+        reviewer's exploit -- a failed result with caller-supplied
+        execution_completed + execution_failed + custom_event -- is now a
+        TypeError, and the classified trail for the same result has no
+        completion."""
+        events = [{"type": "execution_completed"}, {"type": "execution_failed"},
+                  {"type": "custom_event"}]
+        with pytest.raises(TypeError):
+            build_evidence_bundle("j1", self.DEVICE, {"submitted": False, "error": "jam"}, events=events)
+        types = [e["type"] for e in build_evidence_bundle(
+            "j1", self.DEVICE, {"submitted": False, "error": "jam"})["events"]]
+        assert "execution_completed" not in types
+        assert "execution_failed" in types
 
 
 # ---------------------------------------------------------------------------
