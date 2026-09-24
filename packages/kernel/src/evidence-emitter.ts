@@ -131,12 +131,21 @@ export class EvidenceEmitter {
 
     // Every event names its job, and its unit when the step has one, inside the
     // hashed payload: LO-EV-9 and the oracle bind each event, not the bundle.
-    // An adapter may pre-fill a field, but never with another job or unit.
+    // An adapter may pre-fill a field, but never with another job or unit, and
+    // never with a unit the step was not given: the unit fields are reserved
+    // for the binding.
     const payload: Record<string, unknown> = { ...((rawEvent.payload ?? {}) as Record<string, unknown>) };
     const commit: Record<string, string> = {
       jobId,
       ...(stepEv.unit ? { settlementUnitId: stepEv.unit.settlementUnitId, challengeNonce: stepEv.unit.challengeNonce } : {}),
     };
+    if (!stepEv.unit) {
+      for (const field of ["settlementUnitId", "challengeNonce"]) {
+        if (payload[field] !== undefined) {
+          throw new Error(`event payload.${field} is reserved for the step's unit, and this step has none`);
+        }
+      }
+    }
     for (const [field, value] of Object.entries(commit)) {
       if (payload[field] !== undefined && payload[field] !== value) {
         throw new Error(`event payload.${field} ${String(payload[field])} does not match the step's ${value}`);

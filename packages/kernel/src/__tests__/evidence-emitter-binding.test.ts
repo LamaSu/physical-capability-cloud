@@ -61,6 +61,17 @@ describe("EvidenceEmitter commits the job (and unit) on every event", () => {
     );
     expect(() => emitter.registerStep(JOB, "s2", 1, { settlementUnitId: "unit-3", challengeNonce: NONCE })).toThrow();
   });
+
+  it("refuses a unit field on a step that has no unit (the fields are reserved for the binding)", async () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 1);
+    for (const prefill of [{ settlementUnitId: U }, { challengeNonce: NONCE }]) {
+      await expect(emitter.addEvent(JOB, "s1", raw("execution_completed", prefill))).rejects.toThrow(/reserved/);
+    }
+    // The step's own unit, pre-filled with the same value, is still fine.
+    emitter.registerStep(JOB, "s2", 1, { settlementUnitId: U, challengeNonce: NONCE });
+    await expect(emitter.addEvent(JOB, "s2", raw("execution_completed", { settlementUnitId: U }))).resolves.toBeDefined();
+  });
 });
 
 describe("the IPP print path now produces a bundle that binds its PCC job", () => {
