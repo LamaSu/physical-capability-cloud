@@ -30,7 +30,23 @@ import { compileEconomics } from "./compile.js";
 import { cmpStr } from "./hash.js";
 import { snapshotJson } from "./input.js";
 import type { CaptureClassId } from "./rates.js";
-import { EconomicAgreementSchema, ZERO_ADDRESS, type Authority, type IntendedUse, type License } from "./types.js";
+import { z } from "zod";
+import { RateScheduleSchema } from "../types/rate-schedule.js";
+import { CAPTURE_CLASS_IDS } from "./rates.js";
+import {
+  AddressSchema,
+  AmountSchema,
+  AuthoritySchema,
+  EconomicAgreementSchema,
+  IdSchema,
+  IntendedUseSchema,
+  LicenseSchema,
+  MAX_FEE_BPS,
+  ZERO_ADDRESS,
+  type Authority,
+  type IntendedUse,
+  type License,
+} from "./types.js";
 import { verifyAcceptedAgreement, type AcceptedAgreementHashes } from "./verify.js";
 
 /**
@@ -114,11 +130,14 @@ export interface NetSplitterInput {
 }
 
 export const BIND_REFUSAL_CODES = [
+  "SERVER_FACTS_INVALID",
+  "PLAN_UNITS_INVALID",
   "SCHEMA_INVALID",
   "AGREEMENT_HASH_MISMATCH",
   "FEE_MISMATCH",
   "CURRENCY_MISMATCH",
   "AS_OF_OUT_OF_WINDOW",
+  "OFFER_EXPIRED",
   "USE_MISMATCH",
   "LICENSE_NOT_REGISTERED",
   "LICENSE_MISMATCH",
@@ -135,6 +154,60 @@ export const BIND_REFUSAL_CODES = [
 export type BindRefusalCode = (typeof BIND_REFUSAL_CODES)[number];
 
 export const DEFAULT_MAX_AGREEMENT_AGE_SECONDS = 86_400;
+
+const SafeTimeSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+
+/**
+ * The server facts, checked at runtime. TypeScript types do not survive to runtime: a missing or NaN
+ * clock would otherwise make every time comparison false and skip the check (coord-watch #360 P1).
+ * Malformed facts refuse every split (SERVER_FACTS_INVALID); they never throw and are never skipped.
+ */
+export const ServerEconomicsFactsSchema = z
+  .object({
+    feeBps: z.number().int().min(0).max(MAX_FEE_BPS),
+    feeRecipient: AddressSchema,
+    currency: z.object({ code: z.string().regex(/^[A-Z0-9]{2,12}$/), decimals: z.number().int().min(0).max(36) }).strict(),
+    now: SafeTimeSchema,
+    maxAgreementAgeSeconds: SafeTimeSchema.optional(),
+    intendedUse: IntendedUseSchema,
+    licenses: z.array(LicenseSchema).max(1024),
+    parties: z
+      .array(z.object({ partyId: IdSchema, payTo: AddressSchema }).strict())
+      .max(4096)
+      .refine((ps) => new Set(ps.map((p) => p.partyId)).size === ps.length, "a party is registered twice"),
+    unitFacts: z.record(
+      z
+        .object({
+          components: z.array(z.object({ ref: IdSchema, uses: AmountSchema }).strict()).max(64),
+          measures: z.array(z.object({ key: IdSchema, value: AmountSchema }).strict()).max(64),
+        })
+        .strict(),
+    ),
+    schedules: z.array(RateScheduleSchema).max(64),
+    rateFacts: z
+      .object({
+        jobsPerDay: SafeTimeSchema.nullable().optional(),
+        captureClass: z.enum(CAPTURE_CLASS_IDS).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+    forbiddenRecipients: z.array(AddressSchema).max(64),
+    authorityFloor: AuthoritySchema.optional(),
+  })
+  .strict();
+
+function validPlanUnits(units: unknown): units is readonly PlanSplitUnit[] {
+  if (!Array.isArray(units)) return false;
+  return units.every(
+    (u: unknown) =>
+      typeof u === "object" &&
+      u !== null &&
+      typeof (u as PlanSplitUnit).nodeId === "string" &&
+      typeof (u as PlanSplitUnit).payoutAddress === "string" &&
+      /^0x[0-9a-fA-F]{40}$/.test((u as PlanSplitUnit).payoutAddress) &&
+      (["quote", "g", "f", "n"] as const).every((k) => typeof (u as PlanSplitUnit)[k] === "bigint" && (u as PlanSplitUnit)[k] >= 0n),
+  );
+}
 
 /** Refusal codes read `economics:<CODE>[:<detail>]`, bounded, so the seam can record them verbatim. */
 function refuse(code: BindRefusalCode, detail?: string): PlanSplitResult {
@@ -169,12 +242,22 @@ export function agreementUnitGross(agreement: unknown): { ok: true; gross: Recor
 }
 
 export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
-  // Snapshot everything now, so a caller mutating its objects later cannot change a decision.
-  const server = structuredClone(input.server);
-  const accepted = input.accepted === null ? null : { ...input.accepted };
-  const agreementCopy = snapshotJson(input.agreement);
+  // Snapshot everything now, so a caller mutating its objects later cannot change a decision. Reading
+  // never throws; malformed facts refuse every call below.
+  const serverCopy = snapshotJson((input as { server?: unknown } | null)?.server);
+  const serverParsed = serverCopy.ok ? ServerEconomicsFactsSchema.safeParse(serverCopy.value) : null;
+  const acceptedRaw = (input as { accepted?: unknown } | null)?.accepted;
+  const acceptedCopy = acceptedRaw === null ? null : snapshotJson(acceptedRaw);
+  const agreementCopy = snapshotJson((input as { agreement?: unknown } | null)?.agreement);
 
   return (units) => {
+    if (serverParsed === null || !serverParsed.success) {
+      const why = serverParsed?.success === false ? serverParsed.error.issues[0]?.path.join(".") : "unreadable";
+      return refuse("SERVER_FACTS_INVALID", why || "(root)");
+    }
+    const server = serverParsed.data;
+    if (!validPlanUnits(units)) return refuse("PLAN_UNITS_INVALID");
+    const accepted = acceptedCopy === null ? null : acceptedCopy.ok ? (acceptedCopy.value as AcceptedAgreementHashes) : ({} as AcceptedAgreementHashes);
     const parsed = agreementCopy.ok ? EconomicAgreementSchema.safeParse(agreementCopy.value) : null;
     if (parsed === null || !parsed.success) return refuse("SCHEMA_INVALID");
     const ag = parsed.data;
@@ -194,6 +277,8 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
     // asOf decides which licenses are in force and which rate a schedule gives: a server moment only.
     const maxAge = server.maxAgreementAgeSeconds ?? DEFAULT_MAX_AGREEMENT_AGE_SECONDS;
     if (ag.asOf > server.now || ag.asOf < server.now - maxAge) return refuse("AS_OF_OUT_OF_WINDOW", String(ag.asOf));
+    // The offer deadline is judged at the server's actual time, never at the agreement's own asOf.
+    if (ag.terms.acceptBy !== null && server.now > ag.terms.acceptBy) return refuse("OFFER_EXPIRED", String(ag.terms.acceptBy));
 
     // The composer does not get to describe its own use to the licenses it is checked against.
     const serverUse = { ...server.intendedUse, modifies: [...server.intendedUse.modifies].sort(cmpStr) };
@@ -254,6 +339,16 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
     if (!compiled.ok) {
       const codes = [...new Set(compiled.refusals.map((r) => r.code))].sort();
       return refuse("COMPILE_REFUSED", codes.join(","));
+    }
+
+    // Every party the compile pays, not only those a license names, is paid at its registry address
+    // (coord-watch #360 P1): a residual, fixed or split recipient the registry does not know, or knows at
+    // another address, is refused.
+    const paid = new Set(compiled.units.flatMap((u) => u.legs.flatMap((l) => l.partyIds)));
+    for (const partyId of [...paid].sort(cmpStr)) {
+      const registered = registeredPayTo.get(partyId);
+      if (registered === undefined) return refuse("PARTY_NOT_REGISTERED", partyId);
+      if (agreedPayTo.get(partyId) !== registered) return refuse("PARTY_MISMATCH", partyId);
     }
 
     const compiledByRef = new Map(compiled.units.map((u) => [u.unitRef, u] as const));

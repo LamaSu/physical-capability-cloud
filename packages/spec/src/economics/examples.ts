@@ -20,25 +20,30 @@ function openGrants(): License["grants"] {
   return { commercialUse: true, compose: true, resell: true, modify: false, fieldsOfUse: ["*"], regions: ["*"] };
 }
 
-const baseUse: EconomicAgreement["use"] = {
-  commercial: true,
-  composite: false,
-  resell: false,
-  fieldOfUse: "*",
-  region: "US",
-  modifies: [],
-  outbound: { class: "proprietary", shareAlikeTag: null },
-};
+/** Fresh objects on every call: no two built agreements share a nested object a caller could mutate. */
+function baseUse(): EconomicAgreement["use"] {
+  return {
+    commercial: true,
+    composite: false,
+    resell: false,
+    fieldOfUse: "*",
+    region: "US",
+    modifies: [],
+    outbound: { class: "proprietary", shareAlikeTag: null },
+  };
+}
 
-const common = {
-  schema: "pcc.economic-agreement.v1" as const,
-  version: 1,
-  supersedes: null,
-  asOf: AS_OF,
-  currency: { code: "USDC", decimals: 6 },
-  fee: { feeBps: PROTOCOL_FEE_BPS, feeRecipient: PCC_TREASURY },
-  terms: { acceptBy: ACCEPT_BY, changePolicy: "new-version-required" as const },
-};
+function common() {
+  return {
+    schema: "pcc.economic-agreement.v1" as const,
+    version: 1,
+    supersedes: null,
+    asOf: AS_OF,
+    currency: { code: "USDC", decimals: 6 },
+    fee: { feeBps: PROTOCOL_FEE_BPS, feeRecipient: PCC_TREASURY },
+    terms: { acceptBy: ACCEPT_BY, changePolicy: "new-version-required" as const },
+  };
+}
 
 // ── 1. A spare printer earns, and the kit it runs on earns a royalty ─────────
 
@@ -73,7 +78,7 @@ export function exampleSparePrinter(): EconomicAgreement {
     },
   };
   return {
-    ...common,
+    ...common(),
     agreementId: "ex1-spare-printer",
     payer: "dana",
     parties: [
@@ -134,7 +139,7 @@ export function exampleSparePrinter(): EconomicAgreement {
         authority: "registry-anchored",
       },
     ],
-    use: { ...baseUse, fieldOfUse: "3d-printing" },
+    use: { ...baseUse(), fieldOfUse: "3d-printing" },
   };
 }
 
@@ -153,7 +158,7 @@ export function examplePrintAndMail(): EconomicAgreement {
   const addrCheck = "method:address-verify@1";
   const addrFee = { kind: "per_use" as const, rate: "250000", per: { component: addrCheck }, cap: null };
   return {
-    ...common,
+    ...common(),
     agreementId: "ex2-print-and-mail",
     payer: "buyer",
     parties: [
@@ -276,7 +281,7 @@ export function examplePrintAndMail(): EconomicAgreement {
         authority: "registry-anchored",
       },
     ],
-    use: { ...baseUse, composite: true, resell: true, fieldOfUse: "document.print-and-mail" },
+    use: { ...baseUse(), composite: true, resell: true, fieldOfUse: "document.print-and-mail" },
   };
 }
 
@@ -290,7 +295,7 @@ export function examplePrintAndMail(): EconomicAgreement {
 export function exampleGuildRepair(): EconomicAgreement {
   const service = "service:appliance-repair@1";
   return {
-    ...common,
+    ...common(),
     agreementId: "ex3-guild-repair",
     payer: "homeowner",
     parties: [
@@ -372,7 +377,7 @@ export function exampleGuildRepair(): EconomicAgreement {
         authority: "counterparty-accepted",
       },
     ],
-    use: { ...baseUse, fieldOfUse: "appliance-repair" },
+    use: { ...baseUse(), fieldOfUse: "appliance-repair" },
   };
 }
 
@@ -395,7 +400,7 @@ export function exampleLabAssay(): EconomicAgreement {
     { party: "dataset-b", weight: 1200, role: "dataset-contributor" as const, subject: "dataset:chromatograms-b" },
   ];
   return {
-    ...common,
+    ...common(),
     agreementId: "ex4-lab-assay",
     payer: "client",
     parties: [
@@ -508,7 +513,7 @@ export function exampleLabAssay(): EconomicAgreement {
         authority: "counterparty-accepted",
       },
     ],
-    use: { ...baseUse, fieldOfUse: "hplc" },
+    use: { ...baseUse(), fieldOfUse: "hplc" },
   };
 }
 
@@ -524,7 +529,7 @@ export function exampleLabAssay(): EconomicAgreement {
 export function exampleDeckMilestones(): EconomicAgreement {
   const plan = "plan:deck-12x16@1";
   return {
-    ...common,
+    ...common(),
     agreementId: "ex5-deck-milestones",
     payer: "homeowner",
     parties: [
@@ -609,7 +614,7 @@ export function exampleDeckMilestones(): EconomicAgreement {
         authority: "counterparty-accepted",
       },
     ],
-    use: { ...baseUse, fieldOfUse: "construction" },
+    use: { ...baseUse(), fieldOfUse: "construction" },
   };
 }
 
@@ -623,7 +628,7 @@ export function exampleDeckMilestones(): EconomicAgreement {
 export function exampleIncompatibleLicense(): EconomicAgreement {
   const dataset = "dataset:weld-defects@1";
   return {
-    ...common,
+    ...common(),
     agreementId: "ex6-incompatible",
     payer: "factory",
     parties: [
@@ -663,7 +668,7 @@ export function exampleIncompatibleLicense(): EconomicAgreement {
         authority: "registry-anchored",
       },
     ],
-    use: { ...baseUse, composite: true, fieldOfUse: "weld-inspection" },
+    use: { ...baseUse(), composite: true, fieldOfUse: "weld-inspection" },
   };
 }
 

@@ -23,6 +23,7 @@ export const REFUSAL_CODES = {
   ECONOMICS_UNDECIDED_OD4: "structure",
   INVALID_BOUNDS: "structure",
   RATE_PIN_MISMATCH: "structure",
+  RATE_UNVERIFIED: "structure",
   TOO_MANY_ALLOCATIONS: "structure",
   // rights
   RIGHTS_UNKNOWN: "rights",
@@ -31,7 +32,6 @@ export const REFUSAL_CODES = {
   RIGHTS_INCOMPATIBLE: "rights",
   LICENSE_PAYMENT_MISSING: "rights",
   LICENSE_PAYMENT_UNMATCHED: "rights",
-  RATE_UNVERIFIED: "rights",
   // money
   GROSS_OUT_OF_RANGE: "money",
   UNKNOWN_MEASURE: "money",

@@ -40,6 +40,14 @@ describe("golden example agreements", () => {
       if (!r.ok) throw new Error(`${t.templateId}: ${JSON.stringify(r.refusals)}`);
       expect(r.agreementHash).toBe((golden.agreements as Record<string, Golden>)[r.agreementId]!.agreementHash);
       expect(t.build()).not.toBe(t.build()); // a fresh copy each time
+      // ...all the way down: mutating one build never changes another (a shared `terms` once leaked).
+      const a = t.build();
+      a.terms.acceptBy = 1;
+      a.use.modifies.push("x");
+      a.fee.feeBps = 999;
+      expect(t.build().terms.acceptBy).not.toBe(1);
+      expect(t.build().use.modifies).not.toContain("x");
+      expect(t.build().fee.feeBps).not.toBe(999);
     }
   });
 
