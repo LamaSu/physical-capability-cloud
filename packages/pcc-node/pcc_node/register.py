@@ -192,6 +192,14 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
     Each device type maps to one or more capabilities.  Announcements are
     optionally signed with the node's Ed25519 key.
 
+    The announcement goes to the kernel HEARTBEAT (``POST
+    /api/kernels/<id>/heartbeat``), the route that actually writes the
+    capability catalog.  ``POST /api/kernels/<id>/capabilities`` is a stub
+    that answers ``acknowledged`` and stores nothing, so a node registered
+    through it stayed undiscoverable (bus #2622 item 3).  Only capability
+    types are sent: the raw device dicts (URLs, and credentials such as an
+    OctoPrint ``api_key``) never leave the node.
+
     Parameters
     ----------
     pcc_base : str
@@ -214,23 +222,20 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
         "mdns": ["network-instrument"],
     }
 
-    capabilities = []
+    slugs = []
     for dev in devices:
         dtype = dev.get("type", "")
-        slugs = cap_map.get(dtype, [dtype] if dtype else [])
-        for slug in slugs:
-            capabilities.append({
-                "slug": slug,
-                "device": dev,
-            })
+        for slug in cap_map.get(dtype, [dtype] if dtype else []):
+            if slug not in slugs:
+                slugs.append(slug)
 
-    if not capabilities:
+    if not slugs:
         log.info("No capabilities to announce")
         return
 
     announcement = {
         "kernelId": kernel_id,
-        "capabilities": [c["slug"] for c in capabilities],
+        "capabilities": slugs,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -239,25 +244,30 @@ def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):
         signature = sign_announcement(announcement, secret_key)
 
     payload = {
-        **announcement,
+        "status": "online",
+        "capabilities": [{"type": slug} for slug in slugs],
+        "timestamp": announcement["timestamp"],
         "signature": signature,
-        "devices": [c["device"] for c in capabilities],
     }
 
     status, data = pcc_request(
-        "POST", f"/api/kernels/{kernel_id}/capabilities",
+        "POST", f"/api/kernels/{kernel_id}/heartbeat",
         body=payload,
         base_url=pcc_base,
         api_key=api_key,
     )
 
-    if status in (200, 201):
-        log.info(
-            f"Announced {len(capabilities)} capabilities: "
-            f"{', '.join(c['slug'] for c in capabilities)}"
+    if status not in (200, 201):
+        log.warning(f"Capability announcement failed (HTTP {status}): {data}")
+        return
+    received = data.get("capabilitiesReceived") if isinstance(data, dict) else None
+    if isinstance(received, int) and not isinstance(received, bool) and received < len(slugs):
+        log.warning(
+            "Capability announcement: the gateway recorded %d of %d capabilities (%s)",
+            received, len(slugs), ", ".join(slugs),
         )
     else:
-        log.warning(f"Capability announcement failed (HTTP {status}): {data}")
+        log.info(f"Announced {len(slugs)} capabilities: {', '.join(slugs)}")
 
 
 def send_heartbeat(pcc_base, api_key, kernel_id, status_str="online"):

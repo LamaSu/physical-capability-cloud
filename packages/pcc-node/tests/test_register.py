@@ -76,14 +76,46 @@ class TestRegisterKernel:
 
 
 class TestAnnounceCapabilities:
+    def _body(self, mock_pcc):
+        return mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
+
     def test_with_opentrons(self):
         devices = [{"type": "opentrons", "url": "http://localhost:31950"}]
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (200, {})
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 3})
             announce_capabilities("http://pcc", "key", "k1", devices)
         mock_pcc.assert_called_once()
-        body = mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
-        assert "liquid-handler" in body["capabilities"]
+        assert mock_pcc.call_args[0][1] == "/api/kernels/k1/heartbeat"
+        types = [c["type"] for c in self._body(mock_pcc)["capabilities"]]
+        assert "liquid-handler" in types
+
+    def test_never_uses_the_store_nothing_announce_stub(self):
+        """Bus #2622 item 3: /api/kernels/<id>/capabilities acknowledges and
+        stores nothing; a node announced through it stayed undiscoverable."""
+        devices = [{"type": "octoprint", "url": "http://10.0.0.20:5000"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 2})
+            announce_capabilities("http://pcc", "key", "k1", devices)
+        paths = [call[0][1] for call in mock_pcc.call_args_list]
+        assert "/api/kernels/k1/capabilities" not in paths
+
+    def test_device_credentials_never_leave_the_node(self):
+        devices = [{"type": "octoprint", "url": "http://10.0.0.20:5000", "api_key": "OCTO-SECRET-KEY"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 2})
+            announce_capabilities("http://pcc", "key", "k1", devices)
+        body = self._body(mock_pcc)
+        assert "devices" not in body
+        assert "OCTO-SECRET-KEY" not in repr(body)
+        assert "10.0.0.20" not in repr(body)
+
+    def test_a_short_acknowledgement_is_logged(self, caplog):
+        devices = [{"type": "opentrons"}]
+        with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
+            mock_pcc.return_value = (200, {"capabilitiesReceived": 0})
+            with caplog.at_level("WARNING"):
+                announce_capabilities("http://pcc", "key", "k1", devices)
+        assert "recorded 0 of 3" in caplog.text
 
     def test_empty_devices(self):
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
@@ -96,8 +128,7 @@ class TestAnnounceCapabilities:
              mock.patch("pcc_node.register.sign_announcement", return_value="deadbeef"):
             mock_pcc.return_value = (200, {})
             announce_capabilities("http://pcc", "key", "k1", devices, secret_key="ab" * 32)
-        body = mock_pcc.call_args[1].get("body") or mock_pcc.call_args[0][2]
-        assert body["signature"] == "deadbeef"
+        assert self._body(mock_pcc)["signature"] == "deadbeef"
 
 
 class TestSendHeartbeat:
