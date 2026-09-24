@@ -16,6 +16,7 @@ import { writeFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   acceptedDealDigest,
+  planHashOf,
   payoutsConserve,
   stepIdBytes32,
   type CompiledAcceptedPlan,
@@ -574,5 +575,97 @@ describe("seam read-once (the review pattern of #351/#355): every input is read 
     ];
     for (const v of variants) expect(submissionDigest(snapshotSubmission(v)!)).not.toBe(d);
     expect(submissionDigest(snapshotSubmission(agentDag())!)).toBe(d); // deterministic
+  });
+});
+
+describe("N25 through the seam: the accepted deal seals each node's execution inputs", () => {
+  const DOC = "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3";
+  /** The agent's DAG with execution JSON: which document, how many pages, by when, to whom. */
+  const withExec = (over: { print?: Record<string, unknown>; mail?: Record<string, unknown> } = {}): ExternalPlanSubmission => {
+    const d = agentDag();
+    return {
+      ...d,
+      nodes: d.nodes.map((n) =>
+        n.nodeId === "print"
+          ? { ...n, inputs: { documentHash: DOC, pages: 2, copies: 1 }, constraints: { deadline: "2026-09-30T00:00:00.000Z" }, ...over.print }
+          : { ...n, inputs: { recipient: { name: "Clerk of Court", city: "New York" } }, ...over.mail },
+      ),
+    };
+  };
+  const accept = (sub: ExternalPlanSubmission, deps = world().deps) => {
+    const r = acceptExternalPlan(sub, CTX, deps);
+    if (!r.ok) throw new Error(JSON.stringify(r.refusal));
+    return r;
+  };
+  const binding = (plan: CompiledAcceptedPlan, id: string) => plan.nodeToUnit.find((b) => b.nodeId === id)!;
+
+  it("each node's canonicalPlan carries the agent's inputs and constraints next to the server's terms; the store's recompute seals it", () => {
+    const { store, deps } = world();
+    const r = accept(withExec(), deps);
+    const print = binding(r.plan, "print");
+    expect(print.canonicalPlan.inputs).toEqual({ documentHash: DOC, pages: 2, copies: 1 });
+    expect(print.canonicalPlan.constraints).toEqual({ deadline: "2026-09-30T00:00:00.000Z" });
+    expect(print.canonicalPlan.payTo).toBe(OP_PRINT.toLowerCase()); // the server's payee, not the agent's
+    expect(print.canonicalPlan.amount).toEqual({ baseUnits: "6500000", currency: "USDC", decimals: 6 });
+    expect(binding(r.plan, "mail").canonicalPlan.constraints).toEqual({});
+    for (const b of r.plan.nodeToUnit) expect(b.planHash).toBe(planHashOf(b.canonicalPlan));
+    expect(store.consume("resv-1", CTX.principal, r.plan, NOW)).toEqual({ ok: true }); // recompute-and-compare passes
+  });
+
+  it("one input byte changes the node's planHash and the deal; absent and {} are the same deal but different submissions", () => {
+    const base = accept(withExec());
+    const other = accept(withExec({ print: { inputs: { documentHash: DOC, pages: 3, copies: 1 } } }));
+    expect(binding(other.plan, "print").planHash).not.toBe(binding(base.plan, "print").planHash);
+    expect(other.plan.acceptedDealDigest).not.toBe(base.plan.acceptedDealDigest);
+    expect(binding(other.plan, "mail").planHash).toBe(binding(base.plan, "mail").planHash);
+    const explicitEmpty = accept(withExec({ mail: { constraints: {} } }));
+    expect(explicitEmpty.plan.acceptedDealDigest).toBe(base.plan.acceptedDealDigest);
+    expect(explicitEmpty.submissionDigest).not.toBe(base.submissionDigest);
+  });
+
+  it("invalid execution JSON is refused naming every bad field in order, before any reservation is read", () => {
+    let loads = 0;
+    const { deps } = world();
+    const counting: SeamDeps = { ...deps, loadReservation: (id) => (loads++, deps.loadReservation(id)) };
+    const sub = withExec({
+      print: { inputs: { pages: Number.NaN }, constraints: [] },
+      mail: { inputs: { when: new Date(0) } },
+    });
+    const r = acceptExternalPlan(sub, CTX, counting);
+    expect(r.ok === false && r.refusal).toEqual({
+      stage: "submission",
+      reason: "invalid-execution-json",
+      fields: [
+        { nodeId: "mail", field: "inputs", reason: "unsupported-value" },
+        { nodeId: "print", field: "constraints", reason: "not-an-object" },
+        { nodeId: "print", field: "inputs", reason: "non-finite-number" },
+      ],
+    });
+    expect(r.ok === false && r.submissionDigest).toBe(submissionDigest(snapshotSubmission(sub)!));
+    expect(loads).toBe(0);
+  });
+
+  it("execution JSON is read once and owned: a flipping getter on node.inputs seals its first answer; later mutation changes nothing", () => {
+    const sub = withExec();
+    const print = sub.nodes.find((n) => n.nodeId === "print")!;
+    const first = print.inputs!;
+    let reads = 0;
+    Object.defineProperty(print, "inputs", { enumerable: true, get: () => (reads++ === 0 ? first : { documentHash: DOC, pages: 99 }) });
+    const r = accept(sub);
+    expect(reads).toBe(1);
+    expect(r.plan.acceptedDealDigest).toBe(accept(withExec()).plan.acceptedDealDigest);
+    (first as { pages: number }).pages = 42;
+    expect(binding(r.plan, "print").canonicalPlan.inputs).toEqual({ documentHash: DOC, pages: 2, copies: 1 });
+  });
+
+  it("the submission digest covers execution JSON, so a presentation cannot bind another submission's inputs", () => {
+    const d = (s: ExternalPlanSubmission) => submissionDigest(snapshotSubmission(s)!);
+    expect(d(withExec({ print: { inputs: { documentHash: DOC, pages: 3, copies: 1 } } }))).not.toBe(d(withExec()));
+    expect(d(withExec({ print: { constraints: { deadline: "2026-09-30T00:00:00.001Z" } } }))).not.toBe(d(withExec()));
+    // AS EVALUATED: invalid JSON evaluates to its refusal reason (NaN and Infinity alike, one outcome),
+    // exactly as a non-primitive where a primitive belongs evaluates to NOT_DATA; valid JSON never collides with it.
+    expect(d(withExec({ print: { inputs: { pages: Number.NaN } } }))).toBe(d(withExec({ print: { inputs: { pages: Infinity } } })));
+    expect(d(withExec({ print: { inputs: { pages: Number.NaN } } }))).not.toBe(d(withExec({ print: { inputs: { pages: 2 } } })));
+    expect(d(withExec())).toBe(d(withExec())); // deterministic
   });
 });
