@@ -4,6 +4,8 @@ import type { MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@p
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import { checkKernelOwner, requireActor, requireKernelOwner } from "../auth/kernel-owner-guard.js";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -85,7 +87,13 @@ export async function operatorRoutes(app: FastifyInstance) {
     },
   );
 
-  /** PUT /api/operator/policy/:kernelId — Update full policy */
+  /**
+   * PUT /api/operator/policy/:kernelId — Update full policy
+   *
+   * OWNER-ONLY (WP-C, N31): the policy carries `emergencyStop`, so writing it
+   * is the same authority as the e-stop routes below. requireKernelOwner runs
+   * before any write (401 / 404 / 403 not_kernel_owner).
+   */
   app.put<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
@@ -93,6 +101,7 @@ export async function operatorRoutes(app: FastifyInstance) {
       if (!policy || policy.version !== 1) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
+      if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
 
       try {
         const { db } = getStore();
@@ -118,11 +127,17 @@ export async function operatorRoutes(app: FastifyInstance) {
     },
   );
 
-  /** PATCH /api/operator/policy/:kernelId — Partial update */
+  /**
+   * PATCH /api/operator/policy/:kernelId — Partial update
+   *
+   * OWNER-ONLY (WP-C, N31), same as PUT: a patch can set or clear
+   * `emergencyStop`, so it must not be a side door around the e-stop check.
+   */
   app.patch<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
       const patch = req.body as Partial<OperatorPolicy>;
+      if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
 
       try {
         const { db } = getStore();
@@ -158,10 +173,21 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Emergency Stop / Resume
   // ═════════════════════════════════════════════════════════════════
 
+  // OWNER-ONLY (WP-C; N31 from operator-ux #2348, steward #2450). Setting or
+  // clearing a kernel's e-stop, and deciding its pending approvals, are the
+  // kernel operator's calls. Each route requires a PRESENT actor who is the
+  // kernel's recorded operator (requireKernelOwner / checkKernelOwner, over the
+  // shared auth/kernel-operator.ts predicate): 401 without an actor, 404 for an
+  // unknown kernel, 403 not_kernel_owner for anyone else. The check runs BEFORE
+  // any write, so a refusal leaves the e-stop state and the approvals untouched.
+  // (Before: kernelId came from the body with no identity or ownership check, so
+  // any key could stop or resume any kernel.)
+
   /** POST /api/operator/emergency-stop — Activate emergency stop */
   app.post("/api/operator/emergency-stop", async (req, reply) => {
-    const { kernelId, reason } = req.body as { kernelId: string; reason?: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const { kernelId, reason } = (req.body ?? {}) as { kernelId?: unknown; reason?: string };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
 
     try {
       const { db } = getStore();
@@ -202,8 +228,9 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-resume — Deactivate emergency stop */
   app.post("/api/operator/emergency-resume", async (req, reply) => {
-    const { kernelId } = req.body as { kernelId: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const { kernelId } = (req.body ?? {}) as { kernelId?: unknown };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
 
     try {
       const { db } = getStore();
@@ -297,10 +324,48 @@ export async function operatorRoutes(app: FastifyInstance) {
     }
   });
 
+  /**
+   * The approval's kernel must be owned by the request's actor (owner-only, see
+   * the e-stop note above). Returns true when authorized; otherwise the refusal
+   * (401 / 404 / 403 / 500) has been sent and nothing was written.
+   */
+  async function requireApprovalOwner(
+    req: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+    failure: string,
+  ): Promise<boolean> {
+    const actor = requireActor(req, reply);
+    if (!actor) return false;
+    let approval: { kernelId: string } | undefined;
+    try {
+      approval = getStore().db.select().from(pendingApprovals)
+        .where(eq(pendingApprovals.id, req.params.id))
+        .get();
+    } catch {
+      void reply.status(500).send({ error: failure });
+      return false;
+    }
+    if (!approval) {
+      void reply.status(404).send({ error: "Approval not found or already decided" });
+      return false;
+    }
+    const verdict = await checkKernelOwner(actor, approval.kernelId);
+    if (!verdict.ok) {
+      void reply.status(verdict.status).send({
+        error: verdict.error,
+        message: verdict.message,
+        kernelId: approval.kernelId,
+      });
+      return false;
+    }
+    return true;
+  }
+
   /** POST /api/operator/approvals/:id/approve — Approve a pending job */
   app.post<{ Params: { id: string } }>(
     "/api/operator/approvals/:id/approve",
     async (req, reply) => {
+      if (!(await requireApprovalOwner(req, reply, "Failed to approve"))) return reply;
       try {
         const { db } = getStore();
         const now = new Date().toISOString();
@@ -330,6 +395,7 @@ export async function operatorRoutes(app: FastifyInstance) {
     "/api/operator/approvals/:id/reject",
     async (req, reply) => {
       const { reason } = (req.body ?? {}) as { reason?: string };
+      if (!(await requireApprovalOwner(req, reply, "Failed to reject"))) return reply;
 
       try {
         const { db } = getStore();

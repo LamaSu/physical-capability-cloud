@@ -35,7 +35,7 @@ vi.mock("../auth/siwe-auth.js", () => ({
   resolveSession: vi.fn(),
 }));
 
-import { initStore, closeStore, getStore } from "../db.js";
+import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, sql } from "@pcc/store";
 import {
   captureRoutes,
@@ -786,6 +786,31 @@ describe("GET /api/capture/status/:verdictId", () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
+  // WP-C (N31): operator policy writes are OWNER-ONLY, because a policy carries
+  // `emergencyStop`. Old: these writes targeted kernel ids that had no kernel
+  // row (so no owner) and were accepted. New: the kernels exist and are owned by
+  // AUTH_ADDRESS, the mocked session identity that is the actor of every request
+  // in this file. A non-owner write is refused (operator-estop-ownership.test.ts).
+  beforeAll(() => {
+    for (const id of ["kernel-cvp-1", "kernel-cvp-2", "kernel-cvp-3", "kernel-cvp-4", "kernel-cvp-5"]) {
+      getRepos().kernels.insert({
+        id,
+        name: `CVP ${id}`,
+        operatorAddress: AUTH_ADDRESS,
+        location: { lat: 0, lng: 0 },
+        physicalAddress: "",
+        maxAssuranceTier: 0,
+        publicKey: `0x${"00".repeat(32)}`,
+        reputation: 0,
+        totalJobsCompleted: 0,
+        status: "online",
+        registeredAt: NOW_ISO,
+        lastHeartbeat: NOW_ISO,
+        version: "0.1.0",
+      } as never);
+    }
+  });
+
   it("accepts minCaptureClass on PATCH", async () => {
     const res = await app.inject({
       method: "PATCH",
