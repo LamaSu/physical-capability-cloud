@@ -560,7 +560,8 @@ function matchRoute(
  * about what a key holds (review R6: the redactor had its own, looser parse).
  *
  * Accepts ONLY a JSON array whose EVERY element is a string — fails CLOSED to
- * `[]` on anything else:
+ * `[]` on anything else (and, since WP-A round 5: an empty or over-4 KB value, more
+ * than 64 entries, an empty or over-64-character entry, or any duplicate):
  *   - an unparseable value (no CSV fallback — see below);
  *   - valid JSON that is not an array (e.g. "settlement", 42, {"*":true});
  *   - a mixed array like [42,"settlement"]: a malformed value grants NOTHING,
@@ -576,18 +577,30 @@ function matchRoute(
  * to a JSON array before it works again. This is intentional — no gate may
  * infer authority from an unparseable value.
  */
+/** Limits checked BEFORE and after JSON.parse (WP-A round 5, sol #2963). */
+export const MAX_SCOPE_COLUMN_CHARS = 4096;
+export const MAX_SCOPES = 64;
+export const MAX_SCOPE_CHARS = 64;
+
 export function parseScopeColumn(raw: unknown): string[] {
   if (typeof raw !== "string") return [];
+  // Size before parse: an oversized value is refused without parsing it.
+  if (raw.length === 0 || raw.length > MAX_SCOPE_COLUMN_CHARS) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return []; // unparseable serialization → no scopes
   }
-  if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string")) {
-    return parsed as string[];
+  if (!Array.isArray(parsed) || parsed.length > MAX_SCOPES) return [];
+  // Every element a non-empty string of bounded length, and no duplicates: a
+  // duplicated or oversized serialization is malformed, so it grants NOTHING.
+  const seen = new Set<string>();
+  for (const s of parsed) {
+    if (typeof s !== "string" || s.length === 0 || s.length > MAX_SCOPE_CHARS || seen.has(s)) return [];
+    seen.add(s);
   }
-  return [];
+  return parsed as string[];
 }
 
 /**

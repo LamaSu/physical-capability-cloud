@@ -180,6 +180,15 @@ export function assertMintableScopes(scopes: unknown): asserts scopes is string[
       );
     }
   }
+  // A key must be readable by the scope parser it will be checked with: at most 64
+  // scopes of at most 64 characters, no duplicates (WP-A round 5; parseScopeColumn
+  // refuses anything else, so such a key would silently hold nothing).
+  if (scopes.length > 64 || scopes.some((s) => s.length > 64) || new Set(scopes).size !== scopes.length) {
+    throw Object.assign(
+      new Error("provisionApiKey: at most 64 distinct scopes of at most 64 characters"),
+      { code: "invalid_scopes" },
+    );
+  }
 }
 
 /**
