@@ -67,7 +67,7 @@ import {
 import { provisionRoutes } from "../routes/provision.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { provisionApiKey, resolveApiKeyFromToken } from "../auth/api-key-auth.js";
-import { initStore, closeStore, getStore } from "../db.js";
+import { initStore, closeStore, getStore, getRepos } from "../db.js";
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -157,7 +157,7 @@ function insertRow(id: string, stored: unknown): void {
 
 const count = (hay: string, needle: string) => hay.split(needle).length - 1;
 
-type Reveal = { tool: string; path: string; value: string };
+type Reveal = { tool: string; path: string; value: string; boundTo?: string };
 const revealAt = (body: { revealedSecrets?: Reveal[] }, path: string) =>
   (body.revealedSecrets ?? []).find((s) => s.path === path)?.value;
 
@@ -198,9 +198,24 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
 
   it("secrets minted by the real /api/auth/provision never reach the DB, the model or GET, and are revealed exactly once", async () => {
     llm.responses.push(toolTurn("provision_api_key", "tu_1", { email: "new-operator@example.com" }), endTurn);
-    const post = await chat({ message: "sign me up" }, { ip: "198.51.100.11" });
+    const first = await chat({ message: "sign me up" }, { ip: "198.51.100.11" });
+    expect(first.statusCode).toBe(200);
+    // WP-D round 4 M1: an anonymous credential-minting call is HELD, not run, and
+    // shows whose credential it will be before anything is minted.
+    const heldBody = first.json();
+    expect(heldBody.toolCalls[0].status).toBe(202);
+    expect(heldBody.revealedSecrets).toBeUndefined();
+    expect(heldBody.pendingActions[0]).toMatchObject({ tool: "provision_api_key", bindsTo: "new-operator@example.com" });
+    expect(getRepos().apiKeys.countByOperator("new-operator@example.com")).toBe(0);
+
+    // The person confirms it on the same conversation: now it runs, and is revealed once.
+    const post = await chat(
+      { conversationId: heldBody.conversationId, confirmActionId: heldBody.pendingActions[0].actionId },
+      { ip: "198.51.100.11" },
+    );
     expect(post.statusCode).toBe(200);
     const body = post.json();
+    expect(body.confirmedAction).toMatchObject({ tool: "provision_api_key", status: 201 });
     expect(body.toolCalls[0].status).toBe(201);
 
     // The minted secrets, read from the one-time reveal. (Code without the fix has no
@@ -230,11 +245,13 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
     expect((body.revealedSecrets as Reveal[]).map((s) => s.path).sort()).toEqual(
       ["$.api_key", "$.ed25519.private_key", "$.ed25519.private_key_pkcs8_base64"],
     );
-    // What the user is shown is the real, working key.
+    // What the user is shown is the real, working key, and the reveal names whose it is (M1).
     expect(resolveApiKeyFromToken(apiKey)?.operatorId).toBe("new-operator@example.com");
-    // The model is told the user saw it once.
-    expect(llm.requests).toHaveLength(2);
-    expect(JSON.stringify(llm.requests[1])).toContain("shown to the user once");
+    for (const s of body.revealedSecrets as Reveal[]) expect(s.boundTo).toBe("new-operator@example.com");
+    // The model is told the user saw it once, and whose it is.
+    const lastRequest = JSON.stringify(llm.requests[llm.requests.length - 1]);
+    expect(lastRequest).toContain("shown to the user once");
+    expect(lastRequest).toContain("bound to new-operator@example.com");
 
     // Never replayed.
     const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${body.conversationId}` });
@@ -251,11 +268,17 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
   });
 
   it("a key minted before the model fails is still revealed once, in the 502 reply, and never stored", async () => {
-    llm.responses.push(
-      toolTurn("provision_api_key", "tu_9", { email: "second@example.com" }),
-      new Error("529 overloaded"),
+    // Held first (M1); the model then fails on the confirmation turn, after the key was minted.
+    llm.responses.push(toolTurn("provision_api_key", "tu_9", { email: "second@example.com" }), endTurn);
+    const first = await chat({ message: "sign me up" }, { ip: "198.51.100.12" });
+    expect(first.statusCode).toBe(200);
+    const heldBody = first.json();
+    expect(heldBody.pendingActions[0]).toMatchObject({ tool: "provision_api_key", bindsTo: "second@example.com" });
+    llm.responses.push(new Error("529 overloaded"));
+    const post = await chat(
+      { conversationId: heldBody.conversationId, confirmActionId: heldBody.pendingActions[0].actionId },
+      { ip: "198.51.100.12" },
     );
-    const post = await chat({ message: "sign me up" }, { ip: "198.51.100.12" });
     expect(post.statusCode).toBe(502);
     const body = post.json();
     expect(body.error).toBe("anthropic_call_failed");
