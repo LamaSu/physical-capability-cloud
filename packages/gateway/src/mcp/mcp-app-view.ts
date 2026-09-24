@@ -82,6 +82,12 @@ export const RENDER_DASHBOARD_TOOL_NAME = "render_pcc_dashboard";
 
 /** Transient composed dashboard (render_pcc_dashboard). Single-manifest view. */
 export const MCP_APP_RENDER_URI = "ui://pcc/dashboard/render";
+
+/** Phase-B CLOSED-IR render surface. Serves pcc-ir-kit.js (deterministically bundled
+ *  from the audited dashboard-ir adapter/validator/renderer/binder) — read-only, no
+ *  host bridge, no tools/call. A DISTINCT resource so B is A/B-able and re-audited
+ *  before it replaces the live render path (spec §6.5); prod HELD. */
+export const MCP_APP_RENDER_IR_URI = "ui://pcc/dashboard/render-ir";
 /** Saved artifact (save/get/fork/update_dashboard). Same single-manifest view. */
 export const MCP_APP_SAVED_URI = "ui://pcc/dashboard/saved";
 /** Search results (search_dashboards). List view. */
@@ -331,6 +337,9 @@ export function resolveGatewayAsset(relativeSegments: string[], envVarOverride?:
 }
 
 const PCC_UI_KIT_RELATIVE = ["apps", "dashboard", "public", "ui-kit", "v1", "pcc-ui.js"];
+// Phase-B closed-IR kit — GENERATED from the audited TS by scripts/build-dashboard-ir-kit.mjs
+// and committed + byte-checked (pnpm check:ir-kit). A mandatory runtime asset like pcc-ui.js.
+const PCC_IR_KIT_RELATIVE = ["apps", "dashboard", "public", "ui-kit", "v1", "pcc-ir-kit.js"];
 const DASHBOARD_MANIFEST_SCHEMA_RELATIVE = [
   "apps",
   "dashboard",
@@ -349,6 +358,7 @@ const DASHBOARD_MANIFEST_SCHEMA_RELATIVE = [
 // deep inside tools/list / resources/read at request time — which would make
 // every PCC tool undiscoverable, silently (audit finding/directive 6).
 let pccUiKitSourceCache: string | undefined;
+let pccIrKitSourceCache: string | undefined;
 let dashboardManifestSchemaCache: Record<string, unknown> | undefined;
 
 /** pcc-ui.js source — read + cached once (primed at startup, see primeMcpAppAssets). */
@@ -360,6 +370,17 @@ function readPccUiKitSource(): string {
     );
   }
   return pccUiKitSourceCache;
+}
+
+/** pcc-ir-kit.js source (Phase-B closed-IR kit) — read + cached once. */
+function readPccIrKitSource(): string {
+  if (pccIrKitSourceCache === undefined) {
+    pccIrKitSourceCache = readFileSync(
+      resolveGatewayAsset(PCC_IR_KIT_RELATIVE, "PCC_IR_KIT_PATH"),
+      "utf8",
+    );
+  }
+  return pccIrKitSourceCache;
 }
 
 /** manifest.schema.json — read + parsed + cached once (primed at startup). */
@@ -390,6 +411,11 @@ export function primeMcpAppAssets(): void {
     failures.push(`pcc-ui.js — ${error instanceof Error ? error.message : String(error)}`);
   }
   try {
+    readPccIrKitSource();
+  } catch (error) {
+    failures.push(`pcc-ir-kit.js — ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
     readDashboardManifestJsonSchema();
   } catch (error) {
     failures.push(
@@ -418,6 +444,7 @@ export function primeMcpAppAssets(): void {
 /** Test-only: drop the startup asset cache so a following prime re-reads disk. */
 export function _resetMcpAppAssetCacheForTests(): void {
   pccUiKitSourceCache = undefined;
+  pccIrKitSourceCache = undefined;
   dashboardManifestSchemaCache = undefined;
 }
 
@@ -1211,6 +1238,55 @@ function pccUiKitSourceLiteral(): string {
   return JSON.stringify(readPccUiKitSource()).replace(/<\/script/gi, "<\\/script");
 }
 
+/** pcc-ir-kit.js as a safe JS string literal for textContent injection. */
+function pccIrKitSourceLiteral(): string {
+  return JSON.stringify(readPccIrKitSource()).replace(/<\/script/gi, "<\\/script");
+}
+/** Phase-B boot: inject the self-booting closed-IR kit via a programmatic
+ *  <script>.textContent (so a literal "</script" in the bundle can't terminate the
+ *  enclosing element), under 'strict-dynamic'. The kit does its OWN read-only host
+ *  handshake + render. NO __PCC_HOST_BRIDGE__, NO __PCC_HOST_OPERATIONS__, no tools/call. */
+function dashboardIrViewBootScript(): string {
+  // The FIXED PCC API origin the kit binds against — server-authored (matches the CSP
+  // connect-src + MCP_APP_API_BASE_URL), never the manifest/parent/document origin.
+  const originLiteral = JSON.stringify(new URL(MCP_APP_API_BASE_URL).origin);
+  return `(function(){'use strict';window.__PCC_IR_ORIGIN__=${originLiteral};var s=document.createElement('script');s.textContent=${pccIrKitSourceLiteral()};document.head.appendChild(s);})();`;
+}
+/** The Phase-B closed-IR MCP App view. Neutral "waiting" state; the inlined kit boots
+ *  itself, does the read-only lifecycle, and renders the projected manifest the host
+ *  delivers in the tool-result. Same CSP/nonce/strict-dynamic shell as the A view. */
+export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
+<meta name="color-scheme" content="dark light">
+<title>PCC Dashboard</title>
+<style>
+/* PX-4 provenance (build-controlled; the design lane owns the final visual language).
+   Authority is DERIVED, never manifest-chosen: agent-authored prose is marked proposed;
+   bound data carries a text "as of" line that says "stale" when it is. */
+.pcc-src-proposed{border-left:2px dashed currentColor;padding-left:6px}
+.pcc-text.pcc-src-proposed::before,.pcc-heading.pcc-src-proposed::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}
+.pcc-fresh{font-size:12px}
+.pcc-stale,.pcc-unavail,.pcc-time-unknown{border-left:3px solid currentColor;padding-left:6px}
+.pcc-absent{font-style:italic}
+.pcc-empty{font-style:italic}
+</style>
+</head>
+<body>
+<main id="pcc-ir-root">
+  <p class="pcc-invalid">Waiting for the host to hand off a dashboard&hellip;</p>
+</main>
+<script nonce="${nonce}">
+${dashboardIrViewBootScript()}
+</script>
+</body>
+</html>`;
+}
+
 /** Escape a JSON string for safe placement inside a `<script type="application/json">`
  * data block that IS parsed by the HTML tokenizer (only `<`/`>` need neutralizing;
  * `JSON.parse` recovers them). Used only for build-time PRE-inlined manifests. */
@@ -1507,6 +1583,25 @@ export function registerMcpAppResources(
     async () => {
       assertResourceSurfaceAvailable(options);
       return uiResourceContents(MCP_APP_RENDER_URI, buildMcpAppDashboardHtml());
+    },
+  );
+
+  // Phase-B closed-IR render surface (read-only, no bridge). Registered alongside the
+  // A view; the tool-repoint that makes B the live render path is the audited promotion.
+  server.registerResource(
+    "pcc-dashboard-render-ir",
+    MCP_APP_RENDER_IR_URI,
+    {
+      title: "PCC Dashboard — closed IR (MCP App, Phase B)",
+      description:
+        "Read-only closed-IR MCP App view. Renders the projected DashboardManifest from the tool " +
+        "result's structuredContent through the audited dashboard-ir adapter + validator + renderer " +
+        "(pcc-ir-kit.js, deterministically bundled from the audited TS). No host bridge; no write actions.",
+      mimeType: MCP_APP_MIME_TYPE,
+    },
+    async () => {
+      assertResourceSurfaceAvailable(options);
+      return uiResourceContents(MCP_APP_RENDER_IR_URI, buildMcpAppIrDashboardHtml());
     },
   );
 
@@ -1832,6 +1927,64 @@ export function handleRenderDashboardTool(rawArguments: unknown) {
       {
         type: "text" as const,
         text: `Rendered a PCC dashboard: ${manifest.title} — ${sectionCount} section${sectionCount === 1 ? "" : "s"}.`,
+      },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// render_pcc_dashboard_ir — the Phase-B CLOSED-IR render tool. Same input schema,
+// but the handler PROJECTS the manifest (projectDashboardForMcpApp) server-side —
+// the "server projection for hygiene" seam — and delivers the PROJECTED manifest to
+// the B view (dashboard-ir-browser-entry), whose adapter+validator are the
+// authoritative boundary. Delivering the RAW manifest to B would fail-closed on
+// legitimate action/form/approval windows, since the closed adapter expects the
+// projected (stripped) shape. Additive: exists ALONGSIDE render_pcc_dashboard; the
+// repoint that makes B the default render path is a later gated change.
+// ---------------------------------------------------------------------------
+export const RENDER_IR_DASHBOARD_TOOL_NAME = "render_pcc_dashboard_ir";
+
+export function buildRenderIrDashboardTool(): Tool {
+  return {
+    name: RENDER_IR_DASHBOARD_TOOL_NAME,
+    description:
+      "Compose a live PCC dashboard rendered through the closed, PCC-owned IR (read-only). Pass a " +
+      "DashboardManifest; it renders as an interactive MCP App via the audited closed-IR render path.",
+    inputSchema: readDashboardManifestJsonSchema() as unknown as Tool["inputSchema"],
+    outputSchema: RENDER_OUTPUT_SCHEMA as unknown as Tool["outputSchema"],
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: MCP_APP_RENDER_IR_URI } },
+  };
+}
+
+export function handleRenderIrDashboardTool(rawArguments: unknown) {
+  const parsed = DashboardManifestSchema.safeParse(rawArguments);
+  if (!parsed.success) {
+    const detail = parsed.error.errors
+      .map((e) => `${e.path.length ? e.path.join(".") : "(root)"}: ${e.message}`)
+      .join("; ");
+    return toolErrorResult(`Invalid DashboardManifest — ${detail}`);
+  }
+  if (containsApiKey(parsed.data)) {
+    return toolErrorResult(
+      "Refused: the manifest must not contain an API key (pcc_live_/pcc_test_ substring) — it would travel with the rendered dashboard.",
+    );
+  }
+  // Server-side projection to the closed shape (the browser adapter re-derives + validates it).
+  const projected = projectDashboardForMcpApp(parsed.data);
+  if (projected === null) {
+    return toolErrorResult("Refused: the manifest could not be projected to the closed render shape.");
+  }
+  const sectionCount = Array.isArray((projected as { sections?: unknown }).sections)
+    ? ((projected as { sections: unknown[] }).sections).length
+    : 0;
+  return {
+    _meta: { ui: { resourceUri: MCP_APP_RENDER_IR_URI } },
+    structuredContent: { manifest: projected },
+    content: [
+      {
+        type: "text" as const,
+        text: `Rendered a PCC dashboard (closed IR): ${parsed.data.title} — ${sectionCount} section${sectionCount === 1 ? "" : "s"}.`,
       },
     ],
   };

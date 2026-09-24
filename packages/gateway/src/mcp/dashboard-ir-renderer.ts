@@ -1,0 +1,351 @@
+/**
+ * Phase B — closed IR RENDERER (item 7). Paints an IrDoc (from dashboardManifestToIr)
+ * into the `/mcp/apps` view. Read-only surface, no writes, no host bridge.
+ *
+ * Security contract (mirrors the adapter's; the view treats the HOST as untrusted so
+ * server validation is NOT assumed sufficient — §6.3 threat model):
+ *  - IN-BROWSER re-validation: `bootIrView` runs the injected `validateIr` on the doc
+ *    BEFORE painting; an invalid doc paints a fixed inert notice and nothing else.
+ *  - FROZEN painter dispatch: node.type selects a painter from an Object.freeze'd map
+ *    of exactly the 14 catalog types. A doc can never name a painter/handler/tag.
+ *  - TEXT-ONLY SINKS: every string reaches the DOM through `textContent` only. This
+ *    module never references `innerHTML`/`insertAdjacentHTML`/`outerHTML` — untrusted
+ *    prose (all manifest text + fetched values) can only ever be inert text.
+ *  - SCHEMA-VALIDATED DYNAMIC ROWS: fetched list rows/stat scalars are read ONLY via
+ *    the doc's declared own-property selectors; anything else is dropped.
+ *  - NO EFFECTS: no fetch of non-GET, no host tools/call, no __PCC_HOST_BRIDGE__/
+ *    __PCC_HOST_OPERATIONS__. Data binding is GET-only and injected (item 8 wires it).
+ *
+ * Written self-contained (siblings-by-name only) so it can be inlined into the view
+ * HTML via `.toString()` — the tested definition and the browser code are one source.
+ */
+import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
+import { sourceClassOf, LIST_ROW_CAP, isMoneyClaim, listFreeTextFields, WITHHELD_FIELD, recordValueText } from "./dashboard-ir.js";
+
+// Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
+// `document`/element are structurally compatible; tests pass a plain-object fake.
+// NOTE: intentionally NO innerHTML/insertAdjacentHTML member — a painter cannot set one.
+export interface RElement {
+  textContent: string;
+  className: string;
+  readonly children: RElement[];
+  setAttr(name: string, value: string): void;
+  /** Optional: hosts that can remove an attribute (the browser does; test fakes may not). */
+  removeAttr?(name: string): void;
+  appendChild(child: RElement): RElement;
+}
+export interface RDocument { createElement(tag: string): RElement; }
+
+const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fresh" | "stale" | "unavail" | "empty" | "timeUnknown" | "absent", string> = {
+  root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
+  stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
+  badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
+  plan: "pcc-plan", "form-summary": "pcc-form", "field-label": "pcc-field",
+  untrusted: "pcc-untrusted", invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
+  note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
+  fresh: "pcc-fresh", stale: "pcc-stale", unavail: "pcc-unavail", empty: "pcc-empty",
+  timeUnknown: "pcc-time-unknown", absent: "pcc-absent",
+};
+const STATE_CLASSES: readonly string[] = ["pcc-stale", "pcc-unavail", "pcc-time-unknown"];
+function withState(host: RElement, cls: string | null): void {
+  const base = host.className.split(" ").filter((c) => c !== "" && !STATE_CLASSES.includes(c)).join(" ");
+  host.className = cls ? base + " " + cls : base;
+}
+/** "2026-09-24 10:12:33Z" from a normalized ISO string (date included: a time alone is ambiguous). */
+function stamp(iso: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(iso);
+  return m ? m[1] + " " + m[2] + "Z" : "unknown time";
+}
+
+/** own-property read via a dotted selector (NO prototype traversal, NO traversal THROUGH
+ * an array). Returns the raw final value, or undefined for a proto segment / missing key
+ * / non-object step. The selector was already grammar-checked by the adapter/validator;
+ * this re-guards proto segments defensively. */
+function readOwnPath(obj: unknown, sel: string): unknown {
+  let cur: unknown = obj;
+  for (const seg of sel.split(".")) {
+    if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return undefined;
+    if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+    if (!Object.prototype.hasOwnProperty.call(cur, seg)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+/** Scalar coercion of an own-property read. "" for anything not a plain own scalar
+ * (arrays/objects/null included) — identical behavior to the prior selector reader. */
+function readSelector(obj: unknown, sel: string): string {
+  const cur = readOwnPath(obj, sel);
+  if (typeof cur === "string") return cur;
+  if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
+  if (typeof cur === "boolean") return String(cur);
+  return "";
+}
+
+function el(doc: RDocument, cls: string, text?: string, untrusted?: boolean): RElement {
+  const n = doc.createElement("div");
+  n.className = untrusted ? cls + " " + CLS.untrusted : cls;
+  if (text !== undefined) n.textContent = text; // TEXT-ONLY sink
+  return n;
+}
+
+// ── PCC-owned fixed schema profiles (hollow-node binding) ─────────────────────────
+// A manifest supplies a bind PATH only; PCC owns the HEADING, the FIELD SET, and the
+// exact source KEY of each value. Labels are painted BEFORE any fetch; only value slots
+// are dynamic, each read from ITS ONE fixed own-property key. A manifest can therefore
+// never (a) relabel a field, (b) surface an off-schema response field (paid/verified/…),
+// or (c) mint a privileged-looking "receipt" — the settlement record is always framed
+// read-only with an explicit "not proof of payment" warning.
+const UNAVAILABLE = "—"; // em dash — honest "not available", never a partial fake
+interface SchemaField { label: string; key: string | readonly string[]; list?: boolean; bool?: boolean; required?: boolean }
+interface SchemaSpec { heading: string; note?: string; fields: readonly SchemaField[] }
+// Only the DATA-BEARING cards have a schema (a public/known-shape GET). The settlement
+// record is NOT here — it is a static pointer (see SETTLEMENT_NOTICE + the receipt painter).
+export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.freeze({
+  "capability-summary-v1": Object.freeze({
+    heading: "Capability",
+    fields: Object.freeze([
+      { label: "Name", key: "name", required: true },
+      { label: "Type", key: "type", required: true },
+      { label: "Base cost", key: "pricing.baseCost" },
+      { label: "Currency", key: "pricing.currency" },
+      { label: "Assurance tiers", key: "assuranceTiers", list: true },
+      { label: "Available", key: "available", bool: true },
+    ]),
+  }),
+  "run-summary-v1": Object.freeze({
+    heading: "Run",
+    // Dual-shape: the /status route returns top-level status/progress; the /jobs/:id detail
+    // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
+    // keys (NOT a manifest selector); first present wins.
+    fields: Object.freeze([
+      { label: "Status", key: ["status", "job.status"], required: true },
+      { label: "Progress", key: ["progress", "job.progress"] },
+    ]),
+  }),
+}) as Readonly<Record<BindSchema, SchemaSpec>>;
+
+// The settlement record is a STATIC pointer — fixed PCC text, no fetch, no data labels.
+// The endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+// completion time as `settledAt`, so any fetched "Settled at"/"Status" label under a
+// settlement heading would affirmatively assert a settlement that may never have occurred.
+// The authoritative receipt is the out-of-band Surface-B signed receipt; B only points.
+const SETTLEMENT_NOTICE = Object.freeze({
+  heading: "Settlement record (read-only)",
+  note: "Not proof of payment; verify on the authenticated PCC surface.",
+});
+
+/** Read ONE fixed schema field from fetched data. `key` is a fixed own-property selector
+ * (or an ordered list of KNOWN server shapes — first present wins); NEVER a manifest
+ * selector. `list` joins a scalar array; `bool` normalizes to Yes/No. Missing / non-scalar
+ * → the honest unavailable marker (never a partial authoritative card). */
+function readField(data: unknown, f: SchemaField): string {
+  const keys = Array.isArray(f.key) ? f.key : [f.key as string];
+  if (f.list) {
+    for (const k of keys) {
+      const arr = readOwnPath(data, k);
+      if (!Array.isArray(arr)) continue;
+      const parts: string[] = [];
+      for (const x of arr) {
+        if (typeof x === "string" && x.length > 0) parts.push(x);
+        else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
+        else if (typeof x === "boolean") parts.push(String(x));
+        // non-scalar array elements are skipped (never stringified)
+      }
+      if (parts.length) return parts.join(", ");
+    }
+    return UNAVAILABLE;
+  }
+  for (const k of keys) {
+    const v = readSelector(data, k);
+    if (v === "") continue;
+    if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
+    return recordValueText(k, v); // a record's money-state status word is qualified (#3013)
+  }
+  return UNAVAILABLE;
+}
+
+/** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the
+ * field set + order; slot[i] ← the i-th field's fixed key. Missing key → UNAVAILABLE. */
+export function bindSchemaCard(schema: BindSchema, data: unknown, slots: Array<{ textContent: string }>): boolean {
+  const spec = SCHEMA_FIELDS[schema];
+  if (!spec) return false;
+  // A payload missing a REQUIRED field is not this card's data: nothing is painted (the caller
+  // shows "unavailable"). Optional fields the payload lacks show the explicit absent marker.
+  const values = spec.fields.map((f) => readField(data, f));
+  if (spec.fields.some((f, i) => f.required && values[i] === UNAVAILABLE)) return false;
+  spec.fields.forEach((_f, i) => { const slot = slots[i]; if (slot) slot.textContent = values[i]!; });
+  return true;
+}
+
+// ── Frozen painter dispatch — exactly the 14 catalog types, immutable ─────────────
+type Painter = (doc: RDocument, node: IrNode) => RElement;
+function paintChildren(doc: RDocument, node: IrNode, into: RElement): void {
+  if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
+}
+/** Paint a fixed-schema card: PCC-owned heading + (optional) read-only warning + one
+ * (label, empty value slot) row per field. Heading and labels are FIXED PCC text (never
+ * manifest prose → not marked untrusted); only the value slots (filled from the GET by
+ * bindSchemaCard) are untrusted. The label set/order is known at paint time. */
+function paintSchemaCard(doc: RDocument, rootCls: string, schema: BindSchema): RElement {
+  const spec = SCHEMA_FIELDS[schema];
+  const e = el(doc, rootCls + " " + CLS.schemaCard);
+  e.appendChild(el(doc, CLS.heading, spec.heading));
+  if (spec.note) e.appendChild(el(doc, CLS.note, spec.note));
+  for (const f of spec.fields) {
+    const row = el(doc, CLS.row);
+    row.appendChild(el(doc, CLS.field, f.label));
+    // Default to the unavailable marker: a card whose GET never lands (auth-gated route,
+    // network failure, teardown-before-fetch) honestly shows "—", never an empty partial.
+    // bindSchemaCard overwrites on a successful fetch.
+    row.appendChild(el(doc, CLS.value, UNAVAILABLE, true));
+    e.appendChild(row);
+  }
+  return e;
+}
+const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
+  root: (d, n) => { const e = el(d, CLS.root); paintChildren(d, n, e); return e; },
+  section: (d, n) => { const e = el(d, CLS.section); paintChildren(d, n, e); return e; },
+  heading: (d, n) => el(d, CLS.heading, String(n.props?.text ?? ""), n.untrusted),
+  text: (d, n) => el(d, CLS.text, String(n.props?.text ?? ""), n.untrusted),
+  stat: (d, n) => {
+    const e = el(d, CLS.stat);
+    e.appendChild(el(d, CLS.heading, String(n.props?.label ?? ""))); // PCC-owned metric label (trusted)
+    e.appendChild(el(d, CLS.value, UNAVAILABLE, true)); // default "—" until a clean GET lands; bindScalar overwrites (fetched, untrusted)
+    return e;
+  },
+  card: (d, n) => {
+    const rootCls = CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap");
+    const schema = n.bind?.schema;
+    if (schema === "capability-summary-v1" || schema === "run-summary-v1") return paintSchemaCard(d, rootCls, schema);
+    return el(d, rootCls); // defensive: the adapter always tags a card bind with a schema now
+  },
+  receipt: (d) => { // STATIC settlement-record pointer — fixed PCC text only (no bind, no value slots, not collected)
+    const e = el(d, CLS.receipt);
+    e.appendChild(el(d, CLS.heading, SETTLEMENT_NOTICE.heading));
+    e.appendChild(el(d, CLS.note, SETTLEMENT_NOTICE.note));
+    return e;
+  },
+  list: (d) => { const e = el(d, CLS.list); return e; }, // rows appended by bindList
+  badge: (d, n) => { const e = el(d, CLS.badge, String(n.props?.text ?? ""), true); e.setAttr("data-tone", String(n.props?.tone ?? "neutral")); return e; },
+  grid: (d, n) => { const e = el(d, CLS.grid); paintChildren(d, n, e); return e; },
+  "approval-notice": (d, n) => el(d, CLS["approval-notice"], String(n.props?.notice ?? "")),
+  plan: (d) => el(d, CLS.plan, "Composition (view-only)"),
+  "form-summary": (d, n) => { const e = el(d, CLS["form-summary"]); paintChildren(d, n, e); return e; },
+  "field-label": (d, n) => el(d, CLS["field-label"], String(n.props?.label ?? ""), true),
+});
+function paintNode(doc: RDocument, node: IrNode): RElement {
+  const p = PAINTERS[node.type];
+  if (!p) { return el(doc, CLS.invalid, ""); } // frozen dispatch; unknown type → inert
+  const e = p(doc, node);
+  // PX-4 provenance: stamp the DERIVED authority class (never read from the node or the
+  // manifest). Prose → "proposed"; bound data → its registered class; constants → none.
+  const src = sourceClassOf(node);
+  if (src !== null) { e.setAttr("data-source", src); e.className = e.className + " pcc-src-" + src; }
+  return e;
+}
+
+/** PX-4 freshness marker for a BOUND node whose SOURCE stated when it read the state: sets
+ *  `data-as-of` and the stale class on the host, and writes the line into `meta` (TEXT ONLY,
+ *  readable with no stylesheet): "source read 2026-09-24 10:12:33Z" or "... · stale". `asOf`
+ *  is the source's own read time (sourceAsOf), never the receipt time. */
+export function applyFreshness(host: RElement, meta: RElement, asOf: string, stale: boolean): void {
+  host.setAttr("data-as-of", asOf);
+  withState(host, stale ? CLS.stale : null);
+  meta.className = CLS.fresh;
+  meta.textContent = "source read " + stamp(asOf) + (stale ? " · stale" : "");
+}
+
+/** The source served data but did NOT say when it read it. Receipt time is not a substitute,
+ *  so the datum is never presented as fresh: the line says so and gives the receipt time
+ *  separately. No `data-as-of` (no source time exists). */
+export function applyUnknownTime(host: RElement, meta: RElement, receivedIso: string): void {
+  if (host.removeAttr) host.removeAttr("data-as-of");
+  withState(host, CLS.timeUnknown);
+  meta.className = CLS.fresh;
+  meta.textContent = "source time not reported · received " + stamp(receivedIso);
+}
+
+/** PX-4 failure marker for a bound node that has shown NO datum yet: the read failed, or
+ *  the payload does not fit the route's schema. The view says so (TEXT ONLY: "unavailable ·
+ *  HTTP 401") instead of showing an empty authoritative view, which would read as "none":
+ *  absence is not evidence. No `data-as-of`, because nothing was observed. `why` is a fixed
+ *  reason from the binder or the painter, never response text. */
+export function applyUnavailable(host: RElement, meta: RElement, why: string): void {
+  if (host.removeAttr) host.removeAttr("data-as-of");
+  withState(host, CLS.unavail);
+  meta.className = CLS.fresh;
+  meta.textContent = "unavailable · " + why;
+}
+
+/** Paint a validated IrDoc into `mount`. Clears mount, appends title then root. */
+export function renderIrDoc(doc: RDocument, mount: RElement, ir: IrDoc): void {
+  while (mount.children.length) mount.children.pop(); // clear (test fake); browser clears via replaceChildren wrapper in bootIrView
+  mount.appendChild(paintNode(doc, ir.title));
+  mount.appendChild(paintNode(doc, ir.root));
+}
+
+/** Schema-validated dynamic ROW rendering for a list node: read ONLY the declared
+ * selectors from each fetched row via own-property traversal; drop rows that yield
+ * no title. Every field reaches the DOM via textContent. */
+export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[], path = ""): number {
+  const rowTitle = String(node.props?.rowTitle ?? "");
+  const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
+  const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
+  // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
+  const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+  const freeText = listFreeTextFields(path);
+  // Operator-authored free text inside registry rows may not state money (it renders untrusted).
+  const text = (field: string, v: string): string => (freeText.includes(field) && isMoneyClaim(v) ? WITHHELD_FIELD : v);
+  let shown = 0;
+  for (const row of rows) {
+    if (shown >= limit) break;
+    if (row === null || typeof row !== "object") continue;
+    // Every bound value passes recordValueText: a record's money-state status word is qualified (#3013).
+    const title = recordValueText(rowTitle, readSelector(row, rowTitle));
+    if (title === "") continue; // drop malformed row (no valid title)
+    const line = el(doc, CLS.row);
+    line.appendChild(el(doc, CLS.heading, text(rowTitle, title), true));
+    // A selected field the row lacks is shown as explicitly absent, never silently omitted.
+    for (const m of rowMeta) { const v = recordValueText(m, readSelector(row, m)); line.appendChild(v !== "" ? el(doc, CLS.meta, text(m, v), true) : el(doc, CLS.meta + " " + CLS.absent, "not reported")); }
+    if (statusFrom) { const st = recordValueText(statusFrom, readSelector(row, statusFrom)); line.appendChild(st !== "" ? el(doc, CLS.badge, st, true) : el(doc, CLS.badge + " " + CLS.absent, "not reported")); }
+    listEl.appendChild(line);
+    shown++;
+  }
+  if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none")); // a real empty collection says so
+  return shown;
+}
+
+/** True only if EVERY row (up to the cap) is an object carrying its title field: a partial
+ *  collection is not data (PX-4 review #2524: partial reads render unavailable). */
+export function listRowsReadable(node: IrNode, rows: unknown[]): boolean {
+  const rowTitle = String(node.props?.rowTitle ?? "");
+  for (const row of rows.slice(0, LIST_ROW_CAP)) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+    if (readSelector(row, rowTitle) === "") return false;
+  }
+  return true;
+}
+
+/** Fill a STAT value slot from a fetched object via the node's `select` — own-property,
+ * text-only. Returns the string written (for tests). (Cards/receipts bind via the fixed
+ * PCC schema profiles in bindSchemaCard, NOT a manifest select.) */
+export function bindScalar(node: IrNode, data: unknown): string {
+  const sel = node.bind?.select;
+  if (!sel) return "";
+  return recordValueText(sel, readSelector(data, sel)); // a status metric's money-state word is qualified (#3013)
+}
+
+/**
+ * Boot: validate the doc IN-BROWSER, then paint. `validate` is the injected
+ * `validateIr` (same oracle as the server). On failure, paint ONE inert notice and
+ * stop — never partial-render an unvalidated tree.
+ */
+export function bootIrView(doc: RDocument, mount: RElement, rawDoc: unknown, validate: (d: unknown) => { ok: boolean }): boolean {
+  if (!validate(rawDoc).ok) {
+    while (mount.children.length) mount.children.pop();
+    mount.appendChild(el(doc, CLS.invalid, "This dashboard could not be verified and was not rendered."));
+    return false;
+  }
+  renderIrDoc(doc, mount, rawDoc as IrDoc);
+  return true;
+}

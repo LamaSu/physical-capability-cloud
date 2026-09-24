@@ -16,8 +16,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   buildRenderDashboardTool,
+  buildRenderIrDashboardTool,
   enrichOnRampToolResult,
   handleRenderDashboardTool,
+  handleRenderIrDashboardTool,
   isMcpAppSurfaceAvailable,
   isOnRampUiTool,
   MCP_APP_SURFACE_UNAVAILABLE_MESSAGE,
@@ -27,6 +29,7 @@ import {
   registerMcpAppHttpRoute,
   registerMcpAppResources,
   RENDER_DASHBOARD_TOOL_NAME,
+  RENDER_IR_DASHBOARD_TOOL_NAME,
 } from "./mcp-app-view.js";
 import { resolveApiKeyFromToken } from "../auth/api-key-auth.js";
 import {
@@ -405,6 +408,9 @@ export async function dispatchToolCall(
   if (name === RENDER_DASHBOARD_TOOL_NAME) {
     return handleRenderDashboardTool(args);
   }
+  if (name === RENDER_IR_DASHBOARD_TOOL_NAME) {
+    return handleRenderIrDashboardTool(args);
+  }
   // Typed host-mediated operations (R4 PR2): the registry IS the allowlist and
   // the handler derives the principal + authorizes in-process. Routed BEFORE the
   // raw proxy lookup so a typed op never falls through to the pass-through relay.
@@ -465,6 +471,15 @@ export const READONLY_APP_PROXY_TOOLS: ReadonlySet<string> = new Set([
  *
  * Allowed:
  *   1. render_pcc_dashboard — pure client-side manifest render (no server effect).
+ *   1b. render_pcc_dashboard_ir — EFFECT-REVIEWED 2026-09-24 (genui 4df1e691): the same
+ *      zod validation + API-key refusal as (1), plus projectDashboardForMcpApp, a PURE
+ *      bounded projection (5000 nodes / depth 20) that fails closed on request-bearing or
+ *      credential action fields. No DB, network, token consumption, persistence or
+ *      trigger; returns the projected manifest + the B-mode ui:// URI. Stricter than (1).
+ *      Data is read client-side by the closed-IR binder (GET-only, fixed origin). GET-only is
+ *      not by itself effect-free, so every route the binder can reach carries its own effect
+ *      review in dashboard-ir.ts EFFECT_REVIEWED_READS (handler read at source; the only effect
+ *      is an env-gated funnel audit line), pinned to BIND_POLICY by a test.
  *   2. a REGISTERED typed operation with `stateChanging === false` (today only
  *      pcc.op.capability.request_quote; an unregistered id → null → denied, and a
  *      state-changing op such as job.cancel → denied even once it registers).
@@ -480,6 +495,7 @@ export function isReadOnlyAppTool(
   toolsByName: Map<string, AgentPackageTool>,
 ): boolean {
   if (name === RENDER_DASHBOARD_TOOL_NAME) return true;
+  if (name === RENDER_IR_DASHBOARD_TOOL_NAME) return true; // effect-reviewed: see (1b) above
   if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
     const policy = getOperationPolicyByToolName(name);
     return policy !== null && policy.stateChanging === false;
@@ -559,6 +575,7 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
     const tools = [
       ...pack.tools.map(toMcpTool),
       buildRenderDashboardTool(),
+      buildRenderIrDashboardTool(),
       ...typedOperationTools(),
     ];
     if (!surface.readOnly) return { tools };

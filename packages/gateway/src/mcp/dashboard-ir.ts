@@ -1,0 +1,777 @@
+/**
+ * Phase B — closed, PCC-owned render IR + adapter (read-only `/mcp/apps`).
+ * Design + sol audits (R1-R5 folded): ai/research/pcc-genui-b-closed-ir-design.md. Spec §6.
+ *
+ * Projected DashboardManifest → a closed IR (strict subset of Atelier's UiTree).
+ * Rules: PCC picks every node `type` (frozen catalog = EXACTLY what the adapter
+ * emits) + rebuilds every prop from a closed grammar; STRICT REJECTION (never
+ * strip/clamp/truncate) with exact own-key (`onlyKeys` over Reflect.ownKeys) at
+ * every level; recursive prototype rejection; governed per-kind bindings pinned to
+ * the REAL route table (exact end-anchored routes + reserved-collision guard +
+ * selector/query grammar + SSE/path identity correlation); NO actions/capability
+ * (inert ≠ safe) — effecting kinds render neutral; ALL manifest prose `untrusted`.
+ * `validateIr` is an independent whole-tree oracle that MIRRORS every adapter
+ * guarantee (same BIND_POLICY, same prop schemas, same parent/child grammar).
+ * Runtime dependency-free (type-only import) → runnable via --experimental-strip-types.
+ *
+ * NOTE (projection follow-up): metric `format` is intentionally NOT accepted here
+ * (§6.2 locked: PCC pre-formats the scalar, the IR omits `format`). The upstream
+ * projection still preserves `format`; it should be updated to drop it. Until then
+ * a metric window carrying `format` is rejected — the correct strict signal.
+ */
+import type { BoundSourceClass, DashboardManifest, RenderSourceClass } from "@pcc/spec";
+
+// Frozen catalog = the EXACT set of node types the adapter emits (nothing more).
+export const IR_NODE_TYPES = [
+  "root", "section", "heading", "text", "stat", "card", "receipt", "list",
+  "badge", "grid", "approval-notice", "plan", "form-summary", "field-label",
+] as const;
+export type IrNodeType = (typeof IR_NODE_TYPES)[number];
+const FROZEN: ReadonlySet<string> = new Set(IR_NODE_TYPES);
+export const BADGE_TONES = ["neutral", "info", "positive", "warning", "danger"] as const;
+const TONE_SET: ReadonlySet<string> = new Set(BADGE_TONES);
+const CARD_KINDS: ReadonlySet<string> = new Set(["capability", "run"]);
+const GRID_KINDS: ReadonlySet<string> = new Set(["actions-readonly"]);
+const PLAN_KINDS: ReadonlySet<string> = new Set(["composition"]);
+
+const LIM = {
+  sections: 24, windowsPerSection: 32, nodesTotal: 2000, depth: 8, inputDepth: 16,
+  str: 2000, listRows: 200, fields: 64, metaItems: 12, queryKeys: 16,
+  path: 512, select: 256, title: 400,
+  pollMinMs: 5000, pollMaxMs: 3_600_000, boundWindowsTotal: 64, // poll-amplification cap (sol R5)
+  cleanNodes: 50_000, // deepClean traversal budget — >> any legit manifest/IR, kills wide-object DoS (sol R6)
+} as const;
+
+/** The row cap for a list, whatever the manifest's `limit` (DOM-node budget). */
+export const LIST_ROW_CAP = LIM.listRows;
+
+// ── Manifest prose may not present money (PX-5 review #2504) ─────────────────────────────
+// Prose (the title, section headings, notes, action and field labels) renders as agent-authored
+// text, but text-only rendering does not establish provenance: "Payment received - verified" or
+// "1,000,000 USDC" in a note would still read as a financial fact. Money facts come ONLY from
+// PCC-owned schema cards, so prose that states an amount or a money / verification status is
+// replaced by this fixed PCC notice (adapter), and a prose node carrying such text is invalid
+// (validator). Detection folds width variants, zero-width characters and common Cyrillic/Greek
+// look-alikes before matching; it is a backstop to the visible agent-authored marking, not the
+// only line.
+export const WITHHELD_PROSE =
+  "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+const LOOKALIKE: Readonly<Record<string, string>> = {
+  "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04bb": "h", "\u0391": "A", "\u0392": "B",
+  "\u0395": "E", "\u0397": "H", "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
+  "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03a5": "Y", "\u03bf": "o", "\u03b1": "a", "\u03c1": "p",
+};
+function foldForClaims(text: string): string {
+  let t = text.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, "");
+  t = t.replace(/[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
+  return t;
+}
+const AMOUNT_RE = /[$\u20ac\u00a3\u00a5\u20bf]\s?\d|\d[\d,._]*\s?(?:usd|usdc|usdt|eurc|eur|gbp|jpy|eth|weth|btc|wbtc|dai|sol|matic|pol|cents?|dollars?)\b|\b(?:usd|usdc|usdt|eurc|eur|gbp|eth|btc|dai)\s?\d/i;
+const CLAIM_RE = /\b(?:paid|unpaid|payout|payouts|received|refund|refunded|refunds|settled|released|verified|confirmed|funded|charged|deposited|withdrawn|balance|balances|credited|debited|approved|guaranteed)\b/i;
+export function isMoneyClaim(text: string): boolean {
+  const t = foldForClaims(text);
+  return AMOUNT_RE.test(t) || CLAIM_RE.test(t);
+}
+function proseText(text: string): string { return isMoneyClaim(text) ? WITHHELD_PROSE : text; }
+
+// A bound RECORD status is the record's own word, never a payment fact: a job row can literally say
+// "settled" with nothing paid (#313; pcc-design #3013). Any value read from a field named `status`
+// (status, job.status, kernel.status) whose word is a money state gets PCC's fixed qualifier, in every
+// sink (metric, run card, list badge and list meta). Narrower than CLAIM_RE on purpose ("verified",
+// "approved" are not money states). Lookalikes, zero-width characters, fullwidth forms and camel,
+// snake or kebab joins ("SETTLED_RELEASED", "payoutPending") are folded first.
+export const RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
+const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/i;
+export function isMoneyState(value: string): boolean {
+  const t = foldForClaims(value).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[^A-Za-z0-9]+/g, " ");
+  return MONEY_STATE_RE.test(t);
+}
+export function recordValueText(field: string, value: string): string {
+  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+}
+
+// ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
+// A list may show ONLY these fields of each allowlisted collection route; a selector is never
+// "safe because it parses". Money amounts, prices and payment state are not listable: they
+// appear only in schema cards. Escrow is not a list route at all.
+// Source classes per field (PX-4 review #2524): every profile field is registry state the route
+// serves (authoritative); none is agent-generated content, so a list can never show proposed
+// content under an authoritative class. `freeText` fields are operator-authored text inside that
+// registry state: they render as untrusted text and are withheld if they state money.
+const LIST_PROFILES: Readonly<Record<string, { title: readonly string[]; meta: readonly string[]; status: readonly string[]; freeText: readonly string[] }>> = {
+  "/api/jobs": { title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], freeText: [] },
+  "/api/kernels": { title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount", "location.label"], status: ["status"], freeText: ["name", "location.label"] },
+  "/api/capabilities": { title: ["name", "id"], meta: ["id", "type", "kernelId", "location.label"], status: ["available"], freeText: ["name", "location.label"] },
+};
+/** The operator-authored free-text fields of a list route's profile ([] if none / unknown). */
+export function listFreeTextFields(path: string): readonly string[] { return LIST_PROFILES[path]?.freeText ?? []; }
+/** Shown in place of a free-text field that states money (short form of WITHHELD_PROSE). */
+export const WITHHELD_FIELD = "withheld: stated money";
+function listProfileViolation(path: string, props: Record<string, unknown>): string | null {
+  const prof = LIST_PROFILES[path];
+  if (!prof) return `no list field profile for ${path}`;
+  if (typeof props.rowTitle !== "string" || !prof.title.includes(props.rowTitle)) return `list title field not in the ${path} profile`;
+  const meta = Array.isArray(props.rowMeta) ? props.rowMeta : [];
+  for (const m of meta) if (typeof m !== "string" || !prof.meta.includes(m)) return `list meta field not in the ${path} profile`;
+  if (props.statusFrom !== undefined && (typeof props.statusFrom !== "string" || !prof.status.includes(props.statusFrom))) return `list status field not in the ${path} profile`;
+  return null;
+}
+
+// The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
+const APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
+
+// ── Governed bindings — EXACT, end-anchored routes pinned to the REAL route table ──
+// Deny-by-default. Each RegExp is a specific verified read endpoint.
+const PATH_GRAMMAR = /^\/api\/[A-Za-z0-9._~\-/]+$/; // root-relative /api; no scheme/host/query/fragment/{}
+const SSE_GRAMMAR = /^\/sse\/[A-Za-z0-9._~\-/]+$/;
+const SELECT_GRAMMAR = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/;
+const OP_ID_GRAMMAR = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/; // typed op id (discarded in B, still grammared)
+
+// ── The collision defense (sol R3-R6): an ID_SEG is one path segment that is NOT a
+// bare lowercase-alpha(-hyphen) word. PCC resource ids carry a DIGIT / underscore /
+// uppercase / 0x-prefix (uuids, cap-1, kernel_x, 0x…); the collection/status/verb
+// route NAMES that collide with a detail template — types, status, graph-stats,
+// lit-status, submit, submit-from-discovery, … — are pure lowercase-alpha(-hyphen).
+// So a `:` template matcher REJECTS THAT WHOLE CLASS by construction, robust to new
+// sibling routes, instead of depending on a hand-maintained blocklist being complete.
+const ID_SEG = "(?![a-z]+(?:-[a-z]+)*(?:/|$))[A-Za-z0-9_~.-]+";
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Compile a route template; ":" marks an ID_SEG. e.g. "/api/jobs/:/status". */
+function route(template: string): RegExp {
+  return new RegExp("^" + template.split("/").map((s) => (s === ":" ? ID_SEG : escRe(s))).join("/") + "$");
+}
+/** Same, but ":" becomes a CAPTURE group (for sse↔path id correlation). */
+function routeCap(template: string): RegExp {
+  return new RegExp("^" + template.split("/").map((s) => (s === ":" ? "(" + ID_SEG + ")" : escRe(s))).join("/") + "$");
+}
+// Secondary explicit denylist: the id-grammar above catches every pure-alpha sibling;
+// this is belt-and-suspenders for any DIGIT-bearing reserved word the grammar can't
+// (none currently) + a documented record of the known collisions found by sol.
+const RESERVED_EXACT: ReadonlySet<string> = new Set([
+  "/api/capabilities/types", "/api/capabilities/templates", "/api/capabilities/search",
+  "/api/capabilities/graph-stats", "/api/capabilities/graph-search",
+  "/api/settlement/status", "/api/settlement/epochs", "/api/settlement/flush",
+  "/api/settlement/submit", "/api/settlement/release",
+  "/api/evidence/lit-status", "/api/evidence/archive", "/api/evidence/embed", "/api/evidence/search",
+  "/api/jobs/submit", "/api/jobs/submit-from-discovery",
+  "/api/kernels/marketplace", "/api/kernels/register", "/api/escrow/chain",
+]);
+export type BindSchema = "capability-summary-v1" | "run-summary-v1";
+interface BindPolicy {
+  // Provenance (PX-4): the class, schema and freshness budget of the data this route serves.
+  // Server-owned, like the routes themselves; a manifest can never choose any of these.
+  // Bound data is only ever A (authoritative) or B (accepted), never C/D/E.
+  sourceClass: BoundSourceClass;
+  schemaId: string;
+  maxAgeMs: number; // older than this at render time => visibly stale
+  routes: RegExp[];
+  // Query parameters a manifest may pass, per exact route path. Anything else (including any
+  // credential-like name) is refused: a binding URL never carries a token (review #2504).
+  queryByRoute?: Readonly<Record<string, readonly string[]>>;
+  needsSelect?: boolean;
+  sse?: RegExp[];
+  correlate?: { pathRe: RegExp; sseRe: RegExp };
+
+  schema?: BindSchema;
+}
+const BIND_POLICY: Record<string, BindPolicy> = {
+  // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
+  // Only NON-money, non-settlement-timestamp scalar routes are allowed. REMOVED:
+  //  - /api/settlement/:, /api/escrow/: (settlement/payment STATE → "Payment received");
+  //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
+  //    manifest could label it "Payment received");
+  //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
+  // jobs/:id/status + kernels/:id expose no money amount / settlement timestamp. The real
+  // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
+  // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
+  metric: {
+    sourceClass: "authoritative", schemaId: "metric-scalar-v1", maxAgeMs: 120_000,
+    routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
+    needsSelect: true,
+  },
+  // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
+  // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
+  capability: { sourceClass: "authoritative", schemaId: "capability-summary-v1", maxAgeMs: 3_600_000, routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" }, // ID_SEG excludes types/templates/search/graph-*
+  // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
+  // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
+  // endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+  // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
+  // assert a settlement that never occurred. The authoritative receipt is the out-of-band
+  // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
+  // list: collection reads whose rows are listable ONLY through a PCC-owned field profile
+  // (LIST_PROFILES). Escrow is NOT listable: money state appears only in schema cards.
+  list: {
+    sourceClass: "authoritative", schemaId: "collection-v1", maxAgeMs: 300_000,
+    routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities")],
+    queryByRoute: {
+      "/api/jobs": ["kernelId", "status", "offset", "limit"],
+      "/api/kernels": ["status"],
+      "/api/capabilities": ["type", "offset", "limit"],
+    },
+  },
+  // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
+  // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
+  // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
+  run: {
+    sourceClass: "authoritative", schemaId: "run-summary-v1", maxAgeMs: 60_000,
+    routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
+    sse: [route("/sse/stream/job/:")],
+    correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
+    schema: "run-summary-v1",
+  },
+  // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
+};
+
+export interface IrBind { path: string; select?: string; query?: Record<string, string | number | boolean>; pollMs?: number; sse?: string; schema?: BindSchema }
+export interface IrNode { type: IrNodeType; id: string; props?: Record<string, string | number | boolean | string[]>; bind?: IrBind; children?: IrNode[]; untrusted?: true }
+export interface IrDoc { ir: "pcc-dashboard-ir/v1"; title: IrNode; root: IrNode }
+export type IrResult = { ok: true; doc: IrDoc } | { ok: false; reason: string };
+
+// ── Safe primitives (REJECT, never strip) ────────────────────────────────────────
+const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+/** Plain object whose prototype is exactly Object.prototype or null (rejects
+ * Object.create(evil), poisoned prototypes, class instances). */
+function isPlain(v: unknown): v is Record<string, unknown> {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const p = Object.getPrototypeOf(v);
+  return p === Object.prototype || p === null;
+}
+function strictStr(v: unknown, max: number = LIM.str): string | null {
+  return typeof v === "string" && v.length > 0 && v.length <= max ? v : null;
+}
+/** Own-key allowlist over ALL own keys (enumerable + non-enumerable + symbol).
+ * Rejects: any symbol own key, any string own key outside `allowed`, and any
+ * NON-ENUMERABLE own key even with an allowed name (a hidden data-shaped prop). */
+function onlyKeys(o: object, allowed: readonly string[]): boolean {
+  const set = new Set(allowed);
+  for (const k of Reflect.ownKeys(o)) {
+    if (typeof k === "symbol") return false;
+    if (!set.has(k)) return false;
+    const d = Object.getOwnPropertyDescriptor(o, k);
+    if (!d || !d.enumerable) return false;
+  }
+  return true;
+}
+const INDEX_KEY = /^(0|[1-9][0-9]*)$/;
+/** Recursively require plain objects/arrays/finite scalars and reject prototype /
+ * symbol / non-enumerable / non-index own keys ANYWHERE (over Reflect.ownKeys).
+ * BUDGETED: a shared node counter fails fast so a hostile wide/deep object cannot
+ * force full traversal before rejection (browser-side validateIr availability). */
+function deepClean(v: unknown, depth = 0, budget: { n: number } = { n: LIM.cleanNodes }): boolean {
+  if (depth > LIM.inputDepth) return false;
+  if (--budget.n < 0) return false;
+  const t = typeof v;
+  if (v === null || t === "string" || t === "boolean") return true;
+  if (t === "number") return Number.isFinite(v as number);
+  if (Array.isArray(v)) {
+    for (const k of Reflect.ownKeys(v)) { // reject symbol / extra / non-index own keys on the array itself
+      if (typeof k === "symbol") return false;
+      if (k !== "length" && !INDEX_KEY.test(k)) return false;
+    }
+    for (const e of v) if (!deepClean(e, depth + 1, budget)) return false;
+    return true;
+  }
+  if (!isPlain(v)) return false;
+  for (const k of Reflect.ownKeys(v)) {
+    if (typeof k === "symbol" || PROTO_KEYS.has(k)) return false;
+    const d = Object.getOwnPropertyDescriptor(v, k);
+    if (!d || !d.enumerable) return false;
+    if (!deepClean((v as Record<string, unknown>)[k], depth + 1, budget)) return false;
+  }
+  return true;
+}
+/** Dotted selector with NO prototype segment. */
+function isSelector(s: unknown): s is string {
+  if (typeof s !== "string" || !SELECT_GRAMMAR.test(s) || s.length > LIM.select) return false;
+  for (const seg of s.split(".")) if (PROTO_KEYS.has(seg)) return false;
+  return true;
+}
+/** Read path: grammar + no `..` and no single-dot segment. */
+function isReadPath(s: unknown, grammar: RegExp = PATH_GRAMMAR): s is string {
+  if (typeof s !== "string" || !grammar.test(s) || s.length > LIM.path) return false;
+  for (const seg of s.split("/")) if (seg === ".." || seg === ".") return false;
+  return true;
+}
+// Credential-named field DETECTION (normalized: lowercase, strip separators) — for
+// form field labels. Exact-match set avoids "author"/"shipping" false positives;
+// the short substring set catches compounds (userPassword, client_secret).
+const CRED_EXACT: ReadonlySet<string> = new Set([
+  "password", "secret", "token", "credential", "apikey", "privatekey", "authorization",
+  "bearer", "accesstoken", "refreshtoken", "clientsecret", "sessiontoken", "otp", "cvv",
+  "pin", "mnemonic", "seedphrase", "passphrase", "privkey", "signingkey",
+]);
+const CRED_SUBSTR = ["password", "secret", "privatekey", "apikey", "credential", "passphrase"];
+function isCredentialName(k: string): boolean {
+  const n = k.toLowerCase().replace(/[_\-\s]/g, "");
+  if (CRED_EXACT.has(n)) return true;
+  return CRED_SUBSTR.some((t) => n.includes(t));
+}
+// PCC-OWNED metric PROFILE (sol finding 3 durable fix + envelope correctness). Per metric
+// route, the allowlisted selectors → { PCC label, actual SOURCE path in that route's response
+// envelope }. PCC owns the label so a manifest can never frame a scalar as a payment/settlement
+// ("Payment received", "Funds received at"); and only these selectors are bindable, so a money
+// amount or settlement/heartbeat timestamp (usdc, lastHeartbeat, updatedAt, totalAmount) is not
+// selectable at all. A closed (route, selector) map beats a denylist (which leaks "Disbursement
+// time"). The `source` handles per-route unwrapping: GET /api/kernels/:id returns { kernel: … },
+// so "reputation" reads "kernel.reputation" — else the metric would bind but stay inert.
+// validateIr MIRRORS this (stat label + bind.select-as-source must match a profile entry).
+interface MetricField { label: string; source: string; type: "string" | "number" }
+const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
+  { route: route("/api/jobs/:/status"), fields: { // top-level envelope
+    status: { label: "Status", source: "status", type: "string" },
+    progress: { label: "Progress", source: "progress", type: "number" },
+  } },
+  { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
+    status: { label: "Status", source: "kernel.status", type: "string" },
+    reputation: { label: "Reputation", source: "kernel.reputation", type: "number" },
+    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", type: "number" },
+    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", type: "number" },
+    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", type: "number" },
+    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", type: "number" },
+  } },
+];
+/** Adapter side: (route, logical selector) → the field profile (label + real source), or null. */
+function metricFieldForSelect(path: string, select: unknown): MetricField | null {
+  if (typeof select !== "string") return null;
+  for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
+  return null;
+}
+/** Browser side: the declared type of a metric's SOURCE field, or null (not a metric field). A
+ *  metric read whose field is missing or of another type is not data for that metric (PX-4
+ *  review #2524: the painter must validate the route-specific payload, not accept any scalar). */
+export function metricSourceType(path: string, source: unknown): "string" | "number" | null {
+  if (typeof source !== "string") return null;
+  for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].type;
+    return null;
+  }
+  return null;
+}
+/** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
+function metricLabelForSource(path: string, source: unknown): string | null {
+  if (typeof source !== "string") return null;
+  for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+    for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
+    return null;
+  }
+  return null;
+}
+/** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
+ * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */
+function isOpDescriptor(v: unknown): boolean {
+  if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
+  if (v.operation_id !== undefined && (typeof v.operation_id !== "string" || !OP_ID_GRAMMAR.test(v.operation_id))) return false;
+  if (v.id !== undefined && strictStr(v.id, LIM.title) === null) return false;
+  if (v.label !== undefined && strictStr(v.label, LIM.title) === null) return false;
+  if (v.intentText !== undefined && strictStr(v.intentText, LIM.str) === null) return false;
+  // Real Action.confirm is the enum "inline"|"approval" (spec/ui-artifact.ts), NOT boolean.
+  if (v.confirm !== undefined && v.confirm !== "inline" && v.confirm !== "approval") return false;
+  if (v.arguments !== undefined && !isPlain(v.arguments)) return false; // deepClean already ran
+  return true;
+}
+
+// ── Shared bind gate — the ONE policy check both adapter and validator call ────────
+// ── Effect review of every bindable read (PX-5 review #2504: GET-only is not effect-free) ─────
+// Each route a manifest can bind was read at its handler (2026-09-24, master ac86a404): it only
+// reads through a facade list/get and changes no PCC state. One cross-cutting effect exists: with
+// PCC_FUNNEL_ENABLED=true the funnel tracker (services/funnel-tracker.ts, registered in server.ts)
+// writes one "discover" audit line per request trace for a 2xx GET under /api/capabilities, so a
+// polling dashboard adds audit lines (observability only; no entity changes). The SSE job stream is
+// authenticated and never opened by the browser kit (credentials:"omit", no SSE transport).
+// A test pins this list to BIND_POLICY: a new bindable route needs a new entry, i.e. a new review.
+export const EFFECT_REVIEWED_READS: ReadonlyArray<{ route: string; handler: string; effect: string }> = [
+  { route: "/api/jobs", handler: "routes/jobs.ts GET /api/jobs -> JobFacade.list", effect: "read only" },
+  { route: "/api/jobs/:", handler: "routes/jobs.ts GET /api/jobs/:jobId -> JobFacade.getById", effect: "read only" },
+  { route: "/api/jobs/:/status", handler: "routes/job-submit.ts GET /api/jobs/:jobId/status -> JobFacade.getStatus", effect: "read only" },
+  { route: "/api/kernels", handler: "routes/kernels.ts GET /api/kernels -> KernelFacade.list", effect: "read only" },
+  { route: "/api/kernels/:", handler: "routes/kernels.ts GET /api/kernels/:kernelId -> KernelFacade.getById", effect: "read only" },
+  { route: "/api/capabilities", handler: "routes/capabilities.ts GET /api/capabilities -> CapabilityFacade list", effect: "read only; funnel 'discover' audit line when PCC_FUNNEL_ENABLED" },
+  { route: "/api/capabilities/:", handler: "routes/capabilities.ts GET /api/capabilities/:capId -> CapabilityFacade.getById", effect: "read only; funnel 'discover' audit line when PCC_FUNNEL_ENABLED" },
+  { route: "/sse/stream/job/:", handler: "sse/topic-sse.ts GET /sse/stream/job/:jobId (auth + ownership check, topic subscribe)", effect: "read only; per-IP connection counter" },
+];
+/** Regex sources of every route (and SSE route) BIND_POLICY lets a manifest bind. */
+export function bindPolicyRouteSources(): string[] {
+  const out = new Set<string>();
+  for (const p of Object.values(BIND_POLICY)) { for (const re of p.routes) out.add(re.source); for (const re of p.sse ?? []) out.add(re.source); }
+  return [...out].sort();
+}
+/** The regex source a reviewed template compiles to (same compiler as BIND_POLICY). */
+export function reviewedRouteSource(template: string): string { return route(template).source; }
+
+function bindMatchesPolicy(bind: IrBind, key: string): string | null {
+  const policy = BIND_POLICY[key];
+  if (!policy) return `no bind policy for ${key}`;
+  if (!isReadPath(bind.path)) return "bind.path grammar";
+  if (RESERVED_EXACT.has(bind.path)) return "bind.path is a reserved/collection route";
+  if (!policy.routes.some((re) => re.test(bind.path))) return `bind.path outside ${key} allowlist`;
+  if (bind.select !== undefined && !isSelector(bind.select)) return "bind.select grammar";
+  if (policy.needsSelect && bind.select === undefined) return `${key} requires a scalar select`;
+  if (!policy.needsSelect && bind.select !== undefined) return `${key} may not select`;
+  if (bind.query !== undefined) {
+    if (!isPlain(bind.query) || Object.keys(bind.query).length > LIM.queryKeys) return "bind.query shape";
+    const allowedQuery = policy.queryByRoute?.[bind.path] ?? [];
+    for (const [k, v] of Object.entries(bind.query)) {
+      if (!isSelector(k)) return "query key grammar";
+      if (isCredentialName(k) || !allowedQuery.includes(k)) return `query key "${k}" not allowed for ${bind.path}`;
+      const t = typeof v;
+      if (!(t === "string" && (v as string).length <= LIM.str) && t !== "boolean" && !(t === "number" && Number.isFinite(v))) return "query value type";
+    }
+  }
+  if (bind.pollMs !== undefined && (typeof bind.pollMs !== "number" || !Number.isFinite(bind.pollMs) || bind.pollMs < LIM.pollMinMs || bind.pollMs > LIM.pollMaxMs)) return "bind.pollMs range";
+  if (bind.sse !== undefined) {
+    if (!policy.sse) return `${key} may not stream`;
+    if (!isReadPath(bind.sse, SSE_GRAMMAR) || !policy.sse.some((re) => re.test(bind.sse as string))) return "bind.sse outside allowlist";
+    if (policy.correlate) {
+      const mp = policy.correlate.pathRe.exec(bind.path);
+      const ms = policy.correlate.sseRe.exec(bind.sse);
+      if (!mp || !ms || mp[1] !== ms[1]) return "sse/path identity mismatch";
+    }
+  }
+  if (policy.schema) { if (bind.schema !== policy.schema) return `bind.schema must be ${policy.schema}`; }
+  else if (bind.schema !== undefined) return "unexpected bind.schema";
+  return null;
+}
+
+// ── The adapter ─────────────────────────────────────────────────────────────────
+export function dashboardManifestToIr(m: DashboardManifest | null | undefined): IrResult {
+  if (!isPlain(m)) return { ok: false, reason: "manifest not a plain object" };
+  if (!deepClean(m)) return { ok: false, reason: "prototype/nonfinite/symbol in manifest" };
+  const mm = m as Record<string, unknown>;
+  if (!onlyKeys(mm, ["csd", "title", "description", "theme", "sections"])) return { ok: false, reason: "unexpected top-level key" };
+  const rawTitle = strictStr(mm.title, LIM.title);
+  if (rawTitle === null) return { ok: false, reason: "title invalid" };
+  const title = proseText(rawTitle);
+  if (!Array.isArray(mm.sections)) return { ok: false, reason: "sections not array" };
+  if (mm.sections.length > LIM.sections) return { ok: false, reason: "too many sections" };
+
+  let count = 0;
+  const budget = (): boolean => ++count <= LIM.nodesTotal;
+  let bindCount = 0;
+  const bindBudget = (): boolean => ++bindCount <= LIM.boundWindowsTotal; // aggregate poll-amplification cap
+  const nextId = (() => { let n = 0; return () => `n${++n}`; })();
+
+  const sectionNodes: IrNode[] = [];
+  for (const secRaw of mm.sections) {
+    if (!isPlain(secRaw) || !onlyKeys(secRaw, ["heading", "windows"])) return { ok: false, reason: "bad section" };
+    if (!Array.isArray(secRaw.windows)) return { ok: false, reason: "section.windows not array" };
+    if (secRaw.windows.length > LIM.windowsPerSection) return { ok: false, reason: "too many windows" };
+    const children: IrNode[] = [];
+    if (secRaw.heading !== undefined) {
+      const h = strictStr(secRaw.heading, LIM.title);
+      if (h === null) return { ok: false, reason: "section.heading invalid" };
+      if (!budget()) return { ok: false, reason: "node budget" };
+      children.push({ type: "heading", id: nextId(), props: { level: 2, text: proseText(h) }, untrusted: true });
+    }
+    for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
+    if (!budget()) return { ok: false, reason: "node budget" };
+    sectionNodes.push({ type: "section", id: nextId(), children });
+  }
+  if (!budget()) return { ok: false, reason: "node budget" };
+  const titleNode: IrNode = { type: "heading", id: nextId(), props: { level: 1, text: title }, untrusted: true };
+  if (!budget()) return { ok: false, reason: "node budget" };
+  return { ok: true, doc: { ir: "pcc-dashboard-ir/v1", title: titleNode, root: { type: "root", id: nextId(), children: sectionNodes } } };
+}
+
+type MapResult = { ok: true; node: IrNode } | { ok: false; reason: string };
+
+function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bindBudget: () => boolean): MapResult {
+  if (!budget()) return { ok: false, reason: "node budget" };
+  if (!isPlain(w)) return { ok: false, reason: "window not plain object" };
+  const kind = w.kind;
+  if (typeof kind !== "string") return { ok: false, reason: "window.kind missing" };
+  const id = nextId();
+  const chargeBind = (): boolean => bindBudget(); // every window that emits a live bind charges the poll budget
+  switch (kind) {
+    case "note":
+      if (!onlyKeys(w, ["kind", "text"])) return { ok: false, reason: "note extra key" };
+      { const text = strictStr(w.text); if (text === null) return { ok: false, reason: "note.text" };
+        return { ok: true, node: { type: "text", id, props: { text: proseText(text) }, untrusted: true } }; }
+    case "metric":
+      // `format` intentionally NOT accepted (see file header). select is top-level + required.
+      if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
+      { // The manifest `label` is ACCEPTED but IGNORED — PCC OWNS the metric label, derived from
+        // the (route, selector) PROFILE. Only allowlisted infra/execution selectors bind, and
+        // bind.select is rewritten to the REAL source path (envelope-aware, e.g. kernel.reputation)
+        // so the metric actually populates. `format` NOT accepted.
+        const bpath = isPlain(w.binding) ? (w.binding as Record<string, unknown>).path : undefined;
+        const field = typeof bpath === "string" ? metricFieldForSelect(bpath, w.select) : null;
+        if (!field) return { ok: false, reason: "metric (route, select) not an allowlisted metric field" };
+        const b = mapBind(w.binding, "metric", field.source); if (!b.ok) return b; // bind.select = REAL source path
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
+        return { ok: true, node: { type: "stat", id, props: { label: field.label }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
+    case "capability":
+      if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
+      { const b = mapBind(w.binding, "capability"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
+        return { ok: true, node: { type: "card", id, props: { kind: "capability" }, bind: b.bind } }; }
+    case "receipt":
+      // STATIC settlement-record POINTER — no live bind (accepts + ignores a binding, like
+      // `approval`). A public read GET can neither reach settlement (auth-gated) nor prove a
+      // job status is a settlement event; the endpoint even reports `settled` for a merely
+      // completed job and exposes the PHYSICAL completion time as `settledAt`. So B renders
+      // ONLY the fixed read-only heading + "not proof of payment" pointer to the
+      // authoritative out-of-band Surface-B signed receipt — no fetched, mislabellable data.
+      if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "receipt extra key" };
+      if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "receipt.binding shape" };
+      return { ok: true, node: { type: "receipt", id } };
+    case "list":
+      if (!onlyKeys(w, ["kind", "binding", "item", "limit"])) return { ok: false, reason: "list extra key" };
+      { const b = mapBind(w.binding, "list"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
+        const item = w.item;
+        if (!isPlain(item) || !onlyKeys(item, ["title", "meta", "statusFrom"])) return { ok: false, reason: "list.item" };
+        if (!isSelector(item.title)) return { ok: false, reason: "list.item.title selector" };
+        const rowMeta: string[] = [];
+        if (item.meta !== undefined) {
+          if (!Array.isArray(item.meta) || item.meta.length > LIM.metaItems) return { ok: false, reason: "list.meta" };
+          for (const mi of item.meta) { if (!isSelector(mi)) return { ok: false, reason: "list.meta selector" }; rowMeta.push(mi); }
+        }
+        const props: IrNode["props"] = { rowTitle: item.title, rowMeta };
+        if (item.statusFrom !== undefined) { if (!isSelector(item.statusFrom)) return { ok: false, reason: "list.statusFrom selector" }; props.statusFrom = item.statusFrom; }
+        const offProfile = listProfileViolation(b.bind.path, props); if (offProfile) return { ok: false, reason: offProfile };
+        if (w.limit !== undefined) { if (typeof w.limit !== "number" || !Number.isInteger(w.limit) || w.limit <= 0 || w.limit > LIM.listRows) return { ok: false, reason: "list.limit" }; props.limit = w.limit; }
+        return { ok: true, node: { type: "list", id, bind: b.bind, props } }; }
+    case "run":
+      if (!onlyKeys(w, ["kind", "binding", "statusFrom", "latestFrom"])) return { ok: false, reason: "run extra key" };
+      { const b = mapBind(w.binding, "run"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
+        if (!isSelector(w.statusFrom) || !isSelector(w.latestFrom)) return { ok: false, reason: "run selectors" };
+        return { ok: true, node: { type: "card", id, props: { kind: "run", statusFrom: w.statusFrom, latestFrom: w.latestFrom }, bind: b.bind } }; }
+    case "form":
+      if (!onlyKeys(w, ["kind", "schema", "submit"])) return { ok: false, reason: "form extra key" };
+      if (w.submit !== undefined && !isOpDescriptor(w.submit)) return { ok: false, reason: "form.submit grammar" };
+      { const labels = fieldLabels(w.schema); if (!labels.ok) return labels;
+        const children: IrNode[] = [];
+        for (const l of labels.labels) { if (!budget()) return { ok: false, reason: "node budget" }; children.push({ type: "field-label", id: nextId(), props: { label: l }, untrusted: true }); }
+        return { ok: true, node: { type: "form-summary", id, children } }; }
+    case "approval":
+      if (!onlyKeys(w, ["kind", "binding", "approve", "deny"])) return { ok: false, reason: "approval extra key" };
+      if (w.approve !== undefined && !isOpDescriptor(w.approve)) return { ok: false, reason: "approval.approve grammar" };
+      if (w.deny !== undefined && !isOpDescriptor(w.deny)) return { ok: false, reason: "approval.deny grammar" };
+      if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "approval.binding shape" };
+      // Static notice, NO bind — live approval state is the C+D out-of-band surface.
+      return { ok: true, node: { type: "approval-notice", id, props: { notice: APPROVAL_NOTICE } } };
+    case "chain":
+      if (!onlyKeys(w, ["kind", "composeRef", "execute"])) return { ok: false, reason: "chain extra key" };
+      if (!isPlain(w.composeRef)) return { ok: false, reason: "chain.composeRef shape" };
+      if (w.execute !== undefined && !isOpDescriptor(w.execute)) return { ok: false, reason: "chain.execute grammar" };
+      return { ok: true, node: { type: "plan", id, props: { kind: "composition" } } };
+    case "actions":
+      if (!onlyKeys(w, ["kind", "actions"])) return { ok: false, reason: "actions extra key" };
+      { const acts = w.actions;
+        if (!Array.isArray(acts) || acts.length === 0 || acts.length > LIM.fields) return { ok: false, reason: "actions" };
+        const children: IrNode[] = [];
+        for (const a of acts) {
+          if (!budget()) return { ok: false, reason: "node budget" };
+          if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
+          const label = strictStr((a as Record<string, unknown>).label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
+          children.push({ type: "badge", id: nextId(), props: { text: proseText(label), tone: "neutral" }, untrusted: true });
+        }
+        return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } }; }
+    default:
+      return { ok: false, reason: `unknown window kind: ${kind}` };
+  }
+}
+
+function mapBind(b: unknown, key: string, topSelect?: unknown): { ok: true; bind: IrBind } | { ok: false; reason: string } {
+  const policy = BIND_POLICY[key];
+  if (!policy) return { ok: false, reason: `no bind policy for ${key}` };
+  const allowed = policy.sse ? ["path", "query", "pollMs", "sse"] : ["path", "query", "pollMs"];
+  if (!isPlain(b) || !onlyKeys(b, allowed)) return { ok: false, reason: "binding shape" };
+  const bind: IrBind = { path: b.path as string };
+  if (topSelect !== undefined) bind.select = topSelect as string; // metric scalar (validated by caller + policy)
+  if (b.sse !== undefined) bind.sse = b.sse as string;
+  if (b.pollMs !== undefined) bind.pollMs = b.pollMs as number;
+  if (b.query !== undefined) {
+    if (!isPlain(b.query)) return { ok: false, reason: "binding.query shape" };
+    const q: Record<string, string | number | boolean> = {};
+    for (const [k, v] of Object.entries(b.query)) { if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return { ok: false, reason: "query value type" }; q[k] = v; }
+    bind.query = q;
+  }
+  if (policy.schema) bind.schema = policy.schema;
+  const reason = bindMatchesPolicy(bind, key);
+  return reason ? { ok: false, reason } : { ok: true, bind };
+}
+
+/** Read-only field LABELS from a projected form schema — closed field grammar. */
+function fieldLabels(schema: unknown): { ok: true; labels: string[] } | { ok: false; reason: string } {
+  if (!isPlain(schema) || !onlyKeys(schema, ["type", "properties", "required"])) return { ok: false, reason: "form.schema shape" };
+  if (schema.type !== undefined && schema.type !== "object") return { ok: false, reason: "form.schema.type" };
+  if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((x) => typeof x === "string"))) return { ok: false, reason: "form.schema.required" };
+  const props = schema.properties;
+  if (!isPlain(props)) return { ok: false, reason: "form.schema.properties" };
+  const keys = Object.keys(props);
+  if (keys.length > LIM.fields) return { ok: false, reason: "too many fields" };
+  const labels: string[] = [];
+  for (const key of keys) {
+    if (PROTO_KEYS.has(key) || isCredentialName(key)) return { ok: false, reason: "credential/proto field" };
+    const def = (props as Record<string, unknown>)[key];
+    if (!isPlain(def) || !onlyKeys(def, ["type", "title", "description", "enum", "format", "minimum", "maximum", "minLength", "maxLength"])) return { ok: false, reason: "form field-def shape" };
+    if (def.type !== undefined && (typeof def.type !== "string" || !["string", "number", "integer", "boolean"].includes(def.type))) return { ok: false, reason: "form field type" };
+    if (def.title !== undefined && strictStr(def.title, LIM.title) === null) return { ok: false, reason: "form field title" };
+    const rawLabel = typeof def.title === "string" ? def.title : key;
+    const s = strictStr(rawLabel, LIM.title); if (s === null) return { ok: false, reason: "field label" };
+    labels.push(proseText(s));
+  }
+  return { ok: true, labels };
+}
+
+// ── Independent whole-tree validator — MIRRORS every adapter guarantee ─────────────
+type PropT = "s400" | "s2000" | "number" | "limit" | "boolean" | "string[]" | "level" | "tone" | "card-kind" | "grid-kind" | "plan-kind" | "selector";
+type PropSpec = Record<string, PropT>;
+interface NodeSpec { props?: PropSpec; required?: readonly string[]; optional?: readonly string[]; bindKey?: string; needsBind?: boolean; noBind?: boolean; prose?: boolean; parentOf?: readonly IrNodeType[]; childless?: boolean; minChildren?: number; maxChildren?: number }
+const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
+  root: { noBind: true, parentOf: ["section"], maxChildren: LIM.sections },
+  section: { noBind: true, parentOf: ["heading", "text", "stat", "card", "receipt", "list", "grid", "approval-notice", "plan", "form-summary"] },
+  heading: { props: { level: "level", text: "s400" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
+  text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
+  stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, childless: true }, // label is PCC-owned (not prose) — mirrored below
+  card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
+  receipt: { noBind: true, childless: true }, // STATIC settlement-record pointer — no bind, no props, no children
+  list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
+  badge: { props: { text: "s400", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
+  grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"], minChildren: 1, maxChildren: LIM.fields },
+  "approval-notice": { props: { notice: "s2000" }, required: ["notice"], noBind: true, childless: true },
+  plan: { props: { kind: "plan-kind" }, required: ["kind"], noBind: true, childless: true },
+  "form-summary": { noBind: true, parentOf: ["field-label"], maxChildren: LIM.fields },
+  "field-label": { props: { label: "s400" }, required: ["label"], noBind: true, prose: true, childless: true },
+};
+/** The BIND_POLICY key a node binds under. A card resolves by its kind (run vs capability).
+ *  The SINGLE resolution used by both validateIr and the provenance derivation, so they
+ *  cannot drift. Null for a node type that never binds. */
+export function policyKeyOf(node: IrNode): string | null {
+  const spec = NODE_SCHEMA[node.type as IrNodeType];
+  if (!spec || !spec.bindKey) return null;
+  if (node.type === "card") return node.props && node.props.kind === "run" ? "run" : "capability";
+  return spec.bindKey;
+}
+
+/** Authority class of an IR node (PX-4), DERIVED from its structure and the server-owned
+ *  bind registry, never read from the node or the manifest. Prose (manifest-authored
+ *  words) is always `proposed`; a bindable node takes the class its route is registered
+ *  with; PCC constants (the fixed approval sentence, the static receipt pointer) and
+ *  containers are not data and return null. A forged IR cannot carry a class of its own:
+ *  validateIr rejects any node key outside the closed set. */
+export function sourceClassOf(node: IrNode): RenderSourceClass | null {
+  const spec = NODE_SCHEMA[node.type as IrNodeType];
+  if (!spec) return null;
+  if (spec.prose) return "proposed";
+  const key = policyKeyOf(node);
+  const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
+  return policy ? policy.sourceClass : null;
+}
+
+export interface BoundProvenance { sourceClass: BoundSourceClass; schemaId: string; maxAgeMs: number }
+/** Provenance of a BOUND node's data (class, schema, freshness budget); null if unbound. */
+export function provenanceOf(node: IrNode): BoundProvenance | null {
+  if (!node.bind) return null;
+  const key = policyKeyOf(node);
+  const policy = key !== null && Object.prototype.hasOwnProperty.call(BIND_POLICY, key) ? BIND_POLICY[key] : undefined;
+  return policy ? { sourceClass: policy.sourceClass, schemaId: policy.schemaId, maxAgeMs: policy.maxAgeMs } : null;
+}
+
+function propType(v: unknown, t: PropT): boolean {
+  switch (t) {
+    case "s400": return typeof v === "string" && v.length > 0 && v.length <= LIM.title;
+    case "s2000": return typeof v === "string" && v.length > 0 && v.length <= LIM.str;
+    case "number": return typeof v === "number" && Number.isFinite(v);
+    case "limit": return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= LIM.listRows;
+    case "boolean": return typeof v === "boolean";
+    case "string[]": return Array.isArray(v) && v.length <= LIM.metaItems && v.every((x) => isSelector(x));
+    case "level": return v === 1 || v === 2 || v === 3;
+    case "tone": return typeof v === "string" && TONE_SET.has(v);
+    case "card-kind": return typeof v === "string" && CARD_KINDS.has(v);
+    case "grid-kind": return typeof v === "string" && GRID_KINDS.has(v);
+    case "plan-kind": return typeof v === "string" && PLAN_KINDS.has(v);
+    case "selector": return isSelector(v);
+  }
+}
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: string } {
+  if (!isPlain(doc) || doc.ir !== "pcc-dashboard-ir/v1" || !onlyKeys(doc, ["ir", "title", "root"])) return { ok: false, reason: "not an IR doc" };
+  if (!deepClean(doc)) return { ok: false, reason: "proto/nonfinite/symbol in IR" };
+  if (!isPlain(doc.title) || (doc.title as Record<string, unknown>).type !== "heading" || (doc.title as any).props?.level !== 1) return { ok: false, reason: "doc.title not H1" };
+  if (!isPlain(doc.root) || (doc.root as Record<string, unknown>).type !== "root") return { ok: false, reason: "doc.root not root" };
+  const ids = new Set<string>();
+  let count = 0;
+  let bindCount = 0;
+  const walk = (n: unknown, depth: number): string | null => {
+    if (depth > LIM.depth) return "depth";
+    if (++count > LIM.nodesTotal) return "node count";
+    if (!isPlain(n)) return "node not plain";
+    if (!onlyKeys(n, ["type", "id", "props", "bind", "children", "untrusted"])) return "unexpected node key";
+    if (typeof n.type !== "string" || !FROZEN.has(n.type)) return `type not frozen: ${String(n.type)}`;
+    if (typeof n.id !== "string" || !/^n[0-9]+$/.test(n.id) || ids.has(n.id)) return "id format/dup";
+    ids.add(n.id);
+    const spec = NODE_SCHEMA[n.type as IrNodeType];
+    // props: exact keys, exact types, required present via own-property
+    if (n.props !== undefined) {
+      if (!isPlain(n.props) || !onlyKeys(n.props, Object.keys(spec.props ?? {}))) return `props off-schema for ${n.type}`;
+      for (const [k, v] of Object.entries(n.props)) if (!propType(v, (spec.props as PropSpec)[k])) return `prop ${k} wrong type on ${n.type}`;
+    }
+    for (const req of spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
+    // approval-notice text is the ONE fixed PCC sentence — never manifest prose
+    if (n.type === "approval-notice" && (n.props as any)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
+    // card kind ⇒ exact companion props
+    if (n.type === "card") {
+      const k = (n.props as any)?.kind;
+      if (k === "run") { if (!hasOwn(n.props as object, "statusFrom") || !hasOwn(n.props as object, "latestFrom")) return "run card missing selectors"; }
+      else if (hasOwn((n.props ?? {}) as object, "statusFrom") || hasOwn((n.props ?? {}) as object, "latestFrom")) return "capability card has run props";
+    }
+    // bind: mirror BIND_POLICY exactly
+    if (n.bind !== undefined) {
+      if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
+      if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
+      const bk = policyKeyOf(n as unknown as IrNode) as string; // ONE resolution, shared with provenanceOf
+      const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
+      if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
+    } else if (spec.needsBind) return `${n.type} requires a bind`;
+    // stat (metric) label is PCC-OWNED — must equal the fixed label for its ALLOWLISTED
+    // selector (mirror of the adapter; a directly-constructed IR cannot invent a label like
+    // "Payment received" or select a non-allowlisted / money / timestamp scalar).
+    if (n.type === "stat") {
+      const src = (n.bind as { select?: unknown } | undefined)?.select;
+      const bpath = (n.bind as { path?: unknown } | undefined)?.path;
+      const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
+      if (expected === null) return "stat (route, source) not an allowlisted metric field";
+      if ((n.props as { label?: unknown } | undefined)?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+    }
+    // lists show only their route's PCC-owned field profile (never money fields)
+    if (n.type === "list") {
+      const bp = (n.bind as { path?: unknown } | undefined)?.path;
+      const off = typeof bp === "string" ? listProfileViolation(bp, (n.props ?? {}) as Record<string, unknown>) : "list without a bound path";
+      if (off) return off;
+    }
+    // prose may not state an amount or a money / verification status (review #2504)
+    if (spec.prose) {
+      const p = (n.props ?? {}) as { text?: unknown; label?: unknown };
+      const t = typeof p.text === "string" ? p.text : typeof p.label === "string" ? p.label : "";
+      if (t !== WITHHELD_PROSE && isMoneyClaim(t)) return `prose ${n.type} states an amount or a money/verification status`;
+    }
+    // prose provenance
+    if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
+    if (!spec.prose && n.untrusted !== undefined) return `non-prose ${n.type} marked untrusted`;
+    // children: exact parent/child grammar; containers require an array, leaves forbid it
+    if (spec.childless) { if (n.children !== undefined) return `${n.type} may not have children`; }
+    else {
+      if (!Array.isArray(n.children)) return `${n.type} requires children array`;
+      if (spec.minChildren !== undefined && n.children.length < spec.minChildren) return `${n.type} too few children`;
+      if (spec.maxChildren !== undefined && n.children.length > spec.maxChildren) return `${n.type} too many children`;
+      let windowKids = 0;
+      for (let i = 0; i < n.children.length; i++) {
+        const c = n.children[i];
+        if (!isPlain(c) || !spec.parentOf || !spec.parentOf.includes((c as Record<string, unknown>).type as IrNodeType)) return `illegal child under ${n.type}`;
+        if (n.type === "section") { // ≤1 heading, only at index 0, H2; the rest are windows (≤ cap)
+          const ct = (c as Record<string, unknown>).type;
+          if (ct === "heading") { if (i !== 0) return "section heading must be first"; if ((c as any).props?.level !== 2) return "section heading must be H2"; }
+          else if (++windowKids > LIM.windowsPerSection) return "too many windows in section";
+        }
+        const e = walk(c, depth + 1); if (e) return e;
+      }
+    }
+    return null;
+  };
+  const e1 = walk(doc.title, 0); if (e1) return { ok: false, reason: `title: ${e1}` };
+  const e2 = walk(doc.root, 0); return e2 ? { ok: false, reason: e2 } : { ok: true };
+}

@@ -133,6 +133,7 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
       "list_kernels",
       "pcc.op.capability.request_quote",
       "render_pcc_dashboard",
+      "render_pcc_dashboard_ir", // closed-IR render: effect review (1b) in http-mcp-server.ts
       "search_capabilities",
       "search_dashboards",
     ];
