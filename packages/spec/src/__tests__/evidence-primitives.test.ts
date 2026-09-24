@@ -24,12 +24,15 @@ import fdmRaw from "../csds/fdm.csd.json" with { type: "json" };
 import courierRouteRaw from "../csds/courier-route.csd.json" with { type: "json" };
 import hotFoodPrepRaw from "../csds/hot-food-prep.csd.json" with { type: "json" };
 
-// The four primitives with machinery already built/wired (verifier "live").
-const LIVE_FIRST_CLASS = [
+// The lockstep rule (evidence #3195, oracle #3274): verifierStatus "live" is
+// exactly the oracle's /settle verified set. Today that is one primitive.
+const SETTLE_VERIFIED = ["decl.self_attested"];
+// Working machinery outside /settle, which spec §7.1 first listed as live.
+// /settle does not run their verifiers yet, so they are "stub".
+const MACHINERY_NOT_SETTLE_VERIFIED = [
   "approval.payer",
   "receipt.kernel_signed",
   "confirm.execution_mode",
-  "decl.self_attested",
 ];
 
 // The locked golden manifest hash of the shipped vocabulary (v1 16 + the
@@ -77,12 +80,12 @@ describe("evidence vocabulary — registry validates", () => {
     expect(decl.tierSupport.map((t) => t.tier)).toEqual([0]);
   });
 
-  it("the four first-class primitives are verifier 'live'; the rest are 'stub'", () => {
-    for (const id of LIVE_FIRST_CLASS) {
-      expect(getPrimitive(id)?.verifierStatus).toBe("live");
-    }
+  it("only the /settle verified set is verifier 'live' (the lockstep rule); the rest are 'stub'", () => {
     const live = EVIDENCE_PRIMITIVES.filter((d) => d.verifierStatus === "live");
-    expect(live.map((d) => d.id).sort()).toEqual([...LIVE_FIRST_CLASS].sort());
+    expect(live.map((d) => d.id).sort()).toEqual([...SETTLE_VERIFIED].sort());
+    for (const id of MACHINERY_NOT_SETTLE_VERIFIED) {
+      expect(getPrimitive(id)?.verifierStatus, id).toBe("stub");
+    }
   });
 
   it("dependsOn only references known primitives (dependency closure is resolvable)", () => {
@@ -299,6 +302,48 @@ describe("eligibility — requireImplementedVerifier caps below report-only", ()
     // The cap reason names an unimplemented verifier.
     const allReasons = enforcing.perTier.flatMap((t) => t.reasons).join(" ");
     expect(allReasons).toMatch(/verifier not implemented/);
+  });
+});
+
+describe("eligibility — the lockstep rule under oracle enforcement", () => {
+  // Report-only tier-2 eligible, built only from primitives whose machinery
+  // exists outside /settle.
+  const machineryCsd: Pick<CSD, "url" | "evidence"> = {
+    url: "pcc://capabilities/vocab-lockstep/v1",
+    evidence: {
+      tier0: { description: "declaration", required: ["jobId"], primitives: [{ id: "decl.self_attested" }] },
+      tier1: {
+        description: "registered kernel receipt against the real upstream",
+        required: ["jobId"],
+        primitives: [
+          { id: "ident.registered_key" },
+          { id: "receipt.kernel_signed" },
+          { id: "confirm.execution_mode", params: { expected: "real" } },
+        ],
+      },
+      tier2: {
+        description: "plus payer approval",
+        required: ["jobId"],
+        primitives: [{ id: "receipt.kernel_signed" }, { id: "approval.payer" }],
+      },
+    },
+  };
+
+  it("machinery outside /settle carries no tier: each such primitive caps the tier that needs it", () => {
+    expect(computeCsdEligibility(machineryCsd).eligibleTier).toBe(2);
+    const enforcing = computeCsdEligibility(machineryCsd, { requireImplementedVerifier: true });
+    expect(enforcing.eligibleTier).toBe(0);
+    const reasons = enforcing.perTier.flatMap((t) => t.reasons);
+    for (const id of MACHINERY_NOT_SETTLE_VERIFIED) {
+      expect(reasons.some((r) => r.includes(`primitive "${id}" verifier not implemented (stub)`)), id).toBe(true);
+    }
+  });
+
+  it("the verified set still carries tier 0", () => {
+    const enforcing = computeCsdEligibility(machineryCsd, { requireImplementedVerifier: true });
+    const tier0 = enforcing.perTier.find((t) => t.tier === 0)!;
+    expect(tier0.eligible).toBe(true);
+    expect(tier0.stubVerifierPrimitives).toEqual([]);
   });
 });
 
