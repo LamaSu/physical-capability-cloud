@@ -398,7 +398,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     expect((await get(id, { cookie: `pcc_session=${app.signCookie(token)}` })).statusCode).toBe(200);
   });
 
-  it("an anonymous conversation stays id-only until a signed-in caller continues it, which binds it to them", async () => {
+  it("a signed-in caller continuing an anonymous conversation gets a fork of their own; the anonymous one is never claimed (L6)", async () => {
     const carol = provisionApiKey({ operatorId: "carol@example.com", scopes: ["operator"] });
     const erin = provisionApiKey({ operatorId: "erin@example.com", scopes: ["operator"] });
     const asCarol = { authorization: `Bearer ${carol.rawKey}` };
@@ -410,10 +410,18 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     llm.responses.push(calls(["whoami"]), endTurn);
     const cont = await resume(id, asCarol);
     expect(cont.statusCode).toBe(200);
-    // Carol's authenticated read is in the history now, so the id alone no longer opens it.
-    expect((await get(id)).statusCode).toBe(404);
-    expect((await get(id, { authorization: `Bearer ${erin.rawKey}` })).statusCode).toBe(404);
-    const own = await get(id, asCarol);
+    const fork = cont.json();
+    expect(fork.forkedFrom).toBe(id);
+    expect(fork.conversationId).not.toBe(id);
+    // Not claimed: the anonymous creator still opens it by its id, and Carol's
+    // authenticated read never entered it.
+    const anon = await get(id);
+    expect(anon.statusCode).toBe(200);
+    expect(anon.body).not.toContain(carol.record!.id);
+    // Carol's read lives in her fork, which only she can open.
+    expect((await get(fork.conversationId)).statusCode).toBe(404);
+    expect((await get(fork.conversationId, { authorization: `Bearer ${erin.rawKey}` })).statusCode).toBe(404);
+    const own = await get(fork.conversationId, asCarol);
     expect(own.statusCode).toBe(200);
     expect(own.body).toContain(carol.record!.id);
   });

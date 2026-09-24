@@ -256,6 +256,14 @@ const PENDING_ACTION_RETENTION_MS = 60 * 60 * 1000;
 const MAX_PENDING_RECORDS = 50;
 /** Process-wide cap on held argument sets waiting for a confirmation. */
 const MAX_HELD_ACTIONS = 5_000;
+/**
+ * Per-holder quotas, checked BEFORE the process-wide cap (WP-D round 4, L2): one
+ * principal (keys are publicly mintable), one conversation or one client address
+ * cannot fill the shared pool and block everyone else's confirmations.
+ */
+const MAX_HELD_PER_OWNER = 20;
+const MAX_HELD_PER_CONVERSATION = 12;
+const MAX_HELD_PER_ADDRESS = 60;
 
 /**
  * The only non-GET calls an ANONYMOUS chat runs without a confirmation (WP-D
@@ -419,7 +427,8 @@ function isPendingActionRecord(v: unknown): v is PendingActionRecord {
     typeof a.endpoint === "string" && typeof a.target === "string" && typeof a.summary === "string" &&
     typeof a.owner === "string" && typeof a.createdAt === "string" && typeof a.expiresAt === "string" &&
     (a.status === "pending" || a.status === "consumed" || a.status === "expired") &&
-    a.args !== null && typeof a.args === "object"
+    a.args !== null && typeof a.args === "object" &&
+    (a.bindsTo === undefined || typeof a.bindsTo === "string")
   );
 }
 
@@ -471,6 +480,7 @@ function saveConversation(record: ConversationRecord): void {
       target: redactSecretsDeep(a.target),
       args: redactSecretsDeep(a.args),
       summary: redactSecretsDeep(a.summary),
+      ...(a.bindsTo !== undefined ? { bindsTo: redactSecretsDeep(a.bindsTo) } : {}),
     })),
   };
   const msgsJson = JSON.stringify(envelope);
@@ -544,6 +554,22 @@ function runsWithoutConfirmation(principal: ChatPrincipal, plan: ToolPlan): bool
   if (plan.method === "GET") return true;
   if (principal.kind !== "anonymous") return false;
   return ANONYMOUS_DIRECT_WRITES.has(`${plan.method} ${plan.target.split("?")[0]}`);
+}
+
+/**
+ * A new conversation owned by `owner`, seeded with `from`'s history (already
+ * redacted at write) and no held actions (WP-D round 4, L6).
+ */
+function forkConversation(from: ConversationRecord, owner: string): ConversationRecord {
+  const now = new Date().toISOString();
+  return {
+    id: generateConversationId(),
+    owner,
+    messages: JSON.parse(JSON.stringify(from.messages)) as AnthropicMessage[],
+    pendingActions: [],
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 /** An anonymous conversation is open to its id; an owned one only to its owner (WP-D R5). */
@@ -935,18 +961,38 @@ function processToolResult(
  * if a stale copy of the envelope is written back; after a restart every held
  * action is refused and the user asks again.
  */
-const heldArgs = new Map<string, { conversationId: string; owner: string; args: Record<string, unknown>; expiresAtMs: number }>();
+interface HeldArgsEntry {
+  conversationId: string;
+  owner: string;
+  /** The client address that held it, for the per-address quota (L2). */
+  address: string;
+  args: Record<string, unknown>;
+  expiresAtMs: number;
+}
 
-function holdArgs(
-  id: string,
-  entry: { conversationId: string; owner: string; args: Record<string, unknown>; expiresAtMs: number },
-): boolean {
+const heldArgs = new Map<string, HeldArgsEntry>();
+
+type HoldOutcome = "held" | "owner_full" | "conversation_full" | "address_full" | "process_full";
+
+function holdArgs(id: string, entry: HeldArgsEntry): HoldOutcome {
   // Expired arguments (possibly a password) do not outlive their window in memory.
   const now = Date.now();
   for (const [key, held] of heldArgs) if (!(now < held.expiresAtMs)) heldArgs.delete(key);
-  if (heldArgs.size >= MAX_HELD_ACTIONS) return false;
+  // Per-holder quotas first (L2), so one holder can never exhaust the shared pool.
+  let byOwner = 0;
+  let byConversation = 0;
+  let byAddress = 0;
+  for (const held of heldArgs.values()) {
+    if (held.owner === entry.owner) byOwner += 1;
+    if (held.conversationId === entry.conversationId) byConversation += 1;
+    if (held.address === entry.address) byAddress += 1;
+  }
+  if (byConversation >= MAX_HELD_PER_CONVERSATION) return "conversation_full";
+  if (byOwner >= MAX_HELD_PER_OWNER) return "owner_full";
+  if (byAddress >= MAX_HELD_PER_ADDRESS) return "address_full";
+  if (heldArgs.size >= MAX_HELD_ACTIONS) return "process_full";
   heldArgs.set(id, entry);
-  return true;
+  return "held";
 }
 
 function takeHeldArgs(id: string) {
@@ -980,23 +1026,32 @@ function viewAction(a: PendingActionRecord): PendingActionView {
   };
 }
 
+/**
+ * Open = pending, unexpired, and its held arguments still exist in this process
+ * (WP-D round 4, L4). A stale concurrent save can write a consumed action back
+ * as "pending", but take() already removed its arguments, so it never shows as
+ * confirmable again. After a restart nothing shows as open, which is true:
+ * nothing can run.
+ */
 function isOpen(a: PendingActionRecord): boolean {
-  return a.status === "pending" && Date.now() < Date.parse(a.expiresAt);
+  return a.status === "pending" && Date.now() < Date.parse(a.expiresAt) && heldArgs.has(a.id);
 }
 
-/** Hold a checked write call in `record` for its owner's confirmation; null when the process is full. */
+/** Hold a checked write call in `record` for its owner's confirmation, or say which quota refused it. */
 function holdAction(
   record: ConversationRecord,
   tool: AgentPackageTool,
   plan: ToolPlan,
   input: Record<string, unknown>,
   owner: string,
-): PendingActionRecord | null {
+  address: string,
+): PendingActionRecord | Exclude<HoldOutcome, "held"> {
   const id = `act_${randomBytes(16).toString("base64url")}`;
   const now = Date.now();
   const expiresAtMs = now + PENDING_ACTION_TTL_MS;
   const args = JSON.parse(JSON.stringify(input ?? {})) as Record<string, unknown>;
-  if (!holdArgs(id, { conversationId: record.id, owner, args, expiresAtMs })) return null;
+  const outcome = holdArgs(id, { conversationId: record.id, owner, address, args, expiresAtMs });
+  if (outcome !== "held") return outcome;
   const bindsTo = credentialBinding(tool, args);
   const summary = redactSecretsDeep(describeAction(tool, plan));
   const action: PendingActionRecord = {
@@ -1157,6 +1212,8 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
 
     const now = new Date().toISOString();
     let record: ConversationRecord;
+    /** Set when a signed-in caller continued an anonymous conversation in a fork (L6). */
+    let forkedFrom: string | undefined;
     if (body.conversationId !== undefined) {
       // Same rules as GET: a legacy guessable id cannot be resumed (resuming would let
       // a guesser read the history back through the model), nor can another
@@ -1168,10 +1225,19 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(404).send({ error: "conversation_not_found" });
       }
       record = existing;
-      // A signed-in caller continuing an anonymous conversation binds it to
-      // themselves: from here on, what their credential reads is not readable by
-      // the id alone.
-      if (record.owner === null && principal.kind !== "anonymous") record.owner = principal.fingerprint;
+      // L6: a signed-in caller never CLAIMS an anonymous conversation. Claiming would
+      // lock its creator out (404), and anyone holding an anonymous id could do it.
+      // They continue in a fork they own, so what their credential reads is still
+      // not readable by the anonymous id. The anonymous conversation and its held
+      // actions stay as they were; the reply names the fork (forkedFrom).
+      if (record.owner === null && principal.kind !== "anonymous") {
+        if (confirmActionId !== undefined) {
+          const notYours = refusal(404, "action_not_found", "There is no held action with that id on this conversation for you.");
+          return reply.status(notYours.status).send({ ...notYours.result, conversationId: record.id });
+        }
+        forkedFrom = record.id;
+        record = forkConversation(record, principal.fingerprint);
+      }
     } else if (confirmActionId !== undefined) {
       return reply.status(400).send({ error: "conversation_required", message: "Send the conversationId the action belongs to." });
     } else {
@@ -1210,6 +1276,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
     const held: PendingActionView[] = [];
     let confirmedAction: { actionId: string; tool: string; status: number } | undefined;
     const extras = () => ({
+      ...(forkedFrom !== undefined ? { forkedFrom } : {}),
       ...(held.length > 0 ? { pendingActions: held } : {}),
       ...(confirmedAction ? { confirmedAction } : {}),
       // One-time reveal: present only in this reply, never stored or replayed.
@@ -1233,10 +1300,19 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       // An anonymous chat holds every other call except the pure computations.
       if (!runsWithoutConfirmation(principal, planned.plan)) {
         const owner = principal.kind === "anonymous" ? anonymousOwner(record.id) : principal.fingerprint;
-        const action = holdAction(record, tool, planned.plan, input, owner);
-        if (!action) {
-          const result = { error: "too_many_held_actions", message: "The gateway is holding too many actions. Try again in a few minutes." };
-          return { trace: { name, args: safeInput, status: 503, result, durationMs: 0 }, content: JSON.stringify(result) };
+        const action = holdAction(record, tool, planned.plan, input, owner, toolCtx.remoteAddress);
+        if (typeof action === "string") {
+          // A per-holder quota is the caller's own limit (429); only a full process is 503.
+          const result =
+            action === "process_full"
+              ? { error: "too_many_held_actions", message: "The gateway is holding too many actions. Try again in a few minutes." }
+              : {
+                  error: "too_many_held_actions_for_you",
+                  limit: action,
+                  message: "You already have many actions waiting. Confirm them, or let them expire (10 minutes), then try again.",
+                };
+          const status = action === "process_full" ? 503 : 429;
+          return { trace: { name, args: safeInput, status, result, durationMs: 0 }, content: JSON.stringify(result) };
         }
         held.push(viewAction(action));
         return {

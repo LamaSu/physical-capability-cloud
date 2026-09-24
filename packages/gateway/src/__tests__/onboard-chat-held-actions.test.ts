@@ -357,4 +357,77 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     expect(post.json().pendingActions).toBeUndefined();
     expect(counter).toBe(0);
   });
+
+  // ── WP-D round 4, L2: per-holder quotas before the shared pool ──────────────
+  const bumps = (n: number) => calls(...Array.from({ length: n }, () => ["bump_counter", { note: "q" }] as [string, Record<string, unknown>]));
+
+  it("[neg] one principal cannot fill the shared pool: past its own quota it gets 429, and another principal still holds (L2)", async () => {
+    _forgetHeldActionsForTests();
+    const greedy = signedIn("greedy@example.com");
+    // 20 holds, 12 + 8 over two conversations (the per-conversation cap is 12).
+    llm.responses.push(bumps(12), endTurn);
+    expect((await chat({ message: "go" }, greedy.headers)).json().pendingActions).toHaveLength(12);
+    llm.responses.push(bumps(8), endTurn);
+    expect((await chat({ message: "go" }, greedy.headers)).json().pendingActions).toHaveLength(8);
+
+    llm.responses.push(bumps(1), endTurn);
+    const over = (await chat({ message: "go" }, greedy.headers)).json();
+    expect(over.toolCalls[0]).toMatchObject({ status: 429, result: { error: "too_many_held_actions_for_you", limit: "owner_full" } });
+    expect(over.pendingActions).toBeUndefined();
+
+    const other = signedIn("other@example.com");
+    llm.responses.push(bumps(1), endTurn);
+    expect((await chat({ message: "go" }, other.headers)).json().pendingActions).toHaveLength(1);
+    expect(counter).toBe(0);
+  });
+
+  it("[neg] one conversation holds at most 12 actions (L2)", async () => {
+    _forgetHeldActionsForTests();
+    const alice = signedIn("alice-conv-quota@example.com");
+    // 12 is also the per-message tool-call budget, so the 13th comes in a second message.
+    llm.responses.push(bumps(12), endTurn);
+    const first = (await chat({ message: "go" }, alice.headers)).json();
+    expect(first.pendingActions).toHaveLength(12);
+    llm.responses.push(bumps(1), endTurn);
+    const body = (await chat({ conversationId: first.conversationId, message: "one more" }, alice.headers)).json();
+    expect(body.toolCalls[0]).toMatchObject({ status: 429, result: { limit: "conversation_full" } });
+    expect(counter).toBe(0);
+  });
+
+  it("[neg] one client address holds at most 60 actions across principals (L2)", async () => {
+    _forgetHeldActionsForTests();
+    for (const who of ["addr-a@example.com", "addr-b@example.com", "addr-c@example.com"]) {
+      const p = signedIn(who);
+      llm.responses.push(bumps(12), endTurn);
+      expect((await chat({ message: "go" }, p.headers)).json().pendingActions).toHaveLength(12);
+      llm.responses.push(bumps(8), endTurn);
+      expect((await chat({ message: "go" }, p.headers)).json().pendingActions).toHaveLength(8);
+    }
+    const fourth = signedIn("addr-d@example.com");
+    llm.responses.push(bumps(1), endTurn);
+    const body = (await chat({ message: "go" }, fourth.headers)).json();
+    expect(body.toolCalls[0]).toMatchObject({ status: 429, result: { limit: "address_full" } });
+  });
+
+  // ── WP-D round 4, L4: a stale concurrent save cannot revive a consumed action ──
+  it("[neg] a stale concurrent save cannot bring a consumed action back as confirmable (L4)", async () => {
+    _forgetHeldActionsForTests();
+    const alice = signedIn("alice-stale@example.com");
+    const { conversationId, actionId } = await holdBump(alice.headers);
+    const staleEnvelope = persisted(conversationId); // what a slow POST loaded before the confirmation
+
+    const run = await chat({ conversationId, confirmActionId: actionId }, alice.headers);
+    expect(run.statusCode).toBe(200);
+    expect(counter).toBe(1);
+
+    // The slow POST now saves its stale copy, in which the action is still "pending".
+    getStore().db.run(sql`UPDATE onboard_chat_conversations SET messages = ${staleEnvelope} WHERE id = ${conversationId}`);
+
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: alice.headers });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().pendingActions).toEqual([]); // never offered as confirmable again
+    const again = await chat({ conversationId, confirmActionId: actionId }, alice.headers);
+    expect([409, 410]).toContain(again.statusCode);
+    expect(counter).toBe(1); // and it never runs twice
+  });
 });
