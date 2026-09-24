@@ -183,6 +183,65 @@ EVENT_EXECUTION_FAILED = "execution_failed"
 EVIDENCE_LEVEL_SUBMITTED = "submitted"
 EVIDENCE_LEVEL_DEVICE_REPORTED = "device_reported"
 
+# LO-EV-9 (evidence #3219/#3241; the pattern of kernel-sdk's job handler and
+# the kernel's EvidenceEmitter on #341): every evidence event commits the PCC
+# job it belongs to at top-level payload.jobId, plus the settlement unit and
+# challenge nonce when the assignment names them.  Device-local ids never take
+# these names: they stay nested (payload.response, payload.handle.cupsJobId).
+UNIT_FIELD_RE = re.compile(r"0x[0-9a-f]{64}")
+UNIT_FIELDS = ("settlementUnitId", "challengeNonce")
+
+
+class AssignmentBindingError(ValueError):
+    """The job assignment cannot be bound: no job id, or a malformed unit field."""
+
+
+def assignment_binding(job: Dict) -> Dict[str, str]:
+    """The fields every evidence event for ``job`` must commit.
+
+    ``jobId`` is the PCC job id; ``settlementUnitId`` and ``challengeNonce``
+    are included only when the assignment names them, and each must be
+    ``0x`` + 64 lowercase hex (as kernel-sdk requires).  Raises
+    AssignmentBindingError otherwise: evidence that cannot bind is refused
+    before anything runs.
+    """
+    job_id = job.get("id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise AssignmentBindingError("the assignment has no job id")
+    binding = {"jobId": job_id}
+    for field in UNIT_FIELDS:
+        value = job.get(field)
+        if value is None:
+            continue
+        if not (isinstance(value, str) and UNIT_FIELD_RE.fullmatch(value)):
+            raise AssignmentBindingError(f"{field} must be 0x + 64 lowercase hex")
+        binding[field] = value
+    return binding
+
+
+def bind_event_payload(payload: Any, binding: Dict[str, str]) -> Dict[str, Any]:
+    """A copy of ``payload`` that commits the binding fields.
+
+    A payload that already carries a different value for one of them is
+    refused (ValueError), as the kernel's EvidenceEmitter does: the event
+    would claim another job or unit.
+    """
+    out: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {"result": payload}
+    for field, value in binding.items():
+        if field in out and out[field] != value:
+            raise ValueError(
+                f"event payload.{field} {out[field]!r} does not match the assignment's {value!r}"
+            )
+        out[field] = value
+    return out
+
+
+def _resolve_binding(job_id: str, binding: Optional[Dict[str, str]]) -> Dict[str, str]:
+    resolved = dict(binding) if binding else {"jobId": job_id}
+    if resolved.get("jobId") != job_id:
+        raise ValueError(f"binding is for job {resolved.get('jobId')!r}, not {job_id!r}")
+    return resolved
+
 # Outcome reported directly by an adapter via a "status" key.  Compared after
 # `.strip().lower()`: a device that shouts "FAILED" must not slip past the
 # failure set and fall through to a boolean flag that says otherwise.
@@ -773,6 +832,8 @@ def build_evidence_bundle(
     job_id: str,
     device: Dict,
     result: Dict,
+    *,
+    binding: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Construct an evidence bundle from execution result.
 
@@ -793,13 +854,17 @@ def build_evidence_bundle(
     closed EVIDENCE_EVENT_TYPES enum.
     """
     now = datetime.now(tz=timezone.utc).isoformat()
+    resolved = _resolve_binding(job_id, binding)
     return {
         "jobId": job_id,
         "deviceId": device.get("id", device.get("host", "unknown")),
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": _synthesize_events(device, result, now),
+        "events": [
+            {**event, "payload": bind_event_payload(event["payload"], resolved)}
+            for event in _synthesize_events(device, result, now)
+        ],
     }
 
 
@@ -810,6 +875,7 @@ def build_device_reported_bundle(
     *,
     completed: bool,
     error: Optional[str] = None,
+    binding: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Evidence for an outcome the DEVICE reported after it accepted the work.
 
@@ -820,6 +886,7 @@ def build_device_reported_bundle(
     terminal event, or mark an accepted-only result complete.
     """
     now = datetime.now(tz=timezone.utc).isoformat()
+    resolved = _resolve_binding(job_id, binding)
     payload: Dict[str, Any] = {"level": EVIDENCE_LEVEL_DEVICE_REPORTED, **result}
     if completed is True:
         event_type = EVENT_EXECUTION_COMPLETED
@@ -832,7 +899,7 @@ def build_device_reported_bundle(
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": [{"type": event_type, "timestamp": now, "payload": payload}],
+        "events": [{"type": event_type, "timestamp": now, "payload": bind_event_payload(payload, resolved)}],
     }
 
 
@@ -1404,8 +1471,22 @@ class JobExecutor:
 
     def execute(self, job: Dict) -> Dict[str, Any]:
         """Execute a job dict.  Returns the evidence bundle or error dict."""
-        job_id = job.get("id", f"job-{int(time.time())}")
         capability_type = job.get("capabilityType") or job.get("capability_type", "generic")
+
+        # Evidence must bind to this assignment (LO-EV-9).  One that cannot --
+        # no job id, or a malformed settlement unit or nonce -- is refused
+        # before the claim and before the device is touched.  (A missing id
+        # used to be replaced with an invented "job-<time>", which no
+        # settlement could ever match.)
+        try:
+            binding = assignment_binding(job)
+        except AssignmentBindingError as exc:
+            job_id = job.get("id")
+            log.error("Refusing job %r: %s; the device was not touched", job_id, exc)
+            if self.gateway and isinstance(job_id, str) and job_id.strip():
+                self._report_terminal_failure(job_id, {"error": f"unbindable assignment: {exc}"})
+            return {"status": "refused", "error": f"unbindable assignment: {exc}"}
+        job_id = binding["jobId"]
 
         log.info(f"Executing job {job_id} (capability: {capability_type})")
 
@@ -1441,7 +1522,7 @@ class JobExecutor:
 
             result = self._execute_on_device(device, job)
             verdict = classify_execution_result(result)
-            evidence = build_evidence_bundle(job_id, device, result)
+            evidence = build_evidence_bundle(job_id, device, result, binding=binding)
             device_label = device.get("id", "?")
 
             if self.gateway:
@@ -1465,7 +1546,7 @@ class JobExecutor:
                     # failed; it stays "running", as reported above -- until
                     # poll_awaiting observes the device's own outcome, when
                     # the adapter left a handle to ask the device with.
-                    self._register_awaiting(job_id, device, result)
+                    self._register_awaiting(job_id, device, result, binding)
                 else:
                     self._report_terminal_failure(
                         job_id,
@@ -1557,9 +1638,9 @@ class JobExecutor:
             host = result.get("printer_ip")
             if parsed is None or not isinstance(host, str) or not _IPP_HOST.match(host):
                 return None
-            queue, job_id = parsed
+            queue, cups_job_id = parsed
             return COMPLETION_KIND_IPP, {
-                "printer_ip": host, "queue": queue, "job_id": job_id,
+                "printer_ip": host, "queue": queue, "cupsJobId": cups_job_id,
             }
 
         if protocol in ("octoprint", "3d-printer"):
@@ -1573,7 +1654,9 @@ class JobExecutor:
 
         return None
 
-    def _register_awaiting(self, job_id: str, device: Dict, result: Any) -> bool:
+    def _register_awaiting(
+        self, job_id: str, device: Dict, result: Any, binding: Optional[Dict[str, str]] = None
+    ) -> bool:
         """Track an ACCEPTED job until its device reports an outcome.
 
         Registers nothing -- the job simply stays accepted-only, "running"
@@ -1609,6 +1692,7 @@ class JobExecutor:
         accepted_at = self._clock()
         self._awaiting[job_id] = {
             "job_id": job_id,
+            "binding": _resolve_binding(job_id, binding),
             "device": device,
             "kind": kind,
             "handle": handle,
@@ -1704,7 +1788,7 @@ class JobExecutor:
         handle = entry["handle"]
         url, printer_uri = ipp_job_urls(handle)
         request_id = self._next_ipp_request_id()
-        request = encode_ipp_get_job_attributes(printer_uri, handle["job_id"], request_id)
+        request = encode_ipp_get_job_attributes(printer_uri, handle["cupsJobId"], request_id)
         status, body = http_bytes(
             "POST", url, data=request,
             headers={"Content-Type": "application/ipp"},
@@ -1770,6 +1854,7 @@ class JobExecutor:
             result,
             completed=verdict == POLL_COMPLETED,
             error=observation.get("reason") or "device reported a failure",
+            binding=entry.get("binding"),
         )
         payload = evidence["events"][0]["payload"]
 

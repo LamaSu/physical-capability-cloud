@@ -290,7 +290,7 @@ class TestIppRequestEncoding:
 
     def test_urls_follow_rfc_8010_sec_5(self):
         http_url, printer_uri = ipp_job_urls(
-            {"printer_ip": "10.0.0.1", "queue": "default", "job_id": 42}
+            {"printer_ip": "10.0.0.1", "queue": "default", "cupsJobId": 42}
         )
         assert http_url == "http://10.0.0.1:631/printers/default"
         assert printer_uri == "ipp://10.0.0.1:631/printers/default"
@@ -542,7 +542,7 @@ IPP_ACCEPTED_WITH_ID = {
     "printer_ip": "10.0.0.1",
     "printer_name": "",
 }
-IPP_HANDLE = {"printer_ip": "10.0.0.1", "queue": "default", "job_id": 42}
+IPP_HANDLE = {"printer_ip": "10.0.0.1", "queue": "default", "cupsJobId": 42}
 
 
 def accept_ipp(device=IPP_DEVICE, result=IPP_ACCEPTED_WITH_ID, gateway=None, clock=None,
@@ -1351,3 +1351,42 @@ class TestDeviceReportedBundleIsClosed:
         with pytest.raises(TypeError):
             build_device_reported_bundle("j", self.DEVICE, {}, completed=True,
                                          events=[{"type": "custom_event"}])
+
+
+# ---------------------------------------------------------------------------
+# LO-EV-9: the device-reported outcome binds the original assignment
+# ---------------------------------------------------------------------------
+
+class TestDeviceReportedEvidenceBindsTheAssignment:
+    UNIT = "0x" + "12" * 32
+    NONCE = "0x" + "34" * 32
+
+    def test_the_completion_event_carries_the_job_and_unit_of_the_assignment(self):
+        gateway = _gateway()
+        clock = FakeClock()
+        ex = JobExecutor(devices=[IPP_DEVICE], gateway_client=gateway, clock=clock)
+        job = {"id": "job-unit", "capabilityType": "document-printing", "parameters": {},
+               "settlementUnitId": self.UNIT, "challengeNonce": self.NONCE}
+        with mock.patch("pcc_node.job_executor.execute_ipp_print", return_value=IPP_ACCEPTED_WITH_ID):
+            ex.execute(job)
+        assert ex.awaiting_completion()["job-unit"]["binding"] == {
+            "jobId": "job-unit", "settlementUnitId": self.UNIT, "challengeNonce": self.NONCE,
+        }
+        poll(ex, FakeIppPrinter(state=9))
+        bundles = _bundles(gateway)
+        assert len(bundles) == 2
+        for bundle in bundles:
+            for event in bundle["events"]:
+                assert event["payload"]["jobId"] == "job-unit"
+                assert event["payload"]["settlementUnitId"] == self.UNIT
+                assert event["payload"]["challengeNonce"] == self.NONCE
+
+    def test_the_printer_request_id_is_named_cups_job_id_never_job_id(self):
+        gateway = _gateway()
+        ex, gateway, clock = accept_ipp(gateway=gateway)
+        poll(ex, FakeIppPrinter(state=9))
+        final = _bundles(gateway)[-1]
+        payload = final["events"][0]["payload"]
+        assert payload["jobId"] == "job-ipp"
+        assert payload["handle"]["cupsJobId"] == 42
+        assert "job_id" not in _text(final["events"])

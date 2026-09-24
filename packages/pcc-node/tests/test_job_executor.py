@@ -1049,7 +1049,9 @@ class TestEvidenceBundleOutcomeEvents:
         assert progress["payload"]["level"] == "submitted"
         assert progress["payload"]["level"] == EVIDENCE_LEVEL_SUBMITTED
         assert progress["payload"]["result"] == result
-        assert progress["payload"] == {"level": "submitted", "result": result}
+        # Old: the payload was exactly {level, result}.  New: it also commits
+        # the PCC job (LO-EV-9, evidence #3241): every event binds payload.jobId.
+        assert progress["payload"] == {"level": "submitted", "result": result, "jobId": "j1"}
         assert progress["timestamp"] == bundle["executedAt"]
         assert bundle["result"] == result
 
@@ -2787,3 +2789,115 @@ class TestR31PollBoundedness:
 
         assert seen_timeouts, "the run was never polled"
         assert all(t is not None and t <= 3 for t in seen_timeouts), seen_timeouts
+
+
+# ---------------------------------------------------------------------------
+# LO-EV-9 (evidence #3219/#3241): every event binds the assignment
+# ---------------------------------------------------------------------------
+
+from pcc_node.job_executor import (  # noqa: E402
+    AssignmentBindingError,
+    assignment_binding,
+    bind_event_payload,
+)
+
+UNIT = "0x" + "ab" * 32
+NONCE = "0x" + "cd" * 32
+
+
+class TestEvidenceBindsTheAssignment:
+    DEVICE = {"id": "d1", "protocol": "ipp"}
+
+    @pytest.mark.parametrize(
+        "result", [GH_SUCCESS, IPP_ACCEPTED, IPP_FAIL_TIMEOUT, {}, None, {"foo": "bar"}]
+    )
+    def test_every_event_commits_the_pcc_job(self, result):
+        bundle = build_evidence_bundle("job-7", self.DEVICE, result)
+        assert bundle["events"], "the trail is never empty (execution_started)"
+        for event in bundle["events"]:
+            assert event["payload"]["jobId"] == "job-7", event["type"]
+
+    def test_unit_fields_are_committed_on_every_event_when_assigned(self):
+        binding = {"jobId": "job-7", "settlementUnitId": UNIT, "challengeNonce": NONCE}
+        for result in (GH_SUCCESS, IPP_ACCEPTED, IPP_FAIL_TIMEOUT):
+            bundle = build_evidence_bundle("job-7", self.DEVICE, result, binding=binding)
+            for event in bundle["events"]:
+                assert event["payload"]["settlementUnitId"] == UNIT
+                assert event["payload"]["challengeNonce"] == NONCE
+
+    def test_a_binding_for_another_job_is_refused(self):
+        with pytest.raises(ValueError):
+            build_evidence_bundle("job-7", self.DEVICE, GH_SUCCESS, binding={"jobId": "job-8"})
+
+    def test_a_result_naming_another_job_cannot_reach_payload_job_id(self):
+        # A completed payload is the result itself; a device-local "jobId" there
+        # would claim another job, so the bundle is refused rather than built.
+        with pytest.raises(ValueError, match="payload.jobId"):
+            build_evidence_bundle("job-7", self.DEVICE, {**GH_SUCCESS, "jobId": "device-local-1"})
+        same = build_evidence_bundle("job-7", self.DEVICE, {**GH_SUCCESS, "jobId": "job-7"})
+        assert all(e["payload"]["jobId"] == "job-7" for e in same["events"])
+
+    def test_bind_event_payload_wraps_a_non_dict(self):
+        assert bind_event_payload("raw", {"jobId": "j"}) == {"result": "raw", "jobId": "j"}
+
+    def test_assignment_binding_accepts_well_formed_unit_fields(self):
+        job = {"id": "job-7", "settlementUnitId": UNIT, "challengeNonce": NONCE, "extra": 1}
+        assert assignment_binding(job) == {"jobId": "job-7", "settlementUnitId": UNIT, "challengeNonce": NONCE}
+        assert assignment_binding({"id": "job-7"}) == {"jobId": "job-7"}
+
+    @pytest.mark.parametrize(
+        "job",
+        [
+            {},
+            {"id": ""},
+            {"id": "   "},
+            {"id": 42},
+            {"id": "j", "settlementUnitId": "0x" + "AB" * 32},
+            {"id": "j", "settlementUnitId": "0x" + "ab" * 31},
+            {"id": "j", "challengeNonce": "ab" * 32},
+            {"id": "j", "challengeNonce": 7},
+        ],
+    )
+    def test_assignment_binding_refuses_unbindable_assignments(self, job):
+        with pytest.raises(AssignmentBindingError):
+            assignment_binding(job)
+
+    def _gateway(self):
+        g = mock.Mock()
+        g.update_job_status.return_value = True
+        g.push_evidence.return_value = True
+        return g
+
+    def test_an_unbindable_assignment_never_touches_the_device(self):
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}], gateway_client=gateway)
+        with mock.patch.object(ex, "_execute_on_device") as run:
+            out = ex.execute({"id": "job-9", "capabilityType": "document-printing", "challengeNonce": "0xBAD"})
+        run.assert_not_called()
+        assert out["status"] == "refused"
+        statuses = [c.args[1] for c in gateway.update_job_status.call_args_list]
+        assert statuses == ["failed"]          # never claimed "running"
+        gateway.push_evidence.assert_not_called()
+
+    def test_a_job_without_an_id_is_refused_not_given_an_invented_one(self):
+        # Old: execute() invented "job-<time>" for a job with no id, which no
+        # settlement could ever match.  New: refused, and nothing is reported.
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}], gateway_client=gateway)
+        with mock.patch.object(ex, "_execute_on_device") as run:
+            out = ex.execute({"capabilityType": "document-printing"})
+        run.assert_not_called()
+        assert out["status"] == "refused"
+        gateway.update_job_status.assert_not_called()
+
+    def test_execute_binds_the_assignment_s_unit_into_the_pushed_evidence(self):
+        gateway = self._gateway()
+        ex = JobExecutor(devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}], gateway_client=gateway)
+        job = {"id": "job-10", "capabilityType": "document-printing", "settlementUnitId": UNIT, "challengeNonce": NONCE}
+        with mock.patch.object(ex, "_execute_on_device", return_value=IPP_ACCEPTED):
+            ex.execute(job)
+        [bundle] = [c.args[1] for c in gateway.push_evidence.call_args_list]
+        for event in bundle["events"]:
+            assert event["payload"]["jobId"] == "job-10"
+            assert event["payload"]["settlementUnitId"] == UNIT
+            assert event["payload"]["challengeNonce"] == NONCE
