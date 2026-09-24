@@ -660,7 +660,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
       // Pointers the frontend can deep-link to.
       links: {
         viewSchedule: `${baseUrl}/contributors/schedules/${scheduleHash}`,
-        addUsdc: `${baseUrl}/api/fiat-ramp/onramp/session`,
+        addUsdc: `${baseUrl}/api/fiat-ramp/coinbase/onramp`,
         agentPackage: `${baseUrl}/agent-package.json`,
       },
     });

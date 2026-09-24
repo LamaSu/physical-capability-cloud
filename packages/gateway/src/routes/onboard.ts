@@ -656,22 +656,25 @@ export async function onboardRoutes(app: FastifyInstance) {
 
         // Fiat on-ramp — fund agent wallet with credit card
         funding: {
-          message: "Fund your agent wallet with a credit card or bank transfer",
-          stripe: {
-            endpoint: `${baseUrl}/api/fiat-ramp/onramp/session`,
+          message:
+            "Fund your agent wallet with a card or mobile money. A provider that is not configured on " +
+            "this gateway answers 503 not_configured; GET /api/fiat-ramp/status says which are live.",
+          card: {
+            endpoint: `${baseUrl}/api/fiat-ramp/coinbase/onramp`,
             method: "POST",
             body: { walletAddress: keys.evm.address, amount: 50, currency: "USD" },
-            description: "Visa/Mastercard/AMEX → USDC on Base",
+            description: "Coinbase Onramp: card or Coinbase account → USDC on Base (returns onrampUrl)",
           },
           yellowcard: {
-            endpoint: `${baseUrl}/api/fiat-ramp/onramp/yellowcard`,
+            endpoint: `${baseUrl}/api/fiat-ramp/yellowcard/deposit`,
             method: "POST",
-            description: "Mobile money in 34 emerging market countries → USDC",
+            description:
+              "Mobile money / bank deposit → USDC. Needs a channelId (GET /api/fiat-ramp/yellowcard/channels) and recipient details",
           },
           wise: {
-            endpoint: `${baseUrl}/api/fiat-ramp/payout`,
+            endpoint: `${baseUrl}/api/fiat-ramp/wise/payout`,
             method: "POST",
-            description: "Enterprise bank payouts in 40+ currencies",
+            description: "Bank payouts (outbound), not wallet funding",
           },
         },
       });

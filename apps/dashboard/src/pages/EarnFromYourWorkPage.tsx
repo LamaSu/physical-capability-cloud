@@ -170,31 +170,33 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   async function openOnramp(): Promise<void> {
     if (!response) return;
     try {
-      const res = await fetch(`${API_BASE}/api/fiat-ramp/onramp/session`, {
+      const res = await fetch(`${API_BASE}/api/fiat-ramp/coinbase/onramp`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${response.apiKey}`,
         },
         body: JSON.stringify({
-          destinationAddress: response.walletAddress,
-          amountUsd: 20,
-          currency: "USDC",
+          walletAddress: response.walletAddress,
+          amount: 20,
+          currency: "USD",
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
-        url?: string;
-        sessionUrl?: string;
-        clientSecret?: string;
+        onrampUrl?: string;
+        mock?: boolean;
+        error?: string;
       };
-      const onrampUrl = data.url ?? data.sessionUrl;
-      if (onrampUrl) {
-        window.open(onrampUrl, "_blank", "noopener,noreferrer");
+      if (res.status === 503) {
+        alert("Card top-up is not configured on this server, so no funding link is available.");
+        return;
+      }
+      if (res.ok && data.onrampUrl && !data.mock) {
+        window.open(data.onrampUrl, "_blank", "noopener,noreferrer");
+      } else if (!res.ok) {
+        alert(`Couldn't start the card top-up (HTTP ${res.status}${data.error ? `: ${data.error}` : ""}).`);
       } else {
-        alert(
-          "Stripe onramp is in mock mode on this server (no STRIPE_SECRET_KEY configured). " +
-            "On production, this button opens a card/ACH funding session.",
-        );
+        alert("Card top-up is simulated on this server: no funding link is available.");
       }
     } catch (err) {
       alert(`Couldn't start onramp: ${err instanceof Error ? err.message : String(err)}`);

@@ -459,8 +459,8 @@ ${caps.some((c: any) => ["liquid-handler", "hplc", "pcr", "assay"].includes(c.ty
     : "Standard single-user job execution."}
 
 ## Funding
-Fund your wallet: POST ${baseUrl}/api/fiat-ramp/onramp/session
-Accepts: Visa, Mastercard, AMEX → USDC on Base
+Fund your wallet: POST ${baseUrl}/api/fiat-ramp/coinbase/onramp { walletAddress, amount }
+Coinbase Onramp: card or Coinbase account → USDC on Base (503 not_configured when this gateway has no Coinbase app id)
 
 ## API Base
 ${baseUrl}/api

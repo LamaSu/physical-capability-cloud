@@ -246,7 +246,7 @@ function renderFundCond(){
     c.querySelectorAll("[data-f]").forEach(bindInput);
   }else if(S.funding==="fiat"){
     c.style.display="";
-    c.innerHTML=`<div style="font-size:13px;color:var(--muted)">No card needed now — your agent will open a Stripe top-up (<code style="font-family:var(--mono);color:var(--accent)">/api/fiat-ramp/onramp/session</code>) the first time it needs to pay.</div>`;
+    c.innerHTML=`<div style="font-size:13px;color:var(--muted)">No card needed now — your agent will open a card top-up (<code style="font-family:var(--mono);color:var(--accent)">/api/fiat-ramp/coinbase/onramp</code>) the first time it needs to pay.</div>`;
   }else{
     c.style.display="";
     c.innerHTML=`<div style="font-size:13px;color:var(--muted)">🎁 <b style="color:var(--accent)">$25 in PCC credits</b> will be added to your agent for the demo — enough for a few pizzas.</div>`;
