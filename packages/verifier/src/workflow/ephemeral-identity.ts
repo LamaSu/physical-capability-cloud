@@ -9,7 +9,9 @@
  * - Off-chain issuance: zero gas cost for creating session keys.
  * - Scoped authority: each session key is restricted by actions, contracts, TTL.
  * - Reputation routing: all consequences flow to the principalKey.
- * - Deterministic JSON: canonical serialization prevents signature ambiguity.
+ * - Deterministic bytes: the delegation and revocation preimages come from the
+ *   one LO-EV-1 contract in @pcc/spec (sessionKeyDelegationPreimage /
+ *   sessionRevocationPreimage), shared with kernel-sdk and the gateway.
  *
  * Crypto: Ed25519 via tweetnacl (same library used by @pcc/spec identity stack).
  */
@@ -27,77 +29,14 @@ import type {
   SessionVerificationResult,
   SessionAction,
 } from "@pcc/spec";
-import { DEFAULT_SESSION_KEY_CONFIG } from "@pcc/spec";
+import {
+  DEFAULT_SESSION_KEY_CONFIG,
+  SigningPreimageError,
+  sessionKeyDelegationPreimage,
+  sessionRevocationPreimage,
+} from "@pcc/spec";
 import type { AgentRegistryId, ReputationFeedback } from "@pcc/spec";
 import { derivePath, type DerivedKey } from "./slip10-ed25519.js";
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Convert a Uint8Array to a hex string.
- * Used for deterministic JSON serialization of binary fields.
- */
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/**
- * Produce the canonical byte representation of a SessionKey struct
- * for signing/verification.
- *
- * CRITICAL: This excludes the parentSignature field.
- * The parent signs this canonical form; the signature goes INTO parentSignature.
- *
- * Deterministic JSON: sorted keys, no whitespace, binary fields as hex.
- * This format is stable across JS engines because we control key order explicitly.
- *
- * `derivationPath` is INCLUDED in the canonical form ONLY when present.
- * This keeps backward compatibility: a legacy sessionKey (no derivationPath)
- * produces the same canonical bytes it did before the field was added, so
- * its parentSignature still verifies. A derived sessionKey has derivationPath
- * set, which means the parent signs over the path as well — committing to
- * the canonical derivation location in the tree.
- */
-function canonicalSessionKeyBytes(sk: Omit<SessionKey, "parentSignature">): Uint8Array {
-  const body: Record<string, unknown> = {
-    sessionId: sk.sessionId,
-    parentAgentId: sk.parentAgentId,
-    publicKey: toHex(sk.publicKey),
-    issuedAt: sk.issuedAt,
-    expiresAt: sk.expiresAt,
-    scope: {
-      allowedActions: [...sk.scope.allowedActions].sort(),
-      contractIds: [...sk.scope.contractIds].sort(),
-      maxSignatures: sk.scope.maxSignatures,
-    },
-  };
-  // Only include derivationPath when present so legacy (fresh-keypair)
-  // sessionKeys produce byte-identical canonical output.
-  if (sk.derivationPath !== undefined) {
-    body.derivationPath = sk.derivationPath;
-  }
-  const canonical = JSON.stringify(body);
-  return new TextEncoder().encode(canonical);
-}
-
-/**
- * Produce the canonical byte representation of a revocation record
- * for signing/verification.
- *
- * Excludes parentSignature.
- */
-function canonicalRevocationBytes(rev: Omit<SessionRevocation, "parentSignature">): Uint8Array {
-  const canonical = JSON.stringify({
-    sessionId: rev.sessionId,
-    revokedAt: rev.revokedAt,
-    reason: rev.reason,
-  });
-  return new TextEncoder().encode(canonical);
-}
 
 // ---------------------------------------------------------------------------
 // SessionKeyService
@@ -148,6 +87,12 @@ export class SessionKeyService {
     if (ttl <= 0) {
       throw new Error("TTL must be positive");
     }
+    // issuedAt and expiresAt are signed as JSON integers (LO-EV-1 delegation
+    // preimage), so a fractional TTL cannot produce a verifiable delegation.
+    // Refuse it here, with this message, instead of failing inside the preimage.
+    if (!Number.isSafeInteger(ttl)) {
+      throw new Error(`TTL must be a whole number of seconds, got ${ttl}`);
+    }
 
     // Generate a fresh Ed25519 keypair for the session
     const sessionKeypair = nacl.sign.keyPair();
@@ -172,7 +117,7 @@ export class SessionKeyService {
     };
 
     // Sign the canonical form with the parent's private key
-    const canonical = canonicalSessionKeyBytes(sessionKeyBody);
+    const canonical = sessionKeyDelegationPreimage(sessionKeyBody);
     const parentSignature = nacl.sign.detached(canonical, params.principalPrivateKey);
 
     const sessionKey: SessionKey = {
@@ -259,6 +204,12 @@ export class SessionKeyService {
     if (ttl <= 0) {
       throw new Error("TTL must be positive");
     }
+    // issuedAt and expiresAt are signed as JSON integers (LO-EV-1 delegation
+    // preimage), so a fractional TTL cannot produce a verifiable delegation.
+    // Refuse it here, with this message, instead of failing inside the preimage.
+    if (!Number.isSafeInteger(ttl)) {
+      throw new Error(`TTL must be a whole number of seconds, got ${ttl}`);
+    }
 
     // Derive the child keypair deterministically. This throws on non-hardened
     // or malformed paths — we let that propagate so callers see the precise
@@ -296,7 +247,7 @@ export class SessionKeyService {
     // Parent signs over the canonical form (which now includes derivationPath).
     // This is the AUTHORIZATION step — derivation alone is not authorization
     // (see R06 section 5 "implicit delegation" for the rationale).
-    const canonical = canonicalSessionKeyBytes(sessionKeyBody);
+    const canonical = sessionKeyDelegationPreimage(sessionKeyBody);
     const parentSignature = nacl.sign.detached(
       canonical,
       params.principalPrivateKey,
@@ -407,13 +358,17 @@ export class SessionKeyService {
         ? { derivationPath: sessionKey.derivationPath }
         : {}),
     };
-    const canonical = canonicalSessionKeyBytes(sessionKeyBody);
-
-    const parentSigValid = nacl.sign.detached.verify(
-      canonical,
-      sessionKey.parentSignature,
-      event.proof.parentPublicKey,
-    );
+    let parentSigValid = false;
+    try {
+      parentSigValid = nacl.sign.detached.verify(
+        sessionKeyDelegationPreimage(sessionKeyBody),
+        sessionKey.parentSignature,
+        event.proof.parentPublicKey,
+      );
+    } catch (err) {
+      if (!(err instanceof SigningPreimageError)) throw err;
+      failures.push("session_key_malformed");
+    }
     if (!parentSigValid) {
       failures.push("parent_signature_invalid");
     }
@@ -470,7 +425,7 @@ export class SessionKeyService {
       reason: params.reason,
     };
 
-    const canonical = canonicalRevocationBytes(revocationBody);
+    const canonical = sessionRevocationPreimage(revocationBody);
     const parentSignature = nacl.sign.detached(canonical, params.principalPrivateKey);
 
     return {
@@ -497,7 +452,13 @@ export class SessionKeyService {
       reason: params.revocation.reason,
     };
 
-    const canonical = canonicalRevocationBytes(revocationBody);
+    let canonical: Uint8Array;
+    try {
+      canonical = sessionRevocationPreimage(revocationBody);
+    } catch (err) {
+      if (err instanceof SigningPreimageError) return false;
+      throw err;
+    }
 
     return nacl.sign.detached.verify(
       canonical,

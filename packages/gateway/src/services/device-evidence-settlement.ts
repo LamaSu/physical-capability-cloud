@@ -37,6 +37,10 @@ import nacl from "tweetnacl";
 import {
   normalizeRegisteredSigner,
   getPrimitive,
+  isTaggedDigest,
+  parseEd25519PublicKeyHex,
+  parseEd25519SignatureHex,
+  signingPreimage,
   type RegisteredSigner,
   type SessionKeyAuthorization,
   type SessionKey,
@@ -235,15 +239,14 @@ export type VerifyEd25519 = (
   publicKeyHex: string,
 ) => boolean | Promise<boolean>;
 
-function stripHexPrefix(hex: string): string {
-  return hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
-}
-
 /**
  * Reference Ed25519 verify using tweetnacl (the same primitive the node signs
  * with — kernel-sdk `verifyBundleSignature`). Message is UTF-8 bytes of the
- * bundleHash string; signature + public key are hex (optional 0x). Returns false
- * on any malformed input — never throws.
+ * bundleHash string, which for a tagged digest is exactly the LO-EV-1
+ * `signingPreimage` (callers validate the digest first); signature + public
+ * key are hex (optional 0x, either case, exact length: a malformed or
+ * over-long value is rejected, never truncated). Returns false on any
+ * malformed input — never throws.
  */
 export function naclEd25519Verify(
   message: string,
@@ -252,9 +255,8 @@ export function naclEd25519Verify(
 ): boolean {
   try {
     const msg = new TextEncoder().encode(message);
-    const sig = Buffer.from(stripHexPrefix(signatureValue), "hex");
-    const pk = Buffer.from(stripHexPrefix(publicKeyHex), "hex");
-    if (sig.length !== 64 || pk.length !== 32) return false;
+    const sig = parseEd25519SignatureHex(signatureValue);
+    const pk = parseEd25519PublicKeyHex(publicKeyHex);
     return nacl.sign.detached.verify(msg, sig, pk);
   } catch {
     return false;
@@ -302,6 +304,12 @@ export async function verifyDeviceSignedEvidence(
   if (typeof input.bundleHash !== "string" || input.bundleHash.length === 0) {
     return { ok: false, reason: "missing-bundle-hash" };
   }
+  // The signature must cover a real evidence digest. Without this, a valid
+  // signature over any other string the same key signs (e.g. the registration
+  // challenge "pcc-kernel-signing-key:<id>") would pass as device evidence.
+  if (!isTaggedDigest(input.bundleHash)) {
+    return { ok: false, reason: "malformed-bundle-hash" };
+  }
   const signer = normalizeRegisteredSigner(input.registeredSigner);
   if (!signer) return { ok: false, reason: "unregistered-signer" };
   if (signer.algorithm !== "ed25519") return { ok: false, reason: "signer-not-ed25519" };
@@ -313,7 +321,7 @@ export async function verifyDeviceSignedEvidence(
       const sessionKey: SessionKey = {
         sessionId: auth.sessionId,
         parentAgentId: auth.parentAgentId as SessionKey["parentAgentId"],
-        publicKey: Uint8Array.from(Buffer.from(stripHexPrefix(auth.publicKey), "hex")),
+        publicKey: parseEd25519PublicKeyHex(auth.publicKey),
         issuedAt: auth.issuedAt,
         expiresAt: auth.expiresAt,
         scope: {
@@ -321,8 +329,11 @@ export async function verifyDeviceSignedEvidence(
           contractIds: auth.scope.contractIds,
           maxSignatures: auth.scope.maxSignatures,
         },
-        parentSignature: Uint8Array.from(Buffer.from(stripHexPrefix(auth.parentSignature), "hex")),
-        ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
+        parentSignature: parseEd25519SignatureHex(auth.parentSignature),
+        // `!== undefined`, not truthiness: a defined path is reproduced as the
+        // principal signed it. An empty path is refused by the LO-EV-1 contract
+        // before any signature check (a labelled tightening, R20 round 2).
+        ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
       };
       if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
         return { ok: false, reason: "malformed-session-authorization" };
@@ -331,12 +342,12 @@ export async function verifyDeviceSignedEvidence(
         return { ok: false, reason: "contract_not_allowed" };
       }
       const event: SessionSignedEvent = {
-        eventData: new TextEncoder().encode(input.bundleHash),
-        sessionSignature: Uint8Array.from(Buffer.from(stripHexPrefix(input.signature.value), "hex")),
+        eventData: signingPreimage(input.bundleHash),
+        sessionSignature: parseEd25519SignatureHex(input.signature.value),
         proof: {
           sessionKey,
-          parentPublicKey: Uint8Array.from(Buffer.from(stripHexPrefix(signer.publicKey), "hex")),
-          ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
+          parentPublicKey: parseEd25519PublicKeyHex(signer.publicKey),
+          ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
         },
       };
       const result = new SessionKeyService().verifySessionSignedEvent({

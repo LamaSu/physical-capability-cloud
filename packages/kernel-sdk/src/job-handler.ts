@@ -24,7 +24,14 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { canonicalize, ids, sha256 } from "@pcc/spec";
+import {
+  canonicalize,
+  ids,
+  parseEd25519SignatureHex,
+  sessionKeyDelegationPreimage,
+  sha256,
+  signingPreimage,
+} from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Hex helpers (serialising bytes over JSON)
@@ -199,21 +206,10 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       },
     };
 
-    const sessionCanonical = new TextEncoder().encode(
-      JSON.stringify({
-        sessionId: sessionKeyBody.sessionId,
-        parentAgentId: sessionKeyBody.parentAgentId,
-        publicKey: toHex(sessionKeyBody.publicKey),
-        issuedAt: sessionKeyBody.issuedAt,
-        expiresAt: sessionKeyBody.expiresAt,
-        scope: {
-          allowedActions: [...sessionKeyBody.scope.allowedActions].sort(),
-          contractIds: [...sessionKeyBody.scope.contractIds].sort(),
-          maxSignatures: sessionKeyBody.scope.maxSignatures,
-        },
-      }),
+    const parentSig = nacl.sign.detached(
+      sessionKeyDelegationPreimage(sessionKeyBody),
+      principalPrivateKey,
     );
-    const parentSig = nacl.sign.detached(sessionCanonical, principalPrivateKey);
     const sessionKey: SessionKey = {
       ...sessionKeyBody,
       parentSignature: parentSig,
@@ -335,8 +331,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     // ── Finalise bundle (hash + sign with sessionKey) ───────────────────
     const sortedHashes = events.map((e) => e.hash).sort();
     const bundleHash = await sha256(canonicalize(sortedHashes));
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const bundleSig = nacl.sign.detached(bundleHashBytes, sessionKeypair.secretKey);
+    const bundleSig = nacl.sign.detached(signingPreimage(bundleHash), sessionKeypair.secretKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -371,15 +366,30 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
   };
 }
 
-/** Verify an EvidenceBundle signature against a known session public key. */
+/**
+ * Verify an EvidenceBundle signature against a known session public key.
+ *
+ * Transport form: the signature value is UNPREFIXED hex, which is what the SDK
+ * signs and what this verifier has always required. A "0x"/"0X"-prefixed
+ * value decoded to 65 bytes before LO-EV-1 and never verified, so it must not
+ * verify now (parseEd25519SignatureHex alone would strip the prefix).
+ *
+ * Deliberate narrowings vs the pre-LO-EV-1 decoder: a value with a trailing
+ * extra nibble (129 hex) used to be truncated to 64 bytes and could verify; it
+ * is now rejected, as is a bundleHash that is not a canonical tagged digest.
+ */
 export function verifyBundleSignature(
   bundle: EvidenceBundle,
   sessionPublicKey: Uint8Array,
 ): boolean {
+  const value: unknown = bundle.kernelSignature?.value;
+  if (typeof value !== "string" || /^0x/i.test(value)) return false;
   try {
-    const bundleHashBytes = new TextEncoder().encode(bundle.bundleHash);
-    const sig = fromHex(bundle.kernelSignature.value);
-    return nacl.sign.detached.verify(bundleHashBytes, sig, sessionPublicKey);
+    return nacl.sign.detached.verify(
+      signingPreimage(bundle.bundleHash),
+      parseEd25519SignatureHex(value),
+      sessionPublicKey,
+    );
   } catch {
     return false;
   }
