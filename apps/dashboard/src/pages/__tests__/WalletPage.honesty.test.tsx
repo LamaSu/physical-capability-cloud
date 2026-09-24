@@ -149,7 +149,7 @@ describe("outside demo mode, with the gateway unreachable", () => {
     stubFetch({});
     await renderPage();
     const tabs: Array<[tab: string, heading: string, why: RegExp]> = [
-      ["Fund Wallet", "Funding by card or bank transfer", /need a wallet address and identity details/],
+      ["Fund Wallet", "Funding by card or bank transfer", /Stripe deposit route needs a wallet address/],
       ["Withdraw", "Withdrawal to a bank or mobile money", /\/api\/fiat-ramp\/yellowcard\/withdrawal, which the gateway doesn't serve/],
       ["API Credits", "API credits", /API credits are retired/],
       ["Activity", "Your funding activity", /every session in the gateway's memory, for all accounts/],

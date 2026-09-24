@@ -56,10 +56,10 @@ const NOT_LIVE: Record<Exclude<Tab, "fundedkey">, { what: string; detail: string
   fund: {
     what: "Funding by card or bank transfer",
     detail:
-      "This form can't fund a wallet. The gateway's Stripe and Yellowcard deposit routes need a " +
-      "wallet address and identity details it doesn't collect, and they return simulated sessions " +
-      "unless provider keys are configured. The Funded Key tab creates a wallet and links to " +
-      "Coinbase's card checkout.",
+      "This form can't fund a wallet. The gateway's Stripe deposit route needs a wallet address, " +
+      "and its Yellowcard route also needs identity details; this form collects neither. Both " +
+      "return simulated sessions unless provider keys are configured. The Funded Key tab can " +
+      "create a wallet and link it to Coinbase's card checkout.",
   },
   withdraw: {
     what: "Withdrawal to a bank or mobile money",
