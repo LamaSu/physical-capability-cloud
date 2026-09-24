@@ -1145,6 +1145,56 @@ describe("SessionKeyService", () => {
       ).toThrow(/hardened/);
     });
 
+    it("32b. An empty derivation path is refused at issuance and at verification (R20 round 2)", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+      expect(() =>
+        service.deriveSessionKey({ parentSeed, path: "", principal, principalPrivateKey: privateKey }),
+      ).toThrow();
+
+      // A delegation the principal signed over bytes that carry "derivationPath":"".
+      // The incumbent verifier kept any defined path, so it used to verify; the
+      // LO-EV-1 contract now refuses it before checking the signature.
+      const { sessionKey, sessionPrivateKey } = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/1'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+      const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+      const emptyPathBytes = new TextEncoder().encode(
+        JSON.stringify({
+          sessionId: sessionKey.sessionId,
+          parentAgentId: sessionKey.parentAgentId,
+          publicKey: toHex(sessionKey.publicKey),
+          issuedAt: sessionKey.issuedAt,
+          expiresAt: sessionKey.expiresAt,
+          scope: {
+            allowedActions: [...sessionKey.scope.allowedActions].sort(),
+            contractIds: [...sessionKey.scope.contractIds].sort(),
+            maxSignatures: sessionKey.scope.maxSignatures,
+          },
+          derivationPath: "",
+        }),
+      );
+      const emptyPathKey = {
+        ...sessionKey,
+        derivationPath: "",
+        parentSignature: nacl.sign.detached(emptyPathBytes, privateKey),
+      };
+      const eventData = makeEventData();
+      const result = service.verifySessionSignedEvent({
+        event: {
+          eventData,
+          sessionSignature: nacl.sign.detached(eventData, sessionPrivateKey),
+          proof: { sessionKey: emptyPathKey, parentPublicKey: principal.publicKey, derivationPath: "" },
+        },
+        action: "evidence_submit",
+      });
+      expect(result.valid).toBe(false);
+      expect(result.failures[0]).toBe("session_key_malformed");
+    });
+
     it("33. Tampered derivationPath on a derived sessionKey causes parent_signature_invalid", () => {
       const { principal, privateKey } = makePrincipal();
       const parentSeed = makeSeed();

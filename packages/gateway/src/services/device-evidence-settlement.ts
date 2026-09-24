@@ -343,8 +343,9 @@ export async function verifyDeviceSignedEvidence(
           maxSignatures: auth.scope.maxSignatures,
         },
         parentSignature: parseEd25519SignatureHex(auth.parentSignature),
-        // `!== undefined`, not truthiness: an empty path is part of what the
-        // principal signed and must be reproduced, not dropped.
+        // `!== undefined`, not truthiness: a defined path is reproduced as the
+        // principal signed it. An empty path is refused by the LO-EV-1 contract
+        // before any signature check (a labelled tightening, R20 round 2).
         ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
       };
       if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
