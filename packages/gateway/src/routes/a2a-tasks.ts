@@ -52,6 +52,14 @@ import type {
 } from "@pcc/spec";
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  computeUnmet,
+  defaultSupplyReads,
+  intentActor,
+  isUnmetCaptureEnabled,
+  principalFromApiKey,
+  withUnmet,
+} from "../services/unmet-capture.js";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
@@ -893,6 +901,8 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
+  /** Operator of the API key the route resolved (server-side); null if none. */
+  principal: string | null = null,
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
   const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
@@ -938,7 +948,7 @@ async function dispatchTasksSend(
 
       case "pcc-quote": {
         const result = await createPccQuote(skillParams as PccQuoteParams);
-        emitAtomicSessionIntent(skillParams as PccQuoteParams, userAgentId);
+        void emitAtomicSessionIntent(skillParams as PccQuoteParams, userAgentId, principal);
         const task: A2ATask = {
           ...baseTask,
           state: pccStatusToA2A(result.status),
@@ -953,7 +963,7 @@ async function dispatchTasksSend(
       case "pcc-submit": {
         const quote = await createPccQuote(skillParams as PccSubmitParams);
         const commit = await commitPccSession(quote.sessionId);
-        emitAtomicSessionIntent(skillParams as PccSubmitParams, userAgentId);
+        void emitAtomicSessionIntent(skillParams as PccSubmitParams, userAgentId, principal);
         const task: A2ATask = {
           ...baseTask,
           state: pccStatusToA2A(commit.status),
@@ -1130,17 +1140,18 @@ async function dispatchTasksCancel(
 
 // ── Demand-intel hook ────────────────────────────────────────────────────────
 
-function emitAtomicSessionIntent(
+async function emitAtomicSessionIntent(
   params: PccQuoteParams,
   userAgentId: string,
-): void {
+  principal: string | null,
+): Promise<void> {
   try {
     if (!params.capabilityType) return;
     const compositionSignature = computeCompositionSignature(
       [params.capabilityType],
       [],
     );
-    const envelope: DemandEnvelope = {
+    let envelope: DemandEnvelope = {
       id: `intent-a2a-${crypto.randomUUID()}`,
       source: "a2a_tasks_send",
       compositionSignature,
@@ -1151,11 +1162,18 @@ function emitAtomicSessionIntent(
       originAgentId: userAgentId,
       createdAt: new Date().toISOString(),
     };
+    // R44 D2 (flag-gated, default OFF): server-computed unmet types and the
+    // authenticated principal instead of the params' userAgentId. With the
+    // flag off nothing is awaited, so the publish stays synchronous.
+    if (isUnmetCaptureEnabled()) {
+      envelope = withUnmet(envelope, await computeUnmet([params.capabilityType], { reads: defaultSupplyReads() }));
+    }
+    const actor = intentActor(principal, { actorId: userAgentId, actorType: "agent" });
     getEventBus().publish({
       eventType: "intent.atomic_session",
       category: "intent",
-      actorId: userAgentId,
-      actorType: "agent",
+      actorId: actor.actorId,
+      actorType: actor.actorType,
       resourceType: "intent",
       resourceId: envelope.id,
       payload: envelope as unknown as Record<string, unknown>,
@@ -1225,8 +1243,12 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     //
     // Every tasks/send stores a task in the in-memory a2aTasks map, so the
     // anonymous path is per-IP rate-limited. Public is not unbounded.
+    // The authenticated principal for demand capture (R44 D2): the operator of
+    // the API key resolved here, the same primitive apiGate uses. Never params.
+    let principal: string | null = null;
     if (process.env.PCC_A2A_AUTH_DISABLED !== "true") {
       const apiKey = resolveApiKey(req);
+      principal = principalFromApiKey(apiKey);
       const session = !apiKey ? resolveSession(req) : null;
       if (!apiKey && !session) {
         if (!isPublicDiscoverCall(method, params)) {
@@ -1253,7 +1275,7 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     let result: JsonRpcSuccess | JsonRpcError;
     switch (method) {
       case "tasks/send":
-        result = await dispatchTasksSend(rpcId, params);
+        result = await dispatchTasksSend(rpcId, params, principal);
         break;
       case "tasks/get":
         result = await dispatchTasksGet(rpcId, params);

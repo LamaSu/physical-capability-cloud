@@ -36,6 +36,7 @@ import type {
   DemandEnvelope,
   IntentSource,
   DecompositionResult,
+  AnalyticsEvent,
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand, commitmentReportForRequest, normalizeCapabilityNodeConventions } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
@@ -50,6 +51,14 @@ import {
 } from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  authenticatedPrincipal,
+  computeUnmet,
+  defaultSupplyReads,
+  intentActor,
+  isUnmetCaptureEnabled,
+  withUnmet,
+} from "../services/unmet-capture.js";
 import { schema } from "@pcc/store";
 
 // ---------------------------------------------------------------------------
@@ -232,7 +241,7 @@ function buildEnvelopeFromRequest(
   };
 }
 
-function emitIntent(envelope: DemandEnvelope, actor: string, actorType: "requestor" | "agent") {
+function emitIntent(envelope: DemandEnvelope, actor: string, actorType: AnalyticsEvent["actorType"]) {
   try {
     getEventBus().publish({
       eventType:
@@ -450,9 +459,18 @@ export async function requestRoutes(app: FastifyInstance) {
     });
 
     // ── Demand-intel capture point A — composite request ───────────
-    const envelope = buildEnvelopeFromRequest(request, "requests_api");
-    const actor = request.requesterEmail ?? request.requesterWallet ?? "anonymous";
-    emitIntent(envelope, actor, "requestor");
+    // With PCC_UNMET_CAPTURE_ENABLED (R44 D2) the server records which types
+    // no live supply serves, and the authenticated principal instead of the
+    // body-supplied requester. Off: unchanged.
+    let envelope = buildEnvelopeFromRequest(request, "requests_api");
+    if (isUnmetCaptureEnabled()) {
+      envelope = withUnmet(envelope, await computeUnmet(envelope.capabilityTypes, { reads: defaultSupplyReads() }));
+    }
+    const actor = intentActor(authenticatedPrincipal(req), {
+      actorId: request.requesterEmail ?? request.requesterWallet ?? "anonymous",
+      actorType: "requestor",
+    });
+    emitIntent(envelope, actor.actorId, actor.actorType);
 
     // ── Bridge (coord #1276) ────────────────────────────────────────
     // Direct-match requests publish immediately: the buyer already named an

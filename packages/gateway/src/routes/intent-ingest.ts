@@ -28,7 +28,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { DemandEnvelopeSchema, type DemandEnvelope } from "@pcc/spec";
+import { DemandEnvelopeSchema, stripServerOnlyDemandFields, type DemandEnvelope } from "@pcc/spec";
 import { getEventBus } from "../services/event-bus.js";
 import { checkCallerRate } from "../middleware/security-hardening.js";
 
@@ -153,7 +153,10 @@ export async function intentIngestRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
-    const envelope = parsed.data as DemandEnvelope;
+    // fulfillmentPath and unmet are server-owned (R44). A caller must never be
+    // able to assert "unfulfilled" demand, so they are dropped here whatever
+    // the unmet-capture flag says.
+    const envelope = stripServerOnlyDemandFields(parsed.data) as DemandEnvelope;
 
     // ── 4. Idempotency replay check. ───────────────────────────────────
     const rawKey = req.headers["idempotency-key"];
