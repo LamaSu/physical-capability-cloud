@@ -17,14 +17,14 @@
  * or infrastructure decision rather than a code tweak. Recorded here so they
  * are not rediscovered as novel:
  *
- * 1. DOMAIN VALIDATION TRUSTS THE REQUEST HOST. `/verify` compares the SIWE
- *    message's domain against `req.hostname`, which derives from the Host (or
- *    forwarded-host) header. If the ingress does not canonicalize Host, a
- *    signature intended for another relying party could be replayed here.
- *    Correct fix: compare domain AND uri against a CONFIGURED canonical origin,
- *    never a request header — and audit Fastify `trustProxy` alongside it.
- *    Left alone because picking that origin per environment is an operator
- *    decision, and getting it wrong locks everyone out.
+ * 1. DOMAIN VALIDATION — FIXED in WP-A round 5 (astra #2829). `/verify` used to
+ *    compare the SIWE message's domain against `req.hostname` (the Host header)
+ *    and never checked its URI, so a signature an approved wallet gave another
+ *    site could be relayed here with a matching Host. Now domain AND uri must
+ *    name one of the TRUSTED ORIGINS (trustedSiweOrigins): PCC_SIWE_ORIGINS
+ *    when set; otherwise, in production, the canonical https://capability.network
+ *    (+ www) plus the origins of PCC_GATEWAY_URL / PCC_PUBLIC_URL. Only test and
+ *    development still use the request host, and there too the URI must name it.
  *
  * 2. NONCES AND RATE LIMITS ARE PROCESS-LOCAL. Both live in module-level Maps.
  *    With multiple workers/replicas, a nonce issued by one instance is
@@ -274,6 +274,53 @@ function parseSiweMessage(message: string): ParsedSiweMessage | null {
  * Checks both cookie (`pcc_session`) and Authorization Bearer header.
  * Returns the session address or null.
  */
+/** The origin of a URL string, or null. */
+function originOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The origins a SIWE login may be signed for (WP-A round 5): PCC_SIWE_ORIGINS
+ * (comma-separated) when set. Otherwise, in production (anything but
+ * test/development), the canonical public origin plus the configured gateway and
+ * public URLs. null in test/development, where the request host is used.
+ */
+export function trustedSiweOrigins(): string[] | null {
+  const raw = process.env.PCC_SIWE_ORIGINS;
+  if (raw && raw.trim() !== "") {
+    return raw.split(",").map((o) => originOf(o.trim())).filter((o): o is string => o !== null);
+  }
+  const env = process.env.NODE_ENV;
+  if (env === "test" || env === "development") return null;
+  const defaults = [
+    "https://capability.network",
+    "https://www.capability.network",
+    originOf(process.env.PCC_GATEWAY_URL),
+    originOf(process.env.PCC_PUBLIC_URL),
+  ];
+  return Array.from(new Set(defaults.filter((o): o is string => o !== null)));
+}
+
+/** null when the message's domain and uri name a trusted origin; otherwise why not. */
+export function checkSiweOrigin(domain: string, uri: string, requestHost: string): string | null {
+  const uriOrigin = originOf(uri);
+  if (!uriOrigin) return `SIWE message uri '${uri}' is not a valid URL`;
+  const trusted = trustedSiweOrigins();
+  if (trusted === null) {
+    // test/development: the request host, and the URI must name that same host.
+    if (domain !== requestHost) return `SIWE message domain '${domain}' does not match server '${requestHost}'`;
+    if (new URL(uriOrigin).host !== domain) return `SIWE message uri '${uri}' does not match its domain '${domain}'`;
+    return null;
+  }
+  const match = trusted.some((origin) => new URL(origin).host === domain && origin === uriOrigin);
+  return match ? null : `SIWE message domain '${domain}' / uri '${uri}' is not a trusted origin for this gateway`;
+}
+
 export function resolveSession(
   req: FastifyRequest,
 ): { address: `0x${string}`; token: string } | null {
@@ -424,13 +471,11 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         .send({ error: "Invalid SIWE message format" });
     }
 
-    // Validate domain matches this server (prevents cross-site SIWE replay attacks)
-    const expectedHost = req.hostname;
-    if (parsed.domain !== expectedHost) {
-      return reply.status(401).send({
-        error: "Domain mismatch",
-        message: `SIWE message domain '${parsed.domain}' does not match server '${expectedHost}'`,
-      });
+    // Domain AND uri must name a trusted origin, never just echo the request's Host
+    // header (prevents replaying a login signed for another site; astra #2829).
+    const originCheck = checkSiweOrigin(parsed.domain, parsed.uri, req.hostname);
+    if (originCheck) {
+      return reply.status(401).send({ error: "Domain mismatch", message: originCheck });
     }
 
     // Validate issuedAt freshness. These checks FAIL CLOSED: an unparseable
