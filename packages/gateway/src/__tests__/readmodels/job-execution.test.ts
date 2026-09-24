@@ -447,6 +447,9 @@ describe("GET /api/jobs/:jobId/execution", () => {
     app.addHook("onRequest", async (req) => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string") (req as any).operatorId = p;
+      // Stand-in for tenant resolution from the key.
+      const t = req.headers["x-test-tenant"];
+      if (typeof t === "string") (req as any).tenantId = t;
     });
     await app.register(jobRoutes);
     await app.ready();
@@ -674,6 +677,29 @@ describe("GET /api/jobs/:jobId/execution", () => {
         delete process.env.TENANT_ENFORCE;
       }
       expect((await get("job-rm-tenant")).statusCode).toBe(200);
+    });
+
+    it("NEGATIVE (scout-alpha): under TENANT_ENFORCE the job's evidence is still counted, since no writer sets evidence_bundles.tenant_id", async () => {
+      insertJob("job-rm-tenant-ev", "s", "cwm-rm-tenant-ev", { status: "completed", progress: 100, tenantId: "tenant-a" });
+      // Written the way every production writer writes a bundle: no tenantId.
+      getStore().repos.evidence.insert({
+        id: "bundle-rm-tenant-ev", jobId: "job-rm-tenant-ev", stepId: "s", kernelId: "kernel-nyc", assuranceTier: 1,
+        bundleHash: "sha256:" + "a".repeat(64),
+        kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "secp256k1", value: "gateway-auto-sign" },
+        createdAt: now,
+      } as any);
+      getStore().repos.evidence.insertEvent({
+        id: "event-rm-tenant-ev", bundleId: "bundle-rm-tenant-ev", type: "execution_completed", timestamp: now,
+        source: { deviceId: "gateway", deviceType: "machine", kernelId: "kernel-nyc" }, payload: {}, hash: "sha256:" + "b".repeat(64),
+      } as any);
+      process.env.TENANT_ENFORCE = "true";
+      try {
+        const res = await get("job-rm-tenant-ev", OPERATOR_NYC, { "x-test-tenant": "tenant-a" });
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json().evidence).toMatchObject({ bundleCount: 1, eventCount: 1 });
+      } finally {
+        delete process.env.TENANT_ENFORCE;
+      }
     });
 
     it("hasValidAdminKey: unset key grants nothing; comparison is exact", () => {
