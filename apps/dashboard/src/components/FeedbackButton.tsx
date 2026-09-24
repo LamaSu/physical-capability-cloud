@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { cn } from "@pcc/ui";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { api } from "../api/gateway.js";
 
 /**
  * "Report a bug / leave feedback", posted to POST /api/feedback.
@@ -19,18 +19,11 @@ function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }
     if (!message.trim()) return;
     setStatus("sending");
     try {
-      const res = await fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ type, message, page: window.location.pathname }),
-      });
-      if (res.ok) {
-        setStatus("sent");
-        setMessage("");
-        setTimeout(() => { setStatus("idle"); onClose(); }, 1500);
-      } else {
-        setStatus("error");
-      }
+      // The shared gateway client, so the key is sent the same way as every other read.
+      await api.submitFeedback({ type, message, page: window.location.pathname });
+      setStatus("sent");
+      setMessage("");
+      setTimeout(() => { setStatus("idle"); onClose(); }, 1500);
     } catch {
       setStatus("error");
     }
