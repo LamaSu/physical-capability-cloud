@@ -417,3 +417,122 @@ describe("exact-decimal helpers", () => {
     expect(csdSlugFromUrl(undefined)).toBeNull();
   });
 });
+
+describe("round 3 (astra review of 27a23c6e): claims and live rows are read ONCE into owned data", () => {
+  it("a tierKey getter that changes after validation cannot make `current` carry an unoffered tier", () => {
+    let reads = 0;
+    const c = Object.defineProperty(claim({ nodeId: "a" }), "tierKey", { enumerable: true, get: () => (reads++ < 2 ? "tier0" : "tier3") });
+    const v = only(revalidatePlanSnapshots([c], deps([cap({ id: "cap-print" })])));
+    expect(reads).toBe(1);
+    expect(v.status).toBe("current");
+    if (v.status === "current") expect([v.resolved.tierKey, v.resolved.tier]).toEqual(["tier0", 0]);
+  });
+
+  it("a loader that re-points two claims at one node id after the duplicate check changes nothing", () => {
+    const a = claim({ nodeId: "a" });
+    const b = claim({ nodeId: "b" });
+    const d = deps([cap({ id: "cap-print" })]);
+    const sneaky: RevalidationDeps = {
+      ...d,
+      loadCapabilities: (ids) => {
+        (b as { nodeId: string }).nodeId = "a";
+        return d.loadCapabilities(ids);
+      },
+    };
+    const r = revalidatePlanSnapshots([a, b], sneaky);
+    expect(r.verdicts.map((v) => [v.nodeId, v.status])).toEqual([
+      ["a", "current"],
+      ["b", "current"],
+    ]);
+  });
+
+  it("a csdForType callback that mutates the retained row cannot mix kernels: the snapshot's kernel and operator are used", () => {
+    const row = cap({ id: "cap-print", kernelId: "k-1" });
+    const d = deps([row]);
+    const sneaky: RevalidationDeps = {
+      ...d,
+      csdForType: (t) => {
+        (row as { kernelId: string }).kernelId = "k-2";
+        return d.csdForType(t);
+      },
+    };
+    const v = only(revalidatePlanSnapshots([claim({ nodeId: "a", kernelId: "k-2", operator: OP })], sneaky));
+    expect(v.status).toBe("stale");
+    if (v.status === "stale") {
+      expect(v.diffs.map((x) => x.field)).toEqual(["kernelId"]);
+      expect([v.live.kernelId, v.live.operator]).toEqual(["k-1", OP]); // k-1's own operator, never a mix
+    }
+  });
+
+  it("a pricing getter cannot split the gross from the digest", () => {
+    let reads = 0;
+    const row = Object.defineProperty(cap({ id: "cap-print" }), "pricing", {
+      enumerable: true,
+      get: () => (reads++ === 0 ? { currency: "USDC", baseCost: "6.50", minimum: "6.50" } : { currency: "USDC", baseCost: "7.25", minimum: "6.50" }),
+    });
+    const v = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([row])));
+    expect(reads).toBe(1);
+    expect(v.status).toBe("current");
+    if (v.status === "current") {
+      expect(v.resolved.grossBaseUnits).toBe(6_500_000n);
+      expect(v.resolved.matchedCapabilityDigest).toBe(digestAt(6.5)); // the same snapshot priced both
+    }
+  });
+
+  it("a baseCost getter cannot bypass the minimum-charge check", () => {
+    let reads = 0;
+    const pricing = Object.defineProperty({ currency: "USDC", minimum: "6.50" }, "baseCost", { enumerable: true, get: () => (reads++ === 1 ? undefined : "5.00") });
+    const v = only(revalidatePlanSnapshots([claim({ nodeId: "a", price: "5.00" })], deps([cap({ id: "cap-print", pricing })])));
+    expect(reads).toBe(1);
+    expect(v).toEqual({ nodeId: "a", status: "unpriceable", reason: "below-minimum-charge" });
+  });
+
+  it("throwing getters on a claim or a row are typed verdicts, never exceptions", () => {
+    const boom = () => {
+      throw new Error("x");
+    };
+    const c = Object.defineProperty(claim({ nodeId: "a" }), "price", { enumerable: true, get: boom });
+    expect(only(revalidatePlanSnapshots([c], deps([cap({ id: "cap-print" })])))).toEqual({ nodeId: "a", status: "invalid-claim", reason: "unreadable-claim" });
+    const row = Object.defineProperty(cap({ id: "cap-print" }), "id", { enumerable: true, get: boom });
+    // the loader hands the row back untouched (the fixture's filtering loader would itself read the getter)
+    expect(only(revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...deps([]), loadCapabilities: () => [row] }))).toEqual({
+      nodeId: "a",
+      status: "missing",
+      reason: "capability-not-found",
+    });
+    let opReads = 0;
+    const k: LiveKernel[] = [Object.defineProperty({ id: "k-1", status: "online" }, "operatorAddress", { enumerable: true, get: () => (opReads++ === 0 ? OP : null) }) as LiveKernel];
+    expect(() => revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([cap({ id: "cap-print" })], k))).not.toThrow();
+    expect(opReads).toBe(1);
+  });
+
+  it("a tier list's length is read once: a proxy cannot shrink it past a hole or grow it past the cap", () => {
+    let lengthReads = 0;
+    const tiers = new Proxy([0, , 2] as number[], {
+      get: (t, k, r) => (k === "length" ? (lengthReads++ === 0 ? 3 : 1) : Reflect.get(t, k, r)),
+    });
+    const v = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], deps([cap({ id: "cap-print", assuranceTiers: tiers })])));
+    expect(lengthReads).toBe(1);
+    expect(v).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-tiers" }); // the hole was seen
+  });
+
+  it("an unreadable loader answer (not a list, or a throwing length) is a malformed live answer, not 'not found'", () => {
+    const d = deps([cap({ id: "cap-print" })]);
+    const answers: unknown[] = [{}, "rows", new Proxy([], { get: (t, k) => (k === "length" ? (() => { throw new Error("x"); })() : Reflect.get(t, k)) })];
+    for (const a of answers) {
+      const v = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...d, loadCapabilities: () => a as LiveCapability[] }));
+      expect(v).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-live-row" });
+    }
+    const kv = only(revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...d, loadKernels: () => ({}) as unknown as LiveKernel[] }));
+    expect(kv).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-live-row" });
+  });
+
+  it("an unreadable claims list is one typed verdict; a dependency that is not a function is a wiring fault", () => {
+    const lying = new Proxy([], { get: (t, k) => (k === "length" ? (() => { throw new Error("x"); })() : Reflect.get(t, k)) });
+    expect(revalidatePlanSnapshots(lying as unknown as SnapshotClaim[], deps([]))).toEqual({
+      ok: false,
+      verdicts: [{ nodeId: "<claims>", status: "invalid-claim", reason: "unreadable-claim" }],
+    });
+    expect(() => revalidatePlanSnapshots([claim({ nodeId: "a" })], { ...deps([]), csdForType: null as unknown as RevalidationDeps["csdForType"] })).toThrow(TypeError);
+  });
+});

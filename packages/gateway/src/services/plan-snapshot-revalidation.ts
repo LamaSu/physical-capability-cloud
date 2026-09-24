@@ -184,7 +184,8 @@ export type NodeVerdict =
         | "malformed-tier"
         | "malformed-kernel-id"
         | "malformed-operator"
-        | "malformed-cross-check";
+        | "malformed-cross-check"
+        | "unreadable-claim";
     };
 
 export interface RevalidationResult {
@@ -229,14 +230,201 @@ function isId(x: unknown): x is string {
   return typeof x === "string" && ID_PATTERN.test(x);
 }
 
+// ── Read-once snapshots (cross-family review of 27a23c6e) ────────────────────────────────────────
+// Claims are caller data and live rows arrive as JS objects: either can carry getters, proxies or
+// be mutated by a callback between two reads. Every claim, row, nested pricing object and tier list
+// is therefore read EXACTLY ONCE into owned plain data, and validation, comparison, the digest and
+// the output use only that copy. A failure while READING data is a typed verdict; a loader or
+// csdForType call that THROWS is a server fault and propagates.
+
+/** An owned stand-in for a non-primitive where a primitive belongs: fails every check, holds no caller reference. */
+const NOT_DATA: object = Object.freeze(Object.create(null));
+
+/** Primitives are kept; objects and functions become NOT_DATA. */
+function leaf(v: unknown): unknown {
+  return (typeof v === "object" && v !== null) || typeof v === "function" ? NOT_DATA : v;
+}
+
+/** A list's elements, its length read once and capped; null for a non-array or a lying or over-cap length. */
+function listOnce(x: unknown, max: number): unknown[] | null {
+  if (!Array.isArray(x)) return null;
+  const n: unknown = x.length;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > max) return null;
+  const out: unknown[] = [];
+  for (let i = 0; i < n; i++) out.push(x[i]);
+  return out;
+}
+
+const MAX_CLAIMS = 1024;
+const MAX_ROWS = 4096;
+
+type InvalidClaimReason = Extract<NodeVerdict, { status: "invalid-claim" }>["reason"];
+
+/** A claim as owned, validated plain data. */
+interface Claim {
+  nodeId: string;
+  capabilityId: string;
+  /** Canonical decimal. */
+  price: string;
+  currency: string;
+  tierKey: string;
+  tier: number;
+  kernelId: string;
+  operator: string;
+  capabilityType?: string;
+  csd?: string;
+  matchedCapabilityDigest?: string;
+}
+
+function claimError(f: Record<string, unknown>): InvalidClaimReason | null {
+  if (!isId(f.capabilityId)) return "malformed-capability-id";
+  if (canonicalDecimal(f.price) === null) return "malformed-price";
+  if (typeof f.currency !== "string" || !CURRENCY_PATTERN.test(f.currency)) return "malformed-currency";
+  if (tierFromKey(f.tierKey) === null) return "malformed-tier";
+  if (!isId(f.kernelId)) return "malformed-kernel-id";
+  if (!(typeof f.operator === "string" && ADDRESS_PATTERN.test(f.operator))) return "malformed-operator";
+  for (const x of [f.capabilityType, f.csd]) if (x !== undefined && !isId(x)) return "malformed-cross-check";
+  if (f.matchedCapabilityDigest !== undefined && !(typeof f.matchedCapabilityDigest === "string" && DIGEST_PATTERN.test(f.matchedCapabilityDigest))) {
+    return "malformed-cross-check";
+  }
+  return null;
+}
+
+/** Read one claim once. Never throws: a getter that throws makes the claim unreadable. */
+function readClaim(raw: unknown): { ok: true; claim: Claim } | { ok: false; nodeId: string; reason: InvalidClaimReason } {
+  let nodeId: unknown;
+  try {
+    if (typeof raw !== "object" || raw === null) return { ok: false, nodeId: "<undefined>", reason: "malformed-node-id" };
+    const c = raw as Record<string, unknown>;
+    nodeId = leaf(c.nodeId);
+    if (!isId(nodeId)) return { ok: false, nodeId: typeof nodeId === "string" ? nodeId : `<${typeof nodeId}>`, reason: "malformed-node-id" };
+    const f: Record<string, unknown> = {
+      capabilityId: leaf(c.capabilityId),
+      price: leaf(c.price),
+      currency: leaf(c.currency),
+      tierKey: leaf(c.tierKey),
+      kernelId: leaf(c.kernelId),
+      operator: leaf(c.operator),
+      capabilityType: leaf(c.capabilityType),
+      csd: leaf(c.csd),
+      matchedCapabilityDigest: leaf(c.matchedCapabilityDigest),
+    };
+    const bad = claimError(f);
+    if (bad) return { ok: false, nodeId, reason: bad };
+    const claim: Claim = {
+      nodeId,
+      capabilityId: f.capabilityId as string,
+      price: canonicalDecimal(f.price)!,
+      currency: f.currency as string,
+      tierKey: f.tierKey as string,
+      tier: tierFromKey(f.tierKey)!,
+      kernelId: f.kernelId as string,
+      operator: f.operator as string,
+    };
+    if (f.capabilityType !== undefined) claim.capabilityType = f.capabilityType as string;
+    if (f.csd !== undefined) claim.csd = f.csd as string;
+    if (f.matchedCapabilityDigest !== undefined) claim.matchedCapabilityDigest = f.matchedCapabilityDigest as string;
+    return { ok: true, claim };
+  } catch {
+    return { ok: false, nodeId: isId(nodeId) ? nodeId : "<unreadable>", reason: "unreadable-claim" };
+  }
+}
+
+/** A live capability row as owned plain data. Pricing and tiers are copied, never re-read. */
+interface CapRow {
+  id: string;
+  type: unknown;
+  kernelId: unknown;
+  tenantId: unknown;
+  /** The validated tier list, or null when malformed. Never defaulted. */
+  tiers: number[] | null;
+  pricing: Readonly<Record<"currency" | "baseCost" | "minimum" | "perMinute" | "perGram" | "perCm3", unknown>> | null;
+}
+
+interface KernelRow {
+  id: string;
+  operatorAddress: unknown;
+  status: unknown;
+}
+
+/**
+ * A tier list copied once, or null when it is malformed: not an array, empty, over 16 long, holed
+ * (a hole reads as undefined), or holding anything but integers 0..3. Read by index, never through
+ * the row's own methods, length read once.
+ */
+function readTiers(x: unknown): number[] | null {
+  const items = listOnce(x, 16);
+  if (!items || items.length === 0) return null;
+  const out: number[] = [];
+  for (const t of items) {
+    if (typeof t !== "number" || !Number.isInteger(t) || t < 0 || t > 3) return null;
+    out.push(t);
+  }
+  return out;
+}
+
+/** Read one capability row once. An unattributable or unreadable row is null: it cannot be matched to a claim. */
+function readCapRow(raw: unknown): CapRow | null {
+  try {
+    if (typeof raw !== "object" || raw === null) return null;
+    const r = raw as Record<string, unknown>;
+    const id = leaf(r.id);
+    if (!isId(id)) return null;
+    const row: CapRow = { id, type: leaf(r.type), kernelId: leaf(r.kernelId), tenantId: leaf(r.tenantId), tiers: readTiers(r.assuranceTiers), pricing: null };
+    const p = r.pricing;
+    if (typeof p === "object" && p !== null) {
+      const q = p as Record<string, unknown>;
+      row.pricing = Object.freeze({
+        currency: leaf(q.currency),
+        baseCost: leaf(q.baseCost),
+        minimum: leaf(q.minimum),
+        perMinute: leaf(q.perMinute),
+        perGram: leaf(q.perGram),
+        perCm3: leaf(q.perCm3),
+      });
+    }
+    return row;
+  } catch {
+    return null; // tenant visibility is unknown, so it is reported exactly like a missing row
+  }
+}
+
+/** Read one kernel row once. */
+function readKernelRow(raw: unknown): KernelRow | null {
+  try {
+    if (typeof raw !== "object" || raw === null) return null;
+    const r = raw as Record<string, unknown>;
+    const id = leaf(r.id);
+    if (!isId(id)) return null;
+    return { id, operatorAddress: leaf(r.operatorAddress), status: leaf(r.status) };
+  } catch {
+    return null;
+  }
+}
+
+/** Read a loader's answer once. Null when it is not a readable list: the caller reports it as a malformed live answer. */
+function readRows<T>(answer: unknown, read: (raw: unknown) => T | null): T[] | null {
+  try {
+    const items = listOnce(answer, MAX_ROWS);
+    if (!items) return null;
+    const out: T[] = [];
+    for (const raw of items) {
+      const row = read(raw);
+      if (row) out.push(row);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 type Priced =
   | { ok: true; priceDecimal: string; grossBaseUnits: bigint; currency: string; currencyDecimals: number }
   | { ok: false; reason: Extract<NodeVerdict, { status: "unpriceable" }>["reason"] };
 
-/** The live row's exact flat price, or why it has none. Never defaults a currency or a price. */
-function livePrice(cap: LiveCapability): Priced {
-  const p = cap.pricing;
-  if (!p || typeof p !== "object") return { ok: false, reason: "no-pricing" };
+/** The live row's exact flat price from its pricing SNAPSHOT, or why it has none. Never defaults. */
+function livePrice(p: CapRow["pricing"]): Priced {
+  if (!p) return { ok: false, reason: "no-pricing" };
   const currency = p.currency;
   if (typeof currency !== "string" || !Object.prototype.hasOwnProperty.call(SETTLEMENT_TOKEN_DECIMALS, currency)) {
     return { ok: false, reason: "currency-not-settleable" };
@@ -267,127 +455,115 @@ function livePrice(cap: LiveCapability): Priced {
   return { ok: true, priceDecimal, grossBaseUnits: gross, currency, currencyDecimals: decimals };
 }
 
-function claimError(c: SnapshotClaim): Extract<NodeVerdict, { status: "invalid-claim" }>["reason"] | null {
-  if (!isId(c.capabilityId)) return "malformed-capability-id";
-  if (canonicalDecimal(c.price) === null) return "malformed-price";
-  if (typeof c.currency !== "string" || !CURRENCY_PATTERN.test(c.currency)) return "malformed-currency";
-  if (tierFromKey(c.tierKey) === null) return "malformed-tier";
-  if (!isId(c.kernelId)) return "malformed-kernel-id";
-  if (!(typeof c.operator === "string" && ADDRESS_PATTERN.test(c.operator))) return "malformed-operator";
-  for (const x of [c.capabilityType, c.csd]) if (x !== undefined && !isId(x)) return "malformed-cross-check";
-  if (c.matchedCapabilityDigest !== undefined && !(typeof c.matchedCapabilityDigest === "string" && DIGEST_PATTERN.test(c.matchedCapabilityDigest))) {
-    return "malformed-cross-check";
-  }
-  return null;
-}
-
 /**
  * Re-read every claimed capability and its kernel live and compare. One batched load per table.
- * A loader error propagates: an outage must not read as "capability not found".
+ * A loader or csdForType call that THROWS propagates: an outage must not read as "capability not
+ * found". Everything else — claims, rows, their fields — is read once, and a failure to read it is
+ * a typed verdict.
  */
 export function revalidatePlanSnapshots(
   claims: readonly SnapshotClaim[],
   deps: RevalidationDeps,
   opts: RevalidationOpts = {},
 ): RevalidationResult {
-  const list = Array.isArray(claims) ? claims : [];
-  const verdicts: NodeVerdict[] = [];
+  // Dependencies and options, read once, before any claim (a callback cannot swap them later).
+  const loadCapabilities = deps.loadCapabilities;
+  const loadKernels = deps.loadKernels;
+  const csdForType = deps.csdForType;
+  if (typeof loadCapabilities !== "function" || typeof loadKernels !== "function" || typeof csdForType !== "function") {
+    throw new TypeError("revalidatePlanSnapshots: loadCapabilities, loadKernels and csdForType must be functions");
+  }
+  const tenantId = leaf(opts?.tenantId ?? null);
 
-  // Node identity first: a malformed or duplicated node id gets one verdict and nothing else.
-  const counts = new Map<string, number>();
-  for (const c of list) if (isId(c?.nodeId)) counts.set(c.nodeId, (counts.get(c.nodeId) ?? 0) + 1);
-  const valid: SnapshotClaim[] = [];
-  for (const c of list) {
-    const id = c?.nodeId;
-    if (!isId(id)) verdicts.push({ nodeId: typeof id === "string" ? id : `<${typeof id}>`, status: "invalid-claim", reason: "malformed-node-id" });
-    else if (counts.get(id)! > 1) continue;
-    else {
-      const bad = claimError(c);
-      if (bad) verdicts.push({ nodeId: id, status: "invalid-claim", reason: bad });
-      else valid.push(c);
+  const verdicts: NodeVerdict[] = [];
+  const read = (() => {
+    try {
+      return listOnce(claims, MAX_CLAIMS);
+    } catch {
+      return null;
     }
+  })();
+  if (!read) return { ok: false, verdicts: [{ nodeId: "<claims>", status: "invalid-claim", reason: "unreadable-claim" }] };
+
+  // Node identity first, on the COPIES: a malformed or duplicated node id gets one verdict and nothing else.
+  const parsed = read.map(readClaim);
+  const counts = new Map<string, number>();
+  for (const r of parsed) if (r.ok) counts.set(r.claim.nodeId, (counts.get(r.claim.nodeId) ?? 0) + 1);
+  const valid: Claim[] = [];
+  for (const r of parsed) {
+    if (!r.ok) verdicts.push({ nodeId: r.nodeId, status: "invalid-claim", reason: r.reason });
+    else if (counts.get(r.claim.nodeId)! > 1) continue;
+    else valid.push(r.claim);
   }
   for (const [id, n] of counts) if (n > 1) verdicts.push({ nodeId: id, status: "invalid-claim", reason: "duplicate-node-id" });
 
   // Capabilities, then visibility, THEN kernels. A capability scoped to another tenant is dropped
   // before any kernel lookup, so it is indistinguishable from one that does not exist: in the
-  // verdict, in the kernel loader's calls, and in timing. A returned row that is not an object with
-  // a requested string id cannot be attributed to a claim and is ignored (fail closed).
-  const caps = new Map<string, LiveCapability>();
+  // verdict, in the kernel loader's calls, and in timing. An unattributable row is ignored.
+  const caps = new Map<string, CapRow>();
   const capIds = [...new Set(valid.map((c) => c.capabilityId))].sort();
   const requested = new Set(capIds);
-  for (const row of capIds.length > 0 ? deps.loadCapabilities(capIds) : []) {
-    if (isRow(row) && requested.has(row.id) && visibleTo(row, opts)) caps.set(row.id, row);
+  const capRows = capIds.length > 0 ? readRows(loadCapabilities(capIds), readCapRow) : [];
+  for (const row of capRows ?? []) {
+    if (requested.has(row.id) && !caps.has(row.id) && visibleTo(row, tenantId)) caps.set(row.id, row);
   }
-  const kernels = new Map<string, LiveKernel>();
+  const kernels = new Map<string, KernelRow>();
   const kernelIds = [...new Set([...caps.values()].map((r) => r.kernelId).filter(isId))].sort();
-  for (const row of kernelIds.length > 0 ? deps.loadKernels(kernelIds) : []) {
-    if (isRow(row)) kernels.set(row.id, row);
-  }
+  const kernelRows = kernelIds.length > 0 ? readRows(loadKernels(kernelIds), readKernelRow) : [];
+  for (const row of kernelRows ?? []) if (!kernels.has(row.id)) kernels.set(row.id, row);
 
-  for (const c of valid) verdicts.push(judge(c, caps.get(c.capabilityId), deps, kernels));
+  for (const c of valid) {
+    if (capRows === null || (caps.has(c.capabilityId) && kernelRows === null)) {
+      verdicts.push({ nodeId: c.nodeId, status: "unavailable", reason: "malformed-live-row" });
+    } else {
+      verdicts.push(judge(c, caps.get(c.capabilityId), csdForType, kernels));
+    }
+  }
 
   verdicts.sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
   return { ok: verdicts.length > 0 && verdicts.every((v) => v.status === "current"), verdicts };
 }
 
-function isRow(row: unknown): row is { id: string } {
-  return typeof row === "object" && row !== null && isId((row as { id?: unknown }).id);
-}
-
-/**
- * A plain copy of a live tier list, or null when it is malformed: not an array, empty, implausibly
- * long, holed (`every` would skip a hole), or holding anything but integers 0..3. Read by index, never
- * through the row's own methods, and copied, so the digest and the tier check see the same values.
- */
-function liveTiers(x: unknown): number[] | null {
-  if (!Array.isArray(x) || x.length === 0 || x.length > 16) return null;
-  const out: number[] = [];
-  for (let i = 0; i < x.length; i++) {
-    if (!Object.prototype.hasOwnProperty.call(x, i)) return null;
-    const t: unknown = x[i];
-    if (typeof t !== "number" || !Number.isInteger(t) || t < 0 || t > 3) return null;
-    out.push(t);
-  }
-  return out;
-}
-
-function visibleTo(cap: LiveCapability, opts: RevalidationOpts): boolean {
-  return cap.tenantId === undefined || cap.tenantId === null || cap.tenantId === (opts.tenantId ?? null);
+function visibleTo(row: CapRow, tenantId: unknown): boolean {
+  return row.tenantId === undefined || row.tenantId === null || row.tenantId === tenantId;
 }
 
 function judge(
-  c: SnapshotClaim,
-  cap: LiveCapability | undefined,
-  deps: RevalidationDeps,
-  kernels: Map<string, LiveKernel>,
+  c: Claim,
+  cap: CapRow | undefined,
+  csdForType: (type: string) => string | null,
+  kernels: Map<string, KernelRow>,
 ): NodeVerdict {
   const nodeId = c.nodeId;
   if (!cap) return { nodeId, status: "missing", reason: "capability-not-found" };
-  if (!isId(cap.type) || !isId(cap.kernelId)) return { nodeId, status: "unavailable", reason: "malformed-live-row" };
-  const kernel = kernels.get(cap.kernelId);
+  const type = cap.type;
+  const kernelId = cap.kernelId;
+  if (!isId(type) || !isId(kernelId)) return { nodeId, status: "unavailable", reason: "malformed-live-row" };
+  const kernel = kernels.get(kernelId);
   if (!kernel) return { nodeId, status: "missing", reason: "kernel-not-found" };
-  if (typeof kernel.status !== "string") return { nodeId, status: "unavailable", reason: "malformed-live-row" };
-  const csd = deps.csdForType(cap.type);
+  const kernelStatus = kernel.status;
+  if (typeof kernelStatus !== "string") return { nodeId, status: "unavailable", reason: "malformed-live-row" };
+  const csd = leaf(csdForType(type));
   if (!isId(csd)) return { nodeId, status: "incompatible", reason: "no-csd-for-type" };
-  if (kernel.status === "suspended") return { nodeId, status: "unavailable", reason: "operator-suspended" };
+  if (kernelStatus === "suspended") return { nodeId, status: "unavailable", reason: "operator-suspended" };
   const operator = kernel.operatorAddress;
   if (typeof operator !== "string" || !ADDRESS_PATTERN.test(operator) || operator.toLowerCase() === ZERO_ADDRESS) {
     return { nodeId, status: "unavailable", reason: "operator-address-invalid" };
   }
   // Tiers are NEVER defaulted. The decomposer's `?? [0, 1]` would sell tier 1 on a row that offers
   // nothing; SQL NOT NULL does not validate the JSON inside the column (cross-family review, #355).
-  const tiers = liveTiers(cap.assuranceTiers);
+  const tiers = cap.tiers;
   if (!tiers) return { nodeId, status: "unavailable", reason: "malformed-tiers" };
-  const priced = livePrice(cap);
+  const priced = livePrice(cap.pricing);
   if (!priced.ok) return { nodeId, status: "unpriceable", reason: priced.reason };
 
   const assuranceTiers = [...new Set(tiers)].sort((a, b) => a - b);
+  const pricing = cap.pricing!;
   const live: LiveTerms = {
     capabilityId: cap.id,
-    capabilityType: cap.type,
-    kernelId: cap.kernelId,
-    kernelStatus: kernel.status,
+    capabilityType: type,
+    kernelId,
+    kernelStatus,
     csd,
     operator: operator as `0x${string}`,
     payoutAddress: operator as `0x${string}`,
@@ -396,44 +572,44 @@ function judge(
     currency: priced.currency,
     currencyDecimals: priced.currencyDecimals,
     assuranceTiers,
-    // Exactly the decomposer's inputs (toMatched): capPrice, the row's currency, the tier list.
+    // Exactly the decomposer's inputs (toMatched), from the SAME pricing snapshot livePrice read:
+    // capPrice, the row's currency, the tier list.
     matchedCapabilityDigest: matchedCapabilityDigest({
       capabilityId: cap.id,
-      capabilityType: cap.type,
-      kernelId: cap.kernelId,
-      price: capPrice({ id: cap.id, type: cap.type, name: "", kernelId: cap.kernelId, pricing: cap.pricing ?? undefined }),
+      capabilityType: type,
+      kernelId,
+      price: capPrice({
+        id: cap.id,
+        type,
+        name: "",
+        kernelId,
+        pricing: { currency: pricing.currency as string, baseCost: pricing.baseCost as string | undefined, minimum: pricing.minimum as string | undefined },
+      }),
       currency: priced.currency,
       assuranceTiers: tiers,
     }),
   };
 
-  const tier = tierFromKey(c.tierKey)!;
   const diffs: FieldDiff[] = [];
-  const claimedPrice = canonicalDecimal(c.price)!;
-  if (claimedPrice !== live.priceDecimal) diffs.push({ field: "price", claimed: claimedPrice, live: live.priceDecimal });
+  if (c.price !== live.priceDecimal) diffs.push({ field: "price", claimed: c.price, live: live.priceDecimal });
   if (c.currency !== live.currency) diffs.push({ field: "currency", claimed: c.currency, live: live.currency });
-  if (!assuranceTiers.includes(tier)) {
+  if (!assuranceTiers.includes(c.tier)) {
     diffs.push({ field: "tier", claimed: c.tierKey, live: assuranceTiers.map((t) => `tier${t}`).join(",") });
   }
   if (c.capabilityType !== undefined && c.capabilityType !== live.capabilityType) {
     diffs.push({ field: "capabilityType", claimed: c.capabilityType, live: live.capabilityType });
   }
-  if (c.kernelId !== live.kernelId) {
-    diffs.push({ field: "kernelId", claimed: c.kernelId, live: live.kernelId });
-  }
+  if (c.kernelId !== live.kernelId) diffs.push({ field: "kernelId", claimed: c.kernelId, live: live.kernelId });
   if (c.csd !== undefined && c.csd !== live.csd) diffs.push({ field: "csd", claimed: c.csd, live: live.csd });
   if (c.operator.toLowerCase() !== live.operator.toLowerCase()) {
     diffs.push({ field: "operator", claimed: c.operator, live: live.operator });
   }
-  if (
-    c.matchedCapabilityDigest !== undefined &&
-    c.matchedCapabilityDigest.toLowerCase() !== live.matchedCapabilityDigest.toLowerCase()
-  ) {
+  if (c.matchedCapabilityDigest !== undefined && c.matchedCapabilityDigest.toLowerCase() !== live.matchedCapabilityDigest.toLowerCase()) {
     diffs.push({ field: "matchedCapabilityDigest", claimed: c.matchedCapabilityDigest, live: live.matchedCapabilityDigest });
   }
   if (diffs.length > 0) {
     diffs.sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0));
     return { nodeId, status: "stale", diffs, live };
   }
-  return { nodeId, status: "current", resolved: { ...live, nodeId, tierKey: c.tierKey, tier } };
+  return { nodeId, status: "current", resolved: { ...live, nodeId, tierKey: c.tierKey, tier: c.tier } };
 }
