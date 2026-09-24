@@ -13,8 +13,10 @@ ships, those keys:
 
 - **lose money authority.** A money write (POST/PUT/PATCH/DELETE under
   `/api/escrow/`, `/api/fiat-ramp/`, `/api/settlement/`, fiat-ramp setup routes
-  excepted) needs an explicit `settlement` or `admin` scope. A DELETE needs
-  `admin`.
+  excepted, plus the four money-moving Story IP routes `POST
+  /api/ip/distribute-royalties`, `POST /api/ip/settle-royalties`, `POST
+  /api/ip/:ipId/pay` and `POST /api/ip/:ipId/claim`) needs an explicit
+  `settlement` or `admin` scope. A DELETE needs `admin`.
 - **lose admin authority.** Any method on `/api/admin/**` needs an explicit
   `admin` scope. A SIWE session with no API key is refused there too.
 - **keep everything else** until they are **revoked**. That includes rule-table
@@ -41,6 +43,8 @@ note), `packages/gateway/src/auth/api-key-auth.ts` (`assertMintableScopes`),
 | `GET /api/admin/waitlist`, `/api/admin/beta-apply` | any key or session, plus `X-Admin-Token` | explicit `admin` key plus `X-Admin-Token` |
 | `GET /api/admin/feedback` | `X-Admin-Token` only (public in api-gate) | unchanged |
 | Self-service `POST /api/auth/provision {email}` for an email on an admin allowlist | 201, a key the allowlist trusts | 403 `identity_reserved` |
+| Self-service `POST /api/auth/provision {email}` (or `/api/contributors/quickstart`) for an identity that already has a key, or owns a kernel, a machine registration or a job offer | 201, another key for that identity | 409 `identity_claimed`, unless the call is authenticated as that identity (`Authorization: Bearer <one of its keys>`); the new key is then no wider than the caller's |
+| Mutating `/api/operator/**` (e-stop, approvals, relay) | any key or session | `operator` or `admin` scope; a wildcard key keeps it; a session is refused |
 
 The allowlists that `identity_reserved` protects are listed in
 `packages/gateway/src/auth/reserved-identities.ts`: `PCC_KEY_ADMINS`,
@@ -202,6 +206,16 @@ Identities on an admin allowlist get `403 identity_reserved` on the email paths
 by design. Their keys are issued out-of-band. If their allowlist entry is a
 wallet, they can use SIWE instead.
 
+**Identity binding (WP-A fold F3).** An email identity that already has a key
+cannot be claimed again by an anonymous caller: `POST /api/auth/provision
+{email}` answers `409 identity_claimed`. A holder re-issues by calling it
+**authenticated as themselves**: `Authorization: Bearer <their current key>`
+with `{"email": "<their operator_id>"}`. The new key keeps the same
+`operator_id` and is never wider than the key that asked for it. A wildcard key
+can delegate `operator` this way, but never `settlement` or `admin` (those need
+the paths in the table above). An operator can hold at most 5 non-revoked keys,
+so revoke the old key promptly after the cut-over.
+
 ## Step 5: Revoke
 
 Take a backup first. Revocation is reversible only if you keep the campaign
@@ -276,6 +290,56 @@ There are two independent levers. Use the smaller one.
   MUST-CLOSE 7, so do it only as a short, deliberate emergency measure with a
   re-deploy planned.
 
+## Known exposed keys
+
+Two keys were committed in plaintext to scripts in this **public** repository
+(`scripts/hp-full-chain-e2e.ts`, `scripts/real-e2e.ts`,
+`scripts/real-e2e-verbose.ts`, `scripts/smoke-digital-verifier.sh`; introduced
+by `e482d84b`, `a7df7525` and `f3fff67c`, found by lane refvertical, bus
+#2586). WP-A fold F8 removed them from the working tree: the scripts now read
+`PCC_API_KEY` / `PCC_ORACLE_KEY` from the environment and exit with a clear
+message when those are unset. **They remain in git history**, so treat both as
+compromised. Rewriting history is the operator's decision; revoking or rotating
+the keys is required either way.
+
+They are identified here **only** by the first 12 hex characters of the SHA-256
+of the full key string. Never paste the values anywhere, and do not test
+whether they still work by using them.
+
+| Key | SHA-256 prefix | Authenticates at | Action |
+|---|---|---|---|
+| `pcc_live_…` API key | `a60c3ac6acca` | gateway `api_keys` | revoke |
+| `pcc_oracle_…` oracle key | `777ca58da421` | the oracle's `x-oracle-key` (`PCC_ORACLE_KEY`) | rotate |
+
+**The `pcc_live_` key.** The gateway stores `key_hash = sha256(raw key)` as
+lowercase hex, so the prefix finds the row read-only (expect 0 or 1 rows):
+
+```sql
+SELECT id, operator_id, key_prefix, scopes, created_at, last_used_at,
+       expires_at, revoked_at
+  FROM api_keys
+ WHERE key_hash LIKE 'a60c3ac6acca%';
+```
+
+If a row comes back with `revoked_at` NULL, revoke it by ID with the Step 5 DB
+action (back up first), whatever class it would otherwise fall into. If the
+holder needs access, re-issue per Step 4 first. Verify: the same query shows
+`revoked_at` set.
+
+**The `pcc_oracle_` key.** It is not an `api_keys` row; it is the shared secret
+the oracle service checks in `x-oracle-key`, configured as `PCC_ORACLE_KEY` on
+the oracle and on the gateway. Check whether the live configuration still uses
+it without printing it:
+
+```bash
+printf %s "$PCC_ORACLE_KEY" | sha256sum | cut -c1-12   # 777ca58da421 => exposed
+```
+
+If it matches, rotate: generate a new key (`pcc_oracle_` + `openssl rand -hex
+32`), set it on the oracle service and in the gateway's `PCC_ORACLE_KEY`,
+redeploy both, and confirm oracle calls succeed with the new key and are
+refused with the old one.
+
 ## Checklist
 
 - [ ] `PCC_ADMIN_KEY` set in production (>= 32 random bytes); `NODE_ENV=production`
@@ -286,3 +350,4 @@ There are two independent levers. Use the smaller one.
 - [ ] replacement keys issued, with narrow scopes (Step 4)
 - [ ] backup taken; revocations applied by ID (Step 5)
 - [ ] verification queries and spot-checks pass (Step 6)
+- [ ] both known exposed keys revoked / rotated (Known exposed keys)
