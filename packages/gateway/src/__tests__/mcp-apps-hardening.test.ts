@@ -92,6 +92,8 @@ const kit: KitFns = (() => {
     extractFn(PCC_UI_SRC, "canonicalPath"),
     extractFn(PCC_UI_SRC, "matchesWriteTemplate"),
     extractFn(PCC_UI_SRC, "isNonMoneyWrite"),
+    extractFn(PCC_UI_SRC, "plainBody"),
+    extractFn(PCC_UI_SRC, "ownFields"),
     extractFn(PCC_UI_SRC, "requestDescriptor"),
     extractFn(PCC_UI_SRC, "describeRealRequest"),
     "return { isAbsoluteOrSchemeUrl:isAbsoluteOrSchemeUrl, safeApiPath:safeApiPath, resolveApiBase:resolveApiBase, describeRealRequest:describeRealRequest };",

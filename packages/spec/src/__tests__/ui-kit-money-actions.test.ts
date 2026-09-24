@@ -1228,3 +1228,113 @@ describe("B: each validation layer is closed on its own (defense in depth)", () 
     expect(kit.safeApiPath("/api/compose\u0085", false)).toBeNull(); // a C1 control
   });
 });
+
+describe("B (ruling 3): the display IS the wire -- every field the request sends is shown, nothing it does not send", () => {
+  // A body whose "__proto__" key would re-parent a copy made by assignment: the inherited amount/ref
+  // would be DISPLAYED while the wire carried only the own keys. Built with JSON.parse so the key is
+  // a real own property of the manifest JSON (an object literal's __proto__ sets the prototype instead).
+  const protoBody = () =>
+    JSON.parse('{"__proto__":{"amount":1,"jobId":"benign"},"totalAmount":1000000,"escrowId":"evil"}') as Record<string, unknown>;
+  const all = (sel: string) => Array.from(document.querySelectorAll(sel)).map((e) => e.textContent);
+  const bodyRows = (scope: string) => Array.from(document.querySelectorAll(`${scope} .pcc-realreq-body .pcc-args-row`)).map((r) => [
+    r.querySelector(".pcc-args-k")!.textContent, r.querySelector(".pcc-args-v")!.textContent,
+  ]);
+  const FUND = "/api/escrow/chain/0xabc/fund";
+
+  it("an actions-bar body with a __proto__ key is refused at validation: blocked, no gate, nothing sent", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ path: FUND, body: protoBody() }));
+    expect(btn("Go").textContent).toBe("Go · blocked");
+    btn("Go").click();
+    await flush();
+    expect(overlays()).toBe(0);
+    expect(calls.length).toBe(0);
+    expect(barStatus().textContent).toMatch(/^Refused: the request body has a "__proto__" key.* - nothing was sent\.$/);
+  });
+
+  it("an approval window whose approve body has a __proto__ key shows BLOCKED, never the inherited amount or ref, and sends nothing", async () => {
+    const calls = installFetch(okGetsAnd({ status: 200 }));
+    boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, body: protoBody() } }]));
+    await flush();
+    expect(text(".pcc-win .pcc-realreq-blocked")).toContain('"__proto__"');
+    const block = text(".pcc-win .pcc-realreq") || "";
+    expect(block).not.toContain("benign");
+    expect(block).not.toContain("Amount 1.00");
+    btn("Approve").click();
+    await flush();
+    expect(posts(calls).length).toBe(0);
+  });
+
+  it("a form field named __proto__ cannot make the gate show an amount the wire does not carry", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    const schema = JSON.parse('{"properties":{"__proto__":{"type":"object","default":"{\\"amount\\":1,\\"jobId\\":\\"benign\\"}"},"note":{"type":"string","default":"hi"}}}');
+    boot(man([{ kind: "form", schema, submit: { id: "s", label: "Send", kind: "post", path: FUND } }]));
+    btn("Send").click();
+    expect(overlays()).toBe(1);
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual([]);
+    expect(text(".pcc-overlay .pcc-realreq") || "").not.toContain("benign");
+    gateApproveBtn()!.click();
+    await flush();
+    const { idempotencyKey, ...wire } = posts(calls)[0]!.body!;
+    expect(idempotencyKey).toMatch(/^idem-/);
+    expect(wire).toEqual({ note: "hi" });
+  });
+
+  it("several amount fields: the gate names EACH one, so a small 'amount' cannot stand in for a large 'totalAmount'", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(act({ path: FUND, body: { amount: 1, totalAmount: 1000000 } }));
+    btn("Go").click();
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["amount 1.00 USDC", "totalAmount 1,000,000.00 USDC"]);
+    gateApproveBtn()!.click();
+    await flush();
+    expect(posts(calls)[0]!.body).toMatchObject({ amount: 1, totalAmount: 1000000 });
+  });
+
+  it("several reference fields: each is named, so a benign jobId cannot hide the escrowId that is also sent", () => {
+    installFetch(() => ({ status: 200 }));
+    boot(act({ path: FUND, body: { jobId: "benign", escrowId: "evil" } }));
+    btn("Go").click();
+    expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId benign", "escrowId evil"]);
+  });
+
+  it("the approval window shows every other body field exactly as the wire carries it", async () => {
+    const calls = installFetch(okGetsAnd({ status: 200 }));
+    const body = { escrowId: "esc-1", amount: 21.99, payee: "0xevil", split: { a: 1 }, note: "5" };
+    boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, body } }]));
+    await flush();
+    expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["Amount 21.99 USDC"]);
+    expect(all(".pcc-win .pcc-realreq-ref")).toEqual(["ref esc-1"]);
+    expect(bodyRows(".pcc-win")).toEqual([["payee", '"0xevil"'], ["split", '{"a":1}'], ["note", '"5"']]);
+    btn("Approve").click();
+    await flush();
+    const { idempotencyKey, ...wire } = posts(calls)[0]!.body!;
+    expect(idempotencyKey).toMatch(/^idem-/);
+    expect(wire).toEqual(body);
+  });
+
+  it("the gate accounts for every key the wire carries (only the kit's idempotencyKey is added)", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    const body = { amount: 3, currency: "USDC", asset: "ETH", jobId: "j1", offerId: "o1", memo: "m", n: null, deep: { x: [1, 2] } };
+    boot(act({ path: FUND, body }));
+    btn("Go").click();
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["Amount 3.00 USDC"]); // amount + its currency
+    expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId j1", "offerId o1"]);
+    expect(bodyRows(".pcc-overlay")).toEqual([["asset", '"ETH"'], ["memo", '"m"'], ["n", "null"], ["deep", '{"x":[1,2]}']]);
+    gateApproveBtn()!.click();
+    await flush();
+    expect(Object.keys(posts(calls)[0]!.body!).sort()).toEqual([...Object.keys(body), "idempotencyKey"].sort());
+  });
+
+  it("an amount that is not a plain number is shown as sent, never coerced into a sum", () => {
+    installFetch(() => ({ status: 200 }));
+    const cases: Array<[unknown, string]> = [
+      [true, "Amount true USDC"], [[1000], "Amount [1000] USDC"], ["0x0F4240", 'Amount "0x0F4240" USDC'],
+      [{ v: 5 }, 'Amount {"v":5} USDC'], ["21.99", "Amount 21.99 USDC"], [12, "Amount 12.00 USDC"],
+    ];
+    for (const [amount, shown] of cases) {
+      boot(act({ path: FUND, body: { amount } }));
+      btn("Go").click();
+      expect(text(".pcc-overlay .pcc-realreq-amt"), JSON.stringify(amount)).toBe(shown);
+    }
+  });
+});

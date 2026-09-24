@@ -318,23 +318,55 @@
     }
     return false;
   }
+  // The request body exactly as the kit displays AND sends it: a plain copy of the sources' OWN
+  // enumerable keys (overrides win). A "__proto__" key cannot be copied as data -- assigning it
+  // re-parents the copy instead -- so an inherited amount or ref would be DISPLAYED while the wire
+  // carries only the own keys. Such a body has no single meaning: null (the descriptor refuses it).
+  function plainBody(base, overrides) {
+    var out = {};
+    var srcs = [base, overrides];
+    for (var s = 0; s < srcs.length; s++) {
+      var src = srcs[s];
+      if (!src || typeof src !== 'object') continue;
+      var ks = Object.keys(src);
+      for (var i = 0; i < ks.length; i++) {
+        if (ks[i] === '__proto__') return null;
+        out[ks[i]] = src[ks[i]];
+      }
+    }
+    return out;
+  }
+  // [name, value] for each named field the body carries as its OWN key, in the given order.
+  function ownFields(b, names, truthy) {
+    var out = [];
+    for (var i = 0; i < names.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(b, names[i])) continue;
+      var v = b[names[i]];
+      if (truthy ? v : v != null) out.push([names[i], v]);
+    }
+    return out;
+  }
   // -> { ok, method, path (the request-target the wire carries), canonical (decoded pathname),
   //      url (the pinned absolute URL string fetch receives), money, destination (display === url),
-  //      reason (why refused), body (the kit's copy of the request body), amount, asset, refId }
-  function requestDescriptor(action, body, isHost, base) {
-    var b = Object.assign({}, (body && typeof body === 'object') ? body : {});
-    var amount = b.amount != null ? b.amount
-      : (b.totalAmount != null ? b.totalAmount
-      : (b.value != null ? b.value
-      : (b.priceUSD != null ? b.priceUSD
-      : (b.budgetUSD != null ? b.budgetUSD : null))));
+  //      reason (why refused), body (the kit's copy of the request body), amounts / refs (EVERY
+  //      amount- / reference-like field the body carries, as [name, value]), amount / asset / refId
+  //      (the first of each; assetField names the body field the asset came from, if any) }
+  function requestDescriptor(action, body, isHost, base, overrides) {
+    var b = plainBody(body, overrides);
+    var own = b || {};
+    var amounts = ownFields(own, ['amount', 'totalAmount', 'value', 'priceUSD', 'budgetUSD'], false);
+    var refs = ownFields(own, ['jobId', 'escrowId', 'escrowAddress', 'offerId', 'compositionId', 'id'], true);
+    var assets = ownFields(own, ['currency', 'asset'], true);
     var d = {
       ok: false, method: actionMethod(action), path: null, canonical: null, url: null,
-      money: true, destination: null, reason: null, body: b, amount: amount,
-      asset: b.currency || b.asset || (amount != null ? 'USDC' : null),
-      refId: b.jobId || b.escrowId || b.escrowAddress || b.offerId || b.compositionId || b.id || null
+      money: true, destination: null, reason: null, body: own, amounts: amounts, refs: refs,
+      amount: amounts.length ? amounts[0][1] : null,
+      asset: assets.length ? assets[0][1] : (amounts.length ? 'USDC' : null),
+      assetField: assets.length ? assets[0][0] : null,
+      refId: refs.length ? refs[0][1] : null
     };
     if (!d.method) { d.reason = 'unsupported action kind (only "post" and "patch" can write)'; return d; }
+    if (b === null) { d.reason = 'the request body has a "__proto__" key, so what it shows and what it sends would differ'; return d; }
     var safe = safeApiPath(action.path, isHost);
     if (safe === null) { d.reason = 'unsafe or ambiguous request path'; return d; }
     var u = pinnedUrl(base, safe);
@@ -1320,7 +1352,7 @@
     if (st.posting || st.done) { alreadySubmitted(status, st); return null; }
 
     // Validate ONCE into the canonical descriptor; every step below uses this same object.
-    var desc = opts.desc || requestDescriptor(action, Object.assign({}, action.body || {}, opts.formValues || {}), false, ctx.apiBase);
+    var desc = opts.desc || requestDescriptor(action, action.body, false, ctx.apiBase, opts.formValues);
     if (!desc.ok) { refuseStatus(status, desc); return null; }
 
     // Every write the kit's allowlist does not know is money: it passes the Approval gate first
@@ -1448,13 +1480,43 @@
       line.appendChild(el('span', 'pcc-realreq-dest pcc-mono', desc.destination));
     }
     box.appendChild(line);
-    if (desc.amount != null) {
-      box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum', 'Amount ' + fmtUsd(desc.amount) + (desc.asset ? ' ' + desc.asset : '')));
+    // EVERY amount- and reference-like field the body carries. With more than one, each line names
+    // its field, so a small first "amount" can never stand in for a larger "totalAmount" that is also
+    // sent. A value that is not a plain decimal is shown as sent (JSON), never coerced into a sum.
+    var amts = desc.amounts || [], refs = desc.refs || [], shown = {};
+    var asset = desc.asset != null ? ' ' + wireText(desc.asset) : '';
+    for (var i = 0; i < amts.length; i++) {
+      shown[amts[i][0]] = true;
+      box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum',
+        (amts.length > 1 ? amts[i][0] : 'Amount') + ' ' + amountText(amts[i][1]) + asset));
     }
-    if (desc.refId != null) {
-      box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', 'ref ' + String(desc.refId)));
+    if (amts.length && desc.assetField) shown[desc.assetField] = true;
+    for (var j = 0; j < refs.length; j++) {
+      shown[refs[j][0]] = true;
+      box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', (refs.length > 1 ? refs[j][0] : 'ref') + ' ' + wireText(refs[j][1])));
+    }
+    // ...and every OTHER field of the body, exactly as the wire carries it (the kit adds only
+    // idempotencyKey). Nothing the request sends is left off this block.
+    var rest = Object.keys(desc.body || {}).filter(function (k) { return !shown[k]; });
+    if (rest.length) {
+      var tbl = el('div', 'pcc-args pcc-realreq-body');
+      for (var r = 0; r < rest.length; r++) {
+        var kv = el('div', 'pcc-args-row');
+        kv.appendChild(el('span', 'pcc-args-k', rest[r]));
+        kv.appendChild(el('span', 'pcc-args-v pcc-mono', JSON.stringify(desc.body[rest[r]])));
+        tbl.appendChild(kv);
+      }
+      box.appendChild(tbl);
     }
     return box;
+  }
+  // A string as itself; anything else as its JSON (what the wire carries).
+  function wireText(v) { return typeof v === 'string' ? v : JSON.stringify(v); }
+  // Only a plain number or decimal string is formatted as a sum; anything else (true, [1000],
+  // "0x0F4240", an object) is shown exactly as sent, so the display never invents an amount.
+  function amountText(v) {
+    var plain = (typeof v === 'number' && isFinite(v)) || (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v));
+    return plain ? fmtUsd(v) : JSON.stringify(v);
   }
 
   // The kit's Approval window as a floating modal — only its kit-labelled Approve sends, and it sends
@@ -1478,9 +1540,9 @@
     card.appendChild(head);
     // The manifest's label is untrusted: quoted text only. The gate's controls are kit-owned.
     if (action.label) card.appendChild(untrustedLabel(action.label));
-    // The ONE descriptor the Approve below sends, displayed verbatim (method + exact URL + body).
+    // The ONE descriptor the Approve below sends, displayed verbatim (method + exact URL + every
+    // body field: realRequestNode leaves nothing the wire carries off the block).
     card.appendChild(realRequestNode(desc));
-    card.appendChild(approvalDetails({ args: desc.body }));
     var foot = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve');
