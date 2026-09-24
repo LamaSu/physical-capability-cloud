@@ -292,15 +292,22 @@ JS
 ## Dashboard follow-ups (shell lane, not this runbook)
 
 - The `POST /api/onboard/chat` reply can carry `revealedSecrets` once, as
-  `[{ tool, path, value }]`. Only credentials the chat's own call just minted
+  `[{ tool, path, value, boundTo? }]`. `boundTo` names whose credential it is
+  (the minted key's `operator_id`); show it next to the key. Only credentials the chat's own call just minted
   are revealed (`provision_api_key` and `redeem_invite`, named fields only). The
   dashboard has to show those values to the user once and never store them.
   Otherwise a key minted in chat is unrecoverable, and the user has to
   provision again.
-- For a signed-in user, every tool call other than a GET is held, not run. The
-  reply carries it in `pendingActions`
-  (`[{ actionId, tool, method, target, args, summary, expiresAt }]`, arguments
-  redacted), and `GET /api/onboard/chat/:id` lists the open ones to their owner.
+- For a signed-in user, every tool call other than a GET is held, not run. An
+  ANONYMOUS chat holds every non-GET call too, except the pure computations
+  (templates/match, graph-search, marketplace/roi, identify-device), and always
+  holds credential minting. The reply carries each held call in `pendingActions`
+  (`[{ actionId, tool, method, target, args, summary, bindsTo?, expiresAt }]`).
+  `bindsTo` is the email or wallet a new credential would be bound to; show it
+  before the confirm button. The owner view keeps digests (a 64-hex hash) so the
+  person can check them, and removes secrets. `GET /api/onboard/chat/:id` lists
+  the open ones to their owner, or for an anonymous conversation, to whoever
+  holds its id.
   It runs only when the same user sends
   `POST /api/onboard/chat { conversationId, confirmActionId }` within 10 minutes,
   once. The reply to that request carries `confirmedAction` and the call in
@@ -308,3 +315,24 @@ JS
   button, a signed-in dashboard user cannot complete any write through chat.
 - The chat page footer prints the first 12 characters of the conversation id.
   The id is now the only credential for the conversation.
+- A signed-in user who continues an anonymous conversation gets a FORK they own.
+  The reply carries a new `conversationId` and `forkedFrom: <the anonymous id>`,
+  and the dashboard must switch to the new id. The anonymous conversation is
+  never claimed.
+- Quotas: at most 12 open holds per conversation, 20 per principal and 60 per
+  client address, then 429 `too_many_held_actions_for_you`; 503 only when the
+  whole process is full. A full conversation (`doneReason: "history_full"`) takes
+  no more turns: start a new one.
+
+## Deployment constraint: held actions live in one process's memory
+
+The real arguments of a held action are never persisted, because they may carry
+a secret. They sit in the memory of the gateway process that held them. So:
+- run the onboarding chat on ONE instance, or route each conversation to the
+  same instance (sticky routing). On any other instance a confirmation returns
+  410 `action_unavailable`;
+- a restart or redeploy drops every open hold. Confirmations then return 410,
+  and nothing is listed as open. The user asks again;
+- known residual (round-4 L4): if two requests on the same conversation overlap,
+  the slower one's save can overwrite messages the faster one wrote. A consumed
+  action is never offered or run again, but a turn's messages can be lost.
