@@ -51,7 +51,12 @@
   // may never select it. Parsed origin (protocol+host+port), never a string/suffix compare.
   var API_ORIGIN = (function () { try { return new URL(API_DEFAULT).origin; } catch (e) { return API_DEFAULT; } })();
   var POLL_DEFAULT_MS = 30000; // the system_prompt's own recommended cadence
-  var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve)(?:[\/_.-]|$)/i;
+  // Money detection is FAIL-CLOSED: a money action that slips past it never reaches the Approval
+  // gate and fires on a bare click. So the verb list is broad (every known money verb, not just
+  // escrow's), AND any write into a money NAMESPACE is money even when the verb is unrecognised
+  // (a new money route cannot slip through as "not money"). Both run on the DECODED path.
+  var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve|withdraw|payout|deposit|charge|settle|refund|transfer|onramp|offramp|escrow|pay)(?:[\/_.-]|$)/i;
+  var MONEY_NAMESPACE = /^\/api\/(escrow|fiat-ramp|compose)(\/|$)/i;
 
   // ═══════════════════════════════════════════════════════════════════════
   // DOM helpers (verbatim shape from control-plane bus.js) — textContent only
@@ -385,15 +390,19 @@
         return r.json();
       });
   };
-  Transport.prototype.send = function (method, path, body) {
+  Transport.prototype.send = function (method, path, body, idempotencyKey) {
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
     var url = this._pin(safe);
     if (url === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: request resolves outside the PCC API origin.' } });
+    var headers = this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' });
+    // A real Idempotency-Key HEADER: the gateway's idempotency middleware and the escrow money
+    // routes read the header, never a body field. The caller owns key stability (see doPost).
+    if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey);
     return fetch(url, {
       method: method,
-      headers: this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+      headers: headers,
       body: body != null ? JSON.stringify(body) : undefined,
       credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store'
     }).then(function (r) {
@@ -546,10 +555,12 @@
     wrap.appendChild(body);
     wrap._body = body;
     wrap._setFoot = function (traceId, stale) {
-      var old = wrap.querySelector('.pcc-win-foot');
+      // Only ever replace the kit's own trace/stale META footer. Action bars also carry
+      // .pcc-win-foot for styling and must never be removed by a footer refresh.
+      var old = wrap.querySelector('.pcc-win-foot.pcc-foot-meta');
       if (old) old.parentNode.removeChild(old);
       if (!traceId && !stale) return;
-      var foot = el('div', 'pcc-win-foot');
+      var foot = el('div', 'pcc-win-foot pcc-foot-meta');
       if (stale) foot.appendChild(el('span', 'pcc-foot-stale', 'snapshot'));
       if (traceId) foot.appendChild(el('span', 'pcc-mono pcc-foot-trace', 'trace ' + traceId));
       wrap.appendChild(foot);
@@ -856,6 +867,7 @@
       var status = el('span', 'pcc-action-status');
       var approve = el('button', 'pcc-btn pcc-btn-primary', (w.approve && w.approve.label) || 'Approve');
       approve.type = 'button';
+      var deny = null;
       approve.onclick = function () {
         if (desc.destination === null) {
           status.className = 'pcc-action-status st-failed';
@@ -863,25 +875,44 @@
           return;
         }
         // The approval WINDOW is itself the confirmation surface: fire directly.
-        dispatchAction(ctx, w.approve, { status: status, viaApproval: true, rebind: function () { rebindApproval(ctx, w, wrap); } });
+        dispatchAction(ctx, w.approve, { status: status, viaApproval: true, rebind: function () {
+          // The approval is consumed: one effect per approval; a later click cannot re-fire it.
+          approve.disabled = true; if (deny) deny.disabled = true;
+          rebindApproval(ctx, w, wrap);
+        } });
       };
       foot.appendChild(approve);
       if (w.deny) {
-        var deny = el('button', 'pcc-btn pcc-btn-quiet', w.deny.label || 'Deny');
+        deny = el('button', 'pcc-btn pcc-btn-quiet', w.deny.label || 'Deny');
         deny.type = 'button';
-        deny.onclick = function () { dispatchAction(ctx, w.deny, { status: status, viaApproval: true }); };
+        // Deny is UI-ONLY: it never dispatches a manifest-authored action. A hostile manifest could
+        // set w.deny to a money POST, and dispatching it with viaApproval would SKIP the money gate,
+        // turning "Deny" into a one-click unapproved payment. Deny closes the surface; nothing is
+        // sent. (A real server-side deny needs a separately registered typed deny operation.)
+        deny.onclick = function () {
+          status.className = 'pcc-action-status';
+          status.textContent = 'Denied - nothing was sent.';
+          approve.disabled = true; deny.disabled = true;
+          var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
+          if (pill) { pill.textContent = 'denied'; pill.className = 'pcc-pill st-failed'; }
+        };
         foot.appendChild(deny);
       }
       foot.appendChild(status);
       hostLockActionBar(foot); // host lockdown: disable Approve/Deny + show the note
-      wrap.appendChild(foot);
+      // Footer first, action bar last (defense in depth: _setFoot only touches its own meta footer).
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
+      wrap.appendChild(foot);
     });
     return wrap;
   }
   function rebindApproval(ctx, w, wrap) {
-    var pill = wrap.querySelector('.pcc-pill');
-    if (pill) { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-settled'; }
+    var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
+    if (!pill) return;
+    // A 2xx means the gateway ACCEPTED the request, not that money moved: a money approval reads
+    // "submitted" (waiting), never settled-green. Settlement state comes from a read model.
+    if (isMoneyAction(w.approve)) { pill.textContent = 'submitted'; pill.className = 'pcc-pill st-waiting'; }
+    else { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-settled'; }
   }
   function approvalDetails(info) {
     var box = el('div', 'pcc-approval');
@@ -1021,10 +1052,10 @@
     var bar = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     (w.actions || []).forEach(function (a) {
-      // NOTE: an MCP-App projected action carries no `path` (raw-HTTP fields are
-      // stripped; it acts only via operation_id) — read money intent from the
-      // fields the projection keeps (label/id), coercing a missing path to ''.
-      var isMoney = a.confirm === 'approval' || MONEY_VERB.test(String(a.path || '') + ' ' + String(a.label || '') + ' ' + String(a.id || ''));
+      // Button styling uses the SAME predicate as the dispatch gate, so a money action can never
+      // look non-money (or vice versa). isMoneyAction tolerates a projected MCP-App action with no
+      // `path` (it acts only via operation_id; money intent is read from label/id).
+      var isMoney = isMoneyAction(a);
       var btn = el('button', 'pcc-btn ' + (isMoney ? 'pcc-btn-primary' : 'pcc-btn-quiet'), a.label);
       btn.type = 'button';
       // PR2: a button wired to a registered typed operation stays live under the
@@ -1045,9 +1076,15 @@
   // ═══════════════════════════════════════════════════════════════════════
 
   function isMoneyAction(action) {
-    // Tolerate a projected action with no `path` (MCP-App host mode): a missing
-    // path coerces to '' rather than the literal 'undefined'.
-    return action.confirm === 'approval' || MONEY_VERB.test(String(action.path || '') + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
+    if (!action) return false;
+    if (action.confirm === 'approval') return true;
+    // Classify the path the SERVER will route. The gateway decodes %-escapes, and safeApiPath sends
+    // the original string, so a raw-string test would let "/api/fiat%2Dramp/session" skip the gate.
+    // A malformed escape is money (fail closed). A projected MCP-App action has no `path` ('').
+    var path;
+    try { path = decodeURIComponent(String(action.path || '').split('?')[0]); } catch (e) { return true; }
+    if (MONEY_NAMESPACE.test(path)) return true;
+    return MONEY_VERB.test(path + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
   }
 
   // Pull the first text line out of an MCP tool-error result (server-authored,
@@ -1118,29 +1155,57 @@
   }
 
   function doPost(ctx, action, opts, status) {
+    // One effect per click: a re-entrant dispatch of the SAME action while its request is in
+    // flight is ignored (a money button must not fire twice).
+    if (action.__posting) return;
     var body = Object.assign({}, action.body || {}, opts.formValues || {});
-    // idempotencyKey on every offer-posting action (a button can be double-clicked).
-    if (action.kind === 'post') {
-      var idem = action.idempotencyFrom && opts.formValues ? opts.formValues[action.idempotencyFrom] : null;
-      if (!idem) idem = 'idem-' + uuid();
-      body.idempotencyKey = idem;
+    // Idempotency key, stable per action INSTANCE = (action, request body): a double-click or a
+    // retry after a failure / unknown outcome resends the SAME key, so the server dedupes instead
+    // of double-charging. A different body is a different intent (new key); a 2xx consumes the
+    // instance (the key rotates). A form may derive the key from a field (idempotencyFrom).
+    var fp = JSON.stringify(body);
+    if (!action.__idem || action.__idem.fp !== fp) action.__idem = { key: 'idem-' + uuid(), fp: fp };
+    var idem = (action.idempotencyFrom && opts.formValues && opts.formValues[action.idempotencyFrom]) || action.__idem.key;
+    if (action.kind === 'post') body.idempotencyKey = idem; // legacy body field, preserved
+    var money = isMoneyAction(action);
+    function show(cls, text) {
+      status.className = cls; status.textContent = text;
+      // The approval GATE closes after a moment; mirror the final outcome to the caller's status
+      // line so it never stays at a stale "Working...".
+      if (opts.mirror && opts.mirror !== status) { opts.mirror.className = cls; opts.mirror.textContent = text; }
     }
-    status.className = 'pcc-action-status'; status.textContent = 'Working…';
+    action.__posting = true;
+    show('pcc-action-status', 'Working…');
     var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
-    var idemHeader = body.idempotencyKey;
-    ctx.tx.send(method, action.path, body, idemHeader).then(function (res) {
+    ctx.tx.send(method, action.path, body, idem).then(function (res) {
+      action.__posting = false;
       if (res.ok) {
-        status.className = 'pcc-action-status st-settled';
-        status.textContent = 'Done' + (ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
+        action.__idem = null; // this intent is consumed
+        var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
+        // Accepted is not settled: a money write never renders green here. Its settlement state
+        // comes from a read model (a receipt window), not from this HTTP status.
+        if (money) show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace);
+        else show('pcc-action-status st-settled', 'Done' + trace);
         if (typeof opts.rebind === 'function') opts.rebind();
       } else {
-        status.className = 'pcc-action-status st-failed';
-        status.textContent = (res.body && (res.body.message || res.body.error)) || ('Failed (HTTP ' + res.status + ')');
+        show('pcc-action-status st-failed', postErrorText(res, action));
       }
     }, function (err) {
-      status.className = 'pcc-action-status st-failed';
-      status.textContent = String(err && err.message || 'Request failed');
+      action.__posting = false;
+      show('pcc-action-status st-failed', String(err && err.message || 'Request failed'));
     });
+  }
+
+  // Honest message for a failed write. Prefers the server's own message; otherwise explains the
+  // C-03 endpoint changes instead of a bare status code.
+  function postErrorText(res, action) {
+    var msg = res.body && (res.body.message || res.body.error);
+    if (msg) return String(msg);
+    var path = String((action && action.path) || '');
+    if (res.status === 410) return 'This action is no longer available - the endpoint was removed. Nothing was executed.';
+    if (res.status === 404 && /\/fund(\/|$|\?)/.test(path)) return 'Funding was refused: this escrow is not recognised by the protocol.';
+    if (res.status === 503) return 'Temporarily unavailable (a safety gate is closed) - nothing was charged; you can retry shortly.';
+    return 'Failed (HTTP ' + res.status + ')';
   }
 
   function inlineConfirm(status, action, onConfirm) {
@@ -1185,6 +1250,9 @@
     // Host lockdown: writes are disabled in a hosted view — never open the gate.
     // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
     if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
+    // One approval modal per action: a rapid second click must not stack a second gate.
+    if (action.__gateOpen) return;
+    action.__gateOpen = true;
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
@@ -1205,7 +1273,7 @@
     approve.type = 'button';
     var cancel = el('button', 'pcc-btn pcc-btn-quiet', 'Cancel');
     cancel.type = 'button';
-    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    function close() { action.__gateOpen = false; if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
     approve.onclick = function () {
       if (desc.destination === null) {
         status.className = 'pcc-action-status st-failed';
@@ -1213,9 +1281,9 @@
         if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
         return;
       }
-      doPost(ctx, action, Object.assign({}, opts, { viaApproval: true }), status);
+      approve.disabled = true; // one Approve per gate opening
+      doPost(ctx, action, Object.assign({}, opts, { viaApproval: true, mirror: opts.status }), status);
       setTimeout(close, 1200);
-      if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
     };
     cancel.onclick = close;
     overlay.onclick = function (e) { if (e.target === overlay) close(); };
