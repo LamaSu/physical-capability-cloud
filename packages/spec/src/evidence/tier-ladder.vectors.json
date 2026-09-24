@@ -1,0 +1,283 @@
+{
+  "description": "Pinned per-(CSD, tier) evidence ladders (N19). Each entry is compileTierLadder(CsdSchema.parse(<csd>)) and its computeTierLadderDigest. The oracle mirrors these by value. A CSD edit that changes a ladder fails tier-ladder.test.ts; re-pin deliberately.",
+  "vectors": [
+    {
+      "csd": "csds/document-print-and-mail.csd.json",
+      "ladderDigest": "0xe9cf2a2f9f6dcc355a5c71cd503b7598c0cbf1b58429e452adfafe6cf0fe0560",
+      "ladder": {
+        "version": 1,
+        "schemaHash": "tier-ladder/v1",
+        "capabilityContractId": "pcc://capabilities/document-print-and-mail/v1",
+        "capabilityContractDigest": "sha256:35560b16f37cb3e7bc1f8fefcb401f239a73086a4dba439860ebe698153bc331",
+        "tiers": [
+          {
+            "tier": 0,
+            "description": "Self-attested: the operator declares the document was printed and mailed. Not purchasable by a stranger.",
+            "requiredEventTypes": [],
+            "minimumEvents": 0,
+            "nonEventRequirements": [
+              "jobId",
+              "pageCount",
+              "timestamp"
+            ],
+            "primitives": [
+              {
+                "id": "decl.self_attested",
+                "bind": null,
+                "supporting": false,
+                "params": null
+              }
+            ]
+          },
+          {
+            "tier": 1,
+            "description": "Print leg proven by the kernel (kernel-signed SUCCESS receipt = execution_completed, the job log = printer_log_captured, with printer_job_verified as supporting log-chain integrity; execution_failed must be ABSENT — a program-side predicate, never a CSD binding); the upstream-issued label hash (commitment.labelHash, sha256 of the label bytes) and trackingCode in the bundle; mailing still self-declared.",
+            "requiredEventTypes": [
+              [
+                "execution_completed"
+              ],
+              [
+                "printer_job_verified"
+              ],
+              [
+                "printer_log_captured"
+              ]
+            ],
+            "minimumEvents": 3,
+            "nonEventRequirements": [
+              "commitment.labelHash",
+              "jobId",
+              "pageCount",
+              "timestamp",
+              "trackingCode"
+            ],
+            "primitives": [
+              {
+                "id": "machine.execution_log",
+                "bind": "printer_log_captured",
+                "supporting": false,
+                "params": {
+                  "logKind": "job_log"
+                }
+              },
+              {
+                "id": "machine.execution_log",
+                "bind": "printer_job_verified",
+                "supporting": true,
+                "params": {
+                  "logKind": "job_log",
+                  "role": "supporting"
+                }
+              },
+              {
+                "id": "receipt.kernel_signed",
+                "bind": "execution_completed",
+                "supporting": false,
+                "params": {
+                  "capability": "document-printing"
+                }
+              },
+              {
+                "id": "artifact.hash",
+                "bind": "commitment.labelHash",
+                "supporting": false,
+                "params": null
+              }
+            ]
+          },
+          {
+            "tier": 2,
+            "description": "Print + handoff + MAIL: a nonce-bound pre-seal photo of the printed document with its pre-printed label (photo_captured), then the CARRIER's authenticated acceptance-scan webhook (courier_pickup_confirmed: trackerStatus in_transit, HMAC-verified, commitmentVerified) for the upstream-issued trackingCode. The worker cannot author the proof. No scan, no release.",
+            "requiredEventTypes": [
+              [
+                "courier_pickup_confirmed"
+              ],
+              [
+                "execution_completed"
+              ],
+              [
+                "photo_anti_spoof_check"
+              ],
+              [
+                "photo_captured"
+              ],
+              [
+                "printer_job_verified"
+              ],
+              [
+                "printer_log_captured"
+              ]
+            ],
+            "minimumEvents": 6,
+            "nonEventRequirements": [
+              "commitment.labelHash",
+              "jobId",
+              "pageCount",
+              "timestamp",
+              "trackingCode"
+            ],
+            "primitives": [
+              {
+                "id": "machine.execution_log",
+                "bind": "printer_log_captured",
+                "supporting": false,
+                "params": {
+                  "logKind": "job_log"
+                }
+              },
+              {
+                "id": "machine.execution_log",
+                "bind": "printer_job_verified",
+                "supporting": true,
+                "params": {
+                  "logKind": "job_log",
+                  "role": "supporting"
+                }
+              },
+              {
+                "id": "receipt.kernel_signed",
+                "bind": "execution_completed",
+                "supporting": false,
+                "params": {
+                  "capability": "document-printing"
+                }
+              },
+              {
+                "id": "artifact.hash",
+                "bind": "commitment.labelHash",
+                "supporting": false,
+                "params": null
+              },
+              {
+                "id": "capture.photo_nonced",
+                "bind": "photo_captured",
+                "supporting": false,
+                "params": null
+              },
+              {
+                "id": "fresh.challenge_bound",
+                "bind": "photo_anti_spoof_check",
+                "supporting": false,
+                "params": null
+              },
+              {
+                "id": "confirm.target_system",
+                "bind": "courier_pickup_confirmed",
+                "supporting": false,
+                "params": {
+                  "channel": "webhook",
+                  "matcher": "carrier.acceptance_scan"
+                }
+              }
+            ]
+          },
+          {
+            "tier": 3,
+            "description": "Tier 2 + the carrier's delivery scan (courier_delivery_confirmed) + the recipient's signature (certified classes). NOTE: a dedicated signed-channel primitive for carrier scans (channel.carrier_scan) is not yet in evidence-vocabulary v1 and is proposed to the evidence lane; until it lands, tier 3 rides confirm.target_system over the authenticated webhook plus the recipient signature.",
+            "requiredEventTypes": [
+              [
+                "courier_delivery_confirmed"
+              ],
+              [
+                "courier_pickup_confirmed"
+              ],
+              [
+                "execution_completed"
+              ],
+              [
+                "photo_anti_spoof_check"
+              ],
+              [
+                "photo_captured"
+              ],
+              [
+                "printer_job_verified"
+              ],
+              [
+                "printer_log_captured"
+              ]
+            ],
+            "minimumEvents": 7,
+            "nonEventRequirements": [
+              "commitment.labelHash",
+              "jobId",
+              "pageCount",
+              "recipientSignatureCid",
+              "timestamp",
+              "trackingCode"
+            ],
+            "primitives": [
+              {
+                "id": "machine.execution_log",
+                "bind": "printer_log_captured",
+                "supporting": false,
+                "params": {
+                  "logKind": "job_log"
+                }
+              },
+              {
+                "id": "machine.execution_log",
+                "bind": "printer_job_verified",
+                "supporting": true,
+                "params": {
+                  "logKind": "job_log",
+                  "role": "supporting"
+                }
+              },
+              {
+                "id": "receipt.kernel_signed",
+                "bind": "execution_completed",
+                "supporting": false,
+                "params": {
+                  "capability": "document-printing"
+                }
+              },
+              {
+                "id": "artifact.hash",
+                "bind": "commitment.labelHash",
+                "supporting": false,
+                "params": null
+              },
+              {
+                "id": "capture.photo_nonced",
+                "bind": "photo_captured",
+                "supporting": false,
+                "params": null
+              },
+              {
+                "id": "fresh.challenge_bound",
+                "bind": "photo_anti_spoof_check",
+                "supporting": false,
+                "params": null
+              },
+              {
+                "id": "confirm.target_system",
+                "bind": "courier_pickup_confirmed",
+                "supporting": false,
+                "params": {
+                  "channel": "webhook",
+                  "matcher": "carrier.acceptance_scan"
+                }
+              },
+              {
+                "id": "confirm.target_system",
+                "bind": "courier_delivery_confirmed",
+                "supporting": false,
+                "params": {
+                  "channel": "webhook",
+                  "matcher": "carrier.delivery_scan"
+                }
+              },
+              {
+                "id": "confirm.recipient_signature",
+                "bind": "recipientSignatureCid",
+                "supporting": false,
+                "params": null
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

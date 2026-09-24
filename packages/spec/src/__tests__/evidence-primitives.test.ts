@@ -227,6 +227,24 @@ describe("eligibility — an unknown primitive caps at tier 0", () => {
     expect(report.cappedReason).toMatch(/unknown primitive "unknown\.bogus_primitive"/);
   });
 
+  it("an unknown primitive in tier k caps the CSD below k, not at 0 (the aggregate is the rule)", () => {
+    const deeper: Pick<CSD, "url" | "evidence"> = {
+      url: "pcc://capabilities/vocab-unknown-deep/v1",
+      evidence: {
+        tier0: unknownCsd.evidence!.tier0!,
+        tier1: { description: "fine", required: ["jobId"], primitives: [{ id: "artifact.hash" }] },
+        tier2: {
+          description: "references an unknown primitive",
+          required: ["jobId"],
+          primitives: [{ id: "approval.payer" }, { id: "unknown.bogus_primitive" }],
+        },
+      },
+    };
+    const report = computeCsdEligibility(deeper);
+    expect(report.eligibleTier).toBe(1);
+    expect(report.cappedReason).toBe('tier2: unknown primitive "unknown.bogus_primitive" — caps the CSD below tier 2');
+  });
+
   it("stays listable (tier 0 is the permissionless floor)", () => {
     const report = computeCsdEligibility(unknownCsd);
     // eligibleTier never drops below 0 — the CSD is still listable.
