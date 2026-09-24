@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useUIStore } from "../stores/ui-store.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { GATEWAY_BASE } from "../lib/gateway-base.js";
 
 type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "test_results" | "setup_complete" | "text_input" | "selection";
 
@@ -77,7 +78,10 @@ const INITIAL_MESSAGES: ChatMessage[] = [
 async function agentStep(
   userInput: string,
   history: ChatMessage[],
-  gatewayUrl = "http://localhost:3200",
+  // The configured gateway, the only origin these key-bearing requests may go
+  // to. It defaulted to http://localhost:3200, which sent the signed-in user's
+  // key to their own machine (N50).
+  gatewayUrl = GATEWAY_BASE,
 ): Promise<ChatMessage[]> {
   const lower = userInput.toLowerCase();
   const responses: ChatMessage[] = [];
