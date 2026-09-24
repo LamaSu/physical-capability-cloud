@@ -22,7 +22,15 @@
  *
  * An Ed25519 key whose secret half was published is never a device principal:
  * anyone can sign as it (N35). `COMPROMISED_DEVICE_PUBLIC_KEYS` lists them.
+ *
+ * In a funded `authorizedTuples` triple (operator, kernel, device), each
+ * bytes32 word is keccak256 of the UTF-8 of the pinned id string
+ * (`principalTupleWord`). The scheme prefix inside the hashed string keeps the
+ * kinds apart. The device principal's key is the kernel's registered Ed25519
+ * key: it signs the LO-EV-1 delegation (`parentSignature`) and D2.
  */
+
+import { keccak_256 } from "@noble/hashes/sha3";
 
 import { normalizeRegisteredSigner } from "./verifiers/registered-signer.js";
 
@@ -133,4 +141,44 @@ export function principalFromRegistry(signer: unknown, chainId: number): string 
   } catch {
     return null;
   }
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * The bytes32 word a principal occupies in a funded `authorizedTuples` triple:
+ * keccak256 of the UTF-8 of its pinned id. Operator and device ids must be the
+ * pinned forms (a device key whose secret is public is refused); a kernel id
+ * is the registry's non-empty kernel id. Throws PrincipalIdError otherwise.
+ */
+export function principalTupleWord(kind: "operator" | "kernel" | "device", id: string): `0x${string}` {
+  if (kind === "operator" && !parseOperatorPrincipalId(id)) {
+    throw new PrincipalIdError("operator tuple word needs a pinned eip155:<chainId>:0x<address> id");
+  }
+  if (kind === "device") {
+    const parsed = parseDevicePrincipalId(id);
+    if (!parsed) throw new PrincipalIdError("device tuple word needs a pinned ed25519:0x<key> id");
+    if (isCompromisedDevicePublicKey(parsed.publicKey)) {
+      throw new PrincipalIdError("this Ed25519 key's secret half is public; it cannot be authorized");
+    }
+  }
+  if (kind === "kernel" && (typeof id !== "string" || id.length === 0)) {
+    throw new PrincipalIdError("kernel tuple word needs a non-empty kernel id");
+  }
+  return `0x${toHex(keccak_256(new TextEncoder().encode(id)))}`;
+}
+
+/** The (operator, kernel, device) bytes32 triple for one authorization. */
+export function authorizedTuple(
+  operatorPrincipalId: string,
+  kernelId: string,
+  devicePrincipalId: string,
+): readonly [`0x${string}`, `0x${string}`, `0x${string}`] {
+  return [
+    principalTupleWord("operator", operatorPrincipalId),
+    principalTupleWord("kernel", kernelId),
+    principalTupleWord("device", devicePrincipalId),
+  ] as const;
 }
