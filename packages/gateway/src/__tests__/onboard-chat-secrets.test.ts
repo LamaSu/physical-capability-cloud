@@ -213,7 +213,7 @@ describe("onboard-chat secret exposure (N9)", () => {
     }
     const traced = body.toolCalls[0].result;
     expect(traced.a.b.privateKey).toBe(REDACTED_VALUE);
-    expect(traced.note).toContain("Bearer [redacted]");
+    expect(traced.note).toContain("Bearer [REDACTED]");
     // A public 40-hex wallet address is not a secret and survives.
     expect(traced.wallet).toBe(PUBLIC_ADDRESS);
   });
