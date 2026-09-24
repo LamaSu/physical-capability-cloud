@@ -315,10 +315,11 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     const { publishedBy, schedule } = parse.data;
 
     // A schedule is sealed immutably under its hash, so a malformed one can never be corrected. Refuse
-    // overlapping, out-of-order and unreachable segments BEFORE sealing (pcc-economics D1: this route used
-    // to skip the check the in-memory engine performs).
+    // overlapping, out-of-order and unreachable segments, and numbers the economics compiler could not
+    // read the same way (above 2^53 - 1, non-finite, a version above 10^9), BEFORE sealing
+    // (pcc-economics D1: this route used to skip the check the in-memory engine performs).
     try {
-      assertScheduleIsWellFormed({ segments: schedule.segments });
+      assertScheduleIsWellFormed({ version: schedule.version, segments: schedule.segments });
     } catch (err) {
       return reply.code(400).send({
         error: "malformed_schedule",

@@ -346,14 +346,35 @@ export function computeScheduleHash(
   return `0x${hex}` as `0x${string}`;
 }
 
+/** The largest schedule `version`: the `version` range of docs/ECONOMIC_AGREEMENTS.md §1. */
+export const MAX_SCHEDULE_VERSION = 1_000_000_000;
+
+/** The segment fields that hold real numbers; every other numeric segment field is an integer. */
+const REAL_SEGMENT_FIELDS: ReadonlySet<string> = new Set(["scale", "decayPerSecond"]);
+
 /**
- * Validate that a RateSchedule's segments are non-overlapping and time-ordered.
- * Throws on violation. Used by upstream `setRateSchedule` callers; pure.
+ * Validate that a RateSchedule's segments are non-overlapping and time-ordered, and that every number in
+ * it reads the same in every JSON implementation. Throws on violation. Used by upstream
+ * `setRateSchedule` callers, the registry's publish route and the economics compiler; pure.
  */
-export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segments">): void {
+export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segments"> & { version?: number }): void {
+  if (schedule.version !== undefined && !(Number.isSafeInteger(schedule.version) && schedule.version >= 1 && schedule.version <= MAX_SCHEDULE_VERSION)) {
+    throw new Error(`RateSchedule version ${schedule.version} is not an integer in 1..${MAX_SCHEDULE_VERSION}`);
+  }
   let prevEnd: number | null = null;
   for (let i = 0; i < schedule.segments.length; i++) {
     const seg = schedule.segments[i];
+
+    // A schedule is sealed under a hash of its numbers, so each must mean one value to every reader. An
+    // integer above 2^53 - 1 is rounded by a JavaScript reader but not by an exact one, and JSON 1e400
+    // reads as Infinity, which no rate can be computed from (pcc-economics clean-room round 3b, P100c).
+    for (const [field, v] of Object.entries(seg)) {
+      if (typeof v !== "number") continue;
+      const real = REAL_SEGMENT_FIELDS.has(field);
+      if (real ? !Number.isFinite(v) : !Number.isSafeInteger(v)) {
+        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not ${real ? "a finite number" : "an integer in 0..2^53-1"}`);
+      }
+    }
 
     // An open-ended segment (endTime null) covers every later moment, and evaluation returns the FIRST
     // covering segment, so anything after it could never apply. Before this check, `prevEnd = null`
