@@ -11,11 +11,17 @@ forwards the operator's PCC key, and only this server's own loopback origins
 (plus non-browser callers such as the agent) may use the API. User input
 reaches PCC only through the agent, which validates it and calls PCC itself.
 
+For the agent: a submission and its X-UI-Source are CLAIMS, not evidence. Any
+page served here (generated, so lower-trust) can read, pop or forge entries on
+this origin. Money or physical actions must be re-confirmed through PCC's
+registered typed operations, never taken on a submission's word.
+
 Endpoints:
   GET  /                     Hub page listing all active UIs
   GET  /api/health           Server health + file listing
-  GET  /api/submissions      All pending form submissions
-  GET  /api/submissions/pop  Pop oldest submission
+  GET  /api/submissions      All pending form submissions (needs X-PCC-Node-Client: 1)
+  POST /api/submissions/pop  Pop oldest submission (needs X-PCC-Node-Client: 1)
+  GET  /api/submissions/pop  Same, kept for existing agents (needs the header too)
   POST /api/submit           UI posts form data here
   POST /api/generate         Agent posts HTML to create a new UI
   POST /api/pcc/*            410 Gone: the credentialed gateway proxy was removed
@@ -27,6 +33,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from html import escape as _escape
@@ -53,6 +60,14 @@ _MAX_GENERATE_BYTES = 5 * 1024 * 1024
 
 # Generated page names: plain and visible, no markup or path characters.
 _SAFE_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+# Windows reserved device names (any extension): writing "COM1.html" on a Windows node could
+# open a device. Also refused: a trailing dot, which Windows silently strips.
+_RESERVED_DEVICE = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?", re.IGNORECASE)
+# The agent's (non-browser) header for reading or popping the queue. A browser cannot attach a
+# custom header cross-origin without a CORS preflight, which is refused, so this guards the
+# destructive pop even in browsers that send no Fetch Metadata (reviewer-alpha F-2).
+_CLIENT_HEADER = "X-PCC-Node-Client"
+_UI_SOURCE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 _PROXY_GONE = (
     "The credentialed PCC proxy was removed: pages served here are "
@@ -94,12 +109,12 @@ def _read_body(handler, limit):
     Cross-site forms and no-preflight fetches can only send text/plain,
     urlencoded or multipart bodies, so anything but JSON is refused.
     """
-    try:
-        length = int(handler.headers.get("Content-Length") or 0)
-    except ValueError:
+    if handler.headers.get("Transfer-Encoding") is not None:
+        raise _Refused(411, "Send a Content-Length; chunked bodies are not accepted")
+    raw_len = (handler.headers.get("Content-Length") or "0").strip()
+    if not re.fullmatch(r"[0-9]{1,10}", raw_len):
         raise _Refused(400, "Invalid Content-Length")
-    if length < 0:
-        raise _Refused(400, "Invalid Content-Length")
+    length = int(raw_len)
     if length > limit:
         raise _Refused(413, f"Body too large (limit {limit} bytes)")
     raw = handler.rfile.read(length) if length else b""
@@ -110,16 +125,16 @@ def _read_body(handler, limit):
         return {}
     try:
         return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
-        raise _Refused(400, f"Invalid JSON: {e}")
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        raise _Refused(400, f"Invalid JSON: {type(e).__name__}")
 
 
 def _drain(handler):
     """Consume a small unread body so refusing it cannot reset the connection."""
-    try:
-        length = int(handler.headers.get("Content-Length") or 0)
-    except ValueError:
+    raw_len = (handler.headers.get("Content-Length") or "0").strip()
+    if not re.fullmatch(r"[0-9]{1,10}", raw_len):
         return
+    length = int(raw_len)
     if 0 < length <= _MAX_GENERATE_BYTES:
         handler.rfile.read(length)
 
@@ -151,6 +166,9 @@ def _send_html(handler, html, status=200):
 class UIHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler for the dynamic UI server."""
 
+    # A client that stops sending cannot hold a worker forever (reviewer-alpha F-4).
+    timeout = 30
+
     def __init__(self, *args, **kwargs):
         # SimpleHTTPRequestHandler needs 'directory' to serve static files
         super().__init__(*args, directory=str(_active_ui_dir), **kwargs)
@@ -160,8 +178,9 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
     def _refusal(self, api):
         """Why this request must be refused, as (status, message), or None.
 
-        Every request: the Host must be one of this server's own loopback names,
-        so a DNS-rebinding page can never become same-origin with it. API
+        Every request that names a Host must name one of this server's own loopback
+        names, so a DNS-rebinding page can never become same-origin with it (a request
+        with no Host at all can only come from a non-browser client). API
         requests also: a browser caller must be one of this server's own
         origins. Non-browser callers (the agent, the CLI) send neither Origin
         nor Sec-Fetch-Site, and are allowed.
@@ -195,12 +214,16 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
             _drain(self)
             _send_json(self, {"error": refusal[1]}, refusal[0])
             return
+        path = self.path.split("?", 1)[0]
         try:
-            if self.path == "/api/submit":
+            if path == "/api/submit":
                 self._handle_submit()
-            elif self.path == "/api/generate":
+            elif path == "/api/generate":
                 self._handle_generate()
-            elif self.path == "/api/pcc" or self.path.startswith("/api/pcc/"):
+            elif path == "/api/submissions/pop":
+                _drain(self)
+                self._handle_submissions_pop()
+            elif path == "/api/pcc" or path.startswith("/api/pcc/"):
                 _drain(self)
                 _send_json(self, {"error": _PROXY_GONE}, 410)
             else:
@@ -213,7 +236,8 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
         """Store a form submission from a UI."""
         body = _read_body(self, _MAX_SUBMIT_BYTES)
 
-        source = self.headers.get("X-UI-Source", "unknown")
+        raw_source = self.headers.get("X-UI-Source", "unknown")
+        source = raw_source if _UI_SOURCE.fullmatch(raw_source) else "invalid" # a claim, sanitized
         entry = {
             "path": source,
             "data": body,
@@ -230,10 +254,13 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
         if not isinstance(body, dict):
             raise _Refused(400, "Body must be a JSON object")
 
-        filename = body.get("filename", "generated.html")
-        content = body.get("content", "")
+        if "filename" not in body or "content" not in body:
+            raise _Refused(400, "filename and content are required")
+        filename = body["filename"]
+        content = body["content"]
 
-        if not isinstance(filename, str) or not _SAFE_FILENAME.fullmatch(filename):
+        if (not isinstance(filename, str) or not _SAFE_FILENAME.fullmatch(filename)
+                or filename.endswith(".") or _RESERVED_DEVICE.fullmatch(filename)):
             raise _Refused(400, "Invalid filename")
         if not isinstance(content, str):
             raise _Refused(400, "content must be a string")
@@ -256,15 +283,16 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_health()
             return
 
-        if self.path == "/api/submissions":
+        path = self.path.split("?", 1)[0]
+        if path == "/api/submissions":
             self._handle_submissions()
             return
 
-        if self.path == "/api/submissions/pop":
+        if path == "/api/submissions/pop":
             self._handle_submissions_pop()
             return
 
-        if self.path == "/" or self.path == "/index.html":
+        if path == "/" or path == "/index.html":
             self._handle_hub()
             return
 
@@ -275,6 +303,11 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
 
         # Serve static files from ui_dir
         super().do_GET()
+
+    def list_directory(self, path):
+        # No raw directory listings: the hub at "/" is the only index.
+        self.send_error(404, "Not found")
+        return None
 
     def do_HEAD(self):
         refusal = self._refusal(api=self.path.startswith("/api/"))
@@ -295,14 +328,25 @@ class UIHandler(http.server.SimpleHTTPRequestHandler):
             "files": files,
         })
 
+    def _client_ok(self):
+        """The queue is for the agent: require its header (browsers cannot send it cross-origin)."""
+        if self.headers.get(_CLIENT_HEADER) == "1":
+            return True
+        _send_json(self, {"error": f"Send {_CLIENT_HEADER}: 1 to read the submission queue"}, 403)
+        return False
+
     def _handle_submissions(self):
         """Return all pending submissions."""
+        if not self._client_ok():
+            return
         with _submissions_lock:
             subs = list(_submissions)
         _send_json(self, {"submissions": subs})
 
     def _handle_submissions_pop(self):
         """Pop the oldest submission."""
+        if not self._client_ok():
+            return
         with _submissions_lock:
             sub = _submissions.pop(0) if _submissions else None
         _send_json(self, {"submission": sub})
@@ -385,7 +429,7 @@ User input reaches PCC only through the agent, never from this page.
         if _is_own_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin.strip())
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-UI-Source")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-UI-Source")  # never X-PCC-Node-Client
         self.send_header("Vary", "Origin")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -398,6 +442,18 @@ User input reaches PCC only through the agent, never from this page.
 
 
 # ---- Public API ----
+
+
+class _UIServer(http.server.ThreadingHTTPServer):
+    """Threaded, so one stalled client cannot block the others (reviewer-alpha F-4)."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A client that went away mid-response is not a server error.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def start_ui_server(port=3200, ui_dir=None, background=True,
@@ -433,7 +489,7 @@ def start_ui_server(port=3200, ui_dir=None, background=True,
 
     _active_ui_dir.mkdir(parents=True, exist_ok=True)
 
-    server = http.server.HTTPServer(("127.0.0.1", port), UIHandler)
+    server = _UIServer(("127.0.0.1", port), UIHandler)
 
     if background:
         thread = threading.Thread(target=server.serve_forever, daemon=True)

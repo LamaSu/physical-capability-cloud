@@ -60,7 +60,9 @@ def server(ui_dir):
 def _get(port, path):
     """GET a path from the test server, return (status, parsed_body)."""
     url = f"http://127.0.0.1:{port}{path}"
-    req = Request(url, method="GET")
+    # The submission queue is for the agent, which identifies itself with this header.
+    hdrs = {"X-PCC-Node-Client": "1"} if path.startswith("/api/submissions") else {}
+    req = Request(url, method="GET", headers=hdrs)
     try:
         with urlopen(req, timeout=5) as resp:
             raw = resp.read().decode("utf-8")

@@ -180,15 +180,37 @@ class TestCrossOriginLockdown:
         assert status == 403
         assert get_submissions() == []
 
-    def test_cross_site_no_cors_get_cannot_pop(self, node):
-        # e.g. <img src="http://localhost:3200/api/submissions/pop"> on any site:
-        # no Origin header, but the browser marks it cross-site.
+    @pytest.mark.parametrize("site", ["cross-site", "same-site"])
+    def test_cross_site_no_cors_get_cannot_pop(self, node, site):
+        # e.g. <img src="http://localhost:3200/api/submissions/pop"> on any site, or on
+        # another localhost port (same-site): no Origin, but the browser marks the site.
+        # The agent header is included so this pins the Sec-Fetch layer on its own.
         _req(node["port"], "POST", "/api/submit", {"keep": "me"})
         status, _, _ = _req(node["port"], "GET", "/api/submissions/pop",
-                            headers={"Sec-Fetch-Site": "cross-site",
-                                     "Sec-Fetch-Mode": "no-cors"})
+                            headers={"Sec-Fetch-Site": site, "Sec-Fetch-Mode": "no-cors",
+                                     "X-PCC-Node-Client": "1"})
         assert status == 403
         assert len(get_submissions()) == 1
+
+    def test_pop_without_the_agent_header_is_refused(self, node):
+        # A browser that sends no Fetch Metadata (older Safari, some WebViews) reaches the
+        # server with neither Origin nor Sec-Fetch-Site; it still cannot add the header.
+        _req(node["port"], "POST", "/api/submit", {"keep": "me"})
+        for method in ("GET", "POST"):
+            status, _, _ = _req(node["port"], method, "/api/submissions/pop", body={} if method == "POST" else None)
+            assert status == 403, method
+        status, _, body = _req(node["port"], "GET", "/api/submissions")
+        assert status == 403 and "keep" not in body
+        assert len(get_submissions()) == 1
+
+    def test_another_localhost_port_is_a_foreign_origin(self, node):
+        other = f"http://localhost:{node['port'] + 1}"
+        status, hdrs, _ = _req(node["port"], "POST", "/api/submit", {"a": 1}, {"Origin": other})
+        assert status == 403 and "access-control-allow-origin" not in hdrs
+        status, hdrs, _ = _req(node["port"], "OPTIONS", "/api/submit", headers={
+            "Origin": other, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"})
+        assert status == 403 and "access-control-allow-origin" not in hdrs
+        assert get_submissions() == []
 
     @pytest.mark.parametrize("path", ["/api/health", "/", "/hello.html"])
     def test_dns_rebinding_host_is_refused(self, node, path):
@@ -244,8 +266,11 @@ class TestOwnUiStillWorks:
         assert status == 201
         status, _, _ = _req(node["port"], "POST", "/api/submit", {"x": 1})
         assert status == 200
-        status, _, body = _req(node["port"], "GET", "/api/submissions/pop")
+        status, _, body = _req(node["port"], "GET", "/api/submissions/pop", headers={"X-PCC-Node-Client": "1"})
         assert status == 200 and json.loads(body)["submission"]["data"] == {"x": 1}
+        _req(node["port"], "POST", "/api/submit", {"y": 2})
+        status, _, body = _req(node["port"], "POST", "/api/submissions/pop", {}, {"X-PCC-Node-Client": "1"})
+        assert status == 200 and json.loads(body)["submission"]["data"] == {"y": 2}
 
     def test_same_origin_fetch_reads_health(self, node):
         status, _, _ = _req(node["port"], "GET", "/api/health",
@@ -305,3 +330,76 @@ class TestBoundsAndEscaping:
             assert hdrs.get("x-frame-options") == "DENY", path
             assert "frame-ancestors 'none'" in hdrs.get("content-security-policy", ""), path
             assert hdrs.get("x-content-type-options") == "nosniff", path
+
+
+# ---------- reviewer-alpha hardening (F-4, F-5, F-6 and nits) ----------
+
+
+class TestReviewerAlphaHardening:
+    def test_generate_requires_filename_and_content(self, node):
+        for body in ({"filename": "x.html"}, {"content": "<p/>"}, {}):
+            status, _, _ = _req(node["port"], "POST", "/api/generate", body)
+            assert status == 400, body
+        assert not (node["ui_dir"] / "generated.html").exists()
+
+    def test_chunked_body_is_refused(self, node):
+        conn = http.client.HTTPConnection("127.0.0.1", node["port"], timeout=5)
+        conn.putrequest("POST", "/api/generate")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Transfer-Encoding", "chunked")
+        conn.endheaders()
+        conn.send(b"0\r\n\r\n")
+        resp = conn.getresponse()
+        assert resp.status == 411
+        conn.close()
+        assert not (node["ui_dir"] / "generated.html").exists()
+
+    @pytest.mark.parametrize("name", ["CON.html", "com1.html", "LPT9.txt", "nul", "aux.html", "a.", "page.html."])
+    def test_windows_reserved_and_trailing_dot_names_are_refused(self, node, name):
+        status, _, _ = _req(node["port"], "POST", "/api/generate", {"filename": name, "content": "x"})
+        assert status == 400
+
+    @pytest.mark.parametrize("length", ["+7", "1_0", " 7x", "07.0"])
+    def test_lenient_content_length_forms_are_refused(self, node, length):
+        conn = http.client.HTTPConnection("127.0.0.1", node["port"], timeout=5)
+        conn.putrequest("POST", "/api/submit")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", length)
+        conn.endheaders()
+        resp = conn.getresponse()
+        assert resp.status == 400
+        conn.close()
+
+    def test_deeply_nested_json_is_a_400_not_a_dropped_connection(self, node):
+        deep = ("[" * 200_000 + "]" * 200_000).encode()
+        status, _, _ = _req(node["port"], "POST", "/api/submit", deep)
+        assert status == 400
+
+    def test_no_directory_listing_and_the_hub_answers_with_a_query(self, node):
+        (node["ui_dir"] / "sub").mkdir()
+        (node["ui_dir"] / "sub" / "x.html").write_text("x")
+        status, _, _ = _req(node["port"], "GET", "/sub/")
+        assert status == 404
+        status, _, body = _req(node["port"], "GET", "/?q=1")
+        assert status == 200 and "PCC Node" in body
+
+    def test_x_ui_source_is_a_sanitized_claim(self, node):
+        _req(node["port"], "POST", "/api/submit", {"a": 1}, {"X-UI-Source": "evil\x1b[31mred"})
+        _req(node["port"], "POST", "/api/submit", {"a": 2}, {"X-UI-Source": "device-config"})
+        paths = [s_["path"] for s_ in get_submissions()]
+        assert paths == ["invalid", "device-config"]
+
+    def test_proxy_path_with_a_query_is_still_gone(self, node):
+        status, _, _ = _req(node["port"], "POST", "/api/pcc?x=1", {"a": 1}, {"Origin": _own(node["port"])})
+        assert status == 410
+        assert node["upstream"]["seen"] == []
+
+    def test_a_stalled_client_does_not_block_others(self, node):
+        stall = socket.create_connection(("127.0.0.1", node["port"]), timeout=5)
+        stall.sendall(b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n")  # never finishes
+        try:
+            t0 = time.time()
+            status, _, _ = _req(node["port"], "GET", "/api/health")
+            assert status == 200 and time.time() - t0 < 3
+        finally:
+            stall.close()
