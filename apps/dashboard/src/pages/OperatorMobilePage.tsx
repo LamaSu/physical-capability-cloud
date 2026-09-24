@@ -1,666 +1,531 @@
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import type { JobDTO } from "../types/dto.js";
+import { useAgentMe } from "../api/hooks/use-pcc-data.js";
+import { useAuthStore } from "../stores/auth-store.js";
+import { UnavailableState } from "../components/LiveState.js";
+import { isActiveJob, mayBeTruncated } from "../lib/live-status.js";
+import {
+  base64FromDataUrl,
+  checkPhoto,
+  comparePhotos,
+  listKernelJobs,
+  sendSupportReport,
+  type PhotoCheck,
+  type PhotoComparison,
+} from "../lib/operator-api.js";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+/**
+ * Operator mobile page.
+ *
+ * Everything shown here is what the gateway returned. A failed request says
+ * it failed; it never turns into a sample job, a made-up evidence reference,
+ * a "match", or an "issue filed" receipt. The operator's machines and jobs
+ * come from the key's own account (GET /api/agent/me), not from every job
+ * the key can see.
+ */
 
-interface Job {
-  id: string;
-  title: string;
-  status: "active" | "pending" | "completed" | "failed";
-  progress: number;
-  startedAt: string;
-  kernelId?: string;
-}
+type ActiveTab = "photo" | "jobs" | "account";
 
-interface UploadResult {
-  cid: string;
-  antiSpoofScore: number;
-}
-
-interface CompareResult {
-  match: boolean;
-  similarity: number;
-}
-
-type ActiveTab = "camera" | "jobs" | "settings";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function sha256B64(dataUrl: string): Promise<string> {
-  const base64 = dataUrl.split(",")[1] ?? "";
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function formatElapsed(isoStr: string): string {
-  const ms = Date.now() - new Date(isoStr).getTime();
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return "unknown time";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "unknown time";
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
+  if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
+  if (h < 24) return `${h}h ${m % 60}m ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
-function statusColor(status: Job["status"]): string {
+function statusColor(status: string): string {
   switch (status) {
-    case "active":
-      return "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
+    case "in_progress":
+    case "queued":
     case "pending":
-      return "bg-amber-500/20 text-amber-400 border border-amber-500/30";
+      return "bg-amber-500/20 text-amber-300 border border-amber-500/30";
     case "completed":
-      return "bg-sky-500/20 text-sky-400 border border-sky-500/30";
+      return "bg-sky-500/20 text-sky-300 border border-sky-500/30";
     case "failed":
-      return "bg-red-500/20 text-red-400 border border-red-500/30";
+    case "cancelled":
+      return "bg-red-500/20 text-red-300 border border-red-500/30";
     default:
-      return "bg-white/10 text-white/50";
+      return "bg-white/10 text-white/60 border border-white/10";
   }
 }
 
-// ---------------------------------------------------------------------------
-// Mock API fetchers (real calls would hit /api/*)
-// ---------------------------------------------------------------------------
-
-async function fetchActiveJobs(): Promise<Job[]> {
-  try {
-    const res = await fetch("/api/jobs?status=active", { headers: { ...getAuthHeaders() } });
-    if (res.ok) return res.json() as Promise<Job[]>;
-  } catch {
-    // fall through to mock
-  }
-  // Mock fallback
-  return [
-    {
-      id: "job-001",
-      title: "FDM Print — Bracket v3",
-      status: "active",
-      progress: 62,
-      startedAt: new Date(Date.now() - 1_800_000).toISOString(),
-    },
-    {
-      id: "job-002",
-      title: "CNC Mill — Plate A",
-      status: "active",
-      progress: 88,
-      startedAt: new Date(Date.now() - 3_600_000).toISOString(),
-    },
-    {
-      id: "job-003",
-      title: "Laser Engrave — Logo Run",
-      status: "pending",
-      progress: 0,
-      startedAt: new Date(Date.now() - 120_000).toISOString(),
-    },
-  ];
+function readDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the photo"));
+    reader.readAsDataURL(file);
+  });
 }
 
-async function uploadPhoto(
-  base64: string,
-  hash: string,
-  notes: string
-): Promise<UploadResult> {
-  try {
-    const res = await fetch("/api/photo/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({ image: base64, sha256: hash, notes }),
-    });
-    if (res.ok) return res.json() as Promise<UploadResult>;
-  } catch {
-    // fall through to mock
-  }
-  // Mock response
-  await new Promise((r) => setTimeout(r, 600));
-  return {
-    cid: `bafybei${hash.slice(0, 36)}`,
-    antiSpoofScore: 0.94,
-  };
+/** The account's machines, from GET /api/agent/me. `null` while unknown. */
+function useMyKernels() {
+  const me = useAgentMe();
+  const kernels = me.data && !me.data.kernels.unavailable ? me.data.kernels.items : null;
+  return { me, kernels };
 }
 
-async function comparePhoto(base64: string, jobId: string): Promise<CompareResult> {
-  try {
-    const res = await fetch("/api/photo/compare", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({ image: base64, jobId }),
-    });
-    if (res.ok) return res.json() as Promise<CompareResult>;
-  } catch {
-    // fall through to mock
-  }
-  await new Promise((r) => setTimeout(r, 800));
-  return { match: true, similarity: 0.91 };
-}
-
-async function reportIssue(
-  base64: string | null,
-  text: string,
-  jobId: string | null
-): Promise<{ issueId: string }> {
-  try {
-    const res = await fetch("/api/issues", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify({ image: base64, text, jobId }),
-    });
-    if (res.ok) return res.json() as Promise<{ issueId: string }>;
-  } catch {
-    // fall through
-  }
-  await new Promise((r) => setTimeout(r, 400));
-  return { issueId: `issue-${Date.now()}` };
-}
-
-// ---------------------------------------------------------------------------
-// Camera Tab
-// ---------------------------------------------------------------------------
-
-type CameraMode = "idle" | "preview" | "uploading" | "result";
-
-function CameraTab() {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<CameraMode>("idle");
-  const [preview, setPreview] = useState<string | null>(null);
-  const [hash, setHash] = useState<string>("");
-  const [notes, setNotes] = useState("");
-  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
-  const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
-  const [issueText, setIssueText] = useState("");
-  const [issueJobId, setIssueJobId] = useState("");
-  const [issueSent, setIssueSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [actionMode, setActionMode] = useState<"upload" | "compare" | "issue">("upload");
-
-  const handleFileChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      setError(null);
-      const reader = new FileReader();
-      reader.onload = async (ev) => {
-        const dataUrl = ev.target?.result as string;
-        setPreview(dataUrl);
-        const h = await sha256B64(dataUrl);
-        setHash(h);
-        setMode("preview");
-        setUploadResult(null);
-        setCompareResult(null);
-        setIssueSent(false);
-      };
-      reader.readAsDataURL(file);
-    },
-    []
+function NotSent({ reason, children }: { reason: string; children?: React.ReactNode }) {
+  return (
+    <div role="alert" className="rounded-2xl bg-red-500/10 border border-red-500/40 p-4 space-y-2">
+      <div className="text-sm font-semibold text-red-300">Not sent</div>
+      <p className="text-xs text-red-200/80">{reason}</p>
+      {children}
+    </div>
   );
+}
 
-  const handleUpload = useCallback(async () => {
-    if (!preview) return;
-    setMode("uploading");
-    try {
-      const result = await uploadPhoto(preview, hash, notes);
-      setUploadResult(result);
-      setMode("result");
-    } catch (err) {
-      setError("Upload failed. Please try again.");
-      setMode("preview");
-    }
-  }, [preview, hash, notes]);
+// ---------------------------------------------------------------------------
+// Photo tab
+// ---------------------------------------------------------------------------
 
-  const handleCompare = useCallback(async () => {
-    if (!preview) return;
-    setMode("uploading");
-    try {
-      const result = await comparePhoto(preview, issueJobId || "default-job");
-      setCompareResult(result);
-      setMode("result");
-    } catch (err) {
-      setError("Compare failed.");
-      setMode("preview");
-    }
-  }, [preview, issueJobId]);
+type PhotoMode = "check" | "compare" | "issue";
 
-  const handleReportIssue = useCallback(async () => {
-    if (!issueText.trim()) return;
-    setMode("uploading");
-    try {
-      await reportIssue(preview, issueText, issueJobId || null);
-      setIssueSent(true);
-      setMode("result");
-    } catch (err) {
-      setError("Failed to send report.");
-      setMode("preview");
-    }
-  }, [preview, issueText, issueJobId]);
+function PhotoTab() {
+  const { me, kernels } = useMyKernels();
+  const captureRef = useRef<HTMLInputElement>(null);
+  const referenceRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode] = useState<PhotoMode>("check");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [reference, setReference] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [checkResult, setCheckResult] = useState<PhotoCheck | null>(null);
+  const [compareResult, setCompareResult] = useState<PhotoComparison | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [issueKernel, setIssueKernel] = useState("");
+  const [issueJob, setIssueJob] = useState("");
+  const [issueText, setIssueText] = useState("");
+  const [issueThread, setIssueThread] = useState<string | null>(null);
 
   const reset = () => {
-    setMode("idle");
-    setPreview(null);
-    setHash("");
-    setNotes("");
-    setUploadResult(null);
+    setPhoto(null);
+    setReference(null);
+    setCheckResult(null);
     setCompareResult(null);
-    setIssueSent(false);
-    setError(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    setFailure(null);
+    setIssueThread(null);
+    if (captureRef.current) captureRef.current.value = "";
+    if (referenceRef.current) referenceRef.current.value = "";
   };
+
+  const onPick = useCallback(
+    (setter: (v: string) => void) => async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      setFailure(null);
+      setCheckResult(null);
+      setCompareResult(null);
+      try {
+        setter(await readDataUrl(file));
+      } catch (err) {
+        setFailure(err instanceof Error ? err.message : "Could not read the photo.");
+      }
+    },
+    [],
+  );
+
+  const runCheck = useCallback(async () => {
+    if (!photo) return;
+    setBusy(true);
+    setFailure(null);
+    const r = await checkPhoto(base64FromDataUrl(photo));
+    setBusy(false);
+    if (r.ok) setCheckResult(r.data);
+    else setFailure(r.reason);
+  }, [photo]);
+
+  const runCompare = useCallback(async () => {
+    if (!photo || !reference) return;
+    setBusy(true);
+    setFailure(null);
+    const r = await comparePhotos(base64FromDataUrl(photo), base64FromDataUrl(reference));
+    setBusy(false);
+    if (r.ok) setCompareResult(r.data);
+    else setFailure(r.reason);
+  }, [photo, reference]);
+
+  const runIssue = useCallback(async () => {
+    const kernelId = issueKernel || (kernels && kernels.length === 1 ? kernels[0]!.id : "");
+    if (!kernelId || !issueText.trim()) return;
+    setBusy(true);
+    setFailure(null);
+    const lines = [issueText.trim()];
+    if (issueJob.trim()) lines.push(`Job: ${issueJob.trim()}`);
+    const r = await sendSupportReport({ kernelId, message: lines.join("\n"), subject: issueText.trim().slice(0, 80) });
+    setBusy(false);
+    if (r.ok) setIssueThread(r.data.threadId);
+    else setFailure(r.reason);
+  }, [issueKernel, issueJob, issueText, kernels]);
+
+  const modeButton = (m: PhotoMode, label: string) => (
+    <button
+      key={m}
+      onClick={() => { setMode(m); reset(); }}
+      className={`flex-1 py-2 rounded-xl text-xs font-medium transition-all ${
+        mode === m
+          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
+          : "bg-white/[0.04] text-white/40 border border-white/[0.06]"
+      }`}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
-      {error && (
-        <div className="rounded-xl bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-
-      {/* Action mode selector */}
       <div className="flex gap-2">
-        {(["upload", "compare", "issue"] as const).map((m) => (
-          <button
-            key={m}
-            onClick={() => { setActionMode(m); reset(); }}
-            className={`flex-1 py-2 rounded-xl text-xs font-medium transition-all ${
-              actionMode === m
-                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                : "bg-white/[0.04] text-white/40 border border-white/[0.06]"
-            }`}
-          >
-            {m === "upload" ? "Upload Photo" : m === "compare" ? "Verify Print" : "Report Issue"}
-          </button>
-        ))}
+        {modeButton("check", "Photo check")}
+        {modeButton("compare", "Compare")}
+        {modeButton("issue", "Report issue")}
       </div>
 
-      {/* Camera input — always present for accessibility */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={handleFileChange}
-      />
+      <input ref={captureRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onPick(setPhoto)} />
+      <input ref={referenceRef} type="file" accept="image/*" className="hidden" onChange={onPick(setReference)} />
 
-      {mode === "idle" && (
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="flex flex-col items-center justify-center gap-3 w-full rounded-2xl
-                     bg-emerald-500/10 border-2 border-dashed border-emerald-500/40
-                     py-16 text-emerald-400 active:scale-[0.97] transition-transform"
-        >
-          <svg viewBox="0 0 24 24" className="w-12 h-12" fill="none" stroke="currentColor" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round"
-              d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z" />
-            <path strokeLinecap="round" strokeLinejoin="round"
-              d="M16.5 12.75a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM18.75 10.5h.008v.008h-.008V10.5Z" />
-          </svg>
-          <span className="text-base font-semibold">Take Photo</span>
-          <span className="text-xs text-emerald-400/60">Tap to open camera</span>
-        </button>
-      )}
+      {mode !== "issue" && (
+        <>
+          <p className="text-[11px] leading-relaxed text-white/40">
+            {mode === "check"
+              ? "Sends one photo to PCC's photo check (hash and anti-spoof heuristics). It is not attached to any job and is not job evidence."
+              : "Asks an AI model to compare your photo with a reference image. Its answer is advisory: it is not PCC verification and does not affect payment."}
+          </p>
 
-      {(mode === "preview" || mode === "uploading") && preview && (
-        <div className="flex flex-col gap-4">
-          <div className="relative rounded-2xl overflow-hidden border border-white/[0.08]">
-            <img src={preview} alt="Captured" className="w-full object-cover max-h-72" />
-            {mode === "uploading" && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-                <div className="flex flex-col items-center gap-2">
-                  <div className="w-8 h-8 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
-                  <span className="text-xs text-white/60">Processing…</span>
+          {!photo ? (
+            <button
+              onClick={() => captureRef.current?.click()}
+              className="flex flex-col items-center justify-center gap-2 w-full rounded-2xl bg-emerald-500/10 border-2 border-dashed border-emerald-500/40 py-12 text-emerald-400 active:scale-[0.97] transition-transform"
+            >
+              <span className="text-base font-semibold">Take photo</span>
+              <span className="text-xs text-emerald-400/60">Tap to open camera</span>
+            </button>
+          ) : (
+            <div className="rounded-2xl overflow-hidden border border-white/[0.08]">
+              <img src={photo} alt="Your photo" className="w-full object-cover max-h-64" />
+            </div>
+          )}
+
+          {mode === "compare" && photo && (
+            reference ? (
+              <div className="rounded-2xl overflow-hidden border border-sky-500/30">
+                <div className="px-3 py-1 text-[10px] text-sky-300/70 bg-sky-500/10">Reference image</div>
+                <img src={reference} alt="Reference" className="w-full object-cover max-h-40" />
+              </div>
+            ) : (
+              <button
+                onClick={() => referenceRef.current?.click()}
+                className="w-full py-3 rounded-2xl bg-sky-500/10 border border-sky-500/30 text-sm text-sky-300"
+              >
+                Choose the reference image
+              </button>
+            )
+          )}
+
+          {photo && mode === "check" && !checkResult && (
+            <button
+              onClick={runCheck}
+              disabled={busy}
+              className="w-full py-4 rounded-2xl bg-emerald-500 text-black font-semibold text-base active:scale-[0.97] transition-transform disabled:opacity-50"
+            >
+              {busy ? "Sending…" : "Send for photo check"}
+            </button>
+          )}
+
+          {photo && mode === "compare" && reference && !compareResult && (
+            <button
+              onClick={runCompare}
+              disabled={busy}
+              className="w-full py-4 rounded-2xl bg-sky-500 text-black font-semibold text-base active:scale-[0.97] transition-transform disabled:opacity-50"
+            >
+              {busy ? "Comparing…" : "Compare"}
+            </button>
+          )}
+
+          {checkResult && (
+            <div data-testid="photo-check-result" className="rounded-2xl bg-white/[0.04] border border-white/[0.08] p-4 space-y-3">
+              <div className="text-sm font-semibold text-white/80">Received by PCC</div>
+              <div>
+                <div className="text-[10px] text-white/30 mb-1">Image hash (from PCC)</div>
+                <div className="text-[11px] font-mono text-white/60 break-all">{checkResult.imageHash}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-white/30 mb-1">Reference</div>
+                <div className="text-[11px] font-mono text-white/60 break-all">{checkResult.cid}</div>
+                <div className="text-[10px] text-white/40 mt-1">
+                  {checkResult.stored
+                    ? "Stored by PCC's evidence storage."
+                    : "Not stored: PCC kept a hash reference only."}
                 </div>
               </div>
-            )}
-          </div>
-
-          {/* Hash display */}
-          <div className="rounded-xl bg-white/[0.04] border border-white/[0.06] px-3 py-2">
-            <div className="text-[10px] text-white/30 mb-1">SHA-256</div>
-            <div className="text-[10px] font-mono text-white/50 break-all">{hash}</div>
-          </div>
-
-          {/* Action-specific inputs */}
-          {actionMode === "upload" && (
-            <>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Add notes (optional)…"
-                rows={3}
-                className="w-full rounded-xl bg-white/[0.04] border border-white/[0.06]
-                           px-3 py-2 text-sm text-white/80 placeholder:text-white/20
-                           resize-none focus:outline-none focus:border-emerald-500/40"
-              />
-              <button
-                onClick={handleUpload}
-                disabled={mode === "uploading"}
-                className="w-full py-4 rounded-2xl bg-emerald-500 text-black font-semibold
-                           text-base active:scale-[0.97] transition-transform disabled:opacity-50"
-              >
-                Upload to IPFS
-              </button>
-            </>
+              <div>
+                <div className="text-[10px] text-white/30 mb-1">Anti-spoof heuristic (advisory)</div>
+                <div className="text-xs font-mono text-white/60">
+                  {checkResult.antiSpoofScore === null ? "Not reported" : `${Math.round(checkResult.antiSpoofScore * 100)}%`}
+                </div>
+              </div>
+            </div>
           )}
 
-          {actionMode === "compare" && (
+          {compareResult && (
+            <div data-testid="photo-compare-result" className="rounded-2xl bg-white/[0.04] border border-white/[0.08] p-4 space-y-2">
+              <div className="text-[10px] uppercase tracking-wider text-white/35">
+                AI comparison (advisory){compareResult.modelUsed ? ` · ${compareResult.modelUsed}` : ""}
+              </div>
+              <div className="text-sm font-semibold text-white/80">{compareResult.verdict ?? "No verdict returned"}</div>
+              {compareResult.matchScore !== null && (
+                <div className="text-xs text-white/50">Match score: <span className="font-mono">{compareResult.matchScore}</span></div>
+              )}
+              {compareResult.discrepancies.length > 0 && (
+                <ul className="list-disc pl-4 text-xs text-white/50 space-y-1">
+                  {compareResult.discrepancies.map((d, i) => <li key={i}>{d}</li>)}
+                </ul>
+              )}
+              {compareResult.reasoning && <p className="text-[11px] text-white/40">{compareResult.reasoning}</p>}
+            </div>
+          )}
+        </>
+      )}
+
+      {mode === "issue" && (
+        <div className="flex flex-col gap-3">
+          <p className="text-[11px] leading-relaxed text-white/40">
+            Sends a message to PCC support about one of your machines. If anyone is at risk, stop the machine with its own
+            emergency stop first.
+          </p>
+          {me.isLoading && <div className="text-xs text-white/40">Loading your machines…</div>}
+          {me.isError && <UnavailableState what="your machines" error={me.error} onRetry={() => void me.refetch()} />}
+          {kernels && kernels.length === 0 && (
+            <div className="text-xs text-white/50">No machines are registered to this key, so there is nothing to report against.</div>
+          )}
+          {kernels && kernels.length > 0 && (
             <>
+              <label className="text-[10px] text-white/40">
+                Machine
+                <select
+                  value={issueKernel || (kernels.length === 1 ? kernels[0]!.id : "")}
+                  onChange={(e) => setIssueKernel(e.target.value)}
+                  className="mt-1 w-full rounded-xl bg-white/[0.04] border border-white/[0.06] px-3 py-2 text-sm text-white/80"
+                >
+                  {kernels.length > 1 && <option value="">Choose a machine</option>}
+                  {kernels.map((k) => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}
+                </select>
+              </label>
               <input
-                value={issueJobId}
-                onChange={(e) => setIssueJobId(e.target.value)}
+                value={issueJob}
+                onChange={(e) => setIssueJob(e.target.value)}
                 placeholder="Job ID (optional)"
-                className="w-full rounded-xl bg-white/[0.04] border border-white/[0.06]
-                           px-3 py-2 text-sm text-white/80 placeholder:text-white/20
-                           focus:outline-none focus:border-emerald-500/40"
+                className="w-full rounded-xl bg-white/[0.04] border border-white/[0.06] px-3 py-2 text-sm text-white/80 placeholder:text-white/20"
               />
-              <button
-                onClick={handleCompare}
-                disabled={mode === "uploading"}
-                className="w-full py-4 rounded-2xl bg-sky-500 text-black font-semibold
-                           text-base active:scale-[0.97] transition-transform disabled:opacity-50"
-              >
-                Compare to Reference
-              </button>
-            </>
-          )}
-
-          {actionMode === "issue" && (
-            <>
               <textarea
                 value={issueText}
                 onChange={(e) => setIssueText(e.target.value)}
-                placeholder="Describe the issue…"
-                rows={3}
-                className="w-full rounded-xl bg-white/[0.04] border border-white/[0.06]
-                           px-3 py-2 text-sm text-white/80 placeholder:text-white/20
-                           resize-none focus:outline-none focus:border-emerald-500/40"
+                placeholder="What happened?"
+                rows={4}
+                className="w-full rounded-xl bg-white/[0.04] border border-white/[0.06] px-3 py-2 text-sm text-white/80 placeholder:text-white/20 resize-none"
               />
-              <button
-                onClick={handleReportIssue}
-                disabled={mode === "uploading" || !issueText.trim()}
-                className="w-full py-4 rounded-2xl bg-amber-500 text-black font-semibold
-                           text-base active:scale-[0.97] transition-transform disabled:opacity-50"
-              >
-                Send Report
-              </button>
+              {!issueThread && (
+                <button
+                  onClick={runIssue}
+                  disabled={busy || !issueText.trim() || !(issueKernel || kernels.length === 1)}
+                  className="w-full py-4 rounded-2xl bg-amber-500 text-black font-semibold text-base active:scale-[0.97] transition-transform disabled:opacity-50"
+                >
+                  {busy ? "Sending…" : "Send to support"}
+                </button>
+              )}
             </>
           )}
-
-          <button
-            onClick={reset}
-            disabled={mode === "uploading"}
-            className="w-full py-3 rounded-2xl bg-white/[0.04] border border-white/[0.06]
-                       text-sm text-white/40 active:scale-[0.97] transition-transform disabled:opacity-30"
-          >
-            Retake
-          </button>
+          {issueThread && (
+            <div data-testid="issue-sent" className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4 space-y-1">
+              <div className="text-sm font-semibold text-amber-300">Sent to PCC support</div>
+              <div className="text-[11px] text-white/50">
+                Thread <span className="font-mono">{issueThread}</span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {mode === "result" && (
-        <div className="flex flex-col gap-4">
-          {preview && (
-            <div className="rounded-2xl overflow-hidden border border-white/[0.08]">
-              <img src={preview} alt="Captured" className="w-full object-cover max-h-48" />
-            </div>
+      {failure && (
+        <NotSent reason={failure}>
+          {mode === "issue" && (
+            <p className="text-xs text-red-200/80">
+              Your report did not reach PCC. If anyone is at risk, stop the machine with its own emergency stop and call your
+              site contact.
+            </p>
           )}
+        </NotSent>
+      )}
 
-          {/* Upload result */}
-          {uploadResult && (
-            <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 p-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-black text-xs font-bold">
-                  ✓
-                </div>
-                <span className="text-sm font-semibold text-emerald-400">Uploaded</span>
-              </div>
-              <div>
-                <div className="text-[10px] text-white/30 mb-1">IPFS CID</div>
-                <div className="text-xs font-mono text-white/60 break-all">{uploadResult.cid}</div>
-              </div>
-              <div>
-                <div className="text-[10px] text-white/30 mb-1">Anti-spoof Score</div>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 rounded-full bg-white/10">
-                    <div
-                      className="h-2 rounded-full bg-emerald-500"
-                      style={{ width: `${uploadResult.antiSpoofScore * 100}%` }}
-                    />
-                  </div>
-                  <span className="text-xs font-mono text-emerald-400">
-                    {(uploadResult.antiSpoofScore * 100).toFixed(0)}%
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Compare result */}
-          {compareResult && (
-            <div
-              className={`rounded-2xl p-4 space-y-3 ${
-                compareResult.match
-                  ? "bg-emerald-500/10 border border-emerald-500/30"
-                  : "bg-red-500/10 border border-red-500/30"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <div
-                  className={`w-5 h-5 rounded-full flex items-center justify-center text-black text-xs font-bold ${
-                    compareResult.match ? "bg-emerald-500" : "bg-red-500"
-                  }`}
-                >
-                  {compareResult.match ? "✓" : "✗"}
-                </div>
-                <span
-                  className={`text-sm font-semibold ${
-                    compareResult.match ? "text-emerald-400" : "text-red-400"
-                  }`}
-                >
-                  {compareResult.match ? "Matches Reference" : "Mismatch Detected"}
-                </span>
-              </div>
-              <div>
-                <div className="text-[10px] text-white/30 mb-1">Similarity</div>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 rounded-full bg-white/10">
-                    <div
-                      className={`h-2 rounded-full ${compareResult.match ? "bg-emerald-500" : "bg-red-500"}`}
-                      style={{ width: `${compareResult.similarity * 100}%` }}
-                    />
-                  </div>
-                  <span className="text-xs font-mono text-white/60">
-                    {(compareResult.similarity * 100).toFixed(0)}%
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Issue sent */}
-          {issueSent && (
-            <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4">
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center text-black text-xs font-bold">
-                  ✓
-                </div>
-                <span className="text-sm font-semibold text-amber-400">Issue Reported</span>
-              </div>
-              <p className="text-xs text-white/40 mt-2">
-                Your report has been sent to the agent.
-              </p>
-            </div>
-          )}
-
-          <button
-            onClick={reset}
-            className="w-full py-4 rounded-2xl bg-white/[0.04] border border-white/[0.06]
-                       text-sm text-white/60 font-medium active:scale-[0.97] transition-transform"
-          >
-            Take Another Photo
-          </button>
-        </div>
+      {(photo || checkResult || compareResult || issueThread || failure) && (
+        <button
+          onClick={reset}
+          disabled={busy}
+          className="w-full py-3 rounded-2xl bg-white/[0.04] border border-white/[0.06] text-sm text-white/50 disabled:opacity-30"
+        >
+          Start over
+        </button>
       )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Jobs Tab
+// Jobs tab
 // ---------------------------------------------------------------------------
 
-function JobCard({ job, onTap }: { job: Job; onTap: (id: string) => void }) {
+function JobCard({ job }: { job: JobDTO }) {
+  const reported = isActiveJob(job) && typeof job.progress === "number" && job.progress > 0;
   return (
-    <button
-      onClick={() => onTap(job.id)}
-      className="w-full text-left rounded-2xl bg-white/[0.03] border border-white/[0.06]
-                 p-4 flex flex-col gap-3 active:scale-[0.97] transition-transform"
+    <a
+      href={`/jobs/${encodeURIComponent(job.id)}`}
+      className="block w-full text-left rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-2 active:scale-[0.97] transition-transform"
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="text-sm font-medium text-white/80 leading-tight">{job.title}</span>
-        <span className={`shrink-0 text-[10px] font-medium px-2 py-0.5 rounded-full ${statusColor(job.status)}`}>
-          {job.status}
+        <span className="text-sm font-medium text-white/80 leading-tight">{job.capabilityType ?? job.capabilityId}</span>
+        <span className={`shrink-0 text-[10px] font-medium px-2 py-0.5 rounded-full ${statusColor(String(job.status))}`}>
+          {String(job.status).replace(/_/g, " ")}
         </span>
       </div>
-      {/* Progress bar */}
-      <div className="space-y-1">
-        <div className="flex justify-between text-[10px] text-white/30">
-          <span>Progress</span>
-          <span className="font-mono">{job.progress}%</span>
+      {reported && (
+        <div className="space-y-1">
+          <div className="flex justify-between text-[10px] text-white/30">
+            <span>Reported progress</span>
+            <span className="font-mono">{job.progress}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-white/[0.06]">
+            <div className="h-1.5 rounded-full bg-emerald-500" style={{ width: `${Math.min(100, job.progress ?? 0)}%` }} />
+          </div>
         </div>
-        <div className="h-1.5 rounded-full bg-white/[0.06]">
-          <div
-            className="h-1.5 rounded-full bg-emerald-500 transition-all"
-            style={{ width: `${job.progress}%` }}
-          />
-        </div>
-      </div>
-      {/* Timer */}
+      )}
       <div className="text-[10px] text-white/30">
-        Elapsed: <span className="font-mono text-white/50">{formatElapsed(job.startedAt)}</span>
+        <span className="font-mono">{job.id}</span> · created {timeAgo(job.createdAt)}
       </div>
-    </button>
+    </a>
   );
 }
 
 function JobsTab() {
-  const [expandedJob, setExpandedJob] = useState<string | null>(null);
-  const { data: jobs, isLoading, error } = useQuery({
-    queryKey: ["mobile-active-jobs"],
-    queryFn: fetchActiveJobs,
+  const { me, kernels } = useMyKernels();
+  const kernelIds = kernels ? kernels.map((k) => k.id) : [];
+  const jobs = useQuery({
+    queryKey: ["operator-mobile-jobs", kernelIds],
+    queryFn: async () => {
+      const r = await listKernelJobs(kernelIds);
+      if (!r.ok) throw new Error(r.reason);
+      return r.data;
+    },
+    enabled: kernels !== null && kernelIds.length > 0,
     refetchInterval: 15_000,
+    retry: 1,
   });
 
-  if (isLoading) {
+  if (me.isLoading) return <Spinner />;
+  if (me.isError || (me.data && me.data.kernels.unavailable)) {
+    return <UnavailableState what="your machines" error={me.error ?? me.data?.kernels.unavailable} onRetry={() => void me.refetch()} />;
+  }
+  if (kernels && kernels.length === 0) {
     return (
-      <div className="flex items-center justify-center py-16">
-        <div className="w-8 h-8 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
+      <div className="flex flex-col items-center justify-center py-16 gap-2 px-6 text-center">
+        <div className="text-sm text-white/50">No machines are registered to this key yet.</div>
+        {me.data?.next?.[0] && <div className="text-xs text-white/30">{me.data.next[0]}</div>}
       </div>
     );
   }
-
-  if (error) {
-    return (
-      <div className="px-4 py-4">
-        <div className="rounded-xl bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-400">
-          Failed to load jobs.
-        </div>
-      </div>
-    );
+  if (jobs.isLoading) return <Spinner />;
+  if (jobs.isError || !jobs.data) {
+    return <UnavailableState what="your jobs" error={jobs.error} onRetry={() => void jobs.refetch()} />;
   }
-
-  if (!jobs?.length) {
+  if (jobs.data.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-2">
-        <div className="text-3xl opacity-40">📭</div>
-        <div className="text-sm text-white/30">No active jobs</div>
+        <div className="text-sm text-white/40">No jobs on your machines yet.</div>
       </div>
     );
   }
 
+  const active = jobs.data.filter(isActiveJob);
+  const rest = jobs.data.filter((j) => !isActiveJob(j));
   return (
     <div className="flex flex-col gap-3 px-4 py-4">
-      <div className="text-xs text-white/30 mb-1">
-        {jobs.length} active job{jobs.length !== 1 ? "s" : ""}
+      <div className="text-xs text-white/30">
+        {active.length} in progress · {rest.length} other
+        {mayBeTruncated(jobs.data) ? " · showing the latest page only" : ""}
       </div>
-      {jobs.map((job) => (
-        <div key={job.id}>
-          <JobCard
-            job={job}
-            onTap={(id) => setExpandedJob(expandedJob === id ? null : id)}
-          />
-          {expandedJob === job.id && (
-            <div className="mt-1 ml-4 rounded-b-2xl bg-white/[0.02] border border-t-0 border-white/[0.06] p-4 space-y-2">
-              <div className="text-[10px] text-white/30 uppercase tracking-wider mb-2">
-                Evidence Timeline
-              </div>
-              {[
-                { label: "Job queued", time: "0s" },
-                { label: "Material loaded", time: "+2m" },
-                { label: "Printing started", time: "+3m" },
-                { label: "Layer 42 snapshot", time: "+12m" },
-                { label: "Layer 88 snapshot", time: "+24m" },
-              ].map((evt, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/60 shrink-0" />
-                  <div className="flex-1 text-xs text-white/50">{evt.label}</div>
-                  <div className="text-[10px] font-mono text-white/30">{evt.time}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
+      {[...active, ...rest].map((job) => <JobCard key={job.id} job={job} />)}
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <div className="flex items-center justify-center py-16">
+      <div className="w-8 h-8 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Settings Tab
+// Account tab
 // ---------------------------------------------------------------------------
 
-function SettingsTab() {
+function AccountTab() {
+  const { me } = useMyKernels();
+  if (me.isLoading) return <Spinner />;
+  if (me.isError || !me.data) {
+    return <UnavailableState what="your account" error={me.error} onRetry={() => void me.refetch()} />;
+  }
+  const { identity, kernels, keys } = me.data;
+  const wildcard = identity.scopes.includes("*");
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
       <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] divide-y divide-white/[0.04]">
         {[
-          { label: "Kernel ID", value: "kern-alpha-01" },
-          { label: "Operator", value: "op-9f3a2b" },
-          { label: "Network", value: "Base Sepolia" },
-          { label: "Agent Status", value: "Online" },
-          { label: "App Version", value: "v0.1.0-pwa" },
+          { label: "Operator", value: identity.operator },
+          { label: "Key", value: identity.key_name ?? identity.key_id },
+          { label: "As of", value: new Date(me.data.as_of).toLocaleTimeString() },
         ].map(({ label, value }) => (
-          <div key={label} className="flex items-center justify-between px-4 py-3">
+          <div key={label} className="flex items-center justify-between gap-3 px-4 py-3">
             <span className="text-sm text-white/40">{label}</span>
-            <span className="text-sm font-mono text-white/70">{value}</span>
+            <span className="text-sm font-mono text-white/70 truncate">{value}</span>
+          </div>
+        ))}
+      </div>
+
+      {wildcard && (
+        <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200/80">
+          This key has every permission (wildcard). {keys.wildcard_keys > 1 ? `${keys.wildcard_keys} of your keys do.` : ""}
+        </div>
+      )}
+
+      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-2">
+        <div className="text-xs text-white/30 uppercase tracking-wider">Your machines</div>
+        {kernels.unavailable && <div className="text-xs text-amber-300/80">Unavailable: {kernels.unavailable}</div>}
+        {!kernels.unavailable && kernels.items.length === 0 && <div className="text-xs text-white/40">None registered.</div>}
+        {kernels.items.map((k) => (
+          <div key={k.id} className="flex items-center justify-between text-xs">
+            <span className="text-white/60">{k.name || k.id}</span>
+            <span className="text-white/40">
+              {k.status} · heartbeat {k.last_heartbeat ? timeAgo(k.last_heartbeat) : "never"}
+            </span>
           </div>
         ))}
       </div>
 
       <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-3">
-        <div className="text-xs text-white/30 uppercase tracking-wider">Quick Links</div>
+        <div className="text-xs text-white/30 uppercase tracking-wider">Quick links</div>
         {[
-          { label: "Full Operator Dashboard", href: "/operator" },
-          { label: "Job History", href: "/jobs" },
-          { label: "Evidence Explorer", href: "/evidence" },
-          { label: "Sensor Live View", href: "/sensors" },
+          { label: "Full operator dashboard", href: "/operator" },
+          { label: "Job history", href: "/jobs" },
         ].map(({ label, href }) => (
-          <a
-            key={href}
-            href={href}
-            className="flex items-center justify-between py-2 border-b border-white/[0.04] last:border-0"
-          >
+          <a key={href} href={href} className="flex items-center justify-between py-2 border-b border-white/[0.04] last:border-0">
             <span className="text-sm text-white/60">{label}</span>
-            <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-white/20">
-              <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />
-            </svg>
+            <span className="text-white/20">›</span>
           </a>
         ))}
       </div>
@@ -669,13 +534,38 @@ function SettingsTab() {
 }
 
 // ---------------------------------------------------------------------------
-// Main Page
+// Main page
 // ---------------------------------------------------------------------------
 
-export function OperatorMobilePage() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>("camera");
+function ConnectionBadge() {
+  const signedIn = useAuthStore((s) => !!s.apiKey || !!s.sessionToken);
+  const me = useAgentMe();
+  let label = "Connecting…";
+  let tone = "text-white/40";
+  let dot = "bg-white/30";
+  if (!signedIn && !me.isSuccess) {
+    label = "Not signed in";
+  } else if (me.isSuccess) {
+    label = "Connected";
+    tone = "text-emerald-400/80";
+    dot = "bg-emerald-400";
+  } else if (me.isError) {
+    label = "Can't reach PCC";
+    tone = "text-amber-300/80";
+    dot = "bg-amber-400";
+  }
+  return (
+    <div className="flex items-center gap-1.5" data-testid="connection-badge">
+      <div className={`w-1.5 h-1.5 rounded-full ${dot}`} />
+      <span className={`text-[10px] ${tone}`}>{label}</span>
+    </div>
+  );
+}
 
-  // Prevent zoom on double-tap (PWA best practice)
+export function OperatorMobilePage() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("jobs");
+
+  // Prevent pinch zoom (PWA)
   useEffect(() => {
     const handler = (e: TouchEvent) => {
       if (e.touches.length > 1) e.preventDefault();
@@ -684,92 +574,41 @@ export function OperatorMobilePage() {
     return () => document.removeEventListener("touchstart", handler);
   }, []);
 
-  const tabConfig: { id: ActiveTab; label: string; icon: React.ReactNode }[] = [
-    {
-      id: "camera",
-      label: "Camera",
-      icon: (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
-          <path strokeLinecap="round" strokeLinejoin="round"
-            d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z" />
-          <path strokeLinecap="round" strokeLinejoin="round"
-            d="M16.5 12.75a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM18.75 10.5h.008v.008h-.008V10.5Z" />
-        </svg>
-      ),
-    },
-    {
-      id: "jobs",
-      label: "Jobs",
-      icon: (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
-          <path strokeLinecap="round" strokeLinejoin="round"
-            d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 0 0 2.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 0 0-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-.1-.664m-5.8 0A2.251 2.251 0 0 1 13.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25ZM6.75 12h.008v.008H6.75V12Zm0 3h.008v.008H6.75V15Zm0 3h.008v.008H6.75V18Z" />
-        </svg>
-      ),
-    },
-    {
-      id: "settings",
-      label: "Settings",
-      icon: (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
-          <path strokeLinecap="round" strokeLinejoin="round"
-            d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z" />
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-        </svg>
-      ),
-    },
+  const tabs: { id: ActiveTab; label: string }[] = [
+    { id: "jobs", label: "My jobs" },
+    { id: "photo", label: "Photo" },
+    { id: "account", label: "Account" },
   ];
 
   return (
-    <div
-      className="flex flex-col h-screen"
-      style={{ background: "#0A1A0F" }}
-    >
-      {/* Header */}
+    <div className="flex flex-col h-screen" style={{ background: "#0A1A0F" }}>
       <div
         className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]"
         style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
       >
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-emerald-500/20 flex items-center justify-center">
-            <svg viewBox="0 0 16 16" fill="none" className="w-4 h-4">
-              <circle cx="8" cy="8" r="4" fill="#10B981" opacity="0.9" />
-              <circle cx="8" cy="8" r="7" stroke="#10B981" strokeWidth="1.5" opacity="0.4" />
-            </svg>
-          </div>
-          <span className="text-sm font-semibold text-white/80">PCC Operator</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-[10px] text-emerald-400/70">Live</span>
-        </div>
+        <span className="text-sm font-semibold text-white/80">PCC Operator</span>
+        <ConnectionBadge />
       </div>
 
-      {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto overscroll-contain">
-        {activeTab === "camera" && <CameraTab />}
         {activeTab === "jobs" && <JobsTab />}
-        {activeTab === "settings" && <SettingsTab />}
+        {activeTab === "photo" && <PhotoTab />}
+        {activeTab === "account" && <AccountTab />}
       </div>
 
-      {/* Bottom nav */}
       <div
         className="flex border-t border-white/[0.06] bg-black/40 backdrop-blur-xl"
         style={{ paddingBottom: "max(0px, env(safe-area-inset-bottom))" }}
       >
-        {tabConfig.map(({ id, label, icon }) => (
+        {tabs.map(({ id, label }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
-            className={`flex-1 flex flex-col items-center justify-center gap-1 py-3 min-h-[56px]
-                        transition-colors ${
-                          activeTab === id
-                            ? "text-emerald-400"
-                            : "text-white/30 active:text-white/50"
-                        }`}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 py-3 min-h-[56px] transition-colors ${
+              activeTab === id ? "text-emerald-400" : "text-white/30 active:text-white/50"
+            }`}
           >
-            {icon}
-            <span className="text-[10px] font-medium">{label}</span>
+            <span className="text-xs font-medium">{label}</span>
           </button>
         ))}
       </div>

@@ -1,34 +1,41 @@
 import React from "react";
-import { useNavigate } from "react-router-dom";
-import {
-  GlassPanel, GlowBadge, UtilizationGauge,
-  EarningsChart, CertificationBadge, MaintenanceTimelineItem,
-  AmountDisplay,
-} from "@pcc/ui";
+import { useQuery } from "@tanstack/react-query";
+import { GlassPanel, GlowBadge } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { useAgentMe } from "../api/hooks/use-pcc-data.js";
+import type { AgentMeDTO } from "../types/dto.js";
+import { UnavailableState } from "../components/LiveState.js";
+import { NotRecordedState } from "../components/operator/NotRecordedState.js";
 import {
-  mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
-} from "../api/mock-onboarding-data.js";
+  decideApproval,
+  emergencyResume,
+  emergencyStop,
+  listPendingApprovals,
+  readStopState,
+  type PendingApproval,
+  type ResumeOutcome,
+  type StopOutcome,
+} from "../lib/operator-api.js";
+
+/**
+ * Operator dashboard.
+ *
+ * Identity, machines and in-flight work come from GET /api/agent/me for the
+ * signed-in key. The emergency stop acts on the operator's own machines and
+ * shows a machine as stopped only when the gateway confirmed it. Earnings,
+ * certifications and maintenance have no real source yet, so they say so
+ * instead of showing sample values.
+ */
 
 const tabs = ["overview", "approvals", "earnings", "certifications", "maintenance"] as const;
 
-const API = import.meta.env.VITE_PCC_URL ?? "";
+type Kernel = AgentMeDTO["kernels"]["items"][number];
 
-/* ---------- Approval types ---------- */
-interface Approval {
-  id: string;
-  agentId: string;
-  capabilityType: string;
-  estimatedCost: number;
-  submittedAt: string;
-  status: "pending" | "approved" | "rejected";
-}
-
-/* ---------- Time-ago helper ---------- */
-function timeAgo(iso: string): string {
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return "never";
   const diff = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(diff)) return "unknown";
   const mins = Math.floor(diff / 60_000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
@@ -37,109 +44,242 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+function kernelLabel(k: Kernel): string {
+  return k.name || k.id;
+}
+
+// ── Emergency stop ─────────────────────────────────────────────────────────
+
+function EmergencyStopPanel({ kernels }: { kernels: Kernel[] }) {
+  const ids = kernels.map((k) => k.id);
+  const states = useQuery({
+    queryKey: ["operator-stop-states", ids],
+    queryFn: async () => Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await readStopState(id)] as const))),
+    enabled: ids.length > 0,
+    refetchInterval: 15_000,
+  });
+  const [outcomes, setOutcomes] = React.useState<Record<string, StopOutcome | ResumeOutcome>>({});
+  const [busy, setBusy] = React.useState(false);
+
+  async function stop(target: Kernel[]) {
+    const names = target.map((k) => `• ${kernelLabel(k)}`).join("\n");
+    if (!window.confirm(
+      `EMERGENCY STOP\n\nPCC will refuse new work for:\n${names}\n\n` +
+      "This does not stop a job that is already running and does not cut power. " +
+      "Use each machine's own emergency stop for that.\n\nContinue?",
+    )) return;
+    setBusy(true);
+    const results = await Promise.all(target.map((k) => emergencyStop(k.id)));
+    setOutcomes((prev) => ({ ...prev, ...Object.fromEntries(results.map((r) => [r.kernelId, r])) }));
+    setBusy(false);
+    void states.refetch();
+  }
+
+  async function resume(k: Kernel) {
+    if (!window.confirm(`Let PCC send new work to ${kernelLabel(k)} again?`)) return;
+    setBusy(true);
+    const r = await emergencyResume(k.id);
+    setOutcomes((prev) => ({ ...prev, [r.kernelId]: r }));
+    setBusy(false);
+    void states.refetch();
+  }
+
+  const failed = Object.values(outcomes).filter((o) => o.state === "not_stopped");
+
+  return (
+    <div className="space-y-3" data-testid="estop-panel">
+      <button
+        onClick={() => void stop(kernels)}
+        disabled={busy || kernels.length === 0}
+        className="w-full rounded-lg border border-red-400/40 px-4 py-3 text-sm font-semibold text-red-400 hover:bg-red-400/10 transition-all disabled:opacity-40"
+        style={{ background: "rgba(248, 113, 113, 0.05)" }}
+      >
+        {busy ? "Sending…" : kernels.length > 1 ? `EMERGENCY STOP: all ${kernels.length} of your machines` : "EMERGENCY STOP"}
+      </button>
+      <p className="text-[11px] text-white/35">
+        Stops PCC from sending or accepting new work for your machines. It does not stop a job that is already running and
+        does not cut power: use the machine's own emergency stop for that.
+      </p>
+
+      {failed.length > 0 && (
+        <div role="alert" data-testid="estop-failed" className="rounded-lg border border-red-500/60 bg-red-500/10 px-4 py-3 space-y-1">
+          <div className="text-sm font-bold text-red-300">NOT STOPPED</div>
+          {failed.map((o) => (
+            <div key={o.kernelId} className="text-xs text-red-200/80">
+              {kernelLabel(kernels.find((k) => k.id === o.kernelId) ?? { id: o.kernelId, name: "", status: "", last_heartbeat: null })}:{" "}
+              {"reason" in o ? o.reason : ""}
+            </div>
+          ))}
+          <div className="text-xs font-semibold text-red-200">Use the machine's physical emergency stop now.</div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {kernels.map((k) => {
+          const recorded = states.data?.[k.id];
+          const outcome = outcomes[k.id];
+          let stateText: React.ReactNode = <span className="text-white/30">stop state unknown</span>;
+          if (outcome?.state === "stopped") {
+            stateText = <span className="text-red-300 font-semibold">Stopped for new work (confirmed by PCC)</span>;
+          } else if (recorded?.ok && recorded.data.stopped) {
+            stateText = <span className="text-red-300 font-semibold">Stopped for new work</span>;
+          } else if (recorded?.ok) {
+            stateText = <span className="text-white/45">{recorded.data.recorded ? "Taking work" : "No stop recorded"}</span>;
+          } else if (recorded && !recorded.ok) {
+            stateText = <span className="text-amber-300/80">Stop state unavailable</span>;
+          }
+          const stopped = outcome?.state === "stopped" || (recorded?.ok === true && recorded.data.stopped);
+          return (
+            <GlassPanel key={k.id} padding="sm" className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm text-white/70 truncate">{kernelLabel(k)}</div>
+                <div className="text-[10px] text-white/30">
+                  {k.status} · heartbeat {timeAgo(k.last_heartbeat)}
+                </div>
+                <div className="text-[11px] mt-0.5">{stateText}</div>
+                {outcome?.state === "not_resumed" && (
+                  <div className="text-[11px] text-amber-300/80">Not resumed: {outcome.reason}</div>
+                )}
+              </div>
+              {stopped ? (
+                <button
+                  onClick={() => void resume(k)}
+                  disabled={busy}
+                  className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium border border-green-400/30 text-green-400 hover:bg-green-400/10 disabled:opacity-40"
+                >
+                  Resume
+                </button>
+              ) : (
+                <button
+                  onClick={() => void stop([k])}
+                  disabled={busy}
+                  className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium border border-red-400/30 text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+                >
+                  Stop
+                </button>
+              )}
+            </GlassPanel>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Approvals ──────────────────────────────────────────────────────────────
+
+function ApprovalsTab({ kernels }: { kernels: Kernel[] }) {
+  const ids = kernels.map((k) => k.id);
+  const approvals = useQuery({
+    queryKey: ["operator-approvals", ids],
+    queryFn: async () => {
+      const r = await listPendingApprovals(ids);
+      if (!r.ok) throw new Error(r.reason);
+      return r.data;
+    },
+    enabled: ids.length > 0,
+    refetchInterval: 10_000,
+    retry: 1,
+  });
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const [pending, setPending] = React.useState<string | null>(null);
+
+  async function act(a: PendingApproval, action: "approve" | "reject") {
+    setPending(a.id);
+    const r = await decideApproval(a.id, action);
+    setPending(null);
+    if (r.ok) {
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[a.id];
+        return next;
+      });
+      void approvals.refetch();
+    } else {
+      setErrors((prev) => ({ ...prev, [a.id]: r.reason }));
+    }
+  }
+
+  if (ids.length === 0) {
+    return <GlassPanel padding="lg" className="text-center text-sm text-white/40">No machines are registered to this key, so nothing can wait for your approval.</GlassPanel>;
+  }
+  if (approvals.isLoading) return <GlassPanel padding="lg" className="text-center text-xs text-white/30">Loading approvals…</GlassPanel>;
+  if (approvals.isError || !approvals.data) {
+    return (
+      <GlassPanel padding="lg">
+        <UnavailableState what="your pending approvals" error={approvals.error} onRetry={() => void approvals.refetch()} />
+      </GlassPanel>
+    );
+  }
+  if (approvals.data.length === 0) {
+    return (
+      <GlassPanel padding="lg" className="text-center">
+        <div className="text-sm text-white/40">No approvals are waiting for your machines.</div>
+      </GlassPanel>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {approvals.data.map((a) => (
+        <GlassPanel key={a.id} padding="md">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <GlowBadge color="cyan">{a.capabilityType ?? "unspecified work"}</GlowBadge>
+                <span className="text-[10px] text-white/30">{timeAgo(a.createdAt)}</span>
+              </div>
+              <div className="text-xs text-white/40">
+                Machine <span className="font-mono text-white/60">{kernelLabel(kernels.find((k) => k.id === a.kernelId) ?? { id: a.kernelId, name: "", status: "", last_heartbeat: null })}</span>
+                {a.requestedBy && <> · requested by <span className="font-mono text-white/60">{a.requestedBy}</span></>}
+              </div>
+              {a.expiresAt && <div className="text-[10px] text-white/30">Expires {new Date(a.expiresAt).toLocaleString()}</div>}
+              {errors[a.id] && <div role="alert" className="text-xs text-red-300">Not done: {errors[a.id]}</div>}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => void act(a, "approve")}
+                disabled={pending === a.id}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-green-400/30 text-green-400 hover:bg-green-400/10 disabled:opacity-40"
+              >
+                Approve
+              </button>
+              <button
+                onClick={() => void act(a, "reject")}
+                disabled={pending === a.id}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-red-400/30 text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+              >
+                Reject
+              </button>
+            </div>
+          </div>
+        </GlassPanel>
+      ))}
+    </div>
+  );
+}
+
+// ── Page ───────────────────────────────────────────────────────────────────
+
 export function OperatorDashboardPage() {
-  const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const { activeTab, setActiveTab, earningsPeriod, setEarningsPeriod } = useOperatorStore();
+  const { activeTab, setActiveTab } = useOperatorStore();
+  const me = useAgentMe();
 
   React.useEffect(() => {
-    setPageMeta("Operator Dashboard", mockOperatorProfile.displayName);
-  }, [setPageMeta]);
+    setPageMeta("Operator Dashboard", me.data?.identity.operator ?? "");
+  }, [setPageMeta, me.data?.identity.operator]);
 
-  const totalEarnings = mockEarningsData[mockEarningsData.length - 1]?.cumulative ?? 0;
-
-  /* ---------- Emergency Stop state ---------- */
-  const [emergencyStopped, setEmergencyStopped] = React.useState(false);
-  const [estopLoading, setEstopLoading] = React.useState(false);
-
-  async function handleEmergencyStop() {
-    if (!window.confirm("EMERGENCY STOP: This will immediately halt all active jobs on kernel-nanoclaw. Continue?")) return;
-    setEstopLoading(true);
-    try {
-      await fetch(`${API}/api/operator/emergency-stop`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
-      });
-      setEmergencyStopped(true);
-    } catch {
-      // best-effort — show stopped state anyway for operator safety
-      setEmergencyStopped(true);
-    } finally {
-      setEstopLoading(false);
-    }
-  }
-
-  async function handleEmergencyResume() {
-    if (!window.confirm("Resume operations on kernel-nanoclaw?")) return;
-    setEstopLoading(true);
-    try {
-      await fetch(`${API}/api/operator/emergency-resume`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
-      });
-      setEmergencyStopped(false);
-    } catch {
-      // no-op
-    } finally {
-      setEstopLoading(false);
-    }
-  }
-
-  /* ---------- Approvals state ---------- */
-  const [approvals, setApprovals] = React.useState<Approval[]>([]);
-  const [approvalsLoading, setApprovalsLoading] = React.useState(false);
-  const [approvalsError, setApprovalsError] = React.useState<string | null>(null);
-
-  const fetchApprovals = React.useCallback(async () => {
-    setApprovalsLoading(true);
-    setApprovalsError(null);
-    try {
-      const res = await fetch(`${API}/api/operator/approvals?status=pending`, {
-        headers: { ...getAuthHeaders() },
-      });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      const data = await res.json();
-      setApprovals(data.approvals ?? []);
-    } catch (err) {
-      setApprovalsError(err instanceof Error ? err.message : "Failed to fetch approvals");
-    } finally {
-      setApprovalsLoading(false);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    if (activeTab !== "approvals") return;
-    fetchApprovals();
-    const interval = setInterval(fetchApprovals, 10_000);
-    return () => clearInterval(interval);
-  }, [activeTab, fetchApprovals]);
-
-  async function handleApprovalAction(id: string, action: "approve" | "reject") {
-    try {
-      await fetch(`${API}/api/operator/approvals/${id}/${action}`, {
-        method: "POST",
-        headers: { ...getAuthHeaders() },
-      });
-      setApprovals((prev) => prev.filter((a) => a.id !== id));
-    } catch {
-      // silently fail — next auto-refresh will reconcile
-    }
-  }
+  const kernels = me.data && !me.data.kernels.unavailable ? me.data.kernels.items : null;
 
   return (
     <div className="space-y-6">
-      {/* Tab bar */}
       <div className="flex gap-1 border-b border-white/[0.06] pb-1">
         {tabs.map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
             className={`px-4 py-2 rounded-t-lg text-xs capitalize transition-all ${
-              activeTab === t
-                ? "bg-white/[0.04] text-green-400 border-b-2 border-green-400/30"
-                : "text-white/30 hover:text-white/50"
+              activeTab === t ? "bg-white/[0.04] text-green-400 border-b-2 border-green-400/30" : "text-white/30 hover:text-white/50"
             }`}
           >
             {t}
@@ -147,229 +287,66 @@ export function OperatorDashboardPage() {
         ))}
       </div>
 
-      {/* Overview Tab */}
-      {activeTab === "overview" && (
+      {(activeTab === "overview" || activeTab === "approvals") && me.isLoading && (
+        <GlassPanel padding="lg" className="text-center text-xs text-white/30">Loading your account…</GlassPanel>
+      )}
+      {(activeTab === "overview" || activeTab === "approvals") && (me.isError || (me.data && me.data.kernels.unavailable)) && (
+        <GlassPanel padding="lg">
+          <UnavailableState what="your machines" error={me.error ?? me.data?.kernels.unavailable} onRetry={() => void me.refetch()} />
+        </GlassPanel>
+      )}
+
+      {activeTab === "overview" && kernels && me.data && (
         <div className="space-y-6">
-          {/* Emergency Stop */}
-          {emergencyStopped && (
-            <div
-              className="rounded-lg border border-red-400/40 px-4 py-3 flex items-center justify-between"
-              style={{ background: "rgba(248, 113, 113, 0.08)" }}
-            >
-              <div className="flex items-center gap-3">
-                <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />
-                <span className="text-sm text-red-400 font-medium">
-                  EMERGENCY STOP ACTIVE — All jobs halted on kernel-nanoclaw
-                </span>
+          <EmergencyStopPanel kernels={kernels} />
+
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <GlassPanel padding="md" className="text-center">
+              <div className="text-[10px] text-white/30">Your machines</div>
+              <div className="text-2xl font-mono text-white/70 mt-1">{me.data.kernels.count ?? kernels.length}</div>
+            </GlassPanel>
+            <GlassPanel padding="md" className="text-center">
+              <div className="text-[10px] text-white/30">Jobs in flight</div>
+              <div className="text-2xl font-mono text-white/70 mt-1">
+                {me.data.work.unavailable ? "—" : me.data.work.in_flight}
               </div>
-              <button
-                onClick={handleEmergencyResume}
-                disabled={estopLoading}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-green-400/30 text-green-400 hover:bg-green-400/10 transition-all disabled:opacity-40"
-              >
-                {estopLoading ? "Resuming..." : "Resume Operations"}
-              </button>
-            </div>
+              <div className="text-[10px] text-white/25">pending, queued, in progress or paused</div>
+            </GlassPanel>
+            <GlassPanel padding="md" className="text-center">
+              <div className="text-[10px] text-white/30">Earnings</div>
+              <div className="text-sm text-white/45 mt-2">Not recorded yet</div>
+              <div className="text-[10px] text-white/25">each job's payment state is on its job page</div>
+            </GlassPanel>
+          </div>
+
+          {kernels.length === 0 && (
+            <GlassPanel padding="lg" className="text-center space-y-1">
+              <div className="text-sm text-white/50">No machines are registered to this key yet.</div>
+              {me.data.next.map((n) => <div key={n} className="text-xs text-white/30">{n}</div>)}
+            </GlassPanel>
           )}
-          {!emergencyStopped && (
-            <button
-              onClick={handleEmergencyStop}
-              disabled={estopLoading}
-              className="w-full rounded-lg border border-red-400/30 px-4 py-3 text-sm font-medium text-red-400 hover:bg-red-400/10 hover:border-red-400/50 transition-all disabled:opacity-40"
-              style={{ background: "rgba(248, 113, 113, 0.04)" }}
-            >
-              {estopLoading ? "Stopping..." : "EMERGENCY STOP"}
-            </button>
-          )}
-
-          {/* KPIs */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <GlassPanel padding="md" glow="green" className="text-center">
-              <div className="text-[10px] text-white/20">Active Machines</div>
-              <div className="text-2xl font-mono text-green-400 mt-1">2</div>
-            </GlassPanel>
-            <GlassPanel padding="md" className="text-center">
-              <div className="text-[10px] text-white/20">Total Earnings</div>
-              <div className="text-2xl font-mono text-white/70 mt-1">${totalEarnings}</div>
-            </GlassPanel>
-            <GlassPanel padding="md" className="text-center">
-              <div className="text-[10px] text-white/20">Jobs Completed</div>
-              <div className="text-2xl font-mono text-white/70 mt-1">142</div>
-            </GlassPanel>
-            <GlassPanel padding="md" className="text-center">
-              <div className="text-[10px] text-white/20">Reputation</div>
-              <div className="text-2xl font-mono text-yellow-400 mt-1">950</div>
-            </GlassPanel>
-          </div>
-
-          {/* Machines */}
-          <div className="space-y-2">
-            <span className="text-xs text-white/30">Your Machines</span>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[
-                { id: "reg-001", name: "Prusa MK4 Workshop", type: "fdm", utilization: 72, status: "active" },
-                { id: "reg-002", name: "Epilog Fusion Pro", type: "laser-cut", utilization: 58, status: "active" },
-              ].map((m) => (
-                <GlassPanel
-                  key={m.id}
-                  hover
-                  padding="md"
-                  className="flex items-center justify-between cursor-pointer"
-                  onClick={() => navigate(`/operator/${m.id}`)}
-                >
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-white/70">{m.name}</span>
-                      <GlowBadge color="green">{m.type}</GlowBadge>
-                    </div>
-                    <span className="text-[10px] text-white/20">{m.status}</span>
-                  </div>
-                  <UtilizationGauge value={m.utilization} size={50} />
-                </GlassPanel>
-              ))}
-            </div>
-          </div>
-
-          {/* IP Revenue summary card */}
-          <div className="space-y-2">
-            <span className="text-xs text-white/30">Story Protocol IP Revenue</span>
-            <GlassPanel
-              hover
-              padding="md"
-              glow="green"
-              className="cursor-pointer"
-              onClick={() => navigate("/ip")}
-            >
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium text-white/80">IP Revenue Dashboard</div>
-                  <div className="text-xs text-white/40">3 IP assets &middot; 43 derivatives</div>
-                  <div className="flex items-center gap-3 mt-2">
-                    <div>
-                      <div className="text-[10px] text-white/25">Total Revenue</div>
-                      <AmountDisplay amount="6,119.50" currency="USD" size="sm" />
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-white/25">Unclaimed</div>
-                      <div className="text-sm font-mono text-yellow-400/80">$429.50</div>
-                    </div>
-                  </div>
-                </div>
-                <div className="text-white/20 text-2xl leading-none">›</div>
-              </div>
-            </GlassPanel>
-          </div>
         </div>
       )}
 
-      {/* Approvals Tab */}
-      {activeTab === "approvals" && (
-        <div className="space-y-6">
-          <span className="text-xs text-white/30">Pending Approvals</span>
+      {activeTab === "approvals" && kernels && <ApprovalsTab kernels={kernels} />}
 
-          {approvalsLoading && approvals.length === 0 && (
-            <GlassPanel padding="lg" className="text-center">
-              <span className="text-xs text-white/30">Loading approvals...</span>
-            </GlassPanel>
-          )}
-
-          {approvalsError && (
-            <GlassPanel padding="md">
-              <span className="text-xs text-red-400">Error: {approvalsError}</span>
-            </GlassPanel>
-          )}
-
-          {!approvalsLoading && !approvalsError && approvals.length === 0 && (
-            <GlassPanel padding="lg" className="text-center">
-              <div className="text-sm text-white/30">No pending approvals.</div>
-              <div className="text-xs text-white/20 mt-1">
-                Jobs will appear here when agents request access.
-              </div>
-            </GlassPanel>
-          )}
-
-          <div className="space-y-4">
-            {approvals.map((a) => (
-              <GlassPanel key={a.id} padding="md">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="space-y-2 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <GlowBadge color="cyan">{a.capabilityType}</GlowBadge>
-                      <span className="text-[10px] text-white/20">{timeAgo(a.submittedAt)}</span>
-                    </div>
-                    <div className="flex items-center gap-4 text-xs">
-                      <span className="text-white/30">
-                        Agent{" "}
-                        <span className="font-mono text-white/50">
-                          {a.agentId.length > 12 ? `${a.agentId.slice(0, 6)}...${a.agentId.slice(-4)}` : a.agentId}
-                        </span>
-                      </span>
-                      <span className="text-white/30">
-                        Est. cost{" "}
-                        <span className="font-mono text-yellow-400/70">${a.estimatedCost.toFixed(2)}</span>
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => handleApprovalAction(a.id, "approve")}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium border border-green-400/30 text-green-400 hover:bg-green-400/10 transition-all"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      onClick={() => handleApprovalAction(a.id, "reject")}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium border border-red-400/30 text-red-400 hover:bg-red-400/10 transition-all"
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </div>
-              </GlassPanel>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Earnings Tab */}
       {activeTab === "earnings" && (
-        <EarningsChart
-          data={mockEarningsData}
-          period={earningsPeriod}
-          onPeriodChange={setEarningsPeriod}
-          totalEarnings={totalEarnings}
-        />
+        <GlassPanel padding="lg">
+          <NotRecordedState
+            what="operator earnings history"
+            detail="Escrow records carry no per-operator payout history yet. A job's own payment state (paid, refunded or pending) is shown on its job page, from the escrow record."
+          />
+        </GlassPanel>
       )}
-
-      {/* Certifications Tab */}
       {activeTab === "certifications" && (
-        <div className="space-y-2 max-w-lg">
-          {mockCertifications.map((c) => (
-            <CertificationBadge
-              key={c.id}
-              name={c.name}
-              issuer={c.issuer}
-              expiresAt={c.expiresAt}
-              status={c.status}
-            />
-          ))}
-        </div>
+        <GlassPanel padding="lg">
+          <NotRecordedState what="operator certifications" detail="There is no certification store yet." />
+        </GlassPanel>
       )}
-
-      {/* Maintenance Tab */}
       {activeTab === "maintenance" && (
-        <div className="max-w-lg">
-          {mockMaintenanceEvents.map((e) => (
-            <MaintenanceTimelineItem
-              key={e.id}
-              description={e.description}
-              type={e.type}
-              scheduledAt={e.scheduledAt}
-              completedAt={e.completedAt}
-              status={e.status}
-            />
-          ))}
-        </div>
+        <GlassPanel padding="lg">
+          <NotRecordedState what="maintenance windows" detail="Nothing records maintenance events yet." />
+        </GlassPanel>
       )}
     </div>
   );
