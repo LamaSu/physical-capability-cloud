@@ -20,15 +20,37 @@ REFUSED: ot2-executor.py is not safe to run. ...        (exit 2)
 ```
 
 They run only with `--unsafe-local`, and only when `PCC_BASE` points at a gateway on your
-own machine or a private network: loopback, a private or link-local IP, `localhost`,
-`*.local`, or a single-label hostname. Any public gateway, `https://capability.network`
+own machine or a private network. Any public gateway, `https://capability.network`
 included, is refused even with the flag. That is for local development against your own
 gateway, nothing else:
 
 ```
 PCC_BASE=http://127.0.0.1:8080 PCC_API_KEY=... python3 scripts/ot2-executor.py --unsafe-local
-PCC_BASE=http://127.0.0.1:8080 PCC_API_KEY=... ANTHROPIC_API_KEY=... python3 scripts/ot2-agent.py daemon --unsafe-local
+PCC_BASE=http://192.168.1.20:8080 PCC_API_KEY=... ANTHROPIC_API_KEY=... python3 scripts/ot2-agent.py daemon --unsafe-local
 ```
+
+The rules are in `scripts/ot2_local_guard.py`, and neither script starts without it:
+
+- **Addresses, not names.** `PCC_BASE` and `OT2_BASE` must name an IP address in canonical
+  form, in loopback (127/8, ::1), private (10/8, 172.16/12, 192.168/16, fc00::/7) or
+  link-local (169.254/16, fe80::/10) space, or the name `localhost`, which is pinned to
+  127.0.0.1. Nothing is looked up in DNS, and requests go to the exact address that was
+  checked. Hostnames (`spark`, `ot2.local`), integer, hex or octal spellings
+  (`http://134744072` is 8.8.8.8), `0.0.0.0`, IPv4-mapped IPv6, credentials, queries and
+  schemes other than http/https are refused.
+- **One transport.** Every PCC and robot request ignores `HTTP(S)_PROXY`/`ALL_PROXY`,
+  never follows a redirect (the 3xx is treated as a failed call) and verifies TLS. For a
+  local gateway with its own certificate, set `PCC_CA_FILE` to its CA. Robot uploads use
+  `curl --noproxy '*'`.
+- **Nothing runs unauthorised.** The polling loops (`run()`, `daemon_mode()`) and the PCC
+  and robot request helpers exit 2 unless `start_guard()` accepted this process, so
+  importing a script and calling them does nothing.
+- **Self-update is disabled** in `ot2-agent.py`. It installed code downloaded from any URL.
+
+What this guard cannot do: once started, the relayed shell tool and uploaded protocols
+run as code on the robot and can open their own connections. The guard keeps the
+scripts from being driven by a public gateway; it does not make a relayed command safe.
+That is row N4b.
 
 `ot2-agent.py interactive` takes its prompts from the local terminal and does not poll
 PCC. It is not guarded, but the LLM still holds a shell on the robot. Treat that mode as
