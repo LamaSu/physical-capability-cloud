@@ -4,9 +4,17 @@ Maps PCC's ``plrBackend`` string to a concrete PLR Machine instance, holding
 exclusive access while the adapter session is active.
 
 Phase 1 supports two backends:
-  - ``chatterbox`` — PLR's ChatterboxBackend (in-memory mock, always available)
-  - ``ot2`` — Opentrons OT-2 via PLR's OpentronsBackend (requires ``pylabrobot``
-    + optional ``opentrons`` extra)
+  - ``chatterbox`` — PLR's ``LiquidHandlerChatterboxBackend`` (in-memory digital
+    twin; part of core pylabrobot)
+  - ``ot2`` — Opentrons OT-2 via PLR's ``OpentronsOT2Backend`` (requires the
+    ``pylabrobot[opentrons]`` extra)
+
+Both PLR backends need a declared deck: ``backendConfig.deckLayout`` (a
+serialized PLR deck, as produced by ``deck.serialize()``) or
+``backendConfig.deckLayoutPath`` (a JSON file holding one). The layout is data:
+it is loaded with ``Resource.deserialize(..., allow_marshal=False)``, so it can
+never carry code. Without a layout the backend refuses to load, because an empty
+deck cannot run a protocol (status board row R39).
 
 Each backend is loaded lazily via inline imports so an operator can install
 just the extras they need (``pip install pcc-plr-sidecar[ot2]``).
@@ -130,41 +138,104 @@ async def _create_machine(plr_backend: str, config: dict[str, Any]) -> Any:
     )
 
 
-def _create_chatterbox(config: dict[str, Any]) -> Any:
-    """ChatterboxBackend — PLR's in-memory mock liquid handler.
+def _load_deck(config: dict[str, Any], expected_cls: type) -> Any:
+    """Load the declared deck (R39). Raises ValueError, never returns an empty deck.
 
-    Imports PLR; ChatterboxBackend is part of the core distribution.
+    ``deckLayout`` is a serialized PLR resource tree; ``deckLayoutPath`` names a
+    JSON file holding one. PLR's loader resolves each child by ``type`` and
+    assigns it to its parent, so the loaded deck is the populated deck.
+    """
+    from pylabrobot.resources import Resource
+
+    layout = config.get("deckLayout")
+    path = config.get("deckLayoutPath")
+    if layout is not None and path is not None:
+        raise ValueError("backendConfig takes deckLayout or deckLayoutPath, not both")
+    if layout is None and path is None:
+        raise ValueError(
+            "backendConfig.deckLayout (a serialized PLR deck) or deckLayoutPath is required: "
+            "an empty deck cannot run a protocol",
+        )
+    try:
+        if layout is not None:
+            if not isinstance(layout, dict):
+                raise ValueError("deckLayout must be a serialized PLR resource object")
+            # allow_marshal stays False: a layout is data and can never carry code.
+            deck = Resource.deserialize(layout, allow_marshal=False)
+        else:
+            if not isinstance(path, str) or not path:
+                raise ValueError("deckLayoutPath must be a non-empty string")
+            deck = Resource.load_from_json_file(path)
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 — any loader failure is an invalid layout
+        raise ValueError(f"invalid deck layout: {type(e).__name__}: {e}") from e
+    if not isinstance(deck, expected_cls):
+        raise ValueError(
+            f"deck layout loaded as {type(deck).__name__}, expected {expected_cls.__name__}",
+        )
+    return deck
+
+
+def _create_chatterbox(config: dict[str, Any]) -> Any:
+    """PLR's ``LiquidHandlerChatterboxBackend`` over the declared deck.
+
+    ``ChatterboxBackend`` does not exist in pylabrobot 0.2.2, and
+    ``ChatterBoxBackend`` raises NotImplementedError there (deprecated), so the
+    only correct class is ``LiquidHandlerChatterboxBackend``.
     """
     from pylabrobot.liquid_handling import LiquidHandler
-    from pylabrobot.liquid_handling.backends import ChatterboxBackend
+    from pylabrobot.liquid_handling.backends import LiquidHandlerChatterboxBackend
     from pylabrobot.resources import Deck
 
-    deck = Deck()
-    return LiquidHandler(backend=ChatterboxBackend(), deck=deck)
+    deck = _load_deck(config, Deck)
+    num_channels = config.get("numChannels", 8)
+    if not isinstance(num_channels, int) or isinstance(num_channels, bool) or num_channels < 1:
+        raise ValueError("backendConfig.numChannels must be a positive integer")
+    return LiquidHandler(backend=LiquidHandlerChatterboxBackend(num_channels=num_channels), deck=deck)
+
+
+def _parse_ot2_url(url: str) -> tuple[str, int]:
+    """``http://10.0.0.5:31950`` or ``10.0.0.5`` -> (host, port)."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"ot2Url has no host: {url!r}")
+    try:
+        port = parsed.port or 31950
+    except ValueError as e:
+        raise ValueError(f"ot2Url has an invalid port: {url!r}") from e
+    return host, port
 
 
 async def _create_ot2(config: dict[str, Any]) -> Any:
-    """Opentrons OT-2 via PLR's OpentronsBackend.
+    """Opentrons OT-2 via PLR's ``OpentronsOT2Backend(host, port)``.
 
-    Requires ``backend_config`` with at minimum ``ot2Url`` (typically
-    ``http://192.168.1.50:31950``). Optional ``ot2ApiKey``.
+    Requires ``ot2Url`` (for example ``http://192.168.1.50:31950``) and a
+    declared ``OTDeck`` layout. ``OpentronsBackend`` does not exist in
+    pylabrobot 0.2.2, and the backend takes no API key.
     """
     from pylabrobot.liquid_handling import LiquidHandler
-    from pylabrobot.liquid_handling.backends import OpentronsBackend
+    from pylabrobot.liquid_handling.backends import OpentronsOT2Backend
     from pylabrobot.resources.opentrons import OTDeck
 
     ot2_url = config.get("ot2Url") or config.get("host") or config.get("url")
-    if not ot2_url:
+    if not ot2_url or not isinstance(ot2_url, str):
         raise ValueError(
             "OT-2 backendConfig must include 'ot2Url' (e.g. 'http://192.168.1.50:31950')",
         )
-    api_key = config.get("ot2ApiKey") or config.get("apiKey")
-    backend_kwargs: dict[str, Any] = {"host": ot2_url}
-    if api_key:
-        backend_kwargs["api_key"] = api_key
+    if config.get("ot2ApiKey") or config.get("apiKey"):
+        log.warning("ot2ApiKey is not used: OpentronsOT2Backend takes no API key")
+    host, port = _parse_ot2_url(ot2_url)
+    deck = _load_deck(config, OTDeck)
+    return LiquidHandler(backend=OpentronsOT2Backend(host=host, port=port), deck=deck)
 
-    backend = OpentronsBackend(**backend_kwargs)
-    return LiquidHandler(backend=backend, deck=OTDeck())
+
+def is_stub_machine(machine: Any) -> bool:
+    """True for the no-PLR stub; everything else is a PLR LiquidHandler."""
+    return isinstance(machine, _StubMachine)
 
 
 def _create_stub(config: dict[str, Any]) -> "_StubMachine":

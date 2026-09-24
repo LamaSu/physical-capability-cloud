@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any, TYPE_CHECKING
 
+from .backend_loader import is_stub_machine
 from .dispatcher import RPC_ERROR_CODES, RpcException
 
 if TYPE_CHECKING:
@@ -116,6 +117,19 @@ class Commands:
             self.evidence.start_recording(device_id, job_id)
 
         started_at = time.monotonic()
+        if not is_stub_machine(handle.machine):
+            # R39: a PLR LiquidHandler runs every op for real. The evidence is what
+            # the machine did, never an echo of the request.
+            op_count = await self._run_plr_ops(
+                handle, device_id, job_id, protocol_source, protocol_inline,
+            )
+            return {
+                "ok": True,
+                "jobId": job_id,
+                "opCount": op_count,
+                "durationMs": int((time.monotonic() - started_at) * 1000),
+                "summary": {},
+            }
         try:
             ops = _normalise_ops(protocol_source, protocol_payload, protocol_inline, run_params)
             for op in ops:
@@ -267,6 +281,61 @@ class Commands:
             ],
         }
 
+    # ── PLR dispatch (R39) ─────────────────────────────────────────────────
+
+    async def _run_plr_ops(
+        self,
+        handle: Any,
+        device_id: str,
+        job_id: str,
+        protocol_source: Any,
+        protocol_inline: Any,
+    ) -> int:
+        """Run inline ops on a PLR LiquidHandler; one evidence event per completed op."""
+        if protocol_source != "inline-ops":
+            raise RpcException(
+                RPC_ERROR_CODES["NOT_SUPPORTED"],
+                f"protocolSource {protocol_source!r} is not supported on PLR backends; use inline-ops",
+                {"protocolSource": protocol_source, "jobId": job_id},
+            )
+        ops = _inline_op_list(protocol_inline)
+        if not ops:
+            raise RpcException(
+                RPC_ERROR_CODES["INVALID_PARAMS"],
+                "inline-ops protocol has no ops",
+                {"jobId": job_id},
+            )
+        lh = handle.machine
+        done = 0
+        for index, op in enumerate(ops):
+            if not isinstance(op, dict):
+                raise RpcException(
+                    RPC_ERROR_CODES["INVALID_PARAMS"], "each op must be an object",
+                    {"opIndex": index, "jobId": job_id},
+                )
+            if op.get("__delay_ms"):
+                await asyncio.sleep(max(0.0, float(op["__delay_ms"]) / 1000.0))
+                continue
+            kind = op.get("op")
+            try:
+                record = await _run_plr_op(lh, kind, op, index)
+            except RpcException as e:
+                data = dict(e.data or {})
+                data.update({"opIndex": index, "op": kind, "jobId": job_id, "opsCompleted": done})
+                raise RpcException(e.code, e.message, data) from e
+            except Exception as e:  # noqa: BLE001 — a PLR error stops the run, loudly
+                raise RpcException(
+                    RPC_ERROR_CODES["NON_RETRYABLE"],
+                    f"{kind} failed: {e}",
+                    {
+                        "plrException": type(e).__name__, "opIndex": index, "op": kind,
+                        "jobId": job_id, "opsCompleted": done,
+                    },
+                ) from e
+            self.evidence.emit_atomic_op(device_id, kind, record)
+            done += 1
+        return done
+
     # ── helpers ────────────────────────────────────────────────────────────
 
     def _require_handle(self, device_id: str):
@@ -303,6 +372,122 @@ def _try_deck_snapshot(machine: Any) -> dict[str, Any] | None:
         return {"raw": str(result)[:1024]}
     except Exception:
         return None
+
+
+_PLR_OPS = ("pickUpTips", "aspirate", "dispense", "dropTips")
+
+
+def _inline_op_list(protocol_inline: Any) -> list[Any]:
+    if isinstance(protocol_inline, list):
+        return list(protocol_inline)
+    if isinstance(protocol_inline, dict) and isinstance(protocol_inline.get("ops"), list):
+        return list(protocol_inline["ops"])
+    return []
+
+
+def _bad_op(message: str, **data: Any) -> RpcException:
+    return RpcException(RPC_ERROR_CODES["INVALID_PARAMS"], message, data or None)
+
+
+def _resource(lh: Any, name: Any, field: str) -> Any:
+    """Look up a deck resource by name; a missing one fails loud (-32002)."""
+    from pylabrobot.resources import ResourceNotFoundError
+
+    if not isinstance(name, str) or not name:
+        raise _bad_op(f"{field} must be a non-empty string")
+    try:
+        return lh.deck.get_resource(name)
+    except ResourceNotFoundError as e:
+        raise RpcException(
+            RPC_ERROR_CODES["NON_RETRYABLE"], f"resource not on deck: {name}",
+            {"missingResource": name},
+        ) from e
+
+
+def _item(resource: Any, identifier: Any, field: str) -> Any:
+    """A well or tip spot of a resource, e.g. plate["A1"]; unknown ones fail loud."""
+    if not isinstance(identifier, str) or not identifier:
+        raise _bad_op(f"{field} must be a non-empty string like 'A1'")
+    try:
+        items = resource[identifier]
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        raise RpcException(
+            RPC_ERROR_CODES["NON_RETRYABLE"],
+            f"{identifier} is not in {getattr(resource, 'name', resource)}",
+            {"missingItem": identifier, "resource": getattr(resource, "name", None)},
+        ) from e
+    if isinstance(items, list):
+        if len(items) != 1:
+            raise _bad_op(f"{field} must name exactly one item", item=identifier)
+        return items[0]
+    return items
+
+
+def _channels(op: dict[str, Any]) -> Any:
+    channel = op.get("channel")
+    if channel is None:
+        return None
+    if not isinstance(channel, int) or isinstance(channel, bool) or channel < 0:
+        raise _bad_op("channel must be a non-negative integer")
+    return [channel]
+
+
+def _volume(op: dict[str, Any]) -> float:
+    volume = op.get("volume_uL")
+    if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not volume > 0:
+        raise _bad_op("volume_uL must be a positive number")
+    return float(volume)
+
+
+def _tip_spot_name(op: dict[str, Any]) -> Any:
+    if op.get("tipSpot") is not None:
+        return op["tipSpot"]
+    column = op.get("tipColumn")
+    if column is not None:
+        if not isinstance(column, int) or isinstance(column, bool) or column < 1:
+            raise _bad_op("tipColumn must be a positive integer")
+        return f"A{column}"
+    return None
+
+
+async def _run_plr_op(lh: Any, kind: Any, op: dict[str, Any], index: int) -> dict[str, Any]:
+    """Run one op on the LiquidHandler and return the evidence record for it."""
+    channels = _channels(op)
+    record: dict[str, Any] = {"op": kind, "opIndex": index}
+    if channels is not None:
+        record["channel"] = channels[0]
+    if kind == "pickUpTips":
+        rack = _resource(lh, op.get("tipRack"), "tipRack")
+        spot_name = _tip_spot_name(op)
+        if spot_name is None:
+            raise _bad_op("pickUpTips needs tipSpot or tipColumn")
+        spot = _item(rack, spot_name, "tipSpot")
+        await lh.pick_up_tips([spot], use_channels=channels)
+        record.update({"tipRack": op["tipRack"], "tipSpot": spot_name})
+    elif kind in ("aspirate", "dispense"):
+        labware = _resource(lh, op.get("labwareId"), "labwareId")
+        well = _item(labware, op.get("well"), "well")
+        volume = _volume(op)
+        fn = lh.aspirate if kind == "aspirate" else lh.dispense
+        await fn([well], vols=[volume], use_channels=channels)
+        record.update({"labwareId": op["labwareId"], "well": op["well"], "volume_uL": volume})
+    elif kind == "dropTips":
+        if op.get("tipRack") is not None:
+            rack = _resource(lh, op.get("tipRack"), "tipRack")
+            spot_name = _tip_spot_name(op)
+            if spot_name is None:
+                raise _bad_op("dropTips with tipRack needs tipSpot or tipColumn")
+            await lh.drop_tips([_item(rack, spot_name, "tipSpot")], use_channels=channels)
+            record.update({"tipRack": op["tipRack"], "tipSpot": spot_name})
+        else:
+            # No destination named: put the tips back where they were picked up.
+            await lh.return_tips(use_channels=channels)
+            record["returned"] = True
+    else:
+        raise _bad_op(
+            f"unknown op {kind!r}; supported: {', '.join(_PLR_OPS)}", op=kind,
+        )
+    return record
 
 
 def _normalise_ops(

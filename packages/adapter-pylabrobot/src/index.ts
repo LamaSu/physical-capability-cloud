@@ -34,6 +34,7 @@
 
 import { registerMachineAdapter } from "@pcc/kernel";
 import { PyLabRobotAdapter } from "./adapter.js";
+import { defaultPythonPath } from "./sidecar-client.js";
 
 // Auto-register at module load. Mirrors the SiLA / Hamilton / Opentrons
 // pattern of having one entry-point per adapter that the host application
@@ -56,7 +57,7 @@ registerMachineAdapter("pylabrobot", (device, cfg, kernelId) => {
       pythonPath:
         (cfg.pythonPath as string | undefined) ??
         process.env.PCC_PLR_PYTHON_PATH ??
-        "python",
+        defaultPythonPath(),
     },
   });
 });
