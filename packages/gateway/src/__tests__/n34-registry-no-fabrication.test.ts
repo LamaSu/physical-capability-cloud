@@ -122,7 +122,7 @@ const get = (url: string) => app.inject({ method: "GET", url });
 const REFUSAL = {
   error: "not_available",
   message: "Validation attestations are not recorded on this gateway, so nothing is returned rather than an example.",
-  see: ["/api/registry/entities/:entityId", "/api/registry/reputation/:entityId"],
+  see: [],
 };
 
 describe("SERVED-MOCK: the attestation routes", () => {

@@ -249,7 +249,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       return notAvailable(
         reply,
         "Equipment classes and their market snapshots are not recorded on this gateway, so nothing is returned rather than an example.",
-        ["/api/capabilities/types", "/api/capabilities/templates", "/api/kernels/marketplace"],
+        ["GET /api/capabilities/types", "GET /api/capabilities/templates", "GET /api/kernels/marketplace"],
       );
     }
     return markDemo("demo", {
@@ -266,7 +266,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       return notAvailable(
         reply,
         "Equipment class details, market snapshots and price history are not recorded on this gateway, so nothing is returned rather than an example.",
-        ["/api/capabilities/templates", "/api/capabilities/by-type/:type", "/api/kernels/marketplace"],
+        ["GET /api/capabilities/templates", "GET /api/capabilities/by-type/:type", "GET /api/kernels/marketplace"],
       );
     }
     const cls = mockClasses.find((c) => c.id === req.params.id);
@@ -287,7 +287,7 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       return notAvailable(
         reply,
         "A network demand and supply timeline is not recorded on this gateway, so nothing is returned rather than an example.",
-        ["/api/jobs", "/api/kernels"],
+        ["GET /api/jobs", "GET /api/kernels"],
       );
     }
     return markDemo("demo", {

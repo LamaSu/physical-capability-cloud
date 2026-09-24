@@ -170,7 +170,9 @@ async function readEntity(agentId: bigint, dbHint?: DbKnownAgent) {
 const ATTESTATIONS_NOT_RECORDED =
   "Validation attestations are not recorded on this gateway, so nothing is returned rather than an example.";
 /** The registry reads that are real: identity and reputation, from chain. */
-const ATTESTATIONS_SEE = ["/api/registry/entities/:entityId", "/api/registry/reputation/:entityId"];
+// No recorded route holds attestations (the entity read itself answers attestations: null),
+// so there is nothing real to point at.
+const ATTESTATIONS_SEE: string[] = [];
 
 function notAvailable(reply: FastifyReply, message: string, see: string[]) {
   return reply.status(501).send({ error: "not_available", message, see });

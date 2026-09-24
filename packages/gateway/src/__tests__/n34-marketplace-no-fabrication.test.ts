@@ -61,8 +61,8 @@ const FIXTURE_LISTING_IDS = [
 ];
 const NEW_LISTING = { name: "N34 probe listing", category: "tooling", pricePerUnit: 9, unit: "each" };
 const NEW_ORDER = { listingId: "lst-al6061-bar", quantity: 2 };
-const EQUIPMENT_SEE = ["/api/capabilities/types", "/api/capabilities/templates", "/api/kernels/marketplace"];
-const CLASS_DETAIL_SEE = ["/api/capabilities/templates", "/api/capabilities/by-type/:type", "/api/kernels/marketplace"];
+const EQUIPMENT_SEE = ["GET /api/capabilities/types", "GET /api/capabilities/templates", "GET /api/kernels/marketplace"];
+const CLASS_DETAIL_SEE = ["GET /api/capabilities/templates", "GET /api/capabilities/by-type/:type", "GET /api/kernels/marketplace"];
 const LISTINGS_SAY = /^Marketplace supply listings are not recorded on this gateway, so nothing is returned rather than an example\.$/;
 const ORDERS_SAY = /^Marketplace supply orders are not recorded on this gateway, so nothing is returned rather than an example\.$/;
 
@@ -104,7 +104,7 @@ const GATED: Gated[] = [
   {
     method: "GET",
     url: "/api/marketplace/demand-supply",
-    see: ["/api/jobs", "/api/kernels"],
+    see: ["GET /api/jobs", "GET /api/kernels"],
     says: /^A network demand and supply timeline is not recorded on this gateway, so nothing is returned rather than an example\.$/,
     demoStatus: 200,
     demo: (b) => expect(b.timeline).toHaveLength(12),
