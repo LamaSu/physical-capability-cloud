@@ -22,6 +22,9 @@ export * from "./primitives.js";
 // isFabricated / bundleHasFabricatedEvents — the ONE canonical fabricated-evidence
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
+// EvidenceBlockV1 v2 — the evidenceBlockHash a FinalMilestonePackageV2 carries,
+// with the unit-context and settlement-unit derivations it binds.
+export * from "./evidence-block.js";
 export * from "./eligibility.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
