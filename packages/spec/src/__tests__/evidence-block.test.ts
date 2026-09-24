@@ -164,6 +164,54 @@ describe("EvidenceBlockV1 v2 — the events root is the kernel-signed bundleHash
   });
 });
 
+// ── The production-form events root over schema-valid events ──────────────
+// Ported from #270's kernel-signed-events-root-golden-vector.cjs, whose root
+// the oracle reproduced for its EvidenceBlockV2 builder. The fixture above
+// keeps the v2 mirror's inputs, whose Unix-second timestamps are not
+// schema-valid; these events are (ISO-8601), so this is the vector a real
+// kernel bundle hashes the same way.
+describe("kernelSignedEventsRoot — the production-form golden (schema-valid events)", () => {
+  const isoEvents: Array<Omit<EvidenceEvent, "id" | "hash">> = [
+    { type: "execution_completed", timestamp: "2026-08-20T00:00:00Z", source, payload: { ok: true } },
+    { type: "cv_inspection_result", timestamp: "2026-08-20T00:00:05Z", source, payload: { pass: 1, defects: 0 } },
+  ];
+  const withHashes = (raw: Array<Omit<EvidenceEvent, "id" | "hash">>) =>
+    Promise.all(raw.map(async (e) => ({ ...e, id: e.type, hash: await hashEvent(e) })));
+  const rootOf = async (raw: Array<Omit<EvidenceEvent, "id" | "hash">>) =>
+    taggedDigestToBytes32(await hashBundle(await withHashes(raw)));
+  const GOLDEN_ROOT = "0x4e0af964e4e066717998ed7a49bf7c874023bd402b825da22b4dabd70fb6f9fe";
+
+  it("hashEvent → hashBundle → bytes32 reproduces the pinned event hashes and root", async () => {
+    const events = await withHashes(isoEvents);
+    expect(events.map((e) => e.hash)).toEqual([
+      "sha256:f7e78be15fe3bb93c4b9c978431466e1da54879ce49c906489908246661218d0",
+      "sha256:55b4abf189904fcc858505142d7317d610c186cffba9e2329b2c7223aa3f761c",
+    ]);
+    expect(taggedDigestToBytes32(await hashBundle(events))).toBe(GOLDEN_ROOT);
+  });
+
+  it("does not depend on event order (hashBundle sorts the tagged hashes)", async () => {
+    expect(await rootOf([...isoEvents].reverse())).toBe(GOLDEN_ROOT);
+  });
+
+  it("an event's id and hash are outside its preimage (the oracle hashes only type, timestamp, source, payload)", async () => {
+    const [first] = await withHashes(isoEvents);
+    const carried = { ...first!, id: "transport-id-7", hash: `sha256:${"ee".repeat(32)}` } as EvidenceEvent;
+    expect(await hashEvent(carried)).toBe(first!.hash);
+  });
+
+  it("moves when the preimage is 0x-tagged, an event is marked simulated, or a payload value changes type", async () => {
+    const inner0x = sha(
+      canonicalize(isoEvents.map((e) => sha(canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload }))).sort()),
+    );
+    expect(inner0x).not.toBe(GOLDEN_ROOT);
+    const simulated = isoEvents.map((e) => ({ ...e, source: { ...e.source, simulated: true } }));
+    expect(await rootOf(simulated)).not.toBe(GOLDEN_ROOT);
+    // pass:true is not pass:1 — the value the program's field-threshold reads.
+    expect(await rootOf([isoEvents[0]!, { ...isoEvents[1]!, payload: { pass: true, defects: 0 } }])).not.toBe(GOLDEN_ROOT);
+  });
+});
+
 describe("EvidenceBlockV1 v2 — every input binds, and incoherent units are refused", () => {
   it("mutating any root, or the domain/version, moves the block hash", async () => {
     const r = await goldenRoots();
