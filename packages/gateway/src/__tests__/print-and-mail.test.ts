@@ -104,10 +104,17 @@ async function createAndClaimJob(
   if (create.statusCode !== 201 && create.statusCode !== 200) {
     throw new Error(`job create failed: ${create.statusCode} ${create.body}`);
   }
+  // LO-GW-3a (round 2): the claim is authenticated and driverAgent is bound to
+  // the caller. The gig worker claims under its OWN identity — which is exactly
+  // the model this file's header describes ("the driver authenticates ... by
+  // presenting the driverAgent that matches the claim"), now with the driver
+  // actually having to BE that principal instead of merely naming it.
+  const driverAgent = opts.driver ?? DRIVER;
   const claim = await app.inject({
     method: "POST",
     url: `/api/courier-jobs/${opts.jobId}/claim`,
-    payload: { driverAgent: opts.driver ?? DRIVER },
+    payload: { driverAgent },
+    headers: { "x-posted-by": driverAgent },
   });
   if (claim.statusCode !== 200) {
     throw new Error(`job claim failed: ${claim.statusCode} ${claim.body}`);

@@ -36,11 +36,12 @@ import type {
   DemandEnvelope,
   IntentSource,
   DecompositionResult,
+  BudgetAuthorization,
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand, commitmentReportForRequest, normalizeCapabilityNodeConventions } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
 import { matchListings } from "../services/request-matcher.js";
-import { produceJobOffersForRequest } from "../services/job-offer-producer.js";
+import { produceJobOffersForRequest, resolveMatch } from "../services/job-offer-producer.js";
 import {
   decomposeAgentic,
   createMatcher,
@@ -173,6 +174,8 @@ function rowToRequest(row: Record<string, unknown>): CapabilityRequest {
     requesterEmail: (row.requesterEmail as string | null) ?? undefined,
     requesterWallet: (row.requesterWallet as string | null) ?? undefined,
     budget: row.budget as number,
+    // R-06: the same number, under the name that says what it is.
+    authorizedCeiling: row.budget as number,
     currency: row.currency as string,
     deadline: row.deadline as string,
     urgency: row.urgency as CapabilityRequest["urgency"],
@@ -183,6 +186,105 @@ function rowToRequest(row: Record<string, unknown>): CapabilityRequest {
     createdAt: row.createdAt as string,
     updatedAt: row.updatedAt as string,
   };
+}
+
+/**
+ * R-06 / LO-GW-2a — the PRICED commitment of a DAG.
+ *
+ * Counts only nodes backed by a real registered capability, because only those
+ * carry a real price: a matched node's `estimatedCost` is the capability's own
+ * price (agentic-decomposer.ts:520 — `cost = m ? m.price : UNMATCHED_UNIT_COST`;
+ * decomposeDirectMatch — `basePrice * qty`). An unmatched node carries a
+ * template guess, which is not a quote and must not consume the requester's
+ * authority.
+ *
+ * `resolveMatch` is reused rather than re-deriving "matched" here: it is the
+ * one place that reconciles the codebase's TWO matched conventions (agentic
+ * `matchStatus:"matched"` + matchedCapabilityId/KernelId, and direct-match
+ * routed nodes that set no matchStatus at all), and it is the same predicate
+ * that decides which nodes become live job-offers. Counting a different set
+ * than the one that commits money is how a ceiling silently stops applying.
+ *
+ * Recomputed from the stored DAG rather than carried in a column, so it cannot
+ * drift from the plan it describes.
+ */
+function matchedCommitment(dag: CapabilityNode[]): number {
+  const total = dag
+    .filter((n) => resolveMatch(n) !== null)
+    .reduce((sum, n) => sum + (typeof n.estimatedCost === "number" ? n.estimatedCost : 0), 0);
+  return Math.round(total * 100) / 100;
+}
+
+/**
+ * R-06 / LO-GW-2a — judge a decomposition against the requester's authority.
+ *
+ * The defect this replaces: `request.budget = result.derivedBudget` (two
+ * sites). Decomposition would overwrite the requester's stated budget with
+ * whatever the matched capabilities happened to cost, so an unbounded reprice
+ * silently became an authorization. `budget` is the ceiling; `derivedBudget`
+ * is an estimate; the two are never the same thing and this function is where
+ * the difference is made explicit instead of assigned away.
+ */
+function assessBudgetAuthorization(
+  request: CapabilityRequest,
+  result: DecompositionResult,
+): BudgetAuthorization {
+  const authorizedCeiling = request.budget;
+  const committedEstimate = matchedCommitment(result.nodes);
+  const withinAuthorization = committedEstimate <= authorizedCeiling;
+  return {
+    authorizedCeiling,
+    currency: request.currency,
+    committedEstimate,
+    derivedBudget: result.derivedBudget,
+    withinAuthorization,
+    requiresReauthorization: !withinAuthorization,
+  };
+}
+
+/**
+ * R-06 / LO-GW-2a (round 2) — the fields on a request that CARRY or DETERMINE
+ * authority, as opposed to describing the work.
+ *
+ * A ceiling only means something if raising it takes the requester's renewed
+ * acceptance. Round 1 built the ceiling and made `POST /:id/publish` refuse
+ * above it — with `PUT /api/requests/:id` as the documented way up. But that PUT
+ * had no ownership check and no auth at all, so ANY caller could read
+ * `budgetAuthorization.derivedBudget` off a decompose response, PUT it as the
+ * new `budget`, and publish. The gate was real and the door beside it was open.
+ *
+ * `requesterEmail` / `requesterWallet` are in this set for the same reason:
+ * they are the identity an ownership check reads, so leaving them freely
+ * writable would let a caller simply BECOME the requester and then raise the
+ * ceiling legitimately. `currency` is here because a ceiling is an amount AND a
+ * unit — re-denominating 20 USDC as 20 of something else changes the authority
+ * without touching the number.
+ *
+ * Everything else (title, description, deadline, urgency) still updates freely:
+ * this narrows the route to the authority surface rather than locking the row.
+ */
+const AUTHORITY_FIELDS: ReadonlyArray<keyof CapabilityRequest> = [
+  "budget",
+  "currency",
+  "requesterEmail",
+  "requesterWallet",
+];
+
+/**
+ * Is `callerId` the requester of `request`?
+ *
+ * Matches either recorded requester identity, case-insensitively (an EVM
+ * address varies only by EIP-55 checksum casing; an email is case-insensitive
+ * in practice). A request that records NEITHER identity has no requester to
+ * authorize against, so this returns false and the caller is refused — "nobody
+ * owns it" must not read as "anybody may raise it".
+ */
+function isRequester(request: CapabilityRequest, callerId: string): boolean {
+  const caller = callerId.trim().toLowerCase();
+  if (caller === "") return false;
+  const email = request.requesterEmail?.trim().toLowerCase();
+  const wallet = request.requesterWallet?.trim().toLowerCase();
+  return (!!email && email === caller) || (!!wallet && wallet === caller);
 }
 
 /** Compute composition signature from a request's DAG */
@@ -365,13 +467,21 @@ export async function requestRoutes(app: FastifyInstance) {
     }
 
     const now = new Date().toISOString();
+    // R-06 / LO-GW-2a — the authorized ceiling is established HERE, once, from
+    // what the requester actually stated. Everything downstream reads it;
+    // nothing downstream writes it.
+    const authorizedCeiling = body.budget ?? 1000;
     const request: CapabilityRequest = {
       id: newId("req"),
       title: body.title,
       description: body.description,
       requesterEmail: body.requesterEmail,
       requesterWallet: body.requesterWallet,
-      budget: body.budget ?? 1000,
+      budget: authorizedCeiling,
+      // Same number under the name that says what it is. `rowToRequest`
+      // populates it on every read path; this construction path is the write
+      // path and has to set it too, or the response omits it.
+      authorizedCeiling,
       currency: body.currency ?? "USDC",
       deadline: body.deadline ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       urgency: body.urgency ?? "standard",
@@ -422,10 +532,23 @@ export async function requestRoutes(app: FastifyInstance) {
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
-    request.status = publishNow ? "published" : "decomposed";
-    if (result.derivedBudget !== undefined && result.derivedBudget > 0) {
-      request.budget = result.derivedBudget;
+
+    // R-06 / LO-GW-2a — the budget the requester stated IS the authorized
+    // ceiling, and it is stored once, here. `derivedBudget` used to overwrite
+    // it; it is now reported as an estimate and never raises authority.
+    const budgetAuthorization = assessBudgetAuthorization(request, result);
+
+    // The direct-match path publishes immediately (`publishNow`), producing
+    // live job-offers inside THIS request without ever passing through
+    // POST /:id/publish — so the ceiling has to be enforced here too, or the
+    // one path that always carries a real price would be the one path that
+    // skips the check. Over the ceiling: the request is still created (the
+    // requester needs to see what it costs) but nothing goes live, and it rests
+    // in "decomposed" until the ceiling is raised (renewed acceptance).
+    if (publishNow && budgetAuthorization.requiresReauthorization) {
+      publishNow = false;
     }
+    request.status = publishNow ? "published" : "decomposed";
 
     const signature = signatureFromDag(request.capabilityDag);
 
@@ -463,7 +586,9 @@ export async function requestRoutes(app: FastifyInstance) {
     // go live).
     const jobOffers = publishNow ? await produceJobOffersForRequest(request) : undefined;
 
-    return reply.status(201).send({ request, decomposition: result, jobOffers });
+    return reply
+      .status(201)
+      .send({ request, decomposition: result, budgetAuthorization, jobOffers });
   });
 
   // ── POST /api/requests/match ──────────────────────────────────────
@@ -554,9 +679,10 @@ export async function requestRoutes(app: FastifyInstance) {
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
     request.status = "decomposed";
-    if (result.derivedBudget !== undefined && result.derivedBudget > 0) {
-      request.budget = result.derivedBudget;
-    }
+    // R-06 / LO-GW-2a — same rule on the re-decompose path: repricing reports,
+    // it does not authorize. `budget` is deliberately absent from the update
+    // below so that no decomposition can rewrite the ceiling.
+    const budgetAuthorization = assessBudgetAuthorization(request, result);
     request.updatedAt = new Date().toISOString();
 
     const signature = signatureFromDag(request.capabilityDag);
@@ -565,12 +691,11 @@ export async function requestRoutes(app: FastifyInstance) {
       capabilityDag: request.capabilityDag,
       totalEstimatedCost: request.totalEstimatedCost,
       totalEstimatedHours: request.totalEstimatedHours,
-      budget: request.budget,
       compositionSignature: signature,
       updatedAt: request.updatedAt,
     });
 
-    return { request, decomposition: result };
+    return { request, decomposition: result, budgetAuthorization };
   });
 
   // ── POST /api/requests/:id/publish ───────────────────────────────
@@ -590,6 +715,28 @@ export async function requestRoutes(app: FastifyInstance) {
       return reply.status(409).send({
         error: "conflict",
         message: "Request has no decomposed nodes. Run /decompose first.",
+      });
+    }
+
+    // R-06 / LO-GW-2a — publish is the step that turns matched nodes into
+    // bounties and live job-offers, i.e. the step that commits the requester's
+    // money. It refuses while the priced commitment exceeds the authorized
+    // ceiling. The remedy is renewed acceptance — the requester raises the
+    // ceiling explicitly via PUT /api/requests/:id — never a silent rewrite.
+    const committedEstimate = matchedCommitment(request.capabilityDag);
+    if (committedEstimate > request.budget) {
+      return reply.status(409).send({
+        error: "budget_authorization_exceeded",
+        message:
+          "The matched capabilities price this request above its authorized ceiling. "
+          + "Raise the budget (renewed acceptance) before publishing.",
+        budgetAuthorization: {
+          authorizedCeiling: request.budget,
+          currency: request.currency,
+          committedEstimate,
+          withinAuthorization: false,
+          requiresReauthorization: true,
+        },
       });
     }
 
@@ -643,6 +790,37 @@ export async function requestRoutes(app: FastifyInstance) {
     }
 
     const body = (req.body ?? {}) as Partial<CapabilityRequest>;
+
+    // R-06 / LO-GW-2a (round 2) — raising the ceiling IS the renewed acceptance
+    // the publish gate points at, so it is an act of authority and has to be
+    // authenticated and bound to the requester. Identity comes from apiGate /
+    // SIWE (`operatorId` / `userId`) only — deliberately NOT from a
+    // caller-settable header like X-Posted-By, which would make the principal
+    // self-asserted on the one surface where it decides how much money may be
+    // committed. Same shape as PUT /:id/nodes/:nodeId/status below.
+    const touchedAuthority = AUTHORITY_FIELDS.filter((k) => body[k] !== undefined);
+    if (touchedAuthority.length > 0) {
+      const identity = req as unknown as { operatorId?: string | null; userId?: string | null };
+      const callerId = identity.operatorId ?? identity.userId;
+      if (!callerId) {
+        return reply.status(401).send({
+          error: "authentication_required",
+          message: "Changing a request's authorized ceiling or requester identity requires authentication.",
+          fields: touchedAuthority,
+        });
+      }
+      const { isBrokerOperator } = await import("../middleware/security-hardening.js");
+      if (!isRequester(request, callerId) && !isBrokerOperator(callerId)) {
+        return reply.status(403).send({
+          error: "not_requester",
+          message:
+            "Only the requester may change this request's authorized ceiling or requester identity. "
+            + "(A request with no recorded requester cannot have them changed at all.)",
+          fields: touchedAuthority,
+        });
+      }
+    }
+
     const updates: Record<string, unknown> = {};
     const allowed: Array<keyof CapabilityRequest> = [
       "title", "description", "budget", "deadline", "urgency",

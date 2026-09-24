@@ -13,9 +13,11 @@
  * now() injector so sweeper runs deterministically.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { jobOffersRoutes } from "../routes/job-offers.js";
+import { initStore, closeStore } from "../db.js";
+import { getKernelFacade } from "../facades/index.js";
 import {
   initJobOffersStore,
   _resetJobOffersStoreForTests,
@@ -44,6 +46,51 @@ const stubVerify: VerifyFn = async (url) => {
     body: { placed: false },
   };
 };
+
+// ── Identities + kernel fixtures (LO-GW-3a) ────────────────────────────────
+//
+// Claiming is now authenticated and ownership-checked, so the suite needs real
+// kernel rows with real owners. OPERATOR operates every claimable kernel here;
+// STRANGER is an authenticated principal who operates none of them.
+
+const OPERATOR = "operator@shop.test";
+const STRANGER = "stranger@elsewhere.test";
+const DRIVER_KERNEL = "kernel-driver-7";
+const LAB_KERNEL = "kernel-lab-berkeley";
+/** Registered with no actor and no operatorAddress -> zero-address owner. */
+const UNOWNED_KERNEL = "kernel-unowned";
+const RACE_KERNELS = Array.from({ length: 10 }, (_, i) => `kernel-race-${i}`);
+
+/** `resolvePoster` accepts the X-Posted-By fallback, so no apiGate stand-in is
+ *  needed to give a request an identity. */
+function asOperator(id: string): Record<string, string> {
+  return { "x-posted-by": id };
+}
+
+async function registerKernel(id: string, owner: string | undefined): Promise<void> {
+  const res = await getKernelFacade().register(
+    {
+      id,
+      name: id,
+      location: { lat: 37.77, lng: -122.42 },
+      physicalAddress: "1 Test Way",
+      maxAssuranceTier: 2,
+    } as never,
+    owner as never,
+  );
+  if (!res.success) throw new Error(`kernel register failed for ${id}: ${JSON.stringify(res.error)}`);
+}
+
+beforeAll(async () => {
+  process.env.PCC_DB_PATH = ":memory:";
+  initStore({ seed: false });
+  await registerKernel(DRIVER_KERNEL, OPERATOR);
+  await registerKernel(LAB_KERNEL, OPERATOR);
+  await registerKernel(UNOWNED_KERNEL, undefined);
+  for (const k of RACE_KERNELS) await registerKernel(k, OPERATOR);
+});
+
+afterAll(() => closeStore());
 
 // ── App ───────────────────────────────────────────────────────────────────
 
@@ -539,6 +586,11 @@ describe("GET /api/job-offers/:id", () => {
 
 // ── POST /api/job-offers/:id/claim — race-safe ─────────────────────────────
 
+// LO-GW-3a: claiming binds a job to a physical site, so the claimant must be
+// that site's operator. Every case below therefore authenticates and claims for
+// a kernel the principal actually operates; the body's kernelId alone proves
+// nothing. The race-safety, missing-field and unknown-offer behaviours are
+// unchanged — they are just exercised through the authenticated door now.
 describe("POST /api/job-offers/:id/claim", () => {
   it("claims a courier offer with kernelId, returns ok+offer", async () => {
     const app = await buildApp();
@@ -546,12 +598,13 @@ describe("POST /api/job-offers/:id/claim", () => {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-claim") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/c-claim/claim",
-        payload: { kernelId: "kernel-driver-7" },
+        payload: { kernelId: DRIVER_KERNEL },
+        headers: asOperator(OPERATOR),
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.ok).toBe(true);
-      expect(body.offer.claimedByKernelId).toBe("kernel-driver-7");
+      expect(body.offer.claimedByKernelId).toBe(DRIVER_KERNEL);
       expect(body.offer.status).toBe("claimed");
     } finally {
       await app.close();
@@ -564,10 +617,11 @@ describe("POST /api/job-offers/:id/claim", () => {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: hplcOffer("h-claim") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/h-claim/claim",
-        payload: { kernelId: "kernel-lab-berkeley" },
+        payload: { kernelId: LAB_KERNEL },
+        headers: asOperator(OPERATOR),
       });
       expect(res.statusCode).toBe(200);
-      expect(res.json().offer.claimedByKernelId).toBe("kernel-lab-berkeley");
+      expect(res.json().offer.claimedByKernelId).toBe(LAB_KERNEL);
       expect(res.json().offer.capabilityType).toBe("lab.hplc");
     } finally {
       await app.close();
@@ -580,6 +634,7 @@ describe("POST /api/job-offers/:id/claim", () => {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-mc") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/c-mc/claim", payload: {},
+        headers: asOperator(OPERATOR),
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
@@ -593,9 +648,11 @@ describe("POST /api/job-offers/:id/claim", () => {
     try {
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/missing/claim",
-        payload: { kernelId: "k1" },
+        payload: { kernelId: DRIVER_KERNEL },
+        headers: asOperator(OPERATOR),
       });
       expect(res.statusCode).toBe(404);
+      expect(res.json().error).toBe("not_found");
     } finally {
       await app.close();
     }
@@ -605,9 +662,13 @@ describe("POST /api/job-offers/:id/claim", () => {
     const app = await buildApp();
     try {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("race") });
-      const claims = Array.from({ length: 10 }, (_, i) => app.inject({
+      // 10 kernels, all operated by the SAME authenticated principal, so every
+      // request clears authorization and the race is decided by the store's
+      // mutex — not by the new guard.
+      const claims = RACE_KERNELS.map((k) => app.inject({
         method: "POST", url: "/api/job-offers/race/claim",
-        payload: { kernelId: `kernel-${i}` },
+        payload: { kernelId: k },
+        headers: asOperator(OPERATOR),
       }));
       const results = await Promise.all(claims);
       const wins = results.filter((r) => r.statusCode === 200);
@@ -624,6 +685,104 @@ describe("POST /api/job-offers/:id/claim", () => {
     } finally {
       await app.close();
     }
+  });
+
+  // ── LO-GW-3a negative controls ─────────────────────────────────────────
+  describe("authentication + kernel ownership (LO-GW-3a)", () => {
+    it("401s an unauthenticated claim — and the offer stays open", async () => {
+      const app = await buildApp();
+      try {
+        await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-anon") });
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/c-anon/claim",
+          payload: { kernelId: DRIVER_KERNEL },
+        });
+        expect(res.statusCode).toBe(401);
+        expect(res.json().error).toBe("missing_identity");
+
+        const after = await app.inject({ method: "GET", url: "/api/job-offers/c-anon" });
+        expect(after.json().offer.status).toBe("open");
+        expect(after.json().offer.claimedByKernelId).toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("REJECTS an unrelated principal naming someone else's kernel — no claim recorded", async () => {
+      const app = await buildApp();
+      try {
+        await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-steal") });
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/c-steal/claim",
+          // STRANGER is authenticated, but DRIVER_KERNEL is operated by OPERATOR.
+          payload: { kernelId: DRIVER_KERNEL },
+          headers: asOperator(STRANGER),
+        });
+        expect(res.statusCode).toBe(403);
+        expect(res.json().error).toBe("not_kernel_operator");
+
+        // The offer is untouched: still open, never attributed to that kernel.
+        const after = await app.inject({ method: "GET", url: "/api/job-offers/c-steal" });
+        expect(after.json().offer.status).toBe("open");
+        expect(after.json().offer.claimedByKernelId).toBeNull();
+        // ...and no `claimed` event was appended.
+        expect(after.json().events.some((e: { event: string }) => e.event === "claimed")).toBe(false);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("the LEGITIMATE owner of that same kernel claims it successfully", async () => {
+      const app = await buildApp();
+      try {
+        await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-legit") });
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/c-legit/claim",
+          payload: { kernelId: DRIVER_KERNEL },
+          headers: asOperator(OPERATOR),
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().offer.claimedByKernelId).toBe(DRIVER_KERNEL);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("404s a kernel that does not exist (fails closed, no claim)", async () => {
+      const app = await buildApp();
+      try {
+        await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ghost") });
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/c-ghost/claim",
+          payload: { kernelId: "kernel-does-not-exist" },
+          headers: asOperator(OPERATOR),
+        });
+        expect(res.statusCode).toBe(404);
+        expect(res.json().error).toBe("kernel_not_found");
+        const after = await app.inject({ method: "GET", url: "/api/job-offers/c-ghost" });
+        expect(after.json().offer.status).toBe("open");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("403s a kernel with no recorded operator — 'nobody owns it' is not 'anybody may claim'", async () => {
+      const app = await buildApp();
+      try {
+        await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-unowned") });
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/c-unowned/claim",
+          payload: { kernelId: UNOWNED_KERNEL },
+          headers: asOperator(OPERATOR),
+        });
+        expect(res.statusCode).toBe(403);
+        expect(res.json().error).toBe("kernel_unowned");
+        const after = await app.inject({ method: "GET", url: "/api/job-offers/c-unowned" });
+        expect(after.json().offer.status).toBe("open");
+      } finally {
+        await app.close();
+      }
+    });
   });
 });
 

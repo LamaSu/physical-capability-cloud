@@ -32,7 +32,24 @@ export interface CapabilityRequest {
   description: string;
   requesterEmail?: string;
   requesterWallet?: string;
+  /**
+   * The AUTHORIZED CEILING — the most the requester has agreed to spend.
+   *
+   * R-06: this is authority, not an estimate. It is set once, when the request
+   * is created, and repricing NEVER raises it: a decomposition that comes back
+   * more expensive is reported, not silently applied. Raising it is an explicit
+   * act of renewed acceptance by the requester (PUT /api/requests/:id).
+   * Estimates live in `totalEstimatedCost` and in `DecompositionResult
+   * .derivedBudget`, which are separate fields on purpose.
+   */
   budget: number;
+  /**
+   * Mirror of `budget` under the name that says what it is. Read-only on the
+   * wire — the gateway populates it from the stored budget so a consumer never
+   * has to know that the authority happens to be stored in a column called
+   * "budget".
+   */
+  authorizedCeiling?: number;
   currency: string;
   deadline: string;
   urgency: "standard" | "rush" | "emergency";
@@ -115,4 +132,32 @@ export interface DecompositionResult {
   usedLLM?: boolean;
   /** True when the engine fell back to the legacy keyword templates. */
   usedFallback?: boolean;
+}
+
+/**
+ * R-06 — how a decomposition's price relates to the requester's authority.
+ *
+ * Returned alongside every decomposition so the answer to "may this proceed?"
+ * is explicit rather than implied by a silently rewritten budget.
+ */
+export interface BudgetAuthorization {
+  /** The immutable authority (CapabilityRequest.budget). */
+  authorizedCeiling: number;
+  currency: string;
+  /**
+   * The PRICED commitment: the sum of the matched capabilities' own prices.
+   * Unmatched nodes carry template guesses, not quotes, so they are excluded —
+   * only real prices can consume real authority.
+   */
+  committedEstimate: number;
+  /** `derivedBudget` as the decomposer reported it, for transparency. */
+  derivedBudget?: number;
+  /** True when committedEstimate <= authorizedCeiling. */
+  withinAuthorization: boolean;
+  /**
+   * True when the priced estimate exceeds the ceiling. The request is NOT
+   * blocked from existing — it is blocked from being published as bounties /
+   * job-offers until the requester raises the ceiling (renewed acceptance).
+   */
+  requiresReauthorization: boolean;
 }

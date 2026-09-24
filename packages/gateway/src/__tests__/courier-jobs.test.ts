@@ -354,6 +354,13 @@ describe("GET /api/courier-jobs/:id", () => {
 
 // ── POST /api/courier-jobs/:id/claim — race-safe ───────────────────────────
 
+// LO-GW-3a (round 2): the claim is now authenticated and `driverAgent` is bound
+// to the caller — it must be a kernel the principal operates, or the principal's
+// own name. These v0.2 cases are the second shape (a free-form driver agent
+// claiming under its own name), so each one now carries its own identity. The
+// race-safety / missing-field / unknown-job behaviours are unchanged; they are
+// just exercised through the authenticated door. Refusals are pinned below and
+// paired against the generic door in courier-claim-authz.test.ts.
 describe("POST /api/courier-jobs/:id/claim", () => {
   it("claims an open job and returns ok+job", async () => {
     const app = await buildApp();
@@ -365,6 +372,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
       const res = await app.inject({
         method: "POST", url: "/api/courier-jobs/j-claim/claim",
         payload: { driverAgent: "driver-7" },
+        headers: { "x-posted-by": "driver-7" },
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
@@ -385,6 +393,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
       });
       const res = await app.inject({
         method: "POST", url: "/api/courier-jobs/j-mc/claim", payload: {},
+        headers: { "x-posted-by": "driver-7" },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
@@ -399,6 +408,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
       const res = await app.inject({
         method: "POST", url: "/api/courier-jobs/missing/claim",
         payload: { driverAgent: "d1" },
+        headers: { "x-posted-by": "d1" },
       });
       expect(res.statusCode).toBe(404);
     } finally {
@@ -416,6 +426,7 @@ describe("POST /api/courier-jobs/:id/claim", () => {
       const claims = Array.from({ length: 10 }, (_, i) => app.inject({
         method: "POST", url: "/api/courier-jobs/race/claim",
         payload: { driverAgent: `driver-${i}` },
+        headers: { "x-posted-by": `driver-${i}` },
       }));
       const results = await Promise.all(claims);
       const wins = results.filter((r) => r.statusCode === 200);
@@ -429,6 +440,48 @@ describe("POST /api/courier-jobs/:id/claim", () => {
         expect(lb.error).toBe("not_open");
         expect(lb.claimedBy).toBe(winnerName);
       }
+    } finally {
+      await app.close();
+    }
+  });
+  it("refuses an unauthenticated claim (401), leaving the job open", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({
+        method: "POST", url: "/api/courier-jobs",
+        payload: { deliveryId: "j-anon", pickup: { name: "A" }, dropoff: { name: "B" } },
+      });
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs/j-anon/claim",
+        payload: { driverAgent: "driver-7" },
+      });
+      expect(res.statusCode).toBe(401);
+      expect(res.json().error).toBe("missing_identity");
+      const after = await app.inject({ method: "GET", url: "/api/courier-jobs/j-anon" });
+      expect(after.json().job.status).toBe("open");
+      expect(after.json().job.claimedBy).toBeNull();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses a claim posted on another driver's behalf (403), leaving the job open", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({
+        method: "POST", url: "/api/courier-jobs",
+        payload: { deliveryId: "j-behalf", pickup: { name: "A" }, dropoff: { name: "B" } },
+      });
+      const res = await app.inject({
+        method: "POST", url: "/api/courier-jobs/j-behalf/claim",
+        payload: { driverAgent: "driver-7" },
+        headers: { "x-posted-by": "someone-else" },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("not_driver_identity");
+      const after = await app.inject({ method: "GET", url: "/api/courier-jobs/j-behalf" });
+      expect(after.json().job.status).toBe("open");
+      expect(after.json().job.claimedBy).toBeNull();
     } finally {
       await app.close();
     }
