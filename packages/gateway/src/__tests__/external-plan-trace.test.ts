@@ -19,6 +19,7 @@ import {
   payoutsConserve,
   stepIdBytes32,
   type CompiledAcceptedPlan,
+  type ComposeResponse,
   type EvidenceRequirement,
 } from "@pcc/spec";
 import {
@@ -30,6 +31,7 @@ import {
   type SeamResult,
 } from "../services/external-plan-seam.js";
 import type { LiveCapability, LiveKernel } from "../services/plan-snapshot-revalidation.js";
+import { submissionFromComposeResponse } from "../services/compose-plan-adapter.js";
 
 const A = (b: string) => `0x${b.repeat(20)}` as `0x${string}`;
 const OP_PRINT = A("aa");
@@ -323,5 +325,58 @@ describe("the charter's required negatives, through the whole seam", () => {
     const dag = agentDag();
     dag.nodes[1] = { ...dag.nodes[1]!, committedProgramHash: 5 as unknown as string };
     expect(refusal(acceptExternalPlan(dag, CTX, world().deps))).toEqual({ stage: "submission", reason: "malformed-submission" });
+  });
+});
+
+describe("the server composer is one planner among many: /api/compose output enters the SAME seam", () => {
+  const proposal = (over: Partial<ComposeResponse> = {}, steps?: ComposeResponse["steps"]): ComposeResponse => ({
+    compositionId: "comp-1",
+    status: "proposed",
+    steps: steps ?? [
+      { index: 0, capabilityType: PRINT, capabilityId: "cap-print", kernelId: "k-print", operatorAddress: OP_PRINT, estimatedPriceUSD: 6.5, estimatedDurationMs: 1, assuranceTier: 2, dependsOn: [] },
+      { index: 1, capabilityType: "mail.drop", capabilityId: "cap-mail", kernelId: "k-mail", operatorAddress: OP_MAIL, estimatedPriceUSD: 3.25, estimatedDurationMs: 1, assuranceTier: 0, dependsOn: [0] },
+    ],
+    totalPriceUSD: 9.75,
+    totalDurationMs: 2,
+    effectiveAssuranceTier: 0,
+    budgetUSD: 20,
+    budgetRemainingUSD: 10.25,
+    optimizedFor: "price",
+    expiresAt: new Date((NOW + 1800) * 1000).toISOString(),
+    proposedAt: new Date(NOW * 1000).toISOString(),
+    ...over,
+  });
+  const adapt = (p: ComposeResponse) => submissionFromComposeResponse(p, { requestId: "req-42", reservationId: "resv-1", currency: "USDC", nowMs: NOW * 1000 });
+
+  it("a proposal that matches the live rows is accepted through the ordinary seam", () => {
+    const a = adapt(proposal());
+    expect(a.ok).toBe(true);
+    if (!a.ok) return;
+    expect(a.submission.edges).toEqual([{ from: "step-0", to: "step-1" }]);
+    const r = acceptExternalPlan(a.submission, CTX, world().deps);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.plan.jobs.map((j) => j.nodeIds)).toEqual([["step-0"], ["step-1"]]);
+  });
+
+  it("the composer's float drift gets no shortcut: stale at R10, like anyone's", () => {
+    const drift = proposal({}, proposal().steps.map((s) => (s.index === 0 ? { ...s, estimatedPriceUSD: 6.499999999 } : s)));
+    const a = adapt(drift);
+    if (!a.ok) throw new Error("adapter");
+    const r = refusal(acceptExternalPlan(a.submission, CTX, world().deps));
+    expect(r?.stage).toBe("revalidation");
+    if (r?.stage === "revalidation") expect(r.verdicts[0]).toMatchObject({ nodeId: "step-0", status: "stale" });
+    // an exponent-form float is not a plain decimal: a malformed claim, not a guess
+    const tiny = adapt(proposal({}, proposal().steps.map((s) => (s.index === 0 ? { ...s, estimatedPriceUSD: 1e-7 } : s))));
+    if (!tiny.ok) throw new Error("adapter");
+    const t = refusal(acceptExternalPlan(tiny.submission, CTX, world().deps));
+    expect(t?.stage === "revalidation" && t.verdicts[0]).toMatchObject({ status: "invalid-claim", reason: "malformed-price" });
+  });
+
+  it("expired, non-proposed and malformed proposals never reach the seam", () => {
+    expect(adapt(proposal({ expiresAt: new Date(NOW * 1000).toISOString() }))).toEqual({ ok: false, refusal: { reason: "proposal-expired" } });
+    expect(adapt(proposal({ status: "over_budget" }))).toEqual({ ok: false, refusal: { reason: "not-proposed", status: "over_budget" } });
+    const s = proposal().steps;
+    expect(adapt(proposal({}, [s[0]!, { ...s[1]!, dependsOn: [7] }]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
+    expect(adapt(proposal({}, [s[0]!, { ...s[1]!, index: 0 }]))).toEqual({ ok: false, refusal: { reason: "malformed-proposal" } });
   });
 });
