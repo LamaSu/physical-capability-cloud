@@ -79,11 +79,7 @@ export abstract class BaseFacade {
               return err(code, message, 400) as Result<T>;
             }
             if (error.name === "ForbiddenError") {
-              // Preserve a specific attached code (e.g. "not_kernel_owner");
-              // plain ForbiddenErrors keep the generic "FORBIDDEN".
-              const code = (error as any).code ?? "FORBIDDEN";
-              span.setAttribute("facade.error_code", code);
-              return err(code, message, 403) as Result<T>;
+              return err("FORBIDDEN", message, 403) as Result<T>;
             }
             if (error.name === "ConflictError") {
               return err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;

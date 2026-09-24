@@ -15,9 +15,9 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
-import { requestActor } from "../services/kernel-ownership.js";
 import { v4 as uuidv4 } from "uuid";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
@@ -194,12 +194,13 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * Operator node heartbeat: keeps the kernel marked "online" and
    * optionally re-announces capabilities.
    *
-   * Owner-only (WP-C): same facade rule as POST /api/kernels/:kernelId/heartbeat.
+   * Owner-only (WP-C): same rule as POST /api/kernels/:kernelId/heartbeat
+   * (requireKernelOwner, over the shared auth/kernel-operator.ts predicate).
    * The kernel must exist (404) and the authenticated actor (apiGate
    * `operatorId ?? userId`) must be its recorded owner (403
-   * `not_kernel_owner`). A pcc-node daemon must therefore heartbeat with the
-   * key that registered its kernel. Announced capability tiers are clamped to
-   * the kernel's authorized ceiling.
+   * `not_kernel_owner`); nothing is written on a refusal. A pcc-node daemon
+   * must therefore heartbeat with the key that registered its kernel.
+   * Announced capability tiers are clamped to the kernel's authorized ceiling.
    *
    * Body: { kernelId, status?, capabilities?, timestamp? }
    */
@@ -210,11 +211,8 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "kernelId required" });
     }
 
-    const result = await kernelFacade.heartbeat(
-      kernelId,
-      { status, capabilities, timestamp },
-      requestActor(req),
-    );
+    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
+    const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
     return sendResult(reply, result);
   });
 

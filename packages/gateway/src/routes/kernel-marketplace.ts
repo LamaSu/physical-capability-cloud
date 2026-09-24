@@ -11,9 +11,9 @@
  * This is intentional: persisting to the store is tracked as future work
  * once the manifest schema is locked. Admin-facing endpoints (verify,
  * suspend) are gated by the PCC_ADMIN_KEY env var + a matching
- * X-Admin-Key header (constant-time compare). There is no builder
- * self-verification: neither an `X-Agent-Id` header nor the builder's own
- * agent id authorizes anything (WP-C).
+ * X-Admin-Key header, through the shared constant-time checkAdminKey
+ * (auth/admin-key.ts). There is no builder self-verification: neither an
+ * `X-Agent-Id` header nor the builder's own agent id authorizes anything (WP-C).
  *
  * Assurance tier (WP-C): a manifest's `maxAssuranceTier` is the builder's
  * CLAIM, and a verify smoke test (HTTP 2xx) certifies nothing about it. The
@@ -28,7 +28,6 @@
  * exclusively. No canary/hotkey terminology.
  */
 
-import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   AssuranceTier,
@@ -43,7 +42,8 @@ import {
   normalizeClaim,
   type AssuranceCeilingKernel,
 } from "../services/assurance-ceiling.js";
-import { isKernelOwner, requestActor } from "../services/kernel-ownership.js";
+import { checkAdminKey } from "../auth/admin-key.js";
+import { ownsKernel, resolveRequestActor } from "../auth/kernel-owner-guard.js";
 
 // ---------------------------------------------------------------------------
 // In-memory registry (production: swap for facade-backed storage)
@@ -193,37 +193,26 @@ function validateManifest(body: unknown): {
 // ---------------------------------------------------------------------------
 
 /**
- * True iff the request is admin-authorized for verify / suspend.
- *
- *   - PCC_ADMIN_KEY set: the `X-Admin-Key` header must equal it, compared with
- *     crypto.timingSafeEqual after an explicit length check (timingSafeEqual
- *     throws on unequal lengths). A missing, repeated (array) or mismatched
- *     header is refused.
- *   - PCC_ADMIN_KEY unset or empty: open ONLY when NODE_ENV is exactly "test"
- *     or "development". Every other value, including an UNSET NODE_ENV, fails
- *     closed. (The old rule, `NODE_ENV !== "production"`, opened the gate on a
- *     deploy that simply forgot to set NODE_ENV.)
+ * Admin authorization for verify / suspend: the shared WP-A helper
+ * (auth/admin-key.ts, copied verbatim). `X-Admin-Key` must equal
+ * `PCC_ADMIN_KEY`, compared in constant time; a missing or repeated header is
+ * 401 and a wrong one 403. An unset or blank PCC_ADMIN_KEY is open ONLY when
+ * NODE_ENV is exactly "test" or "development". Any other value, including an
+ * UNSET NODE_ENV, is 503 (fail closed). The old rule, `NODE_ENV !==
+ * "production"`, opened the gate on a deploy that simply forgot NODE_ENV.
  *
  * There is deliberately NO self-verification path. The old code accepted an
  * attacker-settable `X-Agent-Id` header (or the builder's own `callerAgentId`)
  * that matched `builder.agentId`, so a builder could "verify" their own
  * manifest and have it listed. Removed entirely (WP-C).
  *
- * Local to this route on purpose: WP-A adds a shared admin-key helper on its
- * own branch; consolidate onto it once both land.
+ * Returns true when authorized; otherwise it has already sent the refusal.
  */
-function isAdminAuthorized(req: FastifyRequest): boolean {
-  const expected = process.env.PCC_ADMIN_KEY;
-  if (!expected) {
-    const env = process.env.NODE_ENV;
-    return env === "test" || env === "development";
-  }
-  const provided = req.headers["x-admin-key"];
-  if (typeof provided !== "string" || provided.length === 0) return false;
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
+  const check = checkAdminKey(req);
+  if (check.ok) return true;
+  void reply.status(check.status).send({ error: check.error, message: check.message });
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +242,7 @@ function servedManifestTiers(
     const row = rowById.get(m.kernelId);
     const registrant = manifestRegistrants.get(m.kernelId);
     const ceiling =
-      row && isKernelOwner(row, registrant) ? authorizedAssuranceCeiling(row) : 0;
+      row && ownsKernel(row.operatorAddress, registrant) ? authorizedAssuranceCeiling(row) : 0;
     out.set(m.kernelId, Math.min(normalizeClaim(m.maxAssuranceTier), ceiling) as AssuranceTier);
   }
   return out;
@@ -359,7 +348,7 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
     manifestRegistry.set(manifest.kernelId, manifest);
     // Record WHO registered it: the manifest may only ever borrow the
     // assurance ceiling of a kernel row this same actor owns.
-    const registrant = requestActor(req);
+    const registrant = resolveRequestActor(req);
     if (registrant) manifestRegistrants.set(manifest.kernelId, registrant);
     else manifestRegistrants.delete(manifest.kernelId);
 
@@ -444,13 +433,8 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "kernel_not_found" });
       }
 
-      // Admin-only. There is no builder self-verification (see isAdminAuthorized).
-      if (!isAdminAuthorized(req)) {
-        return reply.status(401).send({
-          error: "unauthorized",
-          message: "admin key required to verify kernels",
-        });
-      }
+      // Admin-only. There is no builder self-verification (see requireAdmin).
+      if (!requireAdmin(req, reply)) return reply;
 
       const smoke = await runSmokeTest(manifest);
       if (!smoke.ok) {
@@ -483,15 +467,9 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "kernel_not_found" });
     }
 
-    // Suspension requires admin authorization. Same constant-time compare and
-    // the same unset-key rule as verify (open only under NODE_ENV test or
-    // development; an unset NODE_ENV fails closed).
-    if (!isAdminAuthorized(req)) {
-      return reply.status(401).send({
-        error: "unauthorized",
-        message: "admin key required to suspend kernels",
-      });
-    }
+    // Suspension requires admin authorization: the same shared constant-time
+    // check and unset-key rule as verify.
+    if (!requireAdmin(req, reply)) return reply;
 
     manifest.status = "suspended";
     manifestRegistry.set(manifest.kernelId, manifest);

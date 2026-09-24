@@ -529,6 +529,10 @@ describe("WP-C compose: selection uses the clamped tiers", () => {
 
 // ── C1: marketplace verify / suspend are admin-only ─────────────────────────
 
+// Admin authorization is the shared WP-A helper (auth/admin-key.ts):
+// 401 admin_key_required (header missing), 403 admin_key_invalid (wrong key),
+// 503 admin_key_unconfigured (no PCC_ADMIN_KEY outside NODE_ENV test/development).
+// Every refusal leaves the manifest pending.
 describe("WP-C marketplace: no self-verification, constant-time admin key", () => {
   const savedEnv = { admin: process.env.PCC_ADMIN_KEY, node: process.env.NODE_ENV };
 
@@ -580,7 +584,7 @@ describe("WP-C marketplace: no self-verification, constant-time admin key", () =
     else process.env.NODE_ENV = savedEnv.node;
   });
 
-  it("[neg] spoofed X-Agent-Id, NO admin key configured, NODE_ENV=production -> 401, stays pending", async () => {
+  it("[neg] spoofed X-Agent-Id, NO admin key configured, NODE_ENV=production -> 503 (fail closed), stays pending", async () => {
     const id = uid("wpc-mkt-prod");
     await registerManifest(id);
     delete process.env.PCC_ADMIN_KEY;
@@ -590,7 +594,8 @@ describe("WP-C marketplace: no self-verification, constant-time admin key", () =
       url: `/api/kernels/${id}/verify`,
       headers: { ...asAttacker(), "x-agent-id": manifest(id).builder.agentId },
     });
-    expect(res.statusCode).toBe(401);
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe("admin_key_unconfigured");
     expect(await statusOf(id)).toBe("pending");
   });
 
@@ -605,27 +610,29 @@ describe("WP-C marketplace: no self-verification, constant-time admin key", () =
       headers: { ...asAttacker(), "x-agent-id": manifest(id).builder.agentId },
     });
     expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("admin_key_required");
     expect(await statusOf(id)).toBe("pending");
   });
 
-  it("[neg] no admin key configured and NODE_ENV UNSET -> verify and suspend fail closed (401)", async () => {
+  it("[neg] no admin key configured and NODE_ENV UNSET -> verify and suspend fail closed (503)", async () => {
     const id = uid("wpc-mkt-unset");
     await registerManifest(id);
     delete process.env.PCC_ADMIN_KEY;
     delete process.env.NODE_ENV;
     const verify = await app.inject({ method: "POST", url: `/api/kernels/${id}/verify`, headers: asAttacker() });
-    expect(verify.statusCode).toBe(401);
+    expect(verify.statusCode).toBe(503);
     const suspend = await app.inject({
       method: "POST",
       url: `/api/kernels/${id}/suspend`,
       headers: asAttacker(),
       payload: { reason: "x" },
     });
-    expect(suspend.statusCode).toBe(401);
+    expect(suspend.statusCode).toBe(503);
     expect(await statusOf(id)).toBe("pending");
   });
 
-  it("wrong admin key (same and different length) -> 401; the right key -> 200 verified", async () => {
+  // Contract, not polarity: the pre-change code also refused a wrong key (401).
+  it("wrong admin key (same and different length) -> 403 on verify and suspend; the right key -> 200 verified", async () => {
     const id = uid("wpc-mkt-key");
     await registerManifest(id);
     process.env.PCC_ADMIN_KEY = "wpc-admin-secret";
@@ -636,7 +643,16 @@ describe("WP-C marketplace: no self-verification, constant-time admin key", () =
         url: `/api/kernels/${id}/verify`,
         headers: { ...asAttacker(), "x-admin-key": wrong },
       });
-      expect(res.statusCode).toBe(401);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("admin_key_invalid");
+      const suspend = await app.inject({
+        method: "POST",
+        url: `/api/kernels/${id}/suspend`,
+        headers: { ...asAttacker(), "x-admin-key": wrong },
+        payload: { reason: "x" },
+      });
+      expect(suspend.statusCode).toBe(403);
+      expect(await statusOf(id)).toBe("pending");
     }
     const ok = await app.inject({
       method: "POST",

@@ -1,35 +1,10 @@
-import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import { getAllTemplates, getRegisteredTypes, getTemplate } from "@pcc/contract-builder";
 import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
-import { getRepos } from "../db.js";
-import { isKernelOwner, requestActor } from "../services/kernel-ownership.js";
-import { resolveApiKey } from "../auth/api-key-auth.js";
-import { resolveSession } from "../auth/siwe-auth.js";
-
-/**
- * The authenticated publisher of a capability: apiGate's actor when it set
- * one, otherwise credentials resolved here with the SAME resolvers apiGate
- * uses (API key first, then SIWE session). The fallback exists because apiGate
- * lists "/api/capabilities" in PUBLIC_EXACT for EVERY method (it was meant for
- * the public GET listing), so it never resolves identity on this POST. Once
- * apiGate makes that entry GET-only, the fallback is redundant but harmless.
- */
-function resolvePublisher(req: FastifyRequest): string | undefined {
-  const fromGate = requestActor(req);
-  if (fromGate) return fromGate;
-  try {
-    const key = resolveApiKey(req);
-    if (key && typeof key.operatorId === "string" && key.operatorId) return key.operatorId;
-    const session = resolveSession(req);
-    if (session?.address) return session.address;
-  } catch {
-    // Credential store unavailable: no identity (fail closed).
-  }
-  return undefined;
-}
+import { requireKernelOwner } from "../auth/kernel-owner-guard.js";
 
 // ── WoT Thing Description helpers ────────────────────────────────────────────
 //
@@ -725,12 +700,14 @@ export async function capabilityRoutes(app: FastifyInstance) {
    * Returns 400 when kernelId or type is missing.
    * Returns 500 on DB failure with { error, message }.
    *
-   * OWNER-ONLY (WP-C). Listing a capability on a kernel is a catalog mutation
-   * of that kernel, authorized the same way as its heartbeat:
+   * OWNER-ONLY (WP-C; refvertical #2586, coord-watch #2608). Listing a
+   * capability on a kernel is a catalog mutation of that kernel, authorized
+   * the same way as its heartbeat (requireKernelOwner, over the shared
+   * auth/kernel-operator.ts predicate):
    *   - 401 `api_key_required` without an authenticated actor. This matters:
    *     apiGate's PUBLIC_EXACT entry for "/api/capabilities" has no method
-   *     guard, so a POST reaches this handler unauthenticated. The identity
-   *     is therefore resolved here (see resolvePublisher);
+   *     guard, so a POST reaches this handler without apiGate resolving any
+   *     identity. The guard resolves it itself and never relies on apiGate;
    *   - 404 `kernel_not_found` for an unknown kernel id, so no orphan listings;
    *   - 403 `not_kernel_owner` unless the actor is the kernel's recorded owner
    *     (a legacy placeholder owner must first be claimed through register).
@@ -740,26 +717,10 @@ export async function capabilityRoutes(app: FastifyInstance) {
    */
   app.post<{ Body: CreateCapabilityInput }>("/api/capabilities", async (req, reply) => {
     const { kernelId, type } = req.body ?? ({} as Partial<CreateCapabilityInput>);
-    if (!kernelId || !type) {
+    if (typeof kernelId !== "string" || !kernelId || !type) {
       return reply.code(400).send({ error: "kernelId and type required" });
     }
-    const actor = resolvePublisher(req);
-    if (!actor) {
-      return reply.code(401).send({
-        error: "api_key_required",
-        message: "Publishing a capability requires the API key (or session) that owns the kernel.",
-      });
-    }
-    const kernel = getRepos().kernels.findById(kernelId);
-    if (!kernel) {
-      return reply.code(404).send({ error: "kernel_not_found", kernelId });
-    }
-    if (!isKernelOwner(kernel, actor)) {
-      return reply.code(403).send({
-        error: "not_kernel_owner",
-        message: `Authenticated actor does not own kernel '${kernelId}'`,
-      });
-    }
+    if (!(await requireKernelOwner(req, reply, kernelId))) return reply;
     const result = await facade.create(req.body);
     if (!result.success) {
       return reply.code(result.error.httpStatus).send({

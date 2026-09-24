@@ -33,7 +33,6 @@ import {
   clampAssuranceTiers,
   isAssuranceTier,
 } from "../services/assurance-ceiling.js";
-import { hasRecordedOwner, isKernelOwner } from "../services/kernel-ownership.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -319,14 +318,18 @@ export class KernelFacade extends BaseFacade {
 
       const existing = repos.kernels.findById(id);
       if (existing) {
-        const ownerRecorded = hasRecordedOwner(existing);
+        const unownedOperatorAddresses = new Set([
+          "",
+          "0x0000000000000000000000000000000000000000",
+        ]);
+        const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
         // Authorization only — authentication is apiGate's job (POST /api/kernels
         // is Bearer-gated → 401 without a key), so a real request always carries
         // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
         // not mutate someone else's kernel. When actorId is absent (a facade-level
         // unit test with no apiGate wired) there is no owner to check against; the
         // SET-ONCE signer bind still fail-closes via the CAS below.
-        if (actorId && ownerRecorded && existing.operatorAddress !== actorId) {
+        if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
@@ -340,7 +343,7 @@ export class KernelFacade extends BaseFacade {
         // Legacy rows may carry the historical zero-address placeholder rather
         // than an owner. Their first authenticated mutation claims ownership;
         // subsequent heartbeats/profile updates are owner-only like new rows.
-        if (actorId && !ownerRecorded) updates.operatorAddress = actorId;
+        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.
@@ -483,22 +486,27 @@ export class KernelFacade extends BaseFacade {
    * POST /api/operator/heartbeat).
    *
    * OWNER-ONLY (WP-C). A heartbeat marks a kernel online and can insert
-   * catalog rows, so it is authorized like any other mutation of the kernel:
+   * catalog rows, so it is authorized like any other mutation of the kernel.
+   * The CALLER authorizes: both routes (POST /api/kernels/:kernelId/heartbeat
+   * and POST /api/operator/heartbeat) run `requireKernelOwner`
+   * (auth/kernel-owner-guard.ts, over the shared auth/kernel-operator.ts
+   * predicate) before calling this, so only the kernel's recorded operator gets
+   * here. A legacy placeholder owner ("" / zero address) must first be claimed
+   * through an authenticated register. Any new caller MUST do the same.
+   *
+   * Here, fail closed regardless of the caller:
    *   - the kernel must exist (404 otherwise); a heartbeat never creates
    *     capability rows for an unknown kernel id;
-   *   - `actorId` (the route passes apiGate's `operatorId ?? userId`) must be
-   *     the kernel's recorded `operatorAddress`, else 403 `not_kernel_owner`.
-   *     A legacy placeholder owner ("" / zero address) must first be claimed
-   *     through an authenticated register, so it is also 403. A missing actor
-   *     is never the owner (fail closed).
-   * Inserted capability `assuranceTiers` are CLAMPED to the kernel's authorized
-   * ceiling: each value must be an integer 0..3 and <= the ceiling, others are
-   * dropped, and an empty result becomes [0].
+   *   - inserted capability `assuranceTiers` are CLAMPED to the kernel's
+   *     authorized ceiling: each value must be an integer 0..3 and <= the
+   *     ceiling, others are dropped, and an empty result becomes [0];
+   *   - a row whose derived id `cap-<kernelId>-<type>` already belongs to a
+   *     DIFFERENT kernel is left untouched (a heartbeat for one kernel never
+   *     refreshes another kernel's listing).
    */
   async heartbeat(
     kernelId: string,
     body: HeartbeatInput,
-    actorId?: string,
   ): Promise<Result<HeartbeatResult>> {
     return this.execute("heartbeat", async () => {
       const { status = "online", capabilities } = body ?? {};
@@ -510,9 +518,6 @@ export class KernelFacade extends BaseFacade {
       const kernel = repos.kernels.findById(kernelId) as any;
       if (!kernel) {
         throw new NotFoundError("kernel", kernelId);
-      }
-      if (!isKernelOwner(kernel, actorId)) {
-        throw notKernelOwner(kernelId);
       }
       // The authorized ceiling bounds every tier this heartbeat may insert.
       const ceiling = authorizedAssuranceCeiling(kernel);
@@ -579,8 +584,8 @@ export class KernelFacade extends BaseFacade {
                 lastHeartbeatAt: now,
                 validUntil,
               } as any);
-            } else {
-              // Existing capability — refresh its TTL.
+            } else if (existing.kernelId === kernelId) {
+              // Existing capability of THIS kernel — refresh its TTL.
               try {
                 repos.capabilities.update(capId, {
                   lastHeartbeatAt: now,
@@ -590,6 +595,10 @@ export class KernelFacade extends BaseFacade {
                 // soft fail
               }
             }
+            // Otherwise the derived id is already taken by ANOTHER kernel's row
+            // (capability ids are global and POST /api/capabilities accepts a
+            // caller-chosen id). Leave it untouched: this owner's heartbeat must
+            // not keep a different kernel's listing alive.
           } catch {
             // non-fatal
           }
@@ -655,8 +664,9 @@ export class KernelFacade extends BaseFacade {
    * Currently a stub — returns acknowledged without upsert (unlike heartbeat).
    * Replaces: POST /api/kernels/:kernelId/capabilities
    *
-   * OWNER-ONLY (WP-C): the kernel must exist (404) and `actorId` must be its
-   * recorded owner (403 `not_kernel_owner`), the same rule as heartbeat.
+   * OWNER-ONLY (WP-C): the route runs `requireKernelOwner`
+   * (auth/kernel-owner-guard.ts) first, the same rule as heartbeat: 404 for an
+   * unknown kernel, 403 `not_kernel_owner` for anyone but its recorded operator.
    *
    * GUARD: this stub must NEVER write tiers, capabilities or devices. The
    * announced `assuranceTiers` / `maxAssuranceTier` are unverified CLAIMS and
@@ -673,16 +683,8 @@ export class KernelFacade extends BaseFacade {
   async announceCapabilities(
     kernelId: string,
     body: CapabilityAnnouncementInput,
-    actorId?: string,
   ): Promise<Result<AnnouncementResult>> {
     return this.execute("announceCapabilities", async () => {
-      const kernel = this.repos.kernels.findById(kernelId);
-      if (!kernel) {
-        throw new NotFoundError("kernel", kernelId);
-      }
-      if (!isKernelOwner(kernel, actorId)) {
-        throw notKernelOwner(kernelId);
-      }
       const now = new Date().toISOString();
       const capabilities = Array.isArray(body?.capabilities) ? body.capabilities : [];
       const devices = Array.isArray(body?.devices) ? body.devices : [];
@@ -845,19 +847,6 @@ class NotFoundError extends Error {
     super(`${entity} '${id}' not found`);
     this.name = "NotFoundError";
   }
-}
-
-/**
- * 403 `not_kernel_owner`: the actor is not the kernel's recorded owner (or
- * the kernel still carries a legacy placeholder owner that must be claimed
- * through an authenticated register first). BaseFacade maps ForbiddenError to
- * 403 and keeps the attached code.
- */
-function notKernelOwner(kernelId: string): Error {
-  return Object.assign(
-    new Error(`Authenticated actor does not own kernel '${kernelId}'`),
-    { name: "ForbiddenError", code: "not_kernel_owner" },
-  );
 }
 
 // ── Lifecycle telemetry ───────────────────────────────────────────────────

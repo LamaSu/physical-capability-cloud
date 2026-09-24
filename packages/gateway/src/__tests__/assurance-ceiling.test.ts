@@ -18,7 +18,6 @@ import {
   isAssuranceTier,
   normalizeClaim,
 } from "../services/assurance-ceiling.js";
-import { isKernelOwner, requestActor } from "../services/kernel-ownership.js";
 
 const ED25519_KEY = `0x${"ab".repeat(32)}`;
 const EVM_ADDRESS = "0x1234567890abcdef1234567890ABCDEF12345678";
@@ -198,31 +197,5 @@ describe("buildAssuranceCeilingMap / ceilingFor", () => {
     expect(ceilingFor(map, "a")).toBe(3);
     expect(ceilingFor(map, "b")).toBe(0);
     expect(ceilingFor(map, "missing")).toBe(0);
-  });
-});
-
-describe("kernel ownership helpers", () => {
-  it("only the recorded owner owns a kernel", () => {
-    expect(isKernelOwner({ operatorAddress: "op-1" }, "op-1")).toBe(true);
-    expect(isKernelOwner({ operatorAddress: "op-1" }, "op-2")).toBe(false);
-  });
-
-  it("nobody owns a legacy placeholder row, and a missing actor owns nothing", () => {
-    expect(isKernelOwner({ operatorAddress: "" }, "")).toBe(false);
-    expect(
-      isKernelOwner(
-        { operatorAddress: "0x0000000000000000000000000000000000000000" },
-        "0x0000000000000000000000000000000000000000",
-      ),
-    ).toBe(false);
-    expect(isKernelOwner({ operatorAddress: "op-1" }, undefined)).toBe(false);
-    expect(isKernelOwner(undefined, "op-1")).toBe(false);
-  });
-
-  it("requestActor reads operatorId ?? userId and ignores non-strings", () => {
-    expect(requestActor({ operatorId: "op-1", userId: "0xabc" })).toBe("op-1");
-    expect(requestActor({ userId: "0xabc" })).toBe("0xabc");
-    expect(requestActor({})).toBeUndefined();
-    expect(requestActor({ operatorId: 42 })).toBeUndefined();
   });
 });
