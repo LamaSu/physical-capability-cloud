@@ -232,9 +232,24 @@ jobs:
   # Board row N4a: the OT-2 executor start guard. Stdlib-only tests: no install step.
   scripts-python-tests:
     runs-on: ubuntu-latest
+    # Installs unpinned PyPI packages, so the token gets read-only access.
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
       - name: OT-2 executor start-guard tests
         run: python3 -m unittest -v scripts/test_ot2_executor_guard.py
+
+      # Board N52: no CI job ran a Python suite, so pcc-node failures went unseen.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pcc-node tests
+        working-directory: packages/pcc-node
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[all]" pytest
+          python -m pytest -q -p no:cacheprovider tests

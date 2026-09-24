@@ -63,15 +63,37 @@ def _setup_logging(verbose):
 DIAG_ACK_PATH = os.path.expanduser("~/.pcc-node/diagnostics-acknowledged")
 
 
+def _stdin_is_interactive() -> bool:
+    """True when a person can answer a prompt on stdin."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _maybe_prompt_diagnostics(config):
     """First-run banner: explain auto-diagnostics and let operator opt in/out.
 
     Shown once per machine (sentinel at ~/.pcc-node/diagnostics-acknowledged).
     Default is "errors" so the PCC team gets a crash report when things break;
     operators can say no here or run `pcc-node feedback off` later.
+
+    Headless first run (no TTY: systemd, a container, CI): there is nobody to
+    ask, and click.prompt would Abort -- `pcc-node start` exited 1 before it
+    ever ran (board N52).  Consent cannot be given unseen, so diagnostics stay
+    OFF, nothing is recorded as acknowledged, and the banner is shown on the
+    next interactive run.
     """
     if os.path.exists(DIAG_ACK_PATH):
         return  # already acknowledged, don't nag
+
+    if not _stdin_is_interactive():
+        config.diagnostics_mode = "off"
+        click.echo(
+            "  Auto-diagnostics: OFF (no terminal to ask for consent). "
+            "Run `pcc-node feedback on` to enable."
+        )
+        return
 
     click.echo("")
     click.echo("─" * 64)
