@@ -115,3 +115,47 @@ class TestStartCommand:
         assert "Detecting hardware" in result.output
         assert "Node running" in result.output
         mock_daemon.assert_called_once()
+
+
+class TestDiagnosticsConsentPrompt:
+    """Board N52: `pcc-node start` on a headless box (systemd, container, CI)
+    used to Abort on the first-run consent prompt and exit 1.  Consent cannot
+    be given unseen, so a headless first run leaves diagnostics OFF and records
+    nothing; an interactive first run still asks."""
+
+    def _config(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(diagnostics_mode="errors", diagnostics_interval_hours=24)
+
+    def test_headless_first_run_does_not_prompt_and_stays_off(self):
+        from pcc_node import cli
+        config = self._config()
+        with mock.patch("pcc_node.cli._stdin_is_interactive", return_value=False), \
+             mock.patch("pcc_node.cli.click.prompt") as prompt:
+            cli._maybe_prompt_diagnostics(config)
+        prompt.assert_not_called()
+        assert config.diagnostics_mode == "off"
+        assert not os.path.exists(cli.DIAG_ACK_PATH), "headless run must not record consent"
+
+    @pytest.mark.parametrize("answer,mode", [("n", "off"), ("p", "periodic"), ("", "errors")])
+    def test_interactive_first_run_still_asks(self, answer, mode):
+        from pcc_node import cli
+        config = self._config()
+        with mock.patch("pcc_node.cli._stdin_is_interactive", return_value=True), \
+             mock.patch("pcc_node.cli.click.prompt", return_value=answer) as prompt:
+            cli._maybe_prompt_diagnostics(config)
+        prompt.assert_called_once()
+        assert config.diagnostics_mode == mode
+        assert os.path.exists(cli.DIAG_ACK_PATH)
+
+    def test_an_acknowledged_machine_is_not_asked_again(self):
+        from pcc_node import cli
+        os.makedirs(os.path.dirname(cli.DIAG_ACK_PATH), exist_ok=True)
+        with open(cli.DIAG_ACK_PATH, "w") as f:
+            f.write("mode=off\n")
+        config = self._config()
+        with mock.patch("pcc_node.cli._stdin_is_interactive", return_value=True), \
+             mock.patch("pcc_node.cli.click.prompt") as prompt:
+            cli._maybe_prompt_diagnostics(config)
+        prompt.assert_not_called()
+        assert config.diagnostics_mode == "errors"
