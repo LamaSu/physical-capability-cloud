@@ -145,34 +145,21 @@ export async function swfRoutes(app: FastifyInstance) {
     return reply.code(201).send({ epoch });
   });
 
+  // Distribution is REFUSED until real contribution inputs exist. This route used to score every
+  // participant with Math.random() (job count, reputation, uptime, votes) and then DISTRIBUTE the epoch
+  // on those scores: a write that allocated the fund by dice. Nothing records a participant's real job
+  // count, reputation, activity or votes per epoch, so there is no honest input to score from, and a
+  // distribution may not be computed from invented numbers (pcc-economics, readmodels census 2026-09-24).
   app.post<{ Params: { epochId: string } }>(
     "/api/swf/epochs/:epochId/distribute",
-    async (req, reply) => {
-      try {
-        // For mock purposes, generate scores from all active participants
-        const participants = swfService.listParticipants({ status: "active" });
-        if (participants.length > 0) {
-          swfService.calculateContributionScores(
-            req.params.epochId,
-            participants.map((p) => ({
-              participantId: p.id,
-              jobCount: Math.floor(Math.random() * 50),
-              reputation: Math.floor(Math.random() * 1000),
-              uptimeOrActivity: Math.floor(Math.random() * 100),
-              tenureDays: Math.floor(
-                (Date.now() - new Date(p.registeredAt).getTime()) / 86_400_000,
-              ),
-              votedThisEpoch: Math.random() > 0.5,
-            })),
-          );
-        }
-
-        const epoch = swfService.distributeEpoch(req.params.epochId);
-        return { epoch };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(409).send({ error: "conflict", message });
-      }
+    async (_req, reply) => {
+      return reply.code(501).send({
+        error: "not_available",
+        message:
+          "Epoch distribution needs each participant's real contribution for the epoch (jobs, reputation, activity, votes), " +
+          "and nothing records those yet. The epoch is not distributed rather than distributed on estimates.",
+        see: ["/api/swf/epochs/:epochId", "/api/swf/accruals"],
+      });
     },
   );
 
