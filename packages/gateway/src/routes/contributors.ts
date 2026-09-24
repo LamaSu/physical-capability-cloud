@@ -33,6 +33,13 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
+import {
+  decideUnverifiedIdentity,
+  IDENTITY_CLAIMED_RESPONSE,
+  callerMayDelegate,
+  parseStoredScopes,
+  NOTHING_TO_DELEGATE_RESPONSE,
+} from "../auth/reserved-identities.js";
 import { getEmbeddedWalletAdapter } from "../auth/embedded-wallet.js";
 import {
   RateSegmentSchema,
@@ -496,8 +503,18 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
   // adoption-indexed / capture-class / step / decay schedules use the full
   // RateSchedulePublishPage in the dashboard instead.
 
+  /** What a quickstart key may do (narrow; never "*"). */
+  const QUICKSTART_SCOPES = [
+    "contributor:read",
+    "contributor:write",
+    "schedule:read",
+    "schedule:publish",
+  ] as const;
+
   const QuickstartBodySchema = z.object({
-    email: z.string().email().max(255),
+    // Trimmed BEFORE validation (F3): a whitespace variant is the same identity
+    // and must reach the identity checks, not bounce off the format check.
+    email: z.string().trim().email().max(255),
     role: ContributorRoleSchema,
     ratePercent: z.number().min(0.01).max(50),
     contributionDescription: z.string().max(280).optional(),
@@ -515,6 +532,33 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const body = parse.data;
+
+    // The key minted below is bound to this email as its operatorId, and the
+    // email is ASSERTED, not proven — the same unverified-identity path as
+    // POST /api/auth/provision {email}, with the same decision, made BEFORE any
+    // wallet or key is created: an email on an admin allowlist is refused (WP-A
+    // A7); an email that already names an identity (a key ever issued, a
+    // kernel, a registration, a job offer, an artifact) can only be used by
+    // that identity itself — a valid Bearer API key whose operatorId matches —
+    // and then the new key is no wider than the caller's own (F3). Both
+    // refusals are the same 409 (R5), which never says what matched.
+    let operatorId = body.email;
+    let keyScopes: string[] = [...QUICKSTART_SCOPES];
+    // On the same-identity path the new key never outlives the caller's (R4).
+    let notAfter: string | null = null;
+    const decision = decideUnverifiedIdentity(req, body.email);
+    if (decision.kind === "refuse") {
+      return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
+    }
+    if (decision.kind === "self") {
+      operatorId = decision.caller.operatorId;
+      keyScopes = callerMayDelegate(parseStoredScopes(decision.caller.scopes), keyScopes);
+      if (keyScopes.length === 0) {
+        return reply.code(403).send(NOTHING_TO_DELEGATE_RESPONSE);
+      }
+      notAfter = decision.caller.expiresAt || null; // "" = no expiry, as in the auth check
+    }
+
     const adapter = getEmbeddedWalletAdapter();
 
     // 1. Create / recover the embedded wallet for this email.
@@ -534,15 +578,11 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     let keyId: string;
     try {
       const result = provisionApiKey({
-        operatorId: body.email,
+        operatorId,
         name: body.name ?? body.email,
         description: `Contributor quickstart (${body.role})`,
-        scopes: [
-          "contributor:read",
-          "contributor:write",
-          "schedule:read",
-          "schedule:publish",
-        ],
+        scopes: keyScopes,
+        notAfter,
         metadata: {
           flow: "quickstart",
           walletProvider: adapter.providerId,

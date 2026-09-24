@@ -12,11 +12,23 @@
  * x402 mode: mock (always verifies). Set PCC_X402_FACILITATOR_URL for real.
  * MPP mode: uses mppx with Tempo charge method + WWW-Authenticate headers.
  *
+ * Recipient (WP-A fold F1): x402 pays PCC_TREASURY_ADDRESS; MPP pays
+ * TEMPO_RECIPIENT, else PCC_TREASURY_ADDRESS. There is NO default — with payment
+ * enabled and no configured (well-formed, non-placeholder) recipient, every
+ * priced route answers 503 `payments_not_configured` and nothing is advertised.
+ * See config/payment-recipient.ts.
+ *
  * @deprecated x402 path — activate with PCC_X402_LEGACY=true
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { X402Middleware, type RoutePaymentMap, type X402Config } from "@pcc/payments";
 import { MppMiddleware } from "@pcc/payments";
+import { authPath } from "./route-path.js";
+import {
+  mppRecipient,
+  x402Recipient,
+  PAYMENTS_NOT_CONFIGURED,
+} from "../config/payment-recipient.js";
 
 // ---------------------------------------------------------------------------
 // Shared route pricing — single source of truth for both protocols
@@ -28,19 +40,28 @@ interface RoutePricing {
   description: string;
 }
 
-/** Canonical payment route map — both protocols are derived from this. */
+/**
+ * Canonical payment route map — both protocols are derived from this.
+ *
+ * Descriptions must be printable ASCII: MPP carries them inside the
+ * WWW-Authenticate challenge HEADER, and a header value cannot hold a character
+ * above 0xFF. The em dashes these used to contain made every MPP challenge
+ * throw inside mppx (undici "Cannot convert argument to a ByteString"), so a
+ * configured MPP gate answered EVERY priced route with 402
+ * payment_verification_failed and nobody could pay. Found while testing F1.
+ */
 export const PAYMENT_ROUTES: Record<string, RoutePricing> = {
   "POST /api/capabilities/quote": {
     price: "$0.01",
-    description: "Quote a workflow — returns pricing breakdown",
+    description: "Quote a workflow - returns pricing breakdown",
   },
   "POST /api/capabilities/simulate": {
     price: "$0.05",
-    description: "Dry-run simulation — estimate time, cost, and resource usage",
+    description: "Dry-run simulation - estimate time, cost, and resource usage",
   },
   "POST /api/capabilities/route": {
     price: "$0.02",
-    description: "Optimization routing — find best kernel assignment",
+    description: "Optimization routing - find best kernel assignment",
   },
   "GET /api/capabilities/search": {
     price: "$0.001",
@@ -52,34 +73,38 @@ export const PAYMENT_ROUTES: Record<string, RoutePricing> = {
 // Configuration
 // ---------------------------------------------------------------------------
 
-const PCC_TREASURY = (process.env.PCC_TREASURY_ADDRESS ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
+// The payment RECIPIENT has no default any more (WP-A fold F1, aeo #2352): it
+// used to fall back to 0x…0001, so an unconfigured gateway asked clients to pay
+// an address nobody controls. It is resolved when the plugin registers
+// (config/payment-recipient.ts) and, when unconfigured, priced routes are
+// refused with 503 `payments_not_configured` — never gated on a placeholder.
 const NETWORK = "eip155:84532"; // Base Sepolia
 const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
 
-const x402Config: X402Config = {
-  facilitatorUrl: process.env.PCC_X402_FACILITATOR_URL ?? "http://localhost:4020",
-  network: NETWORK,
-  usdcAddress: USDC_ADDRESS,
-  treasuryAddress: PCC_TREASURY,
-};
+function x402ConfigFor(treasury: `0x${string}`): X402Config {
+  return {
+    facilitatorUrl: process.env.PCC_X402_FACILITATOR_URL ?? "http://localhost:4020",
+    network: NETWORK,
+    usdcAddress: USDC_ADDRESS,
+    treasuryAddress: treasury,
+  };
+}
 
 /** Build the x402 RoutePaymentMap from the shared PAYMENT_ROUTES constant. */
-function buildX402Routes(): RoutePaymentMap {
+function buildX402Routes(payTo: `0x${string}`): RoutePaymentMap {
   const result: RoutePaymentMap = {};
   for (const [routeKey, { price, description }] of Object.entries(PAYMENT_ROUTES)) {
-    const [, ...pathParts] = routeKey.split(" ");
     result[routeKey] = {
       price,
       scheme: "exact",
       network: NETWORK,
-      payTo: PCC_TREASURY,
+      payTo,
       description,
     };
   }
   return result;
 }
 
-const TEMPO_RECIPIENT = (process.env.TEMPO_RECIPIENT ?? PCC_TREASURY) as `0x${string}`;
 const TEMPO_CURRENCY = (process.env.TEMPO_CURRENCY ?? USDC_ADDRESS) as `0x${string}`;
 
 /** Build the MPP route map from the shared PAYMENT_ROUTES constant. */
@@ -98,14 +123,11 @@ function buildMppRoutes(): import("@pcc/spec").MppRouteMap {
 // Derived route maps (built from PAYMENT_ROUTES)
 // ---------------------------------------------------------------------------
 
-const protectedRoutes: RoutePaymentMap = buildX402Routes();
 const mppRoutes = buildMppRoutes();
 
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
-
-const middleware = new X402Middleware(x402Config, protectedRoutes);
 
 /** Payment stats tracking */
 interface PaymentStats {
@@ -147,22 +169,62 @@ export async function paymentGate(app: FastifyInstance) {
   const useMpp = !x402Legacy;
   const protocol = useMpp ? "mpp" : "x402";
 
-  // Lazily create MPP middleware only when MPP is requested
+  // Build the middleware for the protocol that will actually run, with a
+  // CONFIGURED recipient — or record that none is configured (F1). There is no
+  // placeholder fallback: `unconfigured` makes every priced route answer 503.
   let mppMiddleware: MppMiddleware | null = null;
-  if (useMpp && enabled) {
-    const secretKey = process.env.MPP_SECRET_KEY;
-    if (!secretKey) {
-      app.log.warn("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning.");
-    } else {
-      mppMiddleware = new MppMiddleware({
-        secretKey,
-        realm: process.env.MPP_REALM,
-        recipient: TEMPO_RECIPIENT,
-        currency: TEMPO_CURRENCY,
-        testnet: process.env.MPP_TESTNET !== "false",
-        routes: mppRoutes,
-      });
+  let x402Middleware: X402Middleware | null = null;
+  let x402Treasury: `0x${string}` | null = null;
+  let unconfigured = false;
+  if (enabled) {
+    if (useMpp) {
+      const secretKey = process.env.MPP_SECRET_KEY;
+      if (!secretKey) {
+        app.log.warn("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning.");
+      } else {
+        const recipient = mppRecipient();
+        if (!recipient) {
+          unconfigured = true;
+        } else {
+          mppMiddleware = new MppMiddleware({
+            secretKey,
+            realm: process.env.MPP_REALM,
+            recipient,
+            currency: TEMPO_CURRENCY,
+            testnet: process.env.MPP_TESTNET !== "false",
+            routes: mppRoutes,
+          });
+        }
+      }
     }
+    // x402: the legacy protocol, or MPP's fallback when it has no secret.
+    if (!mppMiddleware && !unconfigured) {
+      x402Treasury = x402Recipient();
+      if (!x402Treasury) {
+        unconfigured = true;
+      } else {
+        x402Middleware = new X402Middleware(x402ConfigFor(x402Treasury), buildX402Routes(x402Treasury));
+      }
+    }
+    if (unconfigured) {
+      app.log.error(
+        "[payment-gate] payment is ENABLED but no payment recipient is configured " +
+          "(PCC_TREASURY_ADDRESS / TEMPO_RECIPIENT unset, malformed, or a placeholder). " +
+          "Priced routes answer 503 payments_not_configured until one is set.",
+      );
+    }
+  }
+
+  // --- Unconfigured: refuse priced routes, never gate them on a placeholder ---
+  if (unconfigured) {
+    app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+      stats.totalRequests++;
+      // Matched route, not raw URL (MUST-CLOSE 10), like the priced paths below.
+      const routeKey = `${req.method.toUpperCase()} ${authPath(req)}`;
+      if (!Object.prototype.hasOwnProperty.call(PAYMENT_ROUTES, routeKey)) return; // free route
+      stats.gatedRequests++;
+      return reply.status(503).send(PAYMENTS_NOT_CONFIGURED);
+    });
   }
 
   // --- MPP path (mppx/Tempo) ---
@@ -171,7 +233,11 @@ export async function paymentGate(app: FastifyInstance) {
       if (!enabled) return;
       stats.totalRequests++;
 
-      const path = req.url.split("?")[0];
+      // Price the route Fastify MATCHED, not the raw request line: find-my-way
+      // percent-decodes before matching, so `/api/capabilities/%73earch` runs the
+      // paid search handler while the raw string matched no priced route and was
+      // served FREE (MUST-CLOSE 10). authPath is the matched template.
+      const path = authPath(req);
       const check = mppMiddleware!.getRouteHandler(req.method, path);
 
       if (!check.isProtected) return; // Free route
@@ -236,20 +302,22 @@ export async function paymentGate(app: FastifyInstance) {
 
   // --- x402 path (legacy, deprecated) ---
   // @deprecated Use MPP (default) instead. Activate with PCC_X402_LEGACY=true.
-  if (!mppMiddleware) {
-    if (x402Legacy && enabled) {
+  // Registered only when payment is enabled AND a treasury is configured;
+  // payment disabled = no hook = every route free (as before).
+  if (x402Middleware) {
+    const middleware = x402Middleware;
+    if (x402Legacy) {
       app.log.warn(
         "[payment-gate] x402 is deprecated. Set MPP_SECRET_KEY and remove PCC_X402_LEGACY=true to upgrade to MPP.",
       );
     }
 
     app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-      if (!enabled) return; // payment disabled — all routes free
-
       stats.totalRequests++;
 
       const paymentSig = req.headers["payment-signature"] as string | undefined;
-      const result = middleware.checkPayment(req.method, req.url.split("?")[0], paymentSig);
+      // Matched route, not raw URL — see the MPP hook above (MUST-CLOSE 10).
+      const result = middleware.checkPayment(req.method, authPath(req), paymentSig);
 
       if (!result.requiresPayment) {
         if (paymentSig) {
@@ -299,6 +367,12 @@ export async function paymentGate(app: FastifyInstance) {
       enabled,
       protocol,
       deprecated: protocol === "x402",
+      // Whether the recipient for the protocol in use is configured. False
+      // while payment is enabled without one: priced routes are then refused
+      // (503), never charged to a placeholder.
+      recipientConfigured: enabled
+        ? !unconfigured
+        : (useMpp ? mppRecipient() : x402Recipient()) !== null,
       ...stats,
       protectedRoutes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         route: key,
@@ -318,12 +392,17 @@ export async function paymentGate(app: FastifyInstance) {
         routes: mppMiddleware.getProtectedRoutes(),
       };
     }
+    // Advertise a recipient ONLY when one is configured — never a placeholder
+    // (F1). Payment disabled still reports the configured treasury, if any.
+    const payTo = x402Treasury ?? x402Recipient();
     return {
       protocol: "x402",
       deprecated: true,
       x402Version: 2,
-      network: x402Config.network,
-      payTo: x402Config.treasuryAddress,
+      network: NETWORK,
+      ...(payTo && !unconfigured
+        ? { payTo }
+        : { configured: false, error: PAYMENTS_NOT_CONFIGURED.error }),
       routes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         method: key.split(" ")[0],
         path: key.split(" ")[1],

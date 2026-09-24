@@ -25,6 +25,7 @@ import {
   CdpWalletClient,
   CdpOnrampClient,
   CdpSpendPermissionService,
+  isCdpMockAddress,
 } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,59 @@ function getCdp(): {
   return { wallet: cdpWallet, onramp: cdpOnramp!, spendPerm: cdpSpendPerm! };
 }
 
+// ── Mock-wallet truthfulness (WP-A fold F6, shell #2499) ────────────────────
+// With no CDP credentials the wallet client is in MOCK mode and createWallet()
+// returns an address NO key controls. Money sent there is unrecoverable. So:
+//   - a mock wallet is never called "usable" (explicit mock:true + an honest note);
+//   - a real-money Coinbase onramp URL is never built while the CDP wallet
+//     client is mock (503), nor for an address minted in mock mode (409
+//     wallet_not_custodial) — isCdpMockAddress recognizes those by construction,
+//     so an address minted during a mock period stays refused after real
+//     credentials arrive.
+
+const MOCK_WALLET_NOTE =
+  "MOCK wallet: this gateway has no CDP credentials, so this address is a " +
+  "placeholder that NO key controls. Do not send funds to it — anything sent " +
+  "is unrecoverable. Configure CDP_API_KEY_ID / CDP_API_KEY_SECRET / " +
+  "CDP_WALLET_SECRET for a real wallet.";
+
+type OnrampRefusal = { status: 400 | 409 | 503; body: { error: string; message: string } };
+
+/** Why a real-money onramp must NOT be built for `walletAddress`, or null. */
+function onrampRefusal(walletAddress: string): OnrampRefusal | null {
+  if (!isAddress(walletAddress)) {
+    return {
+      status: 400,
+      body: { error: "invalid_wallet_address", message: "walletAddress must be a valid EVM address" },
+    };
+  }
+  if (getCdp().wallet.isMock) {
+    return {
+      status: 503,
+      body: {
+        error: "cdp_wallet_mock",
+        message:
+          "Onramp is disabled while the CDP wallet client is in MOCK mode (no CDP " +
+          "credentials): wallets this gateway issues are then placeholders no key " +
+          "controls, so it will not build a real-money checkout.",
+      },
+    };
+  }
+  if (isCdpMockAddress(walletAddress)) {
+    return {
+      status: 409,
+      body: {
+        error: "wallet_not_custodial",
+        message:
+          "This address was issued by this gateway in MOCK mode; no key controls " +
+          "it, so funds sent there would be unrecoverable. Create a real wallet " +
+          "(POST /api/fiat-ramp/cdp/wallet) and fund that instead.",
+      },
+    };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -245,17 +299,26 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     if (!mode) return reply;
     const { wallet } = getCdp();
     const w = await wallet.createWallet();
+    if (wallet.isMock) {
+      // Never "usable": no key controls a mock address (F6). Reached only in demo mode.
+      return markDemo(mode, {
+        walletAddress: w.address,
+        network: w.network,
+        smartAccount: w.smartAccount,
+        mock: true,
+        usableNow: false,
+        note: MOCK_WALLET_NOTE,
+      });
+    }
     return markDemo(mode, {
       walletAddress: w.address,
       network: w.network,
       smartAccount: w.smartAccount,
-      mock: wallet.isMock,
-      // A simulated wallet is not usable on any network.
-      usableNow: !wallet.isMock,
-      note: wallet.isMock
-        ? "Simulated wallet: it does not exist on any network and cannot hold funds."
-        : "Usable on PCC now — gasless on Base, no card, no gas. Pair with POST /api/auth/provision " +
-          "for an API key. Fund with a card later (POST /api/fiat-ramp/coinbase/onramp) only to pay for jobs.",
+      mock: false,
+      usableNow: true,
+      note:
+        "Usable on PCC now — gasless on Base, no card, no gas. Pair with POST /api/auth/provision " +
+        "for an API key. Fund with a card later (POST /api/fiat-ramp/coinbase/onramp) only to pay for jobs.",
     });
   });
 
@@ -276,9 +339,10 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       onrampUrl: session.onrampUrl,
       sessionId: session.sessionId,
       mock: wallet.isMock,
-      instructions:
-        "Open onrampUrl, pay once by card → USDC lands in the smart wallet on Base (gasless). " +
-        "Then POST /api/fiat-ramp/cdp/spend-permission to give your agent a scoped, revocable spending key.",
+      instructions: wallet.isMock
+        ? MOCK_WALLET_NOTE + " The onrampUrl is a non-functional mock; do not pay anything."
+        : "Open onrampUrl, pay once by card → USDC lands in the smart wallet on Base (gasless). " +
+          "Then POST /api/fiat-ramp/cdp/spend-permission to give your agent a scoped, revocable spending key.",
     });
   });
 
@@ -352,6 +416,9 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
     const mode = providerMode(reply, "coinbase");
     if (!mode) return reply;
+    // Never build a real-money checkout for an address no key controls (F6), demo or not.
+    const refusal = onrampRefusal(String(body.walletAddress));
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
 
     const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
     const asset = body.asset ?? "USDC";
@@ -406,9 +473,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         example: "/api/fiat-ramp/coinbase/onramp-url?wallet=0x...&amount=50&currency=USD",
       };
     }
-
     const mode = providerMode(reply, "coinbase");
     if (!mode) return reply;
+    // Same rule as POST /coinbase/onramp — this builds the same real-money URL (F6).
+    const refusal = onrampRefusal(String(wallet));
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
+
     const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
     const params = new URLSearchParams();
     params.set("appId", appId);
