@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { SWFService } from "@pcc/payments";
 import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy, SWFDemandForecast, SWFOperatorCostModel, SWFEquityTier } from "@pcc/spec";
+import { isDemoRoutesOn, markDemo } from "../config/demo-routes.js";
 
 // ---------------------------------------------------------------------------
 // Shared service instance (in-memory mock)
@@ -145,11 +146,29 @@ export async function swfRoutes(app: FastifyInstance) {
     return reply.code(201).send({ epoch });
   });
 
+  // Distributing an epoch divides its dividend pool by each participant's contribution
+  // score, and nothing records a participant's per-epoch contribution (jobs, reputation,
+  // activity, votes). This route drew those inputs from Math.random() and then DISTRIBUTED
+  // the epoch on them: a write that shared the fund out by chance. Board N34 (the server
+  // side of PX-3): outside demo mode it answers 501 not_available BEFORE anything is read,
+  // scored or written, so the epoch is left exactly as it was. With PCC_DEMO_ROUTES=true
+  // (never under NODE_ENV=production) the old random distribution still runs, and every
+  // answer says mock: true, demo: true.
   app.post<{ Params: { epochId: string } }>(
     "/api/swf/epochs/:epochId/distribute",
     async (req, reply) => {
+      if (!isDemoRoutesOn()) {
+        return reply.code(501).send({
+          error: "not_available",
+          message:
+            "Per-epoch contribution data (jobs, reputation, activity, votes) is not recorded on this gateway, " +
+            "so the epoch was not scored or distributed: without it, every participant's share would come " +
+            "from random numbers.",
+          see: ["GET /api/swf/epochs/:epochId"],
+        });
+      }
       try {
-        // For mock purposes, generate scores from all active participants
+        // Demo only: random scores for all active participants
         const participants = swfService.listParticipants({ status: "active" });
         if (participants.length > 0) {
           swfService.calculateContributionScores(
@@ -168,10 +187,10 @@ export async function swfRoutes(app: FastifyInstance) {
         }
 
         const epoch = swfService.distributeEpoch(req.params.epochId);
-        return { epoch };
+        return markDemo("demo", { epoch });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        return reply.code(409).send({ error: "conflict", message });
+        return reply.code(409).send(markDemo("demo", { error: "conflict", message }));
       }
     },
   );
