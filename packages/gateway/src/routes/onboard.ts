@@ -8,7 +8,24 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
 import { getRepos, getStore } from "../db.js";
-import { proofRecordDigest } from "./onboard-evidence.js";
+import {
+  PHOTO_MEDIA_TYPES,
+  PROOF_RECORD_PREFIX,
+  PROVE_BODY_LIMIT_BYTES,
+  buildEvidenceRecord,
+  checkEventTimestamps,
+  eventsDigest,
+  evidenceRecordDigest,
+  fabricatedEventIndices,
+  getEvidencePhotoStore,
+  inspectPhoto,
+  isPlainObject,
+  proofRecordDigest,
+  summarizeEvidence,
+  validateEvidenceShape,
+  type EvidenceRejection,
+  type InspectedPhoto,
+} from "./onboard-evidence.js";
 import {
   analyzeOnboardingText,
   coalesceAnalysisText,
@@ -59,9 +76,46 @@ function adminAuditIdentity(req: FastifyRequest): { actor: string; adminAuth: "a
 
 /** The authenticated caller set by the auth middleware, for audit attribution only. */
 function requestCaller(req: FastifyRequest): string | null {
-  const r = req as unknown as { operatorId?: unknown; userId?: unknown };
-  const v = r.operatorId ?? r.userId;
-  return typeof v === "string" && v.length > 0 ? v : null;
+  return authenticatedActor(req, ["operatorId", "userId"]);
+}
+
+// ── Ownership (steward rule 7: fail closed) ─────────────────────────────
+// An owner check needs both an authenticated actor and a registration owner.
+// A missing actor is 401 before any lookup; a missing owner (or the zero
+// address /register writes when no operator is given) matches nobody.
+
+const ZERO_ADDRESS_RE = /^0x0{40}$/i;
+
+/**
+ * The authenticated actor, taking the first non-null field in `fields` (the
+ * same precedence as the original `a ?? b ?? ...` chains). An empty or
+ * non-string value is not an actor.
+ */
+function authenticatedActor(req: FastifyRequest, fields: readonly string[]): string | null {
+  const r = req as unknown as Record<string, unknown>;
+  for (const field of fields) {
+    const v = r[field];
+    if (v === undefined || v === null) continue;
+    return typeof v === "string" && v.length > 0 ? v : null;
+  }
+  return null;
+}
+
+/** The registration's owner identity, or null when it has none that can be matched. */
+function registrationOwner(reg: unknown): string | null {
+  const r = reg as {
+    operator?: { walletAddress?: unknown; email?: unknown } | null;
+    walletAddress?: unknown;
+    email?: unknown;
+    operatorId?: unknown;
+  };
+  const v = r.operator?.walletAddress ?? r.operator?.email ?? r.walletAddress ?? r.email ?? r.operatorId;
+  if (typeof v !== "string" || v.length === 0 || ZERO_ADDRESS_RE.test(v)) return null;
+  return v;
+}
+
+function sendEvidenceRejection(reply: FastifyReply, r: EvidenceRejection) {
+  return reply.status(r.status).send({ error: r.error, message: r.message, ...(r.details ? { details: r.details } : {}) });
 }
 
 // ── Review transitions ──────────────────────────────────────────────────
@@ -524,227 +578,248 @@ export async function onboardRoutes(app: FastifyInstance) {
   // self-asserted (nothing binds it to the device or to a server-issued
   // challenge), so it cannot establish that the machine is real. An onboarding
   // admin approves and activates through /approve and /activate.
-  app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/prove", async (req, reply) => {
-    return Sentry.startSpan(
-      { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
-      async () => {
-        const repos = getRepos();
-        const reg = repos.registrations.findById(req.params.id);
-        if (!reg) return reply.status(404).send({ error: "not_found" });
-
-        // Verify the caller owns this registration (prevents self-approval by other operators)
-        const callerId = (req as any).operatorId ?? (req as any).userId;
-        const regOperator = (reg as any).operator?.walletAddress
-          ?? (reg as any).operator?.email
-          ?? (reg as any).walletAddress
-          ?? (reg as any).email
-          ?? (reg as any).operatorId;
-        if (callerId && regOperator && callerId !== regOperator) {
-          return reply.status(403).send({ error: "forbidden", message: "You can only prove your own registration" });
-        }
-
-        if (reg.status === "active") {
-          return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
-        }
-        if (reg.status === "rejected") {
-          return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
-        }
-        if (reg.status === "deleted") {
-          return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
-        }
-        // Evidence is fixed once an admin approves, so what was reviewed is what stays on record.
-        if (reg.status === "approved") {
-          return reply.status(400).send({ error: "already_approved", message: "Registration is already approved; its evidence can't be changed after approval" });
-        }
-        if (reg.status !== "submitted" && reg.status !== "reviewing") {
-          return reply.status(400).send({ error: "invalid_status", message: `Cannot submit evidence for a registration in "${reg.status}" status` });
-        }
-
-        const body = req.body as {
-          evidence?: {
-            /** SHA-256 bundle hash of the evidence */
-            bundleHash?: string;
-            /** Evidence events from the test job */
-            events?: Array<{
-              type: string;
-              timestamp: string;
-              payload: Record<string, unknown>;
-            }>;
-            /** Base64-encoded photo of test output (e.g. printed page, machined part) */
-            photoBase64?: string;
-            /** Device health snapshot */
-            deviceHealth?: {
-              status: string;
-              firmware?: string;
-              model?: string;
-              uptime?: number;
-              [key: string]: unknown;
-            };
-            /** IPFS CID if evidence was already uploaded */
-            ipfsCid?: string;
-          };
-        } | undefined;
-
-        const evidence = body?.evidence;
-        if (!evidence) {
-          return reply.status(400).send({
-            error: "evidence_required",
-            message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
-            example: {
-              evidence: {
-                bundleHash: "sha256:abc123...",
-                events: [
-                  { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
-                  { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
-                ],
-                deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
-              },
-            },
+  //
+  // Order: authenticated actor (401) -> owner (403) -> status -> bounded shape
+  // checks, no decode (400/413/422) -> fabrication screen (422, audited,
+  // status unchanged) -> timestamps -> bounded photo decode + header checks
+  // (422) -> retain the photo -> CAS to "reviewing" + audit record, atomically.
+  // Only `evidence` is read from the body; a `status` field anywhere is ignored.
+  app.post<{ Params: { id: string } }>(
+    "/api/onboard/registrations/:id/prove",
+    {
+      bodyLimit: PROVE_BODY_LIMIT_BYTES,
+      // The server's global handler reports an oversized body as a 400 about
+      // Content-Length. Give /prove a distinct 413 and hand every other error
+      // to the parent handler unchanged.
+      errorHandler: (error, _req, reply) => {
+        if ((error as { code?: string }).code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+          return reply.status(413).send({
+            error: "body_too_large",
+            message: `A /prove request body may be at most ${PROVE_BODY_LIMIT_BYTES} bytes.`,
           });
         }
-
-        // ── Validate bundleHash format ────────────────────────────────────
-        if (evidence.bundleHash !== undefined) {
-          if (!evidence.bundleHash.startsWith("sha256:") || evidence.bundleHash.length < 40) {
-            return reply.status(400).send({
-              error: "invalid_bundle_hash",
-              message: "bundleHash must start with 'sha256:' and be at least 40 characters (e.g. sha256:abc123...).",
+        throw error;
+      },
+    },
+    async (req, reply) => {
+      return Sentry.startSpan(
+        { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
+        async () => {
+          // Steward rule 7: no authenticated actor -> 401, before any lookup.
+          const actor = authenticatedActor(req, ["operatorId", "userId"]);
+          if (!actor) {
+            return reply.status(401).send({
+              error: "authentication_required",
+              message: "Submitting evidence requires an authenticated operator (API key or wallet session).",
             });
           }
-        }
 
-        // ── Validate event timestamps ─────────────────────────────────────
-        if (evidence.events && evidence.events.length > 0) {
-          const now = Date.now();
-          const oneHourMs = 60 * 60 * 1000;
-          for (const ev of evidence.events) {
-            const ts = Date.parse(ev.timestamp);
-            if (isNaN(ts)) {
-              return reply.status(400).send({
-                error: "invalid_event_timestamp",
-                message: `Event of type "${ev.type}" has an invalid ISO timestamp: "${ev.timestamp}"`,
+          const repos = getRepos();
+          const reg = repos.registrations.findById(req.params.id);
+          if (!reg) return reply.status(404).send({ error: "not_found" });
+
+          // Only the registration's owner may submit its evidence. No owner (or
+          // the zero-address placeholder) matches nobody.
+          const owner = registrationOwner(reg);
+          if (!owner || owner !== actor) {
+            return reply.status(403).send({
+              error: "forbidden",
+              message: owner
+                ? "You can only prove your own registration"
+                : "This registration has no owner identity, so no operator can submit evidence for it",
+            });
+          }
+
+          if (reg.status === "active") {
+            return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
+          }
+          if (reg.status === "rejected") {
+            return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+          }
+          if (reg.status === "deleted") {
+            return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
+          }
+          // Evidence is fixed once an admin approves, so what was reviewed is what stays on record.
+          if (reg.status === "approved") {
+            return reply.status(400).send({ error: "already_approved", message: "Registration is already approved; its evidence can't be changed after approval" });
+          }
+          if (!PROVE_FROM.includes(reg.status)) {
+            return reply.status(400).send({ error: "invalid_status", message: `Cannot submit evidence for a registration in "${reg.status}" status` });
+          }
+
+          const body = req.body;
+          const rawEvidence = isPlainObject(body) ? body.evidence : undefined;
+          if (rawEvidence === undefined || rawEvidence === null) {
+            return reply.status(400).send({
+              error: "evidence_required",
+              message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
+              example: {
+                evidence: {
+                  bundleHash: "sha256:abc123...",
+                  events: [
+                    { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
+                    { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
+                  ],
+                  deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
+                },
+              },
+            });
+          }
+
+          // B2 — bounded shape checks. Nothing is decoded yet.
+          const shape = validateEvidenceShape(rawEvidence);
+          if (!shape.ok) return sendEvidenceRejection(reply, shape.rejection);
+          const evidence = shape.value;
+
+          // B1 — the canonical fabrication screen. A rejection rule only: the
+          // registration is left exactly as it was and nothing is stored, but
+          // the attempt is audited.
+          const fabricated = fabricatedEventIndices(evidence.events);
+          if (fabricated.length > 0) {
+            try {
+              auditService.logStrict({
+                eventType: "operator.proof_rejected",
+                actor,
+                resourceType: "registration",
+                resourceId: reg.id,
+                action: "prove_rejected",
+                metadata: {
+                  registrationId: reg.id,
+                  reason: "fabricated_evidence",
+                  fabricatedEventIndices: fabricated,
+                  eventCount: evidence.events.length,
+                  eventsSha256: eventsDigest(evidence.events),
+                  statusUnchanged: reg.status,
+                  at: new Date().toISOString(),
+                },
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+              });
+            } catch (err) {
+              // The rejection stands either way; surface the lost audit record.
+              req.log.error({ err }, "[onboard] audit write for a rejected (fabricated) proof failed");
+              Sentry.captureException(err, { extra: { action: "prove_rejected", registrationId: reg.id } });
+            }
+            return reply.status(422).send({
+              error: "fabricated_evidence",
+              message: "Evidence events marked as simulated or mock (source.simulated or payload.mock) cannot be submitted as proof of a real device.",
+              fabricatedEvents: fabricated,
+              currentStatus: reg.status,
+            });
+          }
+
+          const timestampRejection = checkEventTimestamps(evidence.events, Date.now());
+          if (timestampRejection) return sendEvidenceRejection(reply, timestampRejection);
+
+          // Bounded decode (<= 5 MiB, checked above) + magic bytes + header dimensions.
+          let photo: InspectedPhoto | undefined;
+          if (evidence.photo) {
+            const inspected = inspectPhoto(evidence.photo);
+            if (!inspected.ok) return sendEvidenceRejection(reply, inspected.rejection);
+            photo = inspected.value;
+          }
+
+          const summary = summarizeEvidence(evidence, photo);
+          if (summary.proofs.length === 0) {
+            return reply.status(422).send({
+              error: "insufficient_evidence",
+              message: "Evidence did not meet minimum requirements for review.",
+              warnings: summary.warnings,
+              hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
+            });
+          }
+
+          // Retain the decoded photo, content-addressed, before the transition,
+          // so the record never references a photo that was not stored.
+          let photoCid: string | null = null;
+          if (photo) {
+            try {
+              photoCid = (await getEvidencePhotoStore().put(photo.bytes, PHOTO_MEDIA_TYPES[photo.format])).cid;
+            } catch (err) {
+              req.log.error({ err }, "[onboard] evidence photo retention failed");
+              return reply.status(503).send({
+                error: "evidence_store_unavailable",
+                message: "The evidence photo could not be stored; nothing was recorded. Try again later.",
               });
             }
-            if (ts > now + 5000) {
-              return reply.status(400).send({
-                error: "future_event_timestamp",
-                message: `Event of type "${ev.type}" has a timestamp in the future: "${ev.timestamp}"`,
-              });
-            }
-            if (now - ts > oneHourMs) {
-              return reply.status(400).send({
-                error: "stale_event_timestamp",
-                message: `Event of type "${ev.type}" is older than 1 hour: "${ev.timestamp}". Submit fresh evidence.`,
-              });
-            }
           }
-        }
 
-        // Validate evidence — need at least one substantial proof
-        const proofs: string[] = [];
-        const warnings: string[] = [];
-
-        // 1. Evidence bundle with events
-        if (evidence.bundleHash && evidence.events && evidence.events.length > 0) {
-          const hasCompletion = evidence.events.some((e) =>
-            ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
-          );
-          if (hasCompletion) {
-            proofs.push(`evidence_bundle: ${evidence.events.length} events, hash=${evidence.bundleHash.slice(0, 20)}...`);
-          } else {
-            warnings.push("Evidence events present but no completion/snapshot event found");
-          }
-        }
-
-        // 2. Photo of test output
-        if (evidence.photoBase64) {
-          const sizeBytes = Math.ceil((evidence.photoBase64.length * 3) / 4);
-          if (sizeBytes > 1024) {
-            proofs.push(`photo: ${(sizeBytes / 1024).toFixed(0)}KB image`);
-          } else {
-            warnings.push("Photo too small to be meaningful (< 1KB)");
-          }
-        }
-
-        // 3. Device health check
-        if (evidence.deviceHealth) {
-          if (evidence.deviceHealth.status && evidence.deviceHealth.model) {
-            proofs.push(`device_health: ${evidence.deviceHealth.model} status=${evidence.deviceHealth.status}`);
-          } else {
-            warnings.push("Device health missing status or model");
-          }
-        }
-
-        // 4. IPFS CID (evidence already uploaded to decentralized storage)
-        if (evidence.ipfsCid) {
-          proofs.push(`ipfs: ${evidence.ipfsCid}`);
-        }
-
-        if (proofs.length === 0) {
-          return reply.status(422).send({
-            error: "insufficient_evidence",
-            message: "Evidence did not meet minimum requirements for review.",
-            warnings,
-            hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
+          // B4 — the canonical evidence record, kept in the description column.
+          const submittedAt = new Date().toISOString();
+          const record = buildEvidenceRecord({
+            registrationId: reg.id,
+            submitterOperatorId: actor,
+            submittedAt,
+            evidence,
+            photo,
+            photoCid,
+            evidenceTierClaim: summary.evidenceTierClaim,
           });
-        }
+          const evidenceDigest = evidenceRecordDigest(record);
+          const description = PROOF_RECORD_PREFIX + JSON.stringify({
+            submittedAt,
+            autoApproved: false,
+            proofs: summary.proofs,
+            evidenceBundleHash: record.bundleHash,
+            evidenceIpfsCid: record.ipfsCid,
+            evidenceTierClaim: summary.evidenceTierClaim,
+            evidenceDigest,
+            evidence: record,
+          });
 
-        // ── Determine assurance tier ────────────────────────────────────────
-        const hasEvents = evidence.events && evidence.events.length > 0;
-        const hasCompletion = hasEvents && evidence.events!.some((e) =>
-          ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
-        );
-        const hasPhoto = !!(evidence.photoBase64 && Math.ceil((evidence.photoBase64.length * 3) / 4) > 1024);
-        const hasDeviceHealth = !!(evidence.deviceHealth?.status && evidence.deviceHealth?.model);
-        const hasBundleHash = !!(evidence.bundleHash);
+          // B3 — CAS to "reviewing" from exactly the status checked above, with
+          // the audit record in the same transaction. Nothing here approves,
+          // activates, or sets approvedAt.
+          const outcome = commitTransition({
+            id: reg.id,
+            expectedFrom: reg.status,
+            to: "reviewing",
+            extra: { description },
+            audit: (pre, post) => ({
+              eventType: "operator.proof_submitted",
+              actor,
+              resourceType: "registration",
+              resourceId: pre.id,
+              action: "prove",
+              metadata: {
+                ...transitionAuditFields(pre, post, submittedAt),
+                evidenceDigest,
+                previousEvidenceDigest: proofRecordDigest(pre.description),
+                evidenceTierClaim: summary.evidenceTierClaim,
+                proofCount: summary.proofs.length,
+                proofs: summary.proofs,
+                autoApproved: false,
+                evidence: record,
+              },
+              ip: req.ip,
+              userAgent: req.headers["user-agent"],
+            }),
+          });
+          if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, "evidence submission");
 
-        let assuranceTier: 0 | 1 | 2;
-        let tierWarning: string | undefined;
-
-        if (hasPhoto && hasDeviceHealth && hasEvents) {
-          // Tier 2: photo + device health + events
-          assuranceTier = 2;
-        } else if (hasBundleHash && hasEvents && hasCompletion) {
-          // Tier 1: bundle hash + events with completion event
-          assuranceTier = 1;
-        } else {
-          // Tier 0: self-attested only (deviceHealth only, no events or photo)
-          assuranceTier = 0;
-          tierWarning = "Self-attested only — no independent verification";
-        }
-
-        // Record the evidence and leave the registration for an admin to review.
-        // Nothing here approves, activates, or sets approvedAt.
-        const now = new Date().toISOString();
-        const proofMetadata = JSON.stringify({ submittedAt: now, autoApproved: false, proofs, evidenceBundleHash: evidence.bundleHash ?? null, evidenceIpfsCid: evidence.ipfsCid ?? null, assuranceTier });
-        repos.registrations.updateStatus(req.params.id, "reviewing", { description: `PROOF SUBMITTED: ${proofMetadata}` });
-
-        pipelineTelemetry.emit(reg.id, "operator_verify", "started", { metadata: { proofCount: proofs.length, autoApproved: false, pendingReview: true, assuranceTier } });
-        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier, pendingReview: true });
-        auditService.log({
-          eventType: "operator.proof_submitted",
-          actor: (req as any).operatorId ?? (req as any).apiKeyId ?? reg.operator?.walletAddress,
-          resourceType: "registration",
-          resourceId: reg.id,
-          action: "prove",
-          metadata: { proofCount: proofs.length, assuranceTier, autoApproved: false, proofs },
-          ip: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
-        return {
-          registration: { ...reg, status: "reviewing" },
-          autoApproved: false,
-          activated: false,
-          pendingReview: true,
-          proofs,
-          assuranceTier,
-          warning: tierWarning,
-          warnings: warnings.length > 0 ? warnings : undefined,
-          message: "Evidence recorded. The registration is pending review; an onboarding admin approves and activates it.",
-        };
-      },
-    );
-  });
+          pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
+            metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },
+          });
+          trackServerEvent("operator_proved", { proofCount: summary.proofs.length, evidenceTierClaim: summary.evidenceTierClaim, pendingReview: true });
+          return {
+            registration: outcome.row,
+            autoApproved: false,
+            activated: false,
+            pendingReview: true,
+            proofs: summary.proofs,
+            // A claim about which self-asserted evidence was submitted. It grants
+            // no assurance tier; the served tier comes from the kernel ceiling.
+            evidenceTierClaim: summary.evidenceTierClaim,
+            evidenceDigest,
+            evidence: record,
+            warning: summary.tierWarning,
+            warnings: summary.warnings.length > 0 ? summary.warnings : undefined,
+            message: "Evidence recorded. The registration is pending review; an onboarding admin approves and activates it.",
+          };
+        },
+      );
+    },
+  );
 
   // ═══════════════════════════════════════════════════════════════
   // Agent Onboarding — one invite code provisions everything

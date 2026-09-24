@@ -7,6 +7,7 @@
  * is a bitwise implementation, independent of the table-driven one under test.
  */
 
+import { randomBytes } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
 /** Bitwise CRC-32 (IEEE), deliberately not table-driven. */
@@ -33,6 +34,8 @@ export interface PngOptions {
   colorType?: number;
   /** Flip one CRC bit of IHDR. */
   corruptIhdrCrc?: boolean;
+  /** Random pixels (incompressible, so the file is roughly width*height*3 bytes). */
+  noise?: boolean;
 }
 
 /**
@@ -56,9 +59,13 @@ export function makePng(width: number, height: number, opts: PngOptions = {}): B
   }
   let raw: Buffer;
   if (width * height <= 1_000_000) {
-    const row = Buffer.alloc(1 + width * 3, 0x7f);
-    row[0] = 0; // filter: none
-    raw = Buffer.concat(Array.from({ length: height }, () => row));
+    raw = Buffer.concat(
+      Array.from({ length: height }, () => {
+        const row = opts.noise ? Buffer.concat([Buffer.alloc(1), randomBytes(width * 3)]) : Buffer.alloc(1 + width * 3, 0x7f);
+        row[0] = 0; // filter: none
+        return row;
+      }),
+    );
   } else {
     raw = Buffer.from([0, 0, 0, 0]);
   }

@@ -4,8 +4,8 @@
  * Covers:
  *   - bundleHash format validation (valid/invalid/short)
  *   - event timestamp validation (future, stale, valid)
- *   - assurance tier classification (0, 1, 2)
- *   - auditService.log called on prove
+ *   - evidence-tier CLAIM classification (0, 1, 2) — a claim, never a tier
+ *   - the proof audit record (auditService.logStrict, inside the transition)
  *   - rejected / deleted / suspended registrations cannot be proved
  *   - already-active registration returns error
  *   - /prove never approves or activates, at any tier (it records evidence
@@ -14,13 +14,20 @@
  *     matching PCC_ADMIN_KEY), so no onboarding route lets an operator make
  *     itself live, and no operator identity stands in for the key
  *
- * ALL external calls (PostHog, pipelineTelemetry, auditService) are mocked.
+ * ALL external calls (PostHog, pipelineTelemetry, auditService) are mocked,
+ * and the evidence-photo store is an in-memory map.
+ *
+ * /prove requires an authenticated owner (steward rule 7), so registrations
+ * here are owned by OWNER and /prove calls carry OWNER's identity header.
+ * Bound, fabrication and race negatives live in onboard-prove-hardening.test.ts.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { onboardRoutes } from "../routes/onboard.js";
+import { setEvidencePhotoStoreForTests } from "../routes/onboard-evidence.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { b64, makePng } from "./fixtures/onboard-images.js";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -74,6 +81,10 @@ async function buildApp(): Promise<FastifyInstance> {
 // Helper: create a registration and return its ID
 // ---------------------------------------------------------------------------
 
+/** The operator that owns registrations made by registerMachine() and submits their evidence. */
+const OWNER = "owner@example.com";
+const OWNER_HEADERS = { "x-test-operator": OWNER };
+
 async function registerMachine(app: FastifyInstance, overrides: Record<string, unknown> = {}): Promise<string> {
   const res = await app.inject({
     method: "POST",
@@ -83,6 +94,7 @@ async function registerMachine(app: FastifyInstance, overrides: Record<string, u
       category: "fdm",
       manufacturer: "Test Co",
       model: "TestBot 9000",
+      operator: { walletAddress: OWNER, displayName: "Owner", certifications: [], trainingAcknowledgments: {} },
       ...overrides,
     },
   });
@@ -96,8 +108,10 @@ async function registerMachine(app: FastifyInstance, overrides: Record<string, u
 
 const VALID_BUNDLE_HASH = "sha256:abc123def456abc123def456abc123def456abc123";
 const VALID_DEVICE_HEALTH = { status: "idle", model: "TestBot 9000", firmware: "1.0" };
-// Large enough base64 to exceed 1KB threshold (need >1365 chars of base64 for ~1024 bytes)
-const VALID_PHOTO = "A".repeat(2000);
+// A real 64x48 PNG: a photo counts only if it passes every bound and header
+// check. (The old fixture, "A".repeat(2000), decodes to zero bytes that are
+// not an image; the old code counted anything over 1 KB.)
+const VALID_PHOTO = b64(makePng(64, 48));
 
 function makeRecentTimestamp(): string {
   return new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5 minutes ago
@@ -120,10 +134,19 @@ describe("Prove Endpoint", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    const blobs = new Map<string, Uint8Array>();
+    setEvidencePhotoStoreForTests({
+      put: async (bytes) => {
+        const cid = `test-cid-${blobs.size}`;
+        blobs.set(cid, bytes);
+        return { cid };
+      },
+    });
     app = await buildApp();
   });
 
   afterEach(async () => {
+    setEvidencePhotoStoreForTests(null);
     await app.close();
     closeStore();
   });
@@ -137,6 +160,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -160,6 +184,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: "md5:abc123def456abc123def456abc123def456abc123",
@@ -178,6 +203,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: "sha256:short",
@@ -196,6 +222,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: "fake",
@@ -218,6 +245,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -239,6 +267,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -260,6 +289,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -281,6 +311,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -297,15 +328,16 @@ describe("Prove Endpoint", () => {
     });
   });
 
-  // ── assurance tier classification ─────────────────────────────────────────
+  // ── evidence-tier claim classification (a claim, never a tier) ─────────────
 
-  describe("assurance tier classification", () => {
+  describe("evidence-tier claim classification", () => {
     it("assigns tier 0 for deviceHealth only (no bundleHash, no photo)", async () => {
       const regId = await registerMachine(app);
 
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             deviceHealth: VALID_DEVICE_HEALTH,
@@ -315,7 +347,7 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.assuranceTier).toBe(0);
+      expect(body.evidenceTierClaim).toBe(0);
       // Should have a tier warning
       expect(body.warning).toContain("Self-attested only");
     });
@@ -326,6 +358,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -338,7 +371,7 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.assuranceTier).toBe(1);
+      expect(body.evidenceTierClaim).toBe(1);
     });
 
     it("assigns tier 1 for bundleHash + events with camera_snapshot", async () => {
@@ -347,6 +380,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -359,7 +393,7 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.assuranceTier).toBe(1);
+      expect(body.evidenceTierClaim).toBe(1);
     });
 
     it("assigns tier 2 for photo + deviceHealth + events", async () => {
@@ -368,6 +402,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             photoBase64: VALID_PHOTO,
@@ -381,7 +416,7 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.assuranceTier).toBe(2);
+      expect(body.evidenceTierClaim).toBe(2);
     });
 
     it("prefers tier 2 over tier 1 when all evidence is present", async () => {
@@ -390,6 +425,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             photoBase64: VALID_PHOTO,
@@ -404,20 +440,21 @@ describe("Prove Endpoint", () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.assuranceTier).toBe(2);
+      expect(body.evidenceTierClaim).toBe(2);
     });
   });
 
   // ── audit logging ─────────────────────────────────────────────────────────
 
   describe("audit logging", () => {
-    it("calls auditService.log on successful prove", async () => {
+    it("writes the proof audit record (logStrict) on successful prove", async () => {
       const { auditService } = await import("../services/audit-service.js");
       const regId = await registerMachine(app);
 
       await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             deviceHealth: VALID_DEVICE_HEALTH,
@@ -425,7 +462,7 @@ describe("Prove Endpoint", () => {
         },
       });
 
-      expect(auditService.log).toHaveBeenCalledWith(
+      expect(auditService.logStrict).toHaveBeenCalledWith(
         expect.objectContaining({
           eventType: "operator.proof_submitted",
           action: "prove",
@@ -435,13 +472,14 @@ describe("Prove Endpoint", () => {
       );
     });
 
-    it("includes assuranceTier in audit metadata", async () => {
+    it("includes the evidence-tier claim and evidence digest in audit metadata", async () => {
       const { auditService } = await import("../services/audit-service.js");
       const regId = await registerMachine(app);
 
       await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -452,10 +490,11 @@ describe("Prove Endpoint", () => {
         },
       });
 
-      expect(auditService.log).toHaveBeenCalledWith(
+      expect(auditService.logStrict).toHaveBeenCalledWith(
         expect.objectContaining({
           metadata: expect.objectContaining({
-            assuranceTier: expect.any(Number),
+            evidenceTierClaim: expect.any(Number),
+            evidenceDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
             autoApproved: false,
           }),
         }),
@@ -480,6 +519,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: { deviceHealth: VALID_DEVICE_HEALTH },
         },
@@ -499,6 +539,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: { deviceHealth: VALID_DEVICE_HEALTH },
         },
@@ -513,6 +554,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/onboard/registrations/nonexistent-reg-id/prove",
+        headers: OWNER_HEADERS,
         payload: {
           evidence: { deviceHealth: VALID_DEVICE_HEALTH },
         },
@@ -528,6 +570,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
       });
 
@@ -542,6 +585,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
       });
 
@@ -561,6 +605,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: { evidence: { deviceHealth: VALID_DEVICE_HEALTH } },
       });
 
@@ -581,6 +626,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {},
       });
 
@@ -596,6 +642,7 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: {
           evidence: {
             bundleHash: VALID_BUNDLE_HASH,
@@ -632,12 +679,13 @@ describe("Prove Endpoint", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/onboard/registrations/${regId}/prove`,
+        headers: OWNER_HEADERS,
         payload: { evidence: evidence() },
       });
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.assuranceTier).toBe(tier);
+      expect(body.evidenceTierClaim).toBe(tier);
       expect(body.registration.status).toBe("reviewing");
       expect(body.activated).toBe(false);
       expect(body.autoApproved).toBe(false);
@@ -697,7 +745,7 @@ describe("Prove Endpoint", () => {
         },
       });
       expect(prove.statusCode).toBe(200);
-      expect(prove.json().assuranceTier).toBe(2);
+      expect(prove.json().evidenceTierClaim).toBe(2);
       expect(prove.json().activated).toBe(false);
 
       expect((await post(`/api/onboard/registrations/${regId}/approve`)).statusCode).toBe(403);
