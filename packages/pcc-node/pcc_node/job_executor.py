@@ -190,6 +190,7 @@ EVIDENCE_LEVEL_DEVICE_REPORTED = "device_reported"
 # these names: they stay nested (payload.response, payload.handle.cupsJobId).
 UNIT_FIELD_RE = re.compile(r"0x[0-9a-f]{64}")
 UNIT_FIELDS = ("settlementUnitId", "challengeNonce")
+BINDING_FIELDS = ("jobId",) + UNIT_FIELDS
 
 
 class AssignmentBindingError(ValueError):
@@ -199,20 +200,24 @@ class AssignmentBindingError(ValueError):
 def assignment_binding(job: Dict) -> Dict[str, str]:
     """The fields every evidence event for ``job`` must commit.
 
-    ``jobId`` is the PCC job id; ``settlementUnitId`` and ``challengeNonce``
-    are included only when the assignment names them, and each must be
-    ``0x`` + 64 lowercase hex (as kernel-sdk requires).  Raises
-    AssignmentBindingError otherwise: evidence that cannot bind is refused
-    before anything runs.
+    ``jobId`` is the PCC job id.  ``settlementUnitId`` and ``challengeNonce``
+    come together or not at all (a unit without its nonce is half a
+    binding), each ``0x`` + 64 lowercase hex, and a field that is present
+    must hold a value: an explicit null is refused, as kernel-sdk refuses it
+    (evidence review of #420, F2/F3).  Raises AssignmentBindingError
+    otherwise: evidence that cannot bind is refused before anything runs.
     """
     job_id = job.get("id")
     if not isinstance(job_id, str) or not job_id.strip():
         raise AssignmentBindingError("the assignment has no job id")
     binding = {"jobId": job_id}
-    for field in UNIT_FIELDS:
-        value = job.get(field)
-        if value is None:
-            continue
+    named = [field for field in UNIT_FIELDS if field in job]
+    if named and len(named) != len(UNIT_FIELDS):
+        raise AssignmentBindingError(
+            "settlementUnitId and challengeNonce must be assigned together"
+        )
+    for field in named:
+        value = job[field]
         if not (isinstance(value, str) and UNIT_FIELD_RE.fullmatch(value)):
             raise AssignmentBindingError(f"{field} must be 0x + 64 lowercase hex")
         binding[field] = value
@@ -222,11 +227,15 @@ def assignment_binding(job: Dict) -> Dict[str, str]:
 def bind_event_payload(payload: Any, binding: Dict[str, str]) -> Dict[str, Any]:
     """A copy of ``payload`` that commits the binding fields.
 
-    A payload that already carries a different value for one of them is
-    refused (ValueError), as the kernel's EvidenceEmitter does: the event
-    would claim another job or unit.
+    Refused (ValueError), as the kernel's EvidenceEmitter refuses them: a
+    payload that already carries a different value for a bound field (the
+    event would claim another job or unit), and a payload carrying a unit
+    field the assignment never named (evidence review of #420, F1).
     """
     out: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {"result": payload}
+    for field in BINDING_FIELDS:
+        if field in out and field not in binding:
+            raise ValueError(f"event payload.{field} was not named by the assignment")
     for field, value in binding.items():
         if field in out and out[field] != value:
             raise ValueError(
@@ -1848,14 +1857,21 @@ class JobExecutor:
             "handle": dict(entry["handle"]),
             **observation,
         }
-        evidence = build_device_reported_bundle(
-            job_id,
-            entry["device"],
-            result,
-            completed=verdict == POLL_COMPLETED,
-            error=observation.get("reason") or "device reported a failure",
-            binding=entry.get("binding"),
-        )
+        try:
+            evidence = build_device_reported_bundle(
+                job_id,
+                entry["device"],
+                result,
+                completed=verdict == POLL_COMPLETED,
+                error=observation.get("reason") or "device reported a failure",
+                binding=entry.get("binding"),
+            )
+        except ValueError as exc:
+            # The device's report cannot bind to this assignment; failing
+            # closed needs no evidence.
+            log.error("Job %s: the device report cannot bind (%s); reporting failed", job_id, exc)
+            self._report_terminal_failure(job_id, {"error": f"unbindable device report: {exc}"})
+            return
         payload = evidence["events"][0]["payload"]
 
         pushed = self.gateway.push_evidence(job_id, evidence)

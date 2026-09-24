@@ -1390,3 +1390,22 @@ class TestDeviceReportedEvidenceBindsTheAssignment:
         assert payload["jobId"] == "job-ipp"
         assert payload["handle"]["cupsJobId"] == 42
         assert "job_id" not in _text(final["events"])
+
+
+class TestUnbindableDeviceReportsFailClosed:
+    def test_a_device_report_naming_an_unassigned_unit_is_refused_and_reported_failed(self):
+        # evidence review of #420, F1 (probe P1b): the device-reported path
+        # cannot sign a unit the assignment never named; the job fails closed.
+        from pcc_node.job_executor import build_device_reported_bundle
+        with pytest.raises(ValueError, match="not named by the assignment"):
+            build_device_reported_bundle(
+                "job-1", IPP_DEVICE, {"settlementUnitId": "0x" + "11" * 32},
+                completed=True, binding={"jobId": "job-1"},
+            )
+
+        ex, gateway, _ = accept_ipp()
+        entry = ex._awaiting["job-ipp"]
+        ex._awaiting.pop("job-ipp")
+        ex._report_device_outcome(entry, "completed", {"reason": "done", "settlementUnitId": "0x" + "11" * 32})
+        assert _statuses(gateway) == ["running", "failed"]
+        assert len(_bundles(gateway)) == 1, "no completion bundle was pushed"
