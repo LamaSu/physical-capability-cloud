@@ -23,7 +23,8 @@ function handler() {
       description: "test",
       builder: { agentId: "agent:test" },
       capabilityType: "test.transform",
-      workflowSteps: [],
+      // One declared step, so step-completion events are in the bundle too.
+      workflowSteps: [{ stepId: "s1", stepType: "transform", description: "one step" }],
       pricing: { currency: "USDC", baseUSD: 0 },
       maxAssuranceTier: 0,
       endpointURL: "https://example.test/run",
@@ -41,11 +42,11 @@ function handler() {
 }
 
 describe("kernel-sdk commits the settlement unit and challenge nonce it was given", () => {
-  it("started and completed carry both, and the bundle binds that unit only", async () => {
+  it("every event carries the job, unit and nonce, and the bundle binds that unit only", async () => {
     const { evidenceBundle } = await handler()({ jobId: "job-u", input: { v: 1 }, settlementUnitId: U3, challengeNonce: NONCE });
-    for (const type of ["execution_started", "execution_completed"]) {
-      const e = evidenceBundle.events.find((x) => x.type === type)!;
-      expect(e.payload).toMatchObject({ settlementUnitId: U3, challengeNonce: NONCE });
+    expect(evidenceBundle.events.map((e) => e.type)).toContain("workflow_step_completed");
+    for (const e of evidenceBundle.events) {
+      expect(e.payload, e.type).toMatchObject({ jobId: "job-u", settlementUnitId: U3, challengeNonce: NONCE });
     }
     const subject = { jobId: "job-u", kernelId: KERNEL };
     const bind = (extra: Record<string, string>) =>
@@ -54,9 +55,10 @@ describe("kernel-sdk commits the settlement unit and challenge nonce it was give
     expect(await bind({ settlementUnitId: U4 })).toMatchObject({ ok: false, reason: "unit-mismatch" });
   });
 
-  it("a job without a unit keeps its payloads unchanged", async () => {
+  it("a job without a unit still names the job on every event, and carries no unit fields", async () => {
     const { evidenceBundle } = await handler()({ jobId: "job-plain", input: { v: 1 } });
     for (const e of evidenceBundle.events) {
+      expect(e.payload, e.type).toMatchObject({ jobId: "job-plain" });
       expect(e.payload).not.toHaveProperty("settlementUnitId");
       expect(e.payload).not.toHaveProperty("challengeNonce");
     }
