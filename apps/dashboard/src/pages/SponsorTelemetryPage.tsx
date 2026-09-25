@@ -1,151 +1,157 @@
 import React from "react";
-import { GlassPanel } from "@pcc/ui";
+import { GlassPanel, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { apiGet } from "../lib/api.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+
+/**
+ * Sponsor integration telemetry: what GET /api/status/integrations reports.
+ *
+ * The gateway reports configuration, not usage: for each integration whether
+ * it is configured, its mode, network and addresses, and Lit's in-process
+ * encrypt/decrypt counters (packages/gateway/src/routes/status.ts). It
+ * stopped sending a status string and per-integration counters when its
+ * invented counters were removed (gateway commit 9fd877e7), but this page
+ * kept reading that old shape: a live response crashed it (`totalUploads` of
+ * undefined), and a missing status fell through to "Mock". It now renders
+ * only the fields the gateway returns. A field it didn't send reads "Not
+ * reported"; a status it can't determine reads "Unknown".
+ */
 
 // ---------------------------------------------------------------------------
-// Types
+// Types: GET /api/status/integrations. Every field is optional because the
+// page shows what arrived, not what it expects.
 // ---------------------------------------------------------------------------
 
-type SponsorStatus = "active" | "mock" | "disabled" | "pending" | "not-deployed";
-
-interface StorachaData {
-  status: SponsorStatus;
-  mode: "storacha" | "helia";
-  totalUploads: number;
-  totalCIDs: number;
-  lastUploadAt: string | null;
-  spaceId: string | null;
-  details: string;
+interface LitLiveStatus {
+  connected?: boolean;
+  mode?: string;
+  network?: string;
+  encryptCount?: number;
+  decryptCount?: number;
+  lastError?: string | null;
 }
 
-interface StarknetData {
-  status: SponsorStatus;
-  network: "sepolia" | "mainnet";
-  totalAnchored: number;
-  lastAnchorAt: string | null;
-  contractAddress: string | null;
-  details: string;
+interface IntegrationsPayload {
+  timestamp?: string;
+  storacha?: { configured?: boolean; mode?: string; spaceId?: string | null };
+  starknet?: { configured?: boolean; network?: string; contractAddress?: string | null };
+  litProtocol?: { configured?: boolean; mode?: string; live?: LitLiveStatus };
+  flow?: { configured?: boolean; chainId?: number; escrowAddress?: string | null };
+  near?: { configured?: boolean; endpoint?: string };
+  protocol?: { escrowAddress?: string | null; feeBps?: number; feeRecipient?: string };
 }
 
-interface LitProtocolData {
-  status: SponsorStatus;
-  mode: "real" | "mock";
-  network: "datil-test" | null;
-  totalEncrypted: number;
-  lastEncryptAt: string | null;
-  details: string;
-}
+const INTEGRATIONS = ["storacha", "starknet", "litProtocol", "flow", "near", "protocol"] as const;
 
-interface FlowData {
-  status: "active" | "pending";
-  chainId: number;
-  rpcUrl: string;
-  contracts: { milestoneEscrow: string | null; mockUSDC: string | null };
-  explorerUrl: string;
-  details: string;
-}
-
-interface NearData {
-  status: "active" | "mock";
-  network: "testnet";
-  totalQuotes: number;
-  totalIntents: number;
-  lastIntentAt: string | null;
-  oneClickEndpoint: string;
-  details: string;
-}
-
-interface ProtocolData {
-  status: "active" | "not-deployed";
-  feeRecipient: string;
-  feeBps: number;
-  totalEscrows: number;
-  totalFeesCollected: string;
-  details: string;
-}
-
-interface SponsorsPayload {
-  timestamp: string;
-  storacha: StorachaData;
-  starknet: StarknetData;
-  litProtocol: LitProtocolData;
-  flow: FlowData;
-  near: NearData;
-  protocol: ProtocolData;
-}
-
-// ---------------------------------------------------------------------------
-// API fetch
-// ---------------------------------------------------------------------------
-
-async function fetchSponsors(): Promise<SponsorsPayload> {
-  const res = await fetch("/api/status/integrations", {
-    headers: { ...getAuthHeaders() },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<SponsorsPayload>;
-}
+type IntegrationStatus = "configured" | "not-configured" | "unknown";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatTimeAgo(ts: string | null): string {
-  if (!ts) return "Never";
-  const diffMs = Date.now() - new Date(ts).getTime();
-  const diffSec = Math.floor(diffMs / 1000);
-  if (diffSec < 60) return `${diffSec}s ago`;
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  return `${Math.floor(diffMin / 60)}h ago`;
+const NOT_REPORTED = "Not reported";
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function truncateAddr(addr: string | null, chars = 6): string {
-  if (!addr) return "—";
+/** The gateway's `configured` flag; anything but a boolean is unknown. */
+function statusFrom(configured: unknown): IntegrationStatus {
+  if (configured === true) return "configured";
+  if (configured === false) return "not-configured";
+  return "unknown";
+}
+
+/** The protocol entry has no `configured` flag: an escrow address means configured. */
+function protocolStatus(p: unknown): IntegrationStatus {
+  if (!isRecord(p) || !("escrowAddress" in p)) return "unknown";
+  if (typeof p.escrowAddress === "string" && p.escrowAddress !== "") return "configured";
+  if (p.escrowAddress === null) return "not-configured";
+  return "unknown";
+}
+
+function integrationStatuses(data: IntegrationsPayload): IntegrationStatus[] {
+  return [
+    statusFrom(data.storacha?.configured),
+    statusFrom(data.starknet?.configured),
+    statusFrom(data.litProtocol?.configured),
+    statusFrom(data.flow?.configured),
+    statusFrom(data.near?.configured),
+    protocolStatus(data.protocol),
+  ];
+}
+
+function textOf(v: unknown): string {
+  return typeof v === "string" && v.trim() !== "" ? v : NOT_REPORTED;
+}
+
+function truncateAddr(addr: string, chars = 6): string {
   if (addr.length <= chars * 2 + 2) return addr;
   return `${addr.slice(0, chars)}...${addr.slice(-4)}`;
 }
+
+/** An address field: null means the gateway has none set; absent means it didn't say. */
+function addressOf(v: unknown, chars = 6): string {
+  if (typeof v === "string" && v !== "") return truncateAddr(v, chars);
+  if (v === null) return "Not set";
+  return NOT_REPORTED;
+}
+
+function labelOf(v: unknown, labels: Record<string, string>): string {
+  if (typeof v !== "string" || v === "") return NOT_REPORTED;
+  return Object.hasOwn(labels, v) ? labels[v]! : v;
+}
+
+function reportedTime(ts: unknown): string | null {
+  if (typeof ts !== "string") return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+const STORAGE_BACKENDS: Record<string, string> = {
+  storacha: "Storacha w3up",
+  helia: "Helia (in-process IPFS)",
+};
+
+const LIT_MODES: Record<string, string> = {
+  real: "Lit network",
+  "local-aes": "Local AES-256-GCM",
+};
+
+const LIT_SERVICES: Record<string, string> = {
+  "chipotle-api": "Lit Chipotle API",
+  "local-aes": "Local AES-256-GCM",
+  "mock-aes": "Local AES-256-GCM (mock service)",
+};
 
 // ---------------------------------------------------------------------------
 // StatusBadge
 // ---------------------------------------------------------------------------
 
-interface StatusBadgeProps {
-  status: SponsorStatus | "active" | "mock" | "pending" | "not-deployed";
-}
+const STATUS_BADGES: Record<IntegrationStatus, { label: string; cls: string; dot: string }> = {
+  configured: {
+    label: "Configured",
+    cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
+    dot: "bg-emerald-400",
+  },
+  "not-configured": {
+    label: "Not configured",
+    cls: "border-amber-500/40 bg-amber-500/10 text-amber-400",
+    dot: "bg-amber-400",
+  },
+  unknown: {
+    label: "Unknown",
+    cls: "border-white/20 bg-white/[0.04] text-white/40",
+    dot: "bg-white/20",
+  },
+};
 
-function StatusBadge({ status }: StatusBadgeProps) {
-  const map: Record<string, { label: string; cls: string; dot: string }> = {
-    active: {
-      label: "Active",
-      cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
-      dot: "bg-emerald-400",
-    },
-    mock: {
-      label: "Mock",
-      cls: "border-amber-500/40 bg-amber-500/10 text-amber-400",
-      dot: "bg-amber-400",
-    },
-    disabled: {
-      label: "Disabled",
-      cls: "border-red-500/30 bg-red-500/[0.06] text-red-400/70",
-      dot: "bg-red-400/60",
-    },
-    pending: {
-      label: "Pending",
-      cls: "border-sky-500/40 bg-sky-500/10 text-sky-400",
-      dot: "bg-sky-400 animate-pulse",
-    },
-    "not-deployed": {
-      label: "Not Deployed",
-      cls: "border-white/20 bg-white/[0.04] text-white/40",
-      dot: "bg-white/20",
-    },
-  };
-
-  const { label, cls, dot } = map[status] ?? map["mock"];
+function StatusBadge({ status }: { status: IntegrationStatus }) {
+  // Anything unrecognised is Unknown: the badge never guesses a state.
+  const { label, cls, dot } = STATUS_BADGES[status] ?? STATUS_BADGES.unknown;
 
   return (
     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold tracking-wide ${cls}`}>
@@ -189,225 +195,164 @@ function ExternalLink({ href, label }: { href: string; label: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Individual sponsor cards
+// Integration cards
 // ---------------------------------------------------------------------------
 
-function StorachaCard({ data }: { data: StorachaData }) {
-  const ipfsGateway = data.spaceId
-    ? `https://w3s.link/`
-    : "https://w3s.link/";
+interface IntegrationCardProps {
+  title: string;
+  subtitle: string;
+  status: IntegrationStatus;
+  /** What "configured" means for this integration, from the gateway's own check. */
+  note: string;
+  link?: { href: string; label: string };
+  children: React.ReactNode;
+}
 
+function IntegrationCard({ title, subtitle, status, note, link, children }: IntegrationCardProps) {
   return (
-    <GlassPanel padding="lg" glow={data.status === "active" ? "green" : undefined}>
+    <GlassPanel padding="lg" glow={status === "configured" ? "green" : undefined}>
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h3 className="text-sm font-bold text-white/90 tracking-wide">Storacha / Filecoin</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">Decentralized evidence storage</p>
+            <h3 className="text-sm font-bold text-white/90 tracking-wide">{title}</h3>
+            <p className="text-[11px] text-white/35 mt-0.5">{subtitle}</p>
           </div>
-          <StatusBadge status={data.status} />
+          <StatusBadge status={status} />
         </div>
 
-        <div className="space-y-2">
-          <MetricRow label="Evidence Bundles" value={data.totalUploads.toLocaleString()} mono />
-          <MetricRow label="CIDs Generated" value={data.totalCIDs.toLocaleString()} mono />
-          <MetricRow label="Backend" value={data.mode === "storacha" ? "Storacha w3up" : "Helia IPFS"} />
-          <MetricRow label="Last Upload" value={formatTimeAgo(data.lastUploadAt)} />
-          {data.spaceId && (
-            <MetricRow label="Space" value={truncateAddr(data.spaceId, 8)} mono />
-          )}
-        </div>
+        <div className="space-y-2">{children}</div>
 
         <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
-          {data.details}
+          {note}
         </div>
 
-        <ExternalLink href={ipfsGateway} label="View on IPFS Gateway" />
+        {link && <ExternalLink href={link.href} label={link.label} />}
       </div>
     </GlassPanel>
   );
 }
 
-function StarknetCard({ data }: { data: StarknetData }) {
-  const explorerBase = data.network === "mainnet"
-    ? "https://starkscan.co"
-    : "https://sepolia.starkscan.co";
-  const explorerUrl = data.contractAddress
-    ? `${explorerBase}/contract/${data.contractAddress}`
-    : explorerBase;
-
+function StorachaCard({ data }: { data: IntegrationsPayload["storacha"] }) {
   return (
-    <GlassPanel padding="lg" glow={data.status === "active" ? "green" : undefined}>
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-white/90 tracking-wide">Starknet</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">ZK proof anchoring</p>
-          </div>
-          <StatusBadge status={data.status} />
-        </div>
-
-        <div className="space-y-2">
-          <MetricRow label="Proofs Anchored" value={data.totalAnchored.toLocaleString()} mono />
-          <MetricRow label="Network" value={data.network === "sepolia" ? "Sepolia Testnet" : "Mainnet"} />
-          <MetricRow label="Last Anchor" value={formatTimeAgo(data.lastAnchorAt)} />
-          {data.contractAddress && (
-            <MetricRow label="Contract" value={truncateAddr(data.contractAddress)} mono />
-          )}
-        </div>
-
-        <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
-          {data.details}
-        </div>
-
-        <ExternalLink href={explorerUrl} label="View on Starknet Explorer" />
-      </div>
-    </GlassPanel>
+    <IntegrationCard
+      title="Storacha / Filecoin"
+      subtitle="Decentralized evidence storage"
+      status={statusFrom(data?.configured)}
+      note="Configured means EVIDENCE_STORAGE=storacha with STORACHA_PROOF set."
+    >
+      <MetricRow label="Evidence Backend" value={labelOf(data?.mode, STORAGE_BACKENDS)} />
+      {typeof data?.spaceId === "string" && data.spaceId !== "" && (
+        <MetricRow label="Space" value={truncateAddr(data.spaceId, 8)} mono />
+      )}
+    </IntegrationCard>
   );
 }
 
-function LitProtocolCard({ data }: { data: LitProtocolData }) {
+function StarknetCard({ data }: { data: IntegrationsPayload["starknet"] }) {
+  const network = data?.network;
+  const contract = typeof data?.contractAddress === "string" && data.contractAddress !== "" ? data.contractAddress : null;
+  const explorerBase =
+    network === "mainnet" ? "https://starkscan.co" : network === "sepolia" ? "https://sepolia.starkscan.co" : null;
+
   return (
-    <GlassPanel padding="lg" glow={data.status === "active" ? "green" : undefined}>
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-white/90 tracking-wide">Lit Protocol</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">Threshold encryption + access control</p>
-          </div>
-          <StatusBadge status={data.status} />
-        </div>
-
-        <div className="space-y-2">
-          <MetricRow label="Bundles Encrypted" value={data.totalEncrypted.toLocaleString()} mono />
-          <MetricRow label="Access Conditions" value={data.totalEncrypted > 0 ? data.totalEncrypted.toLocaleString() : "—"} mono />
-          <MetricRow label="Mode" value={data.mode === "real" ? "Threshold (datil-test)" : "AES-256-GCM (local)"} />
-          <MetricRow label="Network" value={data.network ?? "none"} />
-          <MetricRow label="Last Encrypt" value={formatTimeAgo(data.lastEncryptAt)} />
-        </div>
-
-        <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
-          {data.details}
-        </div>
-
-        <ExternalLink href="https://developer.litprotocol.com/sdk/access-control/intro" label="Lit Protocol Docs" />
-      </div>
-    </GlassPanel>
+    <IntegrationCard
+      title="Starknet"
+      subtitle="ZK proof anchoring"
+      status={statusFrom(data?.configured)}
+      note="Configured means STARKNET_ACCOUNT_ADDRESS is set."
+      link={contract && explorerBase ? { href: `${explorerBase}/contract/${contract}`, label: "View contract on Starkscan" } : undefined}
+    >
+      <MetricRow label="Network" value={labelOf(network, { sepolia: "Sepolia testnet", mainnet: "Mainnet" })} />
+      <MetricRow label="Contract" value={addressOf(data?.contractAddress)} mono />
+    </IntegrationCard>
   );
 }
 
-function FlowCard({ data }: { data: FlowData }) {
-  const flowscanUrl = data.contracts.milestoneEscrow
-    ? `${data.explorerUrl}/address/${data.contracts.milestoneEscrow}`
-    : data.explorerUrl;
-
-  const contractsDeployed =
-    Boolean(data.contracts.milestoneEscrow) || Boolean(data.contracts.mockUSDC);
+function LitProtocolCard({ data }: { data: IntegrationsPayload["litProtocol"] }) {
+  const liveRaw: unknown = data?.live;
+  const live = isRecord(liveRaw) ? (liveRaw as LitLiveStatus) : undefined;
+  const encrypted = typeof live?.encryptCount === "number" ? live.encryptCount : null;
+  const decrypted = typeof live?.decryptCount === "number" ? live.decryptCount : null;
 
   return (
-    <GlassPanel padding="lg" glow={data.status === "active" ? "green" : undefined}>
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-white/90 tracking-wide">Flow EVM</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">Chain ID {data.chainId} · EVM Testnet</p>
-          </div>
-          <StatusBadge status={data.status} />
-        </div>
-
-        <div className="space-y-2">
-          <MetricRow label="Chain" value={`Flow EVM Testnet (${data.chainId})`} />
-          <MetricRow
-            label="Contracts Deployed"
-            value={contractsDeployed ? (
-              <span className="text-emerald-400 font-semibold">Yes</span>
-            ) : (
-              <span className="text-amber-400/80">No</span>
-            )}
-          />
-          {data.contracts.milestoneEscrow && (
-            <MetricRow label="MilestoneEscrow" value={truncateAddr(data.contracts.milestoneEscrow)} mono />
-          )}
-          {data.contracts.mockUSDC && (
-            <MetricRow label="MockUSDC" value={truncateAddr(data.contracts.mockUSDC)} mono />
-          )}
-          <MetricRow label="RPC" value="testnet.evm.nodes.onflow.org" mono />
-        </div>
-
-        <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
-          {data.details}
-        </div>
-
-        <ExternalLink href={flowscanUrl} label="View on FlowScan" />
-      </div>
-    </GlassPanel>
+    <IntegrationCard
+      title="Lit Protocol"
+      subtitle="Threshold encryption + access control"
+      status={statusFrom(data?.configured)}
+      note="Configured means LIT_PROTOCOL_REAL=true. Counts are since the gateway process started."
+      link={{ href: "https://developer.litprotocol.com/sdk/access-control/intro", label: "Lit Protocol Docs" }}
+    >
+      <MetricRow label="Requested Mode" value={labelOf(data?.mode, LIT_MODES)} />
+      <MetricRow label="Running As" value={labelOf(live?.mode, LIT_SERVICES)} />
+      <MetricRow label="Network" value={textOf(live?.network)} />
+      <MetricRow
+        label="Connected"
+        value={typeof live?.connected === "boolean" ? (live.connected ? "Yes" : "No") : NOT_REPORTED}
+      />
+      <MetricRow
+        label="Since Start"
+        value={
+          encrypted !== null && decrypted !== null
+            ? `${encrypted.toLocaleString("en-US")} encrypted · ${decrypted.toLocaleString("en-US")} decrypted`
+            : NOT_REPORTED
+        }
+        mono
+      />
+      {typeof live?.lastError === "string" && live.lastError !== "" && (
+        <MetricRow label="Last Error" value={live.lastError} />
+      )}
+    </IntegrationCard>
   );
 }
 
-function NearCard({ data }: { data: NearData }) {
-  const nearExplorer = "https://testnet.nearblocks.io";
-
+function FlowCard({ data }: { data: IntegrationsPayload["flow"] }) {
   return (
-    <GlassPanel padding="lg" glow={data.status === "active" ? "green" : undefined}>
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-white/90 tracking-wide">NEAR Protocol</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">Cross-chain payment intents</p>
-          </div>
-          <StatusBadge status={data.status} />
-        </div>
-
-        <div className="space-y-2">
-          <MetricRow label="Cross-chain Quotes" value={data.totalQuotes.toLocaleString()} mono />
-          <MetricRow label="Intents Submitted" value={data.totalIntents.toLocaleString()} mono />
-          <MetricRow label="Network" value={data.network} />
-          <MetricRow label="Last Intent" value={formatTimeAgo(data.lastIntentAt)} />
-          <MetricRow label="Solver" value="1Click (chaindefuser)" />
-        </div>
-
-        <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
-          {data.details}
-        </div>
-
-        <ExternalLink href={nearExplorer} label="View on NEAR Explorer" />
-      </div>
-    </GlassPanel>
+    <IntegrationCard
+      title="Flow EVM"
+      subtitle="EVM testnet escrow"
+      status={statusFrom(data?.configured)}
+      note="Configured means ESCROW_CONTRACT_ADDRESS is set: the same escrow the PCCProtocol card shows."
+    >
+      <MetricRow label="Chain ID" value={typeof data?.chainId === "number" ? String(data.chainId) : NOT_REPORTED} mono />
+      <MetricRow label="Escrow Address" value={addressOf(data?.escrowAddress)} mono />
+    </IntegrationCard>
   );
 }
 
-function ProtocolCard({ data }: { data: ProtocolData }) {
+function NearCard({ data }: { data: IntegrationsPayload["near"] }) {
   return (
-    <GlassPanel padding="lg" glow={data.status === "active" ? "green" : undefined}>
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-white/90 tracking-wide">PCCProtocol</h3>
-            <p className="text-[11px] text-white/35 mt-0.5">Root escrow + fee settlement</p>
-          </div>
-          <StatusBadge status={data.status} />
-        </div>
+    <IntegrationCard
+      title="NEAR Protocol"
+      subtitle="Cross-chain payment intents"
+      status={statusFrom(data?.configured)}
+      note="The gateway reports NEAR as configured when it runs in production and NEAR_MOCK isn't true."
+    >
+      <MetricRow label="Solver Endpoint" value={textOf(data?.endpoint)} mono />
+    </IntegrationCard>
+  );
+}
 
-        <div className="space-y-2">
-          <MetricRow
-            label="Protocol Fee"
-            value={`${(data.feeBps / 100).toFixed(2)}% (${data.feeBps} bps)`}
-          />
-          <MetricRow label="Fee Recipient" value={truncateAddr(data.feeRecipient)} mono />
-          <MetricRow label="Total Escrows" value={data.totalEscrows.toLocaleString()} mono />
-          <MetricRow label="Total Fees" value={`$${data.totalFeesCollected} USDC`} />
-        </div>
+function ProtocolCard({ data }: { data: IntegrationsPayload["protocol"] }) {
+  const feeBps = typeof data?.feeBps === "number" && Number.isFinite(data.feeBps) ? data.feeBps : null;
 
-        <div className="pt-1 border-t border-white/[0.06] text-[10px] text-white/25 leading-relaxed">
-          {data.details}
-        </div>
-
-        <ExternalLink
-          href="https://sepolia.etherscan.io/address/0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454"
-          label="View MilestoneEscrow on Etherscan"
-        />
-      </div>
-    </GlassPanel>
+  return (
+    <IntegrationCard
+      title="PCCProtocol"
+      subtitle="Root escrow + fee settlement"
+      status={protocolStatus(data)}
+      note="Configured means ESCROW_CONTRACT_ADDRESS is set. Fee and recipient are the gateway's configured values or its defaults."
+    >
+      <MetricRow
+        label="Protocol Fee"
+        value={feeBps !== null ? `${(feeBps / 100).toFixed(2)}% (${feeBps} bps)` : NOT_REPORTED}
+      />
+      <MetricRow
+        label="Fee Recipient"
+        value={typeof data?.feeRecipient === "string" && data.feeRecipient !== "" ? truncateAddr(data.feeRecipient) : NOT_REPORTED}
+        mono
+      />
+      <MetricRow label="Escrow Address" value={addressOf(data?.escrowAddress)} mono />
+    </IntegrationCard>
   );
 }
 
@@ -439,40 +384,42 @@ function CardSkeleton() {
   );
 }
 
+function LoadingSkeleton() {
+  return (
+    <>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[...Array(4)].map((_, i) => (
+          <GlassPanel key={i} padding="md">
+            <div className="animate-pulse space-y-1">
+              <div className="h-2.5 w-20 bg-white/[0.05] rounded" />
+              <div className="h-6 w-10 bg-white/[0.04] rounded" />
+              <div className="h-2 w-16 bg-white/[0.03] rounded" />
+            </div>
+          </GlassPanel>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {[...Array(6)].map((_, i) => <CardSkeleton key={i} />)}
+      </div>
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Summary stat strip
 // ---------------------------------------------------------------------------
 
-interface SummaryStatsProps {
-  data: SponsorsPayload;
-}
-
-function SummaryStats({ data }: SummaryStatsProps) {
-  const sponsors = [
-    data.storacha.status,
-    data.starknet.status,
-    data.litProtocol.status,
-    data.flow.status,
-    data.near.status,
-    data.protocol.status,
-  ];
-
-  const activeCount = sponsors.filter((s) => s === "active").length;
-  const mockCount = sponsors.filter((s) => s === "mock").length;
-  const pendingCount = sponsors.filter(
-    (s) => s === "pending" || s === "not-deployed" || s === "disabled"
-  ).length;
+function SummaryStats({ data }: { data: IntegrationsPayload }) {
+  const statuses = integrationStatuses(data);
+  const configuredCount = statuses.filter((s) => s === "configured").length;
+  const unconfiguredCount = statuses.filter((s) => s === "not-configured").length;
+  const unknownCount = statuses.filter((s) => s === "unknown").length;
 
   const cards = [
-    { label: "Active Integrations", value: activeCount, sub: "of 6 sponsors", glow: activeCount > 0 },
-    { label: "Mock Mode", value: mockCount, sub: "simulated APIs", glow: false },
-    { label: "Pending", value: pendingCount, sub: "not yet deployed", glow: false },
-    {
-      label: "Last Refreshed",
-      value: new Date(data.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-      sub: "live data",
-      glow: false,
-    },
+    { label: "Configured", value: configuredCount, sub: `of ${statuses.length} integrations`, glow: configuredCount > 0 },
+    { label: "Not Configured", value: unconfiguredCount, sub: "per the gateway", glow: false },
+    { label: "Not Reported", value: unknownCount, sub: "status unknown", glow: false },
+    { label: "Reported At", value: reportedTime(data.timestamp) ?? "Unknown", sub: "by the gateway", glow: false },
   ];
 
   return (
@@ -500,21 +447,23 @@ export function SponsorTelemetryPage() {
   React.useEffect(() => {
     setPageMeta(
       "Sponsor Integration Telemetry",
-      "Live status and metrics for all 6 sponsor integrations"
+      "Configuration of the 6 sponsor integrations, as the gateway reports it"
     );
   }, [setPageMeta]);
 
   const query = useQuery({
     queryKey: ["sponsors", "telemetry"],
-    queryFn: fetchSponsors,
+    queryFn: () => apiGet<IntegrationsPayload>("/status/integrations"),
     refetchInterval: 15_000,
     staleTime: 10_000,
     retry: 2,
   });
 
-  const data = query.data;
-  const isLoading = query.isLoading;
-  const isError = query.isError;
+  // react-query never stores undefined, so any stored data means the gateway answered.
+  const answered = query.data !== undefined;
+  const data = isRecord(query.data) ? (query.data as IntegrationsPayload) : undefined;
+  const anyReported = data !== undefined && INTEGRATIONS.some((key) => isRecord(data[key]));
+  const retry = () => void query.refetch();
 
   return (
     <div className="space-y-5">
@@ -523,11 +472,12 @@ export function SponsorTelemetryPage() {
         <div>
           <h1 className="text-base font-semibold text-white/80">Sponsor Integration Telemetry</h1>
           <p className="text-xs text-white/35 mt-0.5">
-            Hackathon sponsor integrations — live status for Storacha, Starknet, Lit Protocol, Flow EVM, NEAR, and PCC Protocol
+            Whether each hackathon sponsor integration is configured on this gateway: Storacha, Starknet,
+            Lit Protocol, Flow EVM, NEAR and PCC Protocol
           </p>
         </div>
         <button
-          onClick={() => void query.refetch()}
+          onClick={retry}
           disabled={query.isFetching}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-white/[0.1] bg-white/[0.04] text-xs text-white/50 hover:text-white/80 hover:bg-white/[0.07] hover:border-white/[0.15] transition-all disabled:opacity-40"
         >
@@ -546,57 +496,47 @@ export function SponsorTelemetryPage() {
         </button>
       </div>
 
-      {/* Error banner */}
-      {isError && !data && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/[0.06] border border-red-500/20 text-xs text-red-400/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-red-400/60" />
-          Failed to fetch sponsor telemetry — gateway may be offline
-        </div>
+      {/* A failed refresh keeps the last answer on screen, labelled with its time */}
+      {answered && query.isError && (
+        <StaleNotice what="integration status" updatedAt={query.dataUpdatedAt} onRetry={retry} />
       )}
 
-      {/* Summary stats */}
-      {data ? (
-        <SummaryStats data={data} />
-      ) : isLoading ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[...Array(4)].map((_, i) => (
-            <GlassPanel key={i} padding="md">
-              <div className="animate-pulse space-y-1">
-                <div className="h-2.5 w-20 bg-white/[0.05] rounded" />
-                <div className="h-6 w-10 bg-white/[0.04] rounded" />
-                <div className="h-2 w-16 bg-white/[0.03] rounded" />
-              </div>
-            </GlassPanel>
-          ))}
-        </div>
-      ) : null}
-
-      {/* Sponsor cards grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {isLoading ? (
-          [...Array(6)].map((_, i) => <CardSkeleton key={i} />)
-        ) : data ? (
-          <>
+      {data && anyReported ? (
+        <>
+          <SummaryStats data={data} />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <StorachaCard data={data.storacha} />
             <StarknetCard data={data.starknet} />
             <LitProtocolCard data={data.litProtocol} />
             <FlowCard data={data.flow} />
             <NearCard data={data.near} />
             <ProtocolCard data={data.protocol} />
-          </>
-        ) : (
-          // Show skeleton cards even on error (data = undefined but no longer loading)
-          [...Array(6)].map((_, i) => <CardSkeleton key={i} />)
-        )}
-      </div>
+          </div>
+        </>
+      ) : answered ? (
+        <GlassPanel padding="lg">
+          <EmptyState
+            title="No integrations reported"
+            description="The gateway answered, but its response named none of the six integrations."
+          />
+        </GlassPanel>
+      ) : query.isError ? (
+        <GlassPanel padding="lg">
+          <UnavailableState what="integration status" error={query.error} onRetry={retry} />
+        </GlassPanel>
+      ) : (
+        <LoadingSkeleton />
+      )}
 
       {/* Footer note */}
       <p className="text-[11px] text-white/20 text-center pb-2">
         Status sourced from{" "}
-        <span className="font-mono text-white/30">/api/status/integrations</span> — refreshes every 15s.
-        Set <span className="font-mono text-white/30">EVIDENCE_STORAGE=storacha</span>,{" "}
+        <span className="font-mono text-white/30">/api/status/integrations</span>, refreshed every 15s. It
+        reports configuration, not usage. Set{" "}
+        <span className="font-mono text-white/30">EVIDENCE_STORAGE=storacha</span> with{" "}
+        <span className="font-mono text-white/30">STORACHA_PROOF</span>,{" "}
         <span className="font-mono text-white/30">LIT_PROTOCOL_REAL=true</span>, or{" "}
-        <span className="font-mono text-white/30">STARKNET_ACCOUNT_ADDRESS</span> to switch from mock to live.
+        <span className="font-mono text-white/30">STARKNET_ACCOUNT_ADDRESS</span> to configure an integration.
       </p>
     </div>
   );

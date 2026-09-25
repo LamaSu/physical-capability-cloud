@@ -17,6 +17,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../gateway.js";
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
 import type {
   CapabilityDTO,
   JobDTO,
@@ -28,6 +29,7 @@ import type {
   ComplianceReportDTO,
   DriftAlertDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../../types/dto.js";
 
 // ---------------------------------------------------------------------------
@@ -96,8 +98,10 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
     queryKey: ["jobs", params],
     queryFn: async () => {
       const res = await api.getJobs(params);
-      // Route wraps result in { jobs: [...] } for backward compat.
-      return res.jobs ?? [];
+      // Route wraps result in { jobs: [...] } for backward compat. A response without that
+      // array is an error, never an empty list (absence is not evidence).
+      if (!Array.isArray(res?.jobs)) throw new Error("unexpected response shape from /api/jobs");
+      return res.jobs;
     },
     retry: 1,
     staleTime: 10_000,
@@ -151,8 +155,10 @@ export function useKernels(params?: { status?: string }) {
     queryKey: ["kernels", params],
     queryFn: async () => {
       const res = await api.getKernels(params);
-      // Route wraps result in { kernels: [...] } for backward compat.
-      return res.kernels ?? [];
+      // Route wraps result in { kernels: [...] } for backward compat. A response without that
+      // array is an error, never an empty list: "0 kernels online" would be a guess.
+      if (!Array.isArray(res?.kernels)) throw new Error("unexpected response shape from /api/kernels");
+      return res.kernels;
     },
     retry: 1,
     staleTime: 15_000,
@@ -164,12 +170,36 @@ export function useKernels(params?: { status?: string }) {
  * Route: GET /api/kernels/:kernelId → { kernel: KernelHealthSnapshot } (backward-compat).
  * Returns the { kernel } envelope — callers use data.kernel to access the snapshot.
  */
+/**
+ * The gateway's own answer that it has no such record. Only its not-found code
+ * counts: a 404 from a missing route or a proxy is an unavailable read.
+ */
+export class RecordNotFoundError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "RecordNotFoundError";
+  }
+}
+
 export function useKernel(kernelId: string | undefined) {
   return useQuery<{ kernel: KernelHealthSnapshot }>({
     queryKey: ["kernel", kernelId],
-    queryFn: () => api.getKernel(kernelId!),
+    // Reads the route directly (api.getKernel drops the error body) so the
+    // kernel facade's KERNEL_NOT_FOUND can be told apart from any other 404.
+    queryFn: async () => {
+      const res = await authorizedFetch(`/api/kernels/${encodeURIComponent(kernelId!)}`);
+      const body = (await res.json().catch(() => null)) as { error?: unknown; message?: unknown; kernel?: unknown } | null;
+      if (res.status === 404 && body?.error === "KERNEL_NOT_FOUND") {
+        throw new RecordNotFoundError("KERNEL_NOT_FOUND", typeof body.message === "string" ? body.message : "kernel not found");
+      }
+      if (!res.ok) throw new Error(typeof body?.message === "string" ? body.message : `API error: ${res.status}`);
+      if (!body || typeof body.kernel !== "object" || body.kernel === null) {
+        throw new Error("unexpected response shape from /api/kernels/:id");
+      }
+      return { kernel: body.kernel as KernelHealthSnapshot };
+    },
     enabled: !!kernelId,
-    retry: 1,
+    retry: (failures, error) => !(error instanceof RecordNotFoundError) && failures < 1,
   });
 }
 
@@ -191,8 +221,10 @@ export function useEscrows(params?: { status?: string }) {
     queryKey: ["escrows", params],
     queryFn: async () => {
       const res = await api.getEscrows(params);
-      // Route wraps result in { escrows: [...] } for backward compat.
-      return res.escrows ?? [];
+      // Route wraps result in { escrows: [...] } for backward compat. A response without that
+      // array is an error, never an empty list.
+      if (!Array.isArray(res?.escrows)) throw new Error("unexpected response shape from /api/escrow");
+      return res.escrows;
     },
     retry: 1,
     staleTime: 10_000,
@@ -244,11 +276,42 @@ export function useSettlementEpochs() {
 // Health
 // ---------------------------------------------------------------------------
 
-export function useGatewayHealth() {
+/**
+ * Gateway liveness (GET /api/health).
+ * `refetchInterval` lets always-visible chrome (the StatusBar) re-check
+ * periodically instead of reporting the state it saw at page load.
+ */
+export function useGatewayHealth(options?: { refetchInterval?: number }) {
   return useQuery({
     queryKey: ["health"],
     queryFn: () => api.health(),
     retry: 0,
+    staleTime: 30_000,
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the current API key's operator stands (GET /api/agent/me): identity,
+ * scopes, keys, kernels and in-flight work. Each section reports its own
+ * `unavailable` reason instead of failing the whole answer.
+ */
+export function useAgentMe() {
+  return useQuery<AgentMeDTO>({
+    queryKey: ["agentMe"],
+    queryFn: async () => {
+      const res = await api.getAgentMe();
+      // An answer without the identity block is not an account; treat it as a failed read.
+      if (!res?.identity || !Array.isArray(res.identity.scopes)) {
+        throw new Error("unexpected response shape from /api/agent/me");
+      }
+      return res;
+    },
+    retry: 1,
     staleTime: 30_000,
   });
 }

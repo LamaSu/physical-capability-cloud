@@ -1,5 +1,5 @@
 import React from "react";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 /**
  * CdpFundedKeyOnramp — zero-friction PCC onboarding.
@@ -15,6 +15,12 @@ import { getAuthHeaders } from "../stores/auth-store.js";
  *   POST   /api/fiat-ramp/coinbase/onramp       (fund an existing wallet — real URL)
  *   POST   /api/fiat-ramp/cdp/spend-permission  (scoped agent key)
  *   DELETE /api/fiat-ramp/cdp/spend-permission/:id
+ *
+ * Without CDP credentials the gateway returns `mock: true` and a random
+ * address that no key controls (packages/payments/src/cdp/wallet-client.ts).
+ * Such a wallet is labelled, is never called usable, and is never offered
+ * card funding: the Coinbase checkout is real, so money sent to that address
+ * could not be recovered. Its spend permissions are simulated too.
  */
 
 interface Wallet {
@@ -33,12 +39,22 @@ interface Permission {
 }
 
 async function api(path: string, method: string, body?: unknown): Promise<any> {
-  const res = await fetch(path, {
+  const res = await authorizedFetch(path, {
     method,
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`);
+  if (!res.ok) {
+    // Show the gateway's own reason (e.g. a missing scope) when it sends one.
+    let reason = "";
+    try {
+      const json = (await res.json()) as { error?: string; message?: string };
+      reason = json.message ?? json.error ?? "";
+    } catch {
+      // No JSON body: the status line is all there is.
+    }
+    throw new Error(`${method} ${path} → ${res.status}${reason ? `: ${reason}` : ""}`);
+  }
   return res.json();
 }
 
@@ -50,6 +66,8 @@ export function CdpFundedKeyOnramp() {
   const [wallet, setWallet] = React.useState<Wallet | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [onrampUrl, setOnrampUrl] = React.useState<string | null>(null);
+  // Set when the gateway answered the onramp request with mock: true.
+  const [onrampNote, setOnrampNote] = React.useState<string | null>(null);
   const [funding, setFunding] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
 
@@ -58,6 +76,14 @@ export function CdpFundedKeyOnramp() {
   const [periodHrs, setPeriodHrs] = React.useState("24");
   const [issuing, setIssuing] = React.useState(false);
   const [perm, setPerm] = React.useState<Permission | null>(null);
+  const [revoking, setRevoking] = React.useState(false);
+
+  // The gateway said this wallet is simulated: nothing controls its address.
+  const simulated = wallet?.mock === true;
+  // Coinbase's card checkout pays out USDC on Base mainnet. Only a real wallet
+  // on "base" can receive it. A base-sepolia (testnet) wallet would be paid
+  // real money on a network PCC doesn't read for it.
+  const cardFundable = !!wallet && !simulated && wallet.network === "base";
 
   async function createWallet() {
     setCreating(true);
@@ -72,14 +98,22 @@ export function CdpFundedKeyOnramp() {
   }
 
   async function fund() {
-    if (!wallet) return;
+    if (!wallet || !cardFundable) return;
     setFunding(true);
     setErr(null);
     try {
-      const r = await api("/api/fiat-ramp/coinbase/onramp", "POST", {
+      const r = (await api("/api/fiat-ramp/coinbase/onramp", "POST", {
         walletAddress: wallet.walletAddress,
-      });
-      setOnrampUrl(r.onrampUrl);
+        network: wallet.network,
+      })) as { onrampUrl?: unknown; mock?: unknown; note?: unknown };
+      if (r.mock === true) {
+        // No Coinbase app is configured on this gateway, so its URL is not a checkout to offer.
+        setOnrampNote(typeof r.note === "string" && r.note ? r.note : "This gateway has no Coinbase app configured.");
+      } else if (typeof r.onrampUrl === "string" && r.onrampUrl.startsWith("https://")) {
+        setOnrampUrl(r.onrampUrl);
+      } else {
+        setErr("The gateway returned no checkout link.");
+      }
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -108,12 +142,18 @@ export function CdpFundedKeyOnramp() {
   }
 
   async function revoke() {
-    if (!perm) return;
+    if (!perm || revoking) return;
+    setRevoking(true);
+    setErr(null);
     try {
-      await api(`/api/fiat-ramp/cdp/spend-permission/${perm.permissionId}`, "DELETE");
-      setPerm({ ...perm, revoked: true });
+      const r = (await api(`/api/fiat-ramp/cdp/spend-permission/${perm.permissionId}`, "DELETE")) as { revoked?: unknown } | null;
+      // Only the gateway's explicit confirmation marks the key revoked.
+      if (r?.revoked === true) setPerm({ ...perm, revoked: true });
+      else setErr("The gateway didn't confirm the revocation, so the key may still be active.");
     } catch (e) {
       setErr((e as Error).message);
+    } finally {
+      setRevoking(false);
     }
   }
 
@@ -155,9 +195,16 @@ export function CdpFundedKeyOnramp() {
                   </span>
                 )}
               </div>
-              <div className="text-[11px] text-emerald-400/70">
-                ✓ Usable on PCC now · {wallet.network} · gasless
-              </div>
+              {simulated ? (
+                <div className="text-[11px] text-amber-400/80">
+                  Simulated wallet: this gateway has no CDP credentials, so no key controls this
+                  address. Don't send funds to it.
+                </div>
+              ) : (
+                <div className="text-[11px] text-emerald-400/70">
+                  ✓ Usable on PCC now · {wallet.network} · gasless
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -168,7 +215,19 @@ export function CdpFundedKeyOnramp() {
             <div className="text-[11px] uppercase tracking-wide text-white/30">
               Step 2 · Add funds (optional — only to spend)
             </div>
-            {!onrampUrl ? (
+            {simulated ? (
+              <p className="text-[12px] text-white/40">
+                Card funding is off for a simulated wallet: money sent to its address could not be
+                recovered.
+              </p>
+            ) : !cardFundable ? (
+              <p className="text-[12px] text-white/40">
+                Card funding is off for a {wallet.network} wallet: the card checkout pays out USDC on
+                Base mainnet, not on this wallet's network.
+              </p>
+            ) : onrampNote ? (
+              <p className="text-[12px] text-amber-400/80">No card checkout on this gateway: {onrampNote}</p>
+            ) : !onrampUrl ? (
               <button
                 onClick={fund}
                 disabled={funding}
@@ -231,14 +290,21 @@ export function CdpFundedKeyOnramp() {
               <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3 space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="font-mono text-[12px] text-white/70">{perm.permissionId}</span>
-                  <span
-                    className={`text-[10px] rounded px-1.5 py-0.5 border ${
-                      perm.revoked
-                        ? "text-white/40 border-white/20"
-                        : "text-emerald-400/80 border-emerald-400/30"
-                    }`}
-                  >
-                    {perm.revoked ? "REVOKED" : "ACTIVE"}
+                  <span className="flex items-center gap-1.5">
+                    {simulated && (
+                      <span className="text-[10px] text-amber-400/70 border border-amber-400/30 rounded px-1.5 py-0.5">
+                        MOCK
+                      </span>
+                    )}
+                    <span
+                      className={`text-[10px] rounded px-1.5 py-0.5 border ${
+                        perm.revoked
+                          ? "text-white/40 border-white/20"
+                          : "text-emerald-400/80 border-emerald-400/30"
+                      }`}
+                    >
+                      {perm.revoked ? "REVOKED" : "ACTIVE"}
+                    </span>
                   </span>
                 </div>
                 <div className="text-[11px] text-white/40">
@@ -249,9 +315,10 @@ export function CdpFundedKeyOnramp() {
                 {!perm.revoked && (
                   <button
                     onClick={revoke}
+                    disabled={revoking}
                     className={`${BTN} bg-white/[0.04] text-white/50 border border-white/10 hover:text-rose-300 hover:border-rose-400/30`}
                   >
-                    Revoke
+                    {revoking ? "Revoking…" : "Revoke"}
                   </button>
                 )}
               </div>

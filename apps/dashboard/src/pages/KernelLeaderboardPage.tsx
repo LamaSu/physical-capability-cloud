@@ -22,6 +22,7 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useCapabilities, useKernels } from "../api/hooks/use-pcc-data.js";
+import { UnavailableState } from "../components/LiveState.js";
 import {
   AssuranceScoreBadge,
   scoreToColor,
@@ -52,16 +53,12 @@ export function KernelLeaderboardPage() {
     );
   }, [setPageMeta]);
 
-  const { data: capabilitiesPage, isLoading: capsLoading } = useCapabilities({
+  const capabilitiesQ = useCapabilities({
     limit: 500,
   });
-  const { data: kernels = [], isLoading: kernelsLoading } = useKernels();
+  const kernelsQ = useKernels();
 
-  if (capsLoading || kernelsLoading) return <LoadingShell rows={6} />;
-
-  const capabilities = capabilitiesPage?.items ?? [];
-  const rows = buildLeaderboard(capabilities, kernels);
-
+  // Called before any early return: hooks must run in the same order on every render.
   const minScore = React.useMemo(() => {
     const raw = minScoreInput.trim();
     if (!raw) return null;
@@ -69,6 +66,28 @@ export function KernelLeaderboardPage() {
     if (!Number.isFinite(n)) return null;
     return n > 1 ? n / 100 : n;
   }, [minScoreInput]);
+
+  if (capabilitiesQ.isLoading || kernelsQ.isLoading) return <LoadingShell rows={6} />;
+
+  // A ranking built from a partial read would be a wrong ranking, so both reads must have data.
+  if (!capabilitiesQ.data || !kernelsQ.data) {
+    return (
+      <GlassPanel padding="lg">
+        <UnavailableState
+          what="the leaderboard"
+          error={capabilitiesQ.error ?? kernelsQ.error}
+          onRetry={() => {
+            void capabilitiesQ.refetch();
+            void kernelsQ.refetch();
+          }}
+        />
+      </GlassPanel>
+    );
+  }
+
+  const capabilities = capabilitiesQ.data.items ?? [];
+  const kernels = kernelsQ.data;
+  const rows = buildLeaderboard(capabilities, kernels);
 
   const filtered = minScore != null
     ? rows.filter((r) => r.avgScore != null && r.avgScore >= minScore)

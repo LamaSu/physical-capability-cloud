@@ -11,149 +11,33 @@ import type {
   CapabilityCertificate,
   RewardEpoch,
   DePINRewardClaim,
-  TreasuryBalance,
 } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store";
 import { useDePINStore } from "../stores/depin-store";
+import { NotLiveState, DemoBanner } from "../components/DemoState.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import {
+  DEMO_TREASURY,
+  DEMO_CERTIFICATES,
+  DEMO_REWARD_EPOCHS,
+  DEMO_REWARD_CLAIMS,
+} from "../demo/DePINDashboardPage.fixtures.js";
 
-// ── Mock Data ───────────────────────────────────────────────────
+/**
+ * DePIN Economics: treasury, capability certificates, reward epochs, claims.
+ *
+ * Not live. No gateway route serves real DePIN state: GET /api/treasury/summary,
+ * GET /api/certificates and GET /api/rewards/epochs return records written as
+ * literals in packages/gateway/src/routes/rewards.ts, and no route lists reward
+ * claims. This page used to load its own sample treasury, certificates, epochs
+ * and claims on every visit and show them as the network's. Outside demo mode
+ * it now says what is missing and requests nothing. In demo mode
+ * (lib/demo-mode.ts) the prototype renders sample values under a DemoBanner.
+ */
 
-const MOCK_TREASURY: TreasuryBalance = {
-  agentId: "broker-agent-001",
-  chain: "solana",
-  balances: [
-    { currency: "USDC", amount: "12450.00" },
-    { currency: "SOL", amount: "84.25" },
-  ],
-  totalUsdValue: "24780.50",
-  lastUpdated: new Date().toISOString(),
-};
-
-const MOCK_CERTIFICATES: CapabilityCertificate[] = [
-  {
-    id: "cnft_cert001",
-    kernelDid: "did:pcc:kernel:kernel-sovereign-001",
-    capabilityType: "fdm",
-    assuranceTier: 2,
-    metadata: { materials: ["PLA", "PETG"], maxBuildVolume: "250x210x210 mm" },
-    mintedAt: "2026-03-01T10:00:00Z",
-    soulbound: true,
-    status: "active",
-    merkleTree: "TreeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    leafIndex: 0,
-    assetId: "Assetcnftcert001aaa",
-  },
-  {
-    id: "cnft_cert002",
-    kernelDid: "did:pcc:kernel:kernel-midwest-002",
-    capabilityType: "cnc-3axis",
-    assuranceTier: 3,
-    metadata: { materials: ["Aluminum", "Steel"], toleranceSpecs: { xy: "+/-0.01mm" } },
-    mintedAt: "2026-02-20T14:30:00Z",
-    soulbound: true,
-    status: "active",
-    merkleTree: "TreeBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-    leafIndex: 1,
-    assetId: "Assetcnftcert002bbb",
-  },
-  {
-    id: "cnft_cert003",
-    kernelDid: "did:pcc:kernel:kernel-east-003",
-    capabilityType: "laser-cut",
-    assuranceTier: 1,
-    metadata: { materials: ["Acrylic", "MDF"] },
-    mintedAt: "2026-01-15T08:00:00Z",
-    soulbound: true,
-    status: "revoked",
-    merkleTree: "TreeCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
-    leafIndex: 2,
-    assetId: "Assetcnftcert003ccc",
-  },
-];
-
-const MOCK_EPOCHS: RewardEpoch[] = [
-  {
-    id: "epoch_e001",
-    epochNumber: 42,
-    startTime: "2026-03-01T00:00:00Z",
-    endTime: "2026-03-07T23:59:59Z",
-    totalRewards: "1000.000000",
-    status: "completed",
-    kernelScores: [
-      {
-        kernelId: "kernel-sovereign-001",
-        kernelDid: "did:pcc:kernel:kernel-sovereign-001",
-        jobsCompleted: 12,
-        qualityScore: 0.95,
-        uptimePercent: 99.2,
-        capabilityDiversity: 2,
-        scarcityBonus: 0.8,
-        totalScore: 0.8515,
-        rewardAmount: "520.123456",
-      },
-      {
-        kernelId: "kernel-midwest-002",
-        kernelDid: "did:pcc:kernel:kernel-midwest-002",
-        jobsCompleted: 8,
-        qualityScore: 0.88,
-        uptimePercent: 97.5,
-        capabilityDiversity: 1,
-        scarcityBonus: 0.4,
-        totalScore: 0.6342,
-        rewardAmount: "387.654321",
-      },
-      {
-        kernelId: "kernel-east-003",
-        kernelDid: "did:pcc:kernel:kernel-east-003",
-        jobsCompleted: 3,
-        qualityScore: 0.72,
-        uptimePercent: 85.0,
-        capabilityDiversity: 1,
-        scarcityBonus: 0.2,
-        totalScore: 0.3930,
-        rewardAmount: "92.222223",
-      },
-    ],
-  },
-  {
-    id: "epoch_e002",
-    epochNumber: 43,
-    startTime: "2026-03-08T00:00:00Z",
-    endTime: "2026-03-12T12:00:00Z",
-    totalRewards: "1000.000000",
-    status: "active",
-    kernelScores: [],
-  },
-];
-
-const MOCK_CLAIMS: DePINRewardClaim[] = [
-  {
-    id: "claim_c001",
-    kernelId: "kernel-sovereign-001",
-    epochId: "epoch_e001",
-    amount: "520.123456",
-    chain: "solana",
-    status: "claimed",
-    txHash: "5VERy...FaKe",
-    claimedAt: "2026-03-08T02:15:00Z",
-  },
-  {
-    id: "claim_c002",
-    kernelId: "kernel-midwest-002",
-    epochId: "epoch_e001",
-    amount: "387.654321",
-    chain: "solana",
-    status: "pending",
-  },
-  {
-    id: "claim_c003",
-    kernelId: "kernel-east-003",
-    epochId: "epoch_e001",
-    amount: "92.222223",
-    chain: "solana",
-    status: "failed",
-  },
-];
+const NOT_LIVE_DETAIL =
+  "The gateway's DePIN routes (GET /api/treasury/summary, /api/certificates and /api/rewards/epochs) " +
+  "return fixed sample records, not network state, and no route lists reward claims.";
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -179,62 +63,64 @@ function epochStatusColor(status: RewardEpoch["status"]): "green" | "gold" | "gr
 
 export function DePINDashboardPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const {
-    certificates,
-    epochs,
-    claims,
-    treasury,
-    selectedEpochId,
-    setCertificates,
-    setEpochs,
-    setClaims,
-    setTreasury,
-    selectEpoch,
-  } = useDePINStore();
 
   React.useEffect(() => {
     setPageMeta("DePIN Economics", "Capability certificates, reward epochs, and treasury");
   }, [setPageMeta]);
 
-  // Load mock data on mount
-  React.useEffect(() => {
-    setCertificates(MOCK_CERTIFICATES);
-    setEpochs(MOCK_EPOCHS);
-    setClaims(MOCK_CLAIMS);
-    setTreasury(MOCK_TREASURY);
-  }, [setCertificates, setEpochs, setClaims, setTreasury]);
+  if (!isDemoMode()) {
+    return (
+      <GlassPanel padding="lg">
+        <NotLiveState what="DePIN economics" detail={NOT_LIVE_DETAIL} hasDemo />
+      </GlassPanel>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <DemoBanner what="DePIN Economics" />
+      <DePINPrototype />
+    </div>
+  );
+}
+
+/** The prototype, rendered only in demo mode, over the sample values in demo/. */
+function DePINPrototype() {
+  const { selectedEpochId, selectEpoch } = useDePINStore();
+  const treasury = DEMO_TREASURY;
+  const certificates = DEMO_CERTIFICATES;
+  const epochs = DEMO_REWARD_EPOCHS;
+  const claims = DEMO_REWARD_CLAIMS;
 
   const selectedEpoch = epochs.find((e) => e.id === selectedEpochId);
 
   return (
-    <div className="space-y-6">
+    <>
       {/* Treasury Summary */}
-      {treasury && (
-        <div className="grid grid-cols-4 gap-4">
-          {treasury.balances.map((b) => (
-            <GlassPanel key={b.currency} padding="md">
-              <DataCell
-                label={`${b.currency} Balance`}
-                value={<AmountDisplay amount={b.amount} currency={b.currency} size="md" />}
-              />
-            </GlassPanel>
-          ))}
-          <GlassPanel padding="md" glow="green">
+      <div className="grid grid-cols-4 gap-4">
+        {treasury.balances.map((b) => (
+          <GlassPanel key={b.currency} padding="md">
             <DataCell
-              label="Total USD Value"
-              value={<AmountDisplay amount={treasury.totalUsdValue} currency="USD" size="md" />}
+              label={`${b.currency} Balance`}
+              value={<AmountDisplay amount={b.amount} currency={b.currency} size="md" />}
             />
           </GlassPanel>
-          <GlassPanel padding="md">
-            <DataCell
-              label="Settlement Chain"
-              value={treasury.chain.charAt(0).toUpperCase() + treasury.chain.slice(1)}
-              sub={`Updated ${new Date(treasury.lastUpdated).toLocaleTimeString()}`}
-              mono
-            />
-          </GlassPanel>
-        </div>
-      )}
+        ))}
+        <GlassPanel padding="md" glow="green">
+          <DataCell
+            label="Total USD Value"
+            value={<AmountDisplay amount={treasury.totalUsdValue} currency="USD" size="md" />}
+          />
+        </GlassPanel>
+        <GlassPanel padding="md">
+          <DataCell
+            label="Settlement Chain"
+            value={treasury.chain.charAt(0).toUpperCase() + treasury.chain.slice(1)}
+            sub={`Updated ${new Date(treasury.lastUpdated).toLocaleTimeString()}`}
+            mono
+          />
+        </GlassPanel>
+      </div>
 
       {/* Capability Certificates */}
       <div>
@@ -402,6 +288,6 @@ export function DePINDashboardPage() {
           ))}
         </div>
       </div>
-    </div>
+    </>
   );
 }
