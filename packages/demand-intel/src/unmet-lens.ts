@@ -8,7 +8,7 @@
  * demand to steer what gets funded:
  *
  *  - Only first-party capture event types are read. `intent.external_ingest`
- *    (caller-asserted envelopes from /api/intent/ingest) is never read.
+ *    (caller-asserted envelopes from /api/intents/ingest) is never read.
  *  - An intent counts only if the SERVER marked it unmet: the payload parses
  *    with `ServerCapturedDemandEnvelopeSchema`, `fulfillmentPath` is
  *    "unfulfilled" and `unmet` is non-empty.
@@ -22,18 +22,26 @@
  *    the envelope's `createdAt`.
  *  - Counting is exact (a Set), not HyperLogLog: the public k threshold must
  *    never be crossed on an estimate.
+ *  - A key's form must match its reason (`resolveCapabilityKey`): a CSD-shaped
+ *    key never stands for `no_capability_type`, and a caller-supplied
+ *    registered set can drop unregistered URIs.
  *  - Evidence classes come from the event type (`SERVER_CAPTURE_EVENT_CLASSES`).
  *    No capture point produces `funded` evidence yet; budget-backed demand
  *    (approved asset-outbound budgets, funded job offers) becomes `funded` only
  *    when the gateway emits it (D2).
  *
- * PRIVATE output. Only `toPublicOpportunityAggregate()` (@pcc/spec) may turn a
- * signal into anything that leaves the server.
+ * PRIVATE output. `compute()` takes any window for private analysis; a public
+ * release takes only `computeForPeriod()` output, because
+ * `toPublicOpportunityAggregate()` / `buildPublicRelease()` (@pcc/spec) refuse
+ * any window that is not exactly one closed release period.
  */
 
 import {
+  CAPABILITY_SLUG_PATTERN,
+  CSD_URI_PATTERN,
   ServerCapturedDemandEnvelopeSchema,
   KitDemandSignalSchema,
+  releasePeriodWindow,
   DEMAND_EVIDENCE_CLASSES,
   evidenceClassRank,
   type KitDemandSignal,
@@ -43,6 +51,7 @@ import {
   type BudgetBand,
   type UrgencyBand,
   type AssuranceTierKey,
+  type ReleasePeriod,
 } from "@pcc/spec";
 import type { IRepositories } from "@pcc/store";
 
@@ -56,8 +65,6 @@ export const SERVER_CAPTURE_EVENT_CLASSES: Readonly<Record<string, DemandEvidenc
   "intent.synthetic_query": "query",
 });
 
-const CSD_URI = /^pcc:\/\/capabilities\/[a-z0-9-]+\/v[0-9]+$/;
-const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 const COUNTRY = /^([A-Za-z]{2})(-[A-Za-z0-9]{1,3})?$/;
 
 /**
@@ -70,16 +77,25 @@ export function normalizeCountry(region: string | undefined): string {
 }
 
 /**
- * Map an unmet capability to a signal key. A type PCC knows must arrive as its
- * CSD URI (the capture point resolves it); only a type with no CSD at all
- * (`no_capability_type`) may arrive as a slug, and it becomes `proposed:<slug>`.
- * Anything else is unresolvable and is dropped (counted in diagnostics).
+ * Map an unmet capability to a signal key, checking the reason FIRST. A type
+ * with no CSD (`no_capability_type`) must arrive as a slug and becomes
+ * `proposed:<slug>`; a URI-shaped key with that reason is refused, so a
+ * requester-derived label cannot pose as a registered type. Every other reason
+ * must arrive as a CSD URI, which must be in `registeredCsdUris` when that set
+ * is given. Anything else is unresolvable and is dropped (counted in
+ * diagnostics).
  */
-export function resolveCapabilityKey(capabilityType: string, reason: UnmetReason): string | null {
-  if (CSD_URI.test(capabilityType)) return capabilityType;
-  const slug = capabilityType.trim().toLowerCase();
-  if (reason === "no_capability_type" && SLUG.test(slug)) return `proposed:${slug}`;
-  return null;
+export function resolveCapabilityKey(
+  capabilityType: string,
+  reason: UnmetReason,
+  registeredCsdUris?: ReadonlySet<string>,
+): string | null {
+  if (reason === "no_capability_type") {
+    return CAPABILITY_SLUG_PATTERN.test(capabilityType) ? `proposed:${capabilityType}` : null;
+  }
+  if (!CSD_URI_PATTERN.test(capabilityType)) return null;
+  if (registeredCsdUris !== undefined && !registeredCsdUris.has(capabilityType)) return null;
+  return capabilityType;
 }
 
 export interface UnmetLensOptions {
@@ -89,6 +105,8 @@ export interface UnmetLensOptions {
   to: string;
   /** Private priors keyed by capability key (CSD URI or proposed:<slug>) */
   priors?: ReadonlyMap<string, KitDemandPriorRef>;
+  /** When given, CSD URIs outside this set are dropped as unresolved */
+  registeredCsdUris?: ReadonlySet<string>;
   /** Clock for computedAt (injectable for deterministic tests) */
   now?: () => string;
 }
@@ -177,7 +195,7 @@ export class UnmetDemandLens {
 
         const keysInIntent = new Set<string>();
         for (const unmet of envelope.unmet) {
-          const key = resolveCapabilityKey(unmet.capabilityType, unmet.reason);
+          const key = resolveCapabilityKey(unmet.capabilityType, unmet.reason, options.registeredCsdUris);
           if (key === null) {
             diagnostics.unresolvedCapability++;
             continue;
@@ -268,5 +286,14 @@ export class UnmetDemandLens {
       signals.push(KitDemandSignalSchema.parse(candidate) as KitDemandSignal);
     }
     return { signals, diagnostics };
+  }
+
+  /**
+   * Compute over exactly one release period (a UTC calendar month, "YYYY-MM"):
+   * the only window a public release accepts.
+   */
+  computeForPeriod(period: ReleasePeriod, options: Omit<UnmetLensOptions, "from" | "to"> = {}): UnmetLensResult {
+    const { from, to } = releasePeriodWindow(period);
+    return this.compute({ ...options, from, to });
   }
 }

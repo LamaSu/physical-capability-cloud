@@ -5,9 +5,9 @@
  *   1. First-party intents (`DemandEnvelope`, `intent.*` events) — PRIVATE.
  *   2. Priors (desk research, external complaint corpora) — PRIVATE strategy data.
  *   3. Public opportunity aggregates — produced ONLY by
- *      `toPublicOpportunityAggregate()`: allow-listed fields, banded counts,
- *      suppressed below k distinct verified requesters at or above an evidence
- *      floor, over a window of at least MIN_WINDOW_DAYS.
+ *      `toPublicOpportunityAggregate()` / `buildPublicRelease()` under one fixed
+ *      release policy, for a closed UTC calendar month, for publisher-approved
+ *      CSD IDs only, labelled by period (never an activity date).
  *
  * This module holds types and pure functions. The data they describe is
  * private; no real record of it belongs in this public package or its tests.
@@ -17,6 +17,8 @@ import { sha256 as sha256Hash } from "@noble/hashes/sha256";
 import { canonicalize } from "../util/canonical.js";
 import type { SHA256 } from "./common.js";
 import {
+  CAPABILITY_SLUG_PATTERN,
+  CSD_URI_PATTERN,
   BudgetBandSchema,
   UnmetReasonSchema,
   UrgencyBandSchema,
@@ -111,10 +113,12 @@ export interface KitDemandSignal {
 
 // ── Schemas ──────────────────────────────────────────────────────
 
+/** The same key forms the lens emits: a CSD URI, or `proposed:` plus a no-CSD slug. */
 export const CapabilityKeySchema = z
   .string()
-  .regex(
-    /^(pcc:\/\/capabilities\/[a-z0-9-]+\/v[0-9]+|proposed:[a-z0-9-]+)$/,
+  .refine(
+    (k) =>
+      CSD_URI_PATTERN.test(k) || (k.startsWith("proposed:") && CAPABILITY_SLUG_PATTERN.test(k.slice("proposed:".length))),
     "Must be a CSD URI (pcc://capabilities/<slug>/v<N>) or proposed:<slug>",
   );
 
@@ -210,19 +214,35 @@ export const KitDemandSignalSchema = z
  * synchronous so projections and folds need not await.
  */
 export function kitDemandSignalDigest(signal: KitDemandSignal): SHA256 {
-  const parsed = KitDemandSignalSchema.parse(signal);
-  const bytes = sha256Hash(new TextEncoder().encode(canonicalize(parsed)));
-  return `sha256:${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}` as SHA256;
+  return canonicalDigest(KitDemandSignalSchema.parse(signal));
 }
 
 // ── Public projection ────────────────────────────────────────────
+//
+// PX-13 round-1 review (pack 10) showed that a stateless projection with
+// caller-chosen policy and windows is an oracle across calls. The public
+// release is therefore FIXED and PERIODIC:
+//   - one server-owned release policy: no caller-chosen k, floor or window
+//     (finding 1);
+//   - canonical, non-overlapping UTC calendar-month periods, released only
+//     after the period has closed (finding 2);
+//   - only capability IDs the publisher approved: registered CSD URIs, never a
+//     proposed or requester-derived label, and never an ID whose slug could
+//     carry a date, place code or counter (finding 3);
+//   - a period label, never an activity date (finding 4).
+// Releasing each period exactly once (a write-once ledger) and any
+// cross-release privacy budget belong to the publisher (kits, PX-13).
 
-/** No public aggregate may describe fewer distinct verified requesters than this. */
-export const MIN_PUBLIC_K = 5;
-/** No public aggregate may cover a window shorter than this many days. */
-export const MIN_WINDOW_DAYS = 30;
-/** The weakest evidence class a public aggregate may count. */
-export const MIN_PUBLIC_EVIDENCE_CLASS: DemandEvidenceClass = "authenticated_order";
+/** The fixed public release policy. Changing it is a code change, never a parameter. */
+export const PUBLIC_RELEASE_POLICY: Readonly<{ k: number; evidenceFloor: DemandEvidenceClass; graceMs: number }> =
+  Object.freeze({
+    /** Minimum distinct verified requesters at or above the evidence floor */
+    k: 5,
+    /** Only requesters whose strongest intent is at least this class are counted */
+    evidenceFloor: "authenticated_order",
+    /** A period becomes releasable only this long after it ends */
+    graceMs: 24 * 60 * 60 * 1000,
+  });
 
 export type DemandBand = "5-9" | "10-24" | "25-99" | "100+";
 
@@ -233,77 +253,165 @@ const BANDS: ReadonlyArray<readonly [number, DemandBand]> = [
   [5, "5-9"],
 ];
 
-export interface OpportunityAggregatePolicy {
-  /** Minimum distinct verified requesters (>= MIN_PUBLIC_K) */
-  k: number;
-  /** Count only requesters whose strongest intent is at or above this class (>= MIN_PUBLIC_EVIDENCE_CLASS) */
-  minEvidenceClass: DemandEvidenceClass;
-  /** Minimum window length in days (>= MIN_WINDOW_DAYS) */
-  minWindowDays: number;
+/** A UTC calendar month, "YYYY-MM" (2000-2099). */
+export type ReleasePeriod = string;
+
+const PERIOD_PATTERN = /^(20[0-9]{2})-(0[1-9]|1[0-2])$/;
+
+/** The exact window a signal must cover to be released for `period`. Throws if malformed. */
+export function releasePeriodWindow(period: ReleasePeriod): { from: string; to: string } {
+  const m = PERIOD_PATTERN.exec(period);
+  if (!m) throw new Error(`releasePeriodWindow: "${period}" is not a YYYY-MM period`);
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const start = Date.UTC(year, month - 1, 1);
+  const next = Date.UTC(year, month, 1);
+  return { from: new Date(start).toISOString(), to: new Date(next - 1).toISOString() };
 }
 
-export const DEFAULT_OPPORTUNITY_POLICY: Readonly<OpportunityAggregatePolicy> = Object.freeze({
-  k: MIN_PUBLIC_K,
-  minEvidenceClass: MIN_PUBLIC_EVIDENCE_CLASS,
-  minWindowDays: MIN_WINDOW_DAYS,
-});
+/** When `period` becomes releasable: its end plus the policy's grace. */
+function releaseOpensAtMs(period: ReleasePeriod): number {
+  return Date.parse(releasePeriodWindow(period).to) + 1 + PUBLIC_RELEASE_POLICY.graceMs;
+}
+
+/** True once `period` ended at least the policy's grace ago (by the server clock). */
+export function isReleasePeriodClosed(period: ReleasePeriod): boolean {
+  return Date.now() >= releaseOpensAtMs(period);
+}
+
+const PUBLIC_ID_PATTERN = /^pcc:\/\/capabilities\/([a-z0-9-]{1,40})\/v[0-9]{1,6}$/;
+
+/**
+ * Whether a capability ID may appear in a public release at all: a CSD URI
+ * whose slug has at most 40 characters, at most 3 hyphens and no run of 4 or
+ * more digits, so an approved ID cannot smuggle a date, place code or counter.
+ * This is defense in depth behind the publisher's approved set (kits, #3405);
+ * the publisher reuses it to exclude and privately log a failing ID.
+ */
+export function isPublishableCapabilityId(id: string): boolean {
+  const m = PUBLIC_ID_PATTERN.exec(id);
+  if (m === null) return false;
+  const slug = m[1]!;
+  return (slug.match(/-/g)?.length ?? 0) <= 3 && !/[0-9]{4}/.test(slug);
+}
+
+function assertReleasable(period: ReleasePeriod): { from: string; to: string } {
+  const bounds = releasePeriodWindow(period);
+  if (!isReleasePeriodClosed(period)) {
+    throw new Error(`public release: period ${period} has not closed; only closed periods are released`);
+  }
+  return bounds;
+}
 
 /** The only demand-intelligence shape that may leave the server. */
 export interface PublicOpportunityAggregate {
-  schema: "pcc.public-opportunity-aggregate.v0";
-  /** A CSD URI. Proposed types are strategy data and never public. */
+  schema: "pcc.public-opportunity-aggregate.v1";
+  /** A publisher-approved, registered CSD URI */
   capabilityType: string;
-  /** Banded distinct verified requesters at or above `countedEvidence`; never an exact count */
+  /** Banded distinct verified requesters at or above the fixed floor; never exact */
   demandBand: DemandBand;
-  /** The evidence floor the band counts (policy, not data) */
+  /** The fixed evidence floor the band counts (policy, not data) */
   countedEvidence: DemandEvidenceClass;
-  /** UTC day (YYYY-MM-DD) of the most recent unmet intent */
-  asOf: string;
+  /** The closed release period, e.g. "2026-09" */
+  period: ReleasePeriod;
 }
 
 /**
- * Project a private signal into the public aggregate, or return `null` when it
- * must stay private. Returns `null` for:
- *   - prior-only signals (priors are strategy, not demand anyone expressed);
- *   - `proposed:` keys;
- *   - a window shorter than `policy.minWindowDays`;
- *   - fewer than `policy.k` distinct verified requesters whose strongest intent
- *     is at or above `policy.minEvidenceClass`. Volume from one caller, or
- *     query-only demand, never makes a type public.
- * Throws on an invalid signal or on a policy weaker than the floors, so it
- * fails closed. k-anonymity is a privacy floor, not a Sybil control: until
- * R28/R29 bind keys to identity, only `funded` evidence costs a forger money.
+ * Project one private signal into the public aggregate for a closed release
+ * period, or return `null` when it must stay private: a key that is not in
+ * the publisher's approved set or fails `isPublishableCapabilityId` (so never
+ * `proposed:` or a CSD-shaped label), a prior-only signal, or fewer than the
+ * fixed k verified requesters at or above the fixed floor. Throws on misuse: a malformed or still-open period, a
+ * signal computed before that period closed or over any window other than
+ * exactly that period, or an invalid signal. There is no policy parameter by
+ * design.
  */
 export function toPublicOpportunityAggregate(
   signal: KitDemandSignal,
-  policy: OpportunityAggregatePolicy = DEFAULT_OPPORTUNITY_POLICY,
+  period: ReleasePeriod,
+  approvedCapabilityTypes: ReadonlySet<string>,
 ): PublicOpportunityAggregate | null {
-  if (!Number.isInteger(policy.k) || policy.k < MIN_PUBLIC_K) {
-    throw new Error(`toPublicOpportunityAggregate: policy.k must be an integer >= ${MIN_PUBLIC_K}`);
-  }
-  if (!DEMAND_EVIDENCE_CLASSES.includes(policy.minEvidenceClass)) {
-    throw new Error("toPublicOpportunityAggregate: unknown policy.minEvidenceClass");
-  }
-  if (evidenceClassRank(policy.minEvidenceClass) < evidenceClassRank(MIN_PUBLIC_EVIDENCE_CLASS)) {
-    throw new Error(`toPublicOpportunityAggregate: policy.minEvidenceClass must be at least ${MIN_PUBLIC_EVIDENCE_CLASS}`);
-  }
-  if (!Number.isFinite(policy.minWindowDays) || policy.minWindowDays < MIN_WINDOW_DAYS) {
-    throw new Error(`toPublicOpportunityAggregate: policy.minWindowDays must be >= ${MIN_WINDOW_DAYS}`);
-  }
+  const bounds = assertReleasable(period);
   const s = KitDemandSignalSchema.parse(signal);
-  if (s.capabilityKey.startsWith("proposed:")) return null;
+  if (Date.parse(s.computedAt) < releaseOpensAtMs(period)) {
+    throw new Error(`public release: signal computed at ${s.computedAt}, before period ${period} closed`);
+  }
+  if (
+    s.internal !== undefined &&
+    (Date.parse(s.internal.windowFrom) !== Date.parse(bounds.from) ||
+      Date.parse(s.internal.windowTo) !== Date.parse(bounds.to))
+  ) {
+    throw new Error(
+      `public release: signal window ${s.internal.windowFrom}..${s.internal.windowTo} is not release period ${period}`,
+    );
+  }
+  if (!isPublishableCapabilityId(s.capabilityKey)) return null;
+  if (!approvedCapabilityTypes.has(s.capabilityKey)) return null;
   if (s.internal === undefined) return null;
-  const windowDays = (Date.parse(s.internal.windowTo) - Date.parse(s.internal.windowFrom)) / 86_400_000;
-  if (windowDays < policy.minWindowDays) return null;
-  const n = s.internal.distinctVerifiedRequestersAtOrAbove[policy.minEvidenceClass];
-  if (n < policy.k) return null;
+  const n = s.internal.distinctVerifiedRequestersAtOrAbove[PUBLIC_RELEASE_POLICY.evidenceFloor];
+  if (n < PUBLIC_RELEASE_POLICY.k) return null;
   const band = BANDS.find(([floor]) => n >= floor);
   if (band === undefined) return null;
   return {
-    schema: "pcc.public-opportunity-aggregate.v0",
+    schema: "pcc.public-opportunity-aggregate.v1",
     capabilityType: s.capabilityKey,
     demandBand: band[1],
-    countedEvidence: policy.minEvidenceClass,
-    asOf: new Date(s.internal.lastSeen).toISOString().slice(0, 10),
+    countedEvidence: PUBLIC_RELEASE_POLICY.evidenceFloor,
+    period,
   };
+}
+
+/** One period's public release: the unit a publisher records once in a write-once ledger. */
+export interface PublicOpportunityRelease {
+  schema: "pcc.public-opportunity-release.v1";
+  period: ReleasePeriod;
+  policy: { k: number; evidenceFloor: DemandEvidenceClass };
+  /** `sha256:<hex>` over the sorted approved set the publisher supplied, so the release records its input */
+  approvedSetDigest: SHA256;
+  /** Qualifying aggregates only, sorted by capabilityType */
+  aggregates: PublicOpportunityAggregate[];
+  /** `sha256:<hex>` over the canonical JSON of every field above */
+  digest: SHA256;
+}
+
+/**
+ * Build the public release for a closed period from one signal per capability
+ * key. Signals that do not qualify are simply absent. Throws on a duplicate
+ * key or on any misuse `toPublicOpportunityAggregate` rejects. Deterministic:
+ * the same signals, period and approved set give the same release and digest.
+ */
+export function buildPublicRelease(
+  signals: readonly KitDemandSignal[],
+  period: ReleasePeriod,
+  approvedCapabilityTypes: ReadonlySet<string>,
+): PublicOpportunityRelease {
+  assertReleasable(period);
+  const seen = new Set<string>();
+  const aggregates: PublicOpportunityAggregate[] = [];
+  for (const signal of signals) {
+    if (seen.has(signal.capabilityKey)) {
+      throw new Error(`public release: more than one signal for ${signal.capabilityKey}`);
+    }
+    seen.add(signal.capabilityKey);
+    const aggregate = toPublicOpportunityAggregate(signal, period, approvedCapabilityTypes);
+    if (aggregate !== null) aggregates.push(aggregate);
+  }
+  aggregates.sort((a, b) => byString(a.capabilityType, b.capabilityType));
+  const body = {
+    schema: "pcc.public-opportunity-release.v1" as const,
+    period,
+    policy: { k: PUBLIC_RELEASE_POLICY.k, evidenceFloor: PUBLIC_RELEASE_POLICY.evidenceFloor },
+    approvedSetDigest: canonicalDigest([...approvedCapabilityTypes].sort(byString)),
+    aggregates,
+  };
+  return { ...body, digest: canonicalDigest(body) };
+}
+
+function byString(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function canonicalDigest(value: unknown): SHA256 {
+  const bytes = sha256Hash(new TextEncoder().encode(canonicalize(value)));
+  return `sha256:${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}` as SHA256;
 }
