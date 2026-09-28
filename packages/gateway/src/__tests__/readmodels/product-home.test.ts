@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES } from "@pcc/spec";
+import { HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES, RELEASE_DECIDED_MILESTONE_STATUSES } from "@pcc/spec";
 import {
   buildCapabilities,
   buildEscrowHeld,
@@ -146,6 +146,38 @@ describe("escrowHeld", () => {
     expect(h.unclassifiedMilestones).toBe(0);
   });
 
+  it("escrow #3356: legacy V3 EVIDENCED and ATTESTED milestones are held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "2", status: "evidenced" },
+        { escrowId: "e-usdc", amount: "3", status: "ATTESTED" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "5000000", milestones: 2 }]);
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("NEGATIVE (escrow #3356): a RELEASE_ALLOCATED milestone is an upper bound reported apart, never added to held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "4", status: "funded" },
+        { escrowId: "e-usdc", amount: "10", status: "release_allocated" },
+        { escrowId: "e-eur", amount: "1.50", status: "RELEASE_ALLOCATED" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "4000000", milestones: 1 }]);
+    expect(h.releaseDecided).toEqual({
+      bound: "at_most",
+      byCurrency: [
+        { currency: "EUR", decimals: 2, amountBaseUnits: "150", milestones: 1 },
+        { currency: "USDC", decimals: 6, amountBaseUnits: "10000000", milestones: 1 },
+      ],
+    });
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
   it("NEGATIVE: a mock escrow is excluded entirely, even with held milestones", () => {
     const h = buildEscrowHeld({ escrows, milestones: [{ escrowId: "e-mock", amount: "500", status: "funded" }] });
     expect(h.byCurrency).toEqual([]);
@@ -171,7 +203,10 @@ describe("escrowHeld", () => {
   it("the held and not-held word sets are disjoint and published in the DTO", () => {
     const held = new Set(HELD_MILESTONE_STATUSES);
     for (const w of NOT_HELD_MILESTONE_STATUSES) expect(held.has(w), w).toBe(false);
-    expect(buildEscrowHeld({ escrows: [], milestones: [] }).heldStatuses).toEqual(HELD_MILESTONE_STATUSES);
+    const empty = buildEscrowHeld({ escrows: [], milestones: [] });
+    expect(empty.heldStatuses).toEqual(HELD_MILESTONE_STATUSES);
+    expect(empty.releaseDecidedStatuses).toEqual(RELEASE_DECIDED_MILESTONE_STATUSES);
+    expect(empty.releaseDecided).toEqual({ byCurrency: [], bound: "at_most" });
   });
 });
 

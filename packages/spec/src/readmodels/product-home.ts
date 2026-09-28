@@ -12,7 +12,9 @@
  *                   not proof that any escrow lives there
  *   escrowHeld      sums of MILESTONE amounts in held states, per currency, mock escrows
  *                   excluded. Escrow totals are never summed: an active escrow can hold
- *                   released milestones. A record, not a chain read.
+ *                   released milestones. Challenge bonds are not milestone money and are
+ *                   never read. A decided but unpaid release is reported apart, as an
+ *                   upper bound (escrow #3356). A record, not a chain read.
  *
  * "Gateway reachable" is a client fact (this DTO arriving proves it), so it is not a field.
  * The served build commit is on GET /api/health (N5), which the StatusBar already reads.
@@ -22,15 +24,19 @@ import type { ExecutionPhase } from "./job-execution.js";
 export const PRODUCT_HOME_SCHEMA_ID = "pcc.product-home/v1" as const;
 
 /**
- * Milestone words (the gateway's escrow_milestones.status and the V-next state names) whose
- * funds are still HELD in escrow: committed, not released and not refunded. Anything else,
- * including an unrecognized word, is not counted as held; unrecognized words are counted
- * apart (`unclassifiedMilestones`) rather than guessed.
+ * Milestone words (the gateway's escrow_milestones.status, the legacy MilestoneEscrow V2/V3
+ * states and the V-next state names) whose FULL milestone amount is still HELD in escrow:
+ * committed, not released and not refunded. Confirmed by escrow (#3356): V-next 1-5 and
+ * REFUND_ALLOCATED (a single refund leg; nothing has moved); legacy V3 EVIDENCED and ATTESTED.
+ * Anything else, including an unrecognized word, is not counted as held; unrecognized words
+ * are counted apart (`unclassifiedMilestones`) rather than guessed.
  */
 export const HELD_MILESTONE_STATUSES: readonly string[] = Object.freeze([
   "FUNDED",
   "LOCKED",
   "EVIDENCE_SUBMITTED",
+  "EVIDENCED",
+  "ATTESTED",
   "RELEASING",
   "DISPUTED",
   "FUNDED_ACTIVE",
@@ -38,13 +44,23 @@ export const HELD_MILESTONE_STATUSES: readonly string[] = Object.freeze([
   "CHALLENGED",
   "BACKUP_PENDING",
   "BACKUP_ASSERTED",
-  "RELEASE_ALLOCATED",
   "REFUND_ALLOCATED",
 ]);
 
 /**
+ * Milestone words whose release is DECIDED but whose payout is outstanding. The unit still
+ * holds only its remaining job liability, which can be LESS than the milestone amount: the
+ * allocation pushes each payout leg and some can succeed before one fails (escrow #3356,
+ * VNextSettlementEscrow.sol:1451-1476). So these amounts are an upper bound, reported apart
+ * (`releaseDecided`) and never added to the held sum.
+ */
+export const RELEASE_DECIDED_MILESTONE_STATUSES: readonly string[] = Object.freeze(["RELEASE_ALLOCATED"]);
+
+/**
  * Milestone words whose funds are known NOT to be held (never funded, paid out or returned).
  * PENDING is what the paid-job flow writes for the milestones of an escrow it did not fund.
+ * SLASHED: resolveDispute transfers the amount back to the payer in the same transaction
+ * (escrow #3356), so no "slashed but held" state exists.
  */
 export const NOT_HELD_MILESTONE_STATUSES: readonly string[] = Object.freeze([
   "CREATED",
@@ -120,13 +136,20 @@ export interface ProductHomeHeldAmount {
 export interface ProductHomeEscrowHeld {
   state: "read";
   byCurrency: ProductHomeHeldAmount[];
-  /** Held milestones whose amount or currency could not be counted exactly. */
+  /**
+   * RELEASE_ALLOCATED milestones: the release is decided and the payout is outstanding. Each
+   * amount is an UPPER BOUND on what the unit still holds (a partly paid allocation holds
+   * less), so these are never added to `byCurrency`.
+   */
+  releaseDecided: { byCurrency: ProductHomeHeldAmount[]; bound: "at_most" };
+  /** Held or release-decided milestones whose amount or currency could not be counted exactly. */
   uncountedMilestones: number;
-  /** Milestones whose status word is neither held nor known-not-held. */
+  /** Milestones whose status word is neither held, release-decided nor known-not-held. */
   unclassifiedMilestones: number;
   /** Mock-settlement escrows left out entirely. */
   excludedSimulatedEscrows: number;
   heldStatuses: readonly string[];
+  releaseDecidedStatuses: readonly string[];
   source: "gateway_escrow_record";
   /** No chain read confirms these sums. */
   confirmation: "record_only";
