@@ -21,6 +21,10 @@
  * most importantly), and one unauthenticated or unbound bundle rejects the
  * whole set. At settlement this is the pinned set (LO-EV-9 R1).
  *
+ * Evaluate only what was hashed: every check below reads the verified
+ * canonical snapshots that binding returns — the JSON text `hashEvent`
+ * hashed, parsed back — never the caller's objects, whose getters or
+ * non-enumerable fields could answer differently from the hashed bytes.
  * Events are counted once: after binding proves each event's `hash` equals
  * hashEvent(event), hash identity is content identity, so a bundle uploaded
  * twice, or an event listed twice, cannot inflate a sample count.
@@ -76,8 +80,8 @@ import {
   evidenceLevelOfBundle,
   executingDeviceIds,
   meetsEvidenceLevel,
-  DEVICE_REPORTED_EVENT_TYPES,
-  INSPECTION_EVENT_TYPES,
+  deriveContradictions,
+  inspectionFailed,
   type EvidenceLevel,
 } from "./evidence-level.js";
 import { profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
@@ -141,15 +145,6 @@ export interface ProfileAdmissionInput {
 }
 
 const EVENT_TYPES = new Set<string>(EVIDENCE_EVENT_TYPES);
-const COMPLETION_TYPES = new Set<string>(DEVICE_REPORTED_EVENT_TYPES);
-const INSPECTION_TYPES = new Set<string>(INSPECTION_EVENT_TYPES);
-
-/** An inspection reporting its own negative verdict. No `passed` field claims no verdict. */
-function inspectionFailed(event: EvidenceEvent): boolean {
-  if (!INSPECTION_TYPES.has(event.type)) return false;
-  const passed = (event.payload as Record<string, unknown> | undefined)?.passed;
-  return passed !== undefined && passed !== true;
-}
 
 function result(
   decision: ProfileAdmissionDecision,
@@ -263,7 +258,9 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
       return reject("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
     }
-    for (const e of bundle.events as EvidenceEvent[]) {
+    // Evaluate only what was hashed: the verified canonical snapshots, never
+    // the caller's objects (a getter or non-enumerable field could differ).
+    for (const e of binding.events) {
       if (seen.has(e.hash)) continue;
       seen.add(e.hash);
       events.push(e);
@@ -279,17 +276,20 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   const findings: { decision: ProfileAdmissionDecision; reason: ProfileAdmissionReason }[] = [];
-  const completed = events.some((e) => COMPLETION_TYPES.has(e.type));
+  // Contradiction is evidence's one public rule, the same one the oracle signs
+  // rejects on (evidence-level.ts deriveContradictions); a failure with no
+  // completion is a device failure, judged here under onDeviceFailure.
+  const contradictions = deriveContradictions(events);
   const executionFailed = events.some((e) => e.type === "execution_failed");
   const failedInspections = events.filter(inspectionFailed).length;
   const failure = [
     ...(executionFailed ? ["execution_failed"] : []),
     ...(failedInspections > 0 ? [`${failedInspections} failed inspection(s)`] : []),
   ].join(" and ");
-  if (completed && failure) {
+  if (contradictions.length > 0) {
     findings.push({
       decision: policyDecision(profile.onContradiction),
-      reason: { code: "contradictory-evidence", detail: `the evidence reports completion and ${failure}` },
+      reason: { code: "contradictory-evidence", detail: `contradictions: ${contradictions.join(", ")}` },
     });
   } else if (failure) {
     findings.push({
