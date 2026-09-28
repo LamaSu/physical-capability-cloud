@@ -12,6 +12,8 @@ export * from "./accepted-plan-compiler.js";
 // bounded plain-JSON rules for a node's execution inputs and constraints.
 export * from "./canonical-plan.js";
 export * from "./plan-json.js";
+// R13 (ChatGPT review H1/M6): the sealed deal read back, strictly, by the reservation store.
+export * from "./sealed-deal.js";
 export * from "./document-print-and-mail.plan.js";
 // Builtin CSDs registered by the gateway's live registry (not loadBuiltinCsds)
 export * from "./builtins/dashboard-v1.js";
