@@ -11,6 +11,8 @@ import {
   evidenceLevelRank,
   executingDeviceIds,
   meetsEvidenceLevel,
+  deriveContradictions,
+  inspectionFailed,
   type EvidenceLevel,
 } from "../evidence/evidence-level.js";
 import { EVIDENCE_EVENT_TYPES, type EvidenceEvent, type EvidenceEventType } from "../types/evidence.js";
@@ -193,5 +195,46 @@ describe("evidence levels — fail closed", () => {
 
   it("an empty bundle proves no level", () => {
     expect(evidenceLevelOfBundle([])).toBeNull();
+  });
+});
+
+describe("deriveContradictions — the public contradiction rule the oracle signs rejects on (J4)", () => {
+  const done = () => ev("execution_completed", PRINTER);
+  const failed = () => ev("execution_failed", PRINTER);
+  const inspect = (passed: unknown) => ev("cv_inspection_result", CAMERA, passed === undefined ? {} : { passed });
+
+  it("completion with execution_failed is a contradiction", () => {
+    expect(deriveContradictions([done(), failed()])).toEqual(["completion-and-failure"]);
+  });
+
+  it("completion with an inspection reporting its own failure is a contradiction", () => {
+    expect(deriveContradictions([done(), inspect(false)])).toEqual(["completion-and-failed-inspection"]);
+    expect(deriveContradictions([done(), inspect("false")])).toEqual(["completion-and-failed-inspection"]);
+  });
+
+  it("both at once are both reported, in a fixed order", () => {
+    expect(deriveContradictions([inspect(false), failed(), done()])).toEqual([
+      "completion-and-failure",
+      "completion-and-failed-inspection",
+    ]);
+  });
+
+  it("a failure without a completion is a device failure, not a contradiction", () => {
+    expect(deriveContradictions([failed()])).toEqual([]);
+    expect(deriveContradictions([inspect(false)])).toEqual([]);
+  });
+
+  it("a passing or verdict-less inspection, and a non-inspection passed:false, contradict nothing", () => {
+    expect(deriveContradictions([done(), inspect(true)])).toEqual([]);
+    expect(deriveContradictions([done(), inspect(undefined)])).toEqual([]);
+    expect(deriveContradictions([done(), ev("temperature_log", PRINTER, { passed: false })])).toEqual([]);
+    expect(inspectionFailed(ev("temperature_log", PRINTER, { passed: false }))).toBe(false);
+  });
+
+  it("fabricated events prove no contradiction", () => {
+    const fakeFailure = ev("execution_failed", PRINTER, { mock: true });
+    const fakeCompletion = ev("execution_completed", PRINTER, {}, { simulated: true });
+    expect(deriveContradictions([done(), fakeFailure])).toEqual([]);
+    expect(deriveContradictions([fakeCompletion, failed()])).toEqual([]);
   });
 });

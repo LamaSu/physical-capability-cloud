@@ -28,7 +28,17 @@ interface StepEvidence {
   stepId: string;
   events: EvidenceEvent[];
   assuranceTier: AssuranceTier;
+  /** The escrow unit (milestone) and its challenge nonce, when the job names one. */
+  unit?: StepUnitContext;
 }
+
+/** `0x` + 64 lowercase hex each (LO-EV-9 unit binding). */
+export interface StepUnitContext {
+  settlementUnitId: string;
+  challengeNonce: string;
+}
+
+const UNIT_FIELD = /^0x[0-9a-f]{64}$/;
 
 export class EvidenceEmitter {
   private kernelId: string;
@@ -88,14 +98,22 @@ export class EvidenceEmitter {
     return this.lastIpfsResult;
   }
 
-  /** Register a job step to collect evidence for */
-  registerStep(jobId: string, stepId: string, assuranceTier: AssuranceTier): void {
+  /**
+   * Register a job step to collect evidence for. `unit` names the escrow
+   * settlement unit and its challenge nonce when the job has one; every event
+   * of the step then commits both (LO-EV-9).
+   */
+  registerStep(jobId: string, stepId: string, assuranceTier: AssuranceTier, unit?: StepUnitContext): void {
+    if (unit && !(UNIT_FIELD.test(unit.settlementUnitId) && UNIT_FIELD.test(unit.challengeNonce))) {
+      throw new Error("registerStep: settlementUnitId and challengeNonce must be 0x + 64 lowercase hex");
+    }
     const key = `${jobId}:${stepId}`;
     this.stepEvidence.set(key, {
       jobId,
       stepId,
       events: [],
       assuranceTier,
+      ...(unit ? { unit } : {}),
     });
   }
 
@@ -111,11 +129,36 @@ export class EvidenceEmitter {
       throw new Error(`No step registered for ${key}`);
     }
 
+    // Every event names its job, and its unit when the step has one, inside the
+    // hashed payload: LO-EV-9 and the oracle bind each event, not the bundle.
+    // An adapter may pre-fill a field, but never with another job or unit, and
+    // never with a unit the step was not given: the unit fields are reserved
+    // for the binding.
+    const payload: Record<string, unknown> = { ...((rawEvent.payload ?? {}) as Record<string, unknown>) };
+    const commit: Record<string, string> = {
+      jobId,
+      ...(stepEv.unit ? { settlementUnitId: stepEv.unit.settlementUnitId, challengeNonce: stepEv.unit.challengeNonce } : {}),
+    };
+    if (!stepEv.unit) {
+      for (const field of ["settlementUnitId", "challengeNonce"]) {
+        if (payload[field] !== undefined) {
+          throw new Error(`event payload.${field} is reserved for the step's unit, and this step has none`);
+        }
+      }
+    }
+    for (const [field, value] of Object.entries(commit)) {
+      if (payload[field] !== undefined && payload[field] !== value) {
+        throw new Error(`event payload.${field} ${String(payload[field])} does not match the step's ${value}`);
+      }
+      payload[field] = value;
+    }
+    const bound = { ...rawEvent, payload } as Omit<EvidenceEvent, "id" | "hash">;
+
     const id = ids.evidence();
-    const hash = await hashEvent(rawEvent);
+    const hash = await hashEvent(bound);
 
     const event: EvidenceEvent = {
-      ...rawEvent,
+      ...bound,
       id,
       hash,
     };

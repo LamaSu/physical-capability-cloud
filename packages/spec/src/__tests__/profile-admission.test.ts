@@ -16,6 +16,7 @@ import {
 import { computeMeasurementProfileDigest, type MeasurementProfileV1 } from "../evidence/measurement-profile.js";
 import { signingPreimage } from "../evidence/signing-preimage.js";
 import { hashBundle, hashEvent } from "../util/canonical.js";
+import { verifyEvidenceSubjectBinding } from "../evidence/subject-binding.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
 const JOB = "job-admission-1";
@@ -398,5 +399,38 @@ describe("profile admission — review #363 fixes (evidence #2777, probes P1-P3 
       const r = await admit(p, [await toBundle([...PRINTED, INSPECT({ passed: true }, version)])]);
       expect(r.decision).toBe(expected);
     }
+  });
+});
+
+describe("profile admission — evaluates only what was hashed (coord-watch rule, evidence #3079)", () => {
+  it("a getter that answered false to the hash cannot answer true to admission", async () => {
+    const b = await toBundle([...PILOT.slice(0, 2), { ...PILOT[2]!, payload: { passed: false } }]);
+    const payload = (b.events[2] as { payload: Record<string, unknown> }).payload;
+    // Measure how many times binding reads `passed`, so the lie starts exactly after binding.
+    let reads = 0;
+    Object.defineProperty(payload, "passed", { get: () => (reads++, false), enumerable: true, configurable: true });
+    const probe = await verifyEvidenceSubjectBinding({ bundleHash: b.bundleHash, events: b.events, subject: { jobId: JOB, kernelId: KERNEL } });
+    expect(probe.ok).toBe(true);
+    const readsDuringBinding = reads;
+    // Now: truthful (false, as hashed) for binding's reads, then true on every later read.
+    reads = 0;
+    Object.defineProperty(payload, "passed", {
+      get: () => reads++ >= readsDuringBinding,
+      enumerable: true,
+      configurable: true,
+    });
+    const r = await admit(inspectedPageProfile(), [b]);
+    expect(codes(r)).not.toContain("unbound-bundle");
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toContain("contradictory-evidence");
+    expect(r.qualifyingObservations).toBe(0);
+  });
+
+  it("contradictions come from evidence's deriveContradictions, named by kind", async () => {
+    const r = await admit(inspectedPageProfile(), [
+      await toBundle([...PILOT, { type: "execution_failed", t: 11, device: PRINTER, version: PRINTER_VERSION }]),
+    ]);
+    expect(r.reasons[0]).toMatchObject({ code: "contradictory-evidence" });
+    expect(r.reasons[0]!.detail).toContain("completion-and-failure");
   });
 });

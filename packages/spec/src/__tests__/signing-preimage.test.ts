@@ -191,10 +191,9 @@ describe("session-key delegation preimage", () => {
     expect(Array.from(sessionKeyDelegationPreimage({ ...SESSION, derivationPath: undefined }))).toEqual(
       Array.from(sessionKeyDelegationPreimage(SESSION)),
     );
-    // "" is defined, so it is included — matching the incumbent `!== undefined` rule
-    expect(new TextDecoder().decode(sessionKeyDelegationPreimage({ ...SESSION, derivationPath: "" }))).toContain(
-      '"derivationPath":""',
-    );
+    // An explicitly empty path is refused before any signature check (R20 round 2):
+    // the pre-contract gateway dropped it by truthiness, so it never verified there.
+    expect(codeOf(() => sessionKeyDelegationPreimage({ ...SESSION, derivationPath: "" }))).toBe("malformed-session-key");
   });
 
   it("does not depend on the caller's array order", () => {
@@ -256,6 +255,21 @@ describe("session-key delegation preimage", () => {
         codeOf(() => sessionKeyDelegationPreimage(bad({ scope: { ...SESSION.scope, contractIds: ["ok", 7] } }))),
       ).toBe("malformed-session-key");
       expect(codeOf(() => sessionKeyDelegationPreimage(bad({ derivationPath: 44 })))).toBe("malformed-session-key");
+      expect(codeOf(() => sessionKeyDelegationPreimage(bad({ derivationPath: null })))).toBe("malformed-session-key");
+    });
+
+    it("rejects sparse and prototype-backed scope arrays instead of serializing holes as null", () => {
+      const bad = (patch: Record<string, unknown>) => ({ ...SESSION, ...patch }) as Omit<SessionKey, "parentSignature">;
+      const sparse = ["job-a"];
+      sparse.length = 2; // a hole at index 1: every() would skip it and JSON.stringify would write null
+      expect(codeOf(() => sessionKeyDelegationPreimage(bad({ scope: { ...SESSION.scope, contractIds: sparse } })))).toBe(
+        "malformed-session-key",
+      );
+      const inherited = new Array<string>(1); // index 0 exists only on the prototype
+      Object.setPrototypeOf(inherited, Object.assign(Object.create(Array.prototype), { 0: "evidence_submit" }));
+      expect(
+        codeOf(() => sessionKeyDelegationPreimage(bad({ scope: { ...SESSION.scope, allowedActions: inherited } }))),
+      ).toBe("malformed-session-key");
     });
   });
 });
@@ -289,6 +303,34 @@ describe("cross-language goldens (packages/pcc-node/tests/goldens.json)", () => 
       expect(Buffer.from(preimage).toString("hex")).toBe(g.preimage_hex);
       expect(verifyHex(g.signer_public_key_hex, preimage, g.signature_hex)).toBe(true);
       expect(verifyHex(g.signer_public_key_hex, preimage, g.raw32_signature_hex)).toBe(false);
+    }
+  });
+
+  it("agrees with every accept/reject parity vector, decoding the JSON text itself", () => {
+    // The vectors are JSON TEXT: JSON.parse is part of the pinned boundary, so
+    // 1.0 and 1e2 are integers here exactly as json.loads' floats are in Python.
+    const outcome = (v: { kind: string; json: string }): string => {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(v.json);
+      } catch {
+        return "REJECT";
+      }
+      try {
+        if (v.kind === "revocation") {
+          return new TextDecoder().decode(sessionRevocationPreimage(parsed as never));
+        }
+        const { publicKeyHex, ...rest } = parsed as { publicKeyHex: unknown } & Record<string, unknown>;
+        const session = { ...rest, publicKey: parseEd25519PublicKeyHex(publicKeyHex) };
+        return new TextDecoder().decode(sessionKeyDelegationPreimage(session as never));
+      } catch (e) {
+        if (!(e instanceof SigningPreimageError)) throw e;
+        return "REJECT";
+      }
+    };
+    expect(goldens.parity_vectors.length).toBeGreaterThanOrEqual(27);
+    for (const v of goldens.parity_vectors) {
+      expect({ name: v.name, got: outcome(v) }).toEqual({ name: v.name, got: v.reject ? "REJECT" : v.preimage_utf8 });
     }
   });
 
