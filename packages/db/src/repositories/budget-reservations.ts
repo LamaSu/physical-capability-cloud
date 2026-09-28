@@ -1,35 +1,53 @@
 /**
  * R13: one-use, server-issued budget reservations (reconciliation row R13; MUST-CLOSE 7 and 8). The
- * schema is operator decision #2240, as amended by #2301 and #2302.
+ * schema is operator decision #2240, as amended by #2301, #2302 and #3231.
  *
  * A reservation is the payer's bounded authority for ONE accepted plan:
  *   - a principal (who may spend it);
  *   - a payer wallet;
  *   - a currency and an exact maximum in token base units;
  *   - a request, an expiry and an optional assurance floor.
- * It is consumed EXACTLY ONCE, in one atomic step that seals the accepted deal's digest.
+ * It is consumed EXACTLY ONCE, in one atomic step that seals the accepted deal.
  *
  * Exactness. SQLite has no numeric(78,0), so amounts are stored as canonical decimal TEXT (no sign,
- * no leading zeros, at most 78 digits) and compared as BigInt in application code, never in SQL and
- * never as a float.
+ * no leading zeros, positive, at most uint256) and compared as BigInt in application code, never in
+ * SQL and never as a float.
  *
  * Atomicity. `issue` and `consume` each run in ONE `BEGIN IMMEDIATE` transaction: the write lock is
  * taken before the row is read, so no other connection can interleave between the check and the
  * write. The final UPDATE is still conditional on `state = 'issued'`, and exactly one row must change.
  *
- * The consume never trusts a caller-carried digest for integrity: the caller (the gateway's consume
- * protocol) RECOMPUTES `acceptedDealDigest` from the compiled plan before calling it (the #351
- * consumer contract).
+ * Round 2 (the operator's ChatGPT review of 0b8adda9, DO-NOT-SHIP):
+ *   - H1. A child's parent-unit terms are never the caller's. `issue` takes only the parent id and the
+ *     unit reference; inside its transaction it reads the parent's stored sealed deal, checks that
+ *     it hashes to the sealed digest, parses it strictly (`parseSealedDeal`), finds that exact unit,
+ *     and derives its operator, net n and reclaimAt there. A child also fits its own request's ceiling.
+ *   - H2. Time is the store's own: one clock, injected at construction and read inside each
+ *     transaction; no caller passes `now`. And "expired" is a durable fact, not a clock reading:
+ *     before an issue lets an expired reservation stop counting against a ceiling, it moves that
+ *     reservation `issued -> expired` in the same transaction, and a consume that finds a reservation
+ *     expired records it too. Consume requires `issued`, so no clock, however skewed, can consume an
+ *     authority whose share has already been released.
+ *   - H3. `0004_budget_reservations.sql` is BUDGET_RESERVATIONS_DDL, statement for statement (a test
+ *     holds them equal), and `ensureBudgetReservationsSchema` refuses a table of another shape: an
+ *     empty one is rebuilt, one holding rows stops the boot.
+ *   - M5. The table refuses the states its invariants forbid: a zero or over-uint256 amount, a
+ *     consumed row without its digest, deal or time, an expiry not after creation, any update that is
+ *     not `issued -> consumed | expired | released`, any change to a term, any delete, and a child
+ *     inserted under a parent that is not consumed. SQL has no sha256, so the trusted readers
+ *     re-check sha256(stored deal) == stored digest.
+ *   - M6. The consume seals only a real deal. It parses the preimage strictly and takes the request,
+ *     reservation, currency, every payer, the obligation and the lowest tier FROM THE DEAL, checking
+ *     each against the row. A caller cannot pass those terms separately any more.
  *
- * The sealed deal itself is stored too (amendment #3231, steward conditions #3235). `consumed_deal_json`
- * holds the digest's own canonical PREIMAGE, so sha256(stored bytes) == consumed_deal_digest holds
- * literally, and the consume refuses otherwise. It holds every settlement term: each job's operator,
- * each unit's g/f/n, payouts and reclaimAt, and each node's planHash. MC 9 derives a parent unit's
- * terms from it. It is never part of the reservation object this store returns; only
- * `sealedDealPreimage` reads it, for server-side use (condition b).
+ * The sealed deal (amendment #3231, steward conditions #3235). `consumed_deal_json` holds the digest's
+ * own canonical PREIMAGE, so sha256(stored bytes) == consumed_deal_digest holds literally. It is never
+ * part of the reservation object this store returns; only `sealedDealPreimage` reads it, for
+ * server-side use (condition b).
  */
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
+import { MAX_SEALED_DEAL_BYTES, parseSealedDeal, type SealedDeal } from "@pcc/spec";
 
 export type BudgetReservationState = "issued" | "consumed" | "expired" | "released";
 
@@ -57,17 +75,11 @@ export interface BudgetReservation {
   consumedAt: number | null;
 }
 
-/** The terms of the parent unit a child reservation is carved from, read by the server from the parent's sealed deal. */
-export interface ParentUnitTerms {
+/** MC 9: which parent unit a child is carved from. Lookup keys only: the store derives every term. */
+export interface ParentUnitRef {
   reservationId: string;
-  /** The parent's `${jobId}#${milestoneIndex}`. */
+  /** The parent deal's `${jobId}#${milestoneIndex}`. */
   unit: string;
-  /** The parent unit's signing operator: the only principal a child may be issued to. */
-  operator: string;
-  /** The parent unit's net n, in exact base units: the most all its children may reserve together. */
-  netBaseUnits: bigint;
-  /** The parent unit's reclaimAt (unix seconds): no child may outlive it. */
-  reclaimAt: number;
 }
 
 export interface IssueReservationInput {
@@ -81,15 +93,15 @@ export interface IssueReservationInput {
   requestId: string;
   jobBinding?: string | null;
   minTier?: number | null;
-  expiresAt: number;
-  now: number;
+  /** Lifetime in seconds, from the store's own clock at issue. */
+  expiresInSec: number;
   /**
    * The request's immutable authorized ceiling in exact base units (#335 R-06), read by the server.
-   * Issued and consumed reservations for the request, plus this one, must fit under it.
+   * Every reservation of the request that still holds money, plus this one, must fit under it.
    */
   requestCeilingBaseUnits: bigint;
-  /** MC 9 (#2301): present for a child reservation. The request ceiling does not apply; the parent unit bounds it. */
-  parent?: ParentUnitTerms | null;
+  /** MC 9 (#2301): present for a child reservation. */
+  parent?: ParentUnitRef | null;
 }
 
 export type IssueRefusal =
@@ -98,8 +110,10 @@ export type IssueRefusal =
   | "over-request-ceiling"
   | "parent-not-found"
   | "parent-not-consumed"
-  | "parent-currency-mismatch"
+  | "parent-deal-corrupt"
+  | "parent-unit-not-found"
   | "child-principal-not-parent-operator"
+  | "parent-currency-mismatch"
   | "child-payer-is-parent-payer"
   | "over-parent-unit"
   | "child-outlives-parent-unit";
@@ -109,23 +123,17 @@ export type IssueResult = { ok: true; reservation: BudgetReservation } | { ok: f
 export interface ConsumeReservationInput {
   reservationId: string;
   principal: string;
-  requestId: string;
-  currency: string;
-  /** Every job's payer in the plan being sealed; each must equal the reservation's payer. */
-  payerAddresses: readonly string[];
-  /** Σ g over the plan's units, DERIVED from the units by the caller, in exact base units. */
-  obligationBaseUnits: bigint;
-  /** The plan's minimum unit tier, for the reservation's floor. */
-  minUnitTier: number;
-  /** `acceptedDealDigest` RECOMPUTED by the caller from the compiled plan. */
+  /** `acceptedDealDigest`, RECOMPUTED by the caller from the compiled plan (the #351 consumer contract). */
   dealDigest: string;
-  /** That digest's canonical preimage (#351 `acceptedDealPreimage`). It must hash to `dealDigest`, and it is stored. */
+  /** That digest's canonical preimage (#351 `acceptedDealPreimage`). It must hash to `dealDigest`, parse as a sealed deal for THIS reservation, and it is stored. */
   dealPreimage: string;
-  now: number;
 }
 
 export type ConsumeRefusal =
   | "invalid-input"
+  | "deal-preimage-mismatch"
+  | "invalid-deal"
+  | "wrong-reservation"
   | "not-found"
   | "wrong-principal"
   | "wrong-request"
@@ -134,46 +142,112 @@ export type ConsumeRefusal =
   | "not-issued"
   | "expired"
   | "over-reservation"
-  | "below-min-tier"
-  | "deal-preimage-mismatch";
+  | "below-min-tier";
 
 export type ConsumeResult = { ok: true; reservation: BudgetReservation } | { ok: false; reason: ConsumeRefusal };
 
-/** The runtime DDL. It is also run by `migrateDatabase` and mirrored in migrations/0004_budget_reservations.sql. */
-export const BUDGET_RESERVATIONS_DDL = `
-    CREATE TABLE IF NOT EXISTS budget_reservations (
-      id TEXT PRIMARY KEY,
-      principal TEXT NOT NULL,
-      payer_address TEXT NOT NULL,
-      currency TEXT NOT NULL,
+/** The largest uint256, as the decimal the SQL CHECK compares 78-digit amounts against. */
+const MAX_UINT256_DECIMAL = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+/** The table, once. SQLite stores it as `CREATE TABLE <this>`, which `ensureBudgetReservationsSchema` compares. */
+const TABLE = `budget_reservations (
+      id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+      principal TEXT NOT NULL CHECK (length(principal) BETWEEN 1 AND 128),
+      payer_address TEXT NOT NULL CHECK (length(payer_address) BETWEEN 1 AND 128),
+      currency TEXT NOT NULL CHECK (length(currency) BETWEEN 1 AND 128),
       max_amount_base_units TEXT NOT NULL
-        CHECK (max_amount_base_units NOT GLOB '*[^0-9]*' AND length(max_amount_base_units) BETWEEN 1 AND 78
-               AND (max_amount_base_units = '0' OR substr(max_amount_base_units, 1, 1) <> '0')),
-      purpose TEXT NOT NULL,
-      request_id TEXT NOT NULL,
-      job_binding TEXT,
-      min_tier INTEGER CHECK (min_tier IS NULL OR min_tier BETWEEN 0 AND 3),
+        CHECK (max_amount_base_units NOT GLOB '*[^0-9]*' AND substr(max_amount_base_units, 1, 1) <> '0'
+               AND (length(max_amount_base_units) BETWEEN 1 AND 77
+                    OR (length(max_amount_base_units) = 78 AND max_amount_base_units <= '${MAX_UINT256_DECIMAL}'))),
+      purpose TEXT NOT NULL CHECK (length(purpose) BETWEEN 1 AND 256),
+      request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
+      job_binding TEXT CHECK (job_binding IS NULL OR length(job_binding) BETWEEN 1 AND 128),
+      min_tier INTEGER CHECK (min_tier IS NULL OR (typeof(min_tier) = 'integer' AND min_tier BETWEEN 0 AND 3)),
       parent_reservation_id TEXT,
-      parent_unit TEXT,
+      parent_unit TEXT CHECK (parent_unit IS NULL OR length(parent_unit) BETWEEN 3 AND 300),
       expires_at INTEGER NOT NULL,
       state TEXT NOT NULL CHECK (state IN ('issued', 'consumed', 'expired', 'released')),
-      consumed_deal_digest TEXT,
-      consumed_deal_json TEXT CHECK (consumed_deal_json IS NULL OR length(CAST(consumed_deal_json AS BLOB)) <= 1048576),
+      consumed_deal_digest TEXT
+        CHECK (consumed_deal_digest IS NULL OR (length(consumed_deal_digest) = 66 AND substr(consumed_deal_digest, 1, 2) = '0x'
+               AND substr(consumed_deal_digest, 3) NOT GLOB '*[^0-9a-f]*')),
+      consumed_deal_json TEXT CHECK (consumed_deal_json IS NULL OR length(CAST(consumed_deal_json AS BLOB)) BETWEEN 2 AND ${MAX_SEALED_DEAL_BYTES}),
       created_at INTEGER NOT NULL,
-      consumed_at INTEGER,
+      consumed_at INTEGER CHECK (consumed_at IS NULL OR (typeof(consumed_at) = 'integer' AND consumed_at >= 0)),
+      CHECK (typeof(created_at) = 'integer' AND typeof(expires_at) = 'integer' AND created_at >= 0 AND expires_at > created_at),
       CHECK ((state = 'consumed') = (consumed_deal_digest IS NOT NULL)),
       CHECK ((state = 'consumed') = (consumed_deal_json IS NOT NULL)),
+      CHECK ((state = 'consumed') = (consumed_at IS NOT NULL)),
       CHECK ((parent_reservation_id IS NULL) = (parent_unit IS NULL))
-    );
+    )`;
+
+/**
+ * The runtime DDL: the table, its indexes and its guard triggers. `ensureBudgetReservationsSchema` runs
+ * it (so does `migrateDatabase`), and migrations/0004_budget_reservations.sql is this, statement for
+ * statement. The triggers hold no data, so they are dropped and recreated on every run.
+ */
+export const BUDGET_RESERVATIONS_DDL = `
+    CREATE TABLE IF NOT EXISTS ${TABLE};
     CREATE INDEX IF NOT EXISTS budget_reservations_request_idx ON budget_reservations(request_id, state);
     CREATE INDEX IF NOT EXISTS budget_reservations_parent_idx ON budget_reservations(parent_reservation_id, parent_unit);
+    DROP TRIGGER IF EXISTS budget_reservations_insert_guard;
+    CREATE TRIGGER budget_reservations_insert_guard BEFORE INSERT ON budget_reservations
+    WHEN NEW.state <> 'issued'
+      OR (NEW.parent_reservation_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM budget_reservations p WHERE p.id = NEW.parent_reservation_id AND p.state = 'consumed'))
+    BEGIN
+      SELECT RAISE(ABORT, 'budget_reservations: a reservation is inserted issued, and a child only under a consumed parent');
+    END;
+    DROP TRIGGER IF EXISTS budget_reservations_update_guard;
+    CREATE TRIGGER budget_reservations_update_guard BEFORE UPDATE ON budget_reservations
+    WHEN OLD.state <> 'issued' OR NEW.state = 'issued'
+      OR NEW.id IS NOT OLD.id OR NEW.principal IS NOT OLD.principal OR NEW.payer_address IS NOT OLD.payer_address
+      OR NEW.currency IS NOT OLD.currency OR NEW.max_amount_base_units IS NOT OLD.max_amount_base_units
+      OR NEW.purpose IS NOT OLD.purpose OR NEW.request_id IS NOT OLD.request_id OR NEW.job_binding IS NOT OLD.job_binding
+      OR NEW.min_tier IS NOT OLD.min_tier OR NEW.parent_reservation_id IS NOT OLD.parent_reservation_id
+      OR NEW.parent_unit IS NOT OLD.parent_unit OR NEW.expires_at IS NOT OLD.expires_at OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+      SELECT RAISE(ABORT, 'budget_reservations: only issued -> consumed, expired or released, and no term changes');
+    END;
+    DROP TRIGGER IF EXISTS budget_reservations_delete_guard;
+    CREATE TRIGGER budget_reservations_delete_guard BEFORE DELETE ON budget_reservations
+    BEGIN
+      SELECT RAISE(ABORT, 'budget_reservations: a reservation is never deleted');
+    END;
 `;
+
+const collapse = (sql: string) => sql.replace(/\s+/g, " ").trim();
+
+/**
+ * Create the table (idempotent) and refuse one of another shape (H3). `CREATE TABLE IF NOT EXISTS`
+ * would silently keep an older table, and a consume would then fail at runtime, so the stored
+ * definition is compared first: an empty table of another shape is rebuilt (the table has never
+ * shipped), and one that holds rows stops the boot for a deliberate migration (#2240).
+ */
+export function ensureBudgetReservationsSchema(sqlite: Database.Database): void {
+  const found = sqlite.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations'").get() as
+    | { sql: string }
+    | undefined;
+  if (found && collapse(found.sql) !== collapse(`CREATE TABLE ${TABLE}`)) {
+    const { n } = sqlite.prepare("SELECT count(*) AS n FROM budget_reservations").get() as { n: number };
+    if (n > 0) {
+      throw new Error(
+        "budget_reservations exists with a different definition from BUDGET_RESERVATIONS_DDL and holds rows: " +
+          "refusing to start a store its schema cannot back. Migrate it deliberately (operator decision #2240).",
+      );
+    }
+    sqlite.exec("DROP TABLE budget_reservations");
+  }
+  sqlite.exec(BUDGET_RESERVATIONS_DDL);
+}
 
 const BASE_UNITS = /^(0|[1-9][0-9]{0,77})$/;
 const DIGEST = /^0x[0-9a-fA-F]{64}$/;
-/** The largest sealed-deal preimage stored (condition c): 64 units' terms fit well inside it. */
-export const MAX_DEAL_PREIMAGE_BYTES = 1 << 20;
+/** The largest sealed-deal preimage stored (condition c). The parser also bounds units, legs and each unit. */
+export const MAX_DEAL_PREIMAGE_BYTES = MAX_SEALED_DEAL_BYTES;
+/** The longest reservation lifetime the store accepts (the issue route's own bound). */
+export const MAX_RESERVATION_LIFETIME_SEC = 7 * 24 * 3600;
 const TEXT_ID = /^[\x21-\x7e]{1,128}$/;
+const UNIT_REF = /^[\x21-\x7e]{1,296}#(0|[1-9][0-9]?)$/;
 const MAX_UINT256 = (1n << 256n) - 1n;
 
 function isId(x: unknown): x is string {
@@ -188,6 +262,7 @@ function isAmount(x: unknown): x is bigint {
 function isTier(x: unknown): x is number {
   return typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3;
 }
+const sha256Hex = (s: string) => `0x${createHash("sha256").update(s, "utf8").digest("hex")}`;
 
 interface Row {
   id: string;
@@ -207,6 +282,10 @@ interface Row {
   created_at: number;
   consumed_at: number | null;
 }
+
+/** The public columns: `consumed_deal_json` is never selected into a reservation. */
+const COLUMNS = `id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, job_binding, min_tier,
+  parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, created_at, consumed_at`;
 
 function decode(r: Row): BudgetReservation {
   if (!BASE_UNITS.test(r.max_amount_base_units)) throw new Error("budget_reservations: non-canonical amount in storage");
@@ -232,44 +311,76 @@ function decode(r: Row): BudgetReservation {
 
 const sum = (xs: readonly bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
-/**
- * The reservations that still hold money against a ceiling: consumed ones, and issued ones that have
- * not expired. An issued reservation past its expiry can never be consumed, so it must not keep its
- * share, even before any housekeeping marks it 'expired'. Binds one parameter: now.
- */
-const HOLDS_MONEY = "(state = 'consumed' OR (state = 'issued' AND expires_at > ?))";
+export interface BudgetReservationStoreOptions {
+  /** Unix seconds. Production: the host clock. Tests inject one. Read inside each transaction, never taken from a caller. */
+  clock?: () => number;
+}
 
 export class BudgetReservationStore {
-  constructor(private readonly sqlite: Database.Database) {}
+  private readonly clock: () => number;
 
-  /** Create the table if needed (idempotent). `migrateDatabase` also runs this DDL. */
+  constructor(
+    private readonly sqlite: Database.Database,
+    options: BudgetReservationStoreOptions = {},
+  ) {
+    this.clock = options.clock ?? (() => Date.now() / 1000);
+  }
+
+  /** Create the table if needed, refusing one of another shape (see `ensureBudgetReservationsSchema`). */
   ensureSchema(): void {
-    this.sqlite.exec(BUDGET_RESERVATIONS_DDL);
+    ensureBudgetReservationsSchema(this.sqlite);
+  }
+
+  /** The store's time, read inside the transaction that uses it. A clock that is not unix time is a wiring fault. */
+  private now(): number {
+    const t = Math.floor(this.clock());
+    if (!isUnix(t)) throw new TypeError("BudgetReservationStore: the clock must return unix seconds");
+    return t;
+  }
+
+  /** H2: expiry becomes durable before any decision relies on it. Scoped to the rows that decision counts. */
+  private expireDue(now: number, scope: string, params: readonly unknown[]): void {
+    this.sqlite.prepare(`UPDATE budget_reservations SET state = 'expired' WHERE state = 'issued' AND expires_at <= ? AND ${scope}`).run(now, ...params);
+  }
+
+  /** The stored sealed deal of a consumed reservation, integrity-checked and parsed; null when it is not a sealed deal. */
+  private sealedDealOf(reservationId: string): SealedDeal | null {
+    const r = this.sqlite
+      .prepare("SELECT consumed_deal_json AS j, consumed_deal_digest AS d FROM budget_reservations WHERE id = ? AND state = 'consumed'")
+      .get(reservationId) as { j: string | null; d: string | null } | undefined;
+    if (!r || r.j === null || r.d === null || sha256Hex(r.j) !== r.d) return null;
+    const parsed = parseSealedDeal(r.j);
+    return parsed.ok && parsed.deal.reservationId === reservationId ? parsed.deal : null;
   }
 
   /**
-   * The sealed deal's canonical preimage for a consumed reservation, or null. Server-side only (MC 9's
-   * parent terms, funding, VCR delivery). Never serve it on a public or non-party read path (#3235 b).
+   * The sealed deal's canonical preimage for a consumed reservation, or null when there is none.
+   * Server-side only (funding, VCR delivery). Never serve it on a public or non-party read path
+   * (#3235 b). Stored bytes that do not hash to the sealed digest, or are not a sealed deal for THIS
+   * reservation, are a fault, never returned.
    */
   sealedDealPreimage(reservationId: string): string | null {
     const r = this.sqlite
       .prepare("SELECT consumed_deal_json AS j FROM budget_reservations WHERE id = ? AND state = 'consumed'")
       .get(reservationId) as { j: string | null } | undefined;
-    return r?.j ?? null;
+    if (!r || r.j === null) return null;
+    if (!this.sealedDealOf(reservationId)) throw new Error("budget_reservations: a stored sealed deal does not hash to its digest or is not this reservation's deal");
+    return r.j;
   }
 
   findById(reservationId: string): BudgetReservation | null {
-    const r = this.sqlite.prepare("SELECT * FROM budget_reservations WHERE id = ?").get(reservationId) as Row | undefined;
+    const r = this.sqlite.prepare(`SELECT ${COLUMNS} FROM budget_reservations WHERE id = ?`).get(reservationId) as Row | undefined;
     return r ? decode(r) : null;
   }
 
   /**
    * Issue a reservation in ONE immediate transaction.
-   * - Top-level: the request's reservations that still hold money (consumed, or issued and unexpired),
-   *   plus this one, must fit the ceiling.
-   * - Child (MC 9): the parent must be consumed, in the same currency, and issued to the parent unit's
-   *   operator. All the unit's children together must fit its net n, and none may outlive the unit's
-   *   reclaimAt.
+   * - Every reservation of the request that still holds money (consumed, or issued and not expired),
+   *   plus this one, must fit the request's ceiling.
+   * - Child (MC 9): the parent must be consumed, and its sealed deal must hold the named unit. The unit's
+   *   operator, net n and reclaimAt come from that deal. The child is issued to that operator only, in
+   *   the parent's currency, never to the parent's payer; all the unit's children together fit n, none
+   *   outlives the unit, and the child's floor is at least the parent's.
    */
   issue(input: IssueReservationInput): IssueResult {
     const i = input;
@@ -277,48 +388,63 @@ export class BudgetReservationStore {
     if (
       !isId(i.reservationId) || !isId(i.principal) || !isId(i.payerAddress) || !isId(i.currency) || !isId(i.requestId) ||
       typeof i.purpose !== "string" || i.purpose.length === 0 || i.purpose.length > 256 ||
-      !isAmount(i.maxAmountBaseUnits) || !isUnix(i.now) || !isUnix(i.expiresAt) || i.expiresAt <= i.now ||
+      !isAmount(i.maxAmountBaseUnits) ||
+      !(Number.isSafeInteger(i.expiresInSec) && i.expiresInSec >= 1 && i.expiresInSec <= MAX_RESERVATION_LIFETIME_SEC) ||
       !(i.minTier === undefined || i.minTier === null || isTier(i.minTier)) ||
       !(i.jobBinding === undefined || i.jobBinding === null || isId(i.jobBinding)) ||
       typeof i.requestCeilingBaseUnits !== "bigint" || i.requestCeilingBaseUnits < 0n ||
-      (parent !== null && (!isId(parent.reservationId) || !isId(parent.unit) || !isId(parent.operator) ||
-        typeof parent.netBaseUnits !== "bigint" || parent.netBaseUnits < 0n || !isUnix(parent.reclaimAt)))
+      (parent !== null && (!isId(parent.reservationId) || typeof parent.unit !== "string" || !UNIT_REF.test(parent.unit)))
     ) {
       return { ok: false, reason: "invalid-input" };
     }
     const run = this.sqlite.transaction((): IssueResult => {
+      const now = this.now();
+      const expiresAt = now + i.expiresInSec;
       if (this.sqlite.prepare("SELECT 1 FROM budget_reservations WHERE id = ?").get(i.reservationId)) return { ok: false, reason: "duplicate-id" };
       let minTier = i.minTier ?? null;
-      if (parent === null) {
-        const held = (this.sqlite
-          .prepare(`SELECT max_amount_base_units AS a FROM budget_reservations WHERE request_id = ? AND parent_reservation_id IS NULL AND ${HOLDS_MONEY}`)
-          .all(i.requestId, i.now) as Array<{ a: string }>).map((r) => BigInt(r.a));
-        if (sum(held) + i.maxAmountBaseUnits > i.requestCeilingBaseUnits) return { ok: false, reason: "over-request-ceiling" };
-      } else {
+      let unitNet = 0n;
+      let unitReclaimAt = 0n;
+      if (parent !== null) {
+        // Identity first: until the principal is shown to be the unit's operator, every answer is one
+        // of the not-found family, which the route answers identically (no oracle on others' deals).
         const p = this.findById(parent.reservationId);
         if (!p) return { ok: false, reason: "parent-not-found" };
         if (p.state !== "consumed") return { ok: false, reason: "parent-not-consumed" };
+        const deal = this.sealedDealOf(parent.reservationId);
+        if (!deal) return { ok: false, reason: "parent-deal-corrupt" };
+        const unit = deal.units.find((u) => u.unitRef === parent.unit);
+        if (!unit) return { ok: false, reason: "parent-unit-not-found" };
+        if (unit.operator !== i.principal.toLowerCase()) return { ok: false, reason: "child-principal-not-parent-operator" };
         if (p.currency !== i.currency) return { ok: false, reason: "parent-currency-mismatch" };
-        if (parent.operator.toLowerCase() !== i.principal.toLowerCase()) return { ok: false, reason: "child-principal-not-parent-operator" };
         // Never the parent payer's credentials (#2301): the operator funds its subcontract from its own wallet.
         if (i.payerAddress.toLowerCase() === p.payerAddress.toLowerCase()) return { ok: false, reason: "child-payer-is-parent-payer" };
-        const siblings = (this.sqlite
-          .prepare(`SELECT max_amount_base_units AS a FROM budget_reservations WHERE parent_reservation_id = ? AND parent_unit = ? AND ${HOLDS_MONEY}`)
-          .all(parent.reservationId, parent.unit, i.now) as Array<{ a: string }>).map((r) => BigInt(r.a));
-        if (sum(siblings) + i.maxAmountBaseUnits > parent.netBaseUnits) return { ok: false, reason: "over-parent-unit" };
-        if (i.expiresAt > parent.reclaimAt) return { ok: false, reason: "child-outlives-parent-unit" };
+        unitNet = unit.n;
+        unitReclaimAt = unit.reclaimAt;
         // A child inherits the parent's assurance floor: max(parent's, its own) (#2302).
         if (p.minTier !== null) minTier = minTier === null ? p.minTier : Math.max(minTier, p.minTier);
+      }
+      this.expireDue(now, "request_id = ?", [i.requestId]);
+      const held = (this.sqlite
+        .prepare("SELECT max_amount_base_units AS a FROM budget_reservations WHERE request_id = ? AND state IN ('issued', 'consumed')")
+        .all(i.requestId) as Array<{ a: string }>).map((r) => BigInt(r.a));
+      if (sum(held) + i.maxAmountBaseUnits > i.requestCeilingBaseUnits) return { ok: false, reason: "over-request-ceiling" };
+      if (parent !== null) {
+        this.expireDue(now, "parent_reservation_id = ? AND parent_unit = ?", [parent.reservationId, parent.unit]);
+        const siblings = (this.sqlite
+          .prepare("SELECT max_amount_base_units AS a FROM budget_reservations WHERE parent_reservation_id = ? AND parent_unit = ? AND state IN ('issued', 'consumed')")
+          .all(parent.reservationId, parent.unit) as Array<{ a: string }>).map((r) => BigInt(r.a));
+        if (sum(siblings) + i.maxAmountBaseUnits > unitNet) return { ok: false, reason: "over-parent-unit" };
+        if (BigInt(expiresAt) > unitReclaimAt) return { ok: false, reason: "child-outlives-parent-unit" };
       }
       this.sqlite
         .prepare(
           `INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id,
-             job_binding, min_tier, parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, created_at, consumed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', NULL, ?, NULL)`,
+             job_binding, min_tier, parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, consumed_deal_json, created_at, consumed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', NULL, NULL, ?, NULL)`,
         )
         .run(
           i.reservationId, i.principal, i.payerAddress, i.currency, i.maxAmountBaseUnits.toString(), i.purpose, i.requestId,
-          i.jobBinding ?? null, minTier, parent?.reservationId ?? null, parent?.unit ?? null, i.expiresAt, i.now,
+          i.jobBinding ?? null, minTier, parent?.reservationId ?? null, parent?.unit ?? null, expiresAt, now,
         );
       return { ok: true, reservation: this.findById(i.reservationId)! };
     });
@@ -327,39 +453,46 @@ export class BudgetReservationStore {
 
   /**
    * Consume a reservation EXACTLY ONCE, in ONE immediate transaction.
-   * - Checks, against the stored row: principal, request, currency, every job's payer, issued and
-   *   unexpired, the obligation within the maximum, and the plan at or above the reservation's floor.
-   * - Then it seals `dealDigest`. The final UPDATE is conditional on `state = 'issued'`, and exactly
-   *   one row must change.
+   * - The preimage must hash to the digest and parse as a sealed deal FOR THIS reservation (M6).
+   * - Then, against the stored row: principal; the deal's request, currency and every payer; issued
+   *   and unexpired; the deal's obligation within the maximum; its lowest tier at or above the floor.
+   * - Then it seals the deal. The final UPDATE is conditional on `state = 'issued'`, and exactly one
+   *   row must change.
    */
   consume(input: ConsumeReservationInput): ConsumeResult {
     const c = input;
     if (
-      !isId(c.reservationId) || !isId(c.principal) || !isId(c.requestId) || !isId(c.currency) ||
-      !Array.isArray(c.payerAddresses) || c.payerAddresses.length === 0 || !c.payerAddresses.every(isId) ||
-      !isAmount(c.obligationBaseUnits) || !isTier(c.minUnitTier) || typeof c.dealDigest !== "string" || !DIGEST.test(c.dealDigest) || !isUnix(c.now) ||
-      typeof c.dealPreimage !== "string" || Buffer.byteLength(c.dealPreimage, "utf8") > MAX_DEAL_PREIMAGE_BYTES
+      !isId(c.reservationId) || !isId(c.principal) ||
+      typeof c.dealDigest !== "string" || !DIGEST.test(c.dealDigest) ||
+      typeof c.dealPreimage !== "string" || c.dealPreimage.length > MAX_DEAL_PREIMAGE_BYTES
     ) {
       return { ok: false, reason: "invalid-input" };
     }
     // Condition (a): the stored bytes must BE the sealed deal, i.e. its digest's own preimage.
-    if (`0x${createHash("sha256").update(c.dealPreimage, "utf8").digest("hex")}` !== c.dealDigest.toLowerCase()) {
-      return { ok: false, reason: "deal-preimage-mismatch" };
-    }
+    if (sha256Hex(c.dealPreimage) !== c.dealDigest.toLowerCase()) return { ok: false, reason: "deal-preimage-mismatch" };
+    const parsed = parseSealedDeal(c.dealPreimage);
+    if (!parsed.ok) return { ok: false, reason: "invalid-deal" };
+    const deal = parsed.deal;
+    if (deal.reservationId !== c.reservationId) return { ok: false, reason: "wrong-reservation" };
     const run = this.sqlite.transaction((): ConsumeResult => {
+      const now = this.now();
       const r = this.findById(c.reservationId);
       if (!r) return { ok: false, reason: "not-found" };
       if (r.principal !== c.principal) return { ok: false, reason: "wrong-principal" };
-      if (r.requestId !== c.requestId) return { ok: false, reason: "wrong-request" };
-      if (r.currency !== c.currency) return { ok: false, reason: "wrong-currency" };
-      if (!c.payerAddresses.every((p) => p.toLowerCase() === r.payerAddress.toLowerCase())) return { ok: false, reason: "wrong-payer" };
+      if (r.requestId !== deal.requestId) return { ok: false, reason: "wrong-request" };
+      if (r.currency !== deal.currency) return { ok: false, reason: "wrong-currency" };
+      if (!deal.payers.every((p) => p === r.payerAddress.toLowerCase())) return { ok: false, reason: "wrong-payer" };
+      if (r.state === "expired") return { ok: false, reason: "expired" }; // durably expired: no clock brings it back
       if (r.state !== "issued") return { ok: false, reason: "not-issued" };
-      if (r.expiresAt <= c.now) return { ok: false, reason: "expired" };
-      if (c.obligationBaseUnits > r.maxAmountBaseUnits) return { ok: false, reason: "over-reservation" };
-      if (r.minTier !== null && c.minUnitTier < r.minTier) return { ok: false, reason: "below-min-tier" };
+      if (r.expiresAt <= now) {
+        this.expireDue(now, "id = ?", [c.reservationId]);
+        return { ok: false, reason: "expired" };
+      }
+      if (deal.totalObligationBaseUnits > r.maxAmountBaseUnits) return { ok: false, reason: "over-reservation" };
+      if (r.minTier !== null && deal.minTier < r.minTier) return { ok: false, reason: "below-min-tier" };
       const changed = this.sqlite
         .prepare("UPDATE budget_reservations SET state = 'consumed', consumed_deal_digest = ?, consumed_deal_json = ?, consumed_at = ? WHERE id = ? AND state = 'issued'")
-        .run(c.dealDigest.toLowerCase(), c.dealPreimage, c.now, c.reservationId).changes;
+        .run(c.dealDigest.toLowerCase(), c.dealPreimage, now, c.reservationId).changes;
       if (changed !== 1) return { ok: false, reason: "not-issued" };
       return { ok: true, reservation: this.findById(c.reservationId)! };
     });

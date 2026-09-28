@@ -12,52 +12,47 @@
  *   - principal: the API gate's identity (`authenticatedPrincipal`), never a body field.
  *   - payer: the wallet bound to that principal (`payerFor`). A request's `requesterWallet` is caller
  *     data and is never used.
- *   - ceiling: the request's authorized ceiling, in EXACT base units of its currency
- *     (`requestCeiling`). It must be the principal's own request; another principal's request is a 404,
- *     exactly like a missing one.
- *   - id, issue time and expiry: server-generated; expiry is bounded.
+ *   - ceiling and floor: the request's own terms (`requestTerms`), read by the server: its authorized
+ *     ceiling in EXACT base units of its currency, and its assurance floor. It must be the principal's
+ *     own request; another principal's request is a 404, exactly like a missing one. The body's
+ *     `minTier` can only RAISE the request's floor, never lower it (R13 round 2, M4).
+ *   - id: server-generated. Issue time and expiry: the store's own clock plus the bounded lifetime
+ *     (round 2, H2); the route passes no time.
  * A body `reservationId`, `principal`, `payer` or `ceiling` is ignored.
  *
  * Gating. `/api/settlement/` is a money-path prefix: the scope checker default-denies its writes (after
  * WP-A, #326, a `settlement` or `admin` scope is required). On top, issue answers 503 and writes nothing
  * until EVERY production piece exists:
  *   - the reservation store (its table is operator decision #2240, PR #402);
- *   - an exact request ceiling. #335's `authorizedCeiling` is a JS number that defaults to 1000, so it is
- *     not usable as money authority until it is exact base units with no default;
+ *   - exact request terms. #335's `authorizedCeiling` is a JS number that defaults to 1000, so it is not
+ *     usable as money authority until it is exact base units with no default, and the requests table
+ *     stores no assurance floor yet;
  *   - the payer-wallet binding (gateway N1/N21).
  */
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { BudgetReservation, BudgetReservationStore, ParentUnitTerms } from "@pcc/store";
+import type { BudgetReservation, BudgetReservationStore } from "@pcc/store";
 import { authenticatedPrincipal } from "./agent-plans.js";
 
-/** The request's authorized ceiling, exact, for the principal who owns the request; null otherwise. */
-export type RequestCeiling = (requestId: string, principal: string) => { currency: string; ceilingBaseUnits: bigint } | null;
+/**
+ * The request's own terms, for the principal who owns the request; null otherwise. Server-held: the
+ * authorized ceiling in exact base units of the request's currency, and the request's assurance floor
+ * (0..3). Neither has a default.
+ */
+export type RequestTerms = (requestId: string, principal: string) => { currency: string; ceilingBaseUnits: bigint; minTier: number } | null;
 
 export interface ReservationIssueWiring {
   store: BudgetReservationStore;
-  requestCeiling: RequestCeiling;
+  requestTerms: RequestTerms;
   /** The paying wallet bound to the principal, or null when none is bound. */
   payerFor(principal: string): string | null;
-  /** Unix seconds. */
-  now(): number;
   /** A fresh server-side id. */
   newId(): string;
 }
 
-/**
- * MC 9: the terms of one unit of a SEALED parent deal, read by the server from where the sealed deal is
- * stored: its operator, its net n, and its reclaimAt. Null when the parent reservation or unit is unknown.
- * The sealed deal itself is not persisted yet (a proposed amendment to operator decision #2240), so
- * production answers 503.
- */
-export type ParentUnitResolver = (parentReservationId: string, unit: string) => ParentUnitTerms | null;
-
 export interface ReservationRouteOptions {
   /** Test injection. Production: `productionReservationWiring`. */
   wiring?: () => ReservationIssueWiring | { missing: string[] };
-  /** Test injection for MC 9 child issuance. Production: missing (no sealed-deal store yet). */
-  parentUnits?: () => ParentUnitResolver | { missing: string[] };
 }
 
 export const MIN_RESERVATION_TTL_SEC = 60;
@@ -69,14 +64,14 @@ export function productionReservationWiring(): { missing: string[] } {
   return {
     missing: [
       "reservation-store (R13; operator decision #2240, PR #402)",
-      "request-ceiling in exact base units, no default (#335's authorizedCeiling is a JS number defaulting to 1000)",
+      "request terms: an exact ceiling in base units and the request's assurance floor, no defaults (#335's authorizedCeiling is a JS number defaulting to 1000; requests store no floor)",
       "payer-wallet binding (gateway N1/N21)",
     ],
   };
 }
 
 /** The unit reference a child names: `${jobId}#${milestoneIndex}` of the parent's sealed deal. */
-const UNIT_REF = /^[\x21-\x7e]{1,300}#(0|[1-9][0-9]?)$/;
+const UNIT_REF = /^[\x21-\x7e]{1,296}#(0|[1-9][0-9]?)$/;
 
 /** A reservation as JSON: exact amounts as decimal strings. */
 function view(r: BudgetReservation) {
@@ -96,6 +91,17 @@ function view(r: BudgetReservation) {
     createdAt: r.createdAt,
     consumedAt: r.consumedAt,
   };
+}
+
+/**
+ * The effective assurance floor (M4): the request's own, which the body may only raise. A malformed
+ * server floor is a wiring fault, never a default.
+ */
+function effectiveFloor(requestFloor: unknown, bodyFloor: number | null): number {
+  if (typeof requestFloor !== "number" || !Number.isInteger(requestFloor) || requestFloor < 0 || requestFloor > 3) {
+    throw new TypeError("requestTerms returned a malformed assurance floor");
+  }
+  return bodyFloor === null ? requestFloor : Math.max(requestFloor, bodyFloor);
 }
 
 /** The issue body, read once into owned primitives; null when it is not a well-formed request. */
@@ -126,7 +132,6 @@ function readIssueBody(body: unknown):
 
 export async function reservationRoutes(app: FastifyInstance, opts: ReservationRouteOptions = {}): Promise<void> {
   const wiringOf = opts.wiring ?? productionReservationWiring;
-  const parentUnitsOf = opts.parentUnits ?? (() => ({ missing: ["sealed-deal store for parent unit terms (MC 9; proposed amendment to operator decision #2240)"] }));
 
   app.post("/api/settlement/reservations", async (req: FastifyRequest, reply: FastifyReply) => {
     const principal = authenticatedPrincipal(req);
@@ -136,12 +141,12 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
       if ("missing" in wiring) return reply.status(503).send({ error: "issue-not-wired", missing: [...wiring.missing] });
       const body = readIssueBody(req.body);
       if (body === null) return reply.status(400).send({ error: "malformed-body" });
-      const ceiling = wiring.requestCeiling(body.requestId, principal);
-      if (ceiling === null) return reply.status(404).send({ error: "request-not-found" }); // missing, or not this principal's
-      if (ceiling.currency !== body.currency) return reply.status(422).send({ error: "currency-mismatch" });
+      const terms = wiring.requestTerms(body.requestId, principal);
+      if (terms === null) return reply.status(404).send({ error: "request-not-found" }); // missing, or not this principal's
+      if (terms.currency !== body.currency) return reply.status(422).send({ error: "currency-mismatch" });
+      const minTier = effectiveFloor(terms.minTier, body.minTier);
       const payer = wiring.payerFor(principal);
       if (payer === null) return reply.status(409).send({ error: "no-payer-wallet" });
-      const now = Math.floor(wiring.now());
       const result = wiring.store.issue({
         reservationId: wiring.newId(),
         principal,
@@ -150,10 +155,9 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
         maxAmountBaseUnits: body.maxAmountBaseUnits,
         purpose: body.purpose,
         requestId: body.requestId,
-        minTier: body.minTier,
-        expiresAt: now + body.expiresInSec,
-        now,
-        requestCeilingBaseUnits: ceiling.ceilingBaseUnits,
+        minTier,
+        expiresInSec: body.expiresInSec,
+        requestCeilingBaseUnits: terms.ceilingBaseUnits,
       });
       if (!result.ok) {
         if (result.reason === "over-request-ceiling") return reply.status(409).send({ error: "over-request-ceiling" });
@@ -170,19 +174,23 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
   /**
    * MC 9 (#2301): a composite operator subcontracts part of a unit it was paid for. The child is funded
    * by its OWN wallet (never the parent payer's), is held by the parent unit's operator only, and all
-   * children of one unit fit that unit's net n and expire by its reclaimAt. The store enforces every
-   * bound in one immediate transaction. The child's request must be the operator's own, in the same
-   * currency. A principal who is not the parent unit's operator gets the same 404 as a missing parent,
-   * so the route is not an oracle for other principals' deals.
+   * children of one unit fit that unit's net n and expire by its reclaimAt.
+   *
+   * The route names only the parent id and the unit reference. The STORE derives every term of the
+   * unit (operator, n, reclaimAt) from the parent's sealed deal inside its immediate transaction, after
+   * checking the stored bytes against the sealed digest (R13 round 2, H1). The child's own request must
+   * be the operator's own, in the same currency; its ceiling and floor apply to the child too.
+   *
+   * No oracle: every answer of the not-found family (no parent, parent not sealed, no such unit, not the
+   * unit's operator, and a corrupt stored deal) is the SAME 404, and the store decides it before any
+   * answer that could reveal the parent's terms.
    */
   app.post("/api/settlement/reservations/:id/children", async (req: FastifyRequest, reply: FastifyReply) => {
     const principal = authenticatedPrincipal(req);
     if (principal === null) return reply.status(401).send({ error: "authentication-required" });
     try {
       const wiring = wiringOf();
-      const parentUnits = parentUnitsOf();
-      const missing = [...("missing" in wiring ? wiring.missing : []), ...("missing" in parentUnits ? parentUnits.missing : [])];
-      if (missing.length > 0 || "missing" in wiring || "missing" in parentUnits) return reply.status(503).send({ error: "issue-not-wired", missing });
+      if ("missing" in wiring) return reply.status(503).send({ error: "issue-not-wired", missing: [...wiring.missing] });
       const parentId = (req.params as { id?: unknown }).id;
       const raw: unknown = req.body;
       const unit = typeof raw === "object" && raw !== null ? (raw as { unit?: unknown }).unit : undefined;
@@ -190,21 +198,13 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
       if (body === null || typeof parentId !== "string" || typeof unit !== "string" || !UNIT_REF.test(unit)) {
         return reply.status(400).send({ error: "malformed-body" });
       }
-      const terms = parentUnits(parentId, unit);
-      // Only the parent unit's operator may carve a child. Anyone else gets exactly the missing-parent
-      // answer, BEFORE any other check, so no later answer can reveal that the parent exists. The store
-      // re-checks it atomically.
-      if (terms === null || terms.operator.toLowerCase() !== principal.toLowerCase()) {
-        return reply.status(404).send({ error: "parent-unit-not-found" });
-      }
-      // The child's own request: the operator's, in the same currency. Its ceiling does not bound a child;
-      // the parent unit does.
-      const request = wiring.requestCeiling(body.requestId, principal);
-      if (request === null) return reply.status(404).send({ error: "request-not-found" });
-      if (request.currency !== body.currency) return reply.status(422).send({ error: "currency-mismatch" });
+      // The child's own request: the principal's own, in the same currency. It says nothing about the parent.
+      const terms = wiring.requestTerms(body.requestId, principal);
+      if (terms === null) return reply.status(404).send({ error: "request-not-found" });
+      if (terms.currency !== body.currency) return reply.status(422).send({ error: "currency-mismatch" });
+      const minTier = effectiveFloor(terms.minTier, body.minTier);
       const payer = wiring.payerFor(principal);
       if (payer === null) return reply.status(409).send({ error: "no-payer-wallet" });
-      const now = Math.floor(wiring.now());
       const result = wiring.store.issue({
         reservationId: wiring.newId(),
         principal,
@@ -213,19 +213,23 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
         maxAmountBaseUnits: body.maxAmountBaseUnits,
         purpose: body.purpose,
         requestId: body.requestId,
-        minTier: body.minTier,
-        expiresAt: now + body.expiresInSec,
-        now,
-        requestCeilingBaseUnits: 0n,
-        parent: terms,
+        minTier,
+        expiresInSec: body.expiresInSec,
+        requestCeilingBaseUnits: terms.ceilingBaseUnits,
+        parent: { reservationId: parentId, unit },
       });
       if (!result.ok) {
         switch (result.reason) {
+          case "parent-deal-corrupt":
+            req.log.error({ parentId }, "reservations child issue: a stored sealed deal failed its integrity check");
+            return reply.status(404).send({ error: "parent-unit-not-found" }); // the same answer as the rest of the family
           case "parent-not-found":
+          case "parent-not-consumed":
+          case "parent-unit-not-found":
           case "child-principal-not-parent-operator":
             return reply.status(404).send({ error: "parent-unit-not-found" });
-          case "parent-not-consumed":
-            return reply.status(409).send({ error: "parent-deal-not-sealed" });
+          case "over-request-ceiling":
+            return reply.status(409).send({ error: "over-request-ceiling" });
           case "parent-currency-mismatch":
             return reply.status(422).send({ error: "currency-mismatch" });
           case "child-payer-is-parent-payer":

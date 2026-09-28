@@ -56,6 +56,10 @@ export { eq, and, or, sql, count, desc, asc } from "drizzle-orm";
 export {
   BudgetReservationStore,
   BUDGET_RESERVATIONS_DDL,
+  ensureBudgetReservationsSchema,
+  MAX_DEAL_PREIMAGE_BYTES,
+  MAX_RESERVATION_LIFETIME_SEC,
+  type BudgetReservationStoreOptions,
   type BudgetReservation,
   type BudgetReservationState,
   type ConsumeRefusal,
@@ -64,7 +68,7 @@ export {
   type IssueRefusal,
   type IssueReservationInput,
   type IssueResult,
-  type ParentUnitTerms,
+  type ParentUnitRef,
 } from "./repositories/budget-reservations.js";
 // Repository interfaces — the public contract for the data access layer
 export type { IRepositories } from "./interfaces/index.js";
