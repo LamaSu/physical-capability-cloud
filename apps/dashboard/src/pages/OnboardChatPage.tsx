@@ -82,6 +82,12 @@ interface ChatResponse {
   pendingActions?: PendingAction[];
   confirmedAction?: ConfirmedAction;
   revealedSecrets?: RevealedSecret[];
+  /**
+   * Set when a signed-in caller continued an anonymous conversation: the
+   * gateway continues it in a new conversation that caller owns (#381, WP-D
+   * round 4, L6). conversationId is then the new one.
+   */
+  forkedFrom?: string;
 }
 
 interface Message {
@@ -169,6 +175,23 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
     }
   }, [messages, busy]);
 
+  // Always continue in the conversation the gateway names. It is a new one
+  // when it forked this conversation for a signed-in caller.
+  const followConversation = useCallback((ok: ChatResponse) => {
+    if (typeof ok.conversationId !== "string" || !ok.conversationId) return;
+    setConversationId(ok.conversationId);
+    if (ok.forkedFrom) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "system",
+          text: "You're signed in, so this continues in a new conversation of your own. The earlier one stays as it was.",
+          ts: new Date().toISOString(),
+        },
+      ]);
+    }
+  }, []);
+
   const appendReply = useCallback((ok: ChatResponse) => {
     const assistantMsg: Message = {
       role: "assistant",
@@ -213,7 +236,7 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
           return;
         }
         const ok = body as ChatResponse;
-        if (!conversationId && ok.conversationId) setConversationId(ok.conversationId);
+        followConversation(ok);
         appendReply(ok);
 
         if (ok.needsApiKey) {
@@ -227,7 +250,7 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
         setBusy(false);
       }
     },
-    [busy, conversationId, chatFetch, appendReply],
+    [busy, conversationId, chatFetch, appendReply, followConversation],
   );
 
   // Confirm one held action: a single request, and the button stays disabled
@@ -259,6 +282,7 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
               ? { kind: "ran", status: confirmed.status, tool: confirmed.tool }
               : { kind: "unknown", reason: "The gateway answered without saying whether it ran. Check before confirming again." },
         }));
+        followConversation(ok);
         appendReply(ok);
       } catch (e) {
         setActionStates((prev) => ({
@@ -272,7 +296,7 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
         inFlight.current.delete(actionId);
       }
     },
-    [conversationId, actionStates, chatFetch, appendReply],
+    [conversationId, actionStates, chatFetch, appendReply, followConversation],
   );
 
   const handleSubmit = (e: React.FormEvent) => {

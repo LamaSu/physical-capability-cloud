@@ -138,6 +138,18 @@ describe("who the chat runs as", () => {
     expect(sent[1]!.body).toEqual({ conversationId: "conv-1", message: "Again" });
   });
 
+  it("follows the conversation the gateway names, including a fork (#381 L6)", async () => {
+    reply({ assistant: "Hi." });
+    reply({ assistant: "Continuing.", conversationId: "conv-2", forkedFrom: "conv-1" });
+    await render("agent");
+    await say("Hello");
+    await say("Again");
+    await say("Third");
+    expect(sent[1]!.body).toEqual({ conversationId: "conv-1", message: "Again" });
+    expect(sent[2]!.body).toEqual({ conversationId: "conv-2", message: "Third" });
+    expect(text()).toContain("continues in a new conversation of your own");
+  });
+
   it("public onboarding sends no key, even when someone is signed in", async () => {
     await render("onboard");
     await say("I run a print shop");
