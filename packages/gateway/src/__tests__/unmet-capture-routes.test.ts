@@ -9,8 +9,9 @@
  *     live supply, off the response path;
  *   - /api/intents/ingest always drops caller-asserted fulfillmentPath/unmet;
  *   - SEAM: events captured by the route feed @pcc/demand-intel's
- *     UnmetDemandLens, whose output projects to a public aggregate only at k
- *     PROVEN principals; key holders add volume, never breadth.
+ *     UnmetDemandLens, whose output reaches a public release only at k PROVEN
+ *     principals, for a closed period, for an approved CSD; key holders add
+ *     volume, never breadth.
  *
  * `req.provenWallet` is set by a test hook here: it stands for gateway's #326
  * follow-up, which binds a proven identity on the request.
@@ -20,7 +21,7 @@ import { readFileSync } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createStore } from "@pcc/store";
 import { UnmetDemandLens } from "@pcc/demand-intel";
-import { toPublicOpportunityAggregate, type AnalyticsEvent, type CSD } from "@pcc/spec";
+import { buildPublicRelease, type AnalyticsEvent, type CSD } from "@pcc/spec";
 import { requestRoutes, resetRequestsStore } from "../routes/requests.js";
 import { intentIngestRoutes, _clearIntentIngestCacheForTesting } from "../routes/intent-ingest.js";
 import { getCsdRegistry, resetCsdRegistry } from "../routes/csd.js";
@@ -209,7 +210,7 @@ describe("capture point A (POST /api/requests)", () => {
 
 describe("POST /api/intents/ingest drops caller-asserted server-only fields", () => {
   for (const flag of [undefined, "true"]) {
-    it(`strips fulfillmentPath and unmet (flag ${flag ?? "OFF"})`, async () => {
+    it(`strips fulfillmentPath, unmet and unmetTruncated (flag ${flag ?? "OFF"})`, async () => {
       if (flag) process.env.PCC_UNMET_CAPTURE_ENABLED = flag;
       const a = await app(key("op-ingest"), intentIngestRoutes);
       try {
@@ -227,6 +228,7 @@ describe("POST /api/intents/ingest drops caller-asserted server-only fields", ()
             createdAt: new Date().toISOString(),
             fulfillmentPath: "unfulfilled",
             unmet: [{ capabilityType: "pcc://capabilities/synthetic-widget/v1", reason: "no_kernel_offering", supplyCount: 0 }],
+            unmetTruncated: true,
           },
         });
         expect(res.statusCode).toBe(202);
@@ -234,6 +236,7 @@ describe("POST /api/intents/ingest drops caller-asserted server-only fields", ()
         expect(ev).toBeDefined();
         expect(ev!.payload).not.toHaveProperty("fulfillmentPath");
         expect(ev!.payload).not.toHaveProperty("unmet");
+        expect(ev!.payload).not.toHaveProperty("unmetTruncated");
         expect(ev!.payload).toMatchObject({ id: "intent-forged-1", source: "sdk" });
       } finally {
         await a.close();
@@ -242,15 +245,23 @@ describe("POST /api/intents/ingest drops caller-asserted server-only fields", ()
   }
 });
 
-describe("seam: route capture -> UnmetDemandLens -> public projection", () => {
-  async function lensFromCaptured() {
+describe("seam: route capture -> UnmetDemandLens -> public release", () => {
+  /**
+   * The lens reads rows by server timestamp and a public release takes only a
+   * closed calendar month, so captured events are re-timestamped into a
+   * period that closed long before now.
+   */
+  const PERIOD = "2026-08";
+  const IN_PERIOD = "2026-08-15T12:00:00.000Z";
+
+  async function releaseFromCaptured(approved: ReadonlySet<string> = new Set([LH_URI])) {
     const lensStore = createStore({ dbPath: ":memory:", seed: false });
     for (const ev of captured) {
       lensStore.repos.analytics.insertEvent({
         id: ev.id,
         eventType: ev.eventType,
         category: ev.category,
-        timestamp: ev.timestamp,
+        timestamp: IN_PERIOD,
         actorId: ev.actorId,
         actorType: ev.actorType,
         resourceType: ev.resourceType,
@@ -260,11 +271,8 @@ describe("seam: route capture -> UnmetDemandLens -> public projection", () => {
         previousHash: ev.previousHash ?? null,
       } as Parameters<typeof lensStore.repos.analytics.insertEvent>[0]);
     }
-    const now = Date.now();
-    return new UnmetDemandLens(lensStore.repos).compute({
-      from: new Date(now - 35 * 86_400_000).toISOString(),
-      to: new Date(now + 86_400_000).toISOString(),
-    });
+    const { signals } = new UnmetDemandLens(lensStore.repos).computeForPeriod(PERIOD);
+    return { signals, release: buildPublicRelease(signals, PERIOD, approved) };
   }
 
   it("counts distinct PROVEN principals and publishes the type only at k = 5", async () => {
@@ -274,50 +282,63 @@ describe("seam: route capture -> UnmetDemandLens -> public projection", () => {
     expect(await hasLiveSupply("liquid-handling")).toBe(false);
 
     for (const w of ["0xa1", "0xa2", "0xa3", "0xa4"]) await postRequest(proven(w));
-    let lh = (await lensFromCaptured()).signals.find((s) => s.capabilityKey === LH_URI);
+    let out = await releaseFromCaptured();
+    let lh = out.signals.find((s) => s.capabilityKey === LH_URI);
     expect(lh?.internal?.distinctVerifiedRequesters).toBe(4);
     expect(lh?.internal?.distinctVerifiedRequestersAtOrAbove.authenticated_order).toBe(4);
-    expect(toPublicOpportunityAggregate(lh!)).toBeNull();
+    expect(out.release.aggregates).toEqual([]);
 
     await postRequest(proven("0xa5"));
     await postRequest(proven("0xA5")); // the same wallet again adds volume, not breadth
-    lh = (await lensFromCaptured()).signals.find((s) => s.capabilityKey === LH_URI);
+    out = await releaseFromCaptured();
+    lh = out.signals.find((s) => s.capabilityKey === LH_URI);
     expect(lh?.internal?.unmetCount).toBe(6);
     expect(lh?.internal?.distinctVerifiedRequesters).toBe(5);
-    expect(toPublicOpportunityAggregate(lh!)).toMatchObject({
-      capabilityType: LH_URI,
-      demandBand: "5-9",
-      countedEvidence: "authenticated_order",
-    });
+    expect(out.release.aggregates).toEqual([
+      {
+        schema: "pcc.public-opportunity-aggregate.v1",
+        capabilityType: LH_URI,
+        demandBand: "5-9",
+        countedEvidence: "authenticated_order",
+        period: PERIOD,
+      },
+    ]);
+  });
+
+  it("keeps a qualifying registered type private until the publisher approves it", async () => {
+    process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
+    registerLiquidHandlingCsd();
+    for (const w of ["0xd1", "0xd2", "0xd3", "0xd4", "0xd5"]) await postRequest(proven(w));
+    expect((await releaseFromCaptured(new Set())).release.aggregates).toEqual([]);
+    expect((await releaseFromCaptured(new Set([LH_URI]))).release.aggregates.map((a) => a.capabilityType)).toEqual([LH_URI]);
   });
 
   it("API-key holders add volume but never breadth, so their demand never publishes", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
     registerLiquidHandlingCsd();
     for (let i = 1; i <= 9; i++) await postRequest(key(`op-${i}`));
-    const lh = (await lensFromCaptured()).signals.find((s) => s.capabilityKey === LH_URI);
+    const { signals, release } = await releaseFromCaptured();
+    const lh = signals.find((s) => s.capabilityKey === LH_URI);
     expect(lh?.internal?.unmetCount).toBe(9);
     expect(lh?.internal?.distinctVerifiedRequesters).toBe(0);
-    expect(toPublicOpportunityAggregate(lh!)).toBeNull();
+    expect(release.aggregates).toEqual([]);
   });
 
   it("flag OFF records no unmet demand at all, so the lens yields nothing", async () => {
     registerLiquidHandlingCsd();
     for (let i = 0; i < 6; i++) await postRequest(proven(`0xb${i}`), { ...LAB_REQUEST, requesterEmail: `buyer-${i}@example.com` });
-    const { signals } = await lensFromCaptured();
-    // Flag OFF: no unmet is recorded at all, so the lens yields no signals.
+    const { signals } = await releaseFromCaptured();
     expect(signals).toEqual([]);
   });
 
-  it("never publishes types without a CSD (proposed keys), whatever their breadth", async () => {
+  it("never publishes types without a CSD (proposed keys), whatever their breadth or approval", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
     for (const w of ["0xc1", "0xc2", "0xc3", "0xc4", "0xc5", "0xc6"]) await postRequest(proven(w));
-    const { signals } = await lensFromCaptured();
-    const proposed = signals.filter((s) => s.capabilityKey.startsWith("proposed:"));
+    const first = await releaseFromCaptured();
+    const proposed = first.signals.filter((s) => s.capabilityKey.startsWith("proposed:"));
     expect(proposed.length).toBeGreaterThan(0);
-    for (const s of proposed) {
-      expect(s.internal?.distinctVerifiedRequesters).toBe(6);
-      expect(toPublicOpportunityAggregate(s)).toBeNull();
-    }
+    for (const s of proposed) expect(s.internal?.distinctVerifiedRequesters).toBe(6);
+    const approvedProposed = new Set(proposed.map((s) => s.capabilityKey));
+    expect((await releaseFromCaptured(approvedProposed)).release.aggregates).toEqual([]);
   });
 });

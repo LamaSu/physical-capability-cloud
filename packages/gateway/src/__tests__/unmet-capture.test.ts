@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import type { FastifyRequest } from "fastify";
-import type { DemandEnvelope } from "@pcc/spec";
+import { UnmetCapabilitySchema, type DemandEnvelope } from "@pcc/spec";
 import {
   KEY_ACTOR_TYPE,
   MAX_MATCH_TYPES,
@@ -101,7 +101,7 @@ describe("intentActor", () => {
 
 describe("computeUnmet", () => {
   it("returns no unmet types when every type is served", async () => {
-    expect(await computeUnmet(["synthetic-widget"], { reads: reads({ "synthetic-widget": [live()] }, { "synthetic-widget": URI }) })).toEqual({ unmet: [], truncated: false });
+    expect(await computeUnmet(["synthetic-widget"], { reads: reads({ "synthetic-widget": [live()] }, { "synthetic-widget": URI }) })).toEqual({ unmet: [], truncated: false, unkeyed: 0 });
   });
 
   it("treats a type with live instances as served even when no CSD is registered", async () => {
@@ -137,7 +137,40 @@ describe("computeUnmet", () => {
 
   it("counts a type once however it is cased or repeated, and skips blanks", async () => {
     const out = await computeUnmet(["Gizmo", "gizmo", " ", "GIZMO"], { reads: reads({}) });
-    expect(out).toEqual({ unmet: [{ capabilityType: "gizmo", reason: "no_capability_type", supplyCount: 0 }], truncated: false });
+    expect(out).toEqual({ unmet: [{ capabilityType: "gizmo", reason: "no_capability_type", supplyCount: 0 }], truncated: false, unkeyed: 0 });
+  });
+
+  describe("keys must match their reason (PX-13 round-1 F3)", () => {
+    it("counts, but does not list, no_capacity or tier_too_high for a type with no CSD", async () => {
+      expect(await computeUnmet(["uncatalogued"], { reads: reads({ uncatalogued: [offline()] }) })).toEqual({ unmet: [], truncated: false, unkeyed: 1 });
+      expect(await computeUnmet(["uncatalogued"], { reads: reads({ uncatalogued: [live([0])] }), assuranceTier: 3 })).toEqual({ unmet: [], truncated: false, unkeyed: 1 });
+    });
+
+    it("counts, but does not list, a registered URL that is not a canonical CSD URI", async () => {
+      const r = reads({}, { odd: "https://example.invalid/csd/odd", upper: "pcc://capabilities/Upper/v1" });
+      expect(await computeUnmet(["odd", "upper"], { reads: r })).toEqual({ unmet: [], truncated: false, unkeyed: 2 });
+    });
+
+    it("counts, but does not list, a name that does not slugify or slugifies past 100 characters", async () => {
+      expect(await computeUnmet(["!!!", "a".repeat(150)], { reads: reads({}) })).toEqual({ unmet: [], truncated: false, unkeyed: 2 });
+    });
+
+    it("never lists a CSD-shaped key for a type with no CSD: an unregistered URI-like name becomes a slug", async () => {
+      const out = await computeUnmet(["pcc://capabilities/proposed-secret-us-ca-sf-20260910-123456/v1"], { reads: reads({}) });
+      expect(out?.unmet).toEqual([
+        { capabilityType: "pcc-capabilities-proposed-secret-us-ca-sf-20260910-123456-v1", reason: "no_capability_type", supplyCount: 0 },
+      ]);
+    });
+
+    it("lists only entries that pass UnmetCapabilitySchema", async () => {
+      const r = reads(
+        { a: [offline()], b: [live([1])], c: [] , d: [] },
+        { a: URI, b: "pcc://capabilities/synthetic-b/v1", c: "pcc://capabilities/synthetic-c/v2" },
+      );
+      const out = await computeUnmet(["a", "b", "c", "d", "e"], { reads: r, assuranceTier: 2 });
+      expect(out?.unmet.map((u) => u.reason)).toEqual(["no_capacity", "tier_too_high", "no_kernel_offering", "no_capability_type", "no_capability_type"]);
+      for (const u of out!.unmet) expect(UnmetCapabilitySchema.safeParse(u).success).toBe(true);
+    });
   });
 
   it(`matches at most ${MAX_MATCH_TYPES} distinct types and records the truncation`, async () => {
@@ -195,14 +228,20 @@ describe("withUnmet", () => {
   });
 
   it("marks a fully served intent auto, without an unmet list", () => {
-    const out = withUnmet(env, { unmet: [], truncated: false });
+    const out = withUnmet(env, { unmet: [], truncated: false, unkeyed: 0 });
     expect(out.fulfillmentPath).toBe("auto");
     expect("unmet" in out).toBe(false);
     expect("unmetTruncated" in out).toBe(false);
   });
 
+  it("marks unfulfilled without a list when every unmet type was unkeyed", () => {
+    const out = withUnmet(env, { unmet: [], truncated: false, unkeyed: 2 });
+    expect(out.fulfillmentPath).toBe("unfulfilled");
+    expect("unmet" in out).toBe(false);
+  });
+
   it("marks unmet types unfulfilled, carries the list, and records truncation", () => {
-    const out = withUnmet(env, { unmet, truncated: true });
+    const out = withUnmet(env, { unmet, truncated: true, unkeyed: 0 });
     expect(out.fulfillmentPath).toBe("unfulfilled");
     expect(out.unmet).toEqual(unmet);
     expect(out.unmetTruncated).toBe(true);

@@ -11,7 +11,7 @@
  *   - Per-operator rate limit (600 / minute = 10/sec sustained + surge).
  *   - Idempotency-Key header is honored — replays within IDEMPOTENCY_TTL_MS
  *     return the cached response, never re-emit the event.
- *   - Envelope is validated server-side against DemandEnvelopeSchema. The
+ *   - Envelope is validated server-side against CallerDemandEnvelopeSchema. The
  *     ingest layer is thin and never trusts client framing.
  *   - Emits an `intent.external_ingest` analytics event so the existing
  *     demand-intel aggregator folds external intents into the same snapshots
@@ -28,7 +28,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { DemandEnvelopeSchema, stripServerOnlyDemandFields, type DemandEnvelope } from "@pcc/spec";
+import { CallerDemandEnvelopeSchema, stripServerOnlyDemandFields, type DemandEnvelope } from "@pcc/spec";
 import { getEventBus } from "../services/event-bus.js";
 import { checkCallerRate } from "../middleware/security-hardening.js";
 
@@ -145,7 +145,7 @@ export async function intentIngestRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // ── 3. Validate envelope. ──────────────────────────────────────────
-    const parsed = DemandEnvelopeSchema.safeParse(req.body);
+    const parsed = CallerDemandEnvelopeSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
         error: "invalid_envelope",
@@ -153,10 +153,11 @@ export async function intentIngestRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
-    // fulfillmentPath and unmet are server-owned (R44). A caller must never be
-    // able to assert "unfulfilled" demand, so they are dropped here whatever
-    // the unmet-capture flag says.
-    const envelope = stripServerOnlyDemandFields(parsed.data) as DemandEnvelope;
+    // fulfillmentPath, unmet and unmetTruncated are server-owned (R44). A
+    // caller must never be able to assert "unfulfilled" demand: the caller
+    // schema has none of them, so zod drops them on parse whatever the
+    // unmet-capture flag says, and the strip is a second guard.
+    const envelope: DemandEnvelope = stripServerOnlyDemandFields(parsed.data as DemandEnvelope);
 
     // ── 4. Idempotency replay check. ───────────────────────────────────
     const rawKey = req.headers["idempotency-key"];

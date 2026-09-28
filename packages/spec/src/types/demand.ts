@@ -264,8 +264,8 @@ export const UnmetCapabilitySchema = z
   });
 
 /**
- * Remove the fields only the server may set (`fulfillmentPath`, `unmet`) from
- * an envelope that arrived from outside: `/api/intents/ingest`, the
+ * Remove the fields only the server may set (`fulfillmentPath`, `unmet`,
+ * `unmetTruncated`) from an envelope that arrived from outside: `/api/intents/ingest`, the
  * `@pcc/intent-collector` SDK, or any other caller. Anyone with an API key can
  * post those fields, so trusting them would let a single caller forge unmet
  * demand and steer what the kit bounties fund.
@@ -310,7 +310,7 @@ export const ServerCapturedDemandEnvelopeSchema = DemandEnvelopeSchema.extend({
 /**
  * Caller input (`/api/intents/ingest`, SDKs): the envelope WITHOUT any
  * server-only field. `fulfillmentPath` is omitted, and zod strips the unknown
- * `unmet` on parse, so a caller can never assert "unfulfilled" demand
+ * `unmet` and `unmetTruncated` on parse, so a caller can never assert "unfulfilled" demand
  * (PX-13 round-1 finding 5). `DemandEnvelopeSchema` keeps `fulfillmentPath`
  * for existing server-side consumers.
  */

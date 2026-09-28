@@ -13,7 +13,11 @@
  *        - "authenticated_key": any API-key holder. The key's operatorId is
  *          self-asserted at /api/auth/provision, so it is volume, not breadth.
  *   2. which requested capability types no live supply could serve
- *      (`fulfillmentPath` + `unmet`), keyed by CSD URI when a CSD exists.
+ *      (`fulfillmentPath` + `unmet`). Each listed entry passes
+ *      UnmetCapabilitySchema: a registered type is keyed only by its CSD URI,
+ *      a type with no CSD only as `no_capability_type` with a slug (PX-13
+ *      round-1 finding 3). An unmet type that cannot be keyed that way is
+ *      counted, not listed.
  *
  * Invariants: flag OFF emits exactly the previous events, synchronously; flag
  * ON computes off the response path, never throws into it, and is bounded
@@ -23,7 +27,7 @@
  */
 
 import type { FastifyRequest } from "fastify";
-import type { AnalyticsEvent, DemandEnvelope, UnmetCapability } from "@pcc/spec";
+import { UnmetCapabilitySchema, type AnalyticsEvent, type DemandEnvelope, type UnmetCapability, type UnmetReason } from "@pcc/spec";
 import type { CapabilityDTO } from "../facades/types.js";
 import { getCapabilityFacade } from "../facades/index.js";
 import { getCsdRegistry } from "../routes/csd.js";
@@ -190,13 +194,54 @@ export interface UnmetResult {
   unmet: UnmetCapability[];
   /** True when the intent named more than MAX_MATCH_TYPES distinct types */
   truncated: boolean;
+  /**
+   * Unmet types left off `unmet` because no key can match their reason: no
+   * capacity or tier for a type with no CSD, a registered URL that is not a
+   * canonical CSD URI, or a name that does not slugify.
+   */
+  unkeyed: number;
+}
+
+/**
+ * One type's verdict: `undefined` when live supply serves it, the unmet entry
+ * when it passes UnmetCapabilitySchema, or `null` when it is unmet but no key
+ * can match its reason.
+ */
+function unmetEntry(
+  type: string,
+  url: string | undefined,
+  caps: readonly SupplyCapability[],
+  tier: number | undefined,
+): UnmetCapability | null | undefined {
+  const live = caps.filter((c) => c.available && (c.kernelStatus === undefined || c.kernelStatus === "online"));
+  let reason: UnmetReason;
+  let supplyCount: number;
+  if (caps.length === 0) {
+    reason = url === undefined ? "no_capability_type" : "no_kernel_offering";
+    supplyCount = 0;
+  } else if (live.length === 0) {
+    reason = "no_capacity";
+    supplyCount = caps.length;
+  } else if (tier !== undefined && !live.some((c) => (c.assuranceTiers as number[]).includes(tier))) {
+    reason = "tier_too_high";
+    supplyCount = live.length;
+  } else {
+    return undefined;
+  }
+  const entry: UnmetCapability = {
+    capabilityType: reason === "no_capability_type" ? slugify(type) : (url ?? ""),
+    reason,
+    supplyCount,
+  };
+  return UnmetCapabilitySchema.safeParse(entry).success ? entry : null;
 }
 
 /**
  * Which requested types no live supply can serve. Live supply decides served
- * versus unmet; the CSD registry only decides the key (URI when a CSD exists,
- * else a kebab slug). At most `maxTypes` distinct types are matched. Returns
- * null when supply could not be read (so nothing is recorded). Never throws.
+ * versus unmet; the CSD registry only decides the key (its URI when a CSD
+ * exists, else a kebab slug). At most `maxTypes` distinct types are matched.
+ * Returns null when supply could not be read (so nothing is recorded). Never
+ * throws.
  */
 export async function computeUnmet(
   types: readonly string[],
@@ -215,26 +260,14 @@ export async function computeUnmet(
     }
     const truncated = distinct.length > maxTypes;
     const out: UnmetCapability[] = [];
+    let unkeyed = 0;
     for (const type of distinct.slice(0, maxTypes)) {
       const caps = await opts.reads.listByType(type);
-      const url = opts.reads.findUrlByType(type);
-      const key = url ?? slugify(type);
-      if (key === "") continue;
-      if (caps.length === 0) {
-        out.push({ capabilityType: key, reason: url ? "no_kernel_offering" : "no_capability_type", supplyCount: 0 });
-        continue;
-      }
-      const live = caps.filter((c) => c.available && (c.kernelStatus === undefined || c.kernelStatus === "online"));
-      if (live.length === 0) {
-        out.push({ capabilityType: key, reason: "no_capacity", supplyCount: caps.length });
-        continue;
-      }
-      const tier = opts.assuranceTier;
-      if (tier !== undefined && !live.some((c) => (c.assuranceTiers as number[]).includes(tier))) {
-        out.push({ capabilityType: key, reason: "tier_too_high", supplyCount: live.length });
-      }
+      const entry = unmetEntry(type, opts.reads.findUrlByType(type), caps, opts.assuranceTier);
+      if (entry === null) unkeyed++;
+      else if (entry !== undefined) out.push(entry);
     }
-    return { unmet: out, truncated };
+    return { unmet: out, truncated, unkeyed };
   } catch {
     return null;
   }
@@ -242,15 +275,16 @@ export async function computeUnmet(
 
 /**
  * Stamp the capture-time supply verdict on an envelope: "unfulfilled" with the
- * unmet list, "auto" when every matched type is served, unchanged when unknown.
+ * unmet list; "unfulfilled" without a list when every unmet type was unkeyed;
+ * "auto" when every matched type is served; unchanged when supply is unknown.
  * A truncated match is recorded as `unmetTruncated: true`.
  */
 export function withUnmet(envelope: DemandEnvelope, result: UnmetResult | null): DemandEnvelope {
   if (result === null) return envelope;
-  const stamped: DemandEnvelope =
-    result.unmet.length === 0
-      ? { ...envelope, fulfillmentPath: "auto" }
-      : { ...envelope, fulfillmentPath: "unfulfilled", unmet: result.unmet };
+  let stamped: DemandEnvelope;
+  if (result.unmet.length > 0) stamped = { ...envelope, fulfillmentPath: "unfulfilled", unmet: result.unmet };
+  else if (result.unkeyed > 0) stamped = { ...envelope, fulfillmentPath: "unfulfilled" };
+  else stamped = { ...envelope, fulfillmentPath: "auto" };
   return result.truncated ? { ...stamped, unmetTruncated: true } : stamped;
 }
 
