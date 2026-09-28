@@ -241,6 +241,25 @@ describe("gateway unreachable: the pages say so, and show nothing invented", () 
   });
 });
 
+describe("routes the pages must never read", () => {
+  it("no page reads the gateway's fabricated operator routes, /api/issues or the demo API", async () => {
+    const fetchMock = stubFetch({
+      ...SIGNED_IN,
+      "GET /api/onboard/registrations/reg-1": { status: 200, body: { registration: { id: "reg-1", name: "Bench printer MK4" } } },
+    });
+    for (const tab of ["overview", "approvals", "earnings", "certifications", "maintenance"] as const) {
+      act(() => useOperatorStore.setState({ activeTab: tab }));
+      await render(<OperatorDashboardPage />);
+    }
+    await render(machineDetail, "/operator/reg-1");
+    await render(<OperatorMobilePage />);
+    for (const tab of ["Photo", "Account", "My jobs"]) await click(button(tab));
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls.filter((u) => /\/api\/operator\/(machines|earnings|certifications|maintenance)\b|\/api\/issues\b|\/api\/demo\//.test(u))).toEqual([]);
+  });
+});
+
 describe("an account answer without a machines section", () => {
   const PARTIAL: Routes = {
     "GET /api/agent/me": { status: 200, body: { ok: true, as_of: NOW, identity: ME.identity, kernels: { count: null, items: [], unavailable: "db timeout" } } },
