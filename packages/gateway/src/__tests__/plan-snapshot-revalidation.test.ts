@@ -606,3 +606,92 @@ describe("round 4 (astra review of 9a6da15a): tenants, wiring, duplicates, recei
     });
   });
 });
+
+describe("round 5 (ChatGPT review of c48af89c): status allowlist, tenant ids, duplicate rows, one CSD mapping", () => {
+  const print = () => [claim({ nodeId: "print" })];
+
+  it("only an ONLINE kernel is available: offline, maintenance and expired are kernel-not-online; an unknown status is malformed", () => {
+    const cases = [
+      ["offline", "kernel-not-online"],
+      ["maintenance", "kernel-not-online"],
+      ["expired", "kernel-not-online"],
+      ["suspended", "operator-suspended"],
+      ["retired", "malformed-live-row"],
+      ["garbage", "malformed-live-row"],
+      ["", "malformed-live-row"],
+      ["ONLINE", "malformed-live-row"],
+    ] as const;
+    for (const [status, reason] of cases) {
+      const r = revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print" })], [{ id: "k-1", operatorAddress: OP, status }]));
+      expect([status, r.ok, only(r)]).toEqual([status, false, { nodeId: "print", status: "unavailable", reason }]);
+    }
+    expect(revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print" })])).ok).toBe(true); // "online"
+  });
+
+  it("an empty or malformed tenant is never a tenant: such an option sees public rows only, and a row scoped to one is visible to nobody", () => {
+    for (const tenantId of ["", " ", "a b", "x".repeat(129), null, undefined]) {
+      const r = revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print", tenantId: "" })]), { tenantId: tenantId as string | null });
+      expect([tenantId, only(r).status]).toEqual([tenantId, "missing"]);
+    }
+    expect(revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print" })]), { tenantId: "" }).ok).toBe(true); // public rows still visible
+    expect(only(revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print", tenantId: "a b" })]), { tenantId: "a b" })).status).toBe("missing");
+    expect(revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print", tenantId: "tenant-1" })]), { tenantId: "tenant-1" }).ok).toBe(true);
+  });
+
+  it("a requested capability id answered twice is a malformed answer in either order, never 'first wins'", () => {
+    const real = cap({ id: "cap-print" });
+    const cheap = cap({ id: "cap-print", pricing: { currency: "USDC", baseCost: "1.00", minimum: "1.00" } });
+    const foreign = cap({ id: "cap-print", tenantId: "tenant-2" });
+    const otherKernel = cap({ id: "cap-print", kernelId: "k-2" });
+    const broken = Object.defineProperty({ ...real }, "pricing", {
+      enumerable: true,
+      get() {
+        throw new Error("unreadable");
+      },
+    }) as LiveCapability;
+    for (const second of [cheap, foreign, otherKernel, broken]) {
+      for (const rows of [[real, second], [second, real]]) {
+        const r = revalidatePlanSnapshots(print(), { ...deps([]), loadCapabilities: () => rows });
+        expect(only(r)).toEqual({ nodeId: "print", status: "unavailable", reason: "malformed-live-row" });
+      }
+    }
+    // Only REQUESTED ids count: an unrequested id twice is ignored, as unrequested rows always were.
+    const extra = cap({ id: "cap-unasked" });
+    expect(revalidatePlanSnapshots(print(), { ...deps([]), loadCapabilities: () => [real, extra, extra] }).ok).toBe(true);
+  });
+
+  it("a kernel id answered twice (another operator, or another status) is a malformed answer in either order", () => {
+    const a = { id: "k-1", operatorAddress: OP, status: "online" };
+    for (const b of [
+      { id: "k-1", operatorAddress: OP2, status: "online" },
+      { id: "k-1", operatorAddress: OP, status: "suspended" },
+    ]) {
+      for (const rows of [[a, b], [b, a]]) {
+        const r = revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print" })], rows));
+        expect(only(r)).toEqual({ nodeId: "print", status: "unavailable", reason: "malformed-live-row" });
+      }
+    }
+  });
+
+  it("one call, one mapping: csdForType is asked once per type, so two nodes of one type share one CSD", () => {
+    let calls = 0;
+    const flip: RevalidationDeps = { ...deps([cap({ id: "cap-a" }), cap({ id: "cap-b" })]), csdForType: () => (++calls === 1 ? PRINT : "other-csd") };
+    const r = revalidatePlanSnapshots([claim({ nodeId: "a", capabilityId: "cap-a" }), claim({ nodeId: "b", capabilityId: "cap-b" })], flip);
+    expect(calls).toBe(1);
+    expect(r.verdicts.map((v) => (v.status === "current" ? v.resolved.csd : v.status))).toEqual([PRINT, PRINT]);
+  });
+
+  it("an overlong decimal is malformed before any BigInt work, in a claim and in a live row", () => {
+    const long = `1.${"0".repeat(99)}`; // 101 characters
+    expect(canonicalDecimal(long)).toBe(null);
+    expect(canonicalDecimal(`1.${"0".repeat(98)}`)).toBe("1"); // 100 characters is fine
+    expect(decimalToBaseUnits(`1${"0".repeat(100)}`, 6)).toBe(null);
+    expect(only(revalidatePlanSnapshots([claim({ nodeId: "print", price: long })], deps([cap({ id: "cap-print" })])))).toEqual({
+      nodeId: "print",
+      status: "invalid-claim",
+      reason: "malformed-price",
+    });
+    const live = revalidatePlanSnapshots(print(), deps([cap({ id: "cap-print", pricing: { currency: "USDC", baseCost: long } })]));
+    expect(only(live)).toEqual({ nodeId: "print", status: "unpriceable", reason: "malformed-price" });
+  });
+});

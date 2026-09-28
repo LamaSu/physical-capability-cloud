@@ -17,13 +17,25 @@
  *                  change since the quote, a different kernel. `diffs` names each field and `live`
  *                  is the re-quote. Never silently accepted: the caller re-submits against `live`.
  *  - missing       no such capability (or not visible to this tenant), or its kernel is gone.
- *  - unavailable   the operator is suspended or has no valid settlement address, or the live row is
- *                  malformed — including missing, empty or out-of-range tiers, which are NEVER
- *                  defaulted (a default would sell a tier the row does not offer).
+ *  - unavailable   the kernel is not "online" (suspended, offline, in maintenance or expired), the
+ *                  operator has no valid settlement address, or the live row is malformed — including
+ *                  an unknown kernel status, a requested id that a loader answers twice, and missing,
+ *                  empty or out-of-range tiers, which are NEVER defaulted (a default would sell a tier
+ *                  the row does not offer).
  *  - unpriceable   the live row has no exact flat price in a settleable currency.
  *  - incompatible  the capability's type maps to no CSD, so there is no evidence contract to settle
  *                  against.
  *  - invalid-claim the claim itself is malformed.
+ *
+ * Kernel eligibility is an ALLOWLIST: only "online" (the kernels table's status model is online,
+ * offline, maintenance and suspended, and the sweeper can set expired). Any other string is a
+ * malformed live row, never "available" (ChatGPT review of c48af89c).
+ *
+ * Tenants: the option must be a well-formed id, or the caller sees public rows only; a row's tenant
+ * must be a well-formed id, or the row is visible to nobody. An empty string is never a tenant.
+ *
+ * One call, one mapping: `csdForType` is called at most once per capability type, so two nodes of
+ * one type cannot resolve against two different CSDs.
  *
  * Price is compared EXACTLY, as canonical decimal strings, and the gross comes from the live decimal
  * STRING in base units. It never goes through the digest's `toFixed(2)` (blind to 6.504 vs 6.50)
@@ -156,7 +168,7 @@ export type NodeVerdict =
   | {
       nodeId: string;
       status: "unavailable";
-      reason: "operator-suspended" | "operator-address-invalid" | "malformed-tiers" | "malformed-live-row";
+      reason: "operator-suspended" | "kernel-not-online" | "operator-address-invalid" | "malformed-tiers" | "malformed-live-row";
     }
   | {
       nodeId: string;
@@ -199,13 +211,15 @@ export interface RevalidationResult {
 // ── Exact decimals ───────────────────────────────────────────────────────────────────────────────
 
 const DECIMAL = /^(0|[1-9][0-9]*)(?:\.([0-9]+))?$/;
+/** A price longer than this is malformed: it bounds the BigInt work, and no settleable price comes close. */
+export const MAX_DECIMAL_LENGTH = 100;
 
 /**
  * The canonical form of an exact non-negative decimal string, or null. "6.50" -> "6.5", "7.0" -> "7".
  * No sign, exponent, whitespace or leading zeros are accepted, so equal strings mean equal amounts.
  */
 export function canonicalDecimal(s: unknown): string | null {
-  if (typeof s !== "string") return null;
+  if (typeof s !== "string" || s.length > MAX_DECIMAL_LENGTH) return null;
   const m = DECIMAL.exec(s);
   if (!m) return null;
   const frac = (m[2] ?? "").replace(/0+$/, "");
@@ -214,6 +228,7 @@ export function canonicalDecimal(s: unknown): string | null {
 
 /** Exact base units of a canonical decimal at `decimals`; null when it is finer than one base unit. */
 export function decimalToBaseUnits(canonical: string, decimals: number): bigint | null {
+  if (canonical.length > MAX_DECIMAL_LENGTH) return null;
   const [whole, frac = ""] = canonical.split(".");
   if (frac.length > decimals) return null;
   return BigInt(whole!) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, "0") || "0");
@@ -365,13 +380,24 @@ function readTiers(x: unknown): number[] | null {
   return out;
 }
 
-/** Read one capability row once. An unattributable or unreadable row is null: it cannot be matched to a claim. */
-function readCapRow(raw: unknown): CapRow | null {
+/** What one row read yields: its id if that could be read (for the duplicate check), and the row if all of it could. */
+interface RowRead<T> {
+  id: string | null;
+  row: T | null;
+}
+
+/**
+ * Read one capability row once. An unattributable or unreadable row has no `row`: it cannot be matched
+ * to a claim. Its id is still reported when it could be read, so a broken second copy of a requested
+ * id makes the answer malformed instead of silently leaving the first copy in charge.
+ */
+function readCapRow(raw: unknown): RowRead<CapRow> {
+  let id: unknown = null;
   try {
-    if (typeof raw !== "object" || raw === null) return null;
+    if (typeof raw !== "object" || raw === null) return { id: null, row: null };
     const r = raw as Record<string, unknown>;
-    const id = leaf(r.id);
-    if (!isId(id)) return null;
+    id = leaf(r.id);
+    if (!isId(id)) return { id: null, row: null };
     const row: CapRow = { id, type: leaf(r.type), kernelId: leaf(r.kernelId), tenantId: leaf(r.tenantId), tiers: readTiers(r.assuranceTiers), pricing: null };
     const p = r.pricing;
     if (typeof p === "object" && p !== null) {
@@ -385,33 +411,43 @@ function readCapRow(raw: unknown): CapRow | null {
         perCm3: leaf(q.perCm3),
       });
     }
-    return row;
+    return { id, row };
   } catch {
-    return null; // tenant visibility is unknown, so it is reported exactly like a missing row
+    return { id: isId(id) ? id : null, row: null }; // tenant visibility is unknown, so it is reported exactly like a missing row
   }
 }
 
 /** Read one kernel row once. */
-function readKernelRow(raw: unknown): KernelRow | null {
+function readKernelRow(raw: unknown): RowRead<KernelRow> {
+  let id: unknown = null;
   try {
-    if (typeof raw !== "object" || raw === null) return null;
+    if (typeof raw !== "object" || raw === null) return { id: null, row: null };
     const r = raw as Record<string, unknown>;
-    const id = leaf(r.id);
-    if (!isId(id)) return null;
-    return { id, operatorAddress: leaf(r.operatorAddress), status: leaf(r.status) };
+    id = leaf(r.id);
+    if (!isId(id)) return { id: null, row: null };
+    return { id, row: { id, operatorAddress: leaf(r.operatorAddress), status: leaf(r.status) } };
   } catch {
-    return null;
+    return { id: isId(id) ? id : null, row: null };
   }
 }
 
-/** Read a loader's answer once. Null when it is not a readable list: the caller reports it as a malformed live answer. */
-function readRows<T>(answer: unknown, read: (raw: unknown) => T | null): T[] | null {
+/**
+ * Read a loader's answer once. Null when it is not a readable list, or when a REQUESTED id appears in it
+ * twice (the database's primary key makes that impossible, so the answer is broken): the caller reports
+ * either as a malformed live answer. Two copies are never resolved by order (ChatGPT review of c48af89c).
+ */
+function readRows<T>(answer: unknown, read: (raw: unknown) => RowRead<T>, requested: ReadonlySet<string>): T[] | null {
   try {
     const items = listOnce(answer, MAX_ROWS);
     if (!items) return null;
     const out: T[] = [];
+    const seen = new Set<string>();
     for (const raw of items) {
-      const row = read(raw);
+      const { id, row } = read(raw);
+      if (id !== null && requested.has(id)) {
+        if (seen.has(id)) return null;
+        seen.add(id);
+      }
       if (row) out.push(row);
     }
     return out;
@@ -487,9 +523,15 @@ export function revalidatePlanSnapshots(
   if (typeof loadCapabilities !== "function" || typeof loadKernels !== "function" || typeof csdForTypeFn !== "function") {
     throw new TypeError("revalidatePlanSnapshots: loadCapabilities, loadKernels and csdForType must be functions");
   }
-  const tenantId = typeof tenantRaw === "string" ? tenantRaw : null;
+  // Only a well-formed id is a tenant; anything else (including "") means public rows only.
+  const tenantId = isId(tenantRaw) ? tenantRaw : null;
   // Called with `deps` as the receiver, so method-style dependencies keep their `this`.
-  const csdForType = (type: string): unknown => Reflect.apply(csdForTypeFn as (t: string) => unknown, deps, [type]);
+  // At most ONE call per type per revalidation: two nodes of one type resolve against one mapping.
+  const csdMemo = new Map<string, unknown>();
+  const csdOf = (type: string): unknown => {
+    if (!csdMemo.has(type)) csdMemo.set(type, leaf(Reflect.apply(csdForTypeFn as (t: string) => unknown, deps, [type])));
+    return csdMemo.get(type);
+  };
 
   const verdicts: NodeVerdict[] = [];
   let read: unknown[] | null = null;
@@ -532,20 +574,20 @@ export function revalidatePlanSnapshots(
   const caps = new Map<string, CapRow>();
   const capIds = [...new Set(valid.map((c) => c.capabilityId))].sort();
   const requested = new Set(capIds);
-  const capRows = capIds.length > 0 ? readRows(Reflect.apply(loadCapabilities, deps, [capIds]), readCapRow) : [];
+  const capRows = capIds.length > 0 ? readRows(Reflect.apply(loadCapabilities, deps, [capIds]), readCapRow, requested) : [];
   for (const row of capRows ?? []) {
     if (requested.has(row.id) && !caps.has(row.id) && visibleTo(row, tenantId)) caps.set(row.id, row);
   }
   const kernels = new Map<string, KernelRow>();
   const kernelIds = [...new Set([...caps.values()].map((r) => r.kernelId).filter(isId))].sort();
-  const kernelRows = kernelIds.length > 0 ? readRows(Reflect.apply(loadKernels, deps, [kernelIds]), readKernelRow) : [];
+  const kernelRows = kernelIds.length > 0 ? readRows(Reflect.apply(loadKernels, deps, [kernelIds]), readKernelRow, new Set(kernelIds)) : [];
   for (const row of kernelRows ?? []) if (!kernels.has(row.id)) kernels.set(row.id, row);
 
   for (const c of valid) {
     if (capRows === null || (caps.has(c.capabilityId) && kernelRows === null)) {
       verdicts.push({ nodeId: c.nodeId, status: "unavailable", reason: "malformed-live-row" });
     } else {
-      verdicts.push(judge(c, caps.get(c.capabilityId), csdForType, kernels));
+      verdicts.push(judge(c, caps.get(c.capabilityId), csdOf, kernels));
     }
   }
 
@@ -553,17 +595,23 @@ export function revalidatePlanSnapshots(
   return { ok: verdicts.length > 0 && verdicts.every((v) => v.status === "current"), verdicts };
 }
 
-/** Public rows are visible to all; a scoped row only to its own tenant, compared as STRINGS (a malformed tenant matches nothing). */
+/**
+ * Public rows are visible to all; a scoped row only to its own tenant. A row tenant that is not a
+ * well-formed id ("" included) is scoped to nobody: visible to no caller, never public.
+ */
 function visibleTo(row: CapRow, tenantId: string | null): boolean {
   const t = row.tenantId;
   if (t === undefined || t === null) return true;
-  return typeof t === "string" && tenantId !== null && t === tenantId;
+  return isId(t) && tenantId !== null && t === tenantId;
 }
+
+/** The kernels table's status model (online, offline, maintenance, suspended) plus the sweeper's expired. */
+const KERNEL_STATUSES: ReadonlySet<string> = new Set(["online", "offline", "maintenance", "suspended", "expired"]);
 
 function judge(
   c: Claim,
   cap: CapRow | undefined,
-  csdForType: (type: string) => unknown,
+  csdOf: (type: string) => unknown,
   kernels: Map<string, KernelRow>,
 ): NodeVerdict {
   const nodeId = c.nodeId;
@@ -574,10 +622,12 @@ function judge(
   const kernel = kernels.get(kernelId);
   if (!kernel) return { nodeId, status: "missing", reason: "kernel-not-found" };
   const kernelStatus = kernel.status;
-  if (typeof kernelStatus !== "string") return { nodeId, status: "unavailable", reason: "malformed-live-row" };
-  const csd = leaf(csdForType(type));
+  // An allowlist, never "anything but suspended": an unknown status is a malformed live row.
+  if (typeof kernelStatus !== "string" || !KERNEL_STATUSES.has(kernelStatus)) return { nodeId, status: "unavailable", reason: "malformed-live-row" };
+  const csd = csdOf(type);
   if (!isId(csd)) return { nodeId, status: "incompatible", reason: "no-csd-for-type" };
   if (kernelStatus === "suspended") return { nodeId, status: "unavailable", reason: "operator-suspended" };
+  if (kernelStatus !== "online") return { nodeId, status: "unavailable", reason: "kernel-not-online" };
   const operator = kernel.operatorAddress;
   if (typeof operator !== "string" || !ADDRESS_PATTERN.test(operator) || operator.toLowerCase() === ZERO_ADDRESS) {
     return { nodeId, status: "unavailable", reason: "operator-address-invalid" };
