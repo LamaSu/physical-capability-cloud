@@ -143,11 +143,39 @@ function signingPreimage(digest) {
   return Buffer.from(digest, "utf8");
 }
 
+// The input domain (R20 round 2): non-negative safe integers taken by value,
+// dense string arrays, and a derivationPath that is absent or non-empty.
+const isUint = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+function isDenseStrings(v) {
+  if (!Array.isArray(v)) return false;
+  for (let i = 0; i < v.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(v, i) || typeof v[i] !== "string") return false;
+  }
+  return true;
+}
+const PUBLIC_KEY_HEX = /^(0[xX])?[0-9a-fA-F]{64}$/;
+
 function sessionKeyDelegationPreimage(sk) {
+  const ok =
+    sk !== null &&
+    typeof sk === "object" &&
+    typeof sk.sessionId === "string" &&
+    typeof sk.parentAgentId === "string" &&
+    typeof sk.publicKeyHex === "string" &&
+    PUBLIC_KEY_HEX.test(sk.publicKeyHex) &&
+    isUint(sk.issuedAt) &&
+    isUint(sk.expiresAt) &&
+    sk.scope !== null &&
+    typeof sk.scope === "object" &&
+    isDenseStrings(sk.scope.allowedActions) &&
+    isDenseStrings(sk.scope.contractIds) &&
+    isUint(sk.scope.maxSignatures) &&
+    (sk.derivationPath === undefined || (typeof sk.derivationPath === "string" && sk.derivationPath.length > 0));
+  if (!ok) throw new Error("malformed-session-key");
   const body = {
     sessionId: sk.sessionId,
     parentAgentId: sk.parentAgentId,
-    publicKey: sk.publicKeyHex,
+    publicKey: sk.publicKeyHex.replace(/^0[xX]/, "").toLowerCase(),
     issuedAt: sk.issuedAt,
     expiresAt: sk.expiresAt,
     scope: {
@@ -161,6 +189,9 @@ function sessionKeyDelegationPreimage(sk) {
 }
 
 function sessionRevocationPreimage(r) {
+  if (!(r !== null && typeof r === "object" && typeof r.sessionId === "string" && isUint(r.revokedAt) && typeof r.reason === "string")) {
+    throw new Error("malformed-revocation");
+  }
   return Buffer.from(JSON.stringify({ sessionId: r.sessionId, revokedAt: r.revokedAt, reason: r.reason }), "utf8");
 }
 
@@ -330,6 +361,70 @@ const goldens = {
     };
   }),
 };
+
+// --- Accept/reject parity vectors (R20 round 2) ------------------------------
+// Inputs are JSON TEXT, so each language decodes them with its own parser and
+// the decode boundary is part of what they pin: JSON.parse gives the same JS
+// number for 1, 1.0 and 1e0, so Python must take json.loads' 1.0 as 1. Each
+// vector states its intended outcome, and generation fails if the mirror
+// disagrees. Session keys travel as publicKeyHex.
+const REVOCATION_TEXT = (revokedAt) => '{"sessionId":"sess-001","revokedAt":' + revokedAt + ',"reason":"rotated"}';
+const SESSION_TEXT = JSON.stringify(SESSION_BASE);
+const sessionWith = (patch) => JSON.stringify({ ...SESSION_BASE, ...patch });
+const swap = (from, to) => {
+  if (!SESSION_TEXT.includes(from)) throw new Error("parity vector anchor missing: " + from);
+  return SESSION_TEXT.replace(from, to);
+};
+const PARITY_VECTORS = [
+  { name: "revocation_integer", kind: "revocation", accept: true, json: REVOCATION_TEXT("1727201000") },
+  { name: "revocation_integral_float", kind: "revocation", accept: true, json: REVOCATION_TEXT("1727201000.0") },
+  { name: "revocation_exponent", kind: "revocation", accept: true, json: REVOCATION_TEXT("1.727201e9") },
+  { name: "revocation_negative_zero", kind: "revocation", accept: true, json: REVOCATION_TEXT("-0.0") },
+  { name: "revocation_max_safe", kind: "revocation", accept: true, json: REVOCATION_TEXT("9007199254740991") },
+  { name: "revocation_fraction", kind: "revocation", accept: false, json: REVOCATION_TEXT("1727201000.5") },
+  { name: "revocation_negative", kind: "revocation", accept: false, json: REVOCATION_TEXT("-1") },
+  { name: "revocation_above_max_safe", kind: "revocation", accept: false, json: REVOCATION_TEXT("9007199254740992") },
+  { name: "revocation_far_above_max_safe", kind: "revocation", accept: false, json: REVOCATION_TEXT("9007199254740993") },
+  { name: "revocation_infinity", kind: "revocation", accept: false, json: REVOCATION_TEXT("1e400") },
+  { name: "revocation_nan_token", kind: "revocation", accept: false, json: REVOCATION_TEXT("NaN") },
+  { name: "revocation_bool", kind: "revocation", accept: false, json: REVOCATION_TEXT("true") },
+  { name: "revocation_numeric_string", kind: "revocation", accept: false, json: REVOCATION_TEXT('"1727201000"') },
+  { name: "revocation_missing_reason", kind: "revocation", accept: false, json: '{"sessionId":"sess-001","revokedAt":1727201000}' },
+  { name: "delegation_base", kind: "delegation", accept: true, json: SESSION_TEXT },
+  { name: "delegation_integral_float_issued_at", kind: "delegation", accept: true, json: swap('"issuedAt":1727200000', '"issuedAt":1727200000.0') },
+  { name: "delegation_integral_float_max_signatures", kind: "delegation", accept: true, json: swap('"maxSignatures":100', '"maxSignatures":1e2') },
+  { name: "delegation_fraction_max_signatures", kind: "delegation", accept: false, json: swap('"maxSignatures":100', '"maxSignatures":100.5') },
+  { name: "delegation_expires_above_max_safe", kind: "delegation", accept: false, json: swap('"expiresAt":1727203600', '"expiresAt":9007199254740992') },
+  { name: "delegation_derivation_path_nonempty", kind: "delegation", accept: true, json: sessionWith({ derivationPath: "m/0'" }) },
+  { name: "delegation_derivation_path_empty", kind: "delegation", accept: false, json: sessionWith({ derivationPath: "" }) },
+  { name: "delegation_derivation_path_null", kind: "delegation", accept: false, json: sessionWith({ derivationPath: null }) },
+  { name: "delegation_non_string_action", kind: "delegation", accept: false, json: sessionWith({ scope: { ...SESSION_BASE.scope, allowedActions: [1] } }) },
+  { name: "delegation_null_contract_id", kind: "delegation", accept: false, json: sessionWith({ scope: { ...SESSION_BASE.scope, contractIds: [null] } }) },
+  { name: "delegation_missing_scope", kind: "delegation", accept: false, json: sessionWith({ scope: undefined }) },
+  { name: "delegation_short_public_key", kind: "delegation", accept: false, json: sessionWith({ publicKeyHex: SESSION_BASE.publicKeyHex.slice(2) }) },
+  { name: "delegation_public_key_0x_uppercase", kind: "delegation", accept: true, json: sessionWith({ publicKeyHex: "0X" + SESSION_BASE.publicKeyHex.toUpperCase() }) },
+];
+
+function evaluateParityVector(v) {
+  let parsed;
+  try {
+    parsed = JSON.parse(v.json);
+  } catch {
+    return { reject: true };
+  }
+  try {
+    const bytes = v.kind === "revocation" ? sessionRevocationPreimage(parsed) : sessionKeyDelegationPreimage(parsed);
+    return { preimage_utf8: bytes.toString("utf8") };
+  } catch {
+    return { reject: true };
+  }
+}
+
+goldens.parity_vectors = PARITY_VECTORS.map((v) => {
+  const result = evaluateParityVector(v);
+  if (("reject" in result) === v.accept) throw new Error("parity vector " + v.name + " does not have its stated outcome");
+  return { name: v.name, kind: v.kind, json: v.json, ...result };
+});
 
 const outPath = join(dirname(fileURLToPath(import.meta.url)), "goldens.json");
 writeFileSync(outPath, JSON.stringify(goldens, null, 2) + "\n", "utf8");

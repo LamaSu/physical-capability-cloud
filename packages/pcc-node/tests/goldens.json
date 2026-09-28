@@ -318,5 +318,169 @@
       "principal_public_key_hex": "a58647b810aa1f8b04bb2a7c85d0ead34cbd1c0feb85b091ccf7792dd81451bf",
       "parent_signature_hex": "8224423745d168b6cf1259e7d6b71daca5b0a87b78779b9b462596459dae5d37d352dce5d4b80a6d91195369ff78770d866ca502969b85e3c758f78a8d617e05"
     }
+  ],
+  "parity_vectors": [
+    {
+      "name": "revocation_integer",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000,\"reason\":\"rotated\"}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000,\"reason\":\"rotated\"}"
+    },
+    {
+      "name": "revocation_integral_float",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000.0,\"reason\":\"rotated\"}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000,\"reason\":\"rotated\"}"
+    },
+    {
+      "name": "revocation_exponent",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":1.727201e9,\"reason\":\"rotated\"}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000,\"reason\":\"rotated\"}"
+    },
+    {
+      "name": "revocation_negative_zero",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":-0.0,\"reason\":\"rotated\"}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"revokedAt\":0,\"reason\":\"rotated\"}"
+    },
+    {
+      "name": "revocation_max_safe",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":9007199254740991,\"reason\":\"rotated\"}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"revokedAt\":9007199254740991,\"reason\":\"rotated\"}"
+    },
+    {
+      "name": "revocation_fraction",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000.5,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_negative",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":-1,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_above_max_safe",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":9007199254740992,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_far_above_max_safe",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":9007199254740993,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_infinity",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":1e400,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_nan_token",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":NaN,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_bool",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":true,\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_numeric_string",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":\"1727201000\",\"reason\":\"rotated\"}",
+      "reject": true
+    },
+    {
+      "name": "revocation_missing_reason",
+      "kind": "revocation",
+      "json": "{\"sessionId\":\"sess-001\",\"revokedAt\":1727201000}",
+      "reject": true
+    },
+    {
+      "name": "delegation_base",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100}}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100}}"
+    },
+    {
+      "name": "delegation_integral_float_issued_at",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000.0,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100}}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100}}"
+    },
+    {
+      "name": "delegation_integral_float_max_signatures",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":1e2}}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100}}"
+    },
+    {
+      "name": "delegation_fraction_max_signatures",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100.5}}",
+      "reject": true
+    },
+    {
+      "name": "delegation_expires_above_max_safe",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":9007199254740992,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100}}",
+      "reject": true
+    },
+    {
+      "name": "delegation_derivation_path_nonempty",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100},\"derivationPath\":\"m/0'\"}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100},\"derivationPath\":\"m/0'\"}"
+    },
+    {
+      "name": "delegation_derivation_path_empty",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100},\"derivationPath\":\"\"}",
+      "reject": true
+    },
+    {
+      "name": "delegation_derivation_path_null",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100},\"derivationPath\":null}",
+      "reject": true
+    },
+    {
+      "name": "delegation_non_string_action",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[1],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100}}",
+      "reject": true
+    },
+    {
+      "name": "delegation_null_contract_id",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[null],\"maxSignatures\":100}}",
+      "reject": true
+    },
+    {
+      "name": "delegation_missing_scope",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600}",
+      "reject": true
+    },
+    {
+      "name": "delegation_short_public_key",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100}}",
+      "reject": true
+    },
+    {
+      "name": "delegation_public_key_0x_uppercase",
+      "kind": "delegation",
+      "json": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKeyHex\":\"0X65776453484ADF482DA51184ADB6787A2BACE2269441CFA3246E6DEF3E55D2D3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"workflow_step_complete\",\"evidence_submit\"],\"contractIds\":[\"job-b\",\"job-a\"],\"maxSignatures\":100}}",
+      "preimage_utf8": "{\"sessionId\":\"sess-001\",\"parentAgentId\":\"eip155:84532:0x1111111111111111111111111111111111111111\",\"publicKey\":\"65776453484adf482da51184adb6787a2bace2269441cfa3246e6def3e55d2d3\",\"issuedAt\":1727200000,\"expiresAt\":1727203600,\"scope\":{\"allowedActions\":[\"evidence_submit\",\"workflow_step_complete\"],\"contractIds\":[\"job-a\",\"job-b\"],\"maxSignatures\":100}}"
+    }
   ]
 }

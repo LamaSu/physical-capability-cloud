@@ -10,6 +10,7 @@ Regenerate goldens after a contract change:
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -42,12 +43,22 @@ def _code(fn, *args):
     return exc.value.code
 
 
+# The signature-parity CI job sets PCC_REQUIRE_PYNACL=1 (and installs the
+# declared `crypto` extra), so a missing PyNaCl FAILS there instead of skipping
+# with a green exit. Elsewhere it skips only the signature half, visibly.
+REQUIRE_PYNACL = os.environ.get("PCC_REQUIRE_PYNACL") == "1"
+
+
 @pytest.fixture
 def nacl():
-    """PyNaCl, for the signature half only. Byte parity never needs it, so a
-    missing PyNaCl skips just the signature checks, visibly, never the module."""
-    signing = pytest.importorskip("nacl.signing", reason="PyNaCl is needed for the signature half")
-    exceptions = pytest.importorskip("nacl.exceptions", reason="PyNaCl is needed for the signature half")
+    """PyNaCl, for the signature half only. Byte parity never needs it."""
+    try:
+        import nacl.exceptions as exceptions
+        import nacl.signing as signing
+    except ImportError as err:
+        if REQUIRE_PYNACL:
+            pytest.fail("PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable: %s" % err)
+        pytest.skip("PyNaCl is needed for the signature half (set PCC_REQUIRE_PYNACL=1 to make this a failure)")
     return signing, exceptions
 
 
@@ -65,7 +76,7 @@ def test_contract_version_matches_ts():
 
 
 def test_goldens_carry_all_contract_sections():
-    for section in ("signing_preimage", "session_delegation", "session_revocation"):
+    for section in ("signing_preimage", "session_delegation", "session_revocation", "parity_vectors"):
         assert _GOLDENS.get(section), "goldens.json lacks %s -- run gen_goldens.mjs" % section
 
 
@@ -268,3 +279,40 @@ class TestMalformedSessionKeys:
 
     def test_malformed_revocation_rejected(self):
         assert _code(session_revocation_preimage, {"sessionId": "s", "revokedAt": 1.5, "reason": "x"}) == "malformed-revocation"
+
+
+def _parity_outcome(v):
+    """Decode the vector's JSON TEXT with json.loads, then build the preimage.
+
+    json.loads yields floats for 1.0 and 1e2 and accepts the NaN token, and the
+    contract takes numbers by value as JSON.parse does, so both languages must
+    land on the same bytes or the same refusal.
+    """
+    parsed = json.loads(v["json"])
+    try:
+        if v["kind"] == "revocation":
+            return session_revocation_preimage(parsed).decode("utf-8", "surrogatepass")
+        session = dict(parsed) if isinstance(parsed, dict) else parsed
+        if isinstance(session, dict):
+            session["publicKey"] = parse_ed25519_public_key_hex(session.pop("publicKeyHex", None))
+        return session_key_delegation_preimage(session).decode("utf-8", "surrogatepass")
+    except SigningPreimageError:
+        return "REJECT"
+
+
+@pytest.mark.parametrize("v", _GOLDENS["parity_vectors"], ids=lambda v: v["name"])
+def test_accept_reject_parity_with_ts(v):
+    expected = "REJECT" if v.get("reject") else v["preimage_utf8"]
+    assert _parity_outcome(v) == expected
+
+
+def test_parity_vectors_cover_the_numeric_domain_and_empty_path():
+    names = {v["name"] for v in _GOLDENS["parity_vectors"]}
+    for required in (
+        "revocation_integral_float",
+        "revocation_nan_token",
+        "revocation_above_max_safe",
+        "delegation_integral_float_issued_at",
+        "delegation_derivation_path_empty",
+    ):
+        assert required in names
