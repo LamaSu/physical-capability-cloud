@@ -230,15 +230,42 @@ export const UnmetReasonSchema = z.enum([
   "region_unavailable",
 ]);
 
-export const UnmetCapabilitySchema = z.object({
-  capabilityType: z.string().min(1),
-  reason: UnmetReasonSchema,
-  supplyCount: z.number().int().nonnegative(),
-});
+/** A registered capability's canonical CSD URI. */
+export const CSD_URI_PATTERN = /^pcc:\/\/capabilities\/[a-z0-9-]{1,100}\/v[0-9]{1,6}$/;
+/** A kebab-case slug for a capability type that has no CSD. */
+export const CAPABILITY_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,99}$/;
+
+/**
+ * One unmet capability. The key's form must match its reason:
+ * `no_capability_type` (no CSD exists) is named only by a kebab slug; every
+ * other reason refers to a registered type, named only by its CSD URI. A
+ * URI-shaped key with `no_capability_type`, or a slug with any other reason,
+ * is rejected, so a requester-derived label can never pose as a CSD
+ * (PX-13 round-1 finding 3).
+ */
+export const UnmetCapabilitySchema = z
+  .object({
+    capabilityType: z.string().min(1).max(120),
+    reason: UnmetReasonSchema,
+    supplyCount: z.number().int().nonnegative(),
+  })
+  .superRefine((v, ctx) => {
+    const isUri = CSD_URI_PATTERN.test(v.capabilityType);
+    const isSlug = CAPABILITY_SLUG_PATTERN.test(v.capabilityType);
+    if (v.reason === "no_capability_type" ? !isSlug : !isUri) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          v.reason === "no_capability_type"
+            ? "no_capability_type must name the type by a kebab slug, never a CSD URI"
+            : `${v.reason} must name a registered type by its CSD URI`,
+      });
+    }
+  });
 
 /**
  * Remove the fields only the server may set (`fulfillmentPath`, `unmet`) from
- * an envelope that arrived from outside: `/api/intent/ingest`, the
+ * an envelope that arrived from outside: `/api/intents/ingest`, the
  * `@pcc/intent-collector` SDK, or any other caller. Anyone with an API key can
  * post those fields, so trusting them would let a single caller forge unmet
  * demand and steer what the kit bounties fund.
@@ -272,13 +299,22 @@ export const DemandEnvelopeSchema = z.object({
  * An envelope the SERVER produced at a first-party capture point, including
  * the server-computed `unmet` list. Parse only server-origin intent events
  * with this schema (never `intent.external_ingest`, never request bodies).
- * `DemandEnvelopeSchema`, which validates caller input, deliberately has no
- * `unmet` field, so zod strips a caller-supplied one on parse.
+ * Caller input is parsed with `CallerDemandEnvelopeSchema`, which has neither
+ * `unmet` nor `fulfillmentPath`, so zod strips caller-supplied ones on parse.
  */
 export const ServerCapturedDemandEnvelopeSchema = DemandEnvelopeSchema.extend({
   unmet: z.array(UnmetCapabilitySchema).max(50).optional(),
   unmetTruncated: z.boolean().optional(),
 });
+
+/**
+ * Caller input (`/api/intents/ingest`, SDKs): the envelope WITHOUT any
+ * server-only field. `fulfillmentPath` is omitted, and zod strips the unknown
+ * `unmet` on parse, so a caller can never assert "unfulfilled" demand
+ * (PX-13 round-1 finding 5). `DemandEnvelopeSchema` keeps `fulfillmentPath`
+ * for existing server-side consumers.
+ */
+export const CallerDemandEnvelopeSchema = DemandEnvelopeSchema.omit({ fulfillmentPath: true });
 
 export const DemandSnapshotCompositionSchema = z.object({
   signature: z.string(),

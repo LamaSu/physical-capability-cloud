@@ -1,12 +1,15 @@
 /**
  * UnmetDemandLens (R44, D3). SYNTHETIC rows only. The last block is the seam
- * test: lens output fed straight into @pcc/spec's public projection.
+ * test: lens output fed straight into @pcc/spec's public release, with the
+ * adversarial cases from the PX-13 round-1 review (pack 10).
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createStore, type Store } from "@pcc/store";
 import {
+  buildPublicRelease,
   computeCompositionSignature,
   kitDemandSignalDigest,
+  releasePeriodWindow,
   toPublicOpportunityAggregate,
   type DemandEnvelope,
   type KitDemandPriorRef,
@@ -16,6 +19,8 @@ import { UnmetDemandLens, resolveCapabilityKey, normalizeCountry, VERIFIED_ACTOR
 
 const HPLC = "pcc://capabilities/synthetic-hplc/v1";
 const WIDGET = "pcc://capabilities/synthetic-widget/v1";
+/** The verdict's F3 counterexample: a CSD-shaped key carrying a proposed type, a place and a time. */
+const CSD_SHAPED_SECRET = "pcc://capabilities/proposed-secret-us-ca-sf-20260910-123456/v1";
 /** 37 days: comfortably above the 30-day public window floor. */
 const WINDOW = { from: "2026-08-25T00:00:00.000Z", to: "2026-09-30T23:59:59.999Z" };
 const NOW = () => "2026-09-24T12:00:00.000Z";
@@ -186,11 +191,29 @@ describe("UnmetDemandLens", () => {
     expect(diagnostics.invalidPayload).toBe(2);
   });
 
-  it("requires known types as CSD URIs and turns only no_capability_type slugs into proposed keys", () => {
+  it("checks the reason first: known types only as CSD URIs, no_capability_type only as an exact slug", () => {
     expect(resolveCapabilityKey(HPLC, "no_kernel_offering")).toBe(HPLC);
     expect(resolveCapabilityKey("synthetic-hplc", "no_kernel_offering")).toBeNull();
-    expect(resolveCapabilityKey("Synthetic-Gizmo", "no_capability_type")).toBe("proposed:synthetic-gizmo");
+    expect(resolveCapabilityKey("synthetic-gizmo", "no_capability_type")).toBe("proposed:synthetic-gizmo");
+    // The capture point slugifies; the lens takes only an exact slug, never a respelling.
+    expect(resolveCapabilityKey("Synthetic-Gizmo", "no_capability_type")).toBeNull();
     expect(resolveCapabilityKey("bad slug!", "no_capability_type")).toBeNull();
+  });
+
+  it("F3: never turns a CSD-shaped no_capability_type key into a signal key", () => {
+    expect(resolveCapabilityKey(CSD_SHAPED_SECRET, "no_capability_type")).toBeNull();
+    expect(resolveCapabilityKey(HPLC, "no_capability_type")).toBeNull();
+    for (let i = 1; i <= 9; i++) {
+      verified(store, `operator-${i}`, {
+        unmet: [{ capabilityType: CSD_SHAPED_SECRET, reason: "no_capability_type", supplyCount: 0 }],
+      });
+    }
+    const { signals, diagnostics } = lens.compute({ ...WINDOW, now: NOW });
+    expect(signals).toEqual([]);
+    expect(diagnostics.invalidPayload).toBe(9);
+  });
+
+  it("drops a whole intent whose unmet list has any key that does not match its reason", () => {
     persist(store, {
       unmet: [
         { capabilityType: "synthetic-hplc", reason: "no_kernel_offering", supplyCount: 0 },
@@ -198,8 +221,39 @@ describe("UnmetDemandLens", () => {
       ],
     });
     const { signals, diagnostics } = lens.compute({ ...WINDOW, now: NOW });
-    expect(signals.map((s) => s.capabilityKey)).toEqual(["proposed:synthetic-gizmo"]);
+    expect(signals).toEqual([]);
+    expect(diagnostics.invalidPayload).toBe(1);
+  });
+
+  it("drops CSD URIs outside a given registered set, and leaves proposed slugs alone", () => {
+    expect(resolveCapabilityKey(HPLC, "no_kernel_offering", new Set([WIDGET]))).toBeNull();
+    expect(resolveCapabilityKey(HPLC, "no_kernel_offering", new Set([HPLC]))).toBe(HPLC);
+    expect(resolveCapabilityKey("synthetic-gizmo", "no_capability_type", new Set())).toBe("proposed:synthetic-gizmo");
+    persist(store, { unmet: [{ capabilityType: HPLC, reason: "no_kernel_offering", supplyCount: 0 }] });
+    persist(store, { unmet: [{ capabilityType: WIDGET, reason: "no_capacity", supplyCount: 1 }] });
+    const { signals, diagnostics } = lens.compute({ ...WINDOW, now: NOW, registeredCsdUris: new Set([HPLC]) });
+    expect(signals.map((s) => s.capabilityKey)).toEqual([HPLC]);
     expect(diagnostics.unresolvedCapability).toBe(1);
+  });
+
+  it("F5: an API-key holder (authenticated_key) adds volume, never verified breadth", () => {
+    for (let i = 0; i < 9; i++) persist(store, { actorType: "authenticated_key", actorId: `key-holder-${i}` });
+    const internal = lens.compute({ ...WINDOW, now: NOW }).signals[0]!.internal!;
+    expect(internal.unmetCount).toBe(9);
+    expect(internal.distinctVerifiedRequesters).toBe(0);
+  });
+
+  it("computeForPeriod covers exactly one UTC calendar month", () => {
+    persist(store, { timestamp: "2026-08-31T23:59:59.999Z" });
+    persist(store, { timestamp: "2026-09-01T00:00:00.000Z" });
+    persist(store, { timestamp: "2026-09-30T23:59:59.999Z" });
+    persist(store, { timestamp: "2026-10-01T00:00:00.000Z" });
+    const { signals, diagnostics } = lens.computeForPeriod("2026-09", { now: NOW });
+    expect(signals[0]!.internal!.unmetCount).toBe(2);
+    expect(diagnostics.outsideWindow).toBe(2);
+    expect(signals[0]!.internal!.windowFrom).toBe(releasePeriodWindow("2026-09").from);
+    expect(signals[0]!.internal!.windowTo).toBe(releasePeriodWindow("2026-09").to);
+    expect(() => lens.computeForPeriod("2026-9")).toThrow();
   });
 
   it("counts a type listed twice in one intent once", () => {
@@ -263,49 +317,104 @@ describe("UnmetDemandLens", () => {
   });
 });
 
-describe("seam: UnmetDemandLens -> toPublicOpportunityAggregate", () => {
+describe("seam: UnmetDemandLens -> public release (PX-13 round-1 findings)", () => {
+  const PERIOD = "2026-09";
+  /** After September closed and its 24-hour grace passed. */
+  const AFTER_CLOSE = "2026-10-05T00:00:00.000Z";
+  const RELEASE_NOW = () => AFTER_CLOSE;
+  const APPROVED: ReadonlySet<string> = new Set([HPLC, WIDGET]);
   let store: Store;
   let lens: UnmetDemandLens;
+  const release = () => lens.computeForPeriod(PERIOD, { now: RELEASE_NOW }).signals;
+  const project = (s: Parameters<typeof toPublicOpportunityAggregate>[0]) => toPublicOpportunityAggregate(s, PERIOD, APPROVED);
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(AFTER_CLOSE));
     store = createStore({ dbPath: ":memory:", seed: false });
     lens = new UnmetDemandLens(store.repos);
   });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
-  it("keeps a type private with 4 order-backed principals and publishes it at 5", () => {
+  it("keeps a type private with 4 order-backed principals and publishes it at 5, labelled by period", () => {
     for (let i = 1; i <= 4; i++) verified(store, `operator-${i}`, { timestamp: `2026-09-1${i}T00:00:00.000Z` });
-    expect(toPublicOpportunityAggregate(lens.compute({ ...WINDOW, now: NOW }).signals[0]!)).toBeNull();
+    expect(project(release()[0]!)).toBeNull();
     verified(store, "operator-5", { timestamp: "2026-09-19T06:00:00.000Z" });
-    expect(toPublicOpportunityAggregate(lens.compute({ ...WINDOW, now: NOW }).signals[0]!)).toEqual({
-      schema: "pcc.public-opportunity-aggregate.v0",
+    expect(project(release()[0]!)).toEqual({
+      schema: "pcc.public-opportunity-aggregate.v1",
       capabilityType: HPLC,
       demandBand: "5-9",
       countedEvidence: "authenticated_order",
-      asOf: "2026-09-19",
+      period: PERIOD,
     });
+  });
+
+  it("F2: the verdict's sliding-window attack gets one canonical answer, and every other window is refused", () => {
+    // One qualifying requester at 10 Sep 12:34:56.789, four on 11 Sep.
+    verified(store, "operator-1", { timestamp: "2026-09-10T12:34:56.789Z" });
+    for (let i = 2; i <= 5; i++) verified(store, `operator-${i}`, { timestamp: "2026-09-11T00:00:00.000Z" });
+    const to = releasePeriodWindow(PERIOD).to;
+    for (const from of ["2026-09-10T12:34:56.789Z", "2026-09-10T12:34:56.790Z", "2026-08-31T00:00:00.000Z"]) {
+      const [slid] = lens.compute({ from, to, now: RELEASE_NOW }).signals;
+      expect(() => project(slid!)).toThrow(/not release period/);
+    }
+    expect(project(release()[0]!)?.demandBand).toBe("5-9");
+  });
+
+  it("F2: refuses to release the month still in progress", () => {
+    for (let i = 1; i <= 6; i++) verified(store, `operator-${i}`, { timestamp: "2026-09-10T00:00:00.000Z" });
+    vi.setSystemTime(new Date("2026-09-20T00:00:00.000Z"));
+    const early = lens.computeForPeriod(PERIOD, { now: () => "2026-09-20T00:00:00.000Z" }).signals;
+    expect(() => project(early[0]!)).toThrow(/has not closed/);
+  });
+
+  it("F4, one unverified late intent: the private signal moves, the public release does not", () => {
+    for (let i = 1; i <= 5; i++) verified(store, `operator-${i}`, { timestamp: `2026-09-1${i}T00:00:00.000Z` });
+    const before = release();
+    const releaseBefore = buildPublicRelease(before, PERIOD, APPROVED);
+    persist(store, { actorType: "requestor", actorId: "late-unverified", timestamp: "2026-09-30T23:59:59.999Z" });
+    verified(store, "late-querier", { eventType: "intent.synthetic_query", timestamp: "2026-09-30T23:00:00.000Z" });
+    const after = release();
+    expect(after[0]!.internal!.lastSeen).toBe("2026-09-30T23:59:59.999Z");
+    expect(after[0]!.internal!.lastSeen).not.toBe(before[0]!.internal!.lastSeen);
+    expect(buildPublicRelease(after, PERIOD, APPROVED)).toEqual(releaseBefore);
+  });
+
+  it("F3: a CSD-shaped no_capability_type key from 9 verified principals publishes nothing", () => {
+    for (let i = 1; i <= 9; i++) {
+      verified(store, `operator-${i}`, {
+        unmet: [{ capabilityType: CSD_SHAPED_SECRET, reason: "no_capability_type", supplyCount: 0 }],
+      });
+    }
+    const out = buildPublicRelease(release(), PERIOD, new Set([...APPROVED, CSD_SHAPED_SECRET]));
+    expect(out.aggregates).toEqual([]);
+  });
+
+  it("F3: a registered type with enough demand still waits for the publisher's approval", () => {
+    for (let i = 1; i <= 6; i++) verified(store, `operator-${i}`);
+    const [signal] = release();
+    expect(toPublicOpportunityAggregate(signal!, PERIOD, new Set([WIDGET]))).toBeNull();
+    expect(toPublicOpportunityAggregate(signal!, PERIOD, new Set([HPLC]))?.capabilityType).toBe(HPLC);
   });
 
   it("keeps query-only demand private, even from many verified principals", () => {
     for (let i = 1; i <= 9; i++) verified(store, `querier-${i}`, { eventType: "intent.synthetic_query" });
-    const [signal] = lens.compute({ ...WINDOW, now: NOW }).signals;
+    const [signal] = release();
     expect(signal!.internal!.distinctVerifiedRequesters).toBe(9);
-    expect(toPublicOpportunityAggregate(signal!)).toBeNull();
-  });
-
-  it("keeps a window shorter than 30 days private", () => {
-    for (let i = 1; i <= 6; i++) verified(store, `operator-${i}`, { timestamp: "2026-09-10T00:00:00.000Z" });
-    const short = lens.compute({ from: "2026-09-01T00:00:00.000Z", to: "2026-09-20T00:00:00.000Z", now: NOW });
-    expect(toPublicOpportunityAggregate(short.signals[0]!)).toBeNull();
+    expect(project(signal!)).toBeNull();
   });
 
   it("publishes nothing from today's data shape, however large the volume", () => {
     for (let i = 0; i < 500; i++) persist(store, { actorType: "requestor", actorId: `body-${i}` });
-    const [signal] = lens.compute({ ...WINDOW, now: NOW }).signals;
-    expect(signal!.internal!.unmetCount).toBe(500);
-    expect(toPublicOpportunityAggregate(signal!)).toBeNull();
+    for (let i = 0; i < 50; i++) persist(store, { actorType: "authenticated_key", actorId: `key-${i}` });
+    const [signal] = release();
+    expect(signal!.internal!.unmetCount).toBe(550);
+    expect(project(signal!)).toBeNull();
   });
 
-  it("never publishes proposed types or prior-only keys", () => {
+  it("never publishes proposed types or prior-only keys, even when the approved set names them", () => {
     for (let i = 1; i <= 9; i++) {
       verified(store, `operator-${i}`, {
         unmet: [{ capabilityType: "synthetic-gizmo", reason: "no_capability_type", supplyCount: 0 }],
@@ -317,8 +426,9 @@ describe("seam: UnmetDemandLens -> toPublicOpportunityAggregate", () => {
         { priorId: "kdp-synthetic-widget", source: "desk_research", demandScore: 9, buildClass: "package", datasetDigest: `sha256:${"d".repeat(64)}` },
       ],
     ]);
-    const { signals } = lens.compute({ ...WINDOW, now: NOW, priors });
+    const { signals } = lens.computeForPeriod(PERIOD, { now: RELEASE_NOW, priors });
     expect(signals.map((s) => s.capabilityKey)).toEqual([WIDGET, "proposed:synthetic-gizmo"]);
-    for (const s of signals) expect(toPublicOpportunityAggregate(s)).toBeNull();
+    const out = buildPublicRelease(signals, PERIOD, new Set([WIDGET, "proposed:synthetic-gizmo"]));
+    expect(out.aggregates).toEqual([]);
   });
 });
