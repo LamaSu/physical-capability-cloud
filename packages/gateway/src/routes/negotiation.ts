@@ -36,12 +36,10 @@ import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, b
 import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
-  authenticatedPrincipal,
-  computeUnmet,
-  defaultSupplyReads,
+  captureUnmetThenEmit,
+  capturePrincipal,
   intentActor,
   isUnmetCaptureEnabled,
-  withUnmet,
 } from "../services/unmet-capture.js";
 import {
   getCapabilityDescriptor,
@@ -291,7 +289,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           [body.capabilityType],
           [],
         );
-        let envelope: DemandEnvelope = {
+        const envelope: DemandEnvelope = {
           id: `intent-${sessionId}`,
           source: "negotiate_api",
           compositionSignature,
@@ -302,21 +300,25 @@ export async function negotiationRoutes(app: FastifyInstance) {
           originAgentId: body.userAgentId,
           createdAt: now.toISOString(),
         };
-        // R44 D2 (flag-gated, default OFF): server-computed unmet types and
-        // the authenticated principal instead of the body's userAgentId.
+        // R44 D2 (flag-gated, default OFF): server-computed unmet types, off
+        // the response path, and the authenticated principal instead of the
+        // body's userAgentId.
+        const actor = intentActor(capturePrincipal(req), { actorId: body.userAgentId, actorType: "agent" });
+        const publish = (env: DemandEnvelope) =>
+          getEventBus().publish({
+            eventType: "intent.atomic_session",
+            category: "intent",
+            actorId: actor.actorId,
+            actorType: actor.actorType,
+            resourceType: "intent",
+            resourceId: env.id,
+            payload: env as unknown as Record<string, unknown>,
+          });
         if (isUnmetCaptureEnabled()) {
-          envelope = withUnmet(envelope, await computeUnmet([body.capabilityType], { reads: defaultSupplyReads() }));
+          void captureUnmetThenEmit(envelope, publish);
+        } else {
+          publish(envelope);
         }
-        const actor = intentActor(authenticatedPrincipal(req), { actorId: body.userAgentId, actorType: "agent" });
-        getEventBus().publish({
-          eventType: "intent.atomic_session",
-          category: "intent",
-          actorId: actor.actorId,
-          actorType: actor.actorType,
-          resourceType: "intent",
-          resourceId: envelope.id,
-          payload: envelope as unknown as Record<string, unknown>,
-        });
       } catch {
         // best-effort
       }

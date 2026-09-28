@@ -52,12 +52,10 @@ import {
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
-  authenticatedPrincipal,
-  computeUnmet,
-  defaultSupplyReads,
+  captureUnmetThenEmit,
+  capturePrincipal,
   intentActor,
   isUnmetCaptureEnabled,
-  withUnmet,
 } from "../services/unmet-capture.js";
 import { schema } from "@pcc/store";
 
@@ -460,17 +458,18 @@ export async function requestRoutes(app: FastifyInstance) {
 
     // ── Demand-intel capture point A — composite request ───────────
     // With PCC_UNMET_CAPTURE_ENABLED (R44 D2) the server records which types
-    // no live supply serves, and the authenticated principal instead of the
-    // body-supplied requester. Off: unchanged.
-    let envelope = buildEnvelopeFromRequest(request, "requests_api");
-    if (isUnmetCaptureEnabled()) {
-      envelope = withUnmet(envelope, await computeUnmet(envelope.capabilityTypes, { reads: defaultSupplyReads() }));
-    }
-    const actor = intentActor(authenticatedPrincipal(req), {
+    // no live supply serves, off the response path, and the authenticated
+    // principal instead of the body-supplied requester. Off: unchanged.
+    const envelope = buildEnvelopeFromRequest(request, "requests_api");
+    const actor = intentActor(capturePrincipal(req), {
       actorId: request.requesterEmail ?? request.requesterWallet ?? "anonymous",
       actorType: "requestor",
     });
-    emitIntent(envelope, actor.actorId, actor.actorType);
+    if (isUnmetCaptureEnabled()) {
+      void captureUnmetThenEmit(envelope, (env) => emitIntent(env, actor.actorId, actor.actorType));
+    } else {
+      emitIntent(envelope, actor.actorId, actor.actorType);
+    }
 
     // ── Bridge (coord #1276) ────────────────────────────────────────
     // Direct-match requests publish immediately: the buyer already named an

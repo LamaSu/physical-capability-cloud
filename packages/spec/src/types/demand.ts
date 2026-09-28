@@ -107,6 +107,8 @@ export interface DemandEnvelope {
    * `stripServerOnlyDemandFields`).
    */
   unmet?: UnmetCapability[];
+  /** Server-owned: true when the intent named more types than the matcher checks */
+  unmetTruncated?: boolean;
   /** ISO 8601 */
   createdAt: Timestamp;
 }
@@ -241,10 +243,10 @@ export const UnmetCapabilitySchema = z.object({
  * post those fields, so trusting them would let a single caller forge unmet
  * demand and steer what the kit bounties fund.
  */
-export function stripServerOnlyDemandFields<T extends { fulfillmentPath?: unknown; unmet?: unknown }>(
-  envelope: T,
-): Omit<T, "fulfillmentPath" | "unmet"> {
-  const { fulfillmentPath: _fp, unmet: _unmet, ...rest } = envelope;
+export function stripServerOnlyDemandFields<
+  T extends { fulfillmentPath?: unknown; unmet?: unknown; unmetTruncated?: unknown },
+>(envelope: T): Omit<T, "fulfillmentPath" | "unmet" | "unmetTruncated"> {
+  const { fulfillmentPath: _fp, unmet: _unmet, unmetTruncated: _truncated, ...rest } = envelope;
   return rest;
 }
 
@@ -275,6 +277,7 @@ export const DemandEnvelopeSchema = z.object({
  */
 export const ServerCapturedDemandEnvelopeSchema = DemandEnvelopeSchema.extend({
   unmet: z.array(UnmetCapabilitySchema).max(50).optional(),
+  unmetTruncated: z.boolean().optional(),
 });
 
 export const DemandSnapshotCompositionSchema = z.object({

@@ -53,12 +53,11 @@ import type {
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
-  computeUnmet,
-  defaultSupplyReads,
+  captureUnmetThenEmit,
   intentActor,
   isUnmetCaptureEnabled,
-  principalFromApiKey,
-  withUnmet,
+  principalFromA2AAuth,
+  type CapturePrincipal,
 } from "../services/unmet-capture.js";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { assertSessionLive } from "./session-liveness.js";
@@ -901,8 +900,8 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
-  /** Operator of the API key the route resolved (server-side); null if none. */
-  principal: string | null = null,
+  /** Who the route authenticated (key holder or SIWE session); server-side only. */
+  principal: CapturePrincipal = { proven: null, key: null },
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
   const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
@@ -1143,7 +1142,7 @@ async function dispatchTasksCancel(
 async function emitAtomicSessionIntent(
   params: PccQuoteParams,
   userAgentId: string,
-  principal: string | null,
+  principal: CapturePrincipal,
 ): Promise<void> {
   try {
     if (!params.capabilityType) return;
@@ -1151,7 +1150,7 @@ async function emitAtomicSessionIntent(
       [params.capabilityType],
       [],
     );
-    let envelope: DemandEnvelope = {
+    const envelope: DemandEnvelope = {
       id: `intent-a2a-${crypto.randomUUID()}`,
       source: "a2a_tasks_send",
       compositionSignature,
@@ -1165,19 +1164,22 @@ async function emitAtomicSessionIntent(
     // R44 D2 (flag-gated, default OFF): server-computed unmet types and the
     // authenticated principal instead of the params' userAgentId. With the
     // flag off nothing is awaited, so the publish stays synchronous.
-    if (isUnmetCaptureEnabled()) {
-      envelope = withUnmet(envelope, await computeUnmet([params.capabilityType], { reads: defaultSupplyReads() }));
-    }
     const actor = intentActor(principal, { actorId: userAgentId, actorType: "agent" });
-    getEventBus().publish({
-      eventType: "intent.atomic_session",
-      category: "intent",
-      actorId: actor.actorId,
-      actorType: actor.actorType,
-      resourceType: "intent",
-      resourceId: envelope.id,
-      payload: envelope as unknown as Record<string, unknown>,
-    });
+    const publish = (env: DemandEnvelope) =>
+      getEventBus().publish({
+        eventType: "intent.atomic_session",
+        category: "intent",
+        actorId: actor.actorId,
+        actorType: actor.actorType,
+        resourceType: "intent",
+        resourceId: env.id,
+        payload: env as unknown as Record<string, unknown>,
+      });
+    if (isUnmetCaptureEnabled()) {
+      await captureUnmetThenEmit(envelope, publish);
+    } else {
+      publish(envelope);
+    }
   } catch {
     // best-effort
   }
@@ -1243,13 +1245,14 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     //
     // Every tasks/send stores a task in the in-memory a2aTasks map, so the
     // anonymous path is per-IP rate-limited. Public is not unbounded.
-    // The authenticated principal for demand capture (R44 D2): the operator of
-    // the API key resolved here, the same primitive apiGate uses. Never params.
-    let principal: string | null = null;
+    // Who made the request, for demand capture (R44 D2): the API key resolved
+    // here (a self-asserted key holder) or the SIWE session (a proven wallet).
+    // The same primitives apiGate uses. Never params.
+    let principal: CapturePrincipal = { proven: null, key: null };
     if (process.env.PCC_A2A_AUTH_DISABLED !== "true") {
       const apiKey = resolveApiKey(req);
-      principal = principalFromApiKey(apiKey);
       const session = !apiKey ? resolveSession(req) : null;
+      principal = principalFromA2AAuth(apiKey, session);
       if (!apiKey && !session) {
         if (!isPublicDiscoverCall(method, params)) {
           return reply.status(200).send(

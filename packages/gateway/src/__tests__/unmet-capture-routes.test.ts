@@ -3,13 +3,19 @@
  *
  * Proves, against the real routes and an in-memory seeded store:
  *   - flag OFF: capture point A emits exactly the legacy actor and envelope;
- *   - flag ON: the principal comes from apiGate's context (never the body), and
- *     unmet types are computed from live supply;
+ *   - flag ON: the principal comes from the server-side auth context (never the
+ *     body): a proven wallet is "authenticated_operator", a plain API-key holder
+ *     "authenticated_key" (gateway review #2975); unmet types are computed from
+ *     live supply, off the response path;
  *   - /api/intents/ingest always drops caller-asserted fulfillmentPath/unmet;
  *   - SEAM: events captured by the route feed @pcc/demand-intel's
- *     UnmetDemandLens, whose output projects to a public aggregate only at k.
+ *     UnmetDemandLens, whose output projects to a public aggregate only at k
+ *     PROVEN principals; key holders add volume, never breadth.
+ *
+ * `req.provenWallet` is set by a test hook here: it stands for gateway's #326
+ * follow-up, which binds a proven identity on the request.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createStore } from "@pcc/store";
@@ -67,14 +73,28 @@ afterEach(() => {
   resetCsdRegistry();
 });
 
-async function app(operatorId: string | null, plugin: (a: FastifyInstance) => Promise<void>): Promise<FastifyInstance> {
+/** Server-side auth context a test request carries: an API key's operatorId, a proven wallet, or neither. */
+interface Auth {
+  operatorId?: string;
+  provenWallet?: string;
+}
+
+/** A key holder (self-asserted identity). */
+const key = (operatorId: string): Auth => ({ operatorId });
+/** A proven identity (plus the key it came with). */
+const proven = (wallet: string): Auth => ({ operatorId: `op-${wallet}`, provenWallet: wallet });
+
+async function app(auth: Auth | null, plugin: (a: FastifyInstance) => Promise<void>): Promise<FastifyInstance> {
   const a = Fastify({ logger: false });
   a.decorateRequest("operatorId", null);
+  a.decorateRequest("provenWallet", null);
   a.decorateRequest("userId", null);
   a.decorateRequest("apiKeyId", null);
-  if (operatorId !== null) {
+  if (auth !== null) {
     a.addHook("onRequest", async (req) => {
-      (req as unknown as { operatorId: string }).operatorId = operatorId;
+      const r = req as unknown as { operatorId: string | null; provenWallet: string | null };
+      r.operatorId = auth.operatorId ?? null;
+      r.provenWallet = auth.provenWallet ?? null;
     });
   }
   await a.register(plugin);
@@ -82,15 +102,21 @@ async function app(operatorId: string | null, plugin: (a: FastifyInstance) => Pr
   return a;
 }
 
-async function postRequest(operatorId: string | null, body: Record<string, unknown> = LAB_REQUEST): Promise<AnalyticsEvent> {
-  const a = await app(operatorId, requestRoutes);
+/** Flag ON emits off the response path, so wait for the one intent event this request produces. */
+async function intentEventSince(before: number): Promise<AnalyticsEvent> {
+  const mine = () => captured.slice(before).filter((e) => e.eventType === "intent.composite_request");
+  await vi.waitFor(() => expect(mine().length).toBeGreaterThanOrEqual(1), { timeout: 2_000, interval: 5 });
+  expect(mine()).toHaveLength(1);
+  return mine()[0]!;
+}
+
+async function postRequest(auth: Auth | null, body: Record<string, unknown> = LAB_REQUEST): Promise<AnalyticsEvent> {
+  const a = await app(auth, requestRoutes);
   try {
     const before = captured.length;
     const res = await a.inject({ method: "POST", url: "/api/requests", payload: body });
     expect(res.statusCode).toBe(201);
-    const mine = captured.slice(before).filter((e) => e.eventType === "intent.composite_request");
-    expect(mine).toHaveLength(1);
-    return mine[0]!;
+    return await intentEventSince(before);
   } finally {
     await a.close();
   }
@@ -110,19 +136,31 @@ function registerLiquidHandlingCsd(): void {
 }
 
 describe("capture point A (POST /api/requests)", () => {
-  it("flag OFF: emits the legacy body actor and no server-only fields", async () => {
-    const ev = await postRequest("op-a");
+  it("flag OFF: emits the legacy body actor and no server-only fields, even for a proven wallet", async () => {
+    const ev = await postRequest(proven("0xabc"));
     expect(ev.actorId).toBe("lab@example.com");
     expect(ev.actorType).toBe("requestor");
     expect(ev.payload).not.toHaveProperty("fulfillmentPath");
     expect(ev.payload).not.toHaveProperty("unmet");
   });
 
-  it("flag ON: records the authenticated principal and unmet types that match live supply", async () => {
+  it("flag ON: labels a plain API-key holder authenticated_key (volume, never verified)", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
-    const ev = await postRequest("op-a");
+    const ev = await postRequest(key("op-a"));
     expect(ev.actorId).toBe("op-a");
+    expect(ev.actorType).toBe("authenticated_key");
+  });
+
+  it("flag ON: labels a proven wallet authenticated_operator, lower-cased", async () => {
+    process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
+    const ev = await postRequest(proven("0xABCDEF"));
+    expect(ev.actorId).toBe("0xabcdef");
     expect(ev.actorType).toBe("authenticated_operator");
+  });
+
+  it("flag ON: records unmet types that match live supply", async () => {
+    process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
+    const ev = await postRequest(key("op-a"));
     const p = ev.payload as { capabilityTypes: string[]; fulfillmentPath?: string; unmet?: Array<{ capabilityType: string; reason: string }> };
     const unmetTypes = new Set((p.unmet ?? []).map((u) => u.capabilityType));
     for (const t of new Set(p.capabilityTypes)) {
@@ -142,18 +180,25 @@ describe("capture point A (POST /api/requests)", () => {
 
   it("ignores identity and actor fields smuggled into the body", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
-    const forged = { ...LAB_REQUEST, operatorId: "forged-op", actorId: "forged-op", actorType: "authenticated_operator" };
+    const forged = {
+      ...LAB_REQUEST,
+      operatorId: "forged-op",
+      provenWallet: "0xforged",
+      actorId: "forged-op",
+      actorType: "authenticated_operator",
+    };
     const unauthed = await postRequest(null, forged);
     expect(unauthed.actorId).not.toBe("forged-op");
     expect(unauthed.actorType).toBe("requestor");
-    const authed = await postRequest("op-real", forged);
-    expect(authed.actorId).toBe("op-real");
+    const keyed = await postRequest(key("op-real"), forged);
+    expect(keyed.actorId).toBe("op-real");
+    expect(keyed.actorType).toBe("authenticated_key");
   });
 
   it("keys a type whose CSD is registered by its URI", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
     registerLiquidHandlingCsd();
-    const ev = await postRequest("op-a");
+    const ev = await postRequest(key("op-a"));
     const unmet = (ev.payload as { unmet?: Array<{ capabilityType: string; reason: string }> }).unmet ?? [];
     // Premise, asserted rather than assumed: the seed has no live liquid-handling supply.
     expect(await hasLiveSupply("liquid-handling")).toBe(false);
@@ -166,7 +211,7 @@ describe("POST /api/intents/ingest drops caller-asserted server-only fields", ()
   for (const flag of [undefined, "true"]) {
     it(`strips fulfillmentPath and unmet (flag ${flag ?? "OFF"})`, async () => {
       if (flag) process.env.PCC_UNMET_CAPTURE_ENABLED = flag;
-      const a = await app("op-ingest", intentIngestRoutes);
+      const a = await app(key("op-ingest"), intentIngestRoutes);
       try {
         const res = await a.inject({
           method: "POST",
@@ -222,20 +267,20 @@ describe("seam: route capture -> UnmetDemandLens -> public projection", () => {
     });
   }
 
-  it("counts distinct authenticated operators and publishes the type only at k = 5", async () => {
+  it("counts distinct PROVEN principals and publishes the type only at k = 5", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
     registerLiquidHandlingCsd();
     // Premise, asserted rather than assumed: the seed has no live liquid-handling supply.
     expect(await hasLiveSupply("liquid-handling")).toBe(false);
 
-    for (const op of ["op-1", "op-2", "op-3", "op-4"]) await postRequest(op);
+    for (const w of ["0xa1", "0xa2", "0xa3", "0xa4"]) await postRequest(proven(w));
     let lh = (await lensFromCaptured()).signals.find((s) => s.capabilityKey === LH_URI);
     expect(lh?.internal?.distinctVerifiedRequesters).toBe(4);
     expect(lh?.internal?.distinctVerifiedRequestersAtOrAbove.authenticated_order).toBe(4);
     expect(toPublicOpportunityAggregate(lh!)).toBeNull();
 
-    await postRequest("op-5");
-    await postRequest("op-5"); // the same operator again adds volume, not breadth
+    await postRequest(proven("0xa5"));
+    await postRequest(proven("0xA5")); // the same wallet again adds volume, not breadth
     lh = (await lensFromCaptured()).signals.find((s) => s.capabilityKey === LH_URI);
     expect(lh?.internal?.unmetCount).toBe(6);
     expect(lh?.internal?.distinctVerifiedRequesters).toBe(5);
@@ -246,9 +291,19 @@ describe("seam: route capture -> UnmetDemandLens -> public projection", () => {
     });
   });
 
+  it("API-key holders add volume but never breadth, so their demand never publishes", async () => {
+    process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
+    registerLiquidHandlingCsd();
+    for (let i = 1; i <= 9; i++) await postRequest(key(`op-${i}`));
+    const lh = (await lensFromCaptured()).signals.find((s) => s.capabilityKey === LH_URI);
+    expect(lh?.internal?.unmetCount).toBe(9);
+    expect(lh?.internal?.distinctVerifiedRequesters).toBe(0);
+    expect(toPublicOpportunityAggregate(lh!)).toBeNull();
+  });
+
   it("flag OFF records no unmet demand at all, so the lens yields nothing", async () => {
     registerLiquidHandlingCsd();
-    for (let i = 0; i < 6; i++) await postRequest(`op-${i}`, { ...LAB_REQUEST, requesterEmail: `buyer-${i}@example.com` });
+    for (let i = 0; i < 6; i++) await postRequest(proven(`0xb${i}`), { ...LAB_REQUEST, requesterEmail: `buyer-${i}@example.com` });
     const { signals } = await lensFromCaptured();
     // Flag OFF: no unmet is recorded at all, so the lens yields no signals.
     expect(signals).toEqual([]);
@@ -256,7 +311,7 @@ describe("seam: route capture -> UnmetDemandLens -> public projection", () => {
 
   it("never publishes types without a CSD (proposed keys), whatever their breadth", async () => {
     process.env.PCC_UNMET_CAPTURE_ENABLED = "true";
-    for (const op of ["op-1", "op-2", "op-3", "op-4", "op-5", "op-6"]) await postRequest(op);
+    for (const w of ["0xc1", "0xc2", "0xc3", "0xc4", "0xc5", "0xc6"]) await postRequest(proven(w));
     const { signals } = await lensFromCaptured();
     const proposed = signals.filter((s) => s.capabilityKey.startsWith("proposed:"));
     expect(proposed.length).toBeGreaterThan(0);

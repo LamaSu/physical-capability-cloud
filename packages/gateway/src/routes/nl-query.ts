@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { getRepos } from "../db.js";
 import { getIntentClassifier } from "../services/intent-classifier.js";
 import { getEventBus } from "../services/event-bus.js";
-import { authenticatedPrincipal, intentActor } from "../services/unmet-capture.js";
+import { capturePrincipal, intentActor } from "../services/unmet-capture.js";
 import type { DemandEnvelope } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 
@@ -321,7 +321,7 @@ export async function nlQueryRoutes(app: FastifyInstance) {
             // R44 D2 (flag-gated, default OFF): record the authenticated
             // principal instead of the body's operatorId. No unmet matching:
             // the type is unknown_synthetic.
-            const actor = intentActor(authenticatedPrincipal(req), {
+            const actor = intentActor(capturePrincipal(req), {
               actorId: body.operatorId ?? "anonymous",
               actorType: "requestor",
             });
