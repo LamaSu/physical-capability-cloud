@@ -21,7 +21,9 @@
  * A level says how strong the evidence is, not what it says: a failed
  * inspection is still inspected_output evidence. Failure and contradiction are
  * separate checks (the committed program's `execution_failed` absence, a
- * profile's onContradiction policy).
+ * profile's onContradiction policy). `deriveContradictions` below is the one
+ * public rule for contradictions: the oracle signs a reject only for a
+ * contradiction it derives this way, never for a producer's say-so (J4).
  *
  * Classify only authenticated events: a bundle whose signature verified and
  * whose digest opens to its events for this job and kernel
@@ -215,4 +217,39 @@ export function evidenceLevelOfBundle(events: readonly EvidenceEvent[]): Evidenc
     }
   }
   return best;
+}
+
+/** A contradiction derivable from authenticated events (J4). */
+export type ContradictionKind = "completion-and-failure" | "completion-and-failed-inspection";
+
+/**
+ * An inspection that reports its own negative verdict: an INSPECTION_EVENT_TYPES
+ * event whose payload.passed is present and not true. With no passed field it
+ * claims no verdict (and a pass/fail on values belongs to a profile tolerance).
+ */
+export function inspectionFailed(event: EvidenceEvent): boolean {
+  if (!INSPECTION.has(event.type)) return false;
+  const passed = (event.payload as Record<string, unknown> | undefined)?.passed;
+  return passed !== undefined && passed !== true;
+}
+
+/**
+ * The contradictions a set of AUTHENTICATED events shows, in this fixed order:
+ *   - "completion-and-failure": a device-reported completion and an
+ *     execution_failed in the same set;
+ *   - "completion-and-failed-inspection": a device-reported completion and an
+ *     inspection that reports its own negative verdict.
+ * A failure with no completion is a device failure, not a contradiction.
+ * Fabricated events prove nothing here either, so they are ignored. This is
+ * the public, deterministic rule: the oracle signs a reject only for what it
+ * derives here (J4), and profile admission reads the same predicate.
+ */
+export function deriveContradictions(events: readonly EvidenceEvent[]): ContradictionKind[] {
+  const genuine = events.filter((e) => !isFabricated(e));
+  const completed = genuine.some((e) => DEVICE_REPORTED.has(e.type));
+  if (!completed) return [];
+  const kinds: ContradictionKind[] = [];
+  if (genuine.some((e) => e.type === "execution_failed")) kinds.push("completion-and-failure");
+  if (genuine.some(inspectionFailed)) kinds.push("completion-and-failed-inspection");
+  return kinds;
 }
