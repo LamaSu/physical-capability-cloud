@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { BUDGET_RESERVATIONS_DDL } from "./repositories/budget-reservations.js";
+import { ensureBudgetReservationsSchema } from "./repositories/budget-reservations.js";
 
 /**
  * Creates all tables using raw SQL via better-sqlite3.
@@ -2028,7 +2028,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // R13 one-use budget reservations (operator decision #2240, amended #2301/#2302). DRAFT: this table
   // exists only once the operator approves the schema and this merges. Mirrored in
   // migrations/0004_budget_reservations.sql.
-  sqlite.exec(BUDGET_RESERVATIONS_DDL);
+  ensureBudgetReservationsSchema(sqlite); // refuses a table of another shape (R13 round 2, H3)
 }
 
 /**

@@ -10,19 +10,25 @@
  *      its own. The preimage bytes are what the store keeps as the sealed deal (amendment #3231), and it
  *      re-checks that they hash to the digest.
  *   3. The obligation is DERIVED from the units (Σ g) and must equal the carried total.
- *   4. Then ONE atomic store consume, in an immediate transaction, re-checks authority against the
- *      stored row and seals the digest:
- *      - principal, request, currency and every job's payer;
- *      - issued and unexpired;
- *      - the obligation within the maximum;
+ *   4. Then ONE atomic store consume, in an immediate transaction. The store parses the preimage
+ *      strictly and takes every term FROM THE SEALED DEAL (R13 round 2, M6), checking against the row:
+ *      - principal, and the deal's reservation, request, currency and every job's payer;
+ *      - issued and unexpired, by the store's OWN clock (round 2, H2): the route's `now` is not
+ *        authority for expiry, so this adapter does not pass it;
+ *      - the deal's obligation within the maximum;
  *      - no unit below the payer's assurance floor.
  * A recomputed digest proves integrity, not authority: a resealed plan with another payer still fails at 4.
+ * If the store refuses the server's OWN compiled deal as malformed, that is a server fault, thrown so the
+ * route answers a generic 500, never a client-facing conflict.
  */
 import { createHash } from "node:crypto";
 import { acceptedDealPreimage, type Address } from "@pcc/spec";
-import type { BudgetReservationStore } from "@pcc/store";
+import type { BudgetReservationStore, ConsumeRefusal } from "@pcc/store";
 import { planIdForReservation, type ReservationRecord } from "./external-plan-seam.js";
 import type { ConsumeReservation } from "../routes/agent-plans.js";
+
+/** Refusals that mean the server's own deal is malformed: never the caller's fault, never a 409. */
+const SERVER_FAULTS: ReadonlySet<ConsumeRefusal> = new Set(["invalid-input", "deal-preimage-mismatch", "invalid-deal", "wrong-reservation"]);
 
 export interface ReservationWiring {
   loadReservation(reservationId: string): ReservationRecord | null;
@@ -47,7 +53,7 @@ export function reservationWiring(store: BudgetReservationStore): ReservationWir
       };
     },
 
-    consumeReservation(reservationId, principal, plan, now) {
+    consumeReservation(reservationId, principal, plan) {
       if (plan.planId !== planIdForReservation(reservationId) || plan.reservationId !== reservationId) {
         return { ok: false, reason: "wrong-binding" };
       }
@@ -58,19 +64,10 @@ export function reservationWiring(store: BudgetReservationStore): ReservationWir
       const units = plan.jobs.flatMap((j) => j.units);
       const derived = units.reduce((acc, u) => acc + u.g, 0n);
       if (units.length === 0 || derived !== plan.totalObligationBaseUnits) return { ok: false, reason: "obligation-mismatch" };
-      const r = store.consume({
-        reservationId,
-        principal,
-        requestId: plan.requestId,
-        currency: plan.currency,
-        payerAddresses: plan.jobs.map((j) => j.payer),
-        obligationBaseUnits: derived,
-        minUnitTier: Math.min(...units.map((u) => u.requestedTier)),
-        dealDigest: recomputed,
-        dealPreimage: preimage,
-        now,
-      });
-      return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+      const r = store.consume({ reservationId, principal, dealDigest: recomputed, dealPreimage: preimage });
+      if (r.ok) return { ok: true };
+      if (SERVER_FAULTS.has(r.reason)) throw new Error(`R13 consume: the store refused the server's own compiled deal (${r.reason})`);
+      return { ok: false, reason: r.reason };
     },
   };
 }

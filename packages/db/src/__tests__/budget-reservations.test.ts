@@ -1,35 +1,103 @@
 /**
- * R13 budget reservations (operator decision #2240, amended by #2301/#2302): the charter's required
- * negatives, against real SQLite. Covered:
+ * R13 budget reservations (operator decision #2240, amended by #2301/#2302/#3231): the charter's
+ * required negatives, against real SQLite, plus round 2 (the operator's ChatGPT review of 0b8adda9):
  *   - two consumes, exactly one wins (across two connections too);
- *   - expired is refused;
- *   - principal, request, currency or payer A used for B is refused;
- *   - an obligation over the reservation is refused;
+ *   - expired is refused, and expiry is DURABLE: skewed clocks cannot consume a released share (H2);
+ *   - principal, request, currency or payer A used for B is refused, with the terms read FROM THE DEAL (M6);
+ *   - only a real sealed deal is stored: canonical, for this reservation (M6);
  *   - exact base units: never a float;
- *   - MC 9 child authority stays bounded.
+ *   - MC 9 child authority is derived from the parent's stored sealed deal, never the caller (H1);
+ *   - the table refuses what its invariants forbid, even from a direct writer (M5);
+ *   - migration 0004 is the runtime DDL, and a table of another shape is refused (H3).
  */
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { acceptedDealPreimage, compileAcceptedPlan, type AcceptedPlanInput } from "@pcc/spec";
 import { createStore } from "../index.js";
-import { BUDGET_RESERVATIONS_DDL, BudgetReservationStore, MAX_DEAL_PREIMAGE_BYTES, type IssueReservationInput } from "../repositories/budget-reservations.js";
+import {
+  BUDGET_RESERVATIONS_DDL,
+  BudgetReservationStore,
+  MAX_DEAL_PREIMAGE_BYTES,
+  MAX_RESERVATION_LIFETIME_SEC,
+  ensureBudgetReservationsSchema,
+  type IssueReservationInput,
+  type ParentUnitRef,
+} from "../repositories/budget-reservations.js";
 
 const NOW = 1_900_000_000;
 const PAYER = `0x${"11".repeat(20)}`;
-/** A sealed deal's canonical preimage, and its digest: sha256(preimage) (amendment #3231, condition a). */
-const sealedPair = (preimage: string) => ({ dealPreimage: preimage, dealDigest: `0x${createHash("sha256").update(preimage, "utf8").digest("hex")}` });
-const PREIMAGE = '{"domain":"PCC:accepted-deal:v2","planId":"plan.resv-1"}';
-const DIGEST = sealedPair(PREIMAGE).dealDigest;
+const CHILD_PAYER = `0x${"22".repeat(20)}`;
+const OP = `0x${"aa".repeat(20)}`;
+const OP_B = `0x${"bb".repeat(20)}`;
 const MAX_UINT256 = (1n << 256n) - 1n;
+const sha = (s: string) => `0x${createHash("sha256").update(s, "utf8").digest("hex")}`;
+/** Bytes and their digest, sealed as a pair (amendment #3231, condition a), whether or not they are a deal. */
+const sealedPair = (preimage: string) => ({ dealPreimage: preimage, dealDigest: sha(preimage) });
 
-function fresh(): { sqlite: Database.Database; store: BudgetReservationStore } {
+interface DealSpec {
+  reservationId?: string;
+  requestId?: string;
+  currency?: string;
+  payer?: string;
+  /** One unit per gross, all by `operators[i]` (default OP). */
+  grosses?: bigint[];
+  operators?: string[];
+  tier?: number;
+  reclaimAt?: bigint;
+}
+
+/** A REAL sealed deal: compiled by #351's compiler, and the digest's own canonical preimage. */
+function deal(o: DealSpec = {}): { dealPreimage: string; dealDigest: string } {
+  const reservationId = o.reservationId ?? "resv-1";
+  const requestId = o.requestId ?? "req-42";
+  const currency = o.currency ?? "USDC";
+  const tier = o.tier ?? 0;
+  const grosses = o.grosses ?? [5_000_000n, 4_750_000n];
+  const plan: AcceptedPlanInput = {
+    planId: `plan.${reservationId}`,
+    requestId,
+    payer: (o.payer ?? PAYER) as `0x${string}`,
+    currency,
+    feeBps: 0,
+    feeRecipient: `0x${"00".repeat(20)}`,
+    reclaimAt: o.reclaimAt ?? BigInt(NOW + 7200),
+    nodes: grosses.map((g, i) => {
+      const operator = (o.operators?.[i] ?? OP) as `0x${string}`;
+      return {
+        nodeId: `n${i}`,
+        capabilityId: `cap-${i}`,
+        capabilityType: "document-printing",
+        csd: "document-print-and-mail",
+        tierKey: `tier${tier}`,
+        operator,
+        payoutAddress: operator,
+        grossBaseUnits: g,
+        matchedCapabilityDigest: `0x${"0c".repeat(32)}`,
+        committedProgramHash: tier > 0 ? `0x${"d2".repeat(32)}` : null,
+        evidenceRequirements: [{ requirementId: "r", evidenceTypeId: "receipt.kernel_signed", tier: 0 }],
+      };
+    }),
+    edges: [],
+    reservation: { reservationId, requestId, currency, maxAmountBaseUnits: 10n ** 30n },
+  };
+  const r = compileAcceptedPlan(plan, { assertProgramForTier: () => ({ ok: true }) });
+  if (!r.ok) throw new Error(`fixture does not compile: ${JSON.stringify(r.violations)}`);
+  const { acceptedDealDigest, ...rest } = r.plan;
+  return { dealPreimage: acceptedDealPreimage(rest), dealDigest: acceptedDealDigest };
+}
+const unitRef = (i: number, operator = OP, reservationId = "resv-1") => `plan.${reservationId}:${operator}#${i}`;
+
+function fresh(start = NOW): { sqlite: Database.Database; store: BudgetReservationStore; at: (t: number) => void } {
   const sqlite = new Database(":memory:");
-  const store = new BudgetReservationStore(sqlite);
+  let t = start;
+  const store = new BudgetReservationStore(sqlite, { clock: () => t });
   store.ensureSchema();
-  return { sqlite, store };
+  return { sqlite, store, at: (x) => (t = x) };
 }
 
 const issueInput = (over: Partial<IssueReservationInput> = {}): IssueReservationInput => ({
@@ -40,60 +108,68 @@ const issueInput = (over: Partial<IssueReservationInput> = {}): IssueReservation
   maxAmountBaseUnits: 20_000_000n,
   purpose: "accept plan for req-42",
   requestId: "req-42",
-  expiresAt: NOW + 3600,
-  now: NOW,
+  expiresInSec: 3600,
   requestCeilingBaseUnits: 100_000_000n,
   ...over,
 });
 
-const consumeInput = (over: Partial<Parameters<BudgetReservationStore["consume"]>[0]> = {}) => ({
-  reservationId: "resv-1",
-  principal: "agent:buyer-1",
-  requestId: "req-42",
-  currency: "USDC",
-  payerAddresses: [PAYER],
-  obligationBaseUnits: 9_750_000n,
-  minUnitTier: 0,
-  dealDigest: DIGEST,
-  dealPreimage: PREIMAGE,
-  now: NOW,
-  ...over,
+const consumeInput = (o: DealSpec & { principal?: string } = {}, sealed = deal(o)) => ({
+  reservationId: o.reservationId ?? "resv-1",
+  principal: o.principal ?? "agent:buyer-1",
+  ...sealed,
 });
 
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+function tempFile(): string {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "r13-"));
+  dirs.push(dir);
+  return join(dir, "r13.sqlite");
+}
 
 describe("issue and read back: exact base units, never a float", () => {
-  it("round-trips the uint256 maximum exactly, with the payer, floor and state", () => {
+  it("round-trips the uint256 maximum exactly, with the payer, floor, state and the store's own times", () => {
     const { store } = fresh();
     const r = store.issue(issueInput({ maxAmountBaseUnits: MAX_UINT256, requestCeilingBaseUnits: MAX_UINT256, minTier: 2 }));
     expect(r.ok).toBe(true);
     const back = store.findById("resv-1")!;
     expect(back.maxAmountBaseUnits).toBe(MAX_UINT256);
-    expect(back).toMatchObject({ payerAddress: PAYER, minTier: 2, state: "issued", consumedDealDigest: null, parentReservationId: null });
+    expect(back).toMatchObject({ payerAddress: PAYER, minTier: 2, state: "issued", consumedDealDigest: null, parentReservationId: null, createdAt: NOW, expiresAt: NOW + 3600 });
     expect(store.findById("resv-404")).toBeNull();
   });
 
-  it("refuses malformed input: zero, over uint256, a non-bigint amount, a bad clock, a past expiry, a bad tier, a duplicate id", () => {
+  it("refuses malformed input: zero, over uint256, a non-bigint amount, a bad lifetime, a bad tier, a bad parent ref, a duplicate id", () => {
     const { store } = fresh();
     const bad: Array<Partial<IssueReservationInput>> = [
       { maxAmountBaseUnits: 0n },
       { maxAmountBaseUnits: MAX_UINT256 + 1n },
       { maxAmountBaseUnits: 20 as unknown as bigint },
-      { now: Number.NaN },
-      { expiresAt: NOW },
+      { expiresInSec: 0 },
+      { expiresInSec: -1 },
+      { expiresInSec: 1.5 },
+      { expiresInSec: MAX_RESERVATION_LIFETIME_SEC + 1 },
       { minTier: 4 },
       { principal: "" },
       { requestCeilingBaseUnits: -1n },
+      { parent: { reservationId: "resv-0", unit: "no-hash-sign" } },
+      { parent: { reservationId: "", unit: unitRef(0) } },
     ];
     for (const b of bad) expect([b, store.issue(issueInput(b))]).toEqual([b, { ok: false, reason: "invalid-input" }]);
     expect(store.issue(issueInput()).ok).toBe(true);
     expect(store.issue(issueInput())).toEqual({ ok: false, reason: "duplicate-id" });
   });
 
-  it("the request ceiling counts issued and consumed top-level reservations, exactly; expired and released ones free their share", () => {
+  it("a clock that is not unix seconds is a wiring fault, never a reservation", () => {
+    const sqlite = new Database(":memory:");
+    const store = new BudgetReservationStore(sqlite, { clock: () => Number.NaN });
+    store.ensureSchema();
+    expect(() => store.issue(issueInput())).toThrow(TypeError);
+    expect(sqlite.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 0 });
+  });
+
+  it("the request ceiling counts issued and consumed reservations, exactly; expired and released ones free their share", () => {
     const { sqlite, store } = fresh();
     const ceiling = 30_000_000n;
     expect(store.issue(issueInput({ reservationId: "a", maxAmountBaseUnits: 20_000_000n, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
@@ -106,75 +182,164 @@ describe("issue and read back: exact base units, never a float", () => {
     expect(store.issue(issueInput({ reservationId: "d", requestId: "req-other", maxAmountBaseUnits: 30_000_000n, requestCeilingBaseUnits: ceiling })).ok).toBe(true); // per request
   });
 
-  it("an issued reservation past its expiry frees its share even before housekeeping marks it expired (it can never be consumed)", () => {
-    const { store } = fresh();
+  it("an expired reservation frees its share, and the freeing is DURABLE: it is marked expired and can never be consumed (H2)", () => {
+    const { store, at } = fresh();
     const ceiling = 20_000_000n;
-    expect(store.issue(issueInput({ reservationId: "a", expiresAt: NOW + 10, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
-    expect(store.issue(issueInput({ reservationId: "b", now: NOW + 5, expiresAt: NOW + 100, requestCeilingBaseUnits: ceiling }))).toEqual({ ok: false, reason: "over-request-ceiling" });
-    expect(store.issue(issueInput({ reservationId: "b", now: NOW + 10, expiresAt: NOW + 100, requestCeilingBaseUnits: ceiling })).ok).toBe(true); // a expired at NOW + 10
-    expect(store.findById("a")!.state).toBe("issued"); // no housekeeping ran
-    expect(store.consume(consumeInput({ reservationId: "a", now: NOW + 10 }))).toEqual({ ok: false, reason: "expired" });
+    expect(store.issue(issueInput({ reservationId: "a", expiresInSec: 10, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
+    at(NOW + 5);
+    expect(store.issue(issueInput({ reservationId: "b", requestCeilingBaseUnits: ceiling }))).toEqual({ ok: false, reason: "over-request-ceiling" });
+    expect(store.findById("a")!.state).toBe("issued"); // a refusal changes nothing that it did not rely on
+    at(NOW + 10);
+    expect(store.issue(issueInput({ reservationId: "b", requestCeilingBaseUnits: ceiling })).ok).toBe(true);
+    expect(store.findById("a")!.state).toBe("expired"); // released for b, so recorded
+    at(NOW); // even a clock that runs backwards cannot bring it back
+    expect(store.consume(consumeInput({ reservationId: "a" }))).toEqual({ ok: false, reason: "expired" });
+  });
+
+  it("a consume that finds its reservation expired records it too", () => {
+    const { store, at } = fresh();
+    store.issue(issueInput({ expiresInSec: 10 }));
+    at(NOW + 10);
+    expect(store.consume(consumeInput())).toEqual({ ok: false, reason: "expired" });
+    expect(store.findById("resv-1")!.state).toBe("expired");
+    at(NOW + 1);
+    expect(store.consume(consumeInput())).toEqual({ ok: false, reason: "expired" });
   });
 });
 
-describe("the ceiling is exact at any magnitude (a float would round these)", () => {
-  it("2^200 - 1 held, plus 1, fits a 2^200 ceiling exactly; plus 2 does not", () => {
-    const { store } = fresh();
-    const ceiling = 1n << 200n;
-    expect(store.issue(issueInput({ reservationId: "a", maxAmountBaseUnits: ceiling - 1n, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
-    expect(store.issue(issueInput({ reservationId: "b", maxAmountBaseUnits: 2n, requestCeilingBaseUnits: ceiling }))).toEqual({ ok: false, reason: "over-request-ceiling" });
-    expect(store.issue(issueInput({ reservationId: "b", maxAmountBaseUnits: 1n, requestCeilingBaseUnits: ceiling })).ok).toBe(true);
-    const big = issueInput({ reservationId: "c", requestId: "req-big", maxAmountBaseUnits: ceiling - 1n, requestCeilingBaseUnits: ceiling });
-    store.issue(big);
-    expect(store.consume(consumeInput({ reservationId: "c", requestId: "req-big", obligationBaseUnits: ceiling }))).toEqual({ ok: false, reason: "over-reservation" });
+describe("H2: two connections with skewed clocks cannot spend one ceiling twice", () => {
+  function pair(file: string, clockA: number, clockB: number) {
+    const a = new Database(file);
+    const b = new Database(file);
+    a.pragma("journal_mode = WAL");
+    b.pragma("busy_timeout = 1000");
+    return {
+      a,
+      b,
+      issuer: new BudgetReservationStore(a, { clock: () => clockA }),
+      consumer: new BudgetReservationStore(b, { clock: () => clockB }),
+    };
+  }
+
+  it("the reviewer's interleaving: A expires at 100; an issuer at 101 re-issues its share as B; a consumer at 99 cannot consume A", () => {
+    const file = tempFile();
+    const seed = new Database(file);
+    const seeding = new BudgetReservationStore(seed, { clock: () => NOW });
+    seeding.ensureSchema();
+    expect(seeding.issue(issueInput({ reservationId: "a", maxAmountBaseUnits: 10_000_000n, expiresInSec: 100, requestCeilingBaseUnits: 10_000_000n })).ok).toBe(true);
+    seed.close();
+    const { a, b, issuer, consumer } = pair(file, NOW + 101, NOW + 99);
+    expect(issuer.issue(issueInput({ reservationId: "b", maxAmountBaseUnits: 10_000_000n, requestCeilingBaseUnits: 10_000_000n })).ok).toBe(true);
+    expect(consumer.consume(consumeInput({ reservationId: "a" }))).toEqual({ ok: false, reason: "expired" });
+    expect(consumer.consume(consumeInput({ reservationId: "b" })).ok).toBe(true);
+    const consumed = b.prepare("SELECT sum(CAST(max_amount_base_units AS INTEGER)) AS s FROM budget_reservations WHERE state = 'consumed'").get() as { s: number };
+    expect(consumed.s).toBe(10_000_000); // one ceiling, spent once
+    a.close();
+    b.close();
+  });
+
+  it("the other order: the lagging consumer wins first, so the share stays held and the re-issue is refused", () => {
+    const file = tempFile();
+    const seed = new Database(file);
+    const seeding = new BudgetReservationStore(seed, { clock: () => NOW });
+    seeding.ensureSchema();
+    seeding.issue(issueInput({ reservationId: "a", maxAmountBaseUnits: 10_000_000n, expiresInSec: 100, requestCeilingBaseUnits: 10_000_000n }));
+    seed.close();
+    const { a, b, issuer, consumer } = pair(file, NOW + 101, NOW + 99);
+    expect(consumer.consume(consumeInput({ reservationId: "a" })).ok).toBe(true);
+    expect(issuer.issue(issueInput({ reservationId: "b", maxAmountBaseUnits: 10_000_000n, requestCeilingBaseUnits: 10_000_000n }))).toEqual({ ok: false, reason: "over-request-ceiling" });
+    a.close();
+    b.close();
+  });
+
+  it("siblings too: a child whose share of the unit was re-issued cannot be consumed by a lagging clock", () => {
+    const file = tempFile();
+    const seed = new Database(file);
+    const seeding = new BudgetReservationStore(seed, { clock: () => NOW });
+    seeding.ensureSchema();
+    seeding.issue(issueInput());
+    expect(seeding.consume(consumeInput()).ok).toBe(true);
+    const childOf = (id: string, amount: bigint, ttl: number) =>
+      issueInput({ reservationId: id, principal: OP, payerAddress: CHILD_PAYER, requestId: "req-child", maxAmountBaseUnits: amount, expiresInSec: ttl, parent: { reservationId: "resv-1", unit: unitRef(0) } });
+    expect(seeding.issue(childOf("child-1", 5_000_000n, 50)).ok).toBe(true); // the whole unit (n = 5.0)
+    seed.close();
+    const { a, b, issuer, consumer } = pair(file, NOW + 51, NOW + 49);
+    expect(issuer.issue(childOf("child-2", 5_000_000n, 60)).ok).toBe(true);
+    expect(issuer.findById("child-1")!.state).toBe("expired");
+    const childDeal = consumeInput({ reservationId: "child-1", requestId: "req-child", payer: CHILD_PAYER, grosses: [5_000_000n], operators: [OP_B], principal: OP });
+    expect(consumer.consume(childDeal)).toEqual({ ok: false, reason: "expired" });
+    a.close();
+    b.close();
   });
 });
 
-describe("consume: exactly once, and only by the principal, request, currency and payer it was issued for", () => {
-  it("seals the digest once; a second consume is refused", () => {
+describe("consume: exactly once, only for a real sealed deal, with the terms taken from the deal (M6)", () => {
+  it("seals the deal once; a second consume is refused", () => {
     const { store } = fresh();
     store.issue(issueInput());
-    const first = store.consume(consumeInput());
-    expect(first.ok && first.reservation).toMatchObject({ state: "consumed", consumedDealDigest: DIGEST, consumedAt: NOW });
-    expect(store.consume(consumeInput())).toEqual({ ok: false, reason: "not-issued" });
-    expect(store.consume(consumeInput(sealedPair('{"another":"deal"}')))).toEqual({ ok: false, reason: "not-issued" });
-    expect(store.findById("resv-1")!.consumedDealDigest).toBe(DIGEST); // the first seal stands
+    const sealed = deal();
+    const first = store.consume(consumeInput({}, sealed));
+    expect(first.ok && first.reservation).toMatchObject({ state: "consumed", consumedDealDigest: sealed.dealDigest, consumedAt: NOW });
+    expect(store.consume(consumeInput({}, sealed))).toEqual({ ok: false, reason: "not-issued" });
+    expect(store.consume(consumeInput({ grosses: [1_000_000n] }))).toEqual({ ok: false, reason: "not-issued" });
+    expect(store.findById("resv-1")!.consumedDealDigest).toBe(sealed.dealDigest); // the first seal stands
   });
 
-  it("refuses A used for B: principal, request, currency, payer; and expired, over the maximum, below the floor, missing", () => {
+  it("the reviewer's case: bytes that hash right but are not a deal are refused, and nothing is written", () => {
+    const { store } = fresh();
+    store.issue(issueInput());
+    for (const bytes of ["y".repeat(MAX_DEAL_PREIMAGE_BYTES), '{"domain":"PCC:accepted-deal:v2","planId":"plan.resv-1"}', `${deal().dealPreimage} `]) {
+      expect(store.consume({ reservationId: "resv-1", principal: "agent:buyer-1", ...sealedPair(bytes) })).toEqual({ ok: false, reason: "invalid-deal" });
+    }
+    expect(store.findById("resv-1")!.state).toBe("issued");
+    expect(store.sealedDealPreimage("resv-1")).toBeNull();
+  });
+
+  it("a real deal for ANOTHER reservation is refused", () => {
+    const { store } = fresh();
+    store.issue(issueInput());
+    store.issue(issueInput({ reservationId: "resv-2" }));
+    expect(store.consume({ ...consumeInput({ reservationId: "resv-2" }), reservationId: "resv-1" })).toEqual({ ok: false, reason: "wrong-reservation" });
+  });
+
+  it("A used for B: principal, and the deal's request, currency, payer, obligation and tier, each against the row", () => {
     const { store } = fresh();
     store.issue(issueInput({ minTier: 2 }));
-    const cases: Array<[Partial<ReturnType<typeof consumeInput>>, string]> = [
-      [{ principal: "agent:someone-else" }, "wrong-principal"],
-      [{ requestId: "req-other" }, "wrong-request"],
-      [{ currency: "USDT" }, "wrong-currency"],
-      [{ payerAddresses: [PAYER, `0x${"22".repeat(20)}`] }, "wrong-payer"],
-      [{ now: NOW + 3600 }, "expired"],
-      [{ obligationBaseUnits: 20_000_001n }, "over-reservation"],
-      [{ minUnitTier: 1 }, "below-min-tier"],
-      [{ reservationId: "resv-404" }, "not-found"],
-      [{ dealDigest: "0xabc" }, "invalid-input"],
-      [{ obligationBaseUnits: 0n }, "invalid-input"],
-      [{ payerAddresses: [] }, "invalid-input"],
+    store.issue(issueInput({ reservationId: "resv-usdt", currency: "USDT" }));
+    const cases: Array<[DealSpec & { principal?: string }, string]> = [
+      [{ tier: 2, principal: "agent:someone-else" }, "wrong-principal"],
+      [{ tier: 2, requestId: "req-other" }, "wrong-request"],
+      [{ tier: 2, payer: CHILD_PAYER }, "wrong-payer"],
+      [{ tier: 2, grosses: [20_000_000n, 1n + 5n] }, "over-reservation"],
+      [{ tier: 1 }, "below-min-tier"],
+      [{ tier: 2, reservationId: "resv-404" }, "not-found"],
     ];
-    for (const [over, reason] of cases) expect([over, store.consume(consumeInput({ minUnitTier: 2, ...over }))]).toEqual([over, { ok: false, reason }]);
+    for (const [spec, reason] of cases) expect([spec, store.consume(consumeInput(spec))]).toEqual([spec, { ok: false, reason }]);
+    expect(store.consume(consumeInput({ reservationId: "resv-usdt" }))).toEqual({ ok: false, reason: "wrong-currency" });
     expect(store.findById("resv-1")!.state).toBe("issued"); // no refusal consumed anything
-    expect(store.consume(consumeInput({ minUnitTier: 2, obligationBaseUnits: 20_000_000n, payerAddresses: [PAYER.toUpperCase().replace("0X", "0x")] })).ok).toBe(true); // exactly the maximum; payer hex case
+    expect(store.consume(consumeInput({ tier: 2, grosses: [15_000_000n, 5_000_000n] })).ok).toBe(true); // exactly the maximum, at the floor
+  });
+
+  it("malformed consume input is refused before anything is read", () => {
+    const { store } = fresh();
+    store.issue(issueInput());
+    const ok = consumeInput();
+    for (const bad of [{ dealDigest: "0xabc" }, { dealDigest: 42 }, { dealPreimage: 42 }, { principal: "" }, { reservationId: " " }]) {
+      expect(store.consume({ ...ok, ...(bad as object) } as typeof ok)).toEqual({ ok: false, reason: "invalid-input" });
+    }
+    expect(store.consume({ ...ok, dealPreimage: "x".repeat(MAX_DEAL_PREIMAGE_BYTES + 1) })).toEqual({ ok: false, reason: "invalid-input" });
   });
 
   it("two connections on one database: exactly one consume wins; while one holds the write lock the other cannot interleave", () => {
-    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "r13-"));
-    dirs.push(dir);
-    const file = join(dir, "r13.sqlite");
+    const file = tempFile();
     const a = new Database(file);
     const b = new Database(file);
     a.pragma("journal_mode = WAL");
     b.pragma("busy_timeout = 0");
-    const storeA = new BudgetReservationStore(a);
-    const storeB = new BudgetReservationStore(b);
+    const storeA = new BudgetReservationStore(a, { clock: () => NOW });
+    const storeB = new BudgetReservationStore(b, { clock: () => NOW });
     storeA.ensureSchema();
     storeA.issue(issueInput());
-    // While A holds the write lock (as its own consume would), B's consume cannot even begin.
     a.exec("BEGIN IMMEDIATE");
     expect(() => storeB.consume(consumeInput())).toThrow(/busy|locked/i);
     a.exec("ROLLBACK");
@@ -186,17 +351,16 @@ describe("consume: exactly once, and only by the principal, request, currency an
 });
 
 describe("the sealed deal is stored as its digest's own preimage (amendment #3231, conditions #3235)", () => {
-  it("(a) a preimage that does not hash to the digest is refused and nothing is written; a matching one is stored", () => {
+  it("(a) a preimage that does not hash to the digest is refused; a matching one is stored and hashes to the sealed digest", () => {
     const { store } = fresh();
     store.issue(issueInput());
-    expect(store.consume(consumeInput({ dealPreimage: PREIMAGE + " " }))).toEqual({ ok: false, reason: "deal-preimage-mismatch" });
-    expect(store.consume(consumeInput({ dealDigest: sealedPair("other").dealDigest }))).toEqual({ ok: false, reason: "deal-preimage-mismatch" });
+    const sealed = deal();
+    expect(store.consume({ ...consumeInput({}, sealed), dealDigest: deal({ grosses: [7_000_000n] }).dealDigest })).toEqual({ ok: false, reason: "deal-preimage-mismatch" });
     expect(store.findById("resv-1")!.state).toBe("issued");
-    expect(store.sealedDealPreimage("resv-1")).toBeNull();
-    const upper = consumeInput({ dealDigest: DIGEST.toUpperCase().replace("0X", "0x") }); // hex case carries no meaning
+    const upper = { ...consumeInput({}, sealed), dealDigest: sealed.dealDigest.toUpperCase().replace("0X", "0x") }; // hex case carries no meaning
     expect(store.consume(upper).ok).toBe(true);
-    expect(store.sealedDealPreimage("resv-1")).toBe(PREIMAGE);
-    expect(createHash("sha256").update(store.sealedDealPreimage("resv-1")!, "utf8").digest("hex")).toBe(store.findById("resv-1")!.consumedDealDigest!.slice(2));
+    expect(store.sealedDealPreimage("resv-1")).toBe(sealed.dealPreimage);
+    expect(sha(store.sealedDealPreimage("resv-1")!)).toBe(store.findById("resv-1")!.consumedDealDigest);
   });
 
   it("(b) the stored bytes are never part of the reservation object; only the server-side reader returns them", () => {
@@ -209,93 +373,210 @@ describe("the sealed deal is stored as its digest's own preimage (amendment #323
     expect(store.sealedDealPreimage("resv-404")).toBeNull();
   });
 
-  it("(c) the size bound holds at write, in the store and in the table", () => {
+  it("(M5) the trusted reader re-checks the stored bytes against the stored digest: a mismatch is a fault, never data", () => {
     const { sqlite, store } = fresh();
     store.issue(issueInput());
-    const big = "x".repeat(MAX_DEAL_PREIMAGE_BYTES + 1);
-    expect(store.consume(consumeInput(sealedPair(big)))).toEqual({ ok: false, reason: "invalid-input" });
-    const atBound = "y".repeat(MAX_DEAL_PREIMAGE_BYTES);
-    expect(store.consume(consumeInput(sealedPair(atBound))).ok).toBe(true);
-    expect(() => sqlite.prepare("UPDATE budget_reservations SET consumed_deal_json = ? WHERE id = 'resv-1'").run(big)).toThrow(/constraint/i);
+    store.consume(consumeInput());
+    // A direct writer (the guard trigger removed) swaps the stored deal for another real deal.
+    sqlite.exec("DROP TRIGGER budget_reservations_update_guard");
+    sqlite.prepare("UPDATE budget_reservations SET consumed_deal_json = ? WHERE id = 'resv-1'").run(deal({ grosses: [1_000_000n] }).dealPreimage);
+    expect(() => store.sealedDealPreimage("resv-1")).toThrow(/does not hash/);
+    const child = issueInput({ reservationId: "child-1", principal: OP, payerAddress: CHILD_PAYER, requestId: "req-child", maxAmountBaseUnits: 1n, parent: { reservationId: "resv-1", unit: unitRef(0) } });
+    expect(store.issue(child)).toEqual({ ok: false, reason: "parent-deal-corrupt" });
+    // Bytes and digest swapped TOGETHER for another reservation's real deal: they hash right, but it is not this reservation's deal.
+    const other = deal({ reservationId: "resv-2" });
+    sqlite.prepare("UPDATE budget_reservations SET consumed_deal_json = ?, consumed_deal_digest = ? WHERE id = 'resv-1'").run(other.dealPreimage, other.dealDigest);
+    expect(() => store.sealedDealPreimage("resv-1")).toThrow(/not this reservation's deal/);
+    expect(store.issue(child)).toEqual({ ok: false, reason: "parent-deal-corrupt" });
   });
 });
 
-describe("the table's own constraints refuse what the store never writes", () => {
-  it("rejects a non-canonical amount, an unknown state, a consumed row without a digest, a bad tier, half a parent binding", () => {
-    const { sqlite } = fresh();
-    const insert = (over: Record<string, unknown>) =>
-      sqlite
-        .prepare(
-          `INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, min_tier,
-             parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, consumed_deal_json, created_at)
-           VALUES (@id, 'p', 'x', 'USDC', @amount, 'purpose', 'req', @minTier, @parent, @unit, 1, @state, @digest, @json, 0)`,
-        )
-        .run({ id: "r", amount: "10", minTier: null, parent: null, unit: null, state: "issued", digest: null, json: null, ...over });
-    for (const bad of [
-      { amount: "010" },
-      { amount: "1.5" },
-      { amount: "-1" },
-      { amount: "1e6" },
-      { amount: "1".repeat(79) },
-      { state: "spent" },
-      { state: "consumed", digest: null, json: PREIMAGE },
-      { state: "consumed", digest: DIGEST, json: null },
-      { state: "issued", digest: DIGEST },
-      { state: "issued", json: PREIMAGE },
-      { minTier: 4 },
-      { parent: "p1", unit: null },
-    ]) {
-      expect(() => insert(bad), JSON.stringify(bad)).toThrow(/constraint/i);
-    }
-    expect(() => insert({})).not.toThrow();
-  });
-});
-
-describe("MC 9: a child reservation is bounded by the parent unit it is carved from (#2301)", () => {
-  const parentTerms = { reservationId: "resv-1", unit: "plan.resv-1:0xaa#0", operator: "0xAAaa", netBaseUnits: 6_000_000n, reclaimAt: NOW + 7200 };
+describe("MC 9: a child's terms come from the parent's SEALED deal, inside the store (H1)", () => {
+  const PARENT: ParentUnitRef = { reservationId: "resv-1", unit: unitRef(0) }; // n0: g = n = 5.0 USDC
   const child = (over: Partial<IssueReservationInput> = {}) =>
     // The operator funds its subcontract from its OWN wallet, never the parent payer's.
-    issueInput({ reservationId: "child-1", principal: "0xaaaa", payerAddress: `0x${"aa".repeat(20)}`, requestId: "req-child", maxAmountBaseUnits: 4_000_000n, requestCeilingBaseUnits: 0n, parent: parentTerms, ...over });
+    issueInput({ reservationId: "child-1", principal: OP, payerAddress: CHILD_PAYER, requestId: "req-child", maxAmountBaseUnits: 3_000_000n, parent: PARENT, ...over });
+  function sealedParent(minTier?: number) {
+    const f = fresh();
+    f.store.issue(issueInput(minTier === undefined ? {} : { minTier }));
+    expect(f.store.consume(consumeInput(minTier === undefined ? {} : { tier: minTier })).ok).toBe(true);
+    return f;
+  }
 
-  it("needs a consumed parent in the same currency, and only the parent unit's operator may hold it", () => {
+  it("the reviewer's input: a caller naming its own operator, net and reclaim time for an invented unit gets nothing", () => {
+    const { store } = sealedParent();
+    const forged = { reservationId: "resv-1", unit: "invented#0", operator: "agent:attacker", netBaseUnits: MAX_UINT256, reclaimAt: 9_999_999_999 } as unknown as ParentUnitRef;
+    expect(store.issue(child({ principal: "agent:attacker", parent: forged, maxAmountBaseUnits: 10n ** 70n, requestCeilingBaseUnits: MAX_UINT256 }))).toEqual({
+      ok: false,
+      reason: "parent-unit-not-found",
+    });
+    const realUnitForged = { ...forged, unit: unitRef(0) } as unknown as ParentUnitRef;
+    expect(store.issue(child({ principal: "agent:attacker", parent: realUnitForged, requestCeilingBaseUnits: MAX_UINT256 }))).toEqual({
+      ok: false,
+      reason: "child-principal-not-parent-operator",
+    });
+    expect(store.issue(child({ parent: { reservationId: "resv-1", unit: unitRef(7) } }))).toEqual({ ok: false, reason: "parent-unit-not-found" });
+    expect(store.issue(child({ parent: { reservationId: "resv-1", unit: unitRef(0, OP_B) } }))).toEqual({ ok: false, reason: "parent-unit-not-found" });
+  });
+
+  it("needs a consumed parent in the same currency; only the unit's operator may hold it, never with the parent payer's wallet", () => {
     const { store } = fresh();
     expect(store.issue(child())).toEqual({ ok: false, reason: "parent-not-found" });
     store.issue(issueInput({ minTier: 2 }));
     expect(store.issue(child())).toEqual({ ok: false, reason: "parent-not-consumed" });
-    store.consume(consumeInput({ minUnitTier: 2 }));
-    expect(store.issue(child({ currency: "USDT" }))).toEqual({ ok: false, reason: "parent-currency-mismatch" });
+    expect(store.consume(consumeInput({ tier: 2 })).ok).toBe(true);
     expect(store.issue(child({ principal: "agent:buyer-1" }))).toEqual({ ok: false, reason: "child-principal-not-parent-operator" });
-    expect(store.issue(child({ payerAddress: PAYER.toUpperCase().replace("0X", "0x") }))).toEqual({ ok: false, reason: "child-payer-is-parent-payer" }); // never the parent payer's credentials
-    const ok = store.issue(child({ minTier: 1 }));
-    expect(ok.ok && ok.reservation).toMatchObject({ parentReservationId: "resv-1", parentUnit: parentTerms.unit, minTier: 2 }); // inherits max(parent, own)
+    expect(store.issue(child({ currency: "USDT" }))).toEqual({ ok: false, reason: "parent-currency-mismatch" });
+    expect(store.issue(child({ payerAddress: PAYER.toUpperCase().replace("0X", "0x") }))).toEqual({ ok: false, reason: "child-payer-is-parent-payer" });
+    const ok = store.issue(child({ principal: OP.toUpperCase().replace("0X", "0x"), minTier: 1 }));
+    expect(ok.ok && ok.reservation).toMatchObject({ parentReservationId: "resv-1", parentUnit: unitRef(0), minTier: 2 }); // inherits max(parent, own)
   });
 
-  it("all children of one unit fit its net n, and none outlives its reclaimAt; the request ceiling does not apply to a child", () => {
-    const { store } = fresh();
-    store.issue(issueInput());
-    store.consume(consumeInput());
-    expect(store.issue(child({ expiresAt: parentTerms.reclaimAt + 1 }))).toEqual({ ok: false, reason: "child-outlives-parent-unit" });
-    expect(store.issue(child()).ok).toBe(true); // 4.0 of 6.0 (with a zero request ceiling)
+  it("all children of one unit fit its net n FROM THE DEAL, and none outlives its reclaimAt FROM THE DEAL", () => {
+    const { store } = sealedParent();
+    expect(store.issue(child({ expiresInSec: 7201 }))).toEqual({ ok: false, reason: "child-outlives-parent-unit" }); // reclaimAt = NOW + 7200
+    expect(store.issue(child({ expiresInSec: 7200 })).ok).toBe(true); // 3.0 of 5.0, ending exactly at reclaimAt
     expect(store.issue(child({ reservationId: "child-2", maxAmountBaseUnits: 2_000_001n }))).toEqual({ ok: false, reason: "over-parent-unit" });
     expect(store.issue(child({ reservationId: "child-2", maxAmountBaseUnits: 2_000_000n })).ok).toBe(true); // exactly n
-    expect(store.issue(child({ reservationId: "child-3", maxAmountBaseUnits: 1n, parent: { ...parentTerms, unit: "plan.resv-1:0xaa#1" } })).ok).toBe(true); // another unit
+    expect(store.issue(child({ reservationId: "child-3", maxAmountBaseUnits: 4_750_000n, parent: { reservationId: "resv-1", unit: unitRef(1) } })).ok).toBe(true); // the other unit: n = 4.75
   });
 
-  it("an expired child frees its share of the parent unit", () => {
-    const { store } = fresh();
-    store.issue(issueInput());
-    store.consume(consumeInput());
-    expect(store.issue(child({ maxAmountBaseUnits: 6_000_000n, expiresAt: NOW + 10 })).ok).toBe(true); // the whole unit
-    expect(store.issue(child({ reservationId: "child-2", now: NOW + 5, maxAmountBaseUnits: 1n }))).toEqual({ ok: false, reason: "over-parent-unit" });
-    expect(store.issue(child({ reservationId: "child-2", now: NOW + 10, maxAmountBaseUnits: 6_000_000n })).ok).toBe(true);
+  it("a child fits its own request's ceiling too (it no longer skips it)", () => {
+    const { store } = sealedParent();
+    expect(store.issue(child({ requestCeilingBaseUnits: 2_999_999n }))).toEqual({ ok: false, reason: "over-request-ceiling" });
+    expect(store.issue(child({ requestCeilingBaseUnits: 3_000_000n })).ok).toBe(true);
+  });
+
+  it("an expired child frees its share of the parent unit, durably", () => {
+    const { store, at } = sealedParent();
+    expect(store.issue(child({ maxAmountBaseUnits: 5_000_000n, expiresInSec: 10 })).ok).toBe(true); // the whole unit
+    at(NOW + 5);
+    expect(store.issue(child({ reservationId: "child-2", maxAmountBaseUnits: 1n }))).toEqual({ ok: false, reason: "over-parent-unit" });
+    at(NOW + 10);
+    expect(store.issue(child({ reservationId: "child-2", maxAmountBaseUnits: 5_000_000n })).ok).toBe(true);
+    expect(store.findById("child-1")!.state).toBe("expired");
+  });
+
+  it("siblings under DIFFERENT requests: the unit's own sweep, not the request's, releases the expired sibling", () => {
+    const { store, at } = sealedParent();
+    expect(store.issue(child({ requestId: "req-child-a", maxAmountBaseUnits: 5_000_000n, expiresInSec: 10 })).ok).toBe(true);
+    at(NOW + 10);
+    expect(store.issue(child({ reservationId: "child-2", requestId: "req-child-b", maxAmountBaseUnits: 5_000_000n })).ok).toBe(true);
+    expect(store.findById("child-1")!.state).toBe("expired");
   });
 });
 
-describe("the gateway's runtime migration creates the table", () => {
-  it("createStore(:memory:) runs the DDL, and it is idempotent", () => {
+describe("M5: the table refuses what its invariants forbid, even from a direct writer", () => {
+  const insert = (sqlite: Database.Database, over: Record<string, unknown>) =>
+    sqlite
+      .prepare(
+        `INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, min_tier,
+           parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, consumed_deal_json, created_at, consumed_at)
+         VALUES (@id, 'p', 'x', 'USDC', @amount, 'purpose', 'req', @minTier, @parent, @unit, @expires, @state, @digest, @json, @created, @consumedAt)`,
+      )
+      .run({ id: "r", amount: "10", minTier: null, parent: null, unit: null, expires: 1, state: "issued", digest: null, json: null, created: 0, consumedAt: null, ...over });
+  const REFUSED = /constraint|budget_reservations:/i;
+
+  it("inserts: a zero, non-canonical or over-uint256 amount, a non-issued state, an expiry not after creation, a bad tier, half a parent, an unconsumed parent", () => {
+    const { sqlite } = fresh();
+    for (const bad of [
+      { amount: "0" },
+      { amount: "010" },
+      { amount: "1.5" },
+      { amount: "-1" },
+      { amount: "1e6" },
+      { amount: (MAX_UINT256 + 1n).toString() },
+      { amount: "1".repeat(79) },
+      { state: "consumed", digest: `0x${"ab".repeat(32)}`, json: "{}", consumedAt: 1 },
+      { state: "expired" },
+      { state: "spent" },
+      { expires: 0 },
+      { expires: 1.5 },
+      { minTier: 4 },
+      { minTier: 1.5 },
+      { parent: "p1", unit: null },
+      { parent: "r0", unit: "u#0" },
+    ]) {
+      expect(() => insert(sqlite, bad), JSON.stringify(bad)).toThrow(REFUSED);
+    }
+    expect(() => insert(sqlite, { amount: MAX_UINT256.toString() })).not.toThrow(); // exactly uint256
+  });
+
+  it("updates: the reviewer's sequence, consumed without its time, a changed term, and deletes are all refused", () => {
+    const { sqlite } = fresh();
+    insert(sqlite, { id: "r1", expires: 10 });
+    const digest = `0x${"ab".repeat(32)}`;
+    expect(() => sqlite.prepare("UPDATE budget_reservations SET state = 'consumed', consumed_deal_digest = ?, consumed_deal_json = '{}' WHERE id = 'r1'").run(digest)).toThrow(REFUSED); // no consumed_at
+    expect(() => sqlite.prepare("UPDATE budget_reservations SET state = 'consumed', consumed_deal_digest = ?, consumed_deal_json = '{}', consumed_at = 1 WHERE id = 'r1'").run(digest.toUpperCase())).toThrow(REFUSED); // digest spelling
+    sqlite.prepare("UPDATE budget_reservations SET state = 'consumed', consumed_deal_digest = ?, consumed_deal_json = '{}', consumed_at = 1 WHERE id = 'r1'").run(digest); // SQL has no sha256: the readers check that
+    expect(() => sqlite.prepare("UPDATE budget_reservations SET state = 'issued', consumed_deal_digest = NULL, consumed_deal_json = NULL, consumed_at = NULL WHERE id = 'r1'").run()).toThrow(REFUSED);
+    expect(() => sqlite.prepare("UPDATE budget_reservations SET consumed_deal_json = '{ }' WHERE id = 'r1'").run()).toThrow(REFUSED);
+    insert(sqlite, { id: "r2", expires: 10 });
+    for (const set of ["max_amount_base_units = '11'", "principal = 'q'", "payer_address = 'y'", "request_id = 'other'", "expires_at = 99", "min_tier = 0", "created_at = 1"]) {
+      expect(() => sqlite.prepare(`UPDATE budget_reservations SET ${set} WHERE id = 'r2'`).run(), set).toThrow(REFUSED);
+    }
+    expect(() => sqlite.prepare("UPDATE budget_reservations SET state = 'issued' WHERE id = 'r2'").run()).toThrow(REFUSED);
+    for (const id of ["r1", "r2"]) expect(() => sqlite.prepare("DELETE FROM budget_reservations WHERE id = ?").run(id)).toThrow(REFUSED);
+    expect(sqlite.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 2 });
+  });
+});
+
+describe("H3: migration 0004 is the runtime DDL, and a table of another shape is refused", () => {
+  const SQL_FILE = fileURLToPath(new URL("../migrations/0004_budget_reservations.sql", import.meta.url));
+  const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
+  /** The 0b8adda9 migration: no consumed_deal_json (the reviewer's H3). */
+  const OLD_0004 = `CREATE TABLE IF NOT EXISTS budget_reservations (
+    id TEXT PRIMARY KEY, principal TEXT NOT NULL, payer_address TEXT NOT NULL, currency TEXT NOT NULL,
+    max_amount_base_units TEXT NOT NULL, purpose TEXT NOT NULL, request_id TEXT NOT NULL, job_binding TEXT,
+    min_tier INTEGER CHECK (min_tier IS NULL OR min_tier BETWEEN 0 AND 3), parent_reservation_id TEXT, parent_unit TEXT,
+    expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('issued', 'consumed', 'expired', 'released')),
+    consumed_deal_digest TEXT, created_at INTEGER NOT NULL, consumed_at INTEGER,
+    CHECK ((state = 'consumed') = (consumed_deal_digest IS NOT NULL)), CHECK ((parent_reservation_id IS NULL) = (parent_unit IS NULL)));`;
+
+  it("0004_budget_reservations.sql is BUDGET_RESERVATIONS_DDL, statement for statement", () => {
+    const file = readFileSync(SQL_FILE, "utf8")
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("--"))
+      .join("\n");
+    expect(collapse(file)).toBe(collapse(BUDGET_RESERVATIONS_DDL));
+  });
+
+  it("the reviewer's path: 0004 applied first, then the runtime migration, then a real consume", () => {
+    const file = tempFile();
+    const pre = new Database(file);
+    pre.exec(readFileSync(SQL_FILE, "utf8"));
+    pre.close();
+    const s = createStore({ dbPath: file, seed: false });
+    const client = (s.db as unknown as { $client: Database.Database }).$client;
+    const store = new BudgetReservationStore(client, { clock: () => NOW });
+    expect(store.issue(issueInput()).ok).toBe(true);
+    expect(store.consume(consumeInput()).ok).toBe(true);
+    expect(store.sealedDealPreimage("resv-1")).toBe(deal().dealPreimage);
+    s.close();
+  });
+
+  it("an older, EMPTY table is rebuilt with the current definition; one that holds rows stops the boot", () => {
+    const empty = new Database(":memory:");
+    empty.exec(OLD_0004);
+    ensureBudgetReservationsSchema(empty);
+    const cols = (empty.prepare("PRAGMA table_info(budget_reservations)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain("consumed_deal_json");
+    const store = new BudgetReservationStore(empty, { clock: () => NOW });
+    expect(store.issue(issueInput()).ok && store.consume(consumeInput()).ok).toBe(true);
+
+    const held = new Database(":memory:");
+    held.exec(OLD_0004);
+    held.prepare("INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, expires_at, state, created_at) VALUES ('x', 'p', 'w', 'USDC', '1', 'p', 'r', 2, 'issued', 1)").run();
+    expect(() => ensureBudgetReservationsSchema(held)).toThrow(/different definition .* holds rows/);
+    expect(held.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 1 }); // nothing dropped
+  });
+
+  it("createStore(:memory:) creates the table and its guards, and running the migration again changes nothing", () => {
     const s = createStore({ dbPath: ":memory:", seed: false });
     const client = (s.db as unknown as { $client: Database.Database }).$client;
-    expect(client.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations'").get()).toEqual({ name: "budget_reservations" });
+    const names = (client.prepare("SELECT name FROM sqlite_master WHERE tbl_name = 'budget_reservations' AND type IN ('table', 'trigger') ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+    expect(names).toEqual(["budget_reservations", "budget_reservations_delete_guard", "budget_reservations_insert_guard", "budget_reservations_update_guard"]);
+    expect(() => ensureBudgetReservationsSchema(client)).not.toThrow();
     expect(() => client.exec(BUDGET_RESERVATIONS_DDL)).not.toThrow();
     s.close();
   });

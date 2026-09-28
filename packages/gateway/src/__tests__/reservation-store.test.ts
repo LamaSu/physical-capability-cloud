@@ -40,7 +40,8 @@ const encoder: DealEncoder = (plan) =>
 
 function world(issue: { minTier?: number | null } = {}) {
   const { sqlite } = createDatabase(":memory:");
-  const store = new BudgetReservationStore(sqlite);
+  let clock = NOW;
+  const store = new BudgetReservationStore(sqlite, { clock: () => clock });
   store.ensureSchema();
   const issued = store.issue({
     reservationId: "resv-1",
@@ -51,8 +52,7 @@ function world(issue: { minTier?: number | null } = {}) {
     purpose: "accept plan for req-42",
     requestId: "req-42",
     minTier: issue.minTier ?? null,
-    expiresAt: NOW + 3600,
-    now: NOW,
+    expiresInSec: 3600,
     requestCeilingBaseUnits: 100_000_000n,
   });
   if (!issued.ok) throw new Error(issued.reason);
@@ -71,7 +71,7 @@ function world(issue: { minTier?: number | null } = {}) {
     now: () => NOW,
   };
   const deps: AgentPlanRouteDeps = { revalidation: seam.revalidation, accept: { seam, encodeDeal: encoder, consumeReservation: wiring.consumeReservation } };
-  return { store, wiring, seam, deps };
+  return { store, wiring, seam, deps, at: (t: number) => (clock = t) };
 }
 
 function dag(over: Partial<ExternalPlanSubmission> = {}): ExternalPlanSubmission {
@@ -175,10 +175,29 @@ describe("the consume protocol refuses a plan it did not compile, and the store 
       expect([k, w.wiring.consumeReservation("resv-1", BUYER, oneJob, NOW)]).toEqual([k, { ok: false, reason: "wrong-payer" }]);
     }
     expect(w.wiring.consumeReservation("resv-1", "agent:intruder", plan, NOW)).toEqual({ ok: false, reason: "wrong-principal" });
-    expect(w.wiring.consumeReservation("resv-1", BUYER, plan, NOW + 3600)).toEqual({ ok: false, reason: "expired" });
     // The mail unit is tier 0 while the payer's floor is 2: refused even if the seam's own check were bypassed.
     expect(w.wiring.consumeReservation("resv-1", BUYER, plan, NOW)).toEqual({ ok: false, reason: "below-min-tier" });
     expect(w.store.findById("resv-1")!.state).toBe("issued");
     expect(world().wiring.consumeReservation("resv-1", BUYER, plan, NOW)).toEqual({ ok: true });
+  });
+
+  it("expiry is the STORE's clock (round 2, H2): the route's now cannot revive an expired reservation", () => {
+    const plan = compiled();
+    const w = world();
+    w.at(NOW + 3600);
+    expect(w.wiring.consumeReservation("resv-1", BUYER, plan, NOW)).toEqual({ ok: false, reason: "expired" });
+    w.at(NOW);
+    expect(w.wiring.consumeReservation("resv-1", BUYER, plan, NOW)).toEqual({ ok: false, reason: "expired" }); // recorded, durably
+    expect(w.store.findById("resv-1")!.state).toBe("expired");
+  });
+
+  it("if the store refuses the server's OWN deal as malformed, that is a thrown server fault, never a client-facing conflict", () => {
+    const plan = compiled();
+    const { acceptedDealDigest: _d, ...rest } = plan;
+    // A deal the compiler never emits (feeBps above the frozen ABI's 1000), resealed so the protocol's own checks pass.
+    const bad = reseal({ ...rest, jobs: rest.jobs.map((j) => ({ ...j, units: j.units.map((u) => ({ ...u, feeBps: 1001 })) })) });
+    const w = world();
+    expect(() => w.wiring.consumeReservation("resv-1", BUYER, bad, NOW)).toThrow(/refused the server's own compiled deal \(invalid-deal\)/);
+    expect(w.store.findById("resv-1")!.state).toBe("issued");
   });
 });
