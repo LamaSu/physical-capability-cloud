@@ -4,7 +4,7 @@
  * durable BudgetReservationStore (real SQLite, in memory).
  *
  * STAND-INS, labelled as such:
- *   - the request-ceiling reader (#335's authorizedCeiling is a JS number today);
+ *   - the request-terms reader (#335's authorizedCeiling is a JS number today, and requests store no floor);
  *   - the payer-wallet binding (gateway N1/N21);
  *   - live rows, evidence's gate and map, and the encoder, as in the other route tests.
  */
@@ -42,25 +42,25 @@ const EVIDENCE: Record<string, EvidenceRequirement[]> = {
 const encoder: DealEncoder = (plan) =>
   plan.jobs.map((j) => ({ jobId: j.jobId, unitIds: j.units.map((_, m) => `0x${createHash("sha256").update(`${plan.acceptedDealDigest}|${j.jobId}|${m}`).digest("hex")}`) }));
 
-/** Requests and their owners; ceilings in exact base units (the stand-in for an exact #335). */
-const REQUESTS: Record<string, { owner: string; currency: string; ceilingBaseUnits: bigint }> = {
-  "req-42": { owner: BUYER, currency: "USDC", ceilingBaseUnits: 30_000_000n },
-  "req-theirs": { owner: "agent:someone-else", currency: "USDC", ceilingBaseUnits: 30_000_000n },
+/** Requests, their owners and their terms: exact ceilings and floors (the stand-in for an exact #335). */
+const REQUESTS: Record<string, { owner: string; currency: string; ceilingBaseUnits: bigint; minTier: number }> = {
+  "req-42": { owner: BUYER, currency: "USDC", ceilingBaseUnits: 30_000_000n, minTier: 0 },
+  "req-theirs": { owner: "agent:someone-else", currency: "USDC", ceilingBaseUnits: 30_000_000n, minTier: 0 },
+  "req-floor2": { owner: BUYER, currency: "USDC", ceilingBaseUnits: 30_000_000n, minTier: 2 },
 };
 
 function world(over: Partial<ReservationIssueWiring> = {}) {
   const { sqlite } = createDatabase(":memory:");
-  const store = new BudgetReservationStore(sqlite);
+  const store = new BudgetReservationStore(sqlite, { clock: () => NOW });
   store.ensureSchema();
   let n = 0;
   const issue: ReservationIssueWiring = {
     store,
-    requestCeiling: (requestId, principal) => {
+    requestTerms: (requestId, principal) => {
       const r = REQUESTS[requestId];
-      return r && r.owner === principal ? { currency: r.currency, ceilingBaseUnits: r.ceilingBaseUnits } : null;
+      return r && r.owner === principal ? { currency: r.currency, ceilingBaseUnits: r.ceilingBaseUnits, minTier: r.minTier } : null;
     },
     payerFor: (principal) => (principal === BUYER ? WALLET : null),
-    now: () => NOW,
     newId: () => `resv_test_${++n}`,
     ...over,
   };
@@ -122,7 +122,7 @@ describe("R13 over HTTP: issue -> accept -> read, on one durable store", () => {
     const res = await issue(app, issueBody({ reservationId: "resv-mine", principal: "agent:attacker", payer: A("99"), ceiling: "1" }));
     expect(res.statusCode).toBe(201);
     const r = res.json().reservation;
-    expect(r).toMatchObject({ reservationId: "resv_test_1", requestId: "req-42", currency: "USDC", maxAmountBaseUnits: "20000000", payerAddress: WALLET, state: "issued", expiresAt: NOW + 3600, minTier: null });
+    expect(r).toMatchObject({ reservationId: "resv_test_1", requestId: "req-42", currency: "USDC", maxAmountBaseUnits: "20000000", payerAddress: WALLET, state: "issued", expiresAt: NOW + 3600, minTier: 0 }); // the request's own floor
     const accepted = await app.inject({ method: "POST", url: "/api/settlement/agent-plans/accept", payload: dag(r.reservationId), headers: AS(BUYER) });
     expect(accepted.statusCode).toBe(200);
     const digest = accepted.json().plan.acceptedDealDigest;
@@ -170,8 +170,23 @@ describe("R13 over HTTP: issue -> accept -> read, on one durable store", () => {
     const i = await issue(prod, issueBody());
     expect([i.statusCode, i.json().error]).toEqual([503, "issue-not-wired"]);
     expect((await prod.inject({ method: "GET", url: "/api/settlement/reservations/x", headers: AS(BUYER) })).statusCode).toBe(503);
-    const faulty = await appWith(world({ requestCeiling: () => { throw new Error("db password in message"); } }));
+    const faulty = await appWith(world({ requestTerms: () => { throw new Error("db password in message"); } }));
     const f = await issue(faulty, issueBody());
     expect([f.statusCode, f.json()]).toEqual([500, { error: "internal-error" }]);
+  });
+
+  it("M4: the floor is the REQUEST's; the body can only raise it, never lower it; a malformed server floor is a fault, never a default", async () => {
+    const app = await appWith(world());
+    const floorOf = async (body: Record<string, unknown>) => (await issue(app, issueBody({ requestId: "req-floor2", maxAmountBaseUnits: "1000000", ...body }))).json().reservation.minTier;
+    expect(await floorOf({})).toBe(2);
+    expect(await floorOf({ minTier: 0 })).toBe(2);
+    expect(await floorOf({ minTier: null })).toBe(2);
+    expect(await floorOf({ minTier: 3 })).toBe(3);
+    expect((await issue(app, issueBody({ maxAmountBaseUnits: "1000000" }))).json().reservation.minTier).toBe(0); // req-42's own floor
+    for (const bad of [5, -1, 1.5, "2", null]) {
+      const broken = await appWith(world({ requestTerms: () => ({ currency: "USDC", ceilingBaseUnits: 30_000_000n, minTier: bad as number }) }));
+      const r = await issue(broken, issueBody());
+      expect([bad, r.statusCode, r.json()]).toEqual([bad, 500, { error: "internal-error" }]);
+    }
   });
 });
