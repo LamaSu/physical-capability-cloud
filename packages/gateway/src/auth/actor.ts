@@ -18,8 +18,17 @@ export function authenticatedActor(req: FastifyRequest): string | null {
   return null;
 }
 
-/** Identity comparison, trimmed and case-insensitive (the same normalization as WP-A). */
+/** WP-A's fold (#326 `normalizeIdentity`): trimmed, lower-cased; null/undefined fold to "". */
+function normalizeIdentity(id: unknown): string {
+  return String(id ?? "").trim().toLowerCase();
+}
+
+/**
+ * Identity comparison with WP-A's semantics: trimmed, case-insensitive, and
+ * never true for an id that folds to empty, so a blank owner can't match a blank
+ * actor. Swap to WP-A's `sameIdentity` once #326 merges (this PR merges after it).
+ */
 export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
-  if (!a || !b) return false;
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
+  const x = normalizeIdentity(a);
+  return x.length > 0 && x === normalizeIdentity(b);
 }
