@@ -544,7 +544,13 @@ function main() {
   // the version the update script set). 2.18.0 was the prior open-catalog
   // reframe: categories demoted from canonical list to examples/facets,
   // search-first discovery, demand-signal fallback, negotiate-refines-fuzzy.
-  const TARGET_VERSION = "2.19.0";
+  //
+  // 2.19.2 — removes the node-local `pcc_generate_ui` tool, whose endpoint was
+  // pcc-node's local UI server (http://localhost:3200/api/generate), not a
+  // gateway route (bus #2313). The committed pack had already moved to 2.19.1
+  // while this constant still said 2.19.0, so a polish run would have
+  // downgraded it. Keep this constant equal to the committed version.
+  const TARGET_VERSION = "2.19.2";
   const oldVersion = pkg.version || "2.14.0";
   pkg.version = TARGET_VERSION;
   pkg.lastUpdated = new Date().toISOString();
