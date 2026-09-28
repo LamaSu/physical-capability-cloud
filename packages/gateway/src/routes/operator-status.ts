@@ -18,6 +18,13 @@
  *       enabledChannelCount
  *     },
  *     agentCardUrls: string[],     // per-kernel A2A cards
+ *     readiness: {                 // server-derived (services/onboarding-readiness.ts)
+ *       devices: { registered, executable },
+ *       adapterReady, verifiedRun,
+ *       runEvidence, setupTestEvidence,   // evidence CLASSES, never keys or ids
+ *       payout: "not_supported",
+ *       openOffers: number | null
+ *     },
  *     status: "ready" | "partial" | "unconfigured",
  *     missing: string[]            // human-readable list of unfilled slots
  *   }
@@ -33,15 +40,34 @@
  *   5. A2A surface:   per-kernel agent-card URLs reachable (always; this is
  *                     PCC-side, not operator-side)
  *
- * The endpoint is PUBLIC — operator slug is non-secret, and status doesn't
- * expose any credential. (Channel credentialRef values are vault references,
- * not secrets — safe to surface.)
+ * "ready" also needs readiness (ADK D4(a), agreed with gateway in bus #2622):
+ * no gap from the registered devices, and a VERIFIED run — a completed job on
+ * one of the operator's kernels whose evidence verifies against the kernel's
+ * registered signing key. A self-attested or test-key setup run never counts.
+ *
+ * The endpoint needs an API key (any key); it is not on the api-gate public
+ * allowlist. The response carries no credential: channel credentialRef values
+ * are vault references, and readiness is aggregate only (flags, counts and
+ * evidence classes). Test-job evidence and provenance DETAIL is owner-only and
+ * waits for WP-A's identity binding (N2); it is not served here.
  */
 
 import type { FastifyInstance } from "fastify";
+import { listRegisteredMachineAdapters } from "@pcc/kernel";
 import { getStore } from "../db.js";
-import { schema, eq } from "@pcc/store";
+import { schema, eq, and, desc, sql } from "@pcc/store";
 import { getChannelsByOperator } from "./operator-channels.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import type { KernelSignerColumns } from "../services/device-evidence-settlement.js";
+import {
+  assessBundle,
+  computeOnboardingReadiness,
+  readinessGaps,
+  strongestEvidence,
+  type EvidenceClass,
+  type OnboardingReadiness,
+  type RunObservation,
+} from "../services/onboarding-readiness.js";
 
 const GATEWAY_URL = process.env.PCC_GATEWAY_URL ?? "https://capability.network";
 
@@ -78,8 +104,118 @@ interface OperatorStatusResponse {
     enabledChannelCount: number;
   };
   agentCardUrls: string[];
+  readiness: OnboardingReadiness;
   status: "ready" | "partial" | "unconfigured";
   missing: string[];
+}
+
+/**
+ * Completed runs examined per kernel, newest first. The bound keeps the route
+ * cheap; more than this many newer completed runs with weaker evidence can
+ * hide an older verified run, so it errs toward "not ready", never "ready".
+ */
+const RUNS_PER_KERNEL = 10;
+/** Evidence bundles examined per run (the evidence relay does not deduplicate). */
+const BUNDLES_PER_RUN = 10;
+
+/**
+ * Readiness from canonical rows. A read failure can only hide a verified run,
+ * never invent one.
+ */
+async function loadReadiness(
+  kernelIds: readonly string[],
+  signerByKernel: ReadonlyMap<string, KernelSignerColumns>,
+  capabilityTypes: readonly string[],
+): Promise<OnboardingReadiness> {
+  const { kernelDevices, jobs, evidenceBundles } = schema;
+  const devices: Array<{ type: string | null; adapterType: string | null }> = [];
+  const runs: RunObservation[] = [];
+  let latestSetupTest: { startedAt: string; run: RunObservation } | null = null;
+
+  try {
+    const { db } = getStore();
+
+    const runEvidence = async (jobId: string, kernelId: string): Promise<EvidenceClass> => {
+      const bundles = db
+        .select({
+          bundleHash: evidenceBundles.bundleHash,
+          kernelSignature: evidenceBundles.kernelSignature,
+          sessionKeyAuthorization: evidenceBundles.sessionKeyAuthorization,
+        })
+        .from(evidenceBundles)
+        .where(eq(evidenceBundles.jobId, jobId))
+        .orderBy(desc(evidenceBundles.createdAt))
+        .limit(BUNDLES_PER_RUN)
+        .all();
+      const classes: EvidenceClass[] = [];
+      for (const bundle of bundles) {
+        const evidence = await assessBundle(bundle, jobId, signerByKernel.get(kernelId));
+        classes.push(evidence);
+        if (evidence === "verified") break;
+      }
+      return strongestEvidence(classes);
+    };
+
+    for (const kernelId of kernelIds) {
+      devices.push(
+        ...db
+          .select({ type: kernelDevices.type, adapterType: kernelDevices.adapterType })
+          .from(kernelDevices)
+          .where(eq(kernelDevices.kernelId, kernelId))
+          .all(),
+      );
+
+      const completed = db
+        .select({ id: jobs.id, status: jobs.status })
+        .from(jobs)
+        .where(and(eq(jobs.kernelId, kernelId), eq(jobs.status, "completed")))
+        .orderBy(desc(jobs.completedAt), desc(jobs.startedAt))
+        .limit(RUNS_PER_KERNEL)
+        .all();
+      for (const job of completed) {
+        const evidence = await runEvidence(job.id, kernelId);
+        runs.push({ status: job.status, evidence });
+        if (evidence === "verified") break;
+      }
+
+      // POST /api/setup/test-job ids are "test-job-<uuid>".
+      const setup = db
+        .select({ id: jobs.id, status: jobs.status, startedAt: jobs.startedAt })
+        .from(jobs)
+        .where(and(eq(jobs.kernelId, kernelId), sql`${jobs.id} LIKE 'test-job-%'`))
+        .orderBy(desc(jobs.startedAt))
+        .limit(1)
+        .get();
+      const setupStartedAt = setup?.startedAt ?? "";
+      if (setup && (latestSetupTest === null || setupStartedAt > latestSetupTest.startedAt)) {
+        latestSetupTest = {
+          startedAt: setupStartedAt,
+          run: { status: setup.status, evidence: await runEvidence(setup.id, kernelId) },
+        };
+      }
+    }
+  } catch {
+    // DB not initialised (test context with nothing seeded): keep what was read.
+  }
+
+  let openOffers: number | null = null;
+  try {
+    const offers = getJobOffersStore();
+    openOffers = [...new Set(capabilityTypes)].reduce(
+      (count, capabilityType) => count + offers.listOpen({ capabilityType }).length,
+      0,
+    );
+  } catch {
+    openOffers = null; // the offer store is not initialised in this process
+  }
+
+  return computeOnboardingReadiness({
+    devices,
+    buildableMachineAdapters: listRegisteredMachineAdapters(),
+    runs,
+    latestSetupTest: latestSetupTest?.run ?? null,
+    openOffers,
+  });
 }
 
 export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> {
@@ -91,6 +227,8 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
 
       let kernels: OperatorStatusKernel[] = [];
       let caps: OperatorStatusCapability[] = [];
+      // Each kernel's proven signer, for verifying run evidence. Never served.
+      const signerByKernel = new Map<string, KernelSignerColumns>();
 
       try {
         const { db } = getStore();
@@ -102,6 +240,9 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
             name: shopKernels.name,
             status: shopKernels.status,
             lastHeartbeat: shopKernels.lastHeartbeat,
+            signingKeyAlgorithm: shopKernels.signingKeyAlgorithm,
+            signingKeyPublicKey: shopKernels.signingKeyPublicKey,
+            signingAddress: shopKernels.signingAddress,
           })
           .from(shopKernels)
           .where(eq(shopKernels.operatorAddress, slug))
@@ -112,6 +253,13 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
           status: r.status as string,
           lastHeartbeat: (r.lastHeartbeat as string) ?? null,
         }));
+        for (const r of kernelRows) {
+          signerByKernel.set(r.id as string, {
+            signingKeyAlgorithm: r.signingKeyAlgorithm,
+            signingKeyPublicKey: r.signingKeyPublicKey,
+            signingAddress: r.signingAddress,
+          });
+        }
 
         if (kernels.length > 0) {
           const kernelIds = kernels.map((k) => k.id);
@@ -189,6 +337,14 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
         missing.push(`availability (slot 4) — ${capsWithoutAvailability.length}/${caps.length} capabilities lack availability; recommend setting mode=always for 24/7 or windows[] for explicit hours`);
       }
 
+      // Readiness (D4(a)): can a device execute, and has a verified run happened?
+      const readiness = await loadReadiness(
+        kernels.map((k) => k.id),
+        signerByKernel,
+        caps.map((c) => c.type),
+      );
+      if (kernels.length > 0) missing.push(...readinessGaps(readiness));
+
       // Overall status
       let status: "ready" | "partial" | "unconfigured" = "ready";
       if (kernels.length === 0 && caps.length === 0 && channels.length === 0) {
@@ -215,6 +371,7 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
           enabledChannelCount: enabledChannels.length,
         },
         agentCardUrls,
+        readiness,
         status,
         missing,
       };
