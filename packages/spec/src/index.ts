@@ -4,6 +4,7 @@ export { canonicalize, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEv
 // RTP-absorption doc 03 — job lifecycle reducer + in-memory timeout registry (transport-independent)
 export * from "./util/job-lifecycle.js";
 export { ids, generateId } from "./util/ids.js";
+export { compareCodeUnits } from "./util/code-unit-order.js";
 // Identity types and browser-safe functions (no node:crypto)
 export * from "./identity/types.js";
 // ERC-8004 types (browser-safe)
