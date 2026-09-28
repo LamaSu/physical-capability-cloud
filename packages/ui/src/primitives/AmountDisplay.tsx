@@ -46,6 +46,9 @@ const TABULAR: React.CSSProperties = { fontVariantNumeric: "tabular-nums" };
 /** "$" and the currency code are quieter than the digits, in the same ink. */
 const SECONDARY: React.CSSProperties = { opacity: 0.7 };
 
+/** Currencies a "$" may stand for. Any other currency shows no "$": "1.50 ETH", not "$1.50 ETH". */
+const DOLLAR_CURRENCIES: ReadonlySet<string> = new Set(["USD", "USDC", "USDT", "USDBC"]);
+
 export function AmountDisplay({
   amount,
   decimals,
@@ -71,6 +74,9 @@ export function AmountDisplay({
   }
 
   const formatted = formatAmountExact(exact);
+  // A dynamic currency can arrive as null at runtime; it then shows no "$" and no unit.
+  const unit = typeof currency === "string" ? currency.trim() : "";
+  const dollar = DOLLAR_CURRENCIES.has(unit.toUpperCase());
   return (
     <span
       className={cn("font-mono font-semibold", sizeMap[size], className)}
@@ -78,9 +84,9 @@ export function AmountDisplay({
       data-amount="value"
     >
       {exact.negative && "-"}
-      <span className="mr-0.5" style={SECONDARY}>$</span>
+      {dollar && <span className="mr-0.5" style={SECONDARY}>$</span>}
       {exact.negative ? formatted.slice(1) : formatted}
-      <span className="text-xs ml-1.5" style={SECONDARY}>{currency}</span>
+      {unit !== "" && <span className="text-xs ml-1.5" style={SECONDARY}>{unit}</span>}
     </span>
   );
 }

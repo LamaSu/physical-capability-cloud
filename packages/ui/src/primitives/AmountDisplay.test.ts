@@ -112,6 +112,20 @@ describe("AmountDisplay (server render)", () => {
     expect(markup({ amount: "12.5" })).toContain("font-variant-numeric:tabular-nums");
   });
 
+  it("shows a $ only for dollar currencies", () => {
+    expect(text({ amount: "1.5", currency: "ETH" })).toBe("1.50 ETH");
+    expect(text({ amount: "1.5", currency: "EUR" })).toBe("1.50 EUR");
+    expect(text({ amount: "1.5", currency: "usd" })).toBe("$ 1.50 usd");
+    expect(text({ amount: "1.5", currency: "USDT" })).toBe("$ 1.50 USDT");
+  });
+
+  it("does not crash or claim dollars when a dynamic currency is missing", () => {
+    for (const currency of [null, "", "   "]) {
+      const props = { amount: "1.5", currency } as unknown as AmountDisplayProps;
+      expect(text(props), JSON.stringify(currency)).toBe("1.50");
+    }
+  });
+
   it("carries no payment-state colour or glow, even when glow is asked for", () => {
     for (const props of [{ amount: "12.5" }, { amount: "12.5", glow: true }, { amount: undefined, glow: true }]) {
       const m = markup(props);
