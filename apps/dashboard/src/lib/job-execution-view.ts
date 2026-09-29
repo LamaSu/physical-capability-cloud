@@ -140,6 +140,8 @@ export function payoutBasisText(s: SettlementAxis): string | null {
           return "This job's milestone or escrow record has a status this view does not recognize, so the payment is unknown.";
         case "status_ambiguous":
           return 'This job\'s milestone says "completed", which may or may not mean released, so the payment is unknown.';
+        case "job_row_conflict":
+          return 'The job record says "settled", but this job\'s milestone record says it was not released, so the payment is unknown.';
         default:
           return "This job's milestone and the escrow record disagree, so the payment is unknown.";
       }

@@ -133,6 +133,8 @@ const SETTLEMENT_NOTICES: ReadonlySet<JobExecutionNoticeCode> = new Set<JobExecu
   "settlement_records_conflict",
   "settlement_row_conflict",
   "settlement_link_conflict",
+  "settlement_status_unrecognized",
+  "milestone_shared_by_jobs",
 ]);
 
 /** The fields both legacy reads share: the money claim, stated with its basis. */
@@ -149,6 +151,8 @@ export interface LegacySettlementClaim {
   settledAt: null;
   payout: PayoutState;
   payoutBasis: SettlementAxis["payoutBasis"];
+  /** Why the payout is unknown although a record is linked (see the execution read model). */
+  payoutUnknownReason: SettlementAxis["payoutUnknownReason"];
   payoutConfirmation: SettlementAxis["payoutConfirmation"];
   /** A mock-settlement escrow: nothing on this record is real money. */
   simulated: boolean;
@@ -169,6 +173,7 @@ function claimOf(dto: JobExecutionDTO, unavailable: string[]): LegacySettlementC
     settledAt: null,
     payout: s.payout,
     payoutBasis: s.payoutBasis,
+    payoutUnknownReason: s.payoutUnknownReason,
     payoutConfirmation: s.payoutConfirmation,
     simulated: s.record?.simulated === true,
     settlementLink: s.link,

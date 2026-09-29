@@ -171,6 +171,7 @@ describe("NEGATIVE: completed is never paid", () => {
     for (const status of ["funded", "refunded"]) {
       const dto = build({ job: job({ status: "settled" }), settlement: { ok: true, value: linked(escrow(), [milestone({ status })]) } });
       expect(dto.settlement.payout, status).toBe("unknown");
+      expect(dto.settlement.payoutUnknownReason, status).toBe("job_row_conflict");
       expect(dto.notices).toEqual(expect.arrayContaining(["job_row_reports_settled", "settlement_row_conflict"]));
       expect(dto.notices).not.toContain("settlement_records_conflict");
     }
