@@ -3852,7 +3852,8 @@ contract VNextSettlementEscrowTest is Test {
         uint256 payeeAndFeeBalances;
     }
 
-    function _fenceSnapshot(VNextSettlementEscrow e, bytes32 id, bytes32[] memory claims)
+    /// @dev The third argument is unused here: the snapshot covers every claim the unit has, found by probing.
+    function _fenceSnapshot(VNextSettlementEscrow e, bytes32 id, bytes32[] memory)
         internal
         view
         returns (FenceSnapshot memory s)
@@ -3864,16 +3865,26 @@ contract VNextSettlementEscrowTest is Test {
         s.bondLiability = e.bondLiability();
         s.compLiability = e.compLiability();
         s.burnLiability = e.burnLiability();
+        bytes32[] memory all = _existingClaims(e, id);
         bytes memory records;
-        for (uint256 k; k < claims.length; ++k) {
-            records = bytes.concat(records, abi.encode(e.claimOf(claims[k]))); // reverts ClaimNotFound if gone
+        for (uint256 k; k < all.length; ++k) {
+            records = bytes.concat(records, abi.encode(all[k], e.claimOf(all[k])));
         }
         s.claimRecords = keccak256(records);
         s.escrowBalance = usdc.balanceOf(address(e));
         s.payerBalance = usdc.balanceOf(payer);
         s.operatorBalance = usdc.balanceOf(operator);
         // Packed, so one field catches a wei moving to or between the two payees and the fee recipient.
-        s.payeeAndFeeBalances = uint256(keccak256(abi.encode(usdc.balanceOf(recip1), usdc.balanceOf(recip2), usdc.balanceOf(feeDest))));
+        s.payeeAndFeeBalances = uint256(
+            keccak256(
+                abi.encode(
+                    usdc.balanceOf(recip1),
+                    usdc.balanceOf(recip2),
+                    usdc.balanceOf(feeDest),
+                    usdc.balanceOf(VNextSettlementLib.BURN_SINK)
+                )
+            )
+        );
     }
 
     function _assertSameSnapshot(FenceSnapshot memory x, FenceSnapshot memory y) internal pure {
@@ -3888,7 +3899,7 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(y.escrowBalance, x.escrowBalance, "a refused exit moved escrow funds");
         assertEq(y.payerBalance, x.payerBalance, "a refused exit paid the payer");
         assertEq(y.operatorBalance, x.operatorBalance, "a refused exit paid the operator");
-        assertEq(y.payeeAndFeeBalances, x.payeeAndFeeBalances, "a refused exit paid a payee or the fee recipient");
+        assertEq(y.payeeAndFeeBalances, x.payeeAndFeeBalances, "a refused exit paid a payee, the fee recipient or the burn sink");
     }
 
     /// @dev Every exit and every state-advancing call, on a unit whose outcome is already allocated (states 6-9).
@@ -3898,6 +3909,7 @@ contract VNextSettlementEscrowTest is Test {
         internal
     {
         assertGe(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED), "the outcome is not yet allocated");
+        _assertOpenClaimsAre(e, id, claims);
         FenceSnapshot memory before = _fenceSnapshot(e, id, claims);
 
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
@@ -3943,6 +3955,73 @@ contract VNextSettlementEscrowTest is Test {
         out = new bytes32[](legs.length);
         for (uint256 k; k < legs.length; ++k) {
             out[k] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, legs[k], classes[k]);
+        }
+    }
+
+    /// @dev EVERY claim that exists for the unit, found by probing each id the unit can have: one per payout leg,
+    ///      the fee, the refund, and the three bond-family legs. So a replay that creates, deletes or edits ANY
+    ///      claim changes the snapshot, listed or not.
+    function _existingClaims(VNextSettlementEscrow e, bytes32 id) internal view returns (bytes32[] memory out) {
+        (, uint256 payoutCount,) = e.unitCounters(id);
+        uint256 n = payoutCount + 5;
+        bytes32[] memory probe = new bytes32[](n);
+        for (uint256 j; j < payoutCount; ++j) {
+            probe[j] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, j, ClaimClass.PRINCIPAL);
+        }
+        probe[payoutCount] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.FEE_LEG_INDEX, ClaimClass.FEE);
+        probe[payoutCount + 1] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.REFUND_LEG_INDEX, ClaimClass.REFUND);
+        probe[payoutCount + 2] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND);
+        probe[payoutCount + 3] =
+            VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.DELAY_COMP_LEG_INDEX, ClaimClass.DELAY_COMP);
+        probe[payoutCount + 4] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.BURN_LEG_INDEX, ClaimClass.BURN);
+        uint256 found;
+        bool[] memory exists = new bool[](n);
+        for (uint256 k; k < n; ++k) {
+            try e.claimOf(probe[k]) {
+                exists[k] = true;
+                ++found;
+            } catch {}
+        }
+        out = new bytes32[](found);
+        uint256 w;
+        for (uint256 k; k < n; ++k) {
+            if (exists[k]) out[w++] = probe[k];
+        }
+    }
+
+    /// @dev The fixture must know exactly which claims are open: the listed set equals the probed set.
+    function _assertOpenClaimsAre(VNextSettlementEscrow e, bytes32 id, bytes32[] memory listed) internal view {
+        bytes32[] memory all = _existingClaims(e, id);
+        assertEq(all.length, listed.length, "the open claims are not the ones the fixture lists");
+        for (uint256 k; k < listed.length; ++k) {
+            bool hit;
+            for (uint256 m; m < all.length; ++m) {
+                if (all[m] == listed[k]) hit = true;
+            }
+            assertTrue(hit, "a listed claim is not open");
+        }
+    }
+
+    /// @dev `base` plus the bond-family claims a failed bond disposition leaves open: delay compensation to the
+    ///      operator (if any) and the remainder, either returned to the challenger (BOND) or burned (BURN).
+    function _withBondClaims(VNextSettlementEscrow e, bytes32 id, bytes32[] memory base, uint256 comp, uint256 rest, bool burn)
+        internal
+        view
+        returns (bytes32[] memory out)
+    {
+        out = new bytes32[](base.length + (comp > 0 ? 1 : 0) + (rest > 0 ? 1 : 0));
+        uint256 w;
+        for (; w < base.length; ++w) {
+            out[w] = base[w];
+        }
+        if (comp > 0) {
+            out[w++] =
+                VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.DELAY_COMP_LEG_INDEX, ClaimClass.DELAY_COMP);
+        }
+        if (rest > 0) {
+            out[w++] = burn
+                ? VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.BURN_LEG_INDEX, ClaimClass.BURN)
+                : VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND);
         }
     }
 
@@ -4044,6 +4123,59 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(usdc.balanceOf(payer), payerAfterFunding + c[0].g, "refund and bond returned exactly once");
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "an overturned unit paid a payee");
         assertEq(e.bondLiability(), 0, "the bond left the bucket exactly once");
+    }
+
+    /// @dev The appeal's other two outcomes on the primary lane, each with every push failing. UPHOLD releases and
+    ///      disposes the bond COMP_BURN: delay compensation to the operator, the remainder burned. SILENCE (no final
+    ///      verdict inside the appeal window) releases and disposes it COMP_RETURN: compensation, the remainder back
+    ///      to the challenger.
+    function test_Fence_AppealUphold_ReleaseOutstanding_EveryExitRefused() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
+        bytes32 id = _unitId(e);
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        uint256 comp = VNextSettlementLib.delayCompensation(c[0].g, bond);
+        bytes32[] memory claims = _withBondClaims(e, id, _releaseClaims(e, id), comp, bond - comp, true);
+
+        vm.warp(c[0].reclaimAt + VNextSettlementLib.APPEAL_WINDOW);
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), c[0].n, "the payees were paid exactly n, once");
+        assertEq(usdc.balanceOf(feeDest), c[0].f, "the fee was paid exactly f, once");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), bond - comp, "the lost bond's remainder burned exactly once");
+        assertEq(e.bondLiability() + e.compLiability() + e.burnLiability(), 0, "every bond-family bucket emptied exactly once");
+    }
+
+    function test_Fence_AppealSilence_ReleaseOutstanding_EveryExitRefused() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
+        bytes32 id = _unitId(e);
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        vm.warp(e.challengedAtOf(id) + VNextSettlementLib.APPEAL_WINDOW); // no verdict was recorded in the window
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.finalize(id); // appeal silence: release (reason 1)
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        uint256 comp = VNextSettlementLib.delayCompensation(c[0].g, bond);
+        bytes32[] memory claims = _withBondClaims(e, id, _releaseClaims(e, id), comp, bond - comp, false);
+
+        vm.warp(c[0].reclaimAt + VNextSettlementLib.APPEAL_WINDOW);
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), c[0].n, "the payees were paid exactly n, once");
+        assertEq(usdc.balanceOf(feeDest), c[0].f, "the fee was paid exactly f, once");
+        assertEq(e.bondLiability() + e.compLiability() + e.burnLiability(), 0, "every bond-family bucket emptied exactly once");
     }
 
     /// @dev An appeal OVERTURN refunds while the accepted assertion is still recorded on the unit. A later
