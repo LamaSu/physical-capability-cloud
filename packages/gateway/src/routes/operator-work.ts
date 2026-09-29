@@ -6,14 +6,18 @@
  *   GET /api/operator/income  OperatorIncomeDTO: what the escrow records show for the
  *                             caller's kernel jobs; totals are sums of rows only
  *
- * Both are scoped to the caller's kernels (operatorAddress is the caller, compared
- * case-insensitively). Anonymous callers get 401. A caller with no kernels gets an empty,
- * fully described read, not an error. `cache-control: no-store`.
+ * Both are scoped to the caller's kernels: kernels whose recorded operatorAddress is the
+ * caller's PROVEN wallet (SIWE: WP-A's req.provenWallet), compared as addresses. An API
+ * key's operatorId or an email is never used, since anyone can claim one at provisioning
+ * (#353 review r3, P1-5). Anonymous callers get 401, and a credential without a proven
+ * wallet gets 403 identity_unverified. A proven wallet with no kernels gets an empty, fully
+ * described read, not an error. `cache-control: no-store`.
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
+import { jobReadCallerOf } from "../readmodels/job-execution.js";
 import {
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
@@ -34,22 +38,34 @@ function offersReader(): OffersReader | null {
   }
 }
 
-type Load = { ok: true; sources: OperatorWorkSources } | { ok: false; status: 401 | 503; body: Record<string, unknown> };
+type Load = { ok: true; sources: OperatorWorkSources } | { ok: false; status: 401 | 403 | 503; body: Record<string, unknown> };
 
 function load(req: FastifyRequest): Load {
-  const principal = ((req as any).operatorId ?? (req as any).userId ?? null) as string | null;
-  if (!principal || String(principal).trim() === "") {
+  const caller = jobReadCallerOf(req as unknown as { headers: Record<string, unknown> });
+  if (!caller.authenticated) {
     return {
       ok: false,
       status: 401,
       body: { error: "unauthenticated", message: "Sign in or send an API key to read your work." },
     };
   }
+  if (!caller.provenWallet) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: "identity_unverified",
+        message:
+          "Your work and income are shown only to a proven identity: sign in with a wallet (SIWE), or use an API key " +
+          "minted from a wallet session. An email or a self-declared operator id is not proof.",
+      },
+    };
+  }
   let store: ReturnType<typeof getStore>;
   let kernels;
   try {
     store = getStore();
-    kernels = findOperatorKernels(principal, store.db);
+    kernels = findOperatorKernels(caller.provenWallet, store.db);
   } catch (error) {
     req.log.error({ err: error }, "operator read model: kernel read failed");
     return {

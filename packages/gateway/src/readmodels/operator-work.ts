@@ -2,10 +2,10 @@
  * OperatorWorkDTO and OperatorIncomeDTO (@pcc/spec readmodels/operator-work.ts): the loader
  * (one pass over the store and the job-offers store) and the pure builders.
  *
- * Scope: the caller's kernels, i.e. kernels whose operatorAddress is the caller's principal
- * (the API key's operatorId or the SIWE wallet), compared case-insensitively as in
- * authorizeJobRead. The principal is self-asserted at provisioning until the gateway's N2
- * fix lands; this read model shows each operator only work on kernels recorded as theirs.
+ * Scope: the caller's kernels, i.e. kernels whose recorded operatorAddress is the caller's
+ * PROVEN wallet (SIWE; the route passes req.provenWallet), compared as addresses as in
+ * authorizeJobRead. A recorded operator that is not an address (an email) never matches, since
+ * no signature proves it (#353 review r3, P1-5).
  */
 import {
   JOB_OFFER_PHASE_MAP,
@@ -94,8 +94,9 @@ export interface OffersReader {
   getEvents(id: string): JobOfferEvent[];
 }
 
-const samePrincipal = (a: unknown, b: string) =>
-  typeof a === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const sameWallet = (recorded: unknown, wallet: string) =>
+  typeof recorded === "string" && ADDRESS.test(recorded.trim()) && recorded.trim().toLowerCase() === wallet.toLowerCase();
 
 const nonEmpty = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v : null);
 
@@ -116,9 +117,9 @@ export interface OperatorWorkLoadOptions {
  * The caller's kernels. A failure here is not recoverable for this read (nothing can be
  * scoped), so it throws, and the route answers 503.
  */
-export function findOperatorKernels(principal: string, db: JobExecutionDb): KernelLite[] {
+export function findOperatorKernels(wallet: string, db: JobExecutionDb): KernelLite[] {
   const rows = db.select().from(schema.shopKernels).all() as KernelLite[];
-  return rows.filter((k) => samePrincipal(k.operatorAddress, principal));
+  return rows.filter((k) => sameWallet(k.operatorAddress, wallet));
 }
 
 /**
