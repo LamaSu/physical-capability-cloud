@@ -1,17 +1,17 @@
 """Durable registry of accepted jobs awaiting device-reported completion.
 
-JobExecutor tracks the jobs a device ACCEPTED -- an ``lp`` spool, an
-OctoPrint print of the job's private copy -- until the device reports their
-outcome.  Kept only in memory, a daemon restart forgot them, and they stayed
+JobExecutor tracks the jobs a device ACCEPTED -- an ``lp`` spool -- until
+the device reports their outcome (only IPP is tracked; an OctoPrint print is
+acceptance-only, r31 round-2 findings 2 and 3).  Kept only in memory, a daemon restart forgot them, and they stayed
 "running" upstream with nobody watching (r31 round-1 verdict, "Existing
 dependencies": "a restart can strand a running job").  AwaitingStore keeps
 them on disk, so a restarted daemon resumes observing where it stopped.
 
 What is stored is PUBLIC: the job id and its evidence binding, the device
-id, the completion kind, the handle (IPP printer host, queue and job id;
-OctoPrint base URL, copy path and baseline) and the deadline.  Never the
-device record itself, which can hold a credential (an OctoPrint API key): on
-load the device is looked up again by id in the node's own configuration.
+id, the completion kind, the handle (IPP printer host, queue and CUPS job
+id) and the deadline.  Never the device record itself, which can hold a
+credential (an OctoPrint API key): on load the device is looked up again by
+id in the node's own configuration.
 
 Deadlines are wall-clock times, because a monotonic clock restarts with the
 machine.  A wall-clock jump can shorten or lengthen a budget; budgets are
@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 log = logging.getLogger("pcc-node.awaiting")
 
-AWAITING_KINDS = ("ipp", "octoprint")
+AWAITING_KINDS = ("ipp",)
 
 
 class AwaitingStore:

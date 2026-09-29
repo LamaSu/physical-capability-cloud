@@ -21,7 +21,6 @@ a transport failure (status 0).
 
 import json
 import ssl
-import uuid
 from http.client import HTTPException
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -138,27 +137,6 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True,
         data = json.dumps(body).encode("utf-8")
         hdrs.setdefault("Content-Type", "application/json")
     req = Request(url, data=data, headers=hdrs, method=method)
-    ctx = None if verify_ssl else _relaxed_ctx
-    return _send(req, timeout, ctx, max_bytes)
-
-
-def http_form(method, url, fields, headers=None, timeout=30, verify_ssl=True,
-              max_bytes=MAX_RESPONSE_BYTES):
-    """Send text ``fields`` as multipart/form-data; the answer is read as :func:`http` reads it."""
-    boundary = f"----PCCForm{uuid.uuid4().hex}"
-    parts = []
-    for name, value in fields.items():
-        parts.append(
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"\r\n'
-            f"\r\n"
-            f"{value}\r\n"
-        )
-    parts.append(f"--{boundary}--\r\n")
-    hdrs = dict(headers or {})
-    hdrs.setdefault("User-Agent", USER_AGENT)
-    hdrs["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-    req = Request(url, data="".join(parts).encode("utf-8"), headers=hdrs, method=method)
     ctx = None if verify_ssl else _relaxed_ctx
     return _send(req, timeout, ctx, max_bytes)
 

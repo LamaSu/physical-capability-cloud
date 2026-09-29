@@ -1,11 +1,9 @@
-"""Deferred completion tracking: IPP job-state and OctoPrint print-history
-pollers.
+"""Deferred completion tracking: the IPP job-state poller.
 
-A queued `lp` job and a started OctoPrint print are ACCEPTANCE, not
-completion (PR #343), so execute() leaves them "running".  execute() now
-registers such a job, and the daemon calls JobExecutor.poll_awaiting() once
-per cycle, which asks the device ONCE per job and reports only what the
-DEVICE says:
+A queued `lp` job is ACCEPTANCE, not completion (PR #343), so execute()
+leaves it "running".  execute() now registers such a job, and the daemon
+calls JobExecutor.poll_awaiting() once per cycle, which asks the printer
+ONCE per job and reports only what the PRINTER says:
 
   * completed  -> one bundle [execution_completed {level: device_reported}]
                   and one 'completed' status, then the job leaves the registry
@@ -15,18 +13,29 @@ DEVICE says:
 
 Fail closed: an outcome nobody observed is never a completion.
 
-r31 round-1 findings 2, 3 and 5 changed both pollers:
+r31 round-1 findings 2 and 5, and r31 round-2 finding 4, changed the poller:
 
-  * IPP (finding 2): a terminal verdict now needs proof the answer is about
-    THIS spooled job -- exactly one echoed job-id equal to the handle's --
-    and a 'completed' state 9 needs a well-formed, non-empty
+  * IPP (round-1 finding 2): a terminal verdict now needs proof the answer is
+    about THIS spooled job -- exactly one echoed job-id equal to the
+    handle's -- and a 'completed' state 9 needs a well-formed, non-empty
     job-state-reasons (RFC 8011 sec 5.3.8 REQUIRES it).  See
     ipp_completion_verdict, ipp_job_id, ipp_job_state_reasons.
-  * OctoPrint (finding 3): completion is read from the job's PRIVATE COPY's
-    own, durable print history (success/failure counts against a baseline
-    read right after the copy was made), never from a snapshot of whatever
-    file happens to be selected on the printer.  See
-    octoprint_history_verdict, JobExecutor._execute_octoprint.
+  * IPP reasons (round-2 finding 4): job-state-reasons values must match
+    RFC 8011 sec 5.1.4 keyword syntax, and a 'completed' state 9 only reads
+    as a clean completion for reasons in IPP_REASONS_COMPLETED_OK ('none',
+    'job-completed-successfully', 'job-restartable'); anything else is
+    UNOBSERVABLE, never COMPLETED.  See ipp_job_state_reasons,
+    ipp_completion_verdict.
+  * OctoPrint (r31 round-3): completion tracking was WITHDRAWN entirely.
+    OctoPrint's REST API names no print attempt a later answer could be
+    bound to, so a select+print it accepts stays acceptance-only forever
+    (see JobExecutor._execute_octoprint, _completion_handle).  The private
+    per-job-copy / baseline / print-history machinery this file used to
+    test (octoprint_job_folder, octoprint_print_history,
+    octoprint_history_verdict, TestOctoprintJobFolder,
+    TestOctoprintPrintHistory, TestOctoPrintHistoryVerdict,
+    TestOctoPrintCompletionTracking) was removed along with it -- see
+    tests/test_r31_round3.py for the adversarial acceptance-only coverage.
   * Deadlines (finding 5): at most one request per job per
     COMPLETION_POLL_MIN_INTERVAL_S, each request timed out at the remaining
     budget (capped), and an answer that lands after the deadline is
@@ -62,7 +71,6 @@ from pcc_node.job_executor import (
     EVIDENCE_LEVEL_DEVICE_REPORTED,
     IPP_COMPLETION_POLL_TIMEOUT_S,
     IPP_REASONS_STOPPED,
-    OCTOPRINT_COMPLETION_POLL_TIMEOUT_S,
     POLL_COMPLETED,
     POLL_FAILED,
     POLL_UNOBSERVABLE,
@@ -78,9 +86,6 @@ from pcc_node.job_executor import (
     ipp_job_state,
     ipp_job_state_reasons,
     ipp_job_urls,
-    octoprint_history_verdict,
-    octoprint_job_folder,
-    octoprint_print_history,
     parse_lp_request_id,
 )
 
@@ -415,7 +420,7 @@ class TestIppResponseDecoding:
 
     @pytest.mark.parametrize("reasons,expected", [
         pytest.param(("job-completed-successfully",), POLL_COMPLETED, id="successfully"),
-        pytest.param(("job-completed-with-warnings",), POLL_COMPLETED, id="with-warnings"),
+        pytest.param(("job-completed-with-warnings",), POLL_UNOBSERVABLE, id="with-warnings"),
         pytest.param(("none",), POLL_COMPLETED, id="none"),
         pytest.param(("job-completed-with-errors",), POLL_FAILED, id="with-errors"),
         pytest.param(("completed-with-errors",), POLL_FAILED, id="with-errors-table-15-spelling"),
@@ -1108,532 +1113,6 @@ class TestIppCompletionTracking:
 
 
 # ---------------------------------------------------------------------------
-# OctoPrint: octoprint_job_folder / octoprint_print_history (pure)
-# ---------------------------------------------------------------------------
-
-class TestOctoprintJobFolder:
-    @pytest.mark.parametrize("job_id,expected", [
-        pytest.param("job-op", "pcc-job-op", id="hyphen-and-letters-are-safe"),
-        pytest.param("job_op_123", "pcc-job_op_123", id="underscores-and-digits-are-safe"),
-        pytest.param("job.op", "pcc-job.op", id="dots-are-safe"),
-        pytest.param("job/../etc", "pcc-job_.._etc", id="path-separators-are-replaced"),
-        pytest.param("job op!", "pcc-job_op_", id="whitespace-and-punctuation-are-replaced"),
-        pytest.param("", "pcc-", id="empty-job-id"),
-    ])
-    def test_unsafe_characters_are_replaced(self, job_id, expected):
-        assert octoprint_job_folder(job_id) == expected
-
-
-class TestOctoprintPrintHistory:
-    def test_no_prints_key_means_never_printed(self):
-        assert octoprint_print_history({"name": "x"}) == ((0, 0), None, "")
-
-    def test_a_populated_history_is_read(self):
-        body = {"prints": {"success": 3, "failure": 1, "last": {"success": True, "date": 1}}}
-        assert octoprint_print_history(body) == ((3, 1), {"success": True, "date": 1}, "")
-
-    def test_a_history_with_no_last_field_is_read_with_last_none(self):
-        body = {"prints": {"success": 0, "failure": 0}}
-        assert octoprint_print_history(body) == ((0, 0), None, "")
-
-    def test_a_non_dict_body_is_refused(self):
-        counts, last, problem = octoprint_print_history("nope")
-        assert counts is None
-        assert problem
-
-    @pytest.mark.parametrize("prints", [
-        pytest.param("not-an-object", id="prints-not-a-dict"),
-        pytest.param({"success": "1", "failure": 0}, id="success-not-an-int"),
-        pytest.param({"success": True, "failure": 0}, id="success-is-a-bool"),
-        pytest.param({"success": -1, "failure": 0}, id="success-negative"),
-        pytest.param({"failure": 0}, id="no-success-key"),
-        pytest.param({"success": 0, "failure": "0"}, id="failure-not-an-int"),
-    ])
-    def test_a_malformed_prints_object_is_refused(self, prints):
-        counts, last, problem = octoprint_print_history({"prints": prints})
-        assert counts is None
-        assert problem
-
-
-# ---------------------------------------------------------------------------
-# OctoPrint device/handle constants and the /api/files/local/<path> body
-# ---------------------------------------------------------------------------
-
-OP_KEY = "SECRET-OCTOPRINT-KEY-1234"
-OP_DEVICE = {"id": "op1", "protocol": "octoprint", "url": "http://10.0.0.20:5000", "api_key": OP_KEY}
-OP_JOB_ID = "job-op"
-OP_FILENAME = "benchy.gcode"
-OP_FOLDER = octoprint_job_folder(OP_JOB_ID)                      # "pcc-job-op"
-OP_PRINT_PATH = f"{OP_FOLDER}/{OP_FILENAME}"                     # "pcc-job-op/benchy.gcode"
-OP_HANDLE = {"base_url": "http://10.0.0.20:5000", "path": OP_PRINT_PATH,
-             "baseline": {"success": 0, "failure": 0}}
-
-
-def file_history(path, origin="local", success=0, failure=0, last_success=None, prints=True, **extra):
-    """An OctoPrint ``GET /api/files/local/<path>`` answer: file metadata plus
-    the durable per-file print history OctoPrint itself writes (a success
-    only on PrintDone, a failure on a cancelled or failed print --
-    octoprint/printer/standard.py log_print)."""
-    body = {"name": path.rsplit("/", 1)[-1], "path": path, "origin": origin, **extra}
-    if prints:
-        counts = {"success": success, "failure": failure}
-        if last_success is not None:
-            counts["last"] = {"success": last_success, "date": 1600000000}
-        body["prints"] = counts
-    return body
-
-
-# ---------------------------------------------------------------------------
-# OctoPrint: the print-history verdict (pure)
-# ---------------------------------------------------------------------------
-
-class TestOctoPrintHistoryVerdict:
-    PATH = OP_PRINT_PATH
-    BASELINE = {"success": 0, "failure": 0}
-
-    def verdict(self, body, baseline=None, status=200, path=None):
-        return octoprint_history_verdict(status, body, path or self.PATH, baseline or self.BASELINE)
-
-    def test_no_finished_print_yet_is_waiting(self):
-        body = file_history(self.PATH, success=0, failure=0)
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_WAITING
-        assert "no finished print" in reason
-
-    def test_no_prints_key_means_never_printed_and_is_waiting(self):
-        body = file_history(self.PATH, prints=False)
-        assert self.verdict(body)[0] == POLL_WAITING
-
-    def test_a_finished_successful_print_above_baseline_is_completed(self):
-        body = file_history(self.PATH, success=1, failure=0, last_success=True)
-        assert self.verdict(body)[0] == POLL_COMPLETED
-
-    @pytest.mark.parametrize("success", [1, 2, 100])
-    def test_any_rise_above_baseline_with_a_recorded_success_completes(self, success):
-        body = file_history(self.PATH, success=success, failure=0, last_success=True)
-        assert self.verdict(body)[0] == POLL_COMPLETED
-
-    def test_success_above_baseline_but_last_not_recorded_success_is_waiting(self):
-        body = file_history(self.PATH, success=1, failure=0, last_success=False)
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_WAITING
-        assert "not recorded as a success" in reason
-
-    def test_success_above_baseline_with_no_last_field_is_waiting(self):
-        body = file_history(self.PATH, success=1, failure=0)
-        assert self.verdict(body)[0] == POLL_WAITING
-
-    def test_a_failed_or_cancelled_print_above_baseline_is_failed(self):
-        body = file_history(self.PATH, success=0, failure=1)
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_FAILED
-        assert "failed or cancelled" in reason
-
-    def test_cancelled_then_a_successful_reprint_between_polls_is_still_failed(self):
-        """Both counts rose since the baseline (a cancellation, then a later
-        successful re-print of the SAME copy).  Failure above baseline is
-        decisive -- the print asked for was not this later success."""
-        body = file_history(self.PATH, success=1, failure=1, last_success=True)
-        assert self.verdict(body)[0] == POLL_FAILED
-
-    def test_an_inherited_baseline_needs_its_own_increment(self):
-        """The copy's baseline is read AFTER the copy command, so it can
-        already carry the source file's history (r31 round-1 finding 3's
-        replacement for the old global 'seen_active' flag: a PER-COPY
-        baseline)."""
-        baseline = {"success": 23, "failure": 4}
-        not_yet = file_history(self.PATH, success=23, failure=4)
-        assert self.verdict(not_yet, baseline=baseline)[0] == POLL_WAITING
-        done = file_history(self.PATH, success=24, failure=4, last_success=True)
-        assert self.verdict(done, baseline=baseline)[0] == POLL_COMPLETED
-
-    def test_success_going_backwards_is_unobservable(self):
-        """The copy was replaced or reset: its history can no longer answer
-        for the print this node asked for."""
-        baseline = {"success": 5, "failure": 2}
-        body = file_history(self.PATH, success=1, failure=2, last_success=True)
-        verdict, reason = self.verdict(body, baseline=baseline)
-        assert verdict == POLL_UNOBSERVABLE
-        assert "went backwards" in reason
-
-    def test_failure_going_backwards_is_also_unobservable(self):
-        baseline = {"success": 5, "failure": 2}
-        body = file_history(self.PATH, success=5, failure=0)
-        assert self.verdict(body, baseline=baseline)[0] == POLL_UNOBSERVABLE
-
-    @pytest.mark.parametrize("status", [0, 401, 403, 404, 409, 500])
-    def test_a_non_200_answer_is_waiting(self, status):
-        body = file_history(self.PATH, success=1, failure=0, last_success=True)
-        assert self.verdict(body, status=status)[0] == POLL_WAITING
-
-    @pytest.mark.parametrize("body", [
-        pytest.param("not json", id="text-body"),
-        pytest.param(None, id="no-body"),
-        pytest.param([{"prints": {"success": 1, "failure": 0}}], id="list-body"),
-        pytest.param({}, id="empty-object"),
-    ])
-    def test_an_unreadable_body_is_waiting(self, body):
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_WAITING, reason
-
-    def test_an_answer_about_another_path_is_waiting(self):
-        body = file_history("other.gcode", success=1, failure=0, last_success=True)
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_WAITING
-        assert "not our copy" in reason
-
-    def test_an_answer_about_another_origin_is_waiting(self):
-        body = {**file_history(self.PATH, success=1, failure=0, last_success=True), "origin": "sdcard"}
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_WAITING
-        assert "not local" in reason
-
-    def test_a_missing_path_or_origin_field_does_not_block_the_verdict(self):
-        """Only a PRESENT, conflicting path/origin blocks the read -- OctoPrint
-        answers about the exact URL requested, so the fields' absence is not
-        itself ambiguous."""
-        body = {"prints": {"success": 1, "failure": 0, "last": {"success": True}}}
-        assert self.verdict(body)[0] == POLL_COMPLETED
-
-    @pytest.mark.parametrize("prints", [
-        pytest.param("not-an-object", id="prints-not-a-dict"),
-        pytest.param({"success": "1", "failure": 0}, id="success-not-an-int"),
-        pytest.param({"success": True, "failure": 0}, id="success-is-a-bool"),
-        pytest.param({"success": -1, "failure": 0}, id="success-negative"),
-        pytest.param({"failure": 0}, id="no-success-key"),
-    ])
-    def test_a_malformed_history_is_waiting(self, prints):
-        body = {**file_history(self.PATH, prints=False), "prints": prints}
-        verdict, reason = self.verdict(body)
-        assert verdict == POLL_WAITING
-        assert "unreadable print history" in reason
-
-
-# ---------------------------------------------------------------------------
-# OctoPrint: registration and one check per cycle, end to end through execute()
-# ---------------------------------------------------------------------------
-
-class FakeOctoPrint:
-    """urlopen stand-in for OctoPrint's four-request acceptance (create the
-    job folder, copy the file into it, read the copy's print-history
-    baseline, select+print the copy) and the history poll (one authenticated
-    GET of the copy) that follows once per cycle.
-
-    ``baseline`` is what the FIRST GET of the copy returns (read right after
-    the copy command, before select+print) -- a fresh copy is 0/0 unless the
-    fake is told the copy inherited history.  ``answer`` is what every GET
-    AFTER that one returns.
-    """
-
-    def __init__(self, baseline=None, answer=None, folder_status=200,
-                 copy_status=201, select_status=204):
-        self.requests = []
-        self.timeouts = []
-        self.baseline = baseline if baseline is not None else file_history(OP_PRINT_PATH, prints=False)
-        self.answer = answer if answer is not None else file_history(OP_PRINT_PATH, success=0, failure=0)
-        self.folder_status = folder_status
-        self.copy_status = copy_status
-        self.select_status = select_status
-        self.http_status = 200
-        self._baseline_served = False
-
-    def __call__(self, req, *args, **kwargs):
-        self.requests.append(req)
-        self.timeouts.append(kwargs.get("timeout"))
-        url, method = req.full_url, req.get_method()
-
-        if method == "POST" and url.endswith("/api/files/local"):
-            return _Resp(self.folder_status, b"{}")
-
-        if method == "POST" and "/api/files/local/" in url:
-            payload = json.loads(req.data.decode()) if req.data else {}
-            if payload.get("command") == "copy":
-                return _Resp(self.copy_status, b"{}")
-            if payload.get("command") == "select" and payload.get("print") is True:
-                return _Resp(self.select_status, b"")
-            raise AssertionError(f"unexpected POST body {payload!r} to {url}")
-
-        if method == "GET" and "/api/files/local/" in url:
-            if not self._baseline_served:
-                self._baseline_served = True
-                body = self.baseline
-            else:
-                body = self.answer
-            if isinstance(body, Exception):
-                raise body
-            raw = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
-            if self.http_status >= 400:
-                raise HTTPError(url, self.http_status, "err", {}, io.BytesIO(raw))
-            return _Resp(self.http_status, raw)
-
-        raise AssertionError(f"unexpected request {method} {url}")
-
-    def polls(self):
-        """GET requests AFTER the baseline read -- the completion-poll cycle."""
-        gets = [r for r in self.requests if r.get_method() == "GET"]
-        return gets[1:]
-
-
-def accept_octoprint(device=OP_DEVICE, gateway=None, clock=None, filename=OP_FILENAME,
-                      job_id=OP_JOB_ID, baseline=None, first_answer=None):
-    gateway = gateway or _gateway()
-    clock = clock or FakeClock()
-    ex = JobExecutor(devices=[device], gateway_client=gateway, clock=clock)
-    fake = FakeOctoPrint(baseline=baseline, answer=first_answer)
-    with mock.patch("pcc_node.http_util.urlopen", side_effect=fake):
-        ex.execute({"id": job_id, "capabilityType": "3d-print",
-                    "parameters": {"filename": filename}})
-    return ex, gateway, clock, fake
-
-
-def answer(ex, clock, fake, body):
-    """Advance the clock past the per-job minimum poll interval, then poll
-    once with this answer -- mirrors one daemon cycle for an awaiting job."""
-    clock.advance(COMPLETION_POLL_MIN_INTERVAL_S)
-    fake.answer = body
-    poll(ex, fake)
-
-
-class TestOctoPrintCompletionTracking:
-    def test_an_accepted_print_is_registered_without_its_api_key(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        entry = ex.awaiting_completion()["job-op"]
-        assert entry["kind"] == "octoprint"
-        assert entry["handle"] == OP_HANDLE
-        assert entry["deadline"] - entry["accepted_at"] == OCTOPRINT_COMPLETION_POLL_TIMEOUT_S
-        assert OP_KEY not in _text(entry["handle"])
-        assert _statuses(gateway) == ["running"]
-
-    def test_acceptance_is_four_requests_folder_copy_baseline_select(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        assert len(fake.requests) == 4
-        folder_req, copy_req, baseline_req, select_req = fake.requests
-
-        assert folder_req.get_method() == "POST"
-        assert folder_req.full_url == "http://10.0.0.20:5000/api/files/local"
-        # http_form() sends multipart/form-data, not JSON.
-        assert folder_req.get_header("Content-type", "").startswith("multipart/form-data")
-        folder_body = folder_req.data.decode()
-        assert 'name="foldername"' in folder_body
-        assert OP_FOLDER in folder_body
-
-        assert copy_req.get_method() == "POST"
-        assert copy_req.full_url == "http://10.0.0.20:5000/api/files/local/benchy.gcode"
-        assert json.loads(copy_req.data.decode()) == {"command": "copy", "destination": OP_FOLDER}
-
-        assert baseline_req.get_method() == "GET"
-        assert baseline_req.full_url == f"http://10.0.0.20:5000/api/files/local/{OP_PRINT_PATH}"
-
-        assert select_req.get_method() == "POST"
-        assert select_req.full_url == f"http://10.0.0.20:5000/api/files/local/{OP_PRINT_PATH}"
-        assert json.loads(select_req.data.decode()) == {"command": "select", "print": True}
-
-        for req in fake.requests:
-            assert req.get_header("X-api-key") == OP_KEY
-
-    @pytest.mark.parametrize("configure,expected_requests", [
-        pytest.param(lambda f: setattr(f, "folder_status", 500), 1, id="folder-creation-fails"),
-        pytest.param(lambda f: setattr(f, "copy_status", 500), 2, id="copy-fails"),
-        pytest.param(lambda f: setattr(f, "http_status", 500), 3, id="baseline-read-fails"),
-    ])
-    def test_a_failed_acceptance_step_stops_the_sequence(self, configure, expected_requests):
-        """The first failing step stops everything: select+print is never
-        sent after a failed folder, copy, or baseline read."""
-        gateway = _gateway()
-        clock = FakeClock()
-        ex = JobExecutor(devices=[OP_DEVICE], gateway_client=gateway, clock=clock)
-        fake = FakeOctoPrint()
-        configure(fake)
-        with mock.patch("pcc_node.http_util.urlopen", side_effect=fake):
-            ex.execute({"id": "job-op", "capabilityType": "3d-print",
-                        "parameters": {"filename": "benchy.gcode"}})
-        assert len(fake.requests) == expected_requests
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_each_cycle_is_one_authenticated_get_of_the_copy(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=0, failure=0))
-        [req] = fake.polls()
-        assert req.full_url == f"http://10.0.0.20:5000/api/files/local/{OP_PRINT_PATH}"
-        assert req.get_header("X-api-key") == OP_KEY
-        assert _statuses(gateway) == ["running"]
-
-    def test_polling_again_before_the_interval_elapses_sends_no_request(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        clock.advance(COMPLETION_POLL_MIN_INTERVAL_S)
-        fake.answer = file_history(OP_PRINT_PATH, success=0, failure=0)
-        poll(ex, fake)
-        assert len(fake.polls()) == 1
-        poll(ex, fake)  # no clock advance: skipped by the min poll interval
-        assert len(fake.polls()) == 1
-
-    def test_the_poll_timeout_is_the_remaining_budget_capped_at_ten_seconds(self):
-        ex, gateway, clock, fake = accept_octoprint(device={**OP_DEVICE, "completionPollTimeout": 7})
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=0, failure=0))
-        assert fake.timeouts[-1] == 2  # 7s budget - 5s already advanced by answer()
-
-    def test_a_finished_print_completes_exactly_once(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=0, failure=0))
-        assert "job-op" in ex.awaiting_completion()
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True))
-
-        assert _statuses(gateway) == ["running", "completed"]
-        acceptance, completion = _bundles(gateway)
-        assert _types(acceptance) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
-        assert _types(completion) == [EVENT_EXECUTION_COMPLETED]
-        payload = completion["events"][0]["payload"]
-        assert payload["level"] == "device_reported"
-        assert payload["handle"] == OP_HANDLE
-        assert ex.awaiting_completion() == {}
-
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True))
-        assert len(fake.polls()) == 2
-        assert _statuses(gateway) == ["running", "completed"]
-
-    def test_an_inherited_baseline_only_completes_on_its_own_increment(self):
-        ex, gateway, clock, fake = accept_octoprint(
-            baseline=file_history(OP_PRINT_PATH, success=23, failure=4)
-        )
-        assert ex.awaiting_completion()["job-op"]["handle"]["baseline"] == {"success": 23, "failure": 4}
-
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=23, failure=4))
-        assert "job-op" in ex.awaiting_completion()
-        assert _statuses(gateway) == ["running"]
-
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=24, failure=4, last_success=True))
-        assert _statuses(gateway) == ["running", "completed"]
-
-    def test_the_api_key_never_reaches_evidence_or_status(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True))
-        for call in gateway.push_evidence.call_args_list + gateway.update_job_status.call_args_list:
-            assert OP_KEY not in _text(call.args), f"API key leaked in {call}"
-
-    def test_an_old_style_job_snapshot_body_at_the_file_url_never_completes(self):
-        """The OLD /api/job "Operational, 100%" snapshot carries no 'prints'
-        key at the NEW file URL, so it can never look like a finished print
-        (r31 round-1 finding 3's replaced endpoint)."""
-        ex, gateway, clock, fake = accept_octoprint()
-        old_style_snapshot = {
-            "job": {"file": {"name": "benchy.gcode", "path": OP_PRINT_PATH, "origin": "local"}},
-            "state": "Operational",
-            "progress": {"completion": 100.0},
-        }
-        for _ in range(3):
-            answer(ex, clock, fake, old_style_snapshot)
-        assert _statuses(gateway) == ["running"]
-        assert "job-op" in ex.awaiting_completion()
-
-    def test_a_failed_or_cancelled_print_is_reported_failed_exactly_once(self):
-        ex, gateway, clock, fake = accept_octoprint()
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=0, failure=1))
-
-        assert _statuses(gateway) == ["running", "failed"]
-        failure = _bundles(gateway)[-1]
-        assert _types(failure) == [EVENT_EXECUTION_FAILED]
-        assert "execution_completed" not in _text(failure)
-        assert failure["events"][0]["payload"]["error"]
-        assert ex.awaiting_completion() == {}
-
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=0, failure=1))
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_cancelled_then_a_successful_reprint_is_still_reported_failed(self):
-        """r31 astra edge matrix: cancelled, then a later successful
-        re-print of the SAME copy between polls -- both counts rose, and
-        failure above baseline is decisive."""
-        ex, gateway, clock, fake = accept_octoprint()
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=1, failure=1, last_success=True))
-        assert _statuses(gateway) == ["running", "failed"]
-
-    @pytest.mark.parametrize("later", [
-        pytest.param(file_history(OP_PRINT_PATH, success=0, failure=0), id="no-change-yet"),
-        pytest.param(file_history(OP_PRINT_PATH, success=1, failure=0, last_success=False),
-                     id="success-up-but-last-not-a-success"),
-        pytest.param(file_history(OP_PRINT_PATH, success=1, failure=0), id="success-up-no-last-field"),
-        pytest.param(b"<html>proxy error</html>", id="not-json"),
-        pytest.param(b"\xff\xfe\x00garbage", id="not-utf8"),
-        pytest.param(URLError("[Errno 113] No route to host"), id="unreachable"),
-    ])
-    def test_ambiguous_answers_keep_it_registered(self, later):
-        ex, gateway, clock, fake = accept_octoprint()
-        answer(ex, clock, fake, later)
-        assert "job-op" in ex.awaiting_completion()
-        assert _statuses(gateway) == ["running"]
-        assert len(_bundles(gateway)) == 1
-
-    def test_the_copy_being_replaced_is_dropped_as_unobservable(self, caplog):
-        ex, gateway, clock, fake = accept_octoprint(
-            baseline=file_history(OP_PRINT_PATH, success=5, failure=2)
-        )
-        with caplog.at_level(logging.ERROR, logger=EXECUTOR_LOGGER):
-            answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True))
-
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running"]
-        assert len(_bundles(gateway)) == 1
-        errors = _messages(caplog, logging.ERROR)
-        assert any("job-op" in m and "stays 'running'" in m for m in errors), errors
-
-    @pytest.mark.parametrize("status", [401, 403, 500])
-    def test_an_http_error_on_the_poll_keeps_it_registered(self, status):
-        ex, gateway, clock, fake = accept_octoprint()
-        fake.http_status = status
-        answer(ex, clock, fake, {"error": "denied"})
-        assert "job-op" in ex.awaiting_completion()
-        assert _statuses(gateway) == ["running"]
-
-    def test_the_deadline_drops_it_without_a_terminal_status(self, caplog):
-        ex, gateway, clock, fake = accept_octoprint(device={**OP_DEVICE, "completionPollTimeout": 3600})
-        answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=0, failure=0))
-        clock.advance(3600)
-        with caplog.at_level(logging.ERROR, logger=EXECUTOR_LOGGER):
-            answer(ex, clock, fake, file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True))
-
-        assert len(fake.polls()) == 1
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running"]
-        assert any("job-op" in m and "stays 'running'" in m for m in _messages(caplog, logging.ERROR))
-
-    def test_an_answer_that_arrives_after_the_deadline_is_discarded_even_when_completed(self, caplog):
-        ex, gateway, clock, fake = accept_octoprint(device={**OP_DEVICE, "completionPollTimeout": 10})
-        fake.answer = file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True)
-
-        def slow(req, *a, **k):
-            clock.advance(20)
-            return fake(req, *a, **k)
-
-        with mock.patch("pcc_node.http_util.urlopen", side_effect=slow), \
-             caplog.at_level(logging.ERROR, logger=EXECUTOR_LOGGER):
-            ex.poll_awaiting()
-
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running"]
-        errors = _messages(caplog, logging.ERROR)
-        assert any("job-op" in m and "arrived after the deadline" in m for m in errors), errors
-
-    def test_no_filename_is_a_failure_and_is_never_registered(self):
-        """Sanity: a refused job is failed by execute() and never tracked."""
-        ex, gateway, clock, fake = accept_octoprint(filename="")
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-        assert fake.requests == []
-
-    def test_no_job_id_is_a_failure_and_is_never_registered(self):
-        """CHANGED at the #420 merge: an assignment with no job id cannot bind
-        its evidence (LO-EV-9), so execute() refuses it before the claim and
-        before the device -- and with no id there is nothing to report a
-        status to.  Stricter than the adapter-level refusal it replaces."""
-        ex, gateway, clock, fake = accept_octoprint(job_id="")
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == []
-        gateway.push_evidence.assert_not_called()
-        assert fake.requests == []
-
-
-# ---------------------------------------------------------------------------
 # The daemon calls poll_awaiting once per cycle, and survives its errors
 # ---------------------------------------------------------------------------
 
@@ -1746,13 +1225,6 @@ class TestPollerEvidenceVocabulary:
         for state in (9, 8):
             ex, gateway, _ = accept_ipp()
             poll(ex, FakeIppPrinter(state=state))
-            emitted.update(_types(_bundles(gateway)[-1]))
-        for final in (
-            file_history(OP_PRINT_PATH, success=1, failure=0, last_success=True),
-            file_history(OP_PRINT_PATH, success=0, failure=1),
-        ):
-            ex, gateway, clock, fake = accept_octoprint()
-            answer(ex, clock, fake, final)
             emitted.update(_types(_bundles(gateway)[-1]))
 
         assert emitted == {EVENT_EXECUTION_COMPLETED, EVENT_EXECUTION_FAILED}, (
