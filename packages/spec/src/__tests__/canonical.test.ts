@@ -329,3 +329,88 @@ describe("canonicalize — only a plain JSON tree, so evaluators read only what 
     expect(canonicalize(JSON.parse('{"__proto__":{"x":1},"k":[]}'))).toBe('{"__proto__":{"x":1},"k":[]}');
   });
 });
+
+describe("canonicalize — round 3 (cross-family A05): pollution, traps and the error boundary", () => {
+  const refuses = (input: () => unknown) => {
+    let err: unknown;
+    try {
+      canonicalize(input());
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NonCanonicalValueError);
+  };
+
+  it("an accessor is refused even while Object.prototype.value is polluted, and its getter never runs", () => {
+    let ran = 0;
+    const obj = {} as Record<string, unknown>;
+    Object.defineProperty(obj, "jobId", { get: () => { ran++; return "job-B"; }, enumerable: true });
+    const arr: unknown[] = [];
+    Object.defineProperty(arr, 0, { get: () => { ran++; return "job-B"; }, enumerable: true });
+    Object.defineProperty(Object.prototype, "value", { value: "job-A", configurable: true });
+    try {
+      refuses(() => obj);
+      refuses(() => arr);
+    } finally {
+      delete (Object.prototype as { value?: unknown }).value;
+    }
+    expect(ran).toBe(0);
+  });
+
+  it("refuses a non-plain object without reading its constructor", () => {
+    let ran = 0;
+    const input = Object.create({
+      get constructor() {
+        ran++;
+        throw new Error("constructor getter executed");
+      },
+    });
+    refuses(() => input);
+    expect(ran).toBe(0);
+  });
+
+  it("a property that vanishes while it is read, and a throwing Proxy trap, are typed refusals", () => {
+    const vanishing = new Proxy({ jobId: "job-A" } as Record<string, unknown>, {
+      getOwnPropertyDescriptor(target, key) {
+        delete target[key as string];
+        return undefined;
+      },
+    });
+    expect(() => canonicalize(vanishing)).toThrow(/vanished while it was read/);
+    const throwing = new Proxy({}, { ownKeys() { throw new Error("trap"); } });
+    refuses(() => throwing);
+  });
+
+  it("a toJSON on Object.prototype or Array.prototype refuses the hash; an own non-function toJSON member is data", () => {
+    Object.defineProperty(Object.prototype, "toJSON", { value: () => "other", configurable: true });
+    try {
+      refuses(() => ({ a: 1 }));
+    } finally {
+      delete (Object.prototype as { toJSON?: unknown }).toJSON;
+    }
+    Object.defineProperty(Array.prototype, "toJSON", { value: () => "other", configurable: true });
+    try {
+      refuses(() => [1]);
+    } finally {
+      delete (Array.prototype as { toJSON?: unknown }).toJSON;
+    }
+    expect(canonicalize({ toJSON: "x" })).toBe('{"toJSON":"x"}');
+    expect(canonicalize({ a: 1 })).toBe('{"a":1}');
+  });
+
+  it("a value nested too deeply to walk is a typed refusal, not a RangeError", () => {
+    let deep: unknown = 0;
+    for (let i = 0; i < 100_000; i++) deep = [deep];
+    refuses(() => deep);
+  });
+
+  it("documents the boundary: a Proxy's later reads are not what was hashed, so consumers evaluate the parsed snapshot", () => {
+    const proxy = new Proxy({ jobId: "job-A" } as Record<string, unknown>, {
+      get: (target, key, receiver) => (key === "jobId" ? "job-B" : Reflect.get(target, key, receiver)),
+    });
+    const text = canonicalize(proxy);
+    expect(text).toBe('{"jobId":"job-A"}');
+    expect(JSON.parse(text).jobId).toBe("job-A"); // the snapshot is what a consumer reads
+    expect(proxy.jobId).toBe("job-B"); // never the object it was handed
+  });
+});

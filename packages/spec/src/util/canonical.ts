@@ -11,16 +11,42 @@
  * This ensures that identical data always produces the same hash,
  * regardless of key insertion order or formatting.
  *
- * EVALUATE ONLY WHAT YOU HASHED. A consumer that hashes a value and then reads
- * fields from it (a job id, a kernel id, a verdict) must read them from what
- * the hash covered. canonicalize therefore refuses anything that is not a
- * plain JSON tree, so a property the hash skipped (non-enumerable, inherited,
- * symbol-keyed, an accessor, a named property on an array) can never be the
- * one an evaluator reads.
+ * EVALUATE ONLY WHAT YOU HASHED. canonicalize hashes exactly the own,
+ * enumerable, string-keyed data properties it reads. It reads each one once,
+ * from its own descriptor, and never runs a getter. It refuses what a plain
+ * JSON tree cannot hold: a non-enumerable, symbol-keyed or accessor property,
+ * or a named property on an array. What it cannot do is make an arbitrary
+ * JavaScript object answer a LATER read the same way:
+ *   - a Proxy can answer [[Get]] differently from its descriptors;
+ *   - an inherited (polluted) property is readable but never hashed.
+ * So a consumer that must evaluate what it hashed parses the canonical text
+ * back (JSON.parse) and reads that snapshot with own-property reads, as
+ * LO-EV-9's verifyEvidenceSubjectBinding does. It never re-reads the object it
+ * was handed.
  */
 
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
+
+// Reflection captured at load, so a later polluted prototype or replaced
+// method cannot change how a descriptor is judged.
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const getPrototypeOf = Object.getPrototypeOf;
+const ownKeys = Reflect.ownKeys;
+const apply = Reflect.apply;
+const hasOwnProperty = Object.prototype.hasOwnProperty;
+const OBJECT_PROTOTYPE = Object.prototype;
+const ARRAY_PROTOTYPE = Array.prototype;
+const hasOwn = (o: object, key: PropertyKey): boolean => apply(hasOwnProperty, o, [key]) as boolean;
+
+/**
+ * A descriptor describes a data property only when it OWNS `value` and has no
+ * own `get` or `set`. `"value" in d` would also find an inherited `value` (a
+ * polluted Object.prototype) and let an accessor pass as data.
+ */
+function isDataDescriptor(d: PropertyDescriptor): boolean {
+  return hasOwn(d, "value") && !hasOwn(d, "get") && !hasOwn(d, "set");
+}
 
 /**
  * Raised when a value has no JSON form. Its canonical text could not survive
@@ -62,9 +88,24 @@ export class NonCanonicalValueError extends Error {
  * (|n| > 2^53 - 1) has already lost precision and must travel as a decimal
  * string, so it is refused. A sparse-array hole and a cyclic reference are
  * refused as well; JSON has no form for either.
+ *
+ * A `toJSON` on Object.prototype or Array.prototype (a polluted prototype) is
+ * refused too: JSON.stringify would then transport something other than the
+ * canonical text. Every failure, including one thrown by a Proxy trap or a too
+ * deeply nested value, surfaces as NonCanonicalValueError.
  */
 export function canonicalize(value: unknown): string {
-  return canonicalizeAt(value, "$", new Set());
+  try {
+    if (getOwnPropertyDescriptor(OBJECT_PROTOTYPE, "toJSON") !== undefined ||
+      getOwnPropertyDescriptor(ARRAY_PROTOTYPE, "toJSON") !== undefined) {
+      throw new NonCanonicalValueError("$", "a value under a prototype that defines toJSON (JSON transport would differ)");
+    }
+    return canonicalizeAt(value, "$", new Set());
+  } catch (err) {
+    if (err instanceof NonCanonicalValueError) throw err;
+    // A Proxy trap threw, or the value nests too deeply to walk: not a plain JSON tree.
+    throw new NonCanonicalValueError("$", "a value that could not be read as a plain JSON tree");
+  }
 }
 
 function canonicalizeAt(value: unknown, path: string, ancestors: Set<object>): string {
@@ -105,19 +146,19 @@ function canonicalizeAt(value: unknown, path: string, ancestors: Set<object>): s
 }
 
 function canonicalArray(arr: unknown[], path: string, ancestors: Set<object>): string {
-  if (Object.getPrototypeOf(arr) !== Array.prototype) {
+  if (getPrototypeOf(arr) !== ARRAY_PROTOTYPE) {
     throw new NonCanonicalValueError(path, "an array with a substituted prototype or an Array subclass");
   }
   const length = arr.length; // read once
   const items: string[] = [];
   for (let i = 0; i < length; i++) {
     const at = `${path}[${i}]`;
-    const d = Object.getOwnPropertyDescriptor(arr, i);
+    const d = getOwnPropertyDescriptor(arr, i);
     if (d === undefined) throw new NonCanonicalValueError(at, "a hole in a sparse array (or an inherited index)");
-    if (!("value" in d)) throw new NonCanonicalValueError(at, "an accessor element");
+    if (!isDataDescriptor(d)) throw new NonCanonicalValueError(at, "an accessor element");
     items.push(canonicalizeAt(d.value, at, ancestors));
   }
-  for (const key of Reflect.ownKeys(arr)) {
+  for (const key of ownKeys(arr)) {
     if (key === "length") continue;
     if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${String(key)}]`, "a symbol-keyed property");
     const index = Number(key);
@@ -129,21 +170,22 @@ function canonicalArray(arr: unknown[], path: string, ancestors: Set<object>): s
 }
 
 function canonicalObject(obj: object, path: string, ancestors: Set<object>): string {
-  const proto = Object.getPrototypeOf(obj);
-  if (proto !== Object.prototype && proto !== null) {
-    const name = (obj as { constructor?: { name?: string } }).constructor?.name ?? "non-plain";
-    throw new NonCanonicalValueError(path, `a ${name} object`);
+  const proto = getPrototypeOf(obj);
+  if (proto !== OBJECT_PROTOTYPE && proto !== null) {
+    // A constant reason: reading the value's constructor could run its code.
+    throw new NonCanonicalValueError(path, "a non-plain object (its prototype is not Object.prototype or null)");
   }
   const keys: string[] = [];
-  for (const key of Reflect.ownKeys(obj)) {
+  for (const key of ownKeys(obj)) {
     if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${String(key)}]`, "a symbol-keyed property");
     keys.push(key);
   }
   const pairs: string[] = [];
   for (const key of keys.sort()) {
     const at = `${path}.${key}`;
-    const d = Object.getOwnPropertyDescriptor(obj, key)!;
-    if (!("value" in d)) throw new NonCanonicalValueError(at, "an accessor property");
+    const d = getOwnPropertyDescriptor(obj, key);
+    if (d === undefined) throw new NonCanonicalValueError(at, "a property that vanished while it was read");
+    if (!isDataDescriptor(d)) throw new NonCanonicalValueError(at, "an accessor property");
     if (!d.enumerable) throw new NonCanonicalValueError(at, "a non-enumerable property");
     if (d.value === undefined) continue; // omitted, as JSON.stringify omits it
     pairs.push(JSON.stringify(key) + ":" + canonicalizeAt(d.value, at, ancestors));
