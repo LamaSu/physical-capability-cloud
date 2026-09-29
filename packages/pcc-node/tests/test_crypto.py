@@ -13,7 +13,21 @@ from pcc_node.crypto import (
     _HAS_NACL,
 )
 
+# The crypto CI job sets PCC_REQUIRE_PYNACL=1 and installs PyNaCl, so there a
+# missing PyNaCl FAILS this file instead of skipping the Ed25519 tests.
+if os.environ.get("PCC_REQUIRE_PYNACL") == "1" and not _HAS_NACL:
+    raise RuntimeError("PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable")
 
+needs_nacl = pytest.mark.skipif(not _HAS_NACL, reason="pynacl not installed")
+
+
+@pytest.fixture(autouse=True)
+def _no_key_path_override(monkeypatch):
+    """A developer's PCC_NODE_KEY_PATH must not steer these tests."""
+    monkeypatch.delenv("PCC_NODE_KEY_PATH", raising=False)
+
+
+@needs_nacl
 class TestGenerateNodeKeys:
     def test_returns_hex_strings(self):
         pub, sec = generate_node_keys()
@@ -35,6 +49,7 @@ class TestGenerateNodeKeys:
         assert sec1 != sec2
 
 
+@needs_nacl
 class TestSignAnnouncement:
     def test_produces_hex_signature(self):
         _pub, sec = generate_node_keys()
@@ -91,6 +106,7 @@ class TestVerifySignature:
         assert verify_signature(announcement, sig, pub2) is False
 
 
+@needs_nacl
 class TestLoadOrCreateKeys:
     def test_creates_new_keys(self, tmp_path):
         path = str(tmp_path / "keys.json")
@@ -160,6 +176,7 @@ class TestVerifyFailsClosed:
         assert verify_signature({"a": object()}, sig, pub) is False
 
 
+@needs_nacl
 class TestKeyFileLocation:
     def test_default_path_is_under_home_not_the_checkout(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -192,9 +209,6 @@ class TestKeyFileLocation:
 # strict hex, a dict-only schema, and key-file permissions and location.
 # A fresh key stands in for the compromised one (its secret is never used).
 # ---------------------------------------------------------------------------
-
-needs_nacl = pytest.mark.skipif(not _HAS_NACL, reason="pynacl not installed")
-
 
 def _write_key_file(path, public, secret, mode=0o600):
     path.write_text(json.dumps({"public": public, "secret": secret}))
@@ -232,18 +246,18 @@ class TestSigningChecksTheKey:
             sign_announcement({"a": 1}, sec)
 
     def test_only_a_dict_is_an_announcement(self):
-        _, sec = generate_node_keys()
+        sec = "11" * 32  # input checks come before the PyNaCl requirement, so no real key is needed
         for not_a_dict in (None, [1], "a", 1):
             with pytest.raises(TypeError):
                 sign_announcement(not_a_dict, sec)
 
     def test_values_json_cannot_hold_are_refused(self):
-        _, sec = generate_node_keys()
+        sec = "11" * 32  # input checks come before the PyNaCl requirement, so no real key is needed
         with pytest.raises(ValueError):
             sign_announcement({"x": float("nan")}, sec)
 
     def test_a_malformed_secret_is_refused(self):
-        _, sec = generate_node_keys()
+        sec = "11" * 32  # input checks come before the PyNaCl requirement, so no real key is needed
         with pytest.raises(ValueError):
             sign_announcement({"a": 1}, " " + sec)
 
@@ -271,7 +285,7 @@ class TestLoadingChecksThePair:
             load_or_create_keys(path)
 
     @needs_nacl
-    def test_a_denylisted_key_spelled_with_whitespace_is_still_refused(self, monkeypatch, tmp_path):
+    def test_a_denylisted_key_spelled_in_uppercase_is_still_refused(self, monkeypatch, tmp_path):
         pub, sec = generate_node_keys()
         path = _write_key_file(tmp_path / "keys.json", pub, sec)
         monkeypatch.setattr(crypto_module, "COMPROMISED_PUBLIC_KEYS", frozenset({pub.upper()}))
@@ -286,6 +300,7 @@ class TestLoadingChecksThePair:
         with pytest.raises(crypto_module.KeyFileError):
             load_or_create_keys(path)
 
+    @needs_nacl
     def test_keys_that_are_not_exact_hex_are_refused(self, tmp_path):
         pub, sec = generate_node_keys()
         for public, secret in ((" " + pub, sec), (pub, sec + "\n"), (pub, None)):
@@ -294,6 +309,7 @@ class TestLoadingChecksThePair:
                 load_or_create_keys(path)
 
 
+@needs_nacl
 class TestKeyFilePermissionsAndPlace:
     def test_a_new_key_file_is_0600(self, tmp_path):
         path = tmp_path / "keys.json"
@@ -315,9 +331,87 @@ class TestKeyFilePermissionsAndPlace:
             load_or_create_keys(str(target))
         assert not target.exists()
 
-    def test_a_dotfiles_repository_at_home_does_not_block_the_default(self, monkeypatch, tmp_path):
+    def test_a_repository_at_home_blocks_the_default_and_the_override_escapes_it(self, monkeypatch, tmp_path):
+        # No home exemption (cross-family A02): a dotfiles repository at home
+        # would publish ~/.pcc-node/keys.json with one `git add`.
         home = tmp_path / "home"
         (home / ".git").mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
+        with pytest.raises(crypto_module.KeyFileError):
+            load_or_create_keys()
+        assert not (home / ".pcc-node" / "keys.json").exists()
+        outside = tmp_path / "keys-outside" / "keys.json"
+        monkeypatch.setenv("PCC_NODE_KEY_PATH", str(outside))
         load_or_create_keys()
-        assert (home / ".pcc-node" / "keys.json").exists()
+        assert outside.exists()
+
+    def test_an_existing_key_inside_a_checkout_is_refused_before_it_is_read(self, tmp_path):
+        made = tmp_path / "made" / "keys.json"
+        load_or_create_keys(str(made))
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        inside = repo / "pcc-keys.json"
+        inside.write_bytes(made.read_bytes())
+        os.chmod(inside, 0o600)
+        with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+            load_or_create_keys(str(inside))
+
+    def test_a_key_file_that_is_a_symbolic_link_is_refused(self, tmp_path):
+        real = tmp_path / "real" / "keys.json"
+        load_or_create_keys(str(real))
+        link_dir = tmp_path / "links"
+        link_dir.mkdir(mode=0o700)
+        link = link_dir / "keys.json"
+        link.symlink_to(real)
+        with pytest.raises(crypto_module.KeyFileError, match="symbolic link"):
+            load_or_create_keys(str(link))
+
+    def test_a_directory_link_into_a_checkout_is_refused(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "keys").mkdir(mode=0o700)
+        alias = tmp_path / "alias"
+        alias.symlink_to(repo / "keys", target_is_directory=True)
+        with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+            load_or_create_keys(str(alias / "keys.json"))
+        assert not (repo / "keys" / "keys.json").exists()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and modes")
+    def test_a_directory_others_can_write_is_refused(self, tmp_path):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        os.chmod(shared, 0o777)
+        with pytest.raises(crypto_module.KeyFileError, match="writable by other users"):
+            load_or_create_keys(str(shared / "keys.json"))
+        assert not (shared / "keys.json").exists()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and modes")
+    def test_a_directory_or_key_file_owned_by_another_user_is_refused(self, monkeypatch, tmp_path):
+        path = tmp_path / "own" / "keys.json"
+        load_or_create_keys(str(path))
+        real_uid = os.getuid()
+        monkeypatch.setattr(crypto_module.os, "getuid", lambda: real_uid + 1)
+        with pytest.raises(crypto_module.KeyFileError, match="not owned by this user"):
+            load_or_create_keys(str(path))
+        monkeypatch.setattr(crypto_module, "_check_directory", lambda directory: None)
+        with pytest.raises(crypto_module.KeyFileError, match="not owned by this user"):
+            load_or_create_keys(str(path))
+
+
+class TestWithoutPyNaClNoKeyIsUsed:
+    """Cross-family A02: without PyNaCl the node cannot derive its Ed25519
+    identity, so it may not create, load or sign with a key at all."""
+
+    def test_no_key_is_created_loaded_or_used(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(crypto_module, "_HAS_NACL", False)
+        with pytest.raises(crypto_module.CryptoUnavailableError):
+            generate_node_keys()
+        with pytest.raises(crypto_module.CryptoUnavailableError):
+            load_or_create_keys(str(tmp_path / "new" / "keys.json"))
+        assert not (tmp_path / "new" / "keys.json").exists()
+        existing = _write_key_file(tmp_path / "keys.json", "aa" * 32, "bb" * 32)
+        with pytest.raises(crypto_module.CryptoUnavailableError):
+            load_or_create_keys(existing)
+        with pytest.raises(crypto_module.CryptoUnavailableError):
+            sign_announcement({"kernelId": "k"}, "bb" * 32)
+        assert verify_signature({"kernelId": "k"}, "00" * 64, "aa" * 32) is False

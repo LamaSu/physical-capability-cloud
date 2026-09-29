@@ -167,14 +167,19 @@ def run_daemon(config: NodeConfig):
     # ------------------------------------------------------------------
     # 1. Load or generate Ed25519 keys
     # ------------------------------------------------------------------
+    # A node must not run without its own valid key. Running on with an empty
+    # secret would turn a refused key (compromised, inside a checkout, not this
+    # user's own, or PyNaCl missing) into unsigned operation, which is the
+    # failure the refusal exists to stop (N35b).
     try:
         public_key, secret_key = load_or_create_keys()
-        if not config.public_key:
-            config.public_key = public_key
-        log.info(f"Node keys loaded: {public_key[:16]}...")
     except Exception as e:
-        log.warning(f"Could not load keys: {e}")
-        secret_key = ""
+        log.error(f"Refusing to start: the node key cannot be used: {e}")
+        _remove_pid()
+        raise SystemExit(2) from None
+    if not config.public_key:
+        config.public_key = public_key
+    log.info(f"Node keys loaded: {public_key[:16]}...")
 
     # ------------------------------------------------------------------
     # 2. Optional: run network discovery to find new devices

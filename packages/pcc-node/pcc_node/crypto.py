@@ -1,17 +1,19 @@
 """Cryptographic utilities for PCC node identity.
 
-Generates Ed25519 key pairs for signing capability announcements.
-Uses pynacl if available, otherwise falls back to a hashlib-based
-HMAC scheme for signing (not real Ed25519; development only). Verification
-never falls back: without pynacl no signature verifies.
+Generates, loads and uses Ed25519 key pairs for signing capability
+announcements. PyNaCl is REQUIRED for every key operation. Without it a node
+cannot create, load or sign with a key (CryptoUnavailableError), because it
+cannot derive the Ed25519 public key that the denylist and the pair check
+need. Verification never falls back either: without PyNaCl no signature
+verifies.
 """
 
-import hashlib
-import hmac
+import errno
 import json
 import os
 import logging
 import re
+import stat
 
 log = logging.getLogger("pcc-node.crypto")
 
@@ -35,6 +37,18 @@ COMPROMISED_PUBLIC_KEYS = frozenset({
 
 class CompromisedKeyError(RuntimeError):
     """A key file holds a key pair that must never be used again."""
+
+
+class CryptoUnavailableError(RuntimeError):
+    """PyNaCl is not installed, so no key can be created, loaded or used."""
+
+
+def _require_nacl(action):
+    if not _HAS_NACL:
+        raise CryptoUnavailableError(
+            "PyNaCl is required to %s: without it the node cannot establish its Ed25519 "
+            "identity or check it against the denylist. Install pcc-node[crypto]." % action
+        )
 
 
 class KeyFileError(RuntimeError):
@@ -78,21 +92,11 @@ def generate_node_keys():
     tuple[str, str]
         (public_key_hex, secret_key_hex)
     """
-    if _HAS_NACL:
-        sk = nacl.signing.SigningKey.generate()
-        public_hex = sk.verify_key.encode(nacl.encoding.HexEncoder).decode("ascii")
-        secret_hex = sk.encode(nacl.encoding.HexEncoder).decode("ascii")
-        return public_hex, secret_hex
-
-    # Fallback: derive a 32-byte "key pair" from random bytes.
-    # This is NOT real Ed25519 -- it is a dev-mode placeholder.
-    log.warning(
-        "pynacl not installed -- using HMAC-SHA256 fallback (not real Ed25519). "
-        "Install pynacl for production use: pip install pcc-node[crypto]"
-    )
-    secret = os.urandom(32)
-    public = hashlib.sha256(secret).digest()
-    return public.hex(), secret.hex()
+    _require_nacl("create an Ed25519 key pair")
+    sk = nacl.signing.SigningKey.generate()
+    public_hex = sk.verify_key.encode(nacl.encoding.HexEncoder).decode("ascii")
+    secret_hex = sk.encode(nacl.encoding.HexEncoder).decode("ascii")
+    return public_hex, secret_hex
 
 
 # ---------------------------------------------------------------------------
@@ -123,22 +127,19 @@ def sign_announcement(announcement, secret_key_hex):
         a value JSON cannot represent.
     CompromisedKeyError
         The key pair is on the denylist: its signatures prove nothing.
+    CryptoUnavailableError
+        PyNaCl is not installed: nothing could check the key, and nothing would
+        verify the signature.
     """
     payload = _announcement_payload(announcement)
     secret = _strict_hex(secret_key_hex, 32)
-
-    if _HAS_NACL:
-        sk = nacl.signing.SigningKey(secret)
-        if _is_compromised(bytes(sk.verify_key)):
-            raise CompromisedKeyError(
-                "refusing to sign with a key pair whose secret was published; generate a new key pair"
-            )
-        return sk.sign(payload).signature.hex()
-
-    # HMAC fallback (development only). Nothing verifies these: verification
-    # needs pynacl and checks Ed25519, so a fallback signature never counts.
-    sig = hmac.new(secret, payload, hashlib.sha256).hexdigest()
-    return sig
+    _require_nacl("sign")
+    sk = nacl.signing.SigningKey(secret)
+    if _is_compromised(bytes(sk.verify_key)):
+        raise CompromisedKeyError(
+            "refusing to sign with a key pair whose secret was published; generate a new key pair"
+        )
+    return sk.sign(payload).signature.hex()
 
 
 def verify_signature(announcement, signature_hex, public_key_hex):
@@ -184,72 +185,136 @@ def verify_signature(announcement, signature_hex, public_key_hex):
 # Key persistence
 # ---------------------------------------------------------------------------
 
+KEY_PATH_ENV = "PCC_NODE_KEY_PATH"
+
+
 def default_key_path():
-    """Where a node keeps its key pair by default: under the user's home,
-    never inside a source checkout. The old default, ``./pcc-keys.json``,
-    resolved to a key file committed to the repository whenever the node ran
-    from the package directory."""
+    """Where a node keeps its key pair: ``$PCC_NODE_KEY_PATH`` when set,
+    otherwise ``~/.pcc-node/keys.json``. Either way the file must lie outside
+    every source checkout (see :func:`load_or_create_keys`). The old default,
+    ``./pcc-keys.json``, resolved to a key file committed to the repository
+    whenever the node ran from the package directory."""
+    override = os.environ.get(KEY_PATH_ENV)
+    if override:
+        return override
     return os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 
 
-def _inside_checkout(directory):
-    """True when *directory* is inside a git work tree. The walk stops at the
-    user's home without checking it, so a dotfiles repository there does not
-    count."""
-    home = os.path.realpath(os.path.expanduser("~"))
+def _checkout_root(directory):
+    """The git work tree holding *directory* (symlinks resolved), or None.
+    Every ancestor up to the filesystem root counts, the user's home included:
+    a key file anywhere in a work tree is one ``git add`` from being published."""
     current = os.path.realpath(directory)
-    while current != home and current != os.path.dirname(current):
+    while True:
         if os.path.exists(os.path.join(current, ".git")):
-            return True
-        current = os.path.dirname(current)
-    return False
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
-def _tighten_permissions(path):
-    """A key file must be readable by its owner only: correct a wider mode, or refuse."""
+def _refuse_checkout(abs_path):
+    root = _checkout_root(os.path.dirname(abs_path) or os.getcwd())
+    if root is not None:
+        raise KeyFileError(
+            "refusing to use a key file inside a source checkout (%s is under %s): a key there "
+            "is one `git add` away from being published. Set %s to a path outside every "
+            "repository." % (abs_path, root, KEY_PATH_ENV)
+        )
+
+
+def _check_directory(directory):
+    """The key's directory must belong to this user and be writable by no one
+    else, or another user could swap the key file. POSIX only: Windows ACLs are
+    not modelled here."""
     if os.name != "posix":
         return
-    mode = os.stat(path).st_mode & 0o777
-    if mode & 0o077:
+    st = os.stat(directory)
+    if st.st_uid != os.getuid():
+        raise KeyFileError("%s is not owned by this user; keep the key in a directory you own" % directory)
+    if st.st_mode & 0o022:
+        raise KeyFileError(
+            "%s is writable by other users (mode %o); run chmod 700 on it" % (directory, st.st_mode & 0o777)
+        )
+
+
+def _read_key_file(abs_path):
+    """Open the key file itself, never through a symbolic link, and judge the
+    same open file it reads: a regular file owned by this user, readable by the
+    owner only (a wider mode is corrected on that descriptor, or refused)."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(abs_path, flags)
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            raise KeyFileError(abs_path + " is a symbolic link; a key file must be a regular file") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise KeyFileError(abs_path + " is not a regular file")
+        if os.name == "posix":
+            if st.st_uid != os.getuid():
+                raise KeyFileError(abs_path + " is not owned by this user")
+            mode = st.st_mode & 0o777
+            if mode & 0o077:
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError as err:
+                    raise KeyFileError(
+                        "%s is readable by other users (mode %o) and cannot be corrected: %s" % (abs_path, mode, err)
+                    ) from None
+                log.warning("%s was mode %o; corrected to 0600", abs_path, mode)
+        f = os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
         try:
-            os.chmod(path, 0o600)
-        except OSError as err:
-            raise KeyFileError(
-                "%s is readable by other users (mode %o) and cannot be corrected: %s" % (path, mode, err)
-            ) from None
-        log.warning("%s was mode %o; corrected to 0600", path, mode)
+            return json.load(f)
+        except ValueError:
+            raise KeyFileError(abs_path + " is not a JSON key file") from None
 
 
 def load_or_create_keys(path=None):
     """Load existing keys from *path* (default :func:`default_key_path`), or
     create and save new ones there.
 
-    Loading checks the pair, not just its label: both keys must be exactly 64
-    hex characters, the public key is derived from the secret (with pynacl)
-    and must match the stored one, and neither may be on the denylist. A file
-    readable by other users is corrected to 0600. A new file is created 0600
-    from the start, and never inside a source checkout.
+    Before anything is read or written, the location must lie outside every
+    source checkout (symlinks resolved, the user's home included) in a
+    directory owned by this user and writable by no one else. An existing file
+    is read through one descriptor opened without following symbolic links.
+    Loading checks the pair, not just its label: both keys are exactly 64 hex
+    characters, the public key derived from the secret must match the stored
+    one, and neither may be on the denylist. A new file is created 0600 from
+    the first byte, never over an existing path.
 
     Raises
     ------
+    CryptoUnavailableError
+        PyNaCl is not installed, so the pair cannot be checked or used.
     CompromisedKeyError
         The pair is in :data:`COMPROMISED_PUBLIC_KEYS`; delete the file so a
         new pair is generated.
     KeyFileError
-        The file is malformed, its public key does not belong to its secret,
-        its mode cannot be corrected, or it would be created in a checkout.
+        The location is inside a checkout, the directory or file is not this
+        user's own, the file is a symbolic link, malformed, or holds a public
+        key that does not belong to its secret.
 
     Returns
     -------
     tuple[str, str]
         (public_key_hex, secret_key_hex)
     """
+    _require_nacl("load or create the node's key pair")
     abs_path = os.path.abspath(path if path is not None else default_key_path())
+    _refuse_checkout(abs_path)
+    parent = os.path.dirname(abs_path)
 
-    if os.path.exists(abs_path):
-        _tighten_permissions(abs_path)
-        with open(abs_path) as f:
-            data = json.load(f)
+    if os.path.lexists(abs_path):
+        _check_directory(os.path.realpath(parent))
+        data = _read_key_file(abs_path)
         public_hex = data.get("public") if isinstance(data, dict) else None
         secret_hex = data.get("secret") if isinstance(data, dict) else None
         try:
@@ -259,33 +324,25 @@ def load_or_create_keys(path=None):
             raise KeyFileError(
                 abs_path + " does not hold a key pair of two 64-hex-character keys"
             ) from None
-        derived = bytes(nacl.signing.SigningKey(secret).verify_key) if _HAS_NACL else None
-        if _is_compromised(public) or (derived is not None and _is_compromised(derived)):
+        derived = bytes(nacl.signing.SigningKey(secret).verify_key)
+        if _is_compromised(public) or _is_compromised(derived):
             raise CompromisedKeyError(
                 abs_path + " holds a key pair whose secret was published in a public "
                 "repository; delete the file and restart to generate a new key pair"
             )
-        if derived is not None and derived != public:
+        if derived != public:
             raise KeyFileError(
-                abs_path + " holds a public key that does not belong to its secret key "
-                "(a file made without pynacl is not an Ed25519 pair); delete it to generate a new pair"
+                abs_path + " holds a public key that does not belong to its secret key; "
+                "delete it to generate a new pair"
             )
-        if derived is None:
-            log.warning("pynacl is not installed: cannot check that %s holds a matching key pair", abs_path)
         return public_hex, secret_hex
 
-    parent = os.path.dirname(abs_path)
-    if _inside_checkout(parent or os.getcwd()):
-        raise KeyFileError(
-            "refusing to create a key file inside a source checkout (" + abs_path + "): a key "
-            "there is one `git add` away from being published. Use the default under "
-            "~/.pcc-node or a path outside the repository."
-        )
-    if parent:
-        os.makedirs(parent, mode=0o700, exist_ok=True)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    _check_directory(os.path.realpath(parent))
     public_hex, secret_hex = generate_node_keys()
-    # 0600 from the first byte, and never over an existing file.
-    fd = os.open(abs_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # 0600 from the first byte, never over an existing path, never through a link.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(abs_path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump({"public": public_hex, "secret": secret_hex}, f, indent=2)
 

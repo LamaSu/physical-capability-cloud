@@ -176,8 +176,10 @@ class TestRegisterSigningKey:
     def test_refuses_real_hmac_fallback_key(self, monkeypatch):
         import pcc_node.crypto as crypto_mod
 
-        monkeypatch.setattr(crypto_mod, "_HAS_NACL", False)
-        pub, sec = crypto_mod.generate_node_keys()  # public = sha256(secret)
+        # The legacy HMAC-fallback shape (public = sha256(secret)). crypto.py no
+        # longer makes such keys, but an old key file can still hold one.
+        sec = "5a" * 32
+        pub = __import__("hashlib").sha256(bytes.fromhex(sec)).hexdigest()
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
             with pytest.raises(LogSigningRefused):
                 register_signing_key("http://pcc", "key", "k1", pub, sec)

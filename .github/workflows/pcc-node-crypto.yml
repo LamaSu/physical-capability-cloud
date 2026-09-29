@@ -1,0 +1,79 @@
+# N35b (board row; cross-family review A02): pcc-node's key handling must
+# fail closed both with and without PyNaCl, and the Ed25519 tests must never
+# pass by skipping.
+#   1. Without PyNaCl, every key operation is refused, and that test must RUN.
+#   2. A negative control: with PCC_REQUIRE_PYNACL=1 and no PyNaCl, the suite
+#      must FAIL on the PyNaCl requirement.
+#   3. With pinned PyNaCl and PCC_REQUIRE_PYNACL=1, the whole suite passes
+#      with nothing skipped.
+name: pcc-node-crypto
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Installs pinned PyPI packages, so the token gets read-only access.
+permissions:
+  contents: read
+
+jobs:
+  pcc-node-crypto-fail-closed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/pcc-node
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Without PyNaCl, every key operation is refused (the refusal test must run)
+        run: |
+          python -m venv "$RUNNER_TEMP/no-nacl"
+          "$RUNNER_TEMP/no-nacl/bin/python" -m pip install --quiet "pytest==8.3.5"
+          if "$RUNNER_TEMP/no-nacl/bin/python" -c "import nacl" 2>/dev/null; then
+            echo "invalid run: PyNaCl is importable in the venv without it"
+            exit 1
+          fi
+          out=$(PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider -rA tests/test_crypto.py 2>&1)
+          echo "$out" | tail -8
+          echo "$out" | grep -q "PASSED tests/test_crypto.py::TestWithoutPyNaClNoKeyIsUsed::test_no_key_is_created_loaded_or_used" \
+            || { echo "the no-PyNaCl refusal test did not run and pass"; exit 1; }
+
+      - name: Negative control - PCC_REQUIRE_PYNACL=1 without PyNaCl must fail on the PyNaCl check
+        run: |
+          set +e
+          out=$(PCC_REQUIRE_PYNACL=1 PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider tests/test_crypto.py 2>&1)
+          rc=$?
+          set -e
+          echo "$out" | tail -5
+          if [ "$rc" -eq 0 ]; then
+            echo "PCC_REQUIRE_PYNACL=1 passed without PyNaCl: the Ed25519 tests can hide behind a skip"
+            exit 1
+          fi
+          echo "$out" | grep -q "PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable" \
+            || { echo "the run failed, but not on the PyNaCl requirement"; exit 1; }
+          echo "ok: without PyNaCl the required run fails on the PyNaCl check"
+
+      - name: With PyNaCl (required, nothing may skip)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
+          set +e
+          out=$(PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_crypto.py 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          if echo "$out" | grep -q "skipped"; then
+            echo "a test skipped in the required run"
+            exit 1
+          fi
