@@ -86,6 +86,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { scopeColumnFits, MAX_SCOPES as SCOPES_LIMIT, MAX_SCOPE_CHARS as SCOPE_CHARS_LIMIT } from "../auth/scope-limits.js";
 import { getRepos } from "../db.js";
 import { authPath } from "./route-path.js";
 
@@ -578,27 +579,28 @@ function matchRoute(
  * to a JSON array before it works again. This is intentional — no gate may
  * infer authority from an unparseable value.
  */
-/** Limits checked BEFORE and after JSON.parse (WP-A round 5, sol #2963). */
-export const MAX_SCOPE_COLUMN_CHARS = 4096;
-export const MAX_SCOPES = 64;
-export const MAX_SCOPE_CHARS = 64;
+/**
+ * Limits checked BEFORE and after JSON.parse (WP-A round 5, sol #2963). They are
+ * shared with minting, and the size is in UTF-8 bytes (round 8): auth/scope-limits.ts.
+ */
+export { MAX_SCOPE_COLUMN_BYTES, MAX_SCOPES, MAX_SCOPE_CHARS } from "../auth/scope-limits.js";
 
 export function parseScopeColumn(raw: unknown): string[] {
   if (typeof raw !== "string") return [];
-  // Size before parse: an oversized value is refused without parsing it.
-  if (raw.length === 0 || raw.length > MAX_SCOPE_COLUMN_CHARS) return [];
+  // Size before parse, in UTF-8 bytes: an oversized value is refused without parsing it.
+  if (!scopeColumnFits(raw)) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return []; // unparseable serialization → no scopes
   }
-  if (!Array.isArray(parsed) || parsed.length > MAX_SCOPES) return [];
+  if (!Array.isArray(parsed) || parsed.length > SCOPES_LIMIT) return [];
   // Every element a non-empty string of bounded length, and no duplicates: a
   // duplicated or oversized serialization is malformed, so it grants NOTHING.
   const seen = new Set<string>();
   for (const s of parsed) {
-    if (typeof s !== "string" || s.length === 0 || s.length > MAX_SCOPE_CHARS || seen.has(s)) return [];
+    if (typeof s !== "string" || s.length === 0 || s.length > SCOPE_CHARS_LIMIT || seen.has(s)) return [];
     seen.add(s);
   }
   return parsed as string[];

@@ -10,7 +10,7 @@
  * Minting refuses the same shapes, so no legitimately minted key can hit them.
  */
 import { describe, it, expect } from "vitest";
-import { parseScopeColumn, MAX_SCOPE_COLUMN_CHARS } from "../middleware/scope-checker.js";
+import { parseScopeColumn, MAX_SCOPE_COLUMN_BYTES } from "../middleware/scope-checker.js";
 import { assertMintableScopes } from "../auth/api-key-auth.js";
 
 describe("parseScopeColumn limits", () => {
@@ -28,13 +28,42 @@ describe("parseScopeColumn limits", () => {
   });
 
   it("the size check applies before parsing", () => {
-    const big = `["settlement"${" ".repeat(MAX_SCOPE_COLUMN_CHARS)}]`; // valid JSON, only whitespace padding
+    const big = `["settlement"${" ".repeat(MAX_SCOPE_COLUMN_BYTES)}]`; // valid JSON, only whitespace padding
     expect(parseScopeColumn(big)).toEqual([]);
   });
 
   it("control: a normal key still parses", () => {
     expect(parseScopeColumn('["operator","settlement"]')).toEqual(["operator", "settlement"]);
     expect(parseScopeColumn("[]")).toEqual([]);
+  });
+});
+
+describe("the column limit is in UTF-8 BYTES, not characters (round 8, astra FC-7)", () => {
+  // "settlement" plus 50 distinct short scopes of 3-byte characters: about 2,300
+  // characters, but more than 4,096 UTF-8 bytes. It used to pass the character check.
+  const unicodeScopes = ["settlement", ...Array.from({ length: 50 }, (_, i) => `${"€".repeat(28)}${String(i).padStart(2, "0")}`)];
+  const raw = JSON.stringify(unicodeScopes);
+
+  it("[neg] the parser grants nothing for a column over 4096 bytes, even if under 4096 characters", () => {
+    expect(raw.length).toBeLessThan(MAX_SCOPE_COLUMN_BYTES);
+    expect(Buffer.byteLength(raw, "utf8")).toBeGreaterThan(MAX_SCOPE_COLUMN_BYTES);
+    expect(parseScopeColumn(raw)).toEqual([]);
+  });
+
+  it("[neg] minting refuses the same list, so no key is minted that would then hold nothing", () => {
+    expect(() => assertMintableScopes(unicodeScopes)).toThrow(/4096 UTF-8 bytes/);
+  });
+
+  it("[neg] minting refuses settlement + 63 distinct 64-character ASCII scopes (4,235 bytes; astra authz r2 new defect 2)", () => {
+    const scopes = ["settlement", ...Array.from({ length: 63 }, (_, i) => `${"y".repeat(62)}${String(i).padStart(2, "0")}`)];
+    expect(Buffer.byteLength(JSON.stringify(scopes), "utf8")).toBe(4235);
+    expect(parseScopeColumn(JSON.stringify(scopes))).toEqual([]);
+    expect(() => assertMintableScopes(scopes)).toThrow(/4096 UTF-8 bytes/);
+  });
+
+  it("control: a normal list mints and parses", () => {
+    expect(() => assertMintableScopes(["operator", "settlement"])).not.toThrow();
+    expect(parseScopeColumn(JSON.stringify(["operator", "settlement"]))).toEqual(["operator", "settlement"]);
   });
 });
 

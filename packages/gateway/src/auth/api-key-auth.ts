@@ -17,6 +17,7 @@ import {
   normalizePublicKeyHex,
   type Ed25519Keypair,
 } from "./ed25519.js";
+import { scopeColumnFits, MAX_SCOPES, MAX_SCOPE_CHARS, MAX_SCOPE_COLUMN_BYTES } from "./scope-limits.js";
 
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
@@ -181,11 +182,19 @@ export function assertMintableScopes(scopes: unknown): asserts scopes is string[
     }
   }
   // A key must be readable by the scope parser it will be checked with: at most 64
-  // scopes of at most 64 characters, no duplicates (WP-A round 5; parseScopeColumn
-  // refuses anything else, so such a key would silently hold nothing).
-  if (scopes.length > 64 || scopes.some((s) => s.length > 64) || new Set(scopes).size !== scopes.length) {
+  // scopes of at most 64 characters, no duplicates, and the stored column (exactly
+  // JSON.stringify(scopes), as provisionApiKey writes it) within the parser's
+  // UTF-8 byte limit (WP-A rounds 5 and 8; auth/scope-limits.ts). parseScopeColumn
+  // refuses anything else, so such a key would silently hold nothing.
+  if (scopes.length > MAX_SCOPES || scopes.some((s) => s.length > MAX_SCOPE_CHARS) || new Set(scopes).size !== scopes.length) {
     throw Object.assign(
-      new Error("provisionApiKey: at most 64 distinct scopes of at most 64 characters"),
+      new Error(`provisionApiKey: at most ${MAX_SCOPES} distinct scopes of at most ${MAX_SCOPE_CHARS} characters`),
+      { code: "invalid_scopes" },
+    );
+  }
+  if (!scopeColumnFits(JSON.stringify(scopes))) {
+    throw Object.assign(
+      new Error(`provisionApiKey: the serialized scope list must fit ${MAX_SCOPE_COLUMN_BYTES} UTF-8 bytes`),
       { code: "invalid_scopes" },
     );
   }
