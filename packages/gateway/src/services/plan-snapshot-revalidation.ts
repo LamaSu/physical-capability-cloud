@@ -432,25 +432,32 @@ function readKernelRow(raw: unknown): RowRead<KernelRow> {
 }
 
 /**
- * Read a loader's answer once. Null when it is not a readable list, or when a REQUESTED id appears in it
- * twice (the database's primary key makes that impossible, so the answer is broken): the caller reports
- * either as a malformed live answer. Two copies are never resolved by order (ChatGPT review of c48af89c).
+ * Read a loader's answer once. Null when it is not a readable list. A REQUESTED id that appears in it twice
+ * is reported in `duplicated`: the database's primary key makes that impossible, so those copies are broken,
+ * and the caller decides what that means for the id. Two copies are never resolved by order (ChatGPT review
+ * of c48af89c). The id is still reported per id, not as a broken WHOLE answer, so a duplicate the caller
+ * cannot see can be treated exactly like an absent row (astra, round 2 of #355).
  */
-function readRows<T>(answer: unknown, read: (raw: unknown) => RowRead<T>, requested: ReadonlySet<string>): T[] | null {
+function readRows<T>(
+  answer: unknown,
+  read: (raw: unknown) => RowRead<T>,
+  requested: ReadonlySet<string>,
+): { rows: T[]; duplicated: ReadonlySet<string> } | null {
   try {
     const items = listOnce(answer, MAX_ROWS);
     if (!items) return null;
-    const out: T[] = [];
+    const rows: T[] = [];
     const seen = new Set<string>();
+    const duplicated = new Set<string>();
     for (const raw of items) {
       const { id, row } = read(raw);
       if (id !== null && requested.has(id)) {
-        if (seen.has(id)) return null;
+        if (seen.has(id)) duplicated.add(id);
         seen.add(id);
       }
-      if (row) out.push(row);
+      if (row) rows.push(row);
     }
-    return out;
+    return { rows, duplicated };
   } catch {
     return null;
   }
@@ -571,20 +578,32 @@ export function revalidatePlanSnapshots(
   // Capabilities, then visibility, THEN kernels. A capability scoped to another tenant is dropped
   // before any kernel lookup, so it is indistinguishable from one that does not exist: in the
   // verdict, in the kernel loader's calls, and in timing. An unattributable row is ignored.
+  // Each requested-id set is built BEFORE its loader runs, and each loader gets its own copy of the ids,
+  // so a loader that edits its argument cannot shrink the duplicate check (astra, round 2 of #355).
+  // A requested capability id answered twice: if ANY copy is visible to this caller, the claims on it are a
+  // malformed live row (a contradiction the caller can see is refused, never resolved by order). If NO copy is
+  // visible, the id is treated exactly like an absent one, so duplicated foreign rows reveal nothing.
   const caps = new Map<string, CapRow>();
   const capIds = [...new Set(valid.map((c) => c.capabilityId))].sort();
   const requested = new Set(capIds);
-  const capRows = capIds.length > 0 ? readRows(Reflect.apply(loadCapabilities, deps, [capIds]), readCapRow, requested) : [];
-  for (const row of capRows ?? []) {
-    if (requested.has(row.id) && !caps.has(row.id) && visibleTo(row, tenantId)) caps.set(row.id, row);
+  const noRows = { rows: [], duplicated: new Set<string>() };
+  const capAnswer = capIds.length > 0 ? readRows(Reflect.apply(loadCapabilities, deps, [[...capIds]]), readCapRow, requested) : noRows;
+  const brokenCaps = new Set<string>();
+  for (const row of capAnswer?.rows ?? []) {
+    if (!requested.has(row.id) || !visibleTo(row, tenantId)) continue;
+    if (capAnswer!.duplicated.has(row.id)) brokenCaps.add(row.id);
+    else caps.set(row.id, row);
   }
   const kernels = new Map<string, KernelRow>();
   const kernelIds = [...new Set([...caps.values()].map((r) => r.kernelId).filter(isId))].sort();
-  const kernelRows = kernelIds.length > 0 ? readRows(Reflect.apply(loadKernels, deps, [kernelIds]), readKernelRow, new Set(kernelIds)) : [];
-  for (const row of kernelRows ?? []) if (!kernels.has(row.id)) kernels.set(row.id, row);
+  const requestedKernels = new Set(kernelIds);
+  const kernelAnswer = kernelIds.length > 0 ? readRows(Reflect.apply(loadKernels, deps, [[...kernelIds]]), readKernelRow, requestedKernels) : noRows;
+  // Kernels are only ever requested for VISIBLE capabilities, so a broken kernel answer reveals nothing hidden.
+  const kernelsBroken = kernelAnswer === null || kernelAnswer.duplicated.size > 0;
+  for (const row of kernelAnswer?.rows ?? []) if (!kernels.has(row.id)) kernels.set(row.id, row);
 
   for (const c of valid) {
-    if (capRows === null || (caps.has(c.capabilityId) && kernelRows === null)) {
+    if (capAnswer === null || brokenCaps.has(c.capabilityId) || (caps.has(c.capabilityId) && kernelsBroken)) {
       verdicts.push({ nodeId: c.nodeId, status: "unavailable", reason: "malformed-live-row" });
     } else {
       verdicts.push(judge(c, caps.get(c.capabilityId), csdOf, kernels));

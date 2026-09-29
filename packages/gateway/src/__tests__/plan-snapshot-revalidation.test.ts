@@ -695,3 +695,72 @@ describe("round 5 (ChatGPT review of c48af89c): status allowlist, tenant ids, du
     expect(only(live)).toEqual({ nodeId: "print", status: "unpriceable", reason: "malformed-price" });
   });
 });
+
+describe("round 6 (astra review of d9a2185c): loader argument edits, and duplicates the caller cannot see", () => {
+  const print = () => [claim({ nodeId: "print" })];
+  const MALFORMED = { nodeId: "print", status: "unavailable", reason: "malformed-live-row" };
+
+  it("D: a loader that edits its argument cannot shrink the duplicate check (kernels and capabilities)", () => {
+    const online = { id: "k-1", operatorAddress: OP, status: "online" };
+    const suspended = { id: "k-1", operatorAddress: OP, status: "suspended" };
+    const kernelEdit: RevalidationDeps = {
+      ...deps([cap({ id: "cap-print" })]),
+      loadKernels: (ids) => {
+        ids.length = 0; // astra's attack: empty the requested ids, then answer two contradictory copies
+        return [online, suspended];
+      },
+    };
+    expect(only(revalidatePlanSnapshots(print(), kernelEdit))).toEqual(MALFORMED);
+    const capEdit: RevalidationDeps = {
+      ...deps([]),
+      loadCapabilities: (ids) => {
+        ids.length = 0;
+        return [cap({ id: "cap-print" }), cap({ id: "cap-print", pricing: { currency: "USDC", baseCost: "1.00", minimum: "1.00" } })];
+      },
+    };
+    expect(only(revalidatePlanSnapshots(print(), capEdit))).toEqual(MALFORMED);
+  });
+
+  it("tenant non-disclosure: a foreign capability answered twice looks exactly like an absent one, in the verdict and the kernel calls", () => {
+    const foreign = cap({ id: "cap-print", tenantId: "tenant-2" });
+    const run = (rows: LiveCapability[], tenantId?: string) => {
+      const calls: Calls = { caps: [], kernels: [] };
+      const d: RevalidationDeps = { ...deps([], KERNELS, calls), loadCapabilities: () => rows };
+      const r = revalidatePlanSnapshots(print(), d, tenantId === undefined ? {} : { tenantId });
+      return { verdicts: r.verdicts, kernelCalls: calls.kernels.length };
+    };
+    expect(run([]).verdicts).toEqual([{ nodeId: "print", status: "missing", reason: "capability-not-found" }]);
+    const cheaper = { ...foreign, pricing: { currency: "USDC", baseCost: "1.00", minimum: "1.00" } };
+    for (const rows of [[foreign], [foreign, foreign], [foreign, cheaper], [cheaper, foreign]]) {
+      expect(run(rows)).toEqual(run([])); // a public caller
+      expect(run(rows, "tenant-1")).toEqual(run([], "tenant-1")); // a caller of another tenant
+    }
+  });
+
+  it("a contradiction the caller CAN see is still refused, in either order: public and foreign, own and foreign, own twice", () => {
+    const pub = cap({ id: "cap-print" });
+    const foreign = cap({ id: "cap-print", tenantId: "tenant-2" });
+    const own = cap({ id: "cap-print", tenantId: "tenant-1" });
+    const cases: Array<[LiveCapability[], string | undefined]> = [
+      [[pub, foreign], undefined],
+      [[foreign, pub], undefined],
+      [[own, foreign], "tenant-1"],
+      [[foreign, own], "tenant-1"],
+      [[own, own], "tenant-1"],
+    ];
+    for (const [rows, tenantId] of cases) {
+      const r = revalidatePlanSnapshots(print(), { ...deps([]), loadCapabilities: () => rows }, tenantId === undefined ? {} : { tenantId });
+      expect([rows.map((x) => x.tenantId), only(r)]).toEqual([rows.map((x) => x.tenantId), MALFORMED]);
+    }
+  });
+
+  it("a duplicate breaks only the claims on its own id: another node is judged normally", () => {
+    const rows = [cap({ id: "cap-a" }), cap({ id: "cap-a", kernelId: "k-2" }), cap({ id: "cap-b" })];
+    const r = revalidatePlanSnapshots(
+      [claim({ nodeId: "a", capabilityId: "cap-a" }), claim({ nodeId: "b", capabilityId: "cap-b" })],
+      { ...deps([]), loadCapabilities: () => rows },
+    );
+    expect(r.verdicts[0]).toEqual({ nodeId: "a", status: "unavailable", reason: "malformed-live-row" });
+    expect(r.verdicts[1]).toMatchObject({ nodeId: "b", status: "current" });
+  });
+});
