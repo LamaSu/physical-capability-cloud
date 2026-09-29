@@ -54,6 +54,7 @@ import {
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
+import { escrowForJob, NON_RELEASABLE_ESCROW_STATUSES } from "../services/escrow-refund.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
@@ -925,6 +926,17 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       //   (b) the check-then-act race — the old read happened many awaits
       //       before the terminal write, so two concurrent PUTs both passed
       //       and double-settled.
+      // N79: an escrow that was given back (refunded, or refund pending on-chain) can never be released. Checked
+      // synchronously right before the claim, with no await in between, so no refund can land in between.
+      const refundGuardEscrow = escrowForJob(jobId);
+      if (refundGuardEscrow && NON_RELEASABLE_ESCROW_STATUSES.has(refundGuardEscrow.status)) {
+        return reply.status(409).send({
+          error: "escrow_refunded",
+          message: "This job's escrow was given back; it can no longer be released.",
+          escrowStatus: refundGuardEscrow.status,
+        });
+      }
+
       const claimed = db
         .update(schema.jobs)
         .set({ status: "completing" })
@@ -1553,6 +1565,17 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // 'completing'. Excludes settled/completed/failed/cancelled/completing, so a
       // settled job or an in-flight /complete is never disturbed, and two
       // concurrent resumes can't both win.
+      // N79: an escrow that was given back (refunded, or refund pending on-chain) can never be released. Checked
+      // synchronously right before the claim, with no await in between, so no refund can land in between.
+      const refundGuardEscrow = escrowForJob(jobId);
+      if (refundGuardEscrow && NON_RELEASABLE_ESCROW_STATUSES.has(refundGuardEscrow.status)) {
+        return reply.status(409).send({
+          error: "escrow_refunded",
+          message: "This job's escrow was given back; it can no longer be released.",
+          escrowStatus: refundGuardEscrow.status,
+        });
+      }
+
       const claimed = db
         .update(schema.jobs)
         .set({ status: "completing" })

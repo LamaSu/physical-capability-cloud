@@ -55,6 +55,7 @@
 
 import type { Address } from "viem";
 import type { IRepositories } from "@pcc/store";
+import { ESCROW_REFUND_STATUS } from "@pcc/spec";
 import {
   getEscrowStateV2,
   isWriteEnabled,
@@ -76,7 +77,13 @@ const KEEPER_INTERVAL_DEFAULT_SEC = 300; // 5 min — challenge windows are ≥1
  * a few extra escrows (a cheap read) over skipping a possibly-trapped one because
  * its DB status lags the chain. This is the money-liveness-over-read-cost call.
  */
-const TERMINAL_ESCROW_STATUSES = new Set(["completed", "refunded"]);
+// N79: "refund_pending" too. A chain escrow whose job failed or was cancelled has its refund decided; releasing it
+// would pay out an escrow the platform has already given back.
+const TERMINAL_ESCROW_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  ESCROW_REFUND_STATUS.DONE,
+  ESCROW_REFUND_STATUS.PENDING,
+]);
 
 export interface KeeperLogger {
   info: (msg: string) => void;

@@ -342,6 +342,18 @@ describe("runKeeperSweep — filtering & resilience", () => {
     expect(mState).not.toHaveBeenCalled();
   });
 
+  it("never releases an escrow whose refund is pending (N79: its job failed or was cancelled)", async () => {
+    const { repos } = makeRepos([
+      { id: "esc-refund-pending", contractAddress: ADDR("ef"), status: "refund_pending", version: "v2" },
+    ]);
+
+    const r = await runKeeperSweep(repos, { nowSeconds: NOW });
+
+    expect(r.skippedTerminal).toBe(1);
+    expect(mState).not.toHaveBeenCalled();
+    expect(mDrive).not.toHaveBeenCalled();
+  });
+
   it("skips a mock / non-hex escrow address (never a live release target)", async () => {
     const { repos } = makeRepos([{ id: "esc-mock", contractAddress: "mock-escrow-123", status: "funded", version: "v2" }]);
 

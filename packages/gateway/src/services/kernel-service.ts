@@ -15,6 +15,7 @@ import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
+import { setJobStatusWithRefund } from "./escrow-refund.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
@@ -338,7 +339,7 @@ export class KernelService {
                     evidenceBundleId: result.bundleId,
                   });
                 } else {
-                  repos.jobs.updateStatus(jobId, "failed");
+                  setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
                 }
               } catch {
                 // DB update failure is non-fatal
@@ -379,8 +380,7 @@ export class KernelService {
               // A rejected runner.run() is a real device failure — record it.
               gateway.recordDeviceFailure(deviceId);
               try {
-                const repos = getRepos();
-                repos.jobs.updateStatus(jobId, "failed");
+                setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
               } catch {
                 // DB update failure is non-fatal
               }
@@ -424,7 +424,7 @@ export class KernelService {
                 evidenceBundleId: result.bundleId,
               });
             } else {
-              repos.jobs.updateStatus(jobId, "failed");
+              setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
             }
           } catch {
             // DB update failure is non-fatal
@@ -459,8 +459,7 @@ export class KernelService {
           // A rejected runner.run() is a real device failure — record it (fallback path).
           gateway.recordDeviceFailure(deviceId);
           try {
-            const repos = getRepos();
-            repos.jobs.updateStatus(jobId, "failed");
+            setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
           } catch {
             // DB update failure is non-fatal
           }

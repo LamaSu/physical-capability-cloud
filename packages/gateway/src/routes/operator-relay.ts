@@ -17,6 +17,7 @@ import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
+import { setJobStatusWithRefund } from "../services/escrow-refund.js";
 import { v4 as uuidv4 } from "uuid";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
@@ -235,8 +236,8 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
     }
 
     try {
-      const repos = getRepos();
-      const updated = repos.jobs.updateStatus(jobId, canonicalStatus);
+      // N79: a `failed`/`cancelled` job gives its escrow back in the same transaction as this write.
+      const { job: updated, escrowRefund } = setJobStatusWithRefund(jobId, canonicalStatus);
 
       if (!updated) {
         // Job not found — return 200 so the node doesn't fail hard
@@ -254,6 +255,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         jobId,
         status: canonicalStatus,
         metadata: metadata ?? null,
+        ...(escrowRefund ? { escrowRefund } : {}),
         timestamp: new Date().toISOString(),
       };
     } catch (err) {
