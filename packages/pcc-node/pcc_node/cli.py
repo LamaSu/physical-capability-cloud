@@ -19,7 +19,7 @@ import click
 
 from . import __version__
 from .config import NodeConfig, generate_config, save_config, load_config
-from .crypto import load_or_create_keys
+from .crypto import KeyFileError, load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
 from .discovery import (
@@ -149,6 +149,15 @@ def _format_device(dev):
         return f"{dtype}: {json.dumps(dev)}"
 
 
+
+def _load_node_keys():
+    """The node's key pair, or a plain message and exit 1 if its key file is unusable."""
+    try:
+        return load_or_create_keys()
+    except KeyFileError as exc:
+        click.echo(f"Cannot use this node's key file: {exc}", err=True)
+        sys.exit(1)
+
 @click.group()
 @click.version_option(version=__version__, prog_name="pcc-node")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging")
@@ -265,7 +274,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
 
     # Load or create node keys
     click.echo("Loading node keys...")
-    public_key, secret_key = load_or_create_keys()
+    public_key, secret_key = _load_node_keys()
     config.public_key = public_key
 
     click.echo(f"  Kernel ID: {config.kernel_id}")
@@ -388,12 +397,11 @@ def discover_cmd(subnet, register, pcc_base, api_key):
             )
             # Register as a single-device kernel
             from .config import generate_config, save_config
-            from .crypto import load_or_create_keys
             node_config = generate_config([cfg])
             node_config.pcc_base = pcc_base
             if api_key:
                 node_config.pcc_api_key = api_key
-            pub_key, _ = load_or_create_keys()
+            pub_key, _ = _load_node_keys()
             node_config.public_key = pub_key
             register_kernel(pcc_base, api_key, node_config)
             registered += 1
