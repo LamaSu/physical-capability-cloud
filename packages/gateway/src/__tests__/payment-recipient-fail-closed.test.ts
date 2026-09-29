@@ -218,6 +218,19 @@ describe("configuredAddress: checksum and known placeholders", () => {
     expect(configuredAddress(address)).toBeNull();
   });
 
+  it("[neg] the correctly CHECKSUMMED (mixed-case) form of a repeated-letter address is still a placeholder (round 8, astra FC-2)", async () => {
+    const { configuredAddress, isPlaceholderAddress } = await import("../config/payment-recipient.js");
+    const { getAddress } = await import("viem");
+    for (const hexDigit of ["a", "b", "c", "d", "e", "f"]) {
+      const checksummed = getAddress(`0x${hexDigit.repeat(40)}`);
+      expect(checksummed).not.toBe(checksummed.toLowerCase()); // it really is mixed case
+      expect(isPlaceholderAddress(checksummed), checksummed).toBe(true);
+      expect(configuredAddress(checksummed), checksummed).toBeNull();
+    }
+    // The known placeholders, in any casing.
+    expect(configuredAddress("0xF39FD6E51AAD88F6F4CE6AB8827279CFFFB92266")).toBeNull();
+  });
+
   it("control: a checksummed mixed-case address and an all-lowercase address are accepted", async () => {
     const { configuredAddress } = await import("../config/payment-recipient.js");
     const { getAddress } = await import("viem");

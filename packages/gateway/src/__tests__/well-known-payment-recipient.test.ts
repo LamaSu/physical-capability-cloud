@@ -127,19 +127,41 @@ describe("F1 — the A2A agent card advertises no placeholder recipient", () => 
   });
 });
 
-describe("F1 — the ERC-8004 registration file claims x402 support only when payable", () => {
-  it("x402Support is false with no recipient, true with one (each read at startup, as the gate is)", async () => {
+describe("F1 — the ERC-8004 registration file claims x402 support only when the gate RUNS x402", () => {
+  it("x402Support is false with no recipient, false for an active MPP gate, true for an active x402 gate", async () => {
     app = await buildApp();
     const off = await app.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
     expect(off.json().x402Support).toBe(false);
     await app.close();
 
-    // WP-A round 5 (#2963): a recipient set after startup no longer flips discovery on its
-    // own (the gate would not be charging it). A restart picks it up for both.
+    // Round 8 (astra FC-4): an ACTIVE MPP gate does not speak x402. It used to set
+    // x402Support: true for any active gate.
     process.env.PCC_TREASURY_ADDRESS = TREASURY;
+    app = await buildApp(); // MPP, with a secret and the treasury
+    const mpp = await app.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
+    expect(mpp.json().x402Support).toBe(false);
+    await app.close();
+
+    process.env.PCC_X402_LEGACY = "true";
     app = await buildApp();
-    const on = await app.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
-    expect(on.json().x402Support).toBe(true);
+    const x402 = await app.inject({ method: "GET", url: "/.well-known/agent-registration.json" });
+    expect(x402.json().x402Support).toBe(true);
+  });
+
+  it("[neg] a second app's gate never rewrites the first app's discovery (round 8, astra FC-3: state was module-global)", async () => {
+    process.env.PCC_TREASURY_ADDRESS = TREASURY;
+    process.env.PCC_X402_LEGACY = "true";
+    app = await buildApp(); // app A: x402 active, charging TREASURY
+    process.env.PCC_PAYMENT_ENABLED = "false"; // app B: payments disabled
+    const b = await buildApp();
+    try {
+      const a = await app.inject({ method: "GET", url: "/.well-known/agent-card.json" });
+      expect(a.json().securitySchemes?.x402?.["x-recipient"]).toBe(TREASURY);
+      const bCard = await b.inject({ method: "GET", url: "/.well-known/agent-card.json" });
+      expect(bCard.json().securitySchemes?.x402).toBeUndefined();
+    } finally {
+      await b.close();
+    }
   });
 });
 

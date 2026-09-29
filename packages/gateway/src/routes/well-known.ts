@@ -35,7 +35,7 @@ const CHAIN_ID = process.env.PCC_CHAIN_ID ? parseInt(process.env.PCC_CHAIN_ID, 1
 const REGISTRY_ADDRESS = (process.env.PCC_REGISTRY_ADDRESS ?? "0x8004A818BFB912233c491871b3d84c89A494BD9e") as `0x${string}`;
 
 export async function wellKnownRoutes(app: FastifyInstance) {
-  app.get("/.well-known/agent-registration.json", async (_request, reply) => {
+  app.get("/.well-known/agent-registration.json", async (request, reply) => {
     const registrations: Array<{ agentId: number; agentRegistry: string }> = [];
 
     if (AGENT_ID !== undefined) {
@@ -74,7 +74,11 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       // Only when the gate is ACTIVE with a configured recipient (WP-A round 5): read
       // from the gate's frozen state, so discovery can never promise what the gate is
       // not doing (disabled, unconfigured, or a config change since startup).
-      x402Support: getPaymentGateState().status === "active",
+      // x402 specifically (round 8, astra FC-4): an ACTIVE MPP gate does not speak x402.
+      x402Support: (() => {
+        const running = getPaymentGateState(request.server);
+        return running.status === "active" && running.protocol === "x402";
+      })(),
       active: true,
       registrations,
       supportedTrust: ["reputation", "crypto-economic"],
@@ -130,7 +134,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
     // and tell every discovering agent to pay it. With no recipient, the scheme
     // and its `x-recipient` are omitted entirely (the gate 503s priced routes).
     // Protocol and recipient come from the gate as it RUNS (WP-A round 5, #2963).
-    const running = getPaymentGateState();
+    const running = getPaymentGateState(_request.server);
     const recipient = running.status === "active" ? running.recipient : null;
     const mppEnabled = running.protocol === "mpp";
     const paymentScheme = recipient

@@ -53,7 +53,11 @@ const KNOWN_PLACEHOLDERS: ReadonlySet<string> = new Set(
  * repeated-digit address, and the known burn / public-key test accounts.
  */
 export function isPlaceholderAddress(address: string): boolean {
-  return PLACEHOLDER_RE.test(address) || REPEATED_DIGIT_RE.test(address) || KNOWN_PLACEHOLDERS.has(address.toLowerCase());
+  // Case never changes the destination, so classify the lowercase form (round 8, astra
+  // FC-2): the backreference in REPEATED_DIGIT_RE is case-sensitive, so the correctly
+  // CHECKSUMMED form of 0xaaaa…aaaa (mixed case) used to pass as a real treasury.
+  const a = address.toLowerCase();
+  return PLACEHOLDER_RE.test(a) || REPEATED_DIGIT_RE.test(a) || KNOWN_PLACEHOLDERS.has(a);
 }
 
 /**

@@ -170,20 +170,21 @@ export interface PaymentGateState {
 }
 
 const DISABLED_STATE: PaymentGateState = Object.freeze({ status: "disabled", protocol: null, recipient: null });
-let gateState: PaymentGateState = DISABLED_STATE;
+/**
+ * The state PER APPLICATION, keyed by its HTTP server, which every encapsulated
+ * plugin of one Fastify app shares (WP-A round 8, astra failclosed r2 FC-3). A
+ * module-global snapshot let a second app's initialization overwrite the first
+ * app's discovery while the first app kept charging with its own middleware.
+ */
+const gateStates = new WeakMap<object, PaymentGateState>();
 
-/** The payment gate's initialized state (disabled until paymentGate() runs). */
-export function getPaymentGateState(): PaymentGateState {
-  return gateState;
-}
-
-/** Test-only: forget the initialized state. */
-export function _resetPaymentGateStateForTests(): void {
-  gateState = DISABLED_STATE;
+/** The payment gate's state for the app `instance` belongs to (disabled until paymentGate() runs there). */
+export function getPaymentGateState(instance: { server: object }): PaymentGateState {
+  return gateStates.get(instance.server) ?? DISABLED_STATE;
 }
 
 export async function paymentGate(app: FastifyInstance) {
-  gateState = DISABLED_STATE; // each initialization decides afresh
+  let gateState: PaymentGateState = DISABLED_STATE; // each initialization decides afresh
   // Payment gate is controlled by env var — disabled by default for dev
   // Support both old (PCC_X402_ENABLED) and new (PCC_PAYMENT_ENABLED) names
   const enabled =
@@ -207,6 +208,7 @@ export async function paymentGate(app: FastifyInstance) {
   let mppMiddleware: MppMiddleware | null = null;
   let x402Middleware: X402Middleware | null = null;
   let x402Treasury: `0x${string}` | null = null;
+  let mppPayTo: `0x${string}` | null = null;
   let unconfigured = false;
   if (enabled) {
     if (useMpp) {
@@ -218,6 +220,7 @@ export async function paymentGate(app: FastifyInstance) {
         if (!recipient) {
           unconfigured = true;
         } else {
+          mppPayTo = recipient; // the SAME value the middleware charges to, recorded for discovery
           mppMiddleware = new MppMiddleware({
             secretKey,
             realm: process.env.MPP_REALM,
@@ -238,7 +241,7 @@ export async function paymentGate(app: FastifyInstance) {
         x402Middleware = new X402Middleware(x402ConfigFor(x402Treasury), buildX402Routes(x402Treasury));
       }
     }
-    if (mppMiddleware) gateState = Object.freeze({ status: "active", protocol: "mpp", recipient: mppRecipient() });
+    if (mppMiddleware) gateState = Object.freeze({ status: "active", protocol: "mpp", recipient: mppPayTo });
     else if (x402Middleware) gateState = Object.freeze({ status: "active", protocol: "x402", recipient: x402Treasury });
     if (unconfigured) {
       gateState = Object.freeze({ status: "unconfigured", protocol: useMpp && process.env.MPP_SECRET_KEY ? "mpp" : "x402", recipient: null });
@@ -249,6 +252,8 @@ export async function paymentGate(app: FastifyInstance) {
       );
     }
   }
+  // Recorded for THIS app only (round 8, FC-3): discovery reads it through req.server.
+  gateStates.set(app.server, gateState);
 
   // --- Unconfigured: refuse priced routes, never gate them on a placeholder ---
   if (unconfigured) {
@@ -397,10 +402,10 @@ export async function paymentGate(app: FastifyInstance) {
 
   // Payment stats endpoint (admin/debug)
   // Note: URL kept as /api/x402/stats for backwards compat — deprecated when MPP is active
-  app.get("/api/x402/stats", async () => {
+  app.get("/api/x402/stats", async (req) => {
     // From the frozen gate state: the protocol that actually RUNS (after the MPP→x402
     // fallback), and whether the gate is charging a configured recipient (#2963).
-    const running = getPaymentGateState();
+    const running = getPaymentGateState(req.server);
     return {
       enabled,
       protocol: running.protocol ?? protocol,
