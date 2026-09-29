@@ -4,8 +4,12 @@ export { CdpWalletClient, CDP_MOCK_ADDRESS_PREFIX, isCdpMockAddress } from "./wa
 export { CdpOnrampClient, type CreateOnrampParams } from "./onramp-client.js";
 export {
   CdpSpendPermissionService,
+  CdpSpendPermissionInputError,
+  CdpSpendPermissionNotFoundError,
+  CdpSpendPermissionUnconfirmedError,
   type IssueSpendPermissionParams,
 } from "./spend-permission-service.js";
+export { cdpCredentialsComplete } from "./mode.js";
 export type {
   CdpConfig,
   CdpNetwork,

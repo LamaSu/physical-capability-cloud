@@ -1,14 +1,18 @@
 import { randomBytes } from "node:crypto";
 import type { CdpConfig, CdpNetwork, CdpWallet } from "./types.js";
+import { cdpCredentialsComplete } from "./mode.js";
 
 /**
  * CdpWalletClient — creates/reads CDP smart wallets (self-custodial, server-managed).
  * Smart accounts on Base get gasless USDC via the CDP paymaster.
  *
- * Mock/real switch is presence-of-creds: `mock = cfg.mock ?? !cfg.apiKeyId`. With no
- * apiKeyId it returns deterministic fakes (gateway/tests/settlement work offline); with
- * creds it calls the real @coinbase/cdp-sdk. The SDK is imported lazily so mock-only
- * consumers don't need it loaded.
+ * Mock/real switch: real mode needs the COMPLETE credential tuple (apiKeyId,
+ * apiKeySecret, walletSecret). It used to go real on apiKeyId alone, so a
+ * half-configured deployment called the SDK with missing secrets. With any of the
+ * three missing it returns simulated results, and every one of them carries
+ * `mock: true` (a zero balance or a faucet "hash" must never read as real; WP-A
+ * round 5, sol #2963). The SDK is imported lazily so mock-only consumers don't need
+ * it loaded.
  */
 export class CdpWalletClient {
   private readonly network: CdpNetwork;
@@ -19,7 +23,7 @@ export class CdpWalletClient {
   constructor(cfg: CdpConfig = {}) {
     this.cfg = cfg;
     this.network = cfg.network ?? "base-sepolia";
-    this.mock = cfg.mock ?? !cfg.apiKeyId;
+    this.mock = cfg.mock ?? !cdpCredentialsComplete(cfg);
   }
 
   get isMock(): boolean {
@@ -46,6 +50,7 @@ export class CdpWalletClient {
         network: this.network,
         smartAccount: true,
         createdAt: new Date().toISOString(),
+        mock: true,
       };
     }
     const cdp = await this.cdp();
@@ -64,9 +69,10 @@ export class CdpWalletClient {
   /** USDC balance for an address on the configured network. */
   async getBalance(
     address: `0x${string}`,
-  ): Promise<{ address: `0x${string}`; usdc: number; network: CdpNetwork }> {
+  ): Promise<{ address: `0x${string}`; usdc: number; network: CdpNetwork; mock?: true }> {
     if (this.mock) {
-      return { address, usdc: 0, network: this.network };
+      // A simulated zero, marked: it must not read as "this wallet is empty".
+      return { address, usdc: 0, network: this.network, mock: true };
     }
     const cdp = await this.cdp();
     // Result-shape parsing is defensive (validated by the live smoke); the CALL is typed.
@@ -96,9 +102,10 @@ export class CdpWalletClient {
   async requestFaucet(
     address: `0x${string}`,
     token: "usdc" | "eth" = "usdc",
-  ): Promise<{ transactionHash: string }> {
+  ): Promise<{ transactionHash: string | null; mock?: true }> {
     if (this.mock) {
-      return { transactionHash: "0x" + "f".repeat(64) };
+      // Nothing was sent, so there is no transaction hash (it used to be a fabricated 0xfff…).
+      return { transactionHash: null, mock: true };
     }
     const cdp = await this.cdp();
     const res = (await cdp.evm.requestFaucet({
