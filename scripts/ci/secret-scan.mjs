@@ -17,7 +17,13 @@
 //   - with --range <base>..<head>, every object reachable from <head> and not
 //     from <base>: each commit (message included), tree (file names) and blob
 //     the range introduces. A key added in one commit and removed in a later
-//     one is still found.
+//     one is still found. When <head> names an annotated tag, the tag object
+//     and its message are scanned too; commit ancestry alone never reaches a
+//     tag object;
+//   - with --history <rev>, every object reachable from <rev>: its whole
+//     history, for a branch that has no earlier state to compare with;
+//   - with --text <label>, standard input, reported under <label> (a pull
+//     request's title and description, which no commit holds).
 // Every blob is scanned byte for byte, binaries included, with no size cap.
 // A blob that holds NUL bytes is also scanned as UTF-16 and UTF-32 text, so a
 // key saved in those encodings is found. File paths are scanned too. Submodule
@@ -31,9 +37,12 @@
 // never passed through.
 //
 // Usage: node scripts/ci/secret-scan.mjs [--root <dir>] [--tree <rev>] [--range <base>..<head>]
+//                                      [--history <rev>] [--text <label>]
+// Each option at most once; anything else on the command line is an error.
 // Exit codes: 0 clean, 1 key literal found, 2 scan error.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -113,6 +122,18 @@ function git(root, args, input, maxBuffer = 256 * 1024 * 1024) {
 function resolveCommit(root, rev) {
   if (typeof rev !== "string" || rev === "" || rev.startsWith("-")) throw new Error("a revision is required");
   const oid = git(root, ["rev-parse", "--verify", "--end-of-options", `${rev}^{commit}`]).toString("utf8").trim();
+  if (!OBJECT_ID.test(oid)) throw new Error("git rev-parse gave no object id");
+  return oid;
+}
+
+/**
+ * The object a revision names, unpeeled: an annotated tag stays a tag, so a
+ * walk from it includes the tag object and its message. It must still lead to
+ * a commit.
+ */
+function resolveEndpoint(root, rev) {
+  resolveCommit(root, rev);
+  const oid = git(root, ["rev-parse", "--verify", "--end-of-options", rev]).toString("utf8").trim();
   if (!OBJECT_ID.test(oid)) throw new Error("git rev-parse gave no object id");
   return oid;
 }
@@ -225,7 +246,8 @@ export function scanTree(root, rev) {
 
 /**
  * Scan every object that `head` reaches and `base` does not: commits (their
- * messages), trees (file names), blobs and tags.
+ * messages), trees (file names) and blobs, and the tag objects on the way when
+ * `head` names an annotated tag.
  * @param {string} root
  * @param {string} range "<base>..<head>"
  */
@@ -233,8 +255,30 @@ export function scanRange(root, range) {
   const m = /^([^.\s][^\s]*)\.\.([^.\s][^\s]*)$/.exec(range ?? "");
   if (!m) throw new Error("--range takes <base>..<head>");
   const base = resolveCommit(root, m[1]);
-  const head = resolveCommit(root, m[2]);
-  const listed = git(root, ["rev-list", "--objects", head, `^${base}`]).toString("utf8").split("\n").filter(Boolean);
+  return scanReachable(root, [resolveEndpoint(root, m[2]), `^${base}`]);
+}
+
+/**
+ * Scan every object reachable from `rev`: its whole history.
+ * @param {string} root
+ * @param {string} rev
+ */
+export function scanHistory(root, rev) {
+  return scanReachable(root, [resolveEndpoint(root, rev)]);
+}
+
+/**
+ * Scan text that no git object holds, reported under `label`.
+ * @param {string} label
+ * @param {Buffer} data
+ */
+export function scanInput(label, data) {
+  return { findings: scanBytes(data).map((f) => ({ file: label, ...f })), scanned: 1, gitlinks: [] };
+}
+
+/** Scan the objects `git rev-list --objects <revs>` lists. */
+function scanReachable(root, revs) {
+  const listed = git(root, ["rev-list", "--objects", ...revs]).toString("utf8").split("\n").filter(Boolean);
   const paths = new Map();
   for (const line of listed) {
     const oid = line.slice(0, line.indexOf(" ") < 0 ? line.length : line.indexOf(" "));
@@ -252,23 +296,45 @@ export function scanRange(root, range) {
   return { findings, scanned: paths.size, gitlinks: [] };
 }
 
-function option(argv, name) {
-  const i = argv.indexOf(name);
-  if (i < 0) return undefined;
-  const value = argv[i + 1];
-  if (value === undefined || value.startsWith("--")) throw new Error(`${name} needs a value`);
-  return value;
+const OPTIONS = new Set(["--root", "--tree", "--range", "--history", "--text"]);
+
+/**
+ * Parse `--name value` pairs. An unknown option, a stray argument, a repeated
+ * option or a missing value is an error: a mistyped option must never fall
+ * back to a clean scan of something else.
+ */
+function parseArgs(argv) {
+  const opts = new Map();
+  for (let i = 0; i < argv.length; i += 2) {
+    const name = argv[i];
+    if (!OPTIONS.has(name)) throw new Error(`unknown argument: ${name}`);
+    if (opts.has(name)) throw new Error(`${name} was given twice`);
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) throw new Error(`${name} needs a value`);
+    opts.set(name, value);
+  }
+  return opts;
 }
 
 function main(argv) {
-  const rootArg = option(argv, "--root");
-  const root = rootArg ? resolve(rootArg) : git(process.cwd(), ["rev-parse", "--show-toplevel"]).toString("utf8").trim();
-  const tree = option(argv, "--tree");
-  const range = option(argv, "--range");
+  const opts = parseArgs(argv);
+  let rootDir;
+  const root = () =>
+    (rootDir ??= opts.has("--root")
+      ? resolve(opts.get("--root"))
+      : git(process.cwd(), ["rev-parse", "--show-toplevel"]).toString("utf8").trim());
+  const tree = opts.get("--tree");
+  const range = opts.get("--range");
+  const history = opts.get("--history");
+  const text = opts.get("--text");
   const results = [];
-  if (tree === undefined && range === undefined) results.push(["tracked files (the index)", scanRepo(root)]);
-  if (tree !== undefined) results.push([`files in the tree of ${redact(tree)}`, scanTree(root, tree)]);
-  if (range !== undefined) results.push([`objects introduced by ${redact(range)}`, scanRange(root, range)]);
+  if ([tree, range, history, text].every((v) => v === undefined)) {
+    results.push(["tracked files (the index)", scanRepo(root())]);
+  }
+  if (tree !== undefined) results.push([`files in the tree of ${redact(tree)}`, scanTree(root(), tree)]);
+  if (range !== undefined) results.push([`objects introduced by ${redact(range)}`, scanRange(root(), range)]);
+  if (history !== undefined) results.push([`objects in the history of ${redact(history)}`, scanHistory(root(), history)]);
+  if (text !== undefined) results.push([`input: ${redact(text)}`, scanInput(text, readFileSync(0))]);
 
   const findings = results.flatMap(([, r]) => r.findings);
   const gitlinks = [...new Set(results.flatMap(([, r]) => r.gitlinks))];

@@ -312,3 +312,97 @@ test("bad revisions and missing option values are errors (exit 2)", () => {
     }
   });
 });
+
+// ── Round 4 (astra r3 on 976c8c36) ──────────────────────────────────────────
+
+/** A commit made with plumbing, so the test controls its parent and message. */
+function commitTree(dir, tree, parent, message) {
+  return execFileSync(
+    "git",
+    ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-p", parent, "-m", message],
+    { encoding: "utf8" },
+  ).trim();
+}
+
+test("a promotion commit's message is invisible to the pull request's range and caught by the merge queue's", () => {
+  const dir = tempRepo({ "a.txt": "base\n" });
+  try {
+    const base = commitAll(dir, "base");
+    writeFileSync(join(dir, "a.txt"), "change\n");
+    const head = commitAll(dir, "a clean change");
+    const tree = execFileSync("git", ["-C", dir, "rev-parse", `${head}^{tree}`], { encoding: "utf8" }).trim();
+    // What a squash merge writes: the head's tree, a new message, the base as parent.
+    const squash = commitTree(dir, tree, base, `squash ${key("live")} [skip ci]`);
+    assert.equal(runCli(dir, "--tree", head, "--range", `${base}..${head}`).status, 0);
+    const queued = runCli(dir, "--tree", squash, "--range", `${base}..${squash}`);
+    assert.equal(queued.status, 1);
+    assert.ok(!queued.stderr.includes(HEX64));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--history scans everything a commit reaches, where --tree alone misses old history", () => {
+  const dir = tempRepo({ "a.txt": "one\n" });
+  try {
+    commitAll(dir, `first ${key("live")}`);
+    writeFileSync(join(dir, "b.txt"), `${key("test")}\n`);
+    commitAll(dir, "second");
+    unlinkSync(join(dir, "b.txt"));
+    commitAll(dir, "third");
+    assert.equal(runCli(dir, "--tree", "HEAD").status, 0);
+    const res = runCli(dir, "--tree", "HEAD", "--history", "HEAD");
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /2 PCC key literal/);
+    assert.ok(!res.stderr.includes(HEX64));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--text scans standard input, such as a pull request's title and description", () => {
+  const dir = tempRepo({ "a.txt": "clean\n" });
+  try {
+    track(dir, "a.txt");
+    const spawn = (input) =>
+      spawnSync(process.execPath, [SCANNER, "--root", dir, "--text", "the pull request's title and description"], {
+        input,
+        encoding: "utf8",
+      });
+    const clean = spawn("fix: a title\n\nA description.\n");
+    assert.equal(clean.status, 0);
+    const leaked = spawn(`fix: rotate ${key("oracle")}\n`);
+    assert.equal(leaked.status, 1);
+    assert.match(leaked.stderr, /title and description:1/);
+    assert.ok(!leaked.stderr.includes(HEX64));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown option or stray argument is an error (exit 2), never a clean scan of something else", () => {
+  const dir = tempRepo({ "a.txt": "clean\n" });
+  try {
+    commitAll(dir, "clean");
+    assert.equal(runCli(dir, "--tree", "HEAD").status, 0);
+    for (const args of [["--rnage", "a..b"], ["--tree", "HEAD", "extra"], ["--history"]]) {
+      assert.equal(runCli(dir, ...args).status, 2, args.join(" "));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a range that ends at an annotated tag scans the tag's own message", () => {
+  const dir = tempRepo({ "a.txt": "one\n" });
+  try {
+    const base = commitAll(dir, "base");
+    commitAll(dir, "head");
+    execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "tag", "-a", "v1", "-m", `release ${key("live")}`]);
+    const res = runCli(dir, "--range", `${base}..v1`);
+    assert.equal(res.status, 1);
+    assert.ok(!res.stderr.includes(HEX64));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -35,7 +35,7 @@ jobs:
           node-version: 22
 
       - name: Secret-scan self-test
-        run: node --test scripts/ci/secret-scan.test.mjs
+        run: node --test scripts/ci/secret-scan.test.mjs scripts/ci/secret-scan-workflow.test.mjs scripts/ci/smoke-digital-verifier.test.mjs
 
       - name: Scan the commit tree and every object this change adds
         env:
@@ -47,7 +47,7 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then
             node scripts/ci/secret-scan.mjs --tree HEAD --range "${BASE_SHA}..HEAD"
           elif [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            node scripts/ci/secret-scan.mjs --tree HEAD
+            node scripts/ci/secret-scan.mjs --tree HEAD --history HEAD
           else
             node scripts/ci/secret-scan.mjs --tree HEAD --range "${BEFORE}..HEAD"
           fi
