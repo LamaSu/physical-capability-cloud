@@ -434,7 +434,9 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   envelope?: WorkEnvelope;           // Build volume
   assuranceTiers: (0|1|2|3)[];       // Which tiers this supports
   pricing: PricingModel;             // {currency, baseCost, minimum, ...}
-  location: {lat, lng};
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell
+  locationCell: string | null;       // the site's geohash-5 cell
   tags?: string[];
   // Enrichment (populated by facades):
   reputation?: number;               // 0-1000, from ERC-8004
@@ -478,8 +480,10 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   id: string;
   name: string;
   operatorAddress: string;
-  location: {lat, lng};
-  physicalAddress: string;
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell; none = no location ({0,0} included)
+  locationCell: string | null;       // the site's geohash-5 cell
+  physicalAddress: string | null;    // only when the operator opted in
   maxAssuranceTier: 0|1|2|3;
   status: "online"|"offline"|"maintenance"|"suspended";
   lastHeartbeat: string;
