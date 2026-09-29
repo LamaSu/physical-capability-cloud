@@ -11,7 +11,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DHTNode, dhtTelemetry } from "@pcc/dht";
 import { pipelineTelemetry } from "../telemetry.js";
-import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { canOpenSSE, trackSSEOpen, trackSSEClose, checkCallerRate } from "../middleware/security-hardening.js";
 import { resolveApiKeyFromToken } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { sameIdentity } from "../auth/reserved-identities.js";
@@ -40,6 +40,8 @@ export function dhtPeerPrincipal(req: FastifyRequest): string | null {
 const MAX_ANNOUNCE_CAPABILITIES = 50;
 const MAX_ANNOUNCE_ENDPOINTS = 10;
 const MAX_ANNOUNCE_TTL_SECONDS = 3600;
+/** Per-principal announce quota (#2883): at most this many announcements per window. */
+export const ANNOUNCE_QUOTA = { limit: 30, windowMs: 10 * 60_000 };
 
 function announceShapeError(a: any): string | null {
   if (!a || typeof a !== "object") return "a JSON object is required";
@@ -82,6 +84,13 @@ function getGatewayDHTNode(): DHTNode {
       port: 0, // Don't listen on a separate port; use Fastify's WS
       defaultTTL: 5,
       queryTimeoutMs: 5000,
+      // Only the owner-checked REST announce below may put a record in the gateway's
+      // registry. A /ws/dht peer's announcement has no verified signature and no
+      // owner check, so the node drops it and ignores peers' query answers
+      // (WP-A round 6, wpa-326-admingates-astra "bind announcements to an
+      // authorized kernel"). Without this, any key holder could connect and inject
+      // kernel records that the public /api/dht/query then served.
+      trustPeerRecords: false,
     });
   }
   return gatewayDHTNode;
@@ -128,6 +137,9 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
     if (!actor) {
       return reply.status(401).send({ error: "Authentication required for DHT announcements" });
     }
+    if (!checkCallerRate(String(actor), "dht_announce", ANNOUNCE_QUOTA.limit, ANNOUNCE_QUOTA.windowMs)) {
+      return reply.status(429).send({ error: "too_many_announcements", message: "Announcement quota reached; try again later." });
+    }
     const announcement = req.body as any;
     const shapeError = announceShapeError(announcement);
     if (shapeError) return reply.status(400).send({ error: "invalid_announcement", message: shapeError });
@@ -144,8 +156,11 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
       capabilities: announcement.capabilities,
       endpoints: announcement.endpoints ?? [],
       ttlSeconds: announcement.ttlSeconds ?? 300,
+      // Server-stamped: a record's freshness is its TTL from now, never a caller's clock.
       timestamp: new Date().toISOString(),
-      signature: typeof announcement.signature === "string" ? announcement.signature : "",
+      // The gateway does not verify a caller-supplied signature, so it never passes
+      // one on as if it did. The record's authority is the owner check above.
+      signature: "",
     };
     dhtNode.getRegistry().store(record);
     dhtNode.announce(record);

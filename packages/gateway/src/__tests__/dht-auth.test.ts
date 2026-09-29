@@ -124,3 +124,90 @@ describe("POST /api/dht/announce", () => {
     expect(peers.body).not.toContain("did:pcc:someone-else");
   });
 });
+
+/**
+ * WP-A round 6 (wpa-326-admingates-astra: bind announcements to an authorized
+ * kernel, and enforce signed content, freshness, schema limits and quotas).
+ * The seam: a REAL /ws/dht peer connection (injectWS) with a valid key.
+ */
+describe("DHT announcement integrity (round 6)", () => {
+  const Q_OWNER = "dht-quota-owner@x.test";
+  const Q_KERNEL = "dht-quota-kernel-1";
+  let qOwnerKey: string;
+
+  beforeAll(async () => {
+    qOwnerKey = seedKey(Q_OWNER);
+    const reg = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      remoteAddress: "10.99.0.3",
+      headers: { authorization: `Bearer ${qOwnerKey}` },
+      payload: { id: Q_KERNEL, name: "DHT quota kernel" },
+    });
+    expect(reg.statusCode, reg.body).toBeLessThan(300);
+  });
+
+  const query = async (type: string) =>
+    (await app.inject({ method: "GET", url: `/api/dht/query?type=${type}`, remoteAddress: "10.99.0.4" })).json() as {
+      results: Array<{ kernelDid: string; signature: string }>;
+    };
+
+  it("[neg] a /ws/dht peer's own announcement is not stored or served (the REST owner check cannot be bypassed)", async () => {
+    // A real socket: listen on an ephemeral port and connect with Node's WebSocket
+    // client. It cannot set headers, and /ws/dht also takes ?apiKey=.
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const { port } = app.server.address() as { port: number };
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/dht?apiKey=${encodeURIComponent(strangerKey)}`);
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener("open", () => resolve());
+      ws.addEventListener("error", () => reject(new Error("ws connect failed")));
+    });
+    const injected = {
+      kernelDid: `did:pcc:${KERNEL}`,
+      kernelId: KERNEL,
+      capabilities: [{ type: "ws-injected-type" }],
+      endpoints: [{ transport: "websocket-relay", url: "wss://attacker.example/ws" }],
+      ttlSeconds: 300,
+      timestamp: new Date().toISOString(),
+      signature: "forged",
+    };
+    ws.send(JSON.stringify({ protocol: "/pcc/cap-gossip/1.0.0", payload: { type: "announce", announcement: injected, ttl: 2 } }));
+    await new Promise((r) => setTimeout(r, 150));
+    const peers = await app.inject({ method: "GET", url: "/api/dht/peers", remoteAddress: "10.99.0.5" });
+    expect((peers.json() as { peers: unknown[] }).peers.length).toBeGreaterThan(0); // the peer really is connected
+    expect((await query("ws-injected-type")).results).toEqual([]);
+    ws.close();
+  }, 20_000);
+
+  it("[neg] a caller-supplied signature is never passed on as if the gateway had checked it", async () => {
+    const res = await announce(qOwnerKey, { kernelId: Q_KERNEL, capabilities: [{ type: "sig-probe-type" }], signature: "forged-signature" });
+    expect(res.statusCode).toBe(200);
+    const { results } = await query("sig-probe-type");
+    expect(results).toHaveLength(1);
+    expect(results[0]!.signature).toBe("");
+  });
+
+  it("[neg] the per-principal announce quota answers 429 once it is spent", async () => {
+    const { ANNOUNCE_QUOTA } = await import("../routes/dht-ws.js");
+    const codes: number[] = [];
+    for (let i = 0; i < ANNOUNCE_QUOTA.limit + 1; i++) {
+      codes.push((await announce(qOwnerKey, { kernelId: Q_KERNEL, capabilities: [{ type: "quota-type" }] })).statusCode);
+    }
+    // The signature probe above already used one of this principal's announcements.
+    expect(codes.filter((c) => c === 200)).toHaveLength(ANNOUNCE_QUOTA.limit - 1);
+    expect(codes.slice(-2)).toEqual([429, 429]);
+  });
+
+  it("boundary: /api/dht/peers and /api/dht/metrics are public by design and carry no network address", async () => {
+    for (const url of ["/api/dht/peers", "/api/dht/metrics"]) {
+      const res = await app.inject({ method: "GET", url, remoteAddress: "10.99.0.6" });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.body, url).not.toMatch(/"(ip|remoteAddress|address|host)"\s*:/);
+      expect(res.body, url).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+    }
+    const peers = (await app.inject({ method: "GET", url: "/api/dht/peers", remoteAddress: "10.99.0.7" })).json() as {
+      peers: Array<{ did: string }>;
+    };
+    for (const p of peers.peers) expect(p.did).toMatch(/^did:pcc:peer_[A-Za-z0-9_-]+$/);
+  });
+});
