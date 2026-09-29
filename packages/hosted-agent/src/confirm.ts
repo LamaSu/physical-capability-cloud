@@ -1,12 +1,9 @@
 /**
  * The hosted agent writes only with the user's explicit confirmation.
  *
- * Each tool is classified from the pinned agent package's HTTP method and path:
- *   - read: a GET or HEAD runs at once;
- *   - write: anything else is HELD;
- *   - l2: accepting jobs, price, payout, e-stop, policy, funds. These are not
- *     offered at all while the L2 flag is off, and are held like writes when it
- *     is on.
+ * Each tool is classified by the policy (policy.ts) from the pinned agent
+ * package: reads run at once; writes are HELD; L2 tools are offered only while
+ * the L2 flag is on, and are held like writes; `never` tools are never offered.
  * A held call becomes a pending confirmation bound to its session: an
  * unguessable single-use token, a frozen copy of the exact arguments the model
  * supplied, and an expiry. The model is told only that the call is held. It
@@ -15,19 +12,11 @@
  */
 import { randomBytes } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
+import { classify, DEFAULT_TOOL_POLICY, type ToolPolicy, type ToolSpec } from "./policy.js";
 
 /** The same shapes as @pcc/agent-runtime's ToolDef and ToolCaller (LLMAgent). */
 export type ToolDef = Anthropic.Tool;
 export type ToolCaller = (input: unknown) => Promise<unknown>;
-
-export type ToolLevel = "read" | "write" | "l2";
-
-/** A tool's endpoint, from the pinned agent package. */
-export interface ToolSpec {
-  readonly name: string;
-  readonly method: string;
-  readonly path: string;
-}
 
 export interface GatedTool {
   readonly def: ToolDef;
@@ -35,38 +24,11 @@ export interface GatedTool {
   readonly caller: ToolCaller;
 }
 
-/** Non-GET paths that move money, accept work or touch safety. Matching is
- * deliberately broad: a false match only hides a tool while L2 is off. */
-export const DEFAULT_L2_PATTERNS: readonly RegExp[] = [
-  /\/claim\b/i,
-  /\/accept\b/i,
-  /emergency/i,
-  /\/policy\b/i,
-  /\/approv/i,
-  /\/reject\b/i,
-  /payout/i,
-  /pric(e|ing)/i,
-  /wallet/i,
-  /\/fund/i,
-  /transfer/i,
-  /withdraw/i,
-  /escrow/i,
-  /settle/i,
-  /\/pay\b|\/pay\//i,
-  /stake|slash/i,
-];
-
-export function classify(spec: ToolSpec, l2Patterns: readonly RegExp[] = DEFAULT_L2_PATTERNS): ToolLevel {
-  const method = spec.method.toUpperCase();
-  if (method === "GET" || method === "HEAD") return "read";
-  return l2Patterns.some((re) => re.test(spec.path)) ? "l2" : "write";
-}
-
 export interface HeldCall {
   readonly token: string;
   readonly sessionId: string;
   readonly tool: string;
-  readonly level: Exclude<ToolLevel, "read">;
+  readonly level: "write" | "l2";
   readonly method: string;
   readonly path: string;
   readonly input: unknown;
@@ -103,7 +65,7 @@ export class ConfirmationGate {
       readonly ttlMs?: number;
       readonly now?: () => number;
       readonly token?: () => string;
-      readonly l2Patterns?: readonly RegExp[];
+      readonly policy?: ToolPolicy;
     } = {},
   ) {}
 
@@ -124,7 +86,8 @@ export class ConfirmationGate {
     const defs: ToolDef[] = [];
     const callers: Record<string, ToolCaller> = {};
     for (const t of tools) {
-      const level = classify(t.spec, this.opts.l2Patterns);
+      const level = classify(t.spec, this.opts.policy ?? DEFAULT_TOOL_POLICY);
+      if (level === "never") continue;
       if (level === "l2" && !flags.l2Enabled) continue;
       defs.push(t.def);
       if (level === "read") {
