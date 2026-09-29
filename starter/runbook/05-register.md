@@ -58,11 +58,11 @@ curl -s -X POST "$BASE/api/setup/register-device" -H "$AUTH" -H 'Content-Type: a
 **Check:** HTTP 201, or 200 if it already existed.
 
 ## 5. A channel for job notifications
-The operator status wants a notification channel. The operator's slug is the account's id, the email you provisioned with.
+The operator status wants a notification channel. The operating loop polls for jobs itself (phase 7), so the channel is `manual`: it gives the gateway no address to send to or write at. The operator's slug is the account's id, the email you provisioned with.
 ```bash
 SLUG=$(python3 -c "import urllib.parse,json; print(urllib.parse.quote(json.load(open('.pcc/kernel.json'))['kernel']['operatorAddress'], safe=''))")
 curl -s -X POST "$BASE/api/operators/$SLUG/channels" -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"label": "operator log", "transport": "file", "direction": "out", "endpoint": {"scheme": "file", "path": "./.pcc/inbox.log"}, "describe": "the local operating loop picks jobs up by polling", "enabled": true}'
+  -d '{"label": "operating loop", "transport": "manual", "direction": "out", "endpoint": {}, "describe": "the local operating loop polls GET /api/operator/jobs; nothing is sent", "enabled": true}'
 curl -s "$BASE/api/operators/$SLUG/status" -H "$AUTH"
 ```
 **Check:** the channel is created (201). The status lists what is still missing. On the current gateway, availability can't be set, so that slot stays open; it is not your error.
