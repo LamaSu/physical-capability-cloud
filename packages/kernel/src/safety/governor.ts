@@ -39,19 +39,23 @@ export type CommandClass =
   | "privileged"; // Class 4: Never auto-approved (shell, self-update)
 
 export interface OperationalEnvelope {
-  /** Max velocity (mm/s or equivalent) */
+  /** Max velocity (mm/s or equivalent), by magnitude; 0 is a limit, not "no limit" */
   maxVelocity?: number;
-  /** Max temperature (°C) */
+  /** Max temperature (°C), signed; 0 is a limit, not "no limit" */
   maxTemperature?: number;
-  /** Max force (N) */
+  /** Max force (N), by magnitude; 0 is a limit, not "no limit" */
   maxForce?: number;
-  /** Allowed G-code commands (if applicable) */
+  /**
+   * Allowed G-code commands. NOT enforced here: the governor never sees G-code
+   * (jobs carry a gcodeHash), so a non-empty list throws at construction rather
+   * than look enforced. Enforce it in the adapter that emits the G-code.
+   */
   allowedGcodes?: string[];
-  /** Forbidden parameter patterns */
+  /** Forbidden parameter patterns (matched without the g or y flag, so every call is checked the same way) */
   forbiddenPatterns?: RegExp[];
-  /** Max commands per minute */
+  /** Max commands per minute, per device, whichever agent sends them */
   maxCommandRate: number;
-  /** Max duration for a single scope (minutes) */
+  /** Max duration for a single scope (minutes). NOT enforced here: the governor never sees when a scope started. */
   maxScopeDuration: number;
 }
 
@@ -88,16 +92,44 @@ const DEFAULT_ENVELOPE: OperationalEnvelope = {
   maxScopeDuration: 120,   // minutes
 };
 
+/** Parameters bounded by the envelope. A sign on velocity or force is a direction, so those are bounded by magnitude. */
+const BOUNDED_PARAMS = [
+  { param: "velocity", limit: "maxVelocity", label: "Velocity", unit: "", magnitude: true },
+  { param: "temperature", limit: "maxTemperature", label: "Temperature", unit: "°C", magnitude: false },
+  { param: "force", limit: "maxForce", label: "Force", unit: "N", magnitude: true },
+] as const;
+
+function describeValue(value: unknown): string {
+  if (typeof value === "number") return String(value);
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return typeof value === "string" ? JSON.stringify(value) : `a ${typeof value}`;
+}
+
 export class SafetyGovernor {
   private readonly envelope: OperationalEnvelope;
-  private readonly commandLog: Map<string, number[]> = new Map(); // agentDid → timestamps
+  private readonly commandLog: Map<string, number[]> = new Map(); // deviceId → timestamps
   private hardwareState: HardwareState;
 
   constructor(
     envelope?: Partial<OperationalEnvelope>,
     initialHardwareState?: Partial<HardwareState>,
   ) {
-    this.envelope = { ...DEFAULT_ENVELOPE, ...envelope };
+    // Only declared values override a default: an explicit undefined must not remove a limit.
+    const declared = Object.fromEntries(
+      Object.entries(envelope ?? {}).filter(([, value]) => value !== undefined),
+    ) as Partial<OperationalEnvelope>;
+    if (declared.allowedGcodes?.length) {
+      throw new Error(
+        "allowedGcodes is not enforced by the SafetyGovernor, which never sees G-code; enforce it in the adapter, or leave it out",
+      );
+    }
+    this.envelope = {
+      ...DEFAULT_ENVELOPE,
+      ...declared,
+      // RegExp.test with the g or y flag resumes from lastIndex, so a repeat of a match would pass.
+      forbiddenPatterns: declared.forbiddenPatterns?.map((p) => new RegExp(p.source, p.flags.replace(/[gy]/g, ""))),
+    };
     this.hardwareState = {
       isEStopEngaged: false,
       isMaintenanceMode: false,
@@ -148,13 +180,14 @@ export class SafetyGovernor {
         : undefined,
     });
 
-    // 3. Rate limiting (prevent stuttering wear on physical equipment)
-    const rateOk = this.checkRateLimit(cmd.agentDid, now);
+    // 3. Rate limiting (prevent stuttering wear on physical equipment): per
+    // device, so a second agent does not get a second budget on the same device.
+    const rateOk = this.checkRateLimit(cmd.deviceId, now);
     checks.push({
       name: "rate_limit",
       passed: rateOk,
       detail: !rateOk
-        ? `Exceeded ${this.envelope.maxCommandRate} commands/minute`
+        ? `Exceeded ${this.envelope.maxCommandRate} commands/minute on device ${cmd.deviceId}`
         : undefined,
     });
 
@@ -169,7 +202,7 @@ export class SafetyGovernor {
     // Final verdict
     const allPassed = checks.every((c) => c.passed);
     if (allPassed) {
-      this.recordCommand(cmd.agentDid, now);
+      this.recordCommand(cmd.deviceId, now);
     }
 
     return {
@@ -205,56 +238,47 @@ export class SafetyGovernor {
     }
   }
 
-  private checkRateLimit(agentDid: string, now: number): boolean {
+  private checkRateLimit(deviceId: string, now: number): boolean {
     const window = 60_000; // 1 minute
-    const timestamps = this.commandLog.get(agentDid) ?? [];
+    const timestamps = this.commandLog.get(deviceId) ?? [];
     const recent = timestamps.filter((t) => now - t < window);
     return recent.length < this.envelope.maxCommandRate;
   }
 
-  private recordCommand(agentDid: string, now: number): void {
-    const timestamps = this.commandLog.get(agentDid) ?? [];
+  private recordCommand(deviceId: string, now: number): void {
+    const timestamps = this.commandLog.get(deviceId) ?? [];
     const window = 60_000;
     const recent = timestamps.filter((t) => now - t < window);
     recent.push(now);
-    this.commandLog.set(agentDid, recent);
+    this.commandLog.set(deviceId, recent);
   }
 
   private checkEnvelope(cmd: PhysicalCommand): SafetyCheck[] {
     const checks: SafetyCheck[] = [];
 
-    // Velocity check
-    if (this.envelope.maxVelocity && typeof cmd.params.velocity === "number") {
+    for (const { param, limit, label, unit, magnitude } of BOUNDED_PARAMS) {
+      const value = cmd.params[param];
+      if (value === undefined) continue; // the command does not set it
+      const name = `${param}_envelope`;
+      const max = this.envelope[limit];
+      // A present value is checked or refused, never skipped: a numeric string,
+      // an object, null or NaN would otherwise pass unchecked.
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        checks.push({ name, passed: false, detail: `${label} must be a finite number (got ${describeValue(value)})` });
+        continue;
+      }
+      // 0 is a limit. An undeclared limit refuses rather than passes.
+      if (max === undefined) {
+        checks.push({ name, passed: false, detail: `${label} has no declared limit` });
+        continue;
+      }
+      const measured = magnitude ? Math.abs(value) : value;
       checks.push({
-        name: "velocity_envelope",
-        passed: cmd.params.velocity <= this.envelope.maxVelocity,
+        name,
+        passed: measured <= max,
         detail:
-          cmd.params.velocity > this.envelope.maxVelocity
-            ? `Velocity ${cmd.params.velocity} exceeds max ${this.envelope.maxVelocity}`
-            : undefined,
-      });
-    }
-
-    // Temperature check
-    if (this.envelope.maxTemperature && typeof cmd.params.temperature === "number") {
-      checks.push({
-        name: "temperature_envelope",
-        passed: cmd.params.temperature <= this.envelope.maxTemperature,
-        detail:
-          cmd.params.temperature > this.envelope.maxTemperature
-            ? `Temperature ${cmd.params.temperature}°C exceeds max ${this.envelope.maxTemperature}°C`
-            : undefined,
-      });
-    }
-
-    // Force check
-    if (this.envelope.maxForce && typeof cmd.params.force === "number") {
-      checks.push({
-        name: "force_envelope",
-        passed: cmd.params.force <= this.envelope.maxForce,
-        detail:
-          cmd.params.force > this.envelope.maxForce
-            ? `Force ${cmd.params.force}N exceeds max ${this.envelope.maxForce}N`
+          measured > max
+            ? `${label} ${value}${unit} exceeds max ${max}${unit}${value < 0 && magnitude ? " in magnitude" : ""}`
             : undefined,
       });
     }
