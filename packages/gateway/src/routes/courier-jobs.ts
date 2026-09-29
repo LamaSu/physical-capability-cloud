@@ -259,8 +259,9 @@ export async function courierJobsRoutes(app: FastifyInstance) {
     }
     const offer = getJobOffersStore().get(req.params.id);
     if (!offer) return reply.code(404).send({ error: "not_found" });
-    // pickup/delivered: the authenticated claimant only. cancelled/note: the
-    // claimant or the poster. A body driverAgent grants nothing.
+    // pickup/delivered: the authenticated claimant only. cancelled: the poster
+    // only (N81; a driver gives a job back with release on /api/job-offers).
+    // note: the claimant or the poster. A body driverAgent grants nothing.
     const decision = authorizeOfferEvent(
       b.event,
       actor,
@@ -268,7 +269,7 @@ export async function courierJobsRoutes(app: FastifyInstance) {
       offer.posterDid,
     );
     if (!decision.ok) {
-      return reply.code(403).send({ error: "forbidden", reason: decision.reason });
+      return reply.code(decision.reason === "server_only" ? 409 : 403).send({ error: "forbidden", reason: decision.reason });
     }
     const store = getCourierJobsStore();
     const result = store.recordEvent(

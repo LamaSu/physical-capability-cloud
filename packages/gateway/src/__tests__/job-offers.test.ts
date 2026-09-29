@@ -838,6 +838,77 @@ describe("claimant binding: claims and progress events belong to authenticated p
     }
   });
 
+  it("N81: the claimant cannot cancel the offer; it releases it instead (poster-only cancel)", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-n81-release");
+      const cancel = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(cancel.statusCode).toBe(403);
+      expect(getJobOffersStore().get("cb-n81-release")!.status).not.toBe("cancelled");
+      const release = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "release" },
+      });
+      expect(release.statusCode).toBe(200);
+      expect(release.json().event.by).toBe("claimant");
+      const posterRelease = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-release/events",
+        headers: as("poster@kits.test"), payload: { event: "release" },
+      });
+      expect(posterRelease.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("N81: only the poster may confirm or dispute a delivery", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-n81-judge");
+      for (const event of ["confirmed", "disputed"]) {
+        const byClaimant = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+          headers: as("driver7@kits.test"), payload: { event },
+        });
+        expect(byClaimant.statusCode, event).toBe(403);
+        const byStranger = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+          headers: as("attacker@kits.test"), payload: { event },
+        });
+        expect(byStranger.statusCode, event).toBe(403);
+      }
+      const byPoster = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+        headers: as("poster@kits.test"), payload: { event: "confirmed" },
+      });
+      expect(byPoster.statusCode).toBe(200);
+      expect(byPoster.json().event.by).toBe("poster");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("N81: 'settled' is server-only; every caller gets 409, the poster and the claimant included", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-n81-settled");
+      for (const who of ["poster@kits.test", "driver7@kits.test", "attacker@kits.test"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-n81-settled/events",
+          headers: as(who), payload: { event: "settled" },
+        });
+        expect(res.statusCode, who).toBe(409);
+        expect(res.json().error).toBe("server_only_event");
+      }
+      expect(getJobOffersStore().get("cb-n81-settled")!.status).not.toBe("settled");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("records the actor's role as 'by', never the body label or the identity", async () => {
     const app = await buildApp();
     try {

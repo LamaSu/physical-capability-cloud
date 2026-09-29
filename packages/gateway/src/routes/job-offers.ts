@@ -359,6 +359,12 @@ export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoute
       store.claimantOf(offer.id) ??
       (offer.claimedByKernelId ? kernelOwnerOf(offer.claimedByKernelId) : null);
     const decision = authorizeOfferEvent(eventKind, actor, claimant, offer.posterDid);
+    if (!decision.ok && decision.reason === "server_only") {
+      return reply.code(409).send({
+        error: "server_only_event",
+        message: `"${eventKind}" is recorded only by the server (a linked job's settlement); no caller may post it.`,
+      });
+    }
     if (!decision.ok) {
       return reply.code(403).send({
         error: "forbidden",
@@ -366,7 +372,7 @@ export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoute
         message:
           decision.reason === "not_claimed"
             ? "This event advances an offer and needs a claimant; the offer has none you can act as."
-            : "Only the offer's claimant (or, for non-advancing events, its poster) may post this event.",
+            : "Only the offer's claimant may post in_progress, pickup, delivered or release; only its poster may post cancelled, confirmed or disputed.",
       });
     }
     // `by` records the actor's role, never a caller-supplied label or an
