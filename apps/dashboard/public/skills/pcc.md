@@ -92,7 +92,7 @@ Never report "ordered", "delivered", "complete", "done" unless you have read the
 
 Operators are ERC-8004 identities with reputation scores tied to evidence-verified completions. The gateway charges a 2.35% protocol fee on settlement. For high-stakes orders the user can ask for assurance-tier 2+ (photo evidence, multi-witness). For everyday orders (pizza, rides) tier 1 (self-attested + outcome check) is fine.
 
-For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject. PCC also ships `@pcc/evidence-judge` for headless cases.
+For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject.
 
 ## Dashboards (generate a surface when the task needs one)
 
@@ -135,7 +135,7 @@ API base: `https://capability.network`
 | GET | `/api/job-offers/open?capabilityType=` | Open offers operators can claim. |
 | GET | `/api/storage/:cid?public=true` | Retrieve a public blob (STL, photo, etc.). |
 | POST | `/api/auth/provision` | Provision a Bearer key. Body: `{ email }` or `{ walletAddress }`. |
-| GET | `/agent-package.json` | The full spec — 249 tools + system_prompt + examples. |
+| GET | `/agent-package.json` | The full spec — 250+ tools + system_prompt + examples. |
 | GET | `/skills/pcc.md` | This file. |
 
 ### Bearer-required endpoints
@@ -181,7 +181,7 @@ User: "I have an STL file. Print it on an FDM printer near me."
 
 User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 
-> "For ongoing operator polling you want a persistent runtime — install `@pcc/operator-agent-runtime`. I can show what's open right now."
+> "For ongoing operator polling you want a persistent runtime — the pcc-node daemon running next to the machine. I can show what's open right now."
 
 1. `GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50` — list current offers.
 2. Format the list with price, deadline, requirements summary.
@@ -190,7 +190,7 @@ User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 
 ## When the user is an operator (not a buyer)
 
-If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding flow (`POST /api/onboard/session/start`) handles this end-to-end if available, otherwise do it manually. Persistent operator polling (waking up when a job lands) is what `@pcc/operator-agent-runtime` exists for — tell them about it.
+If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding flow (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) handles this end-to-end if available; otherwise do it manually. For a physical device, persistent operator polling (waking up when a job lands) is the pcc-node daemon's job: `pip install 'pcc-node>=0.1.1'`, then `pcc-node start` on the machine next to the device.
 
 ## When NOT to use PCC
 
@@ -205,8 +205,8 @@ Every response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `
 
 ## More
 
-- Full agent-package (249 tools + schemas): https://capability.network/agent-package.json
+- Full agent-package (250+ tools + schemas): https://capability.network/agent-package.json
 - A2A agent card: https://capability.network/.well-known/agent-card.json
 - MCP server: see docs/quickstart/claude-desktop.md (or run `node packages/mcp-server/dist/index.js`)
-- npm packages (BYOK / programmatic): `@pcc/decompose-skill`, `@pcc/operator-agent-runtime`, `@pcc/evidence-judge`
+- Operator daemon for physical devices (Python): `pip install 'pcc-node>=0.1.1'`, then `pcc-node start`
 - Status: https://capability.network/health

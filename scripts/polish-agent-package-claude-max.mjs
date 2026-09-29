@@ -35,6 +35,19 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_PATH = join(ROOT, "apps", "dashboard", "public", "agent-package.json");
 
+// RETIRED 2026-09-29 (ADK track item 2: the agent pack has one writer). The
+// templates below are older than the live package. Re-running this on master
+// drops the "Report failures automatically" trigger that
+// agent-package-auto-feedback.test.ts pins, brings back a route and three
+// packages that do not exist, and downgrades the version. Edit
+// apps/dashboard/public/agent-package.json directly; agent-pack-truth.test.ts
+// and agent-package-auto-feedback.test.ts (packages/gateway) guard it.
+console.error(
+  "scripts/polish-agent-package-claude-max.mjs is retired: its templates are older than the live agent " +
+    "package, so a re-run would regress it. Edit apps/dashboard/public/agent-package.json directly.",
+);
+process.exit(1);
+
 // ────────────────────────────────────────────────────────────────────────
 // The new system prompt (Claude-as-user-agent framing).
 // Replaces the old operator-interview prompt. Onboarding flow still works
