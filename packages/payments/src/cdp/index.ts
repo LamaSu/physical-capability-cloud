@@ -5,6 +5,7 @@ export { CdpOnrampClient, type CreateOnrampParams } from "./onramp-client.js";
 export {
   CdpSpendPermissionService,
   CdpSpendPermissionInputError,
+  CdpSpendPermissionListIncompleteError,
   CdpSpendPermissionNotFoundError,
   CdpSpendPermissionUnconfirmedError,
   type IssueSpendPermissionParams,

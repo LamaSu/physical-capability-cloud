@@ -27,7 +27,10 @@ export interface CdpConfig {
   network?: CdpNetwork;
   /** Coinbase Onramp App ID (CDP_ONRAMP_APP_ID) for building the hosted onramp URL. */
   onrampAppId?: string;
-  /** Force mock regardless of keys. Default: mock unless the full credential tuple is set (cdpCredentialsComplete). */
+  /**
+   * `true` forces mock mode. `false` can NOT force real mode: real mode always needs the
+   * full credential tuple (cdpCredentialsComplete), whatever this says (round 8, FC-6).
+   */
   mock?: boolean;
 }
 

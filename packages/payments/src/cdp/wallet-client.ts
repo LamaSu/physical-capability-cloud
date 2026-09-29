@@ -23,7 +23,9 @@ export class CdpWalletClient {
   constructor(cfg: CdpConfig = {}) {
     this.cfg = cfg;
     this.network = cfg.network ?? "base-sepolia";
-    this.mock = cfg.mock ?? !cdpCredentialsComplete(cfg);
+    // cfg.mock can force MOCK, never REAL: without the full tuple the client is mock
+    // whatever cfg.mock says (round 8, astra failclosed r2 FC-6).
+    this.mock = cfg.mock === true || !cdpCredentialsComplete(cfg);
   }
 
   get isMock(): boolean {

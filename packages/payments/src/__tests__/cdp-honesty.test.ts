@@ -201,3 +201,29 @@ describe("list reports the chain's facts", () => {
     expect(sdk.listSpendPermissions).toHaveBeenLastCalledWith({ address: ACCT, pageToken: "p2" });
   });
 });
+
+describe("round 8 (astra failclosed r2 FC-6 and new defect 4)", () => {
+  it("[neg] cfg.mock: false cannot force real mode without the full credential tuple", () => {
+    for (const cfg of [{ mock: false }, { mock: false, apiKeyId: "key-id" }, { mock: false, apiKeyId: "key-id", apiKeySecret: "key-secret" }]) {
+      expect(new CdpWalletClient(cfg).isMock, JSON.stringify(cfg)).toBe(true);
+      expect(new CdpOnrampClient(cfg).isMock).toBe(true);
+      expect(new CdpSpendPermissionService(cfg).isMock).toBe(true);
+    }
+  });
+
+  it("control: cfg.mock: true still forces mock, even with the full tuple", () => {
+    expect(new CdpWalletClient({ ...FULL, mock: true }).isMock).toBe(true);
+    expect(new CdpWalletClient({ ...FULL, mock: false }).isMock).toBe(false);
+  });
+
+  it("[neg] a listing that still has pages after the cap is refused (502), never returned as the whole list", async () => {
+    sdk.listSpendPermissions.mockImplementation(async (opts: { pageToken?: string }) => ({
+      spendPermissions: [{ permissionHash: "0x" + (opts.pageToken ?? "p0").replace(/\D/g, "").padStart(64, "0"), permission: {} }],
+      nextPageToken: `p${Number((opts.pageToken ?? "p0").slice(1)) + 1}`,
+    }));
+    await expect(new CdpSpendPermissionService(FULL).list(ACCT)).rejects.toMatchObject({
+      code: "spend_permission_list_incomplete",
+      statusCode: 502,
+    });
+  });
+});

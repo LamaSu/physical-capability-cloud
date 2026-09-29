@@ -71,6 +71,20 @@ export class CdpSpendPermissionUnconfirmedError extends Error {
   }
 }
 
+/**
+ * list() could not read every page within MAX_LIST_PAGES (HTTP 502). A prefix is
+ * never presented as the complete list (round 8, astra failclosed r2 new defect 4):
+ * it could hide live allowances.
+ */
+export class CdpSpendPermissionListIncompleteError extends Error {
+  readonly code = "spend_permission_list_incomplete";
+  readonly statusCode = 502;
+  constructor(readonly account: `0x${string}`) {
+    super(`The spend permissions of ${account} span more than ${MAX_LIST_PAGES} pages, so no partial list is returned.`);
+    this.name = "CdpSpendPermissionListIncompleteError";
+  }
+}
+
 /** One entry of listSpendPermissions, parsed defensively. */
 interface ListedPermission {
   permissionHash?: string;
@@ -133,7 +147,9 @@ export class CdpSpendPermissionService {
 
   constructor(cfg: CdpConfig = {}) {
     this.cfg = cfg;
-    this.mock = cfg.mock ?? !cdpCredentialsComplete(cfg);
+    // cfg.mock can force MOCK, never REAL: without the full tuple the client is mock
+    // whatever cfg.mock says (round 8, astra failclosed r2 FC-6).
+    this.mock = cfg.mock === true || !cdpCredentialsComplete(cfg);
     this.network = cfg.network ?? "base-sepolia";
   }
 
@@ -251,8 +267,10 @@ export class CdpSpendPermissionService {
       const a = account.toLowerCase();
       return [...this.store.values()].filter((p) => p.account.toLowerCase() === a);
     }
+    const listed = await this.listAll(account);
+    if (!listed.complete) throw new CdpSpendPermissionListIncompleteError(account);
     const out: SpendPermission[] = [];
-    for (const p of await this.listAll(account)) {
+    for (const p of listed.entries) {
       // An entry with no hash can be neither identified nor revoked (it used to become id "0x").
       if (!p.permissionHash) continue;
       const id = p.permissionHash;
@@ -279,21 +297,25 @@ export class CdpSpendPermissionService {
     return out;
   }
 
-  /** Every listed permission of an account, following pagination (bounded). */
-  private async listAll(account: `0x${string}`): Promise<ListedPermission[]> {
+  /**
+   * Every listed permission of an account, following pagination (bounded). `complete`
+   * is false when MAX_LIST_PAGES pages were read and the SDK still named a next page:
+   * callers must not treat that prefix as the whole list.
+   */
+  private async listAll(account: `0x${string}`): Promise<{ entries: ListedPermission[]; complete: boolean }> {
     const cdp = await this.cdp();
-    const out: ListedPermission[] = [];
+    const entries: ListedPermission[] = [];
     let pageToken: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page++) {
       const res = (await cdp.evm.listSpendPermissions({ address: account, pageToken })) as unknown as {
         spendPermissions?: ListedPermission[];
         nextPageToken?: string;
       };
-      out.push(...(res.spendPermissions ?? []));
-      if (!res.nextPageToken) break;
+      entries.push(...(res.spendPermissions ?? []));
+      if (!res.nextPageToken) return { entries, complete: true };
       pageToken = res.nextPageToken;
     }
-    return out;
+    return { entries, complete: false };
   }
 
   /** The hash of the permission carrying `salt` (real mode), or undefined if it never lists. */
@@ -305,7 +327,9 @@ export class CdpSpendPermissionService {
       if (delay > 0) await new Promise((r) => setTimeout(r, delay));
       let listed: ListedPermission[];
       try {
-        listed = await this.listAll(account);
+        // An incomplete listing may still contain the new entry; if it does not, the
+        // permission counts as unconfirmed (no id is ever guessed).
+        listed = (await this.listAll(account)).entries;
       } catch {
         continue;
       }

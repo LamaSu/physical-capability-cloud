@@ -99,6 +99,7 @@ export {
   type CreateOnrampParams,
   CdpSpendPermissionService,
   CdpSpendPermissionInputError,
+  CdpSpendPermissionListIncompleteError,
   CdpSpendPermissionNotFoundError,
   CdpSpendPermissionUnconfirmedError,
   cdpCredentialsComplete,
