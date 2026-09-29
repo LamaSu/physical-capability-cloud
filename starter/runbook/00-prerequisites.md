@@ -42,14 +42,19 @@ umask 077
 curl -s -X POST "$(cat .pcc/base)/api/auth/provision" \
   -H 'Content-Type: application/json' \
   -d '{"email": "operator@example.org", "name": "Bench plate reader"}' > .pcc/provision.json
-python3 -c "import json; print(json.load(open('.pcc/provision.json'))['api_key'], end='')" > .pcc/api-key
-chmod 600 .pcc/api-key .pcc/provision.json
+python3 - <<'EOF'
+import json
+key = json.load(open(".pcc/provision.json"))["api_key"]
+open(".pcc/api-key", "w").write(key)
+open(".pcc/auth.header", "w").write("Authorization: Bearer " + key + "\n")
+EOF
+chmod 600 .pcc/api-key .pcc/auth.header .pcc/provision.json
 ```
-The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once you no longer need the private key in it.
+Every later call sends the key with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once you no longer need the private key in it.
 
 **Check:**
 ```bash
-curl -s "$(cat .pcc/base)/api/auth/validate" -H "Authorization: Bearer $(cat .pcc/api-key)"
+curl -s "$(cat .pcc/base)/api/auth/validate" -H @.pcc/auth.header
 # → {"valid": true, ...}
 ```
 

@@ -23,7 +23,7 @@ The kit is what you built:
 - the research citations;
 - the pcc-node configuration **without any key**.
 
-Never publish anything from `.pcc/api-key`, `.pcc/buyer-key`, `.pcc/node-keys.json` or `.pcc/provision.json`.
+Never publish `.pcc/api-key`, `.pcc/auth.header`, `.pcc/buyer.header`, `.pcc/node-keys.json` or `.pcc/provision.json`, or anything copied from them.
 
 **Coming:** the kit registry (kits, #397) and the split helper (economics, after #360) will turn this into one publish call, with the exact split shown before you confirm. Until they land, record the human's decision:
 ```bash

@@ -72,6 +72,15 @@ class TestTruths(unittest.TestCase):
                 window = text[m.end(): m.end() + 400]
                 self.assertRegex(window, r"> \.pcc/", f"{path.name}: provision output must be written under .pcc/")
 
+    def test_no_key_is_expanded_onto_a_command_line(self):
+        # A key in argv is readable by every user of the machine (ps, /proc/<pid>/cmdline).
+        for path, text in text_files():
+            for line in text.splitlines():
+                self.assertNotRegex(line, r"Bearer \$|KEY=\"?\$\(", f"{path.name}: {line}")
+                public = re.search(r"/api/(auth/provision|health|onboard/identify-device)\b", line)
+                if re.search(r"\bcurl\b.*\$BASE/api/", line) and not public:
+                    self.assertIn("-H @.pcc/", line, f"{path.name}: authenticated calls send the key from a header file")
+
     def test_the_private_state_is_git_ignored(self):
         self.assertIn(".pcc/", (STARTER / ".gitignore").read_text(encoding="utf-8").splitlines())
 
