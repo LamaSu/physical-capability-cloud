@@ -89,8 +89,9 @@ and `BROKER_OPERATORS`. The same refusal applies to
      const { initStore } = await import("./packages/gateway/dist/db.js");
      initStore({ seed: false });
      const { provisionApiKey } = await import("./packages/gateway/dist/auth/api-key-auth.js");
+     // allowAdmin: true is required: no request path can mint `admin` (WP-A round 7)
      const r = provisionApiKey({ operatorId: "<ops identity>", name: "ops admin <date>",
-                                 scopes: ["admin"], expiresInDays: 30 });
+                                 scopes: ["admin"], expiresInDays: 30, allowAdmin: true });
      console.log(r.record.id, r.rawKey);
      ```
      An operator can hold at most 5 non-revoked keys; expired keys count toward

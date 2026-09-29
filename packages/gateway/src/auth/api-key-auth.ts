@@ -243,10 +243,23 @@ export function provisionApiKey(opts: {
    * that to HTTP 400.
    */
   publicKey?: string;
+  /**
+   * `admin` is minted ONLY when this is true (WP-A round 7, admingates AG-10). It
+   * is for the operator's out-of-band procedure in
+   * docs/security/WILDCARD_KEY_ROTATION.md. No request path passes it; a test pins
+   * that. Without it, a scope set containing `admin` throws `admin_scope_refused`.
+   */
+  allowAdmin?: boolean;
 }): ProvisionResult {
   // Validate BEFORE taking the lock or touching the DB: a refused scope set
   // (or an unreadable expiry bound) must leave no trace.
   assertMintableScopes(opts.scopes);
+  if (opts.scopes.includes("admin") && opts.allowAdmin !== true) {
+    throw Object.assign(
+      new Error("provisionApiKey: `admin` is never minted by a request path; use the out-of-band procedure"),
+      { code: "admin_scope_refused" },
+    );
+  }
   const boundMs = expiryBoundMs(opts.notAfter);
 
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
