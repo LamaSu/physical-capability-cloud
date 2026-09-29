@@ -578,9 +578,8 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     // 1b. A fresh claim is decided AGAIN here, and nothing is awaited from here to
     // the insert below. The wallet call above yields, and a concurrent request can
     // claim this email meanwhile (another quickstart, or POST /api/auth/provision).
-    // Both passing the first decision would leave two parties holding one identity
-    // (F3) and two keys carrying its first-claim mark (identityBinding). The loser
-    // gets the same 409 as any claimed identity (R5), and no wallet or key.
+    // If both passed the first decision, two parties would hold one identity (F3).
+    // The loser gets the same 409 as any claimed identity (R5), and no wallet or key.
     if (decision.kind === "fresh" && decideUnverifiedIdentity(req, body.email).kind !== "fresh") {
       return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
     }

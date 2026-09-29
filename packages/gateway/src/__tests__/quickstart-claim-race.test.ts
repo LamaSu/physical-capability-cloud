@@ -1,13 +1,13 @@
 /**
- * F3 under concurrency (found while adding the F3 mark for readmodels #3714).
+ * F3 under concurrency (found 2026-09-29 while answering readmodels #3714).
  *
  * POST /api/contributors/quickstart decides the identity (fresh, self, refuse)
  * BEFORE it awaits the wallet provider, then mints the key. Two concurrent
  * quickstarts for one unclaimed email both passed the decision across that
- * await, so both minted a key: two parties holding one identity, and both keys
- * marked as its first claim. A claim through /api/auth/provision landing during
- * the await did the same. A fresh claim is now decided again right before the
- * insert, with nothing awaited in between; the loser gets 409 and nothing else.
+ * await, so both minted a key: two parties holding one identity. A claim through
+ * /api/auth/provision landing during the await did the same. A fresh claim is
+ * now decided again right before the insert, with nothing awaited in between;
+ * the loser gets 409 and nothing else.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -117,6 +117,8 @@ describe("F3: quickstart's identity decision holds across its wallet await", () 
     holdNext(2);
     const [r1, r2] = await Promise.all([quickstart(email, a), quickstart(email, b)]);
     hold.expected = 0;
+    // Both reached the wallet call, so both passed the FIRST decision: the 409 is the second one's.
+    expect(hold.arrived).toBe(2);
     expect([r1.statusCode, r2.statusCode].sort()).toEqual([201, 409]);
     const loser = r1.statusCode === 409 ? r1 : r2;
     expect(loser.json().error).toBe("identity_claimed");
@@ -153,6 +155,7 @@ describe("F3: quickstart's identity decision holds across its wallet await", () 
     holdNext(2);
     const [r1, r2] = await Promise.all([quickstart(email, own), quickstart(email, own)]);
     hold.expected = 0;
+    expect(hold.arrived).toBe(2);
     expect([r1.statusCode, r2.statusCode]).toEqual([201, 201]);
     expect(keysOf(email)).toHaveLength(3);
   });
