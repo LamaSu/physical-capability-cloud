@@ -5,9 +5,12 @@ import { getRepos, getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import {
+  JOB_READ_REFUSAL,
   authorizeJobRead,
   buildJobExecutionDTO,
+  jobReadCallerOf,
   loadJobExecutionSources,
+  precheckJobRead,
   type JobExecutionRepos,
   type JobRow,
 } from "../readmodels/job-execution.js";
@@ -77,15 +80,22 @@ export async function jobRoutes(app: FastifyInstance) {
    * naming its source; nothing is inferred across axes, and a source that cannot be
    * read is reported `unavailable`, never defaulted.
    *
-   * Object-authorized before any axis is read (authorizeJobRead): an admin, the job's
-   * kernel operator, or its recorded buyer. Anonymous callers get 401; anyone else gets
-   * 404 (no existence oracle), whatever TENANT_ENFORCE says. Under TENANT_ENFORCE a job
+   * Identity is checked before the job is read, so no refusal depends on whether the job
+   * exists: no credential is 401, and a credential without a proven wallet is 403
+   * identity_unverified (precheckJobRead). Then only an admin, or a proven wallet that is the
+   * job's kernel operator or recorded buyer (authorizeJobRead), reads it. Anyone else gets
+   * the same 404 as a missing job, whatever TENANT_ENFORCE says. Under TENANT_ENFORCE a job
    * of another tenant is also a 404.
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/execution", async (req, reply) => {
     const asOf = new Date().toISOString();
     const notFound = () =>
       reply.code(404).send({ error: "not_found", message: `job '${req.params.jobId}' not found` });
+    const pre = precheckJobRead(jobReadCallerOf(req));
+    if (!pre.proceed) {
+      const refusal = JOB_READ_REFUSAL[pre.reason];
+      return reply.code(refusal.status).send(refusal.body);
+    }
     let store;
     let job: JobRow | undefined;
     try {
@@ -103,28 +113,18 @@ export async function jobRoutes(app: FastifyInstance) {
     const tenant = tenantOpts(req as any);
     if (tenant && (job.tenantId ?? null) !== tenant.tenantId) return notFound();
 
-    const principal = ((req as any).operatorId ?? (req as any).userId ?? null) as string | null;
-    const adminHeader = req.headers["x-admin-key"];
-    let decision;
-    try {
-      decision = authorizeJobRead(
-        job,
-        { principal, adminKey: typeof adminHeader === "string" ? adminHeader : null },
-        store.repos as unknown as JobExecutionRepos,
-        store.db,
-      );
-    } catch (error) {
-      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: authorization read failed");
-      return reply.code(503).send({
-        error: "read_model_unavailable",
-        message: "The job record could not be read. Try again shortly.",
-      });
-    }
-    if (!decision.allow) {
-      if (decision.reason === "unauthenticated") {
-        return reply.code(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
+    if (pre.as === "proven") {
+      let decision;
+      try {
+        decision = authorizeJobRead(job, pre.wallet, store.repos as unknown as JobExecutionRepos, store.db);
+      } catch (error) {
+        req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: authorization read failed");
+        return reply.code(503).send({
+          error: "read_model_unavailable",
+          message: "The job record could not be read. Try again shortly.",
+        });
       }
-      return notFound();
+      if (!decision.allow) return notFound();
     }
 
     const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
