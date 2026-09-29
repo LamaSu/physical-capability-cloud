@@ -398,17 +398,40 @@ export class JobFacade extends BaseFacade {
         healthStatus: "healthy",
       });
 
-      return { device };
+      // Never echo the stored adapterConfig (N71). Every other field of the row is
+      // returned as before.
+      if (!device) return { device };
+      const { adapterConfig: _stored, ...echoed } = device as Record<string, unknown>;
+      return { device: echoed };
     });
   }
 
   /**
-   * Get devices for a kernel.
+   * The public view of a device row (N71, operator item 86). It is the same view
+   * GET /api/kernels/:kernelId/devices returns (kernel.facade.ts getDevices). A
+   * row's adapterConfig is the device's connection config (hosts, tokens, API
+   * keys): it never leaves the API, and dispatch reads it from the row. This
+   * endpoint used to return the raw rows to any key, for any kernel.
+   */
+  private publicDevice(d: any) {
+    return {
+      id: d.id,
+      type: d.type,
+      model: d.model,
+      status: d.status ?? "offline",
+      healthStatus: d.healthStatus ?? "unknown",
+      adapterType: d.adapterType ?? undefined,
+      capabilities: d.capabilities ?? d.contributesToCapabilities ?? [],
+    };
+  }
+
+  /**
+   * Get devices for a kernel (the public view; see publicDevice).
    * Replaces: GET /api/devices/:kernelId
    */
   async getDevicesForKernel(kernelId: string): Promise<Result<unknown[]>> {
     return this.execute("getDevicesForKernel", async () => {
-      return this.repos.kernels.findDevicesByKernel(kernelId);
+      return this.repos.kernels.findDevicesByKernel(kernelId).map((d: any) => this.publicDevice(d));
     });
   }
 
