@@ -99,9 +99,12 @@ describe("F6 — CDP wallet client in MOCK mode (no CDP credentials)", () => {
 
 describe("F6 — CDP wallet client REAL (credentials present)", () => {
   beforeEach(() => {
-    // Presence of a key id flips the client out of mock mode. No network is
-    // touched: the onramp route only reads isMock and builds a URL.
+    // The COMPLETE credential tuple flips the client out of mock mode (a key id
+    // alone no longer does: payments cdpCredentialsComplete, WP-A round 5). No
+    // network is touched: the onramp route only reads isMock and builds a URL.
     process.env.CDP_API_KEY_ID = "test-cdp-key-id";
+    process.env.CDP_API_KEY_SECRET = "test-cdp-key-secret";
+    process.env.CDP_WALLET_SECRET = "test-cdp-wallet-secret";
     process.env.COINBASE_APP_ID = "live-app-id";
   });
 
