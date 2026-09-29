@@ -35,8 +35,22 @@ describe("SettlementPage shows the gateway's queue, or why it can't", () => {
     expect(page).not.toMatch(/epochs\?\.length\)\s*setEpochs/);
     // Both reads are shown as they come back, whatever they hold (an empty list included).
     expect(page).toMatch(/const \[s, e\] = await Promise\.all\(\[loadStatus\(\), loadEpochs\(\)\]\);\s*setStatus\(s\);\s*setEpochs\(e\);/);
-    expect(page).toContain("No epoch has settled since the gateway last started.");
+    expect(page).toContain("No epoch has been flushed since the gateway last started.");
     expect(page).toContain('const DASH = "—"');
+  });
+
+  it("NEGATIVE (#313: accepted is not settled): a flushed epoch never reads as settled", () => {
+    // An epoch is the gateway's record of a flush to the bundler; it carries no on-chain receipt.
+    expect(page).not.toMatch(/Epochs Settled|has settled|Settled epoch|totalSettled/);
+    expect(page).toContain('label="Epochs Flushed"');
+  });
+
+  it("NEGATIVE: a flush, an operational money action, runs only after a confirmation that says what it does", () => {
+    expect(page).toContain("flushConfirmation(");
+    expect(page).not.toMatch(/onClick=\{handleFlush\}/);
+    // handleFlush is declared once and called once, from the confirmation's own button.
+    expect(page.match(/handleFlush/g)).toHaveLength(2);
+    expect(page).toContain("Confirm flush");
   });
 
   it("NEGATIVE: claims no throughput multiplier", () => {

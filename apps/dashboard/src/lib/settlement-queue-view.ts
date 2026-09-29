@@ -103,13 +103,30 @@ export function epochsFromResponse(httpStatus: number, body: unknown): Read<Epoc
   return { state: "read", value: body.epochs };
 }
 
-/** What the page says after a flush: the settled epoch, or the gateway's refusal (e.g. batch settlement not configured). */
+/**
+ * What the page says after a flush: what the gateway reports it flushed, or its refusal (e.g.
+ * batch settlement not configured). A flush hands the epoch's operations to the bundler as
+ * UserOperations; its answer carries their hashes, not an on-chain receipt, so the page never
+ * calls it settled (#313: accepted is not settled).
+ */
 export function flushOutcome(httpStatus: number, body: unknown): { ok: boolean; message: string } {
   if (httpStatus < 200 || httpStatus >= 300) return { ok: false, message: refusalReason(httpStatus, body) };
   if (isObj(body) && isCount(body.epoch) && isCount(body.totalIntents) && isCount(body.batches)) {
-    return { ok: true, message: `Settled epoch ${body.epoch}: ${body.totalIntents} operations in ${body.batches} batch(es).` };
+    return {
+      ok: true,
+      message: `The gateway reports epoch ${body.epoch} flushed: ${body.totalIntents} operations in ${body.batches} batch(es).`,
+    };
   }
   return { ok: true, message: "The gateway accepted the flush." };
+}
+
+/** The confirmation a manual flush asks for: how many operations, what a flush does, and that it is final. */
+export function flushConfirmation(q: QueueStatus): string {
+  const ops = `${q.pending} pending operation${q.pending === 1 ? "" : "s"}`;
+  return (
+    `Flush ${ops} now? The gateway submits them to the bundler as batched ERC-4337 UserOperations ` +
+    "that act on escrow. A flush cannot be recalled once sent."
+  );
 }
 
 /** Exact USDC from base units (6 decimals), at least 2 decimals shown; null for anything but an integer string. */

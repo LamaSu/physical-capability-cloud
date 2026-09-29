@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   UNREACHABLE,
   epochsFromResponse,
+  flushConfirmation,
   flushOutcome,
   formatUsdcBaseUnits,
   statusFromResponse,
@@ -65,12 +66,32 @@ describe("epochsFromResponse", () => {
 });
 
 describe("flushOutcome", () => {
-  it("reports the settled epoch, or the gateway's refusal", () => {
-    expect(flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1 })).toEqual({ ok: true, message: "Settled epoch 3: 5 operations in 1 batch(es)." });
+  it("reports what the gateway says it flushed, or its refusal", () => {
+    expect(flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1 })).toEqual({
+      ok: true,
+      message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es).",
+    });
     expect(flushOutcome(503, { error: "batch_disabled", message: "Batch settlement is not configured. Set PCC_BUNDLER_URL to enable." })).toEqual({
       ok: false,
       message: "Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.",
     });
+  });
+});
+
+describe("NEGATIVE (#313: accepted is not settled): a flush never reads as settled", () => {
+  it("the flush answer carries bundler UserOperation hashes, not an on-chain receipt", () => {
+    const body = { epoch: 3, totalIntents: 5, batches: 1, batchDetails: [{ userOpHash: "0xab", operationCount: 5, trigger: "manual" }] };
+    for (const b of [body, {}, null]) expect(flushOutcome(200, b).message, JSON.stringify(b)).not.toMatch(/settle/i);
+  });
+});
+
+describe("flushConfirmation", () => {
+  it("names the pending count, what a flush does, and that it cannot be recalled", () => {
+    const text = flushConfirmation({ ...STATUS, pending: 7 });
+    expect(text).toContain("Flush 7 pending operations now?");
+    expect(text).toContain("to the bundler as batched ERC-4337 UserOperations that act on escrow");
+    expect(text).toContain("A flush cannot be recalled once sent.");
+    expect(flushConfirmation({ ...STATUS, pending: 1 })).toContain("Flush 1 pending operation now?");
   });
 });
 

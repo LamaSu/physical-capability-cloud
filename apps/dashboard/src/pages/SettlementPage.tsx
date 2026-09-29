@@ -12,6 +12,7 @@ import {
   UNREACHABLE,
   UNREACHABLE_REASON,
   epochsFromResponse,
+  flushConfirmation,
   flushOutcome,
   formatUsdcBaseUnits,
   statusFromResponse,
@@ -56,6 +57,7 @@ export function SettlementPage() {
   const [status, setStatus] = React.useState<Read<QueueStatus>>(LOADING);
   const [epochs, setEpochs] = React.useState<Read<EpochSummary[]>>(LOADING);
   const [flushing, setFlushing] = React.useState(false);
+  const [confirmingFlush, setConfirmingFlush] = React.useState(false);
   const [flushResult, setFlushResult] = React.useState<{ ok: boolean; message: string } | null>(null);
   const [selectedEpoch, setSelectedEpoch] = React.useState<number | null>(null);
 
@@ -92,9 +94,9 @@ export function SettlementPage() {
   const statusNote = status.state === "unavailable" ? status.reason : status.state === "loading" ? "Loading…" : null;
   const epochsNote = epochs.state === "unavailable" ? epochs.reason : epochs.state === "loading" ? "Loading…" : null;
 
-  const totalSettled = list ? list.reduce((s, e) => s + e.totalIntents, 0) : null;
+  const totalFlushed = list ? list.reduce((s, e) => s + e.totalIntents, 0) : null;
   const totalBatches = list ? list.reduce((s, e) => s + e.batches.length, 0) : null;
-  const avgOpsPerBatch = totalSettled !== null && totalBatches ? Math.round(totalSettled / totalBatches) : null;
+  const avgOpsPerBatch = totalFlushed !== null && totalBatches ? Math.round(totalFlushed / totalBatches) : null;
   const queueValue = q ? formatUsdcBaseUnits(q.totalValue) : null;
   const canFlush = !flushing && q !== null && q.batchEnabled && q.pending > 0;
 
@@ -120,9 +122,9 @@ export function SettlementPage() {
         </GlassPanel>
         <GlassPanel>
           <DataCell
-            label="Epochs Settled"
+            label="Epochs Flushed"
             value={list ? list.length.toString() : DASH}
-            sub={list ? `${totalSettled} ops; since the gateway's last restart` : epochsNote ?? ""}
+            sub={list ? `${totalFlushed} ops; since the gateway's last restart` : epochsNote ?? ""}
           />
         </GlassPanel>
         <GlassPanel>
@@ -175,8 +177,8 @@ export function SettlementPage() {
               Manual Flush
             </p>
             <button
-              onClick={handleFlush}
-              disabled={!canFlush}
+              onClick={() => setConfirmingFlush(true)}
+              disabled={!canFlush || confirmingFlush}
               className={`w-full rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
                 !canFlush
                   ? "bg-white/5 text-white/30 cursor-not-allowed"
@@ -185,6 +187,29 @@ export function SettlementPage() {
             >
               {flushing ? "Flushing..." : q ? `Flush ${q.pending} ops` : "Flush"}
             </button>
+            {confirmingFlush && q && (
+              <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                <p className="text-xs text-amber-200/90">{flushConfirmation(q)}</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setConfirmingFlush(false);
+                      void handleFlush();
+                    }}
+                    disabled={!canFlush}
+                    className="flex-1 rounded-lg border border-amber-500/40 bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30"
+                  >
+                    Confirm flush
+                  </button>
+                  <button
+                    onClick={() => setConfirmingFlush(false)}
+                    className="flex-1 rounded-lg bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:bg-white/10"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
             {flushResult && (
               <p className={`text-xs ${flushResult.ok ? "text-emerald-400/80" : "text-red-400/80"}`}>{flushResult.message}</p>
             )}
@@ -257,7 +282,7 @@ export function SettlementPage() {
           {list !== null && list.length === 0 && (
             <GlassPanel>
               <p className="text-sm text-white/40 text-center py-4">
-                No epoch has settled since the gateway last started.
+                No epoch has been flushed since the gateway last started.
               </p>
             </GlassPanel>
           )}
