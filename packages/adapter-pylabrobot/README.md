@@ -68,7 +68,8 @@ Register a PLR-driven device via your `KERNEL_CONFIG`:
         "plrBackend": "ot2",
         "backendConfig": {
           "ot2Url": "http://192.168.1.50:31950",
-          "deckLayoutPath": "/etc/pcc/decks/ot2-dilution.json"
+          "deckLayoutPath": "ot2-dilution.json",
+          "initialLiquids": { "src": { "A1": 1500 } }
         },
         "pythonPath": "python3"
       }
@@ -86,6 +87,7 @@ operator onboarding docs).
 |-----|---------|-------------|
 | `PCC_PLR_PYTHON_PATH` | `python3` (`python` on Windows) | Python interpreter the sidecar runs under |
 | `PCC_PLR_SIDECAR_TIMEOUT_MS` | `60000` | Default per-RPC timeout |
+| `PCC_PLR_LAYOUT_DIR` | (unset) | The directory the operator keeps deck layouts in. Required for `deckLayoutPath`, which must name a `.json` file inside it (symlinks are resolved first). The sidecar inherits it from the kernel's environment. |
 
 Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 `config.runTimeoutMs`, `config.restartAfterJobs`.
@@ -94,9 +96,9 @@ Per-device overrides via `config.pythonPath`, `config.rpcTimeoutMs`,
 
 | Backend       | Config keys                          | Notes |
 |---------------|--------------------------------------|-------|
-| `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only. |
-| `ot2`         | `ot2Url`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required) | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`. Requires the `[ot2]` extra (PLR's own `opentrons` extra). |
-| `stub`        | (none)                               | Pure-stdlib no-PLR fallback. CI + smoke tests use this. Single sub-second simulated run. |
+| `chatterbox`  | `deckLayout` or `deckLayoutPath` (required), `numChannels?` (1–96), `maxVolumeUL?`, `initialLiquids?`, `tracking?` | PLR's `LiquidHandlerChatterboxBackend`: an in-memory digital twin of the declared deck. Dry-run only: `executionMode: "simulator"`, and its evidence is marked `mock: true`. |
+| `ot2`         | `ot2Url`, `deckLayout` or `deckLayoutPath` (an `OTDeck`, required), `maxVolumeUL?`, `initialLiquids?` | Opentrons OT-2 via PLR's `OpentronsOT2Backend(host, port)`: `executionMode: "hardware"`. Requires the `[ot2]` extra (PLR's own `opentrons` extra). Tip and volume tracking are always on. |
+| `stub`        | (none)                               | Pure-stdlib test backend, used only when `plrBackend` is `"stub"`; nothing falls back to it. `executionMode: "stub"`, evidence marked `mock: true`. |
 
 Phase 2 extends with `flex`, `star`, `vantage`, `evo`, `hamilton-hhs`, `inheco-thermoshake`. Phase 3 adds `clariostar`, `cytation5`, `inheco-odtc`, `vspin`. Phase 4 adds `cytomat-2`, `cytomat-6`, `liconic-stx`.
 
@@ -145,22 +147,62 @@ await adapter.dispose();
 ### Declared deck and inline ops (status board row R39)
 
 A PLR backend refuses to start without a declared deck: `backendConfig.deckLayout`
-(the output of `deck.serialize()`) or `deckLayoutPath` (a JSON file holding one).
-The layout is data, loaded with `Resource.deserialize(..., allow_marshal=False)`.
+(the output of `deck.serialize()`) or `deckLayoutPath` (a `.json` file inside
+`PCC_PLR_LAYOUT_DIR`). The layout is operator configuration, never job input, and it
+is checked as data before PLR builds anything from it, on both paths:
 
-Each inline op is one real `LiquidHandler` call, and its evidence event is emitted
-only after the call returns:
+- the root is the expected deck (`Deck` or `OTDeck` for chatterbox, `OTDeck` for
+  `ot2`), and every typed object in it is one of the PLR resource or geometry
+  classes in `backend_loader.LAYOUT_TYPES`;
+- a serialized function is stripped (replaced by `null`, counted in
+  `metadata.strippedFunctions`) and never deserialized. Keys starting with `__`,
+  non-finite numbers, strings over 4 KiB, more than 100,000 values or nesting
+  deeper than 32 are refused. A file is at most 5 MB;
+- every labware on the deck has a size and a location, lies inside the deck and
+  overlaps no other labware;
+- only then is it loaded with `Resource.deserialize(..., allow_marshal=False)`, and
+  the result must be the expected deck class.
+
+PLR's own tip and volume tracking are switched on for every PLR backend, so a
+missing tip, a well without enough liquid or an overfilled well fails inside PLR
+before it becomes a physical action. `initialLiquids` declares what the operator
+loaded, as `{resource: {well: uL}}`. On the simulator, `tracking: {"tips": false}`
+or `{"volume": false}` switches tracking off explicitly; on hardware it can't be
+switched off.
+
+Each inline op is one real `LiquidHandler` call. An op may carry only its own
+fields, and anything else (a typo, a test hook such as `__delay_ms`) refuses the
+whole protocol:
 
 | `op` | Fields | Call |
 |---|---|---|
-| `pickUpTips` | `tipRack`, `tipSpot` (e.g. `"A1"`) or `tipColumn` (1 → `A1`), `channel?` | `pick_up_tips([spot])` |
-| `aspirate` / `dispense` | `labwareId`, `well`, `volume_uL` (> 0), `channel?` | `aspirate/dispense([well], vols=[v])` |
+| `pickUpTips` | `tipRack`, `tipSpot` (e.g. `"A1"`) or `tipColumn` (1 → `A1`), not both; `channel?` | `pick_up_tips([spot])` |
+| `aspirate` / `dispense` | `labwareId`, `well`, `volume_uL` (finite, in (0, `maxVolumeUL`], default 1000); `channel?` | `aspirate/dispense([well], vols=[v])` |
 | `dropTips` | `channel?`; optional `tipRack` + `tipSpot`/`tipColumn` | `drop_tips([spot])`, or `return_tips()` |
+
+A run has two phases. First every op is checked (fields, bounds, a `channel` below
+the backend's channel count, and deck resources: a tip op must name a tip spot, a
+liquid op a well or container) before anything moves, so a protocol with one bad
+op runs no op at all. Then the ops run in order, and each op's evidence event is
+emitted only after its call returns. Every run result and every op event carries
+`executionMode` (`hardware`, `simulator` or `stub`); anything but `hardware` is also
+marked `mock: true`, and the TypeScript adapter marks the run's
+`execution_completed` event the same way.
 
 Failures are loud and typed. A missing resource or well is `-32002`
 (`data.missingResource` / `data.missingItem`, plus `opIndex` and `opsCompleted`).
-A PLR exception is `-32002` with `data.plrException`. A malformed or unknown op is
-`-32602`. An empty op list is `-32602`. A non-inline `protocolSource` is `-32004`.
+A PLR exception is `-32002` with `data.plrException`. A malformed or unknown op, a
+field an op does not take, or an out-of-bounds value is `-32602`. An empty op list
+is `-32602`. A non-inline `protocolSource` is `-32004`. `opsCompleted` counts the
+calls that returned: it does not prove the failing call had no physical effect.
+
+**Not verified yet (operator decision D1, queue item 19).** The layout allowlist,
+the geometry check, and tip and volume tracking are written from PLR's documented
+names. The genuine-library test (`python/tests/test_plr_real.py`) runs everything
+above through PLR 0.2.2's real deserializer and chatterbox, and it skips until D1
+allows installing the pinned library. OT-2 completion semantics (what a returned
+call means on the robot), timeouts, cancellation and partial-channel outcomes also
+need the genuine backend and a robot before physical arming.
 
 Mock mode (no Python subprocess — pure synthetic responses):
 
@@ -243,10 +285,10 @@ events.
 ## Testing
 
 ```bash
-# TypeScript side (34 tests, runs without Python or PLR):
+# TypeScript side (38 tests, runs without Python or PLR):
 pnpm --filter @pcc/adapter-pylabrobot test
 
-# Python side (36 tests, uses the `stub` backend — no pylabrobot required):
+# Python side (105 tests on tests/fake_plr, a small fake of the PLR API; no pylabrobot required):
 cd packages/adapter-pylabrobot/python
 PYTHONPATH=. python3 -m pytest tests/   # pytest-asyncio optional; test_plr_real.py skips without pylabrobot
 ```

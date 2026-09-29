@@ -1,6 +1,18 @@
-"""Fake pylabrobot.resources: Deck, TipRack, Plate and the (de)serializer."""
+"""Fake pylabrobot.resources: Deck, TipRack, Plate, the (de)serializer and tracking switches."""
 
 import json
+
+# What set_tip_tracking / set_volume_tracking were last called with (the real ones
+# are process-wide switches in pylabrobot.resources).
+TRACKING = {}
+
+
+def set_tip_tracking(enabled):
+    TRACKING["tips"] = enabled
+
+
+def set_volume_tracking(enabled):
+    TRACKING["volume"] = enabled
 
 
 class ResourceNotFoundError(Exception):
@@ -19,10 +31,28 @@ class TipSpot(_Item):
         self.has_tip = has_tip
 
 
-class Well(_Item):
+class Container(_Item):
+    pass
+
+
+class _Tracker:
+    """The part of PLR's volume tracker the sidecar uses: set_liquids / get_used_volume."""
+
+    def __init__(self, well):
+        self.well = well
+
+    def set_liquids(self, liquids):
+        self.well.volume = float(sum(v for _, v in liquids))
+
+    def get_used_volume(self):
+        return self.well.volume
+
+
+class Well(Container):
     def __init__(self, name, parent, volume=0.0):
         super().__init__(name, parent)
         self.volume = float(volume)
+        self.tracker = _Tracker(self)
 
 
 class Resource:
@@ -36,7 +66,7 @@ class Resource:
 
     @classmethod
     def deserialize(cls, data, allow_marshal=False):
-        Resource.deserialize_calls.append({"allow_marshal": allow_marshal})
+        Resource.deserialize_calls.append({"allow_marshal": allow_marshal, "data": data})
         kind = data["type"]
         if kind in ("Deck", "OTDeck"):
             from .opentrons import OTDeck

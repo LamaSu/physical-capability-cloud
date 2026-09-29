@@ -170,6 +170,12 @@ export interface BackendRunResult {
   opCount: number;
   /** Wall-clock duration (ms) */
   durationMs: number;
+  /**
+   * How the ops ran: "hardware" (a real instrument), "simulator" (PLR's
+   * chatterbox) or "stub". Anything but "hardware" is marked mock: true in the
+   * evidence, so it can never count as a physical run.
+   */
+  executionMode?: "hardware" | "simulator" | "stub";
   /** Any per-op summary the sidecar wants to surface */
   summary?: Record<string, unknown>;
 }

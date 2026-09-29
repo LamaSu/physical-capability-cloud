@@ -210,6 +210,34 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     expect((instrumentResults[0]!.payload as Record<string, unknown>).well).toBe("A1");
   });
 
+  it("marks a run mock unless the sidecar says it ran on hardware", async () => {
+    const completion = async (runResult: Record<string, unknown>) => {
+      const { adapter, transport, sidecar } = makeAdapterWithTransport();
+      await sidecar.start();
+      const events: AdapterEvidenceEvent[] = [];
+      adapter.onEvidence((e) => events.push(e));
+      const startP = adapter.execute({ type: "start", payload: { jobId: "j-mode" } });
+      await tick();
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox" });
+      await tick();
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+      await tick();
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", opCount: 1, durationMs: 5, ...runResult });
+      await tick();
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true });
+      await startP;
+      return events.find((e) => e.type === "execution_completed")!.payload as Record<string, unknown>;
+    };
+    const hardware = await completion({ executionMode: "hardware" });
+    expect(hardware.executionMode).toBe("hardware");
+    expect(hardware.mock).toBeUndefined();
+    const simulator = await completion({ executionMode: "simulator" });
+    expect(simulator.mock).toBe(true);
+    const unsaid = await completion({});
+    expect(unsaid.executionMode).toBe("unknown");
+    expect(unsaid.mock).toBe(true);
+  });
+
   it("backend.run failure surfaces as execute() failure + execution_failed event", async () => {
     const { adapter, transport, sidecar } = makeAdapterWithTransport();
     await sidecar.start();

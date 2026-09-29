@@ -292,10 +292,15 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         runParams as unknown as Record<string, unknown>,
         this.config.runTimeoutMs ?? 3_600_000,
       );
+      // Only a run the sidecar says ran on hardware may read as physical evidence;
+      // a simulator, a stub or an older sidecar that doesn't say is marked mock.
+      const onHardware = result.executionMode === "hardware";
       const bufferedEvents = collector.stopRecording(jobId, {
         opCount: result.opCount,
         durationMs: result.durationMs,
         summary: result.summary,
+        executionMode: result.executionMode ?? "unknown",
+        ...(onHardware ? {} : { mock: true }),
       });
       this.completedJobs += 1;
       if (this.completedJobs >= (this.config.restartAfterJobs ?? 100)) {
@@ -320,6 +325,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
           jobId,
           opCount: result.opCount,
           durationMs: result.durationMs,
+          executionMode: result.executionMode ?? "unknown",
           bufferedEvents: bufferedEvents.length,
         },
       };

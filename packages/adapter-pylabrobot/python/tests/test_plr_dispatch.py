@@ -22,13 +22,20 @@ from pcc_plr_sidecar.server import Server
 FAKE_DIR = Path(__file__).parent / "fake_plr"
 PYTHON_DIR = Path(__file__).parent.parent
 
+def _at(x: float) -> dict:
+    return {"location": {"x": x, "y": 20, "z": 0, "type": "Coordinate"}, "size_x": 127.76, "size_y": 85.48, "size_z": 14.2}
+
+
+# The same geometry test_plr_real.py uses on the genuine library: a 600 x 400 deck
+# with a tip rack and two plates side by side.
 DECK = {
     "type": "Deck",
     "name": "deck",
+    "size_x": 600, "size_y": 400, "size_z": 200,
     "children": [
-        {"type": "TipRack", "name": "tips", "spots": ["A1", "A2"]},
-        {"type": "Plate", "name": "src", "wells": {"A1": 150.0}},
-        {"type": "Plate", "name": "dst", "wells": {"A1": 0.0}},
+        {"type": "TipRack", "name": "tips", "spots": ["A1", "A2"], **_at(20)},
+        {"type": "Plate", "name": "src", "wells": {"A1": 150.0}, **_at(200)},
+        {"type": "Plate", "name": "dst", "wells": {"A1": 0.0}, **_at(380)},
     ],
 }
 
@@ -122,12 +129,13 @@ async def test_init_loads_the_declared_deck_as_data(fake_plr):
     assert lh.calls[0] == ("setup",)
 
 
-async def test_init_loads_a_layout_file(fake_plr, tmp_path):
-    path = tmp_path / "deck.json"
-    path.write_text(json.dumps(DECK))
-    s, out = _server()
-    resp = await init(s, out, deckLayoutPath=str(path))
-    assert resp["result"]["ok"] is True
+async def test_init_loads_a_layout_file_from_the_layout_directory(fake_plr, tmp_path, monkeypatch):
+    monkeypatch.setenv("PCC_PLR_LAYOUT_DIR", str(tmp_path))
+    (tmp_path / "deck.json").write_text(json.dumps(DECK))
+    for given in (str(tmp_path / "deck.json"), "deck.json"):
+        s, out = _server()
+        resp = await init(s, out, deckLayoutPath=given)
+        assert resp["result"]["ok"] is True, resp
 
 
 # ── op dispatch ─────────────────────────────────────────────────────────────
@@ -169,7 +177,7 @@ async def _run(s: Server, out: Out, ops: list, source: str = "inline-ops") -> di
     }, "9")
 
 
-async def test_a_missing_labware_fails_loud_and_changes_nothing(fake_plr):
+async def test_a_missing_labware_anywhere_refuses_the_run_before_anything_moves(fake_plr):
     s, out = _server()
     await init(s, out, deckLayout=DECK)
     resp = await _run(s, out, [
@@ -180,10 +188,10 @@ async def test_a_missing_labware_fails_loud_and_changes_nothing(fake_plr):
     assert err["code"] == RPC_ERROR_CODES["NON_RETRYABLE"]
     assert err["data"]["missingResource"] == "no_such_plate"
     assert err["data"]["opIndex"] == 1
-    assert err["data"]["opsCompleted"] == 1
+    assert err["data"]["opsCompleted"] == 0
     lh = s.loader.get("lh1").machine
-    assert [c[0] for c in lh.calls] == ["setup", "pick_up_tips"]
-    assert lh.deck.get_resource("src")["A1"].volume == 150.0
+    assert [c[0] for c in lh.calls] == ["setup"]  # op 0 never ran: the protocol is checked first
+    assert lh.deck.get_resource("tips")["A1"].has_tip is True
 
 
 async def test_a_missing_well_fails_loud(fake_plr):
@@ -244,6 +252,230 @@ async def test_tips_can_be_dropped_into_a_named_spot(fake_plr):
     assert resp["result"]["opCount"] == 2
     lh = s.loader.get("lh1").machine
     assert lh.calls[-1] == ("drop_tips", ["A2"], [0])
+
+
+# ── astra r1 on #378: no op is skipped, and every op is checked before any runs ─
+
+def _calls(s: Server) -> list:
+    return [c[0] for c in s.loader.get("lh1").machine.calls]
+
+
+async def test_a_delay_field_is_refused_and_nothing_moves(fake_plr):
+    # The skipped-op bypass: this op used to be skipped (no check, no aspirate) while
+    # the run still answered ok.
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    resp = await _run(s, out, [
+        TRANSFER[0],
+        {"op": "aspirate", "labwareId": "missing", "well": "A1", "volume_uL": 100, "__delay_ms": 1},
+    ])
+    err = resp["error"]
+    assert err["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert err["data"]["unknownFields"] == ["__delay_ms"]
+    assert (err["data"]["opIndex"], err["data"]["opsCompleted"]) == (1, 0)
+    assert _calls(s) == ["setup"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"volume": 10}, {"speed": 3}, {"__proto__": {}}, {"labwareId": "src"}],
+)
+async def test_any_field_an_op_does_not_take_refuses_the_whole_protocol(fake_plr, extra):
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    ops = [dict(TRANSFER[0]), *TRANSFER[1:]]
+    ops[0].update(extra)  # pickUpTips takes no volume, speed or labware
+    resp = await _run(s, out, ops)
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _calls(s) == ["setup"]
+
+
+@pytest.mark.parametrize(
+    "bad_op",
+    [
+        {"op": "aspirate", "labwareId": "src", "well": "A1", "volume_uL": float("inf")},
+        {"op": "aspirate", "labwareId": "src", "well": "A1", "volume_uL": float("nan")},
+        {"op": "aspirate", "labwareId": "src", "well": "A1", "volume_uL": 1e9},
+        {"op": "aspirate", "labwareId": "src", "well": "A1", "volume_uL": 1000.5},
+        {"op": "aspirate", "labwareId": "src", "well": "A1", "volume_uL": 10, "channel": 8},
+        {"op": "pickUpTips", "tipRack": "tips", "tipSpot": "A1", "tipColumn": 1},
+        {"op": "pickUpTips", "tipRack": "src", "tipSpot": "A1"},
+        {"op": "aspirate", "labwareId": "tips", "well": "A1", "volume_uL": 10},
+        {"op": "dropTips", "tipSpot": "A1"},
+    ],
+    ids=["inf", "nan", "huge", "over-max", "channel-8-of-8", "spot-and-column",
+         "tips-from-a-plate", "liquid-from-a-tip-rack", "spot-without-rack"],
+)
+async def test_bounds_and_types_are_checked_before_anything_moves(fake_plr, bad_op):
+    s, out = _server()
+    await init(s, out, deckLayout=DECK)
+    resp = await _run(s, out, [TRANSFER[0], bad_op])
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert resp["error"]["data"]["opsCompleted"] == 0
+    assert _calls(s) == ["setup"]
+
+
+async def test_the_operator_can_lower_the_volume_bound_and_the_channel_count(fake_plr):
+    s, out = _server()
+    await init(s, out, deckLayout=DECK, maxVolumeUL=50, numChannels=2)
+    over = await _run(s, out, [TRANSFER[0], dict(TRANSFER[1], volume_uL=60)])
+    assert over["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
+    channel = await _run(s, out, [dict(TRANSFER[0], channel=2)])
+    assert channel["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
+    ok = await _run(s, out, [TRANSFER[0], dict(TRANSFER[1], volume_uL=50)])
+    assert ok["result"]["opCount"] == 2
+    for bad in ({"maxVolumeUL": 0}, {"maxVolumeUL": 5000}, {"maxVolumeUL": float("inf")}, {"numChannels": 97}):
+        s2, out2 = _server()
+        assert (await init(s2, out2, deckLayout=DECK, **bad))["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
+
+
+async def test_every_result_and_event_says_how_the_ops_were_executed(fake_plr):
+    s, out = _server()
+    init_resp = await init(s, out, deckLayout=DECK)
+    assert init_resp["result"]["metadata"]["executionMode"] == "simulator"
+    await call(s, out, "evidence.startRecording", {"deviceId": "lh1", "jobId": "job-1"}, "2")
+    resp = await call(s, out, "backend.run", {
+        "deviceId": "lh1", "jobId": "job-1", "protocolSource": "inline-ops", "protocolInline": TRANSFER,
+    }, "3")
+    assert resp["result"]["executionMode"] == "simulator"
+    await asyncio_sleep_for_notifications()
+    events = [m["params"] for m in out.messages() if m.get("method") == "evidence"]
+    op_events = [e for e in events if e["type"] in ("pickUpTips", "aspirate", "dispense", "dropTips")]
+    assert len(op_events) == 4 and all(e["payload"]["executionMode"] == "simulator" for e in op_events)
+    assert all(e["payload"]["mock"] is True for e in op_events)  # simulated, never physical evidence
+
+    s, out = _server()
+    await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+        "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck")}})
+    run = await call(s, out, "backend.run", {
+        "deviceId": "ot", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": [TRANSFER[0]]}, "4")
+    assert run["result"]["executionMode"] == "hardware"
+
+    s, out = _server()
+    await call(s, out, "backend.init", {"deviceId": "st", "plrBackend": "stub", "backendConfig": {}})
+    stub = await call(s, out, "backend.run", {
+        "deviceId": "st", "jobId": "j", "protocolSource": "inline-ops", "protocolInline": TRANSFER}, "5")
+    assert stub["result"]["executionMode"] == "stub"
+
+
+# ── astra r1 on #378: the layout is checked as data before PLR builds anything ─
+
+def _deserialized(fake) -> list:
+    from pylabrobot.resources import Resource
+
+    return Resource.deserialize_calls
+
+
+def _deep(depth: int) -> list:
+    value: list = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+HOSTILE_LAYOUTS = {
+    "unknown-type-nested": dict(DECK, children=[
+        dict(DECK["children"][0], extra={"type": "subprocess.Popen", "args": ["id"]}), *DECK["children"][1:]]),
+    "unknown-child-type": dict(DECK, children=[{"type": "Popen", "name": "x", **_at(20)}]),
+    "dunder-key": dict(DECK, children=[dict(DECK["children"][0], __reduce__=["os.system", "id"]), *DECK["children"][1:]]),
+    "too-deep": dict(DECK, junk=_deep(40)),
+    "too-many-values": dict(DECK, junk=list(range(120_000))),
+    "huge-string": dict(DECK, junk="x" * 5000),
+    "non-finite": dict(DECK, size_x=float("inf")),
+    "root-is-a-plate": {"type": "Plate", "name": "p", "wells": {}, "size_x": 1, "size_y": 1, "size_z": 1},
+    "off-the-deck": dict(DECK, children=[{"type": "Plate", "name": "far", "wells": {}, **_at(590)}]),
+    "overlapping": dict(DECK, children=[dict(DECK["children"][1]), dict(DECK["children"][2], name="dst", **_at(250))]),
+    "no-size": dict(DECK, children=[{"type": "Plate", "name": "p", "wells": {}, "location": {"x": 1, "y": 1, "z": 0}}]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_LAYOUTS))
+async def test_hostile_inline_layouts_never_reach_the_deserializer(fake_plr, name):
+    s, out = _server()
+    resp = await init(s, out, deckLayout=HOSTILE_LAYOUTS[name])
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_LAYOUTS))
+async def test_hostile_layout_files_never_reach_the_deserializer(fake_plr, name, tmp_path, monkeypatch):
+    monkeypatch.setenv("PCC_PLR_LAYOUT_DIR", str(tmp_path))
+    (tmp_path / "deck.json").write_text(json.dumps(HOSTILE_LAYOUTS[name]))
+    s, out = _server()
+    # An absolute path inside the directory: the file is readable, so only the checks stop it.
+    resp = await init(s, out, deckLayoutPath=str(tmp_path / "deck.json"))
+    assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], resp
+    assert _deserialized(fake_plr) == []
+
+
+async def test_a_serialized_function_is_stripped_not_deserialized(fake_plr):
+    layout = dict(DECK, children=[dict(DECK["children"][1], compute_volume_from_height={
+        "type": "function", "code": "e30=", "name": "evil"}), DECK["children"][2]])
+    s, out = _server()
+    resp = await init(s, out, deckLayout=layout)
+    assert resp["result"]["metadata"]["strippedFunctions"] == 1
+    sent = _deserialized(fake_plr)[0]
+    assert sent["allow_marshal"] is False
+    assert sent["data"]["children"][0]["compute_volume_from_height"] is None
+
+
+async def test_layout_files_must_come_from_the_layout_directory(fake_plr, tmp_path, monkeypatch):
+    layouts = tmp_path / "layouts"
+    layouts.mkdir()
+    (tmp_path / "outside.json").write_text(json.dumps(DECK))
+    (layouts / "deck.txt").write_text(json.dumps(DECK))
+    (layouts / "big.json").write_text(" " * (5 * 1024 * 1024 + 1))
+    (layouts / "link.json").symlink_to(tmp_path / "outside.json")
+    s, out = _server()
+    no_dir = await init(s, out, deckLayoutPath=str(tmp_path / "outside.json"))
+    assert "PCC_PLR_LAYOUT_DIR" in no_dir["error"]["message"]
+    monkeypatch.setenv("PCC_PLR_LAYOUT_DIR", str(layouts))
+    for given in (str(tmp_path / "outside.json"), "../outside.json", "link.json", "deck.txt", "big.json", "missing.json"):
+        s, out = _server()
+        resp = await init(s, out, deckLayoutPath=given)
+        assert resp["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], (given, resp)
+    assert _deserialized(fake_plr) == []
+
+
+# ── astra r1 on #378: PLR's own tracking is on, and liquids are declared ─────
+
+async def test_tip_and_volume_tracking_are_on_by_default(fake_plr):
+    from pylabrobot.resources import TRACKING
+
+    s, out = _server()
+    resp = await init(s, out, deckLayout=DECK)
+    assert TRACKING == {"tips": True, "volume": True}
+    assert resp["result"]["metadata"]["tracking"] == {"tips": True, "volume": True}
+
+
+async def test_tracking_can_be_switched_off_on_the_simulator_but_not_on_hardware(fake_plr):
+    from pylabrobot.resources import TRACKING
+
+    s, out = _server()
+    resp = await init(s, out, deckLayout=DECK, tracking={"volume": False})
+    assert resp["result"]["metadata"]["tracking"] == {"tips": True, "volume": False}
+    assert TRACKING["volume"] is False
+    for tracking in ({"tips": False}, {"volume": False}):
+        s, out = _server()
+        hw = await call(s, out, "backend.init", {"deviceId": "ot", "plrBackend": "ot2", "backendConfig": {
+            "ot2Url": "10.0.0.5", "deckLayout": dict(DECK, type="OTDeck"), "tracking": tracking}})
+        assert hw["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"], hw
+    for bad in ({"tips": "yes"}, {"speed": True}, ["tips"]):
+        s, out = _server()
+        assert (await init(s, out, deckLayout=DECK, tracking=bad))["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
+
+
+async def test_initial_liquids_declare_what_the_operator_loaded(fake_plr):
+    s, out = _server()
+    resp = await init(s, out, deckLayout=DECK, initialLiquids={"src": {"A1": 20}})
+    assert resp["result"]["metadata"]["declaredWells"] == 1
+    lh = s.loader.get("lh1").machine
+    assert lh.deck.get_resource("src")["A1"].volume == 20.0
+    short = await _run(s, out, TRANSFER)  # 100 uL from a well holding 20: PLR refuses
+    assert short["error"]["data"]["plrException"] == "TooLittleLiquidError"
+    for bad in ({"nope": {"A1": 1}}, {"src": {"Z9": 1}}, {"src": {"A1": -1}}, {"src": {"A1": float("inf")}}, {"src": 5}):
+        s2, out2 = _server()
+        assert (await init(s2, out2, deckLayout=DECK, initialLiquids=bad))["error"]["code"] == RPC_ERROR_CODES["INVALID_PARAMS"]
 
 
 # ── OT-2 via PLR ────────────────────────────────────────────────────────────

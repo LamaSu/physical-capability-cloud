@@ -11,25 +11,63 @@ Phase 1 supports two backends:
 
 Both PLR backends need a declared deck: ``backendConfig.deckLayout`` (a
 serialized PLR deck, as produced by ``deck.serialize()``) or
-``backendConfig.deckLayoutPath`` (a JSON file holding one). The layout is data:
-it is loaded with ``Resource.deserialize(..., allow_marshal=False)``, so it can
-never carry code. Without a layout the backend refuses to load, because an empty
-deck cannot run a protocol (status board row R39).
+``backendConfig.deckLayoutPath`` (a JSON file holding one). Without a layout the
+backend refuses to load, because an empty deck cannot run a protocol (status
+board row R39). The layout is data, and it is checked as data BEFORE PLR builds
+anything from it (:func:`checked_layout`):
+
+- the root must be the expected deck type, and every typed object in the tree
+  must be one of ``LAYOUT_TYPES``;
+- serialized functions are stripped, never deserialized, and it is then loaded
+  with ``Resource.deserialize(..., allow_marshal=False)`` on both paths;
+- size, depth, key and number limits apply, and every labware placed on the deck
+  must lie inside it without overlapping another.
+
+``deckLayoutPath`` is operator configuration, never job input, and it must name
+a ``.json`` file inside ``PCC_PLR_LAYOUT_DIR``.
+
+PLR's tip and volume tracking are switched on for every PLR backend, so a missing
+tip, a well without enough liquid or an overfilled well fails inside PLR before
+it becomes a physical action. ``backendConfig.initialLiquids`` declares what the
+operator loaded (``{"src": {"A1": 200}}``, in uL). On the simulator, tracking can
+be switched off explicitly with ``backendConfig.tracking``; on hardware it can't.
 
 Each backend is loaded lazily via inline imports so an operator can install
 just the extras they need (``pip install pcc-plr-sidecar[ot2]``).
 
-A small ``stub`` backend is also registered for test environments where PLR
-is not installed — it implements the same surface (setup / run / stop /
-status / dispose) with synthetic responses.
+A small ``stub`` backend exists for tests. It is used only when ``plrBackend``
+is ``"stub"``, never as a fallback, and every result it gives says
+``executionMode: "stub"``.
 """
 
 from __future__ import annotations
+import json
 import logging
+import math
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 log = logging.getLogger("pcc_plr_sidecar.backend_loader")
+
+EXECUTION_MODES = {"chatterbox": "simulator", "chatter": "simulator", "ot2": "hardware", "stub": "stub"}
+DEFAULT_MAX_VOLUME_UL = 1000.0  # the OT-2's largest pipette; backendConfig.maxVolumeUL may lower it
+
+# Every object with a "type" in a deck layout must be one of these PLR resource
+# (or geometry) classes. Anything else, including a serialized function, never
+# reaches PLR's deserializer. Written from PLR's resource class names; the
+# genuine-library test (test_plr_real.py) checks it once operator decision D1
+# allows installing pylabrobot.
+LAYOUT_TYPES = frozenset({
+    "Deck", "OTDeck", "Resource", "Container", "Well", "Plate", "Lid", "TipRack", "TipSpot",
+    "Tip", "HamiltonTip", "Trash", "Tube", "TubeRack", "Trough", "ResourceHolder",
+    "ResourceStack", "PlateAdapter", "Coordinate", "Rotation",
+})
+MAX_LAYOUT_BYTES = 5 * 1024 * 1024
+MAX_LAYOUT_DEPTH = 32
+MAX_LAYOUT_NODES = 100_000
+MAX_LAYOUT_STRING = 4096
+_GEOMETRY_TOLERANCE_MM = 0.5
 
 
 @dataclass
@@ -47,6 +85,11 @@ class BackendHandle:
     backend_config: dict[str, Any] = field(default_factory=dict)
     setup_done: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    # "hardware" (a real instrument), "simulator" (PLR's chatterbox) or "stub".
+    # Every run result and every evidence record carries it.
+    execution_mode: str = "stub"
+    # The largest volume one aspirate or dispense may move, in uL.
+    max_volume_ul: float = DEFAULT_MAX_VOLUME_UL
 
 
 class BackendLoader:
@@ -88,13 +131,16 @@ class BackendLoader:
             return existing
 
         log.info("loading backend %s for device %s", plr_backend, device_id)
-        machine = await _create_machine(plr_backend, backend_config)
+        mode = EXECUTION_MODES.get(plr_backend.strip().lower())
+        machine, metadata = await _create_machine(plr_backend, backend_config)
         handle = BackendHandle(
             plr_backend=plr_backend,
             device_id=device_id,
             machine=machine,
             backend_config=dict(backend_config),
-            metadata={"loaded_via": "BackendLoader.load"},
+            metadata={"loaded_via": "BackendLoader.load", "executionMode": mode, **metadata},
+            execution_mode=mode,
+            max_volume_ul=_max_volume(backend_config),
         )
         self._handles[device_id] = handle
         return handle
@@ -116,11 +162,12 @@ class BackendLoader:
 
 # ── private — backend instantiation ────────────────────────────────────────
 
-async def _create_machine(plr_backend: str, config: dict[str, Any]) -> Any:
+async def _create_machine(plr_backend: str, config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """Dispatch on ``plr_backend`` to a concrete PLR Machine constructor.
 
-    Imports are inline + per-branch so the operator only needs the vendor
-    extras they actually use.
+    Returns the machine and what the loader learned while building it (for the
+    handle's metadata). Imports are inline + per-branch so the operator only
+    needs the vendor extras they actually use.
     """
     plr_backend = plr_backend.strip().lower()
 
@@ -128,7 +175,7 @@ async def _create_machine(plr_backend: str, config: dict[str, Any]) -> Any:
         return _create_chatterbox(config)
 
     if plr_backend == "stub":
-        return _create_stub(config)
+        return _create_stub(config), {}
 
     if plr_backend == "ot2":
         return await _create_ot2(config)
@@ -138,12 +185,133 @@ async def _create_machine(plr_backend: str, config: dict[str, Any]) -> Any:
     )
 
 
-def _load_deck(config: dict[str, Any], expected_cls: type) -> Any:
+def _max_volume(config: dict[str, Any]) -> float:
+    value = config.get("maxVolumeUL", DEFAULT_MAX_VOLUME_UL)
+    if (
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        or not 0 < value <= DEFAULT_MAX_VOLUME_UL
+    ):
+        raise ValueError(f"backendConfig.maxVolumeUL must be a number in (0, {DEFAULT_MAX_VOLUME_UL:g}] uL")
+    return float(value)
+
+
+def _read_layout_file(path: Any) -> Any:
+    """Read ``deckLayoutPath``: a .json file inside PCC_PLR_LAYOUT_DIR, at most 5 MB."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("deckLayoutPath must be a non-empty string")
+    root = os.environ.get("PCC_PLR_LAYOUT_DIR")
+    if not root:
+        raise ValueError(
+            "deckLayoutPath needs PCC_PLR_LAYOUT_DIR, the directory the operator keeps deck layouts in",
+        )
+    base = os.path.realpath(root)
+    real = os.path.realpath(path if os.path.isabs(path) else os.path.join(base, path))
+    if os.path.commonpath([base, real]) != base:
+        raise ValueError("deckLayoutPath must name a file inside PCC_PLR_LAYOUT_DIR")
+    if not real.endswith(".json") or not os.path.isfile(real):
+        raise ValueError("deckLayoutPath must name an existing .json file")
+    with open(real, "rb") as f:
+        raw = f.read(MAX_LAYOUT_BYTES + 1)
+    if len(raw) > MAX_LAYOUT_BYTES:
+        raise ValueError(f"deck layout file is larger than {MAX_LAYOUT_BYTES} bytes")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise ValueError(f"deck layout file is not JSON: {e}") from e
+
+
+def checked_layout(layout: Any, root_types: frozenset) -> tuple[dict[str, Any], int]:
+    """Check a serialized deck as data before anything is built from it.
+
+    Returns a cleaned copy and the number of serialized functions stripped from it
+    (a function is code, so it is replaced by None and never deserialized).
+    Raises ValueError for anything outside the rules in the module docstring.
+    """
+    if not isinstance(layout, dict) or layout.get("type") not in root_types:
+        found = layout.get("type") if isinstance(layout, dict) else type(layout).__name__
+        raise ValueError(f"deck layout is a {found!r}, expected {' or '.join(sorted(root_types))}")
+    counts = {"nodes": 0, "stripped": 0}
+
+    def walk(value: Any, depth: int) -> Any:
+        counts["nodes"] += 1
+        if counts["nodes"] > MAX_LAYOUT_NODES:
+            raise ValueError(f"deck layout has more than {MAX_LAYOUT_NODES} values")
+        if depth > MAX_LAYOUT_DEPTH:
+            raise ValueError(f"deck layout is nested deeper than {MAX_LAYOUT_DEPTH} levels")
+        if isinstance(value, dict):
+            if value.get("type") == "function":
+                counts["stripped"] += 1
+                return None
+            if "type" in value and value["type"] not in LAYOUT_TYPES:
+                raise ValueError(f"deck layout holds a {value['type']!r}, which is not an allowed resource type")
+            cleaned = {}
+            for key, item in value.items():
+                if not isinstance(key, str) or key.startswith("__"):
+                    raise ValueError(f"deck layout key {key!r} is not allowed")
+                cleaned[key] = walk(item, depth + 1)
+            return cleaned
+        if isinstance(value, list):
+            return [walk(item, depth + 1) for item in value]
+        if isinstance(value, str):
+            if len(value) > MAX_LAYOUT_STRING:
+                raise ValueError(f"deck layout holds a string longer than {MAX_LAYOUT_STRING} characters")
+            return value
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("deck layout holds a non-finite number")
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        raise ValueError(f"deck layout holds a {type(value).__name__}, which is not JSON data")
+
+    cleaned = walk(layout, 0)
+    _check_deck_geometry(cleaned)
+    return cleaned, counts["stripped"]
+
+
+def _box(resource: dict[str, Any], what: str) -> tuple[float, float, float]:
+    dims = []
+    for axis in ("size_x", "size_y", "size_z"):
+        v = resource.get(axis)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+            raise ValueError(f"{what} needs a positive {axis} to be placed on the deck")
+        dims.append(float(v))
+    return dims[0], dims[1], dims[2]
+
+
+def _check_deck_geometry(deck: dict[str, Any]) -> None:
+    """Every labware on the deck lies inside it, and no two overlap."""
+    deck_x, deck_y, _ = _box(deck, "the deck")
+    tol = _GEOMETRY_TOLERANCE_MM
+    placed: list[tuple[str, tuple[float, ...]]] = []
+    for child in deck.get("children") or []:
+        if child is None:
+            continue
+        if not isinstance(child, dict):
+            raise ValueError("every deck child must be a serialized resource")
+        name = child.get("name") if isinstance(child.get("name"), str) else "a deck child"
+        loc = child.get("location")
+        if not isinstance(loc, dict) or not all(
+            isinstance(loc.get(a), (int, float)) and not isinstance(loc.get(a), bool) for a in ("x", "y", "z")
+        ):
+            raise ValueError(f"{name} needs a location with numeric x, y and z")
+        sx, sy, sz = _box(child, name)
+        x, y, z = float(loc["x"]), float(loc["y"]), float(loc["z"])
+        if x < -tol or y < -tol or x + sx > deck_x + tol or y + sy > deck_y + tol:
+            raise ValueError(f"{name} does not fit on the deck")
+        box = (x, x + sx, y, y + sy, z, z + sz)
+        for other, obox in placed:
+            if all(box[2 * i] < obox[2 * i + 1] - tol and obox[2 * i] < box[2 * i + 1] - tol for i in range(3)):
+                raise ValueError(f"{name} overlaps {other} on the deck")
+        placed.append((name, box))
+
+
+def _load_deck(config: dict[str, Any], expected_cls: type, root_types: frozenset) -> tuple[Any, int]:
     """Load the declared deck (R39). Raises ValueError, never returns an empty deck.
 
     ``deckLayout`` is a serialized PLR resource tree; ``deckLayoutPath`` names a
-    JSON file holding one. PLR's loader resolves each child by ``type`` and
-    assigns it to its parent, so the loaded deck is the populated deck.
+    JSON file holding one. Both go through :func:`checked_layout` and then the
+    same ``Resource.deserialize(..., allow_marshal=False)``. PLR's loader resolves
+    each child by ``type`` and assigns it to its parent, so the loaded deck is the
+    populated deck. Returns the deck and the number of functions stripped.
     """
     from pylabrobot.resources import Resource
 
@@ -156,28 +324,72 @@ def _load_deck(config: dict[str, Any], expected_cls: type) -> Any:
             "backendConfig.deckLayout (a serialized PLR deck) or deckLayoutPath is required: "
             "an empty deck cannot run a protocol",
         )
+    if layout is not None and not isinstance(layout, dict):
+        raise ValueError("deckLayout must be a serialized PLR resource object")
+    data = layout if layout is not None else _read_layout_file(path)
+    cleaned, stripped = checked_layout(data, root_types)
     try:
-        if layout is not None:
-            if not isinstance(layout, dict):
-                raise ValueError("deckLayout must be a serialized PLR resource object")
-            # allow_marshal stays False: a layout is data and can never carry code.
-            deck = Resource.deserialize(layout, allow_marshal=False)
-        else:
-            if not isinstance(path, str) or not path:
-                raise ValueError("deckLayoutPath must be a non-empty string")
-            deck = Resource.load_from_json_file(path)
-    except ValueError:
-        raise
+        # allow_marshal stays False: a layout is data and can never carry code.
+        deck = Resource.deserialize(cleaned, allow_marshal=False)
     except Exception as e:  # noqa: BLE001 — any loader failure is an invalid layout
         raise ValueError(f"invalid deck layout: {type(e).__name__}: {e}") from e
     if not isinstance(deck, expected_cls):
         raise ValueError(
             f"deck layout loaded as {type(deck).__name__}, expected {expected_cls.__name__}",
         )
-    return deck
+    return deck, stripped
 
 
-def _create_chatterbox(config: dict[str, Any]) -> Any:
+def _configure_tracking(config: dict[str, Any], hardware: bool) -> dict[str, bool]:
+    """Switch on PLR's tip and volume tracking (process-wide; one sidecar per device).
+
+    On hardware both are required. On the simulator either may be switched off
+    explicitly with ``backendConfig.tracking = {"tips": false}`` and the like.
+    """
+    from pylabrobot.resources import set_tip_tracking, set_volume_tracking
+
+    requested = config.get("tracking") or {}
+    if not isinstance(requested, dict) or set(requested) - {"tips", "volume"} or not all(
+        isinstance(v, bool) for v in requested.values()
+    ):
+        raise ValueError('backendConfig.tracking must look like {"tips": true, "volume": true}')
+    tracking = {"tips": requested.get("tips", True), "volume": requested.get("volume", True)}
+    if hardware and not all(tracking.values()):
+        raise ValueError("tip and volume tracking cannot be switched off on a hardware backend")
+    set_tip_tracking(tracking["tips"])
+    set_volume_tracking(tracking["volume"])
+    return tracking
+
+
+def _declare_liquids(deck: Any, config: dict[str, Any]) -> int:
+    """Apply ``backendConfig.initialLiquids``: {resource: {well: uL}}, what the operator loaded."""
+    declared = config.get("initialLiquids") or {}
+    if not isinstance(declared, dict):
+        raise ValueError("backendConfig.initialLiquids must map a resource to {well: uL}")
+    count = 0
+    for resource_name, wells in declared.items():
+        if not isinstance(wells, dict):
+            raise ValueError(f"initialLiquids[{resource_name!r}] must map a well to uL")
+        try:
+            resource = deck.get_resource(resource_name)
+        except Exception as e:  # noqa: BLE001 — a missing resource is an invalid declaration
+            raise ValueError(f"initialLiquids names {resource_name!r}, which is not on the deck") from e
+        for well_name, volume in wells.items():
+            if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume < 0:
+                raise ValueError(f"initialLiquids[{resource_name!r}][{well_name!r}] must be a finite volume >= 0")
+            try:
+                items = resource[well_name]
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(f"initialLiquids names {well_name!r}, which is not in {resource_name!r}") from e
+            items = items if isinstance(items, list) else [items]
+            if len(items) != 1 or getattr(items[0], "tracker", None) is None:
+                raise ValueError(f"initialLiquids[{resource_name!r}][{well_name!r}] is not one well")
+            items[0].tracker.set_liquids([(None, float(volume))])
+            count += 1
+    return count
+
+
+def _create_chatterbox(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """PLR's ``LiquidHandlerChatterboxBackend`` over the declared deck.
 
     ``ChatterboxBackend`` does not exist in pylabrobot 0.2.2, and
@@ -188,11 +400,15 @@ def _create_chatterbox(config: dict[str, Any]) -> Any:
     from pylabrobot.liquid_handling.backends import LiquidHandlerChatterboxBackend
     from pylabrobot.resources import Deck
 
-    deck = _load_deck(config, Deck)
     num_channels = config.get("numChannels", 8)
-    if not isinstance(num_channels, int) or isinstance(num_channels, bool) or num_channels < 1:
-        raise ValueError("backendConfig.numChannels must be a positive integer")
-    return LiquidHandler(backend=LiquidHandlerChatterboxBackend(num_channels=num_channels), deck=deck)
+    if not isinstance(num_channels, int) or isinstance(num_channels, bool) or not 1 <= num_channels <= 96:
+        raise ValueError("backendConfig.numChannels must be an integer from 1 to 96")
+    _max_volume(config)
+    tracking = _configure_tracking(config, hardware=False)
+    deck, stripped = _load_deck(config, Deck, frozenset({"Deck", "OTDeck"}))
+    liquids = _declare_liquids(deck, config)
+    machine = LiquidHandler(backend=LiquidHandlerChatterboxBackend(num_channels=num_channels), deck=deck)
+    return machine, {"tracking": tracking, "strippedFunctions": stripped, "declaredWells": liquids}
 
 
 def _parse_ot2_url(url: str) -> tuple[str, int]:
@@ -210,7 +426,7 @@ def _parse_ot2_url(url: str) -> tuple[str, int]:
     return host, port
 
 
-async def _create_ot2(config: dict[str, Any]) -> Any:
+async def _create_ot2(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """Opentrons OT-2 via PLR's ``OpentronsOT2Backend(host, port)``.
 
     Requires ``ot2Url`` (for example ``http://192.168.1.50:31950``) and a
@@ -229,8 +445,12 @@ async def _create_ot2(config: dict[str, Any]) -> Any:
     if config.get("ot2ApiKey") or config.get("apiKey"):
         log.warning("ot2ApiKey is not used: OpentronsOT2Backend takes no API key")
     host, port = _parse_ot2_url(ot2_url)
-    deck = _load_deck(config, OTDeck)
-    return LiquidHandler(backend=OpentronsOT2Backend(host=host, port=port), deck=deck)
+    _max_volume(config)
+    tracking = _configure_tracking(config, hardware=True)
+    deck, stripped = _load_deck(config, OTDeck, frozenset({"OTDeck"}))
+    liquids = _declare_liquids(deck, config)
+    machine = LiquidHandler(backend=OpentronsOT2Backend(host=host, port=port), deck=deck)
+    return machine, {"tracking": tracking, "strippedFunctions": stripped, "declaredWells": liquids}
 
 
 def is_stub_machine(machine: Any) -> bool:
@@ -246,8 +466,9 @@ def _create_stub(config: dict[str, Any]) -> "_StubMachine":
 class _StubMachine:
     """A fake PLR Machine — same surface, synthetic behavior.
 
-    Used by tests that don't want a pylabrobot dependency, and as the
-    default backend when ``import pylabrobot`` fails.
+    Used only when ``plrBackend`` is ``"stub"`` (tests that don't want a
+    pylabrobot dependency). Nothing falls back to it: a missing pylabrobot fails
+    ``backend.init``.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:

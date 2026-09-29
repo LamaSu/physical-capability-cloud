@@ -11,8 +11,10 @@ Method names + payload shapes mirror the TypeScript constants in
 from __future__ import annotations
 import asyncio
 import logging
+import math
 import time
-from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from .backend_loader import is_stub_machine
 from .dispatcher import RPC_ERROR_CODES, RpcException
@@ -127,18 +129,18 @@ class Commands:
                 "ok": True,
                 "jobId": job_id,
                 "opCount": op_count,
+                "executionMode": handle.execution_mode,
                 "durationMs": int((time.monotonic() - started_at) * 1000),
                 "summary": {},
             }
+        # The stub moves nothing: its results and every event say executionMode "stub".
         try:
             ops = _normalise_ops(protocol_source, protocol_payload, protocol_inline, run_params)
             for op in ops:
-                # Honor mid-protocol delay declarations for tests/demos.
-                if isinstance(op, dict) and op.get("__delay_ms"):
-                    await asyncio.sleep(max(0.0, float(op["__delay_ms"]) / 1000.0))
-                    continue
                 op_type = (op.get("op") if isinstance(op, dict) else None) or "atomic_op"
-                payload = op if isinstance(op, dict) else {"op": op}
+                payload = dict(op) if isinstance(op, dict) else {"op": op}
+                payload["executionMode"] = "stub"
+                payload["mock"] = True
                 self.evidence.emit_atomic_op(device_id, op_type, payload)
 
             # If the operator handed us inline-ops we have no further work.
@@ -166,6 +168,7 @@ class Commands:
                 "ok": True,
                 "jobId": job_id,
                 "opCount": summary.get("opCount", len(ops)),
+                "executionMode": "stub",
                 "durationMs": duration_ms,
                 "summary": summary,
             }
@@ -291,7 +294,14 @@ class Commands:
         protocol_source: Any,
         protocol_inline: Any,
     ) -> int:
-        """Run inline ops on a PLR LiquidHandler; one evidence event per completed op."""
+        """Run inline ops on a PLR LiquidHandler; one evidence event per completed op.
+
+        Two phases. First every op is checked: its fields, its bounds, and the deck
+        resources it names, all before anything moves. A protocol with one bad op
+        runs no op at all. Then the checked ops run in order; a PLR error stops the
+        run. ``opsCompleted`` in an error counts the calls that returned; it does not
+        prove the failing call had no physical effect.
+        """
         if protocol_source != "inline-ops":
             raise RpcException(
                 RPC_ERROR_CODES["NOT_SUPPORTED"],
@@ -306,33 +316,33 @@ class Commands:
                 {"jobId": job_id},
             )
         lh = handle.machine
-        done = 0
+        limits = _Limits(num_channels=_num_channels(lh), max_volume_ul=handle.max_volume_ul)
+        steps: list[_Step] = []
         for index, op in enumerate(ops):
-            if not isinstance(op, dict):
-                raise RpcException(
-                    RPC_ERROR_CODES["INVALID_PARAMS"], "each op must be an object",
-                    {"opIndex": index, "jobId": job_id},
-                )
-            if op.get("__delay_ms"):
-                await asyncio.sleep(max(0.0, float(op["__delay_ms"]) / 1000.0))
-                continue
-            kind = op.get("op")
+            kind = op.get("op") if isinstance(op, dict) else None
             try:
-                record = await _run_plr_op(lh, kind, op, index)
+                steps.append(_prepare_plr_op(lh, op, index, limits))
             except RpcException as e:
                 data = dict(e.data or {})
-                data.update({"opIndex": index, "op": kind, "jobId": job_id, "opsCompleted": done})
+                data.update({"opIndex": index, "op": kind, "jobId": job_id, "opsCompleted": 0})
                 raise RpcException(e.code, e.message, data) from e
+        done = 0
+        for step in steps:
+            try:
+                await step.run()
             except Exception as e:  # noqa: BLE001 — a PLR error stops the run, loudly
                 raise RpcException(
                     RPC_ERROR_CODES["NON_RETRYABLE"],
-                    f"{kind} failed: {e}",
+                    f"{step.kind} failed: {e}",
                     {
-                        "plrException": type(e).__name__, "opIndex": index, "op": kind,
-                        "jobId": job_id, "opsCompleted": done,
+                        "plrException": type(e).__name__, "opIndex": step.index, "op": step.kind,
+                        "jobId": job_id, "opsCompleted": done, "executionMode": handle.execution_mode,
                     },
                 ) from e
-            self.evidence.emit_atomic_op(device_id, kind, record)
+            record = dict(step.record, executionMode=handle.execution_mode)
+            if handle.execution_mode != "hardware":
+                record["mock"] = True  # a simulated op is never physical evidence
+            self.evidence.emit_atomic_op(device_id, step.kind, record)
             done += 1
         return done
 
@@ -375,6 +385,40 @@ def _try_deck_snapshot(machine: Any) -> dict[str, Any] | None:
 
 
 _PLR_OPS = ("pickUpTips", "aspirate", "dispense", "dropTips")
+# The only fields each op may carry; anything else (a test hook, a typo, a field
+# a later version adds) refuses the whole protocol before anything moves.
+_OP_FIELDS = {
+    "pickUpTips": frozenset({"op", "channel", "tipRack", "tipSpot", "tipColumn"}),
+    "aspirate": frozenset({"op", "channel", "labwareId", "well", "volume_uL"}),
+    "dispense": frozenset({"op", "channel", "labwareId", "well", "volume_uL"}),
+    "dropTips": frozenset({"op", "channel", "tipRack", "tipSpot", "tipColumn"}),
+}
+
+
+@dataclass(frozen=True)
+class _Limits:
+    num_channels: int
+    max_volume_ul: float
+
+
+@dataclass(frozen=True)
+class _Step:
+    """One checked op: the call to make and the evidence record for it."""
+
+    index: int
+    kind: str
+    run: Callable[[], Awaitable[Any]]
+    record: dict[str, Any]
+
+
+def _num_channels(lh: Any) -> int:
+    count = getattr(getattr(lh, "backend", None), "num_channels", None)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise RpcException(
+            RPC_ERROR_CODES["HARDWARE_UNREACHABLE"],
+            "the backend does not report how many channels it has, so no op can be checked",
+        )
+    return count
 
 
 def _inline_op_list(protocol_inline: Any) -> list[Any]:
@@ -423,23 +467,28 @@ def _item(resource: Any, identifier: Any, field: str) -> Any:
     return items
 
 
-def _channels(op: dict[str, Any]) -> Any:
+def _channels(op: dict[str, Any], num_channels: int) -> Any:
     channel = op.get("channel")
     if channel is None:
         return None
-    if not isinstance(channel, int) or isinstance(channel, bool) or channel < 0:
-        raise _bad_op("channel must be a non-negative integer")
+    if not isinstance(channel, int) or isinstance(channel, bool) or not 0 <= channel < num_channels:
+        raise _bad_op(f"channel must be an integer from 0 to {num_channels - 1} (this backend has {num_channels})")
     return [channel]
 
 
-def _volume(op: dict[str, Any]) -> float:
+def _volume(op: dict[str, Any], max_volume_ul: float) -> float:
     volume = op.get("volume_uL")
-    if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not volume > 0:
-        raise _bad_op("volume_uL must be a positive number")
+    if (
+        isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume)
+        or not 0 < volume <= max_volume_ul
+    ):
+        raise _bad_op(f"volume_uL must be a finite number in (0, {max_volume_ul:g}]")
     return float(volume)
 
 
 def _tip_spot_name(op: dict[str, Any]) -> Any:
+    if op.get("tipSpot") is not None and op.get("tipColumn") is not None:
+        raise _bad_op("give tipSpot or tipColumn, not both")
     if op.get("tipSpot") is not None:
         return op["tipSpot"]
     column = op.get("tipColumn")
@@ -450,9 +499,36 @@ def _tip_spot_name(op: dict[str, Any]) -> Any:
     return None
 
 
-async def _run_plr_op(lh: Any, kind: Any, op: dict[str, Any], index: int) -> dict[str, Any]:
-    """Run one op on the LiquidHandler and return the evidence record for it."""
-    channels = _channels(op)
+def _tip_spot(rack: Any, name: Any) -> Any:
+    from pylabrobot.resources import TipSpot
+
+    spot = _item(rack, name, "tipSpot")
+    if not isinstance(spot, TipSpot):
+        raise _bad_op(f"{name} in {getattr(rack, 'name', rack)} is not a tip spot", item=name)
+    return spot
+
+
+def _liquid_container(labware: Any, name: Any) -> Any:
+    from pylabrobot import resources
+
+    kinds = tuple(k for k in (getattr(resources, "Container", None), getattr(resources, "Well", None)) if isinstance(k, type))
+    well = _item(labware, name, "well")
+    if not kinds or not isinstance(well, kinds):
+        raise _bad_op(f"{name} in {getattr(labware, 'name', labware)} is not a well or container", item=name)
+    return well
+
+
+def _prepare_plr_op(lh: Any, op: Any, index: int, limits: _Limits) -> _Step:
+    """Check one op completely, without moving anything, and return the call to make."""
+    if not isinstance(op, dict):
+        raise _bad_op("each op must be an object")
+    kind = op.get("op")
+    if kind not in _OP_FIELDS:
+        raise _bad_op(f"unknown op {kind!r}; supported: {', '.join(_PLR_OPS)}", op=kind)
+    unknown = sorted(str(k) for k in set(op) - _OP_FIELDS[kind])
+    if unknown:
+        raise _bad_op(f"{kind} does not take {', '.join(unknown)}", unknownFields=unknown)
+    channels = _channels(op, limits.num_channels)
     record: dict[str, Any] = {"op": kind, "opIndex": index}
     if channels is not None:
         record["channel"] = channels[0]
@@ -461,33 +537,30 @@ async def _run_plr_op(lh: Any, kind: Any, op: dict[str, Any], index: int) -> dic
         spot_name = _tip_spot_name(op)
         if spot_name is None:
             raise _bad_op("pickUpTips needs tipSpot or tipColumn")
-        spot = _item(rack, spot_name, "tipSpot")
-        await lh.pick_up_tips([spot], use_channels=channels)
+        spot = _tip_spot(rack, spot_name)
         record.update({"tipRack": op["tipRack"], "tipSpot": spot_name})
-    elif kind in ("aspirate", "dispense"):
+        return _Step(index, kind, lambda: lh.pick_up_tips([spot], use_channels=channels), record)
+    if kind in ("aspirate", "dispense"):
         labware = _resource(lh, op.get("labwareId"), "labwareId")
-        well = _item(labware, op.get("well"), "well")
-        volume = _volume(op)
+        well = _liquid_container(labware, op.get("well"))
+        volume = _volume(op, limits.max_volume_ul)
         fn = lh.aspirate if kind == "aspirate" else lh.dispense
-        await fn([well], vols=[volume], use_channels=channels)
         record.update({"labwareId": op["labwareId"], "well": op["well"], "volume_uL": volume})
-    elif kind == "dropTips":
-        if op.get("tipRack") is not None:
-            rack = _resource(lh, op.get("tipRack"), "tipRack")
-            spot_name = _tip_spot_name(op)
-            if spot_name is None:
-                raise _bad_op("dropTips with tipRack needs tipSpot or tipColumn")
-            await lh.drop_tips([_item(rack, spot_name, "tipSpot")], use_channels=channels)
-            record.update({"tipRack": op["tipRack"], "tipSpot": spot_name})
-        else:
-            # No destination named: put the tips back where they were picked up.
-            await lh.return_tips(use_channels=channels)
-            record["returned"] = True
-    else:
-        raise _bad_op(
-            f"unknown op {kind!r}; supported: {', '.join(_PLR_OPS)}", op=kind,
-        )
-    return record
+        return _Step(index, kind, lambda: fn([well], vols=[volume], use_channels=channels), record)
+    # dropTips
+    if op.get("tipRack") is not None:
+        rack = _resource(lh, op.get("tipRack"), "tipRack")
+        spot_name = _tip_spot_name(op)
+        if spot_name is None:
+            raise _bad_op("dropTips with tipRack needs tipSpot or tipColumn")
+        spot = _tip_spot(rack, spot_name)
+        record.update({"tipRack": op["tipRack"], "tipSpot": spot_name})
+        return _Step(index, kind, lambda: lh.drop_tips([spot], use_channels=channels), record)
+    if op.get("tipSpot") is not None or op.get("tipColumn") is not None:
+        raise _bad_op("dropTips names a tip spot without a tipRack")
+    # No destination named: put the tips back where they were picked up.
+    record["returned"] = True
+    return _Step(index, kind, lambda: lh.return_tips(use_channels=channels), record)
 
 
 def _normalise_ops(
