@@ -27,7 +27,7 @@ const PACK: PinnedPack = {
 
 type Req = { system?: string; tools: Array<{ name: string }>; messages: Array<{ role: string; content: unknown }> };
 
-function harness(opts: { caps?: BudgetCaps; replies?: unknown[] } = {}) {
+function harness(opts: { caps?: BudgetCaps; replies?: unknown[]; served?: string[] } = {}) {
   const requests: Req[] = [];
   const replies = [...(opts.replies ?? [])];
   const create = vi.fn(async (req: Req) => {
@@ -40,6 +40,7 @@ function harness(opts: { caps?: BudgetCaps; replies?: unknown[] } = {}) {
   const calls: Array<[string, Record<string, unknown>]> = [];
   const transport: ToolTransport & { closed: boolean } = {
     closed: false,
+    listTools: async () => [...(opts.served ?? PACK.tools.map((t) => t.def.name)), "delete_preview"],
     callTool: async (name, args) => (calls.push([name, args]), { ok: true, tool: name }),
     close: async () => void (transport.closed = true),
   };
@@ -159,6 +160,13 @@ describe("a hosted session", () => {
     expect(report.outcome).toBe("error");
     expect(report.turns).toBe(2);
     expect(report.spentNanoUsd).toBeGreaterThan(0);
+  });
+
+  it("only the pinned tools the connected surface serves are offered", async () => {
+    const h = harness({ replies: [text("ok")], served: ["list_open_jobs"] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    await s.send("hi");
+    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_open_jobs"]);
   });
 
   it("a tool name LLMAgent reserves is dropped, not fatal", async () => {

@@ -57,6 +57,12 @@ describe("the agent calls the gateway as the user", () => {
     expect(posts.every((s) => s.path === "/mcp" && s.auth === `Bearer ${KEY}`)).toBe(true);
   });
 
+  it("listTools reports the surface's tools", async () => {
+    const t = await connectMcp(base, null);
+    expect(await t.listTools()).toEqual(["echo"]);
+    await t.close();
+  });
+
   it("a keyless session uses the read-only /mcp/apps and sends no credential", async () => {
     seen.length = 0;
     const t = await connectMcp(base, null);
@@ -100,14 +106,15 @@ describe("what the model sees is scrubbed", () => {
 describe("pack tools", () => {
   it("each pinned tool calls the transport under its own name, with an object input", async () => {
     const calls: Array<[string, Record<string, unknown>]> = [];
-    const transport = { callTool: async (n: string, a: Record<string, unknown>) => (calls.push([n, a]), "ok"), close: async () => {} };
+    const transport = { listTools: async () => ["list_open_jobs"], callTool: async (n: string, a: Record<string, unknown>) => (calls.push([n, a]), "ok"), close: async () => {} };
     const pack: PinnedPack = {
       version: "1",
       sha256: "0".repeat(64),
       systemPrompt: "p",
       tools: [{ def: { name: "list_open_jobs", description: "", input_schema: { type: "object" } }, spec: { name: "list_open_jobs", method: "GET", path: "/api/job-offers/open" } }],
     };
-    const [tool] = packTools(pack, transport);
+    expect(packTools(pack, transport, new Set())).toEqual([]);
+    const [tool] = packTools(pack, transport, new Set(["list_open_jobs"]));
     await tool!.caller({ capabilityType: "fdm" });
     await tool!.caller("not an object");
     expect(calls).toEqual([

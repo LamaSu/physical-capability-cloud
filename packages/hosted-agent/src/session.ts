@@ -80,7 +80,8 @@ export class HostedSession {
     const id = randomBytes(24).toString("base64url");
     const transport = await deps.connect(opts.credential);
     const gate = new ConfirmationGate({ now: deps.now });
-    const offered = gate.forSession(id, packTools(deps.pack, transport), { l2Enabled: deps.l2Enabled });
+    const served = new Set(await transport.listTools());
+    const offered = gate.forSession(id, packTools(deps.pack, transport, served), { l2Enabled: deps.l2Enabled });
     // LLMAgent refuses reserved tool names (delete_*, fund_*, ...). The policy
     // never offers the ones it knows; any other is dropped here, never renamed.
     const defs = offered.defs.filter((d) => {

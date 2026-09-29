@@ -15,6 +15,8 @@ import type { GatedTool } from "./confirm.js";
 import type { PinnedPack } from "./pack.js";
 
 export interface ToolTransport {
+  /** The tool names the connected surface serves (/mcp/apps serves a read-only subset). */
+  listTools(): Promise<string[]>;
   callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
   close(): Promise<void>;
 }
@@ -76,6 +78,16 @@ export async function connectMcp(gatewayBase: string, credential: string | null)
   const client = new Client({ name: "pcc-hosted-agent", version: "0.1.0" });
   await client.connect(transport);
   return {
+    async listTools() {
+      const names: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await client.listTools(cursor ? { cursor } : undefined);
+        names.push(...page.tools.map((t) => t.name));
+        cursor = page.nextCursor;
+      } while (cursor);
+      return names;
+    },
     async callTool(name, args) {
       const result = await client.callTool({ name, arguments: args });
       const { isError, value } = scrubToolResult(result as { content?: unknown; isError?: unknown });
@@ -86,9 +98,10 @@ export async function connectMcp(gatewayBase: string, credential: string | null)
   };
 }
 
-/** The pinned package's tools, each calling through the session's transport. */
-export function packTools(pack: PinnedPack, transport: ToolTransport): GatedTool[] {
-  return pack.tools.map(({ def, spec }) => ({
+/** The pinned package's tools that the connected surface serves, each calling
+ * through the session's transport. */
+export function packTools(pack: PinnedPack, transport: ToolTransport, served: ReadonlySet<string>): GatedTool[] {
+  return pack.tools.filter(({ def }) => served.has(def.name)).map(({ def, spec }) => ({
     def,
     spec,
     caller: (input: unknown) =>

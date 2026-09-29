@@ -26,6 +26,7 @@ function setup(o: { replies?: unknown[]; create?: (req: unknown) => Promise<unkn
   }));
   const calls: string[] = [];
   const transport: ToolTransport = {
+    listTools: async () => PACK.tools.map((t) => t.def.name),
     callTool: async (n) => {
       if (o.failTool) throw new Error(o.failTool);
       calls.push(n);
