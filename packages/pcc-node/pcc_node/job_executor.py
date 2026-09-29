@@ -6,6 +6,13 @@ This module handles the full job execution lifecycle:
   3. Execute the job (IPP print, Opentrons protocol, OctoPrint job, etc.)
   4. Build an evidence bundle
   5. Report evidence + status back via the gateway client
+  6. For a job the device only ACCEPTED (an ``lp`` spool), keep checking the
+     device once per daemon cycle (:meth:`JobExecutor.poll_awaiting`) and
+     report the outcome the DEVICE records for THIS job -- the IPP
+     ``job-state`` of the spooled job-id.  A completion is only ever read
+     through an execution id the device issued for this job (the CUPS job-id,
+     the Opentrons run id); an OctoPrint print and a generic HTTP request
+     name none, so they stay acceptance-only (non-terminal)
 """
 
 import json
@@ -13,11 +20,14 @@ import logging
 import math
 import os
 import platform
+import re
+import struct
 import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 log = logging.getLogger("pcc-node.job-executor")
 
@@ -53,7 +63,10 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
     and a job can still jam, run out of paper or be cancelled.  That is
     ACCEPTANCE, not completion, so every path reports the acceptance flag
     ``submitted`` and none the completion flag ``printed``: this adapter never
-    observes the job's own state (IPP job-state / ``lpstat``).
+    observes the job's own state.  The job's own IPP ``job-state`` is read
+    later, one request per daemon cycle, by :meth:`JobExecutor.poll_awaiting`
+    -- when ``stdout`` names the CUPS request id (see
+    :func:`parse_lp_request_id`) and the job went to a printer host.
     """
     params = job.get("parameters", {})
     content = params.get("content", params.get("text", "Hello from PCC"))
@@ -161,15 +174,18 @@ EVENT_EXECUTION_PROGRESS = "execution_progress"
 EVENT_EXECUTION_COMPLETED = "execution_completed"
 EVENT_EXECUTION_FAILED = "execution_failed"
 
-# Evidence levels, weakest first:
+# Evidence levels, weakest first (the ``level`` payload value in brackets):
 #   submitted        -- the device only ACCEPTED the command (a spooler queued
-#                       the job, a print was started, an API answered 202)
-#   device-reported  -- the device itself reported the work finished
-#   inspected-output -- the output itself was inspected
+#     ["submitted"]     the job, a print was started, an API answered 202)
+#   device reported  -- the device itself reported the work finished (or
+#     ["device_reported"] failed): JobExecutor.poll_awaiting reading the IPP
+#                       job-state of our CUPS job-id after an acceptance
+#   inspected output -- the output itself was inspected (not emitted here)
 # Only device-reported (or stronger) evidence may carry execution_completed,
 # which is what the settlement oracle releases on.  A submitted-only result is
 # recorded as execution_progress at this level and never as a completion.
 EVIDENCE_LEVEL_SUBMITTED = "submitted"
+EVIDENCE_LEVEL_DEVICE_REPORTED = "device_reported"
 
 # Outcome reported directly by an adapter via a "status" key.  Compared after
 # `.strip().lower()`: a device that shouts "FAILED" must not slip past the
@@ -183,18 +199,22 @@ SUCCESS_STATUS_VALUES = frozenset({
 })
 
 # COMPLETION flags -- the device reported that the WORK ITSELF finished.
-# Reserved for adapters that actually OBSERVE completion:
-#   executed -> JobExecutor._execute_generic_http, for a 2xx other than 202:
-#               a synchronous API's own answer that it ran the request
+# Reserved for adapters that actually OBSERVE completion, and no current
+# adapter sets either one to True:
+#   executed -> no current adapter.  Generic HTTP reports acceptance only
+#               (r31 round-2 finding 1; see CORRELATION_HEADER).
 #   printed  -> no current adapter.  An ``lp`` exit of 0 and an OctoPrint 2xx
 #               both mean the job was QUEUED or STARTED, so those adapters
-#               report ``submitted``; ``printed`` waits for an adapter that
-#               observes a finished print (IPP job-state, OctoPrint /api/job).
+#               report ``submitted``.  A finished ``lp`` job is observed later
+#               by JobExecutor.poll_awaiting (IPP job-state), which emits its
+#               own device_reported execution_completed rather than a flag
+#               through this classifier.
+# Either flag present and not True is still read as a failure (rule 6).
 COMPLETION_FLAG_KEYS = ("printed", "executed")
 
 # ACCEPTANCE flags -- the device only reported that it TOOK the request.
 #   submitted -> execute_ipp_print, JobExecutor._execute_octoprint,
-#                JobExecutor._execute_generic_http (HTTP 202 only),
+#                JobExecutor._execute_generic_http (every clean 2xx),
 #                JobExecutor._execute_opentrons
 # Acceptance is not completion: an Opentrons run that is playing has been
 # accepted and can still fail at step 40.  True here is therefore NOT a success
@@ -221,7 +241,11 @@ STATUS_FIELD_KEYS = ("status", "state")
 
 # The device-body scan walks nested dicts and lists (a failure is as real at
 # data.result[0].error as at the top level).  A body deeper or larger than
-# these bounds cannot be verified, and the scan says so as a failure.
+# these bounds cannot be verified, and the scan says so as a failure.  EVERY
+# value is a node -- the root, each dict value and list item, scalars included
+# (r31 round-1 finding 4: counting only the containers visited let a flat
+# 6,000-field body through) -- and a container at depth >= 8 (root 0) is too
+# deep.  _body_shape_problem checks both before any reader looks at the body.
 DEVICE_BODY_MAX_DEPTH = 8
 DEVICE_BODY_MAX_NODES = 5000
 
@@ -252,38 +276,43 @@ HTTP_ACCEPTED = 202
 
 OCTOPRINT_SUCCESS_STATUSES = (200, 201, 204)
 
-# Generic HTTP completion contract (r31 astra verdict item 1, bus #2476).  A 2xx
-# is only the TRANSPORT's answer; "2xx and no recognized error" is not the
-# device saying the work finished.  _execute_generic_http therefore claims
-# `executed` only on the device's POSITIVE completion statement:
-#   * a per-device contract, when configured -- ``device["completionField"]``
-#     (a dot path into the JSON body, e.g. "result.phase") and
-#     ``device["completionValues"]`` (the values meaning finished; default
-#     [True]).  With a contract, the default vocabulary below is not used; or
-#   * by default, a completion word in ``status``/``state``, or a completion
-#     boolean set to True, at the body's top level or in one of
-#     GENERIC_OUTCOME_ENVELOPES.
-# A recognised queueing/running statement is acceptance (``submitted``).
-# Anything else -- {}, null, {"ok": true}, an unknown status word, a malformed
-# value, or completion and acceptance stated at once -- carries no flag at
-# all and classifies as unclassifiable, which fails the job closed.
-# "ok" and "success" are deliberately NOT completion words: many APIs use them
-# for "your REQUEST succeeded", which says nothing about the work.
-GENERIC_COMPLETION_STATUS_VALUES = frozenset({
-    "completed", "complete", "succeeded", "finished", "done",
-})
-GENERIC_ACCEPTANCE_STATUS_VALUES = frozenset({
+# Generic HTTP never completes a job (r31 round-2 finding 1).  A 2xx is the
+# TRANSPORT's answer, and no field of an arbitrary device's body can be read
+# as "the physical work finished": a correlated ``{"ok": true, "jobId": ...}``
+# is exactly what an asynchronous endpoint sends on RECEIPT, and a local
+# field/value mapping (the round-2 completion contract, now removed) cannot
+# tell the two apart.  So a clean 2xx -- 202 and 204 included -- is
+# ACCEPTANCE: ``submitted``, recorded as execution_progress at the submitted
+# level, never execution_completed, and the job stays "running" upstream
+# (non-terminal) for a human to settle.  A failure stated in the body, a body
+# too large or deep to verify, and a non-2xx answer are still failures.
+# Settlement-grade completion needs a dedicated adapter in this module, bound
+# to an execution id the device issued for THIS job and reviewed as code, as
+# the Opentrons run id and the CUPS job-id are.  No device config and no job
+# can turn a generic answer into a completion.
+#
+# The job id rides in this header on every generic request so the device can
+# log which PCC job a request belongs to.  It grants nothing.
+CORRELATION_HEADER = "X-PCC-Job-Id"
+
+# Words a generic device may use under a status/state key for "I took it" or
+# "it is done".  None of them completes a job here (see above), but each is
+# consistent with ACCEPTANCE.  Any other value there -- "jammed", "rejected",
+# null, a number -- or an acceptance/completion flag that is not True
+# ({"accepted": false}) may be the device refusing or failing in words this
+# module does not know.  Recording that as acceptance would be a false
+# statement, so such a result carries no flag and fails closed as
+# unclassifiable: classify_execution_result rule 8's reasoning, applied inside
+# the device's body (_unreadable_outcome).
+GENERIC_ACCEPTANCE_WORDS = frozenset({
     "accepted", "queued", "pending", "submitted", "scheduled", "created",
     "started", "running", "in_progress", "in-progress", "processing", "busy",
     "printing", "waiting",
+    "completed", "complete", "succeeded", "success", "finished", "done", "ok",
 })
-GENERIC_COMPLETION_BOOL_KEYS = ("completed", "complete", "done", "finished")
-GENERIC_ACCEPTANCE_BOOL_KEYS = ("submitted", "accepted", "queued")
-GENERIC_OUTCOME_ENVELOPES = ("result", "data", "response", "body", "payload")
-
-OUTCOME_COMPLETED = "completed"
-OUTCOME_ACCEPTED = "accepted"
-OUTCOME_UNKNOWN = "unknown"
+GENERIC_ACCEPTANCE_FLAG_KEYS = (
+    "submitted", "accepted", "queued", "completed", "complete", "done", "finished",
+)
 
 # Opentrons run lifecycle.  `POST /runs/<id>/actions {play}` only STARTS the
 # protocol; the run's own status is the only report that it finished, so a
@@ -302,6 +331,14 @@ OPENTRONS_TERMINAL_FAILURE = frozenset({"failed", "stopped"})
 # run-completion watcher is the fix; releasing on "the run was accepted" is not.
 OPENTRONS_RUN_POLL_TIMEOUT_S = 120.0
 OPENTRONS_RUN_POLL_INTERVAL_S = 2.0
+# Deadlines (r31 round-1 finding 5).  A per-device budget is clamped to this
+# maximum and an interval to this minimum, so no finite override can hold the
+# daemon for days or flood the device (an interval of 0 used to poll as fast
+# as the device answered).  Every request's timeout is min(cap, remaining)
+# with no floor, and the deadline is checked again after every answer: an
+# answer that arrives after the deadline is discarded, never a completion.
+OPENTRONS_RUN_POLL_TIMEOUT_MAX_S = 3600.0
+MIN_POLL_INTERVAL_S = 0.5
 # Upper bound for a single poll request; the remaining budget can lower it.
 POLL_REQUEST_TIMEOUT_MAX_S = 30.0
 
@@ -371,15 +408,44 @@ def _extract_device_error(body: Any) -> Optional[str]:
     Being the only reader of a device body, it is the single place a new
     failure envelope has to be taught.
     """
-    budget = [DEVICE_BODY_MAX_NODES]
-    return _scan_device_body(body, "", 0, budget)
+    problem = _body_shape_problem(body)
+    if problem:
+        return problem
+    return _scan_device_body(body, "", 0)
 
 
-def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Optional[str]:
-    """Depth-first failure scan behind :func:`_extract_device_error`."""
-    budget[0] -= 1
-    if budget[0] < 0:
-        return "device body too large to verify"
+def _body_shape_problem(body: Any) -> Optional[str]:
+    """Why a device body is too large or too deep to verify, or None.
+
+    Iterative and bounded: it stops at the first bound crossed, and it adds a
+    container's children to the count before walking them, so a huge flat
+    container is refused without being walked.
+    """
+    count = 1  # the root
+    stack: List[Tuple[Any, int]] = [(body, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, (list, tuple)):
+            children = node
+        else:
+            continue
+        if depth >= DEVICE_BODY_MAX_DEPTH:
+            return "device body too deeply nested to verify"
+        count += len(node)
+        if count > DEVICE_BODY_MAX_NODES:
+            return "device body too large to verify"
+        stack.extend((child, depth + 1) for child in children)
+    return None
+
+
+def _scan_device_body(node: Any, path: str, depth: int) -> Optional[str]:
+    """Depth-first failure scan behind :func:`_extract_device_error`.
+
+    Only called on a body that passed :func:`_body_shape_problem`; the depth
+    guards below are a second line, not the bound.
+    """
     where = f" (at {path})" if path else ""
 
     if isinstance(node, str):
@@ -394,7 +460,7 @@ def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Op
         if depth >= DEVICE_BODY_MAX_DEPTH:
             return "device body too deeply nested to verify"
         for index, item in enumerate(node):
-            message = _scan_device_body(item, f"{path}[{index}]", depth + 1, budget)
+            message = _scan_device_body(item, f"{path}[{index}]", depth + 1)
             if message:
                 return message
         return None
@@ -424,7 +490,7 @@ def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Op
     for key, value in node.items():
         if isinstance(value, (dict, list, tuple)) or (isinstance(value, str) and "<" in value):
             child = f"{path}.{key}" if path else str(key)
-            message = _scan_device_body(value, child, depth + 1, budget)
+            message = _scan_device_body(value, child, depth + 1)
             if message:
                 return message
 
@@ -448,85 +514,48 @@ def _nested_device_error(result: Dict) -> Optional[str]:
     return None
 
 
-def _contract_outcome(data: Any, field: Any, values: Any) -> Tuple[str, str]:
-    """Outcome under a device's own completion contract (see the constants)."""
-    if not isinstance(field, str) or not field.strip():
-        return OUTCOME_UNKNOWN, "completionField is not a usable path"
-    node: Any = data
-    for part in field.strip().split("."):
-        if not isinstance(node, dict) or part not in node:
-            return OUTCOME_UNKNOWN, f"completionField {field!r} is absent from the body"
-        node = node[part]
-    wanted = values if isinstance(values, list) and values else [True]
-    for want in wanted:
-        if isinstance(want, bool):
-            matched = node is want
-        elif isinstance(want, int):
-            matched = isinstance(node, int) and not isinstance(node, bool) and node == want
-        elif isinstance(want, str):
-            matched = isinstance(node, str) and node.strip().lower() == want.strip().lower()
-        else:
-            matched = False
-        if matched:
-            return OUTCOME_COMPLETED, f"completionField {field!r} = {_short(node)}"
-    if isinstance(node, str) and node.strip().lower() in GENERIC_ACCEPTANCE_STATUS_VALUES:
-        return OUTCOME_ACCEPTED, f"completionField {field!r} = {_short(node)}"
-    return OUTCOME_UNKNOWN, f"completionField {field!r} = {_short(node)} is not a completion value"
+def _unreadable_outcome(body: Any) -> Optional[str]:
+    """Why a generic device body states an outcome the node cannot read as
+    acceptance, or None (see GENERIC_ACCEPTANCE_WORDS).
 
-
-def _generic_http_outcome(data: Any, device: Dict) -> Tuple[str, str]:
-    """What a 2xx device body positively states: completed, accepted or unknown.
-
-    Called only after the failure scan found nothing, and never for a 202.
-    Returns ``(outcome, reason)``.  Only an explicit, well-formed statement
-    counts; everything else is unknown.
+    Walks every dict and list: a status/state value (or list item) outside
+    GENERIC_ACCEPTANCE_WORDS, or a GENERIC_ACCEPTANCE_FLAG_KEYS flag that is
+    not True, is unreadable.  Only called on a body that passed
+    _extract_device_error, so the body is within the shape bounds and states
+    no known failure.
     """
-    if "completionField" in device:
-        return _contract_outcome(data, device.get("completionField"), device.get("completionValues"))
-
-    if not isinstance(data, dict):
-        return OUTCOME_UNKNOWN, "the device body states no outcome"
-    containers = [data] + [
-        data[key] for key in GENERIC_OUTCOME_ENVELOPES if isinstance(data.get(key), dict)
-    ]
-
-    completed = accepted = unreadable = False
-    for container in containers:
+    stack: List[Tuple[Any, str]] = [(body, "")]
+    while stack:
+        node, path = stack.pop()
+        if isinstance(node, (list, tuple)):
+            stack.extend(
+                (item, f"{path}[{index}]") for index, item in enumerate(node)
+                if isinstance(item, (dict, list, tuple))
+            )
+            continue
+        if not isinstance(node, dict):
+            continue
         for key in STATUS_FIELD_KEYS:
-            if key not in container:
+            if key not in node:
                 continue
-            value = container[key]
-            if isinstance(value, dict):
-                continue  # an object under "state" is a container, not a statement
-            word = value.strip().lower() if isinstance(value, str) else None
-            if word in GENERIC_COMPLETION_STATUS_VALUES:
-                completed = True
-            elif word in GENERIC_ACCEPTANCE_STATUS_VALUES:
-                accepted = True
-            else:
-                unreadable = True  # unknown word, number, list, null
-        for key in GENERIC_COMPLETION_BOOL_KEYS:
-            if key in container:
-                if container[key] is True:
-                    completed = True
-                else:
-                    unreadable = True
-        for key in GENERIC_ACCEPTANCE_BOOL_KEYS:
-            if key in container:
-                if container[key] is True:
-                    accepted = True
-                else:
-                    unreadable = True
-
-    if unreadable:
-        return OUTCOME_UNKNOWN, "the device body carries an outcome field this node cannot read"
-    if completed and accepted:
-        return OUTCOME_UNKNOWN, "the device body states both completion and acceptance"
-    if completed:
-        return OUTCOME_COMPLETED, "the device body states completion"
-    if accepted:
-        return OUTCOME_ACCEPTED, "the device body states acceptance"
-    return OUTCOME_UNKNOWN, "the device body states no outcome"
+            value = node[key]
+            for item in value if isinstance(value, list) else [value]:
+                if not (isinstance(item, str) and item.strip().lower() in GENERIC_ACCEPTANCE_WORDS):
+                    return (
+                        f"the device states {path + '.' if path else ''}{key}={_short(value)}, "
+                        "which this node cannot read as an acceptance"
+                    )
+        for key in GENERIC_ACCEPTANCE_FLAG_KEYS:
+            if key in node and node[key] is not True:
+                return (
+                    f"the device states {path + '.' if path else ''}{key}={_short(node[key])}, "
+                    "which this node cannot read as an acceptance"
+                )
+        stack.extend(
+            (value, f"{path}.{key}" if path else str(key)) for key, value in node.items()
+            if isinstance(value, (dict, list, tuple))
+        )
+    return None
 
 
 def _describe_transport_status(status: int, data: Any) -> str:
@@ -789,6 +818,39 @@ def build_evidence_bundle(
     }
 
 
+def build_device_reported_bundle(
+    job_id: str,
+    device: Dict,
+    result: Dict,
+    *,
+    completed: bool,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Evidence for an outcome the DEVICE reported after it accepted the work.
+
+    Used by the IPP completion poller (the job-state of our CUPS job-id).  It
+    is closed by construction: exactly one terminal event, whose type is chosen by
+    ``completed is True`` (anything else is a failure) and whose level is fixed
+    to device-reported.  No caller can supply event types, add a second
+    terminal event, or mark an accepted-only result complete.
+    """
+    now = datetime.now(tz=timezone.utc).isoformat()
+    payload: Dict[str, Any] = {"level": EVIDENCE_LEVEL_DEVICE_REPORTED, **result}
+    if completed is True:
+        event_type = EVENT_EXECUTION_COMPLETED
+    else:
+        event_type = EVENT_EXECUTION_FAILED
+        payload["error"] = error or "device reported a failure"
+    return {
+        "jobId": job_id,
+        "deviceId": device.get("id", device.get("host", "unknown")),
+        "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
+        "executedAt": now,
+        "result": result,
+        "events": [{"type": event_type, "timestamp": now, "payload": payload}],
+    }
+
+
 def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
     """Default event trail: ``execution_started`` plus at most one more event --
     an outcome (completed / failed), or a submitted-level progress record."""
@@ -840,6 +902,520 @@ def _synthesize_events(device: Dict, result: Any, now: str) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Deferred completion tracking (IPP job-state)
+# ---------------------------------------------------------------------------
+#
+# A queued `lp` job is ACCEPTED, not completed (rule 10 above), so execute()
+# leaves it "running".  A print takes minutes, so execute() does not block on
+# it: it registers the job, and the daemon calls JobExecutor.poll_awaiting()
+# once per cycle, which asks the printer ONCE for the state of OUR job-id and
+# reports only what the PRINTER says.
+#
+# Only IPP is tracked.  An OctoPrint print is accepted-only for good (r31
+# round-2 findings 2 and 3): OctoPrint's REST API names no print attempt, so
+# no answer it gives can be bound to THIS job's print (see _execute_octoprint).
+#
+# Fail closed: an outcome that was not observed is never a completion.
+# Unknown, unreadable, still processing, a failed request and an exhausted
+# budget all leave the job registered or drop it WITHOUT a terminal status.
+
+COMPLETION_KIND_IPP = "ipp"
+
+# Verdict of ONE completion check.
+POLL_COMPLETED = "completed"      # the device reported the work finished
+POLL_FAILED = "failed"            # the device reported a terminal failure
+POLL_WAITING = "waiting"          # not finished, or not (yet) readable
+# The device says it can NEVER report the outcome (IPP 'queued-in-device',
+# RFC 8011 sec 5.3.8).  Dropped at once like an expired budget: no status.
+POLL_UNOBSERVABLE = "unobservable"
+
+# Budget per accepted job, seconds from acceptance; the per-device override is
+# ``device["completionPollTimeout"]``.  0 (or less) disables tracking.  The
+# interval is the daemon's poll cycle: one request per job per cycle.
+IPP_COMPLETION_POLL_TIMEOUT_S = 3600.0
+DEFAULT_COMPLETION_POLL_TIMEOUT_S = {
+    COMPLETION_KIND_IPP: IPP_COMPLETION_POLL_TIMEOUT_S,
+}
+# A per-device completionPollTimeout is clamped to this (7 days).
+COMPLETION_POLL_TIMEOUT_MAX_S = 7 * 24 * 3600.0
+# At most one request per job per this many seconds, however fast the daemon
+# cycles.
+COMPLETION_POLL_MIN_INTERVAL_S = 5.0
+# Per request, and never more than the job's remaining budget.  Checks run
+# inside the daemon loop, so keep a dead device from stalling it for long.
+COMPLETION_POLL_REQUEST_TIMEOUT_S = 10
+
+# --- IPP (RFC 8010 encoding, RFC 8011 semantics) ---------------------------
+
+IPP_PORT = 631
+IPP_REQUEST_VERSION = b"\x02\x00"              # IPP/2.0
+IPP_OPERATION_GET_JOB_ATTRIBUTES = 0x0009      # RFC 8011 sec 5.4.15
+IPP_INT_MAX = 2 ** 31 - 1                      # integer(1:MAX); request-id range
+
+# Delimiter tags are 0x00-0x0f, value tags 0x10-0xff (RFC 8010 sec 3.5).
+IPP_TAG_OPERATION_ATTRIBUTES = 0x01
+IPP_TAG_JOB_ATTRIBUTES = 0x02
+IPP_TAG_END_OF_ATTRIBUTES = 0x03
+IPP_DELIMITER_TAG_MAX = 0x0F
+
+IPP_VALUE_INTEGER = 0x21
+IPP_VALUE_ENUM = 0x23
+IPP_VALUE_KEYWORD = 0x44
+IPP_VALUE_URI = 0x45
+IPP_VALUE_CHARSET = 0x47
+IPP_VALUE_NATURAL_LANGUAGE = 0x48
+
+# RFC 8011 appendix B.1.2: 0x0000-0x00FF is the "successful" class.
+IPP_STATUS_SUCCESS_MAX = 0x00FF
+
+# job-state (type1 enum), RFC 8011 sec 5.3.7 table 15.
+IPP_JOB_STATE_NAMES = {
+    3: "pending",
+    4: "pending-held",
+    5: "processing",
+    6: "processing-stopped",
+    7: "canceled",
+    8: "aborted",
+    9: "completed",
+}
+# B.1.2.1: "The transition of the Job object into the 'completed' state is the
+# only indicator that the Job has been printed."
+IPP_JOB_STATES_COMPLETED = frozenset({9})
+IPP_JOB_STATES_FAILED = frozenset({7, 8})
+IPP_JOB_STATES_NOT_COMPLETED = frozenset({3, 4, 5, 6})   # sec 5.3.7.2
+
+# job-state-reasons (sec 5.3.8) that change what 'completed' means:
+# * 'queued-in-device': a gateway handed the job to a device that cannot report
+#   status; it says 'completed' and "never will have any better information".
+# * '...completed-with-errors': the device finished, and reports errors.
+#   (Table 15 spells these without the 'job-' prefix; sec 5.3.8 with it.)
+IPP_REASON_QUEUED_IN_DEVICE = "queued-in-device"
+IPP_REASONS_COMPLETED_WITH_ERRORS = frozenset({
+    "job-completed-with-errors", "completed-with-errors",
+})
+# Reasons that contradict a plain 'completed': the job was canceled or aborted,
+# or is being stopped (sec 5.3.8).  With state 9 they are a failure.
+IPP_REASONS_STOPPED = frozenset({
+    "job-canceled-by-user", "job-canceled-by-operator", "job-canceled-at-device",
+    "aborted-by-system", "processing-to-stop-point",
+})
+# The ONLY reasons that let state 9 read as a clean completion (r31 round-2
+# finding 4): 'none' (no reason applies), 'job-completed-successfully', and
+# 'job-restartable', which says only that the finished job is retained and
+# could be restarted (sec 5.3.7.2).  Any other reason with state 9 --
+# 'job-completed-with-warnings', a processing reason such as 'job-printing'
+# that contradicts it, a vendor keyword -- cannot establish that this job
+# printed cleanly: UNOBSERVABLE, never COMPLETED.
+IPP_REASONS_COMPLETED_OK = frozenset({
+    "none", "job-completed-successfully", "job-restartable",
+})
+# RFC 8011 sec 5.1.4: a keyword is 1 to 255 US-ASCII lowercase letters,
+# digits, "-", "." and "_", and its first character is a lowercase letter.
+# Matched with fullmatch, so a trailing newline is refused too.
+_IPP_KEYWORD = re.compile(r"[a-z][a-z0-9._-]{0,254}")
+
+# `lp` announces the spooled job as "request id is <queue>-<N> (1 file(s))".
+# The queue is the longest run before the LAST "-<digits>", so hyphenated
+# queue names parse.  The character class is deliberately narrow (CUPS allows
+# more): the queue is pasted into a URL path, and an unusual name only means
+# "no handle", i.e. the job stays accepted-only.
+_LP_REQUEST_ID = re.compile(
+    r"^[ \t]*request id is ([A-Za-z0-9_.+@~-]+)-(\d+)(?=\s|$)", re.MULTILINE
+)
+# A host `lp -h` printed to that is safe to put in a URL unmodified: a name or
+# an IPv4 address.  A host:port or IPv6 literal gets no handle (not tracked).
+_IPP_HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+class IppDecodeError(ValueError):
+    """The bytes are not a well-formed IPP response (RFC 8010 sec 3)."""
+
+
+def parse_lp_request_id(stdout: Any) -> Optional[Tuple[str, int]]:
+    """``(queue, job_id)`` from ``lp`` stdout, or None when there is none.
+
+    ``"request id is default-42 (1 file(s))"`` -> ``("default", 42)``.  None
+    for anything else, including the empty stdout of the Windows
+    ``notepad /p`` path: no request id means no completion handle.
+    """
+    if not isinstance(stdout, str):
+        return None
+    match = _LP_REQUEST_ID.search(stdout)
+    if match is None:
+        return None
+    job_id = int(match.group(2))
+    if not 1 <= job_id <= IPP_INT_MAX:
+        return None
+    return match.group(1), job_id
+
+
+def ipp_job_urls(handle: Dict[str, Any]) -> Tuple[str, str]:
+    """``(http_url, printer_uri)`` for an IPP completion handle.
+
+    RFC 8010 sec 5: the HTTP layer uses ``http://host:631/...`` and the
+    ``printer-uri`` operation attribute keeps the ``ipp://`` form.
+    """
+    path = f"{handle['printer_ip']}:{IPP_PORT}/printers/{handle['queue']}"
+    return f"http://{path}", f"ipp://{path}"
+
+
+def _ipp_value(value_tag: int, name: bytes, value: bytes) -> bytes:
+    """attribute-with-one-value, or additional-value when ``name`` is empty
+    (RFC 8010 secs 3.1.4 / 3.1.5).  Lengths are SIGNED-SHORT, big-endian."""
+    return (
+        struct.pack(">B", value_tag)
+        + struct.pack(">h", len(name)) + name
+        + struct.pack(">h", len(value)) + value
+    )
+
+
+def encode_ipp_get_job_attributes(printer_uri: str, job_id: int, request_id: int) -> bytes:
+    """Encode an IPP/2.0 Get-Job-Attributes request (RFC 8010 / RFC 8011).
+
+    Operation attributes in the order RFC 8011 secs 4.1.4-4.1.5 require:
+    attributes-charset, attributes-natural-language, printer-uri, job-id --
+    then requested-attributes = job-id, job-state, job-state-reasons.  The
+    job-id comes back so the verdict can check the answer is about THIS job
+    (r31 round-1 finding 2); the reasons ride along because 'completed' alone
+    can mean "handed to a device that cannot report" or "finished with errors"
+    (see IPP_REASON_QUEUED_IN_DEVICE).
+    """
+    if not 1 <= job_id <= IPP_INT_MAX:
+        raise ValueError(f"job-id out of range: {job_id!r}")
+    if not 1 <= request_id <= IPP_INT_MAX:
+        raise ValueError(f"request-id out of range: {request_id!r}")
+    return b"".join((
+        IPP_REQUEST_VERSION,
+        struct.pack(">h", IPP_OPERATION_GET_JOB_ATTRIBUTES),
+        struct.pack(">i", request_id),
+        bytes((IPP_TAG_OPERATION_ATTRIBUTES,)),
+        _ipp_value(IPP_VALUE_CHARSET, b"attributes-charset", b"utf-8"),
+        _ipp_value(IPP_VALUE_NATURAL_LANGUAGE, b"attributes-natural-language", b"en"),
+        _ipp_value(IPP_VALUE_URI, b"printer-uri", printer_uri.encode("ascii")),
+        _ipp_value(IPP_VALUE_INTEGER, b"job-id", struct.pack(">i", job_id)),
+        _ipp_value(IPP_VALUE_KEYWORD, b"requested-attributes", b"job-id"),
+        _ipp_value(IPP_VALUE_KEYWORD, b"", b"job-state"),
+        _ipp_value(IPP_VALUE_KEYWORD, b"", b"job-state-reasons"),
+        bytes((IPP_TAG_END_OF_ATTRIBUTES,)),
+    ))
+
+
+def _ipp_read_length(data: bytes, pos: int, what: str) -> Tuple[int, int]:
+    """A SIGNED-SHORT length at ``pos``; returns ``(length, next_pos)``."""
+    if pos + 2 > len(data):
+        raise IppDecodeError(f"truncated in {what}")
+    (length,) = struct.unpack(">h", data[pos:pos + 2])
+    if length < 0:
+        raise IppDecodeError(f"negative {what}: {length}")
+    return length, pos + 2
+
+
+def decode_ipp_response(data: Any) -> Dict[str, Any]:
+    """Parse an IPP response (RFC 8010 sec 3).  Pure; raises IppDecodeError.
+
+    Returns ``{"version": (major, minor), "statusCode": int, "requestId": int,
+    "groups": [{"tag": int, "attributes": [{"name": str, "values":
+    [(value_tag, bytes), ...]}]}]}``.  Values are walked by length whatever
+    their tag, so a collection is a flat run of values and never a job-state.
+    Truncation, a missing end-of-attributes-tag, an attribute outside a group
+    and an additional-value with no attribute before it are all malformed.
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        raise IppDecodeError(f"expected bytes, got {type(data).__name__}")
+    data = bytes(data)
+    if len(data) < 8:
+        raise IppDecodeError(f"truncated header ({len(data)} bytes)")
+    (status_code,) = struct.unpack(">H", data[2:4])
+    (request_id,) = struct.unpack(">i", data[4:8])
+    groups: List[Dict[str, Any]] = []
+    pos = 8
+    while True:
+        if pos >= len(data):
+            raise IppDecodeError("no end-of-attributes-tag")
+        tag = data[pos]
+        pos += 1
+        if tag == IPP_TAG_END_OF_ATTRIBUTES:
+            break
+        if tag <= IPP_DELIMITER_TAG_MAX:
+            groups.append({"tag": tag, "attributes": []})
+            continue
+        if not groups:
+            raise IppDecodeError("attribute before any attribute group")
+        name_len, pos = _ipp_read_length(data, pos, "name-length")
+        if pos + name_len > len(data):
+            raise IppDecodeError("truncated in name")
+        name = data[pos:pos + name_len].decode("ascii", errors="replace")
+        pos += name_len
+        value_len, pos = _ipp_read_length(data, pos, "value-length")
+        if pos + value_len > len(data):
+            raise IppDecodeError("truncated in value")
+        value = data[pos:pos + value_len]
+        pos += value_len
+        attributes = groups[-1]["attributes"]
+        if name_len == 0:
+            if not attributes:
+                raise IppDecodeError("additional-value with no attribute before it")
+            attributes[-1]["values"].append((tag, value))
+        else:
+            attributes.append({"name": name, "values": [(tag, value)]})
+    return {
+        "version": (data[0], data[1]),
+        "statusCode": status_code,
+        "requestId": request_id,
+        "groups": groups,
+    }
+
+
+def ipp_job_state(response: Dict[str, Any]) -> Tuple[Optional[int], List[str], str]:
+    """``(job_state, job_state_reasons, problem)`` from a decoded response.
+
+    Read ONLY from the one Job Attributes group (tag 0x02) a Get-Job-Attributes
+    response carries (RFC 8011 sec 4.3.4.2): the same keyword echoed in the
+    Unsupported group, or anything in the Operation group, is not the job's
+    state.  ``job_state`` is None -- with ``problem`` saying why -- unless
+    there is exactly one job-state holding exactly one 4-octet enum.  An
+    out-of-band value (RFC 8011 sec 5.1 'unknown') is therefore None too.
+    """
+    job_groups = [g for g in response["groups"] if g["tag"] == IPP_TAG_JOB_ATTRIBUTES]
+    if len(job_groups) != 1:
+        return None, [], f"{len(job_groups)} job attribute groups (expected 1)"
+    attributes = job_groups[0]["attributes"]
+
+    reasons: List[str] = []
+    for attribute in attributes:
+        if attribute["name"] == "job-state-reasons":
+            reasons.extend(
+                value.decode("ascii", errors="replace")
+                for value_tag, value in attribute["values"]
+                if value_tag == IPP_VALUE_KEYWORD
+            )
+
+    states = [a for a in attributes if a["name"] == "job-state"]
+    if len(states) != 1:
+        return None, reasons, f"{len(states)} job-state attributes (expected 1)"
+    values = states[0]["values"]
+    if len(values) != 1:
+        return None, reasons, f"job-state has {len(values)} values (expected 1)"
+    value_tag, value = values[0]
+    if value_tag != IPP_VALUE_ENUM or len(value) != 4:
+        return None, reasons, (
+            f"job-state is not a 4-octet enum (tag 0x{value_tag:02x}, "
+            f"{len(value)} octets)"
+        )
+    (state,) = struct.unpack(">i", value)
+    return state, reasons, ""
+
+
+def _ipp_single_attribute(response: Dict[str, Any], name: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The one attribute called ``name`` in the one Job Attributes group."""
+    job_groups = [g for g in response["groups"] if g["tag"] == IPP_TAG_JOB_ATTRIBUTES]
+    if len(job_groups) != 1:
+        return None, f"{len(job_groups)} job attribute groups (expected 1)"
+    found = [a for a in job_groups[0]["attributes"] if a["name"] == name]
+    if len(found) != 1:
+        return None, f"{len(found)} {name} attributes (expected 1)"
+    return found[0], ""
+
+
+def ipp_job_id(response: Dict[str, Any]) -> Tuple[Optional[int], str]:
+    """The job-id an answer is about: exactly one integer(1:MAX), else None + why."""
+    attribute, problem = _ipp_single_attribute(response, "job-id")
+    if attribute is None:
+        return None, problem
+    values = attribute["values"]
+    if len(values) != 1:
+        return None, f"job-id has {len(values)} values (expected 1)"
+    value_tag, value = values[0]
+    if value_tag != IPP_VALUE_INTEGER or len(value) != 4:
+        return None, f"job-id is not a 4-octet integer (tag 0x{value_tag:02x}, {len(value)} octets)"
+    (job_id,) = struct.unpack(">i", value)
+    if not 1 <= job_id <= IPP_INT_MAX:
+        return None, f"job-id {job_id} is out of range"
+    return job_id, ""
+
+
+def ipp_job_state_reasons(response: Dict[str, Any]) -> Tuple[Optional[List[str]], str]:
+    """job-state-reasons read strictly (RFC 8011 sec 5.3.8: REQUIRED, and
+    'none' when no reason applies): exactly one attribute whose every value is
+    keyword-tagged and has keyword syntax (sec 5.1.4, :data:`_IPP_KEYWORD`).
+    ONE malformed value makes the whole attribute unusable (r31 round-2
+    finding 4): ``" "`` or ``"job-completed-with-errors "`` is not a reason
+    this reader could match against the error set, so it is never read past.
+    None + why otherwise."""
+    attribute, problem = _ipp_single_attribute(response, "job-state-reasons")
+    if attribute is None:
+        return None, problem
+    reasons: List[str] = []
+    for value_tag, value in attribute["values"]:
+        if value_tag != IPP_VALUE_KEYWORD:
+            return None, f"a job-state-reasons value is not a keyword (tag 0x{value_tag:02x})"
+        keyword = value.decode("ascii", errors="replace")
+        if not _IPP_KEYWORD.fullmatch(keyword):
+            return None, f"job-state-reasons value {keyword[:64]!r} is not an RFC 8011 keyword"
+        reasons.append(keyword)
+    if not reasons:
+        return None, "job-state-reasons has no values"
+    return reasons, ""
+
+
+def ipp_completion_verdict(
+    http_status: int, body: Any, request_id: int, job_id: int
+) -> Tuple[str, Dict[str, Any]]:
+    """Verdict for one Get-Job-Attributes exchange about spooled job ``job_id``.
+
+    Pure; never raises.  Returns ``(verdict, observation)``.
+
+    No terminal verdict without proof the answer is about THIS job (r31
+    round-1 finding 2): exactly one integer job-id equal to ``job_id``, else
+    WAITING.  For job-state 9, job-state-reasons must be well-formed
+    (:func:`ipp_job_state_reasons`); missing, duplicated or malformed reasons
+    -> WAITING.  Then 'queued-in-device' -> UNOBSERVABLE; errors,
+    cancellation or abort -> FAILED; any other reason outside
+    :data:`IPP_REASONS_COMPLETED_OK` -> UNOBSERVABLE (r31 round-2 finding 4:
+    the combination does not establish a clean completion); and COMPLETED
+    only when every reason is in that allowlist.  FAILED for 7 canceled /
+    8 aborted.  Everything else -- 3-6, an unknown or
+    unreadable state, a non-success IPP status-code (e.g. 0x0406 not-found:
+    the job may have been purged), a request-id that is not ours, a malformed
+    body, a non-200 HTTP status (RFC 8010 sec 3.4.3) or a transport failure
+    (status 0) -- is WAITING.
+    """
+    observation: Dict[str, Any] = {"httpStatus": http_status}
+    if http_status != 200:
+        observation["reason"] = (
+            "transport failure: printer unreachable"
+            if not isinstance(http_status, int) or http_status <= 0
+            else f"HTTP {http_status} (no IPP answer)"
+        )
+        return POLL_WAITING, observation
+    try:
+        response = decode_ipp_response(body)
+    except IppDecodeError as exc:
+        observation["reason"] = f"malformed IPP response: {exc}"
+        return POLL_WAITING, observation
+
+    observation["ippVersion"] = "%d.%d" % response["version"]
+    observation["ippStatusCode"] = "0x%04x" % response["statusCode"]
+    if response["version"][0] not in (1, 2):
+        observation["reason"] = "not an IPP/1.x or IPP/2.x response"
+        return POLL_WAITING, observation
+    if response["requestId"] != request_id:
+        observation["reason"] = (
+            f"request-id {response['requestId']} is not ours ({request_id})"
+        )
+        return POLL_WAITING, observation
+    if response["statusCode"] > IPP_STATUS_SUCCESS_MAX:
+        observation["reason"] = (
+            f"IPP status-code {observation['ippStatusCode']} is not a success"
+        )
+        return POLL_WAITING, observation
+
+    state, reasons, problem = ipp_job_state(response)
+    observation["jobStateCode"] = state
+    observation["jobState"] = IPP_JOB_STATE_NAMES.get(state) if state is not None else None
+    observation["jobStateReasons"] = reasons
+
+    reported_job_id, id_problem = ipp_job_id(response)
+    observation["reportedJobId"] = reported_job_id
+    if reported_job_id is None:
+        observation["reason"] = f"the answer names no usable job-id: {id_problem}"
+        return POLL_WAITING, observation
+    if reported_job_id != job_id:
+        observation["reason"] = f"the answer is about job {reported_job_id}, not our job {job_id}"
+        return POLL_WAITING, observation
+
+    if state is None:
+        observation["reason"] = f"no readable job-state: {problem}"
+        return POLL_WAITING, observation
+
+    name = IPP_JOB_STATE_NAMES.get(state, str(state))
+    if state in IPP_JOB_STATES_COMPLETED:
+        strict_reasons, reasons_problem = ipp_job_state_reasons(response)
+        if strict_reasons is None:
+            observation["reason"] = (
+                f"job-state completed, but job-state-reasons is unusable ({reasons_problem}); "
+                "RFC 8011 requires it, so the completion cannot be read"
+            )
+            return POLL_WAITING, observation
+        if IPP_REASON_QUEUED_IN_DEVICE in strict_reasons:
+            observation["reason"] = (
+                "job-state completed with 'queued-in-device': the job was "
+                "handed to a device that cannot report its outcome"
+            )
+            return POLL_UNOBSERVABLE, observation
+        errors = sorted(IPP_REASONS_COMPLETED_WITH_ERRORS.intersection(strict_reasons))
+        if errors:
+            observation["reason"] = f"job-state completed with errors ({', '.join(errors)})"
+            return POLL_FAILED, observation
+        stopped = sorted(IPP_REASONS_STOPPED.intersection(strict_reasons))
+        if stopped:
+            observation["reason"] = (
+                f"job-state completed, but the printer also reports {', '.join(stopped)}"
+            )
+            return POLL_FAILED, observation
+        unexpected = sorted(set(strict_reasons) - IPP_REASONS_COMPLETED_OK)
+        if unexpected:
+            observation["reason"] = (
+                f"job-state completed with {_short(', '.join(unexpected))}: not a clean "
+                "completion (only none, job-completed-successfully and job-restartable are)"
+            )
+            return POLL_UNOBSERVABLE, observation
+        observation["reason"] = f"job-state completed ({', '.join(strict_reasons)})"
+        return POLL_COMPLETED, observation
+    if state in IPP_JOB_STATES_FAILED:
+        observation["reason"] = f"job-state {name}"
+        return POLL_FAILED, observation
+    if state in IPP_JOB_STATES_NOT_COMPLETED:
+        observation["reason"] = f"job-state {name}"
+        return POLL_WAITING, observation
+    observation["reason"] = f"unrecognised job-state {state}"
+    return POLL_WAITING, observation
+
+
+# --- OctoPrint (acceptance only) -------------------------------------------
+#
+# OctoPrint completion is NOT tracked (r31 round-2 findings 2 and 3).  Its REST
+# API names no print ATTEMPT: /api/job describes whatever the printer runs now,
+# and a file's print history ("prints": success/failure counters and the last
+# print) is cumulative, and a copied or replaced file inherits it.  No answer
+# can therefore be bound to THIS job's print, and counter deltas are not a
+# binding.  A select+print that OctoPrint accepts is recorded as ``submitted``
+# and the job stays "running" upstream (non-terminal).  A completion poller
+# needs ordered start/done events for a file generation this node exclusively
+# created (OctoPrint's push API), with any file event or lost connection read
+# as unobservable -- separate work with its own review.
+
+
+def _octoprint_base_url(device: Dict) -> str:
+    return device.get("url") or f"http://{device.get('host', 'localhost')}:5000"
+
+
+def _octoprint_headers(device: Dict) -> Dict[str, str]:
+    """Auth headers for the device's OctoPrint API."""
+    api_key = device.get("api_key") or device.get("apiKey", "")
+    return {"X-Api-Key": api_key} if api_key else {}
+
+
+def octoprint_file_path(filename: Any) -> Optional[str]:
+    """The job's file as a path in OctoPrint's local storage, or None.
+
+    The filename comes from the JOB and becomes a URL path on the device, so
+    it must be a plain relative path: no empty, ``.`` or ``..`` segment (which
+    could climb out of ``/api/files/local/`` into another API route), no
+    backslash and no control character.  Each segment is percent-encoded by
+    the caller.
+    """
+    if not isinstance(filename, str):
+        return None
+    path = filename.lstrip("/")
+    if not path or "\\" in path or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        return None
+    if any(segment in ("", ".", "..") for segment in path.split("/")):
+        return None
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Main executor class
 # ---------------------------------------------------------------------------
 
@@ -852,9 +1428,19 @@ class JobExecutor:
         List of device dicts (from NodeConfig.devices or discovery).
     gateway_client:
         A PCCGatewayClient instance for pushing status + evidence.
+    clock:
+        Monotonic clock for every deadline (tests inject a fake one).
+    sleep:
+        Sleep between Opentrons run polls (tests inject a fake one).
     """
 
-    def __init__(self, devices: List[Dict], gateway_client=None):
+    def __init__(
+        self,
+        devices: List[Dict],
+        gateway_client=None,
+        clock: Optional[Callable[[], float]] = None,
+        sleep: Optional[Callable[[float], None]] = None,
+    ):
         # Index by id and by protocol for fast lookup
         self._devices_by_id: Dict[str, Dict] = {}
         self._devices_by_protocol: Dict[str, List[Dict]] = {}
@@ -867,6 +1453,17 @@ class JobExecutor:
             self._devices_by_protocol.setdefault(protocol, []).append(dev)
 
         self.gateway = gateway_client
+        self._clock: Callable[[], float] = clock or time.monotonic
+        self._sleep: Callable[[float], None] = sleep or time.sleep
+
+        # Jobs a device ACCEPTED whose completion is still to be observed, by
+        # job id (see poll_awaiting).  IN MEMORY ONLY: a daemon restart forgets
+        # them and they stay "running" upstream.  That is the safe side -- the
+        # job was claimed "running" before its side effect, so it is never
+        # dispatched as queued again (no second print), and no outcome nobody
+        # observed is reported -- but settling it then needs a human.
+        self._awaiting: Dict[str, Dict[str, Any]] = {}
+        self._last_ipp_request_id = 0
 
     def execute(self, job: Dict) -> Dict[str, Any]:
         """Execute a job dict.  Returns the evidence bundle or error dict."""
@@ -928,8 +1525,10 @@ class JobExecutor:
                 elif verdict == RESULT_ACCEPTED:
                     # No terminal status.  The device took the job but has not
                     # reported it finished, so it is neither completed nor
-                    # failed; it stays "running", as reported above.
-                    pass
+                    # failed; it stays "running", as reported above -- until
+                    # poll_awaiting observes the device's own outcome, when
+                    # the adapter left a handle to ask the device with.
+                    self._register_awaiting(job_id, device, result)
                 else:
                     self._report_terminal_failure(
                         job_id,
@@ -989,6 +1588,257 @@ class JobExecutor:
                 metadata.get("error"),
             )
         return acknowledged
+
+    # ------------------------------------------------------------------
+    # Deferred completion tracking
+    # ------------------------------------------------------------------
+
+    def awaiting_completion(self) -> Dict[str, Dict[str, Any]]:
+        """Snapshot of the jobs awaiting device-reported completion."""
+        return {job_id: dict(entry) for job_id, entry in self._awaiting.items()}
+
+    def _completion_handle(
+        self, device: Dict, result: Any
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """``(kind, handle)`` to ask the device about an accepted job, or None.
+
+        A handle is PUBLIC: it is copied into evidence, so it never holds a
+        credential.
+
+        * IPP: ``lp`` stdout names the CUPS request id and the job went to a
+          printer host (``lp -h``).  No request id (e.g. the Windows
+          ``notepad /p`` path), a local queue (``lp -d``/``lp``, no host) or a
+          host that is not a plain name/IPv4 -> no handle.
+        * anything else -- OctoPrint and generic HTTP included -> no handle:
+          no execution id binds a later answer to this job, so the job stays
+          accepted-only.
+        """
+        if not isinstance(result, dict):
+            return None
+        protocol = device.get("protocol") or device.get("type") or "generic"
+
+        if protocol in ("ipp", "printer"):
+            parsed = parse_lp_request_id(result.get("stdout"))
+            host = result.get("printer_ip")
+            if parsed is None or not isinstance(host, str) or not _IPP_HOST.match(host):
+                return None
+            queue, job_id = parsed
+            return COMPLETION_KIND_IPP, {
+                "printer_ip": host, "queue": queue, "job_id": job_id,
+            }
+
+        return None
+
+    def _register_awaiting(self, job_id: str, device: Dict, result: Any) -> bool:
+        """Track an ACCEPTED job until its device reports an outcome.
+
+        Registers nothing -- the job simply stays accepted-only, "running"
+        upstream, as before completion tracking existed -- when there is no
+        handle, when the device's ``completionPollTimeout`` is 0 or less, or
+        when the job is already tracked (a second entry could report twice).
+        """
+        found = self._completion_handle(device, result)
+        if found is None:
+            log.info(
+                "Job %s: no completion handle for this device/result; it stays "
+                "accepted-only (running) with no completion tracking", job_id,
+            )
+            return False
+        kind, handle = found
+        timeout_s = _as_float(
+            device.get("completionPollTimeout"), DEFAULT_COMPLETION_POLL_TIMEOUT_S[kind]
+        )
+        if not math.isfinite(timeout_s):
+            timeout_s = DEFAULT_COMPLETION_POLL_TIMEOUT_S[kind]
+        timeout_s = min(timeout_s, COMPLETION_POLL_TIMEOUT_MAX_S)
+        if timeout_s <= 0:
+            log.info(
+                "Job %s: completion tracking disabled (completionPollTimeout=%g); "
+                "it stays accepted-only (running)", job_id, timeout_s,
+            )
+            return False
+        if job_id in self._awaiting:
+            log.warning(
+                "Job %s is already awaiting completion; not registering it twice",
+                job_id,
+            )
+            return False
+        accepted_at = self._clock()
+        self._awaiting[job_id] = {
+            "job_id": job_id,
+            "device": device,
+            "kind": kind,
+            "handle": handle,
+            "accepted_at": accepted_at,
+            "deadline": accepted_at + timeout_s,
+            "next_poll_at": accepted_at,
+            "last_observation": None,
+        }
+        log.info(
+            "Job %s: awaiting device-reported completion via %s %s (budget %gs)",
+            job_id, kind, handle, timeout_s,
+        )
+        return True
+
+    def poll_awaiting(self) -> None:
+        """Check every awaiting job ONCE -- one request each, no sleeping.
+
+        Called by the daemon once per cycle.  Per job:
+
+        * past its deadline -> dropped WITHOUT a status, ERROR naming it
+          (outcome unknown; it stays "running" upstream).  Checked before the
+          request, which gets at most the remaining budget, and again after
+          the answer: an answer that arrives late is discarded the same way,
+          even when the device said completed.
+        * polled again sooner than COMPLETION_POLL_MIN_INTERVAL_S -> skipped.
+        * the device reports COMPLETED -> dropped, then one bundle
+          ``[execution_completed {level: device_reported, ...}]`` and one
+          ``completed`` status (only if that evidence was acknowledged).
+        * a device-reported terminal FAILURE -> dropped, then one bundle
+          ``[execution_failed ...]`` and one ``failed`` status.
+        * the device says the outcome is unobservable -> dropped like a
+          deadline, ERROR, no status.
+        * still pending/processing, or the check failed/was unreadable ->
+          left registered.
+
+        A job is removed from the registry BEFORE anything is reported, so no
+        failure part-way through can make a later cycle report it again: never
+        two terminal statuses, never two completion bundles.  One job's
+        exception is logged and does not stop the others.
+        """
+        for job_id in list(self._awaiting):
+            entry = self._awaiting.get(job_id)
+            if entry is None:
+                continue
+            try:
+                self._poll_one(entry)
+            except Exception as exc:
+                log.error(
+                    "Job %s: completion check raised %s: %s",
+                    job_id, type(exc).__name__, exc,
+                )
+
+    def _expire(self, entry: Dict[str, Any], why: str) -> None:
+        """Stop tracking a job WITHOUT a status: its outcome is unknown."""
+        job_id = entry["job_id"]
+        self._awaiting.pop(job_id, None)
+        log.error(
+            "Job %s: %s (budget %gs from acceptance, %s %s); completion tracking "
+            "stopped WITHOUT reporting completed or failed -- the outcome is "
+            "unknown and the job stays 'running' upstream (last observation: %s)",
+            job_id, why, entry["deadline"] - entry["accepted_at"], entry["kind"],
+            entry["handle"], entry["last_observation"],
+        )
+
+    def _poll_one(self, entry: Dict[str, Any]) -> None:
+        job_id = entry["job_id"]
+        now = self._clock()
+        remaining = entry["deadline"] - now
+        if remaining <= 0:
+            self._expire(entry, "the device reported no outcome within the budget")
+            return
+        if now < entry.get("next_poll_at", now):
+            return
+        entry["next_poll_at"] = now + COMPLETION_POLL_MIN_INTERVAL_S
+
+        # r31 round-1 finding 5: the request may not outlive the budget, and an
+        # answer that arrives after the deadline is discarded, never reported.
+        timeout = min(COMPLETION_POLL_REQUEST_TIMEOUT_S, remaining)
+        verdict, observation = self._check_ipp(entry, timeout)
+        entry["last_observation"] = observation
+        if self._clock() >= entry["deadline"]:
+            self._expire(entry, "the device's answer arrived after the deadline and is discarded")
+            return
+
+        if verdict == POLL_WAITING:
+            log.debug("Job %s: still awaiting completion (%s)", job_id, observation.get("reason"))
+            return
+
+        self._awaiting.pop(job_id, None)
+        if verdict == POLL_UNOBSERVABLE:
+            log.error(
+                "Job %s: the device cannot report this job's outcome (%s); "
+                "completion tracking stopped WITHOUT reporting completed or "
+                "failed -- the outcome is unknown and the job stays 'running' "
+                "upstream", job_id, observation.get("reason"),
+            )
+            return
+        self._report_device_outcome(entry, verdict, observation)
+
+    def _next_ipp_request_id(self) -> int:
+        self._last_ipp_request_id = self._last_ipp_request_id % IPP_INT_MAX + 1
+        return self._last_ipp_request_id
+
+    def _check_ipp(self, entry: Dict[str, Any], timeout: float) -> Tuple[str, Dict[str, Any]]:
+        """One IPP Get-Job-Attributes for an awaiting job."""
+        from .http_util import http_bytes
+
+        handle = entry["handle"]
+        url, printer_uri = ipp_job_urls(handle)
+        request_id = self._next_ipp_request_id()
+        request = encode_ipp_get_job_attributes(printer_uri, handle["job_id"], request_id)
+        status, body = http_bytes(
+            "POST", url, data=request,
+            headers={"Content-Type": "application/ipp"},
+            timeout=timeout,
+        )
+        return ipp_completion_verdict(status, body, request_id, handle["job_id"])
+
+    def _report_device_outcome(
+        self, entry: Dict[str, Any], verdict: str, observation: Dict[str, Any]
+    ) -> None:
+        """Push the device-reported outcome, then report its terminal status.
+
+        The caller has already removed the job from the registry: this runs
+        at most once per job.  'completed' is reported only when the gateway
+        acknowledged the completion evidence -- a completed status whose
+        execution_completed never landed could not settle, and pushing the
+        bundle again risks a duplicate -- so an unacknowledged push leaves the
+        job "running" and says so at ERROR.  'failed' is reported either way,
+        as execute() does: failing closed needs no evidence to be safe.
+        """
+        job_id = entry["job_id"]
+        result = {
+            "kind": entry["kind"],
+            "handle": dict(entry["handle"]),
+            **observation,
+        }
+        evidence = build_device_reported_bundle(
+            job_id,
+            entry["device"],
+            result,
+            completed=verdict == POLL_COMPLETED,
+            error=observation.get("reason") or "device reported a failure",
+        )
+        payload = evidence["events"][0]["payload"]
+
+        pushed = self.gateway.push_evidence(job_id, evidence)
+        if verdict == POLL_COMPLETED:
+            if not pushed:
+                log.error(
+                    "Job %s: the device reported completion (%s) but the gateway "
+                    "did not acknowledge the completion evidence; NOT reporting "
+                    "'completed' -- the job stays 'running' upstream",
+                    job_id, observation.get("reason"),
+                )
+                return
+            if self.gateway.update_job_status(job_id, "completed", result):
+                log.info(
+                    "Job %s completed: the device reported it (%s)",
+                    job_id, observation.get("reason"),
+                )
+            else:
+                log.error(
+                    "Job %s: the gateway did not acknowledge the 'completed' "
+                    "status report; the job may still look 'running' upstream "
+                    "(the device reported: %s)", job_id, observation.get("reason"),
+                )
+            return
+
+        log.warning(
+            "Job %s failed: the device reported %s", job_id, payload["error"],
+        )
+        self._report_terminal_failure(job_id, {"error": payload["error"], "result": result})
 
     def _find_device(self, job: Dict) -> Optional[Dict]:
         """Find the best device for this job.
@@ -1136,7 +1986,10 @@ class JobExecutor:
         # submitted, and reporting that as a completion is the OH-1 defect one
         # layer up from the play guard above.  So wait for the run's own
         # terminal status and report THAT.
-        timeout_s = _as_float(device.get("runPollTimeout"), OPENTRONS_RUN_POLL_TIMEOUT_S)
+        timeout_s = min(
+            _as_float(device.get("runPollTimeout"), OPENTRONS_RUN_POLL_TIMEOUT_S),
+            OPENTRONS_RUN_POLL_TIMEOUT_MAX_S,
+        )
         interval_s = _as_float(device.get("runPollInterval"), OPENTRONS_RUN_POLL_INTERVAL_S)
         run_status, run_body = self._await_opentrons_run(
             base_url, run_id, ot2_headers, timeout_s, interval_s
@@ -1209,26 +2062,38 @@ class JobExecutor:
         run never reached a terminal state inside the budget, or when the poll
         could not be read -- both of which the caller must treat as "outcome
         unknown", never as a success.
+
+        r31 round-1 finding 5: the budget is clamped to
+        OPENTRONS_RUN_POLL_TIMEOUT_MAX_S and the interval to at least
+        MIN_POLL_INTERVAL_S, so the request count is bounded; each request
+        gets min(cap, remaining) with no floor; and an answer that arrives
+        after the deadline is discarded (outcome unknown).  Only a body about
+        THIS run (``data.id == run_id``) is read at all; another run's body is
+        ignored, so it can neither settle nor fail this run.
         """
         from .http_util import http
 
-        if timeout_s <= 0:
+        timeout_s = min(timeout_s, OPENTRONS_RUN_POLL_TIMEOUT_MAX_S)
+        if not timeout_s > 0:
             return None, None
+        interval_s = min(max(interval_s, MIN_POLL_INTERVAL_S), timeout_s)
+        max_requests = int(timeout_s / interval_s) + 1
 
-        deadline = time.monotonic() + timeout_s
+        deadline = self._clock() + timeout_s
         last_body: Any = None
-        while True:
-            # Each request gets at most the remaining budget (r31 item 4): a
-            # device that stops answering cannot hold the poll past its deadline.
-            remaining = deadline - time.monotonic()
+        for _ in range(max_requests):
+            remaining = deadline - self._clock()
             if remaining <= 0:
                 return None, last_body
             status, body = http(
                 "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False,
-                timeout=max(1.0, min(POLL_REQUEST_TIMEOUT_MAX_S, remaining)),
+                timeout=min(POLL_REQUEST_TIMEOUT_MAX_S, remaining),
             )
-            last_body = body
-            if status in (200, 201):
+            if self._clock() >= deadline:
+                return None, last_body  # this answer came too late: discarded
+            data = _opentrons_run_data(body)
+            if status in (200, 201) and data is not None and data.get("id") == run_id:
+                last_body = body
                 run_status = _opentrons_run_status(body)
                 if (
                     run_status in OPENTRONS_TERMINAL_SUCCESS
@@ -1237,44 +2102,55 @@ class JobExecutor:
                 ):
                     return run_status, body
 
-            remaining = deadline - time.monotonic()
+            remaining = deadline - self._clock()
             if remaining <= 0:
                 return None, last_body
-            time.sleep(min(max(interval_s, 0.0), remaining))
+            self._sleep(min(interval_s, remaining))
+        return None, last_body
 
     def _execute_octoprint(self, device: Dict, job: Dict) -> Dict[str, Any]:
-        """Start an OctoPrint print job.
+        """Start an OctoPrint print job: ACCEPTANCE only, never completion.
 
         OctoPrint answering 200/201/204 to ``select + print`` means the API
         ACCEPTED the job -- it selected the file and started the print -- not
         that anything was printed: the print can still fail hours later.  The
         result therefore carries the acceptance flag ``submitted``, never the
-        completion flag ``printed``.  Observing completion needs the job's own
-        state (``GET /api/job``), which this adapter does not poll.
+        completion flag ``printed``, and it gets no completion handle: the job
+        stays "running" upstream (non-terminal).  OctoPrint names no print
+        attempt, so no later answer could be bound to this print (r31 round-2
+        findings 2 and 3; see _octoprint_base_url's section comment).
 
         ``submitted`` still reads the device's answer, not just the status
         line, for the same reason as :meth:`_execute_generic_http`: a printer
         that replies ``{"error": "E_JAM: carriage jam, job aborted"}`` in a 200
         body has failed.  A failure stated in the body outranks the status code.
+
+        The job's filename must be a plain path in OctoPrint's local storage
+        (:func:`octoprint_file_path`); any other name is refused before
+        anything is sent.
         """
         from .http_util import http
 
-        base_url = device.get("url") or f"http://{device.get('host', 'localhost')}:5000"
-        api_key = device.get("api_key") or device.get("apiKey", "")
+        base_url = _octoprint_base_url(device)
         params = job.get("parameters", {})
         filename = params.get("filename", "")
 
-        headers = {}
-        if api_key:
-            headers["X-Api-Key"] = api_key
-
         if not filename:
             return {"error": "no_filename", "note": "octoprint job requires filename in parameters"}
+        path = octoprint_file_path(filename)
+        if path is None:
+            return {
+                "error": "unsafe_filename",
+                "submitted": False,
+                "filename": _short(filename),
+                "note": "the filename must be a plain relative path (no '.', '..' or empty "
+                        "segments, backslashes or control characters); nothing was sent",
+            }
 
         status, data = http(
-            "POST", f"{base_url}/api/files/local/{filename}",
+            "POST", f"{base_url}/api/files/local/{quote(path, safe='/')}",
             body={"command": "select", "print": True},
-            headers=headers,
+            headers=_octoprint_headers(device),
             verify_ssl=False,
         )
 
@@ -1302,10 +2178,10 @@ class JobExecutor:
         modbus, opcua, http, serial, mdns, camera and unknown per
         ``discovery.py``/``detect.py``, plus anything ``_find_device`` step 4
         drops on an unmapped capability.  It is the widest adapter path, not an
-        edge, so its notion of "success" is the one that matters most.
+        edge, so what it may claim matters most.
 
-        ``executed`` is therefore derived from the DEVICE's answer, not from
-        the transport alone:
+        It claims ACCEPTANCE at most, never completion (r31 round-2 finding
+        1; see CORRELATION_HEADER):
 
         * the success band is 2xx.  ``status < 400`` also admitted redirects
           (nothing was executed) and http_util's status-0 transport sentinel.
@@ -1313,53 +2189,65 @@ class JobExecutor:
           EVERY status, not only on transport failure.  A reachable instrument
           that answers ``200`` with ``{"error": ...}`` -- a JSON-RPC error, a
           REST ``{"status": "error"}``, ``{"success": false}``, a SOAP fault --
-          is a failed job, and lifting its reason here is what stops the bundle
-          claiming ``execution_completed`` for it.
-        * 202 Accepted is ACCEPTANCE, not completion (:data:`HTTP_ACCEPTED`):
-          the device took the request and has not finished it.  A 202 reports
-          the acceptance flag ``submitted`` instead of ``executed``, derived
-          the same way.
-        * any other clean 2xx claims ``executed`` ONLY when the body positively
-          states completion (the device's contract, or the default completion
-          vocabulary -- see GENERIC_COMPLETION_STATUS_VALUES).  A recognised
-          queueing/running statement reports ``submitted``.  Anything else
-          (``{}``, ``null``, ``{"ok": true}``, an unknown status word, a
-          malformed value) carries NO flag, so it classifies as unclassifiable
-          and the job fails closed: "2xx and no recognised error" is the
-          transport answering, not the device saying the work finished (r31
-          astra verdict item 1).
+          is a failed job, and so is a body too large or too deep to verify.
+        * a 2xx whose body states an outcome the node cannot read as
+          acceptance (:func:`_unreadable_outcome`: a status/state word such as
+          ``"rejected"``, or ``{"accepted": false}``) carries NO flag, so it
+          classifies as unclassifiable and fails closed: the device may be
+          refusing in words this module does not know.
+        * any other 2xx -- a 200 saying ``{"status": "completed"}`` or
+          ``{"ok": true, "jobId": <this job>}``, an empty body, a 202, a 204
+          -- is the device ACCEPTING the request: ``submitted``, which the
+          classifier reads as accepted (non-terminal).  Nothing in the body,
+          the device config or the job can make it a completion.
+        * the job chooses the method and the path, and the path must be an
+          absolute path on the device (it is appended to the device URL, so
+          ``@host`` or ``//host`` must not reach another host).
         """
         from .http_util import http
 
         base_url = device.get("url") or device.get("baseUrl") or ""
         params = job.get("parameters", {})
+        job_id = job.get("id")
         method = params.get("method", "POST")
         path = params.get("path", "/execute")
         body = params.get("body") or params
 
         if not base_url:
-            return {"error": "no_base_url", "executed": False}
+            return {"error": "no_base_url", "submitted": False}
+        if not (
+            isinstance(path, str)
+            and path.startswith("/")
+            and not path.startswith("//")
+            and "\\" not in path
+            and not any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path)
+        ):
+            return {
+                "error": f"the job's path {_short(path)} is not an absolute path on the device; nothing was sent",
+                "submitted": False,
+                "device": base_url,
+            }
+
+        headers: Dict[str, str] = {}
+        if isinstance(job_id, str) and job_id:
+            headers[CORRELATION_HEADER] = job_id
 
         url = f"{base_url.rstrip('/')}{path}"
-        status, data = http(method, url, body=body, verify_ssl=False)
-
-        transport_ok = HTTP_SUCCESS_MIN <= status < HTTP_SUCCESS_MAX_EXCLUSIVE
-        device_error = _extract_device_error(data)
-        # A 202 only acknowledges the request, so it may never claim `executed`.
-        flag = "submitted" if status == HTTP_ACCEPTED else "executed"
+        status, data = http(method, url, body=body, headers=headers, verify_ssl=False)
 
         result: Dict[str, Any] = {"status_code": status, "response": data, "device": base_url}
+        device_error = _extract_device_error(data)
         if device_error is not None:
-            return {flag: False, **result, "error": device_error}
-        if not transport_ok:
-            return {flag: False, **result, "error": _describe_transport_status(status, data)}
-        if status == HTTP_ACCEPTED:
-            return {"submitted": True, **result}
-
-        outcome, reason = _generic_http_outcome(data, device)
-        if outcome == OUTCOME_COMPLETED:
-            return {"executed": True, **result}
-        if outcome == OUTCOME_ACCEPTED:
-            return {"submitted": True, **result}
-        # No flag: the classifier reads this as unclassifiable (fail closed).
-        return {**result, "outcome": "unrecognized", "note": reason}
+            return {"submitted": False, **result, "error": device_error}
+        if not HTTP_SUCCESS_MIN <= status < HTTP_SUCCESS_MAX_EXCLUSIVE:
+            return {"submitted": False, **result, "error": _describe_transport_status(status, data)}
+        unreadable = _unreadable_outcome(data)
+        if unreadable is not None:
+            # No flag: the classifier reads this as unclassifiable (fail closed).
+            return {**result, "outcome": "unrecognized", "note": unreadable}
+        return {
+            "submitted": True,
+            **result,
+            "note": "acceptance only: generic HTTP never reads a completion (no reviewed "
+                    "adapter binds this device's answer to this job's execution)",
+        }
