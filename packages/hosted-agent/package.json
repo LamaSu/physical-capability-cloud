@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@pcc/agent-runtime": "workspace:*",
     "better-sqlite3": "^11.8.1"
   },
