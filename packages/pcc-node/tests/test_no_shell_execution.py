@@ -18,6 +18,16 @@ SHELL_PATTERNS = {
     "os.system": re.compile(r"\bos\.system\s*\("),
     "os.popen": re.compile(r"\bos\.popen\s*\("),
     "subprocess.getoutput": re.compile(r"\bsubprocess\.getstatusoutput\s*\(|\bsubprocess\.getoutput\s*\("),
+    # Refvertical's hardening notes on #442 (bus #3782): the other ways to start
+    # a shell, or to replace the process with one.
+    "asyncio.create_subprocess_shell": re.compile(r"\bcreate_subprocess_shell\s*\("),
+    "a shell as argv[0]": re.compile(
+        r"""[\[(]\s*["'](?:/usr)?(?:/bin/)?(?:sh|bash|zsh|dash|ksh|fish|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh)["']"""
+    ),
+    "pty.spawn": re.compile(r"\bpty\.spawn\s*\("),
+    "os.exec*": re.compile(r"\bos\.exec[lv]p?e?\s*\("),
+    "os.spawn*": re.compile(r"\bos\.spawn[lv]p?e?\s*\("),
+    "os.posix_spawn": re.compile(r"\bos\.posix_spawnp?\s*\("),
 }
 
 
