@@ -284,3 +284,41 @@ describe("anything else is a typed refusal", () => {
     expect(refused).toBeGreaterThan(900);
   });
 });
+
+describe("astra, round 2 of R13 (D): the assurance structure only the compiler produces", () => {
+  const withPrograms = (a: string | null, b: string | null) =>
+    plan({
+      nodes: [
+        node({ nodeId: "print", tierKey: a === null ? "tier0" : "tier2", committedProgramHash: a }),
+        node({ nodeId: "mail", capabilityType: "mail.drop", tierKey: b === null ? "tier0" : "tier2", committedProgramHash: b }),
+      ],
+    });
+
+  it("a unit above tier 0 with NO committed program is refused (astra's forgery: a tier-0 deal relabelled tier 2)", () => {
+    const forged = edit(sealed(plan()), (d) => {
+      for (const j of d.jobs) for (const u of j.units) {
+        u.requiredTier = 2;
+        u.requestedTier = 2;
+      }
+      for (const b of d.nodeToUnit) b.tier = 2; // committedProgramHash stays null
+    });
+    expect(parseSealedDeal(forged)).toEqual({ ok: false, reason: "bad-assurance" });
+  });
+
+  it("a tier-0 unit that commits a program is refused", () => {
+    const forged = edit(sealed(plan()), (d) => {
+      d.nodeToUnit[0].committedProgramHash = PROGRAM_T2;
+    });
+    expect(parseSealedDeal(forged)).toEqual({ ok: false, reason: "bad-assurance" });
+  });
+
+  it("two different programs in one deal are refused: the compiler commits at most one (v2); one program, or none, parses", () => {
+    const one = sealed(withPrograms(PROGRAM_T2, PROGRAM_T2));
+    expect(parseSealedDeal(one).ok).toBe(true);
+    expect(parseSealedDeal(sealed(withPrograms(PROGRAM_T2, null))).ok).toBe(true);
+    const forged = edit(one, (d) => {
+      d.nodeToUnit[1].committedProgramHash = DIG("e3");
+    });
+    expect(parseSealedDeal(forged)).toEqual({ ok: false, reason: "bad-assurance" });
+  });
+});

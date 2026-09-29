@@ -151,7 +151,7 @@ const MAX_UINT256_DECIMAL = "115792089237316195423570985008687907853269984665640
 
 /** The table, once. SQLite stores it as `CREATE TABLE <this>`, which `ensureBudgetReservationsSchema` compares. */
 const TABLE = `budget_reservations (
-      id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+      id TEXT NOT NULL PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
       principal TEXT NOT NULL CHECK (length(principal) BETWEEN 1 AND 128),
       payer_address TEXT NOT NULL CHECK (length(payer_address) BETWEEN 1 AND 128),
       currency TEXT NOT NULL CHECK (length(currency) BETWEEN 1 AND 128),
@@ -181,21 +181,31 @@ const TABLE = `budget_reservations (
     )`;
 
 /**
- * The runtime DDL: the table, its indexes and its guard triggers. `ensureBudgetReservationsSchema` runs
+ * The schema's version, recorded in `pcc_schema_versions` by the DDL itself. `ensureBudgetReservationsSchema`
+ * trusts this record, never the table's SQL text: two texts can describe one schema (astra, round 2 of R13).
+ * Bump it whenever TABLE, or anything the store relies on, changes. v1 was 45d0cde3; v2 adds `id NOT NULL`
+ * and the insert guard that refuses a reused id.
+ */
+export const BUDGET_RESERVATIONS_SCHEMA_VERSION = 2;
+
+/**
+ * The runtime DDL: the version table, the table, its indexes, its guard triggers and the version record. `ensureBudgetReservationsSchema` runs
  * it (so does `migrateDatabase`), and migrations/0004_budget_reservations.sql is this, statement for
  * statement. The triggers hold no data, so they are dropped and recreated on every run.
  */
 export const BUDGET_RESERVATIONS_DDL = `
+    CREATE TABLE IF NOT EXISTS pcc_schema_versions (object TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS ${TABLE};
     CREATE INDEX IF NOT EXISTS budget_reservations_request_idx ON budget_reservations(request_id, state);
     CREATE INDEX IF NOT EXISTS budget_reservations_parent_idx ON budget_reservations(parent_reservation_id, parent_unit);
     DROP TRIGGER IF EXISTS budget_reservations_insert_guard;
     CREATE TRIGGER budget_reservations_insert_guard BEFORE INSERT ON budget_reservations
     WHEN NEW.state <> 'issued'
+      OR EXISTS (SELECT 1 FROM budget_reservations e WHERE e.id = NEW.id)
       OR (NEW.parent_reservation_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM budget_reservations p WHERE p.id = NEW.parent_reservation_id AND p.state = 'consumed'))
     BEGIN
-      SELECT RAISE(ABORT, 'budget_reservations: a reservation is inserted issued, and a child only under a consumed parent');
+      SELECT RAISE(ABORT, 'budget_reservations: a reservation is inserted issued, under an id never used before, and a child only under a consumed parent');
     END;
     DROP TRIGGER IF EXISTS budget_reservations_update_guard;
     CREATE TRIGGER budget_reservations_update_guard BEFORE UPDATE ON budget_reservations
@@ -213,32 +223,67 @@ export const BUDGET_RESERVATIONS_DDL = `
     BEGIN
       SELECT RAISE(ABORT, 'budget_reservations: a reservation is never deleted');
     END;
+    INSERT OR REPLACE INTO pcc_schema_versions (object, version) VALUES ('budget_reservations', ${BUDGET_RESERVATIONS_SCHEMA_VERSION});
 `;
 
-const collapse = (sql: string) => sql.replace(/\s+/g, " ").trim();
-
 /**
- * Create the table (idempotent) and refuse one of another shape (H3). `CREATE TABLE IF NOT EXISTS`
- * would silently keep an older table, and a consume would then fail at runtime, so the stored
- * definition is compared first: an empty table of another shape is rebuilt (the table has never
- * shipped), and one that holds rows stops the boot for a deliberate migration (#2240).
+ * Create the table (idempotent) and refuse one of an unknown version (H3). `CREATE TABLE IF NOT EXISTS`
+ * would silently keep an older table, and a consume would then fail at runtime.
+ * - Compatibility is the RECORDED version (`BUDGET_RESERVATIONS_SCHEMA_VERSION`), never the SQL text:
+ *   two texts can describe one schema (astra, round 2 of R13).
+ * - A table without the current version is rebuilt if it is empty (the table has never shipped). If it
+ *   holds rows, it stops the boot for a deliberate migration (#2240).
+ * - Everything runs in ONE immediate transaction: inspection, the emptiness check, the drop, the DDL and
+ *   the version record. So no writer can commit a row between the check and a drop.
  */
 export function ensureBudgetReservationsSchema(sqlite: Database.Database): void {
-  const found = sqlite.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations'").get() as
-    | { sql: string }
-    | undefined;
-  if (found && collapse(found.sql) !== collapse(`CREATE TABLE ${TABLE}`)) {
-    const { n } = sqlite.prepare("SELECT count(*) AS n FROM budget_reservations").get() as { n: number };
-    if (n > 0) {
-      throw new Error(
-        "budget_reservations exists with a different definition from BUDGET_RESERVATIONS_DDL and holds rows: " +
-          "refusing to start a store its schema cannot back. Migrate it deliberately (operator decision #2240).",
-      );
-    }
-    sqlite.exec("DROP TABLE budget_reservations");
-  }
-  sqlite.exec(BUDGET_RESERVATIONS_DDL);
+  sqlite
+    .transaction(() => {
+      const table = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations'").get();
+      if (table) {
+        const versions = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pcc_schema_versions'").get();
+        const recorded = versions
+          ? (sqlite.prepare("SELECT version FROM pcc_schema_versions WHERE object = 'budget_reservations'").get() as { version: unknown } | undefined)
+          : undefined;
+        if (recorded?.version !== BUDGET_RESERVATIONS_SCHEMA_VERSION) {
+          const { n } = sqlite.prepare("SELECT count(*) AS n FROM budget_reservations").get() as { n: number };
+          if (n > 0) {
+            throw new Error(
+              `budget_reservations holds rows but its recorded schema version is ${recorded ? String(recorded.version) : "missing"}, ` +
+                `not ${BUDGET_RESERVATIONS_SCHEMA_VERSION}: refusing to start a store its schema cannot back. ` +
+                "Verify and migrate it deliberately (operator decision #2240).",
+            );
+          }
+          sqlite.exec("DROP TABLE budget_reservations");
+        }
+      }
+      sqlite.exec(BUDGET_RESERVATIONS_DDL);
+    })
+    .immediate();
 }
+
+/**
+ * Read each named field of a caller's object ONCE into an owned, frozen, prototype-free copy (astra, round 2 of
+ * R13). Validation and every later use see only that copy, so a getter or a proxy cannot pass a check with one
+ * value and then be written with another. Null when the value is not an object, or when a read throws.
+ */
+function readOnce(x: unknown, keys: readonly string[]): Readonly<Record<string, unknown>> | null {
+  try {
+    if (typeof x !== "object" || x === null) return null;
+    const src = x as Record<string, unknown>;
+    const out: Record<string, unknown> = Object.create(null);
+    for (const k of keys) out[k] = src[k];
+    return Object.freeze(out);
+  } catch {
+    return null;
+  }
+}
+
+const ISSUE_FIELDS = [
+  "reservationId", "principal", "payerAddress", "currency", "maxAmountBaseUnits", "purpose", "requestId",
+  "expiresInSec", "minTier", "jobBinding", "requestCeilingBaseUnits", "parent",
+] as const;
+const CONSUME_FIELDS = ["reservationId", "principal", "dealDigest", "dealPreimage"] as const;
 
 const BASE_UNITS = /^(0|[1-9][0-9]{0,77})$/;
 const DIGEST = /^0x[0-9a-fA-F]{64}$/;
@@ -383,8 +428,12 @@ export class BudgetReservationStore {
    *   outlives the unit, and the child's floor is at least the parent's.
    */
   issue(input: IssueReservationInput): IssueResult {
-    const i = input;
-    const parent = i.parent ?? null;
+    // Every field is read ONCE, the nested parent reference included; only the copies are used below.
+    const i = readOnce(input, ISSUE_FIELDS) as IssueReservationInput | null;
+    if (!i) return { ok: false, reason: "invalid-input" };
+    const parentRaw: unknown = i.parent ?? null;
+    const parent = parentRaw === null ? null : (readOnce(parentRaw, ["reservationId", "unit"]) as ParentUnitRef | null);
+    if (parentRaw !== null && parent === null) return { ok: false, reason: "invalid-input" };
     if (
       !isId(i.reservationId) || !isId(i.principal) || !isId(i.payerAddress) || !isId(i.currency) || !isId(i.requestId) ||
       typeof i.purpose !== "string" || i.purpose.length === 0 || i.purpose.length > 256 ||
@@ -460,7 +509,9 @@ export class BudgetReservationStore {
    *   row must change.
    */
   consume(input: ConsumeReservationInput): ConsumeResult {
-    const c = input;
+    // Every field is read ONCE: the checks, the hash, the parse and the final UPDATE all see the same values.
+    const c = readOnce(input, CONSUME_FIELDS) as ConsumeReservationInput | null;
+    if (!c) return { ok: false, reason: "invalid-input" };
     if (
       !isId(c.reservationId) || !isId(c.principal) ||
       typeof c.dealDigest !== "string" || !DIGEST.test(c.dealDigest) ||

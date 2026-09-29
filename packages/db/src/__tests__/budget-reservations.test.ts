@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { acceptedDealPreimage, compileAcceptedPlan, type AcceptedPlanInput } from "@pcc/spec";
+import { acceptedDealPreimage, canonicalize, compileAcceptedPlan, type AcceptedPlanInput } from "@pcc/spec";
 import { createStore } from "../index.js";
 import {
   BUDGET_RESERVATIONS_DDL,
@@ -567,7 +567,7 @@ describe("H3: migration 0004 is the runtime DDL, and a table of another shape is
     const held = new Database(":memory:");
     held.exec(OLD_0004);
     held.prepare("INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, expires_at, state, created_at) VALUES ('x', 'p', 'w', 'USDC', '1', 'p', 'r', 2, 'issued', 1)").run();
-    expect(() => ensureBudgetReservationsSchema(held)).toThrow(/different definition .* holds rows/);
+    expect(() => ensureBudgetReservationsSchema(held)).toThrow(/holds rows but its recorded schema version is missing/);
     expect(held.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 1 }); // nothing dropped
   });
 
@@ -579,5 +579,168 @@ describe("H3: migration 0004 is the runtime DDL, and a table of another shape is
     expect(() => ensureBudgetReservationsSchema(client)).not.toThrow();
     expect(() => client.exec(BUDGET_RESERVATIONS_DDL)).not.toThrow();
     s.close();
+  });
+});
+
+describe("astra, round 2 of R13 (ac3db658): each finding reproduced first, then fixed", () => {
+  const PARENT: ParentUnitRef = { reservationId: "resv-1", unit: unitRef(0) }; // unit n0: n = 5.0 USDC
+  function sealedParent() {
+    const f = fresh();
+    f.store.issue(issueInput());
+    expect(f.store.consume(consumeInput()).ok).toBe(true);
+    return f;
+  }
+  const childInput = (over: Partial<IssueReservationInput> = {}) =>
+    issueInput({ reservationId: "child-1", principal: OP, payerAddress: CHILD_PAYER, requestId: "req-child", maxAmountBaseUnits: 3_000_000n, parent: PARENT, ...over });
+
+  it("A: issue reads the amount ONCE: a value that checks as 1 cannot be inserted as 100 USDC (astra's counterexample)", () => {
+    const { store } = sealedParent();
+    let reads = 0;
+    const input = childInput({ requestCeilingBaseUnits: 10_000_000n });
+    Object.defineProperty(input, "maxAmountBaseUnits", { enumerable: true, get: () => (++reads <= 3 ? 1n : 100_000_000n) });
+    const r = store.issue(input);
+    expect(reads).toBe(1);
+    expect(r.ok && r.reservation.maxAmountBaseUnits).toBe(1n); // the ONE value that was checked
+  });
+
+  it("A: issue reads the nested parent reference ONCE", () => {
+    const { store } = sealedParent();
+    let unitReads = 0;
+    const parent = { reservationId: "resv-1" } as ParentUnitRef;
+    Object.defineProperty(parent, "unit", { enumerable: true, get: () => (unitReads++, unitRef(0)) });
+    expect(store.issue(childInput({ parent })).ok).toBe(true);
+    expect(unitReads).toBe(1);
+  });
+
+  it("A: consume reads the reservation id ONCE: checks made on the caller's reservation cannot consume someone else's", () => {
+    const f = fresh();
+    f.store.issue(issueInput()); // resv-1: the caller's
+    f.store.issue(issueInput({ reservationId: "resv-2", principal: "agent:other", requestId: "req-other" })); // not the caller's
+    let idReads = 0;
+    const input = { ...consumeInput() };
+    Object.defineProperty(input, "reservationId", { enumerable: true, get: () => (++idReads <= 3 ? "resv-1" : "resv-2") });
+    f.store.consume(input);
+    expect(f.store.findById("resv-2")!.state).toBe("issued");
+    expect(idReads).toBe(1);
+  });
+
+  it("A: consume reads the preimage ONCE: the stored bytes are exactly the bytes that were hashed and parsed", () => {
+    const f = fresh();
+    f.store.issue(issueInput());
+    const good = consumeInput();
+    let reads = 0;
+    const input = { ...good };
+    Object.defineProperty(input, "dealPreimage", { enumerable: true, get: () => (++reads <= 3 ? good.dealPreimage : `${good.dealPreimage} `) });
+    const r = f.store.consume(input);
+    expect(reads).toBe(1);
+    expect(r.ok).toBe(true);
+    const stored = f.sqlite.prepare("SELECT consumed_deal_json AS j FROM budget_reservations WHERE id = 'resv-1'").get() as { j: string };
+    expect(stored.j).toBe(good.dealPreimage);
+  });
+
+  it("B: schema repair holds ONE immediate transaction: a writer cannot commit a row between the emptiness check and the drop", () => {
+    const file = tempFile();
+    const a = new Database(file);
+    a.exec("CREATE TABLE budget_reservations (id TEXT PRIMARY KEY, junk TEXT)"); // another shape, empty: the repair case
+    const b = new Database(file);
+    b.pragma("busy_timeout = 0");
+    let bCommitted = false;
+    const realPrepare = a.prepare.bind(a);
+    const interleaving = new Proxy(a, {
+      get(target, key) {
+        if (key === "prepare") {
+          return (sql: string) => {
+            const st = realPrepare(sql);
+            if (!/count\(\*\)/i.test(sql)) return st;
+            const realGet = st.get.bind(st);
+            // Right after A counts the rows, B inserts and commits (astra's interleaving).
+            return new Proxy(st, {
+              get: (t, k) =>
+                k === "get"
+                  ? (...args: unknown[]) => {
+                      const r = realGet(...args);
+                      try {
+                        b.prepare("INSERT INTO budget_reservations (id, junk) VALUES ('landed', 'x')").run();
+                        bCommitted = true;
+                      } catch {
+                        // SQLITE_BUSY: A holds the write lock, so B's row is never committed
+                      }
+                      return r;
+                    }
+                  : Reflect.get(t, k),
+            });
+          };
+        }
+        const v = Reflect.get(target, key);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    try {
+      ensureBudgetReservationsSchema(interleaving as Database.Database);
+    } catch {
+      // a refusal is fine too; losing a committed row is not
+    }
+    if (bCommitted) {
+      const has = a.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'budget_reservations'").get() as { n: number };
+      const rows = has.n > 0 ? (a.prepare("SELECT count(*) AS n FROM budget_reservations WHERE id = 'landed'").get() as { n: number }).n : 0;
+      expect(rows).toBe(1); // a COMMITTED row must survive
+    }
+    a.close();
+    b.close();
+  });
+
+  it("B: a table whose recorded schema version matches is accepted however its SQL text is written; textual difference alone refuses nothing", () => {
+    const sqlite = new Database(":memory:");
+    // The same table, written differently (quoted name, lower-case keywords), holding a row, with its version recorded.
+    sqlite.exec(BUDGET_RESERVATIONS_DDL.replace("CREATE TABLE IF NOT EXISTS budget_reservations (", 'create table if not exists "budget_reservations" ('));
+    sqlite.exec("CREATE TABLE IF NOT EXISTS pcc_schema_versions (object TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL)");
+    sqlite.exec("INSERT OR REPLACE INTO pcc_schema_versions (object, version) VALUES ('budget_reservations', 2)");
+    new BudgetReservationStore(sqlite, { clock: () => NOW }).issue(issueInput());
+    expect(() => ensureBudgetReservationsSchema(sqlite)).not.toThrow();
+  });
+
+  it("C: INSERT OR REPLACE cannot reopen a consumed reservation, with recursive triggers OFF", () => {
+    const f = fresh();
+    f.sqlite.pragma("recursive_triggers = OFF");
+    f.store.issue(issueInput());
+    expect(f.store.consume(consumeInput()).ok).toBe(true);
+    expect(() =>
+      f.sqlite
+        .prepare(
+          `INSERT OR REPLACE INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id,
+             job_binding, min_tier, parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, consumed_deal_json, created_at, consumed_at)
+           VALUES ('resv-1', 'agent:buyer-1', ?, 'USDC', '20000000', 'reopened', 'req-42', NULL, NULL, NULL, NULL, ?, 'issued', NULL, NULL, ?, NULL)`,
+        )
+        .run(PAYER, NOW + 3600, NOW),
+    ).toThrow();
+    expect(f.store.findById("resv-1")!.state).toBe("consumed");
+  });
+
+  it("C: the id is NOT NULL (a TEXT primary key does not enforce it by itself)", () => {
+    const f = fresh();
+    expect(() =>
+      f.sqlite
+        .prepare(
+          `INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id,
+             job_binding, min_tier, parent_reservation_id, parent_unit, expires_at, state, consumed_deal_digest, consumed_deal_json, created_at, consumed_at)
+           VALUES (NULL, 'agent:buyer-1', ?, 'USDC', '20000000', 'p', 'req-42', NULL, NULL, NULL, NULL, ?, 'issued', NULL, NULL, ?, NULL)`,
+        )
+        .run(PAYER, NOW + 3600, NOW),
+    ).toThrow();
+  });
+
+  it("D: a deal claiming tier 2 with NO committed program is not a sealed deal, so a floor-2 reservation refuses it", () => {
+    const f = fresh();
+    f.store.issue(issueInput({ minTier: 2 }));
+    const base = deal(); // a real tier-0 deal
+    const o = JSON.parse(base.dealPreimage);
+    for (const job of o.jobs) for (const u of job.units) {
+      u.requiredTier = 2;
+      u.requestedTier = 2;
+    }
+    for (const b of o.nodeToUnit) b.tier = 2; // committedProgramHash stays null
+    const forged = canonicalize(o);
+    expect(f.store.consume({ reservationId: "resv-1", principal: "agent:buyer-1", ...sealedPair(forged) })).toEqual({ ok: false, reason: "invalid-deal" });
+    expect(f.store.findById("resv-1")!.state).toBe("issued");
   });
 });

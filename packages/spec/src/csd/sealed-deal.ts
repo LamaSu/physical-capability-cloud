@@ -86,6 +86,7 @@ export type SealedDealRefusal =
   | "bad-shape"
   | "bad-money"
   | "bad-identity"
+  | "bad-assurance"
   | "too-many-units"
   | "unit-too-large";
 
@@ -261,6 +262,7 @@ function read(raw: unknown): SealedDeal {
   // Exactly one binding per unit, each naming that unit's node, job, operator and tier.
   const bindings = list(d.nodeToUnit, units.length, units.length);
   const bound = new Set<string>();
+  const programs = new Set<string>();
   for (const rawBinding of bindings) {
     const b = exact(rawBinding, BINDING_KEYS);
     const jobIndex = b.jobIndex;
@@ -276,8 +278,15 @@ function read(raw: unknown): SealedDeal {
     if (b.tier !== unit.tier) refuse("bad-identity");
     const program = b.committedProgramHash;
     if (!(program === null || (typeof program === "string" && BYTES32.test(program)))) refuse("bad-shape");
+    // The structure only the compiler produces (accepted-plan-compiler.ts): a tier-0 unit commits NO program,
+    // a unit above tier 0 commits one, and one deal commits at most one distinct program (v2; per job from
+    // accepted-deal v3). Whether a program is APPROVED stays with the acceptance and verifier boundary
+    // (astra, round 2 of R13, D).
+    if ((unit.tier === 0) !== (program === null)) refuse("bad-assurance");
+    if (program !== null) programs.add(program);
     if (typeof b.planHash !== "string" || !PLAN_HASH.test(b.planHash) || b.canonicalPlanHash !== b.planHash) refuse("bad-identity");
   }
+  if (programs.size > 1) refuse("bad-assurance");
 
   return Object.freeze({
     planId,
