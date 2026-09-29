@@ -36,6 +36,20 @@
  *      nonce was issued cannot contain it.
  * Both unit fields are `0x` + 64 lowercase hex, byte-equal to the settlement
  * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`.
+ *  10. time, only when the subject names a window: EVERY event's `timestamp`
+ *      is RFC 3339 with an explicit offset and lies within the window, give
+ *      or take `EVIDENCE_CLOCK_SKEW_SECONDS` (`checkEventTimes`,
+ *      delegation-rules.ts). The consumer sets the window to the delegation's
+ *      `issuedAt` .. the earlier of its `expiresAt` and the verified receipt's
+ *      `receivedAt`.
+ *
+ * ONE BUNDLE PER SETTLEMENT UNIT. /settle judges exactly the one kernel-signed
+ * bundle the committed package names: EvidenceBlockV2 commits one events root.
+ * A unit's evidence is therefore one bundle that holds every outcome-bearing
+ * event, terminal events and inspections alike. A completion and a failed
+ * inspection are then co-signed and cannot be separated by leaving a bundle out.
+ * Evidence spread over several bundles does not settle as a whole. A kernel-
+ * sealed multi-bundle set is a parked design item (N56, bus #3543).
  *
  * EVALUATE ONLY WHAT YOU HASHED. Steps 5-7 read the canonical snapshot of each
  * event's hashed content (the JSON text `hashEvent` hashes, parsed back), with
@@ -60,6 +74,7 @@
 import { canonicalize, hashBundle, sha256 } from "../util/canonical.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 import { isTaggedDigest } from "./signing-preimage.js";
+import { checkEventTimes, type EventTimeWindow } from "./delegation-rules.js";
 
 export const EVIDENCE_SUBJECT_BINDING_CONTRACT = "pcc.evidence.subject-binding.v1";
 
@@ -77,6 +92,9 @@ export interface EvidenceSubject {
   settlementUnitId?: string;
   /** The gateway-issued challenge nonce for that unit: `0x` + 64 lowercase hex. */
   challengeNonce?: string;
+  /** The window every event must fall in (Unix seconds): the delegation's
+   *  `issuedAt` .. min(`expiresAt`, the verified receipt's `receivedAt`). */
+  eventTimeWindow?: EventTimeWindow;
 }
 
 /** The unit fields' form: `0x` + 64 lowercase hex (a bytes32). */
@@ -97,7 +115,9 @@ export type EvidenceSubjectBindingErrorCode =
   | "unit-not-committed"
   | "unit-mismatch"
   | "challenge-not-committed"
-  | "challenge-mismatch";
+  | "challenge-mismatch"
+  | "event-time-malformed"
+  | "event-time-outside-window";
 
 export type EvidenceSubjectBindingResult =
   /** `events`: the verified canonical snapshots, in input order (see the header). */
@@ -118,6 +138,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isWindow(value: unknown): value is EventTimeWindow {
+  return (
+    isPlainObject(value) &&
+    Number.isSafeInteger(value.notBefore) &&
+    Number.isSafeInteger(value.notAfter) &&
+    (value.notBefore as number) <= (value.notAfter as number)
+  );
 }
 
 /** An own property only: never one a prototype supplies. */
@@ -141,7 +170,8 @@ export async function verifyEvidenceSubjectBinding(
     (subject.settlementUnitId !== undefined &&
       !(typeof subject.settlementUnitId === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.settlementUnitId))) ||
     (subject.challengeNonce !== undefined &&
-      !(typeof subject.challengeNonce === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.challengeNonce)))
+      !(typeof subject.challengeNonce === "string" && SUBJECT_UNIT_FIELD_PATTERN.test(subject.challengeNonce))) ||
+    (subject.eventTimeWindow !== undefined && !isWindow(subject.eventTimeWindow))
   ) {
     return { ok: false, reason: "malformed-subject" };
   }
@@ -230,6 +260,15 @@ export async function verifyEvidenceSubjectBinding(
       committedOnce = true;
     }
     if (!committedOnce) return { ok: false, reason: notCommitted };
+  }
+
+  // Time, only when the subject names a window, read from the hashed snapshots.
+  if (subject.eventTimeWindow !== undefined) {
+    const timed = checkEventTimes(events, subject.eventTimeWindow as EventTimeWindow);
+    if (!timed.ok) {
+      const reason = timed.reason === "event-time-malformed" ? "event-time-malformed" : "event-time-outside-window";
+      return { ok: false, reason, ...(timed.eventIndex !== undefined ? { eventIndex: timed.eventIndex } : {}) };
+    }
   }
 
   return { ok: true, events };

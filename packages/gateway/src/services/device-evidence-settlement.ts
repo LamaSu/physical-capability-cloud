@@ -48,6 +48,7 @@ import {
   parseEd25519SignatureHex,
   signingPreimage,
   verifyEvidenceSubjectBinding,
+  checkDelegationScope,
   type EvidenceEvent,
   type EvidenceSubject,
   type RegisteredSigner,
@@ -290,6 +291,9 @@ export interface DeviceEvidenceVerifyInput {
   sessionKeyAuthorization?: SessionKeyAuthorization;
   /** Job/contract id the session scope must explicitly contain. */
   contractId?: string;
+  /** How many events the delegated session vouches for (the bundle's verified
+   *  events). No more than the delegation's maxSignatures, as at /settle. */
+  sessionSignedEventCount?: number;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
 }
@@ -352,8 +356,21 @@ export async function verifyDeviceSignedEvidence(
       if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
         return { ok: false, reason: "malformed-session-authorization" };
       }
-      if (!sessionKey.scope.contractIds.includes(input.contractId)) {
-        return { ok: false, reason: "contract_not_allowed" };
+      // One scope rule with the oracle's /settle (checkDelegationScope): the
+      // contract list is non-empty and names this job, maxSignatures is a safe
+      // integer >= 1, and it covers the events the session vouches for.
+      const scoped = checkDelegationScope(
+        { scope: sessionKey.scope },
+        {
+          settlingJobId: input.contractId,
+          ...(input.sessionSignedEventCount !== undefined
+            ? { sessionSignedEventCount: input.sessionSignedEventCount }
+            : {}),
+        },
+      );
+      if (!scoped.ok) {
+        const contract = scoped.reason === "contract-ids-empty" || scoped.reason === "contract-not-allowed";
+        return { ok: false, reason: contract ? "contract_not_allowed" : scoped.reason };
       }
       const event: SessionSignedEvent = {
         eventData: signingPreimage(input.bundleHash),
@@ -535,6 +552,7 @@ async function verifyDeviceAnchor(
       ? { sessionKeyAuthorization: slot.sessionKeyAuthorization }
       : {}),
     contractId: slot.subject.jobId,
+    sessionSignedEventCount: binding.events.length,
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
   return verified.ok

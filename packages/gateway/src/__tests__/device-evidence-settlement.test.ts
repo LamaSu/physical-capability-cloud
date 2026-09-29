@@ -799,6 +799,56 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
 // kept only when truthy. Defined fields are now reproduced as signed, and an empty
 // path is refused by the contract (R20 round 2), so neither change widens.
 
+describe("device evidence — the delegation scope rule is /settle's (checkDelegationScope)", () => {
+  async function delegated(scope: { contractIds: string[]; maxSignatures: number }) {
+    const principal = nacl.sign.keyPair();
+    const session = nacl.sign.keyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const body = {
+      sessionId: "session-scope-rule",
+      parentAgentId: "eip155:1:0x0000000000000000000000000000000000000001",
+      publicKey: session.publicKey,
+      issuedAt: now,
+      expiresAt: now + 300,
+      scope: { allowedActions: ["evidence_submit"], ...scope },
+    };
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(session.publicKey),
+      parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
+    };
+    const a = await boundDeviceEvidence({ jobId: "job-scope", keyPair: session });
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { ...a.slot(), sessionKeyAuthorization: auth },
+      registeredSigner: ed25519Signer(principal.publicKey),
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    return { decision, eventCount: a.slot().events?.length ?? 0 };
+  }
+
+  it("anchors when maxSignatures covers the bundle's session-signed events", async () => {
+    const { decision, eventCount } = await delegated({ contractIds: ["job-scope"], maxSignatures: 2 });
+    expect(eventCount).toBe(2);
+    expect(decision).toMatchObject({ source: "device" });
+  });
+
+  it("refuses one event over the budget, a zero budget and an empty contract list", async () => {
+    expect((await delegated({ contractIds: ["job-scope"], maxSignatures: 1 })).decision).toMatchObject({
+      source: "gateway-fallback",
+      reason: "scope-signatures-exhausted",
+    });
+    expect((await delegated({ contractIds: ["job-scope"], maxSignatures: 0 })).decision).toMatchObject({
+      source: "gateway-fallback",
+      reason: "max-signatures-invalid",
+    });
+    expect((await delegated({ contractIds: [], maxSignatures: 10 })).decision).toMatchObject({
+      source: "gateway-fallback",
+      reason: "contract_not_allowed",
+    });
+  });
+});
+
 describe("device evidence — strict transport decoding (no truncation)", () => {
   it("a signature or key with a trailing nibble or junk is rejected, not truncated", () => {
     const dev = realDeviceEvidence();
