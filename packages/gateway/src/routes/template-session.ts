@@ -93,8 +93,8 @@ export interface TemplateSession {
   };
   /** Event log for /live-data. Capped at 200 entries to bound memory. */
   events: TemplateSessionEvent[];
-  /** Tenant identity captured when the session was created (for cross-tenant
-   *  read prevention in Wave 4). T1.9 plumbing. */
+  /** Tenant identity captured when the session was created. Only this tenant
+   *  may use the session's `:id` routes (ownedSession, N58). */
   tenant_id: string | null;
   created_at: number;
   updated_at: number;
@@ -178,6 +178,24 @@ const sessionStore = new Map<string, TemplateSession>();
 /** Test-only — clear the in-memory session store between tests. */
 export function _resetSessionsForTests(): void {
   sessionStore.clear();
+}
+
+/**
+ * The session `id` names, if the caller may act on it; otherwise null (N58).
+ *
+ * A session belongs to the tenant that started it (`tenant_id`, stored by
+ * POST /start from `req.tenantId`). Every `:id` route answers 404 unless the
+ * caller's tenant is that tenant: the same answer as an unknown id, so a
+ * leaked id tells another tenant nothing, not even that it exists. Fails
+ * closed on a missing actor: a caller with no tenant never matches, not even
+ * a session that was stored with a null tenant.
+ */
+function ownedSession(id: string, tenantId: string | null | undefined): TemplateSession | null {
+  const session = sessionStore.get(id);
+  if (!session) return null;
+  if (typeof tenantId !== "string" || tenantId.length === 0) return null;
+  // A non-empty tenant can equal neither a null nor an empty stored tenant.
+  return session.tenant_id === tenantId ? session : null;
 }
 
 /**
@@ -315,7 +333,7 @@ export async function templateSessionRoutes(
   app.post<{ Params: { id: string }; Body: { url?: unknown } }>(
     `${prefix}/:id/scrape`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const body = req.body ?? {};
       const url = typeof body.url === "string" ? body.url.trim() : "";
@@ -379,7 +397,7 @@ export async function templateSessionRoutes(
   app.post<{ Params: { id: string }; Body: { doc_urls?: unknown } }>(
     `${prefix}/:id/ingest-docs`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const body = req.body ?? {};
       const docUrls = Array.isArray(body.doc_urls)
@@ -437,7 +455,7 @@ export async function templateSessionRoutes(
   app.post<{ Params: { id: string } }>(
     `${prefix}/:id/build-agent`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
 
       session.state = "building";
@@ -507,7 +525,7 @@ export async function templateSessionRoutes(
   app.get<{ Params: { id: string } }>(
     `${prefix}/:id/status`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const lastEvent = session.events[session.events.length - 1];
       return {
@@ -532,7 +550,7 @@ export async function templateSessionRoutes(
   app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
     `${prefix}/:id/live-data`,
     async (req, reply) => {
-      const session = sessionStore.get(req.params.id);
+      const session = ownedSession(req.params.id, req.tenantId);
       if (!session) return reply.status(404).send({ error: "session_not_found" });
       const sinceRaw = req.query?.since;
       const since = sinceRaw ? Number.parseInt(sinceRaw, 10) : 0;
