@@ -211,3 +211,78 @@ describe("DHT announcement integrity (round 6)", () => {
     for (const p of peers.peers) expect(p.did).toMatch(/^did:pcc:peer_[A-Za-z0-9_-]+$/);
   });
 });
+
+/**
+ * WP-A round 7 (wpa-326-admingates-r2-astra AG-18 and AG-13):
+ *   - AG-18: shape validation counted the capabilities but not their elements.
+ *     null, strings and arbitrary objects were stored and broadcast as sent. Each
+ *     capability and endpoint is now validated and REBUILT from known fields.
+ *   - AG-13: /api/dht/metrics returned raw telemetry events. A query_started event
+ *     carries the caller's search filter, which is demand data. The public reads now
+ *     return an explicit field set.
+ */
+describe("DHT announcement elements and the public read boundary (round 7)", () => {
+  const R7_OWNER = "dht-r7-owner@x.test";
+  const R7_KERNEL = "dht-r7-kernel-1";
+  let r7Key: string;
+
+  beforeAll(async () => {
+    r7Key = seedKey(R7_OWNER);
+    const reg = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      remoteAddress: "10.99.0.8",
+      headers: { authorization: `Bearer ${r7Key}` },
+      payload: { id: R7_KERNEL, name: "DHT round-7 kernel" },
+    });
+    expect(reg.statusCode, reg.body).toBeLessThan(300);
+  });
+
+  it.each<[string, unknown]>([
+    ["null", null],
+    ["a string", "fdm-printing"],
+    ["a number", 42],
+    ["an object with no type", {}],
+    ["an empty type", { type: "" }],
+    ["an over-long type", { type: "x".repeat(200) }],
+    ["materials that are not a string array", { type: "fdm-printing", materials: "PLA" }],
+    ["an inverted price range", { type: "fdm-printing", priceRange: { min: 5, max: 1, currency: "USD" } }],
+  ])("[neg] a capability that is %s is refused (400), not stored", async (_name, bad) => {
+    const res = await announce(r7Key, { kernelId: R7_KERNEL, capabilities: [{ type: "fdm-printing" }, bad] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_announcement");
+  });
+
+  it("[neg] unknown keys are dropped: what is stored is rebuilt from known fields only", async () => {
+    const res = await announce(r7Key, {
+      kernelId: R7_KERNEL,
+      capabilities: [{ type: "r7-rebuilt-type", materials: ["PLA"], injected: "<script>", nested: { deep: true } }],
+      endpoints: [{ url: "wss://node.example/ws", evil: "x", transport: "websocket-relay" }],
+    });
+    expect(res.statusCode).toBe(200);
+    const q = (await app.inject({ method: "GET", url: "/api/dht/query?type=r7-rebuilt-type", remoteAddress: "10.99.0.9" })).json() as {
+      results: Array<{ capabilities: Array<Record<string, unknown>>; endpoints: Array<Record<string, unknown>> }>;
+    };
+    expect(q.results).toHaveLength(1);
+    expect(q.results[0]!.capabilities).toEqual([{ type: "r7-rebuilt-type", materials: ["PLA"] }]);
+    expect(q.results[0]!.endpoints).toEqual([{ transport: "websocket-relay", url: "wss://node.example/ws", priority: 1 }]);
+  });
+
+  it("[neg] /api/dht/metrics never exposes a caller's search filter (demand data)", async () => {
+    await app.inject({ method: "GET", url: "/api/dht/query?type=secret-demand-probe-7&materials=unobtainium", remoteAddress: "10.99.0.10" });
+    const res = await app.inject({ method: "GET", url: "/api/dht/metrics", remoteAddress: "10.99.0.11" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("secret-demand-probe-7");
+    expect(res.body).not.toContain("unobtainium");
+    const body = res.json() as { metrics: Record<string, unknown>; recentEvents: Array<Record<string, unknown>> };
+    const allowedEvent = new Set(["type", "timestamp", "kernelDid", "capabilityTypes", "resultCount", "durationMs", "count", "ttl"]);
+    for (const e of body.recentEvents) for (const k of Object.keys(e)) expect(allowedEvent.has(k), k).toBe(true);
+    expect(body.recentEvents.some((e) => e.type === "query_started")).toBe(true); // the event is there, just without its filter
+    for (const v of Object.values(body.metrics)) expect(typeof v).toBe("number");
+  });
+
+  it("boundary: /api/dht/peers returns only a DID per peer", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/dht/peers", remoteAddress: "10.99.0.12" });
+    for (const p of (res.json() as { peers: Array<Record<string, unknown>> }).peers) expect(Object.keys(p)).toEqual(["did"]);
+  });
+});
