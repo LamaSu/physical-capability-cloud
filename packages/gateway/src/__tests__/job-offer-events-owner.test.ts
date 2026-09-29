@@ -121,6 +121,13 @@ describe("job-offer events: only the offer's parties record them", () => {
     expect(await statusOf(id)).not.toBe("delivered");
   });
 
+  it("[neg] the claimant cannot cancel the offer: cancelling is the poster's", async () => {
+    const id = await newOffer(true);
+    const res = await inj("POST", `/api/job-offers/${id}/events`, keyC, { event: "cancelled" });
+    expect(res.statusCode).toBe(403);
+    expect(await statusOf(id)).not.toBe("cancelled");
+  });
+
   it("control: the claimant's operator marks it delivered, and the event's author is the caller, not the body", async () => {
     const id = await newOffer(true);
     const res = await inj("POST", `/api/job-offers/${id}/events`, keyC, { event: "delivered", by: "someone-else@x.test" });
