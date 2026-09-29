@@ -378,14 +378,28 @@ describe("POST /api/settlement/agent-plans/accept: seam -> deal binding -> ONE a
     }
   });
 
-  it("only an explicit { ok: true } from the store is a seal: a refusing or malformed consume is 409, never 'sealed'", async () => {
-    const answers: unknown[] = [{ ok: false, reason: "digest-mismatch" }, undefined, { ok: "yes" }, null];
+  it("only an explicit { ok: true } from the store is a seal: a public refusal is 409 with its code; anything else is a generic 500; never 'sealed'", async () => {
+    // A documented conflict code of the caller's OWN reservation reaches the client.
+    for (const reason of ["not-issued", "expired", "wrong-request", "wrong-currency", "over-reservation", "below-min-tier"]) {
+      const { deps } = world({ consume: () => ({ ok: false, reason }) });
+      const res = await accept(await appWith(deps), dag());
+      expect([reason, res.statusCode, res.json()]).toEqual([reason, 409, { error: "reservation-conflict", reason }]);
+    }
+    // A store diagnostic, or a malformed answer, is never forwarded (astra, round 1 of #391): logged, generic 500.
+    const answers: unknown[] = [
+      { ok: false, reason: "digest-mismatch" },
+      { ok: false, reason: "wrong-payer" },
+      { ok: false, reason: "SQLITE_BUSY: database is locked at /var/lib/pcc/store.db" },
+      { ok: false, reason: 5 },
+      undefined,
+      { ok: "yes" },
+      null,
+    ];
     for (const a of answers) {
       const { deps } = world({ consume: () => a as ReturnType<ConsumeReservation> });
       const res = await accept(await appWith(deps), dag());
-      expect(res.statusCode).toBe(409);
-      expect(res.json().error).toBe("reservation-conflict");
-      expect(res.body).not.toMatch(/"sealed"/);
+      expect([a, res.statusCode, res.json()]).toEqual([a, 500, { error: "internal-error" }]);
+      expect(res.body).not.toMatch(/"sealed"|SQLITE|digest-mismatch|wrong-payer/);
     }
   });
 
@@ -432,6 +446,45 @@ describe("POST /api/settlement/agent-plans/accept: seam -> deal binding -> ONE a
     expect(res.statusCode).toBe(200);
     expect(base.store.state("resv-1")).toBe("consumed");
   });
+
+  it("astra round 1 of #391: a seam whose methods use PRIVATE fields keeps working (called on the original seam, not a wrapper)", async () => {
+    const base = world();
+    const accept0 = base.deps.accept as { seam: SeamDeps; encodeDeal: DealEncoder; consumeReservation: ConsumeReservation };
+    class PrivateSeam {
+      readonly #inner: SeamDeps;
+      constructor(inner: SeamDeps) {
+        this.#inner = inner;
+      }
+      get revalidation() {
+        return this.#inner.revalidation;
+      }
+      get policy() {
+        return this.#inner.policy;
+      }
+      get economics() {
+        return this.#inner.economics;
+      }
+      resolveProgram(csd: string, tierKey: string) {
+        return this.#inner.resolveProgram(csd, tierKey);
+      }
+      assertProgramForTier(a: Parameters<SeamDeps["assertProgramForTier"]>[0]) {
+        return this.#inner.assertProgramForTier(a);
+      }
+      evidenceFor(csd: string, tierKey: string) {
+        return this.#inner.evidenceFor(csd, tierKey);
+      }
+      loadReservation(id: string) {
+        return this.#inner.loadReservation(id);
+      }
+      now() {
+        return this.#inner.now();
+      }
+    }
+    const deps: AgentPlanRouteDeps = { revalidation: base.deps.revalidation, accept: { ...accept0, seam: new PrivateSeam(accept0.seam) as unknown as SeamDeps } };
+    const res = await accept(await appWith(deps), dag());
+    expect(res.statusCode).toBe(200);
+    expect(base.store.state("resv-1")).toBe("consumed");
+  });
 });
 
 describe("bindDeal (pure): the release order VCR enforces", () => {
@@ -454,6 +507,45 @@ describe("bindDeal (pure): the release order VCR enforces", () => {
     const req = Object.fromEntries(bindings.map((b) => [b.nodeId, b.requires]));
     expect(req).toEqual({ a: [], b: [unitOf("a")], c: [unitOf("a")], d: [unitOf("b"), unitOf("c")] });
     for (const b of bindings) expect(b.requires).not.toContain(unitOf(b.nodeId)); // never itself
+  });
+
+  it("astra round 1 of #391: the node-to-unit map must be a bijection: two nodes on one unit, or a unit no node maps to, is an encoder mismatch", () => {
+    const compiled = compiledPlan();
+    const [b0, b1] = compiled.nodeToUnit;
+    const twoOnOne = { ...compiled, nodeToUnit: [b0!, { ...b1!, jobIndex: b0!.jobIndex, milestoneIndex: b0!.milestoneIndex }] } as CompiledAcceptedPlan;
+    expect(bindDeal(twoOnOne, [], standInEncoder)).toMatchObject({ ok: false, reason: "encoder-mismatch", detail: "binding-not-one-to-one" });
+    const dangling = { ...compiled, nodeToUnit: [b0!] } as CompiledAcceptedPlan;
+    expect(bindDeal(dangling, [], standInEncoder)).toMatchObject({ ok: false, reason: "encoder-mismatch", detail: "unit-count" });
+    expect(bindDeal(compiled, [], standInEncoder).ok).toBe(true); // the intact plan still binds
+  });
+
+  it("astra round 1 of #391: interleaved same-operator nodes (a and c by one operator, b between them) bind to their OWN units", () => {
+    const X = A("e1");
+    const Y = A("e2");
+    const opOf: Record<string, string> = { a: X, b: Y, c: X };
+    const caps: LiveCapability[] = ["a", "b", "c"].map((x) => ({ id: `cap-${x}`, type: "mail.drop", kernelId: `k-${x}`, pricing: { currency: "USDC", baseCost: "3.25", minimum: "3.25" }, assuranceTiers: [0], tenantId: null }));
+    const kernels: LiveKernel[] = ["a", "b", "c"].map((x) => ({ id: `k-${x}`, operatorAddress: opOf[x]!, status: "online" }));
+    const nodes = ["a", "b", "c"].map((x) => ({ nodeId: x, capabilityId: `cap-${x}`, price: "3.25", currency: "USDC", tierKey: "tier0", kernelId: `k-${x}`, operator: opOf[x]! }));
+    const edges = [
+      { from: "a", to: "b" },
+      { from: "b", to: "c" },
+    ];
+    const { deps } = world({ caps, kernels });
+    const r = acceptExternalPlan(dag({ nodes, edges }), { principal: BUYER }, (deps.accept as { seam: SeamDeps }).seam);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const plan = r.plan;
+    expect(plan.jobs.map((j) => j.units.length).sort()).toEqual([1, 2]); // X's job holds a AND c; b sits between them
+    const encoded = standInEncoder(plan);
+    const unitOf = (nodeId: string) => {
+      const b = plan.nodeToUnit.find((x) => x.nodeId === nodeId)!;
+      return encoded[b.jobIndex]!.unitIds[b.milestoneIndex]!.toLowerCase();
+    };
+    expect(new Set(["a", "b", "c"].map(unitOf)).size).toBe(3);
+    const bound = bindDeal(plan, edges, standInEncoder);
+    expect(bound.ok).toBe(true);
+    if (!bound.ok) return;
+    expect(Object.fromEntries(bound.bindings.map((b) => [b.nodeId, b.requires]))).toEqual({ a: [], b: [unitOf("a")], c: [unitOf("b")] });
   });
 
   it("an edge that names no node of the deal, or loops, is an edge-mismatch before the encoder runs; a throwing encoder propagates", () => {
