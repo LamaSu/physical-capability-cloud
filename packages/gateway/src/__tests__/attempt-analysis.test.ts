@@ -823,10 +823,11 @@ describe("analyzeAttempts", () => {
     expect(analysis.totals.failedOrBlocked).toBe(1);
     expect(analysis.totals.finishedOk).toBe(1);
     expect(analysis.totals.harnessSplit).toEqual({ "claude-code": 1, codex: 1 });
-    // Two signatures: the register/failed phase report AND the session
-    // roll-up itself (its outcome is also "failed", so it is its own break).
-    expect(analysis.signatures).toHaveLength(2);
-    expect(analysis.signatures.every((s) => s.sessionsHit === 1)).toBe(true);
+    // One signature: the register/failed phase report. The failed roll-up only
+    // restates it, so it is not counted as a second break.
+    expect(analysis.signatures).toHaveLength(1);
+    expect(analysis.signatures[0].template.startsWith("register/failed")).toBe(true);
+    expect(analysis.signatures[0].sessionsHit).toBe(1);
     expect(analysis.proposals).toHaveLength(1);
     expect(analysis.proposals[0].target).toBe("runbook");
     expect(analysis.proposals[0].routeTo).toBe("adk");
@@ -848,5 +849,53 @@ describe("analyzeAttempts", () => {
       stalled: 0,
       harnessSplit: {},
     });
+  });
+});
+
+describe("lane review fixes (painpoints)", () => {
+  it("normalizes hostile summaries in linear time (digit runs, long hex, many short runs)", () => {
+    // 50k characters: large enough that a quadratic pattern takes seconds while a
+    // linear one takes about a millisecond.
+    const hostile = [
+      "1".repeat(50_000),
+      `${"0123456789".repeat(4999)}a`,
+      "1234567 ".repeat(6000),
+      `${"a1".repeat(25_000)}`,
+      `${"'x".repeat(25_000)}`,
+    ];
+    for (const h of hostile) {
+      const t0 = performance.now();
+      normalizeSummary(h);
+      expect(performance.now() - t0).toBeLessThan(50);
+    }
+    expect(normalizeSummary("id 12345678 and deadbeef00")).toBe("id <n> and <hex>");
+  });
+
+  it("keeps apostrophes inside words and still masks quoted values", () => {
+    expect(normalizeSummary("Didn't find the 'kernel_9' key; couldn't retry")).toBe("didn't find the <q> key; couldn't retry");
+    expect(normalizeSummary('field "tier" missing')).toBe("field <q> missing");
+  });
+
+  it("counts a failed roll-up as a signature only when no phase report failed", () => {
+    const at = new Date(NOW - HOUR).toISOString();
+    const records: Record<string, unknown>[] = [];
+    for (let i = 0; i < 5; i++) {
+      const sid = `bb00000${i}-0000-4000-8000-00000000000${i}`;
+      records.push(mkAttempt({ sessionId: sid, seq: 0, phase: "verify", outcome: "failed", summary: `test job ${i} timed out`, createdAt: at }));
+      records.push(mkAttempt({ sessionId: sid, seq: 1, phase: "session", outcome: "failed", summary: "session: failed", createdAt: at }));
+    }
+    const lonely = "cc000000-0000-4000-8000-000000000000";
+    records.push(mkAttempt({ sessionId: lonely, seq: 0, phase: "session", outcome: "abandoned", createdAt: at }));
+    const crashed = "dd000000-0000-4000-8000-000000000000";
+    records.push(mkAttempt({ sessionId: crashed, seq: 0, phase: "intake", outcome: "ok", createdAt: at }));
+    records.push(mkAttempt({ sessionId: crashed, seq: 1, phase: "session", outcome: "failed", summary: "agent crashed during research", createdAt: at }));
+
+    const ranked = rankSignatures(sessionize(records, { now: NOW }), { now: NOW });
+    expect(ranked[0].template.startsWith("verify/failed")).toBe(true);
+    expect(ranked[0].sessionsHit).toBe(5);
+    const rollups = ranked.filter((r) => r.template.startsWith("session/"));
+    expect(rollups).toHaveLength(1);
+    expect(rollups[0].template).toContain("agent crashed during research");
+    expect(rollups[0].sessionsHit).toBe(1);
   });
 });

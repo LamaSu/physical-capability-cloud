@@ -448,9 +448,14 @@ export function normalizePath(path: string): string {
 const UUID_TEXT_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 // A hex run needs >=1 a-f letter, otherwise a plain decimal number (e.g.
 // "12345678") would be swallowed here instead of by the number rule below.
-const HEX_TEXT_RE = /(?=[0-9a-f]*[a-f])[0-9a-f]{8,}/g;
+// Runs are matched whole and tested in the replacer: a lookahead here would
+// re-scan each run from every position, which is quadratic on hostile input
+// (summaries arrive from the public report route).
+const HEX_RUN_RE = /[0-9a-f]{8,}/g;
 const NUMBER_TEXT_RE = /[0-9]+/g;
-const QUOTED_TEXT_RE = /'[^']*'|"[^"]*"|`[^`]*`/g;
+// Quoted spans, bounded. A single quote opens and closes only at a word edge,
+// so apostrophes inside words ("didn't") are left alone.
+const QUOTED_TEXT_RE = /(?<![a-z0-9])'[^'\n]{0,200}'(?![a-z0-9])|"[^"\n]{0,200}"|`[^`\n]{0,200}`/g;
 
 /**
  * Normalize free text for signature merging: lowercase; UUIDs -> "<uuid>";
@@ -461,7 +466,7 @@ export function normalizeSummary(s: string): string {
   const raw = typeof s === "string" ? s : "";
   let out = raw.toLowerCase();
   out = out.replace(UUID_TEXT_RE, "<uuid>");
-  out = out.replace(HEX_TEXT_RE, "<hex>");
+  out = out.replace(HEX_RUN_RE, (run) => (/[a-f]/.test(run) ? "<hex>" : run));
   out = out.replace(NUMBER_TEXT_RE, "<n>");
   out = out.replace(QUOTED_TEXT_RE, "<q>");
   out = out.replace(/\s+/g, " ").trim();
@@ -544,7 +549,13 @@ export function rankSignatures(sessions: AttemptSession[], opts: { now: number; 
   const agg = new Map<string, SignatureAgg>();
 
   for (const session of sessions) {
+    // A session roll-up restates the session's outcome. It names the break only
+    // when no phase report failed; otherwise its generic summary ("session:
+    // failed" when the agent sent none) would merge every failed session into
+    // one noise signature at the top of the ranking.
+    const phaseFailed = session.reports.some((r) => r.phase !== "session" && FAILING_OUTCOMES.has(r.outcome));
     for (const report of session.reports) {
+      if (report.phase === "session" && phaseFailed) continue;
       const sig = failureSignature(report);
       if (!sig) continue;
       const hitAt = toMs(report.createdAt) ?? session.lastAt;
@@ -752,7 +763,8 @@ const DEFAULT_DIGEST_TOP_N = 5;
 // This pass catches anything that still slipped through (e.g. an email
 // address, which normalizeSummary does not target).
 const DIGEST_UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-const DIGEST_EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+// Bounded quantifiers and a start-of-run lookbehind keep this linear.
+const DIGEST_EMAIL_RE = /(?<![a-z0-9._%+-])[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){1,8}/gi;
 
 function scrubDigest(s: string): string {
   return s.replace(DIGEST_UUID_RE, "<uuid>").replace(DIGEST_EMAIL_RE, "[redacted-email]");
