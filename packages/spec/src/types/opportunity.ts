@@ -17,19 +17,38 @@
  * producer of the content. Titles are server-templated: requester free text,
  * requester ids and fine-grained locations never appear.
  *
- * Demand intelligence stays private: a demand_aggregate carries exactly what
- * painpoints' toPublicOpportunityAggregate publishes (capability type, demand
- * band, as-of day). No raw intents, no private priors, no requester
- * identities, no location, evidence or deadline.
+ * Demand intelligence stays private. A demand_aggregate carries exactly what
+ * painpoints' public release publishes: capability type, demand band and the
+ * closed release period (YYYY-MM). It is served only from the publisher's
+ * write-once release ledger and never computed on read. It carries no raw
+ * intents, private priors, requester identities, location, evidence, deadline
+ * or pinned contract digest.
+ *
+ * `asOf` is the READ time for every kind. It never says when an intent
+ * happened, so it cannot leak activity timing (#365 finding F4).
  *
  * v0, FROZEN FOR CONSUMERS (steward ruling #3058): adk, readmodels,
  * operator-ux and refvertical build against this shape. Any change needs
- * their ack on the bus first; a breaking change is a new version.
+ * their ack on the bus first; a breaking change is a new version. Amendment 1
+ * (2026-09-29) was acked by readmodels and adk and adds three fields:
+ *   - A2: capabilityContractDigest pins the exact CSD revision;
+ *   - A3: evidence.requiredPrimitives uses the CSD / EmitterDecl grammar;
+ *   - A5: releasePeriod on a demand_aggregate.
  */
 
 import { z } from "zod";
 
 import type { SHA256, Timestamp } from "./common.js";
+import { CsdEvidencePrimitiveRefSchema, type CsdEvidencePrimitiveRef } from "../csd/schema.js";
+import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
+import { CSD_CAPABILITY_URL_PATTERN } from "./capability-kit.js";
+
+/** A closed UTC calendar month, the public demand release unit (painpoints #365). */
+export const OPPORTUNITY_RELEASE_PERIOD_PATTERN = /^(20[0-9]{2})-(0[1-9]|1[0-2])$/;
+
+const ACTIVE_PRIMITIVE_IDS: ReadonlySet<string> = new Set(
+  EVIDENCE_PRIMITIVES.filter((p) => p.status === "active").map((p) => p.id),
+);
 
 export const OPPORTUNITY_SCHEMA = "pcc.opportunity.v0" as const;
 
@@ -51,15 +70,29 @@ export interface OpportunityDTO {
   kind: OpportunityKind;
   /** CSD url of the capability the opportunity is for. */
   capabilityType: string;
+  /**
+   * The exact CSD revision (A2): REQUIRED on a funded funded_offer, since the
+   * accepted plan pins it; optional on a kit_build_request (the revision the
+   * kit must satisfy); never on a demand_aggregate.
+   */
+  capabilityContractDigest?: SHA256;
   /** Server-templated from structured fields; never requester free text. */
   title: string;
   reward?: OpportunityReward;
-  evidence?: { tier: 0 | 1 | 2 | 3; requiredEventClasses: string[] };
+  /**
+   * The evidence the work requires (A3): CSD evidence-primitive refs, the same
+   * {id, params?, bind?} grammar as a CSD's evidence and setup's EmitterDecl
+   * emits[], so supply compares against demand with no mapping table. Each id is
+   * an active id in EVIDENCE_PRIMITIVES.
+   */
+  evidence?: { tier: 0 | 1 | 2 | 3; requiredPrimitives: CsdEvidencePrimitiveRef[] };
   /** Coarse only: an ISO 3166-1 alpha-2 country and, at most, a named region. */
   location?: { country?: string; region?: string };
   deadline?: Timestamp;
   /** demand_aggregate only. */
   demandBand?: OpportunityDemandBand;
+  /** demand_aggregate only, and required there (A5): the closed release period, "YYYY-MM". */
+  releasePeriod?: string;
   /** The kit that already serves this capability, or null when one must be built. */
   kitRef?: { kitDigest: SHA256; name: string } | null;
   /** Server-assigned from the source record. */
@@ -73,7 +106,8 @@ export const OpportunityDTOSchema = z
     schema: z.literal(OPPORTUNITY_SCHEMA),
     id: z.string().min(1),
     kind: z.enum(["funded_offer", "kit_build_request", "demand_aggregate"]),
-    capabilityType: z.string().regex(/^pcc:\/\/capabilities\/[a-z0-9-]+\/v[0-9]+$/),
+    capabilityType: z.string().regex(CSD_CAPABILITY_URL_PATTERN),
+    capabilityContractDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
     title: z.string().min(1).max(160).regex(/^[^\n\r]*$/, "single line"),
     reward: z
       .object({
@@ -86,7 +120,13 @@ export const OpportunityDTOSchema = z
     evidence: z
       .object({
         tier: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
-        requiredEventClasses: z.array(z.string().min(1)),
+        requiredPrimitives: z
+          .array(
+            CsdEvidencePrimitiveRefSchema.strict().refine((ref) => ACTIVE_PRIMITIVE_IDS.has(ref.id), {
+              message: "an evidence primitive id must be active in EVIDENCE_PRIMITIVES",
+            }),
+          )
+          .max(50),
       })
       .strict()
       .optional(),
@@ -99,6 +139,7 @@ export const OpportunityDTOSchema = z
       .optional(),
     deadline: z.string().optional(),
     demandBand: z.enum(["5-9", "10-24", "25-99", "100+"]).optional(),
+    releasePeriod: z.string().regex(OPPORTUNITY_RELEASE_PERIOD_PATTERN, "Must be a YYYY-MM period").optional(),
     kitRef: z
       .object({ kitDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), name: z.string().min(1) })
       .strict()
@@ -118,8 +159,11 @@ export const OpportunityDTOSchema = z
       if (o.location) fail("a demand_aggregate carries no location");
       if (o.evidence) fail("a demand_aggregate carries no evidence requirements");
       if (o.deadline) fail("a demand_aggregate carries no deadline");
-    } else if (o.demandBand) {
-      fail("only a demand_aggregate carries a demandBand");
+      if (!o.releasePeriod) fail("a demand_aggregate needs its releasePeriod");
+      if (o.capabilityContractDigest) fail("a demand_aggregate carries no pinned contract digest");
+    } else {
+      if (o.demandBand) fail("only a demand_aggregate carries a demandBand");
+      if (o.releasePeriod) fail("only a demand_aggregate carries a releasePeriod");
     }
     if (o.reward?.fundingStatus === "funded") {
       if (o.kind === "demand_aggregate") fail("demand is never funded");
@@ -127,5 +171,8 @@ export const OpportunityDTOSchema = z
     }
     if (o.kind === "funded_offer" && o.reward?.fundingStatus !== "funded") {
       fail("a funded_offer must carry a funded reward");
+    }
+    if (o.kind === "funded_offer" && o.reward?.fundingStatus === "funded" && !o.capabilityContractDigest) {
+      fail("a funded funded_offer must pin the capabilityContractDigest its accepted plan pinned");
     }
   });

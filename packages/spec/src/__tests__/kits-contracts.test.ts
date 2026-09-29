@@ -240,6 +240,7 @@ describe("OpportunityDTO", () => {
       kind: "funded_offer",
       reward: { amount: "40000000", currency: "USDC", fundingStatus: "funded" },
       authority: "authoritative",
+      capabilityContractDigest: H("d"),
       kitRef: { kitDigest: H("c"), name: "HPLC kit" },
     });
     expect(OpportunityDTOSchema.safeParse(funded).success).toBe(true);
@@ -256,7 +257,7 @@ describe("OpportunityDTO", () => {
   });
 
   it("a demand aggregate is a banded signal with no reward", () => {
-    const agg = opportunity({ kind: "demand_aggregate", reward: undefined, demandBand: "5-9", authority: "derived_signal" });
+    const agg = opportunity({ kind: "demand_aggregate", reward: undefined, demandBand: "5-9", releasePeriod: "2026-09", authority: "derived_signal" });
     expect(OpportunityDTOSchema.safeParse(agg).success).toBe(true);
     expect(OpportunityDTOSchema.safeParse({ ...agg, reward: { amount: "1", currency: "USDC", fundingStatus: "unfunded" } }).success).toBe(false);
     expect(OpportunityDTOSchema.safeParse({ ...agg, demandBand: undefined }).success).toBe(false);
@@ -264,10 +265,10 @@ describe("OpportunityDTO", () => {
   });
 
   it("a demand aggregate carries only painpoints' public fields: no location, evidence or deadline", () => {
-    const agg = opportunity({ kind: "demand_aggregate", reward: undefined, demandBand: "10-24", authority: "derived_signal" });
+    const agg = opportunity({ kind: "demand_aggregate", reward: undefined, demandBand: "10-24", releasePeriod: "2026-09", authority: "derived_signal" });
     expect(OpportunityDTOSchema.safeParse(agg).success).toBe(true);
     expect(OpportunityDTOSchema.safeParse({ ...agg, location: { country: "US" } }).success).toBe(false);
-    expect(OpportunityDTOSchema.safeParse({ ...agg, evidence: { tier: 1, requiredEventClasses: [] } }).success).toBe(false);
+    expect(OpportunityDTOSchema.safeParse({ ...agg, evidence: { tier: 1, requiredPrimitives: [] } }).success).toBe(false);
     expect(OpportunityDTOSchema.safeParse({ ...agg, deadline: "2026-10-01T00:00:00Z" }).success).toBe(false);
   });
 
@@ -277,5 +278,61 @@ describe("OpportunityDTO", () => {
     expect(OpportunityDTOSchema.safeParse(opportunity({ title: "need hplc\nplease call 555" })).success).toBe(false);
     expect(OpportunityDTOSchema.safeParse(opportunity({ location: { country: "US", region: "CA", ...({ lat: 37.7 } as object) } })).success).toBe(false);
     expect(OpportunityDTOSchema.safeParse(opportunity({ location: { country: "usa" } })).success).toBe(false);
+  });
+});
+
+describe("v0 amendment 1 (2026-09-29): A2, A3, A5, A6", () => {
+  const funded = () =>
+    opportunity({
+      kind: "funded_offer",
+      reward: { amount: "40000000", currency: "USDC", fundingStatus: "funded" },
+      authority: "authoritative",
+      capabilityContractDigest: H("d"),
+    });
+  const aggregate = () =>
+    opportunity({ kind: "demand_aggregate", reward: undefined, demandBand: "5-9", releasePeriod: "2026-09", authority: "derived_signal" });
+
+  it("A2: a funded funded_offer must pin the capabilityContractDigest", () => {
+    expect(OpportunityDTOSchema.safeParse(funded()).success).toBe(true);
+    expect(OpportunityDTOSchema.safeParse({ ...funded(), capabilityContractDigest: undefined }).success).toBe(false);
+    expect(OpportunityDTOSchema.safeParse({ ...funded(), capabilityContractDigest: "sha256:XYZ" }).success).toBe(false);
+  });
+
+  it("A2: the pin is optional on a kit_build_request and forbidden on a demand_aggregate", () => {
+    expect(OpportunityDTOSchema.safeParse(opportunity()).success).toBe(true);
+    expect(OpportunityDTOSchema.safeParse(opportunity({ capabilityContractDigest: H("e") })).success).toBe(true);
+    expect(OpportunityDTOSchema.safeParse({ ...aggregate(), capabilityContractDigest: H("e") }).success).toBe(false);
+  });
+
+  it("A3: requiredPrimitives uses the CSD evidence-primitive grammar with active ids only", () => {
+    const withEvidence = (requiredPrimitives: unknown) => ({ ...opportunity(), evidence: { tier: 1, requiredPrimitives } });
+    expect(OpportunityDTOSchema.safeParse(withEvidence([{ id: "artifact.hash" }, { id: "ident.registered_key", bind: "source" }])).success).toBe(true);
+    expect(OpportunityDTOSchema.safeParse(withEvidence([{ id: "made.up_primitive" }])).success).toBe(false);
+    expect(OpportunityDTOSchema.safeParse(withEvidence([{ id: "artifact.hash", smuggled: true }])).success).toBe(false);
+    // The v0 field name is gone; a strict schema refuses it.
+    expect(OpportunityDTOSchema.safeParse({ ...opportunity(), evidence: { tier: 1, requiredEventClasses: ["photo"] } }).success).toBe(false);
+  });
+
+  it("A5: a demand_aggregate needs a well-formed releasePeriod; no other kind carries one", () => {
+    expect(OpportunityDTOSchema.safeParse(aggregate()).success).toBe(true);
+    expect(OpportunityDTOSchema.safeParse({ ...aggregate(), releasePeriod: undefined }).success).toBe(false);
+    for (const bad of ["2026-13", "2026-9", "26-09", "2026-09-01", "1999-12"]) {
+      expect(OpportunityDTOSchema.safeParse({ ...aggregate(), releasePeriod: bad }).success, bad).toBe(false);
+    }
+    expect(OpportunityDTOSchema.safeParse({ ...funded(), releasePeriod: "2026-09" }).success).toBe(false);
+  });
+
+  it("A6: artifact names are safe relative paths, so an installer can't be walked out of the kit", async () => {
+    const withName = (name: string) =>
+      liquidHandlingKit({
+        artifacts: [...liquidHandlingKit().artifacts, { role: "docs", name, mediaType: "text/markdown", digest: H("9") }],
+      });
+    for (const ok of ["README.md", "tests/test_method_plan.py", "labware/pcc_carrier_24_tube_2ml_screwcap.json"]) {
+      expect(CapabilityKitManifestV1Schema.safeParse(withName(ok)).success, ok).toBe(true);
+    }
+    for (const bad of ["../x", "../../etc/passwd", "/etc/passwd", "a/../b", "a\\b", "./a", "a//b", "a/", "tests/.."]) {
+      expect(CapabilityKitManifestV1Schema.safeParse(withName(bad)).success, bad).toBe(false);
+      await expect(computeKitDigest(withName(bad)), bad).rejects.toThrow();
+    }
   });
 });

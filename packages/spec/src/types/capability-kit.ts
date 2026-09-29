@@ -25,9 +25,22 @@
  * second one. Golden vectors are pinned in kits-contracts.test.ts; re-run them
  * whenever that canonicalizer changes (N15 / PR #359).
  *
+ * Conventions (v0 amendment A4; no shape change):
+ *   - The `provenance-recipe` artifact has mediaType
+ *     `application/vnd.pcc.provenance-recipe+json;v=1`: which evidence
+ *     primitives the kit emits, and which ones each tier requires. It is
+ *     co-owned with the evidence lane.
+ *   - `compatibility.interfaces` uses the kernel's AdapterType names
+ *     (packages/kernel/src/kernel-config.ts) as the single source, for example
+ *     opentrons, hamilton, octoprint, ipp, modbus, opcua, sila or generic-http.
+ *     A kit never declares "mock".
+ *
  * v0, FROZEN FOR CONSUMERS (steward ruling #3058): adk, readmodels,
  * operator-ux and refvertical build against this shape. Any change needs
- * their ack on the bus first; a breaking change is a new version.
+ * their ack on the bus first; a breaking change is a new version. Amendment 1
+ * (2026-09-29) was acked on the bus before it landed. It adds A4 (the
+ * conventions above) and A6 (artifact names are safe relative paths), and
+ * shares the CSD url pattern with the binding and opportunity contracts.
  */
 
 import { z } from "zod";
@@ -36,6 +49,21 @@ import type { SHA256 } from "./common.js";
 import { canonicalize, sha256 } from "../util/canonical.js";
 
 export const KIT_MANIFEST_SCHEMA = "pcc.capability-kit/v1" as const;
+
+/**
+ * A CSD capability url, e.g. pcc://capabilities/liquid-handling/v1. One pattern
+ * shared by the kit manifest, OperatorBindingDTO and OpportunityDTO, so a
+ * binding, a kit and an opportunity compare capability types directly.
+ */
+export const CSD_CAPABILITY_URL_PATTERN = /^pcc:\/\/capabilities\/[a-z0-9-]+\/v[0-9]+$/;
+
+/**
+ * An artifact name is a relative POSIX path (amendment A6). Segments are
+ * [A-Za-z0-9._-]+, and there is no leading "/", no "." or ".." segment, no
+ * backslash and no empty segment. An installer may write an artifact to disk by
+ * its name, so a name must never be able to leave the kit's directory.
+ */
+export const KIT_ARTIFACT_NAME_PATTERN = /^(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
 /** What an artifact is for. Machine-native roles cover lab/workcell kits. */
 export const KIT_ARTIFACT_ROLES = [
@@ -62,8 +90,12 @@ const TermsHashSchema = z.string().regex(/^0x[0-9a-f]{64}$/, "Must be 0x<64 lowe
 export const KitArtifactRefSchema = z
   .object({
     role: z.enum(KIT_ARTIFACT_ROLES),
-    /** Stable name within the kit, e.g. "opentrons-labware.json". */
-    name: z.string().min(1).max(200),
+    /** Stable name within the kit, e.g. "opentrons-labware.json" or "tests/test_method.py". */
+    name: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(KIT_ARTIFACT_NAME_PATTERN, "Must be a safe relative path (no leading '/', no '.' or '..' segment, no backslash)"),
     mediaType: z.string().min(1).max(120),
     /** sha256 of the exact artifact bytes (a JSON artifact: of its canonical form). */
     digest: Sha256DigestSchema,
@@ -80,7 +112,7 @@ export type KitArtifactRef = z.infer<typeof KitArtifactRefSchema>;
 export const KitCapabilityRefSchema = z
   .object({
     /** CSD url, e.g. pcc://capabilities/liquid-handling/v1 */
-    csdUrl: z.string().regex(/^pcc:\/\/capabilities\/[a-z0-9-]+\/v[0-9]+$/),
+    csdUrl: z.string().regex(CSD_CAPABILITY_URL_PATTERN),
     /** Pins the exact CSD revision; see capability-contract-identity.ts. */
     capabilityContractDigest: Sha256DigestSchema,
   })
@@ -93,6 +125,7 @@ export const KitCompatibilitySchema = z
   .object({
     deviceFamilies: z.array(Label).max(50).optional(),
     models: z.array(Label).max(200).optional(),
+    /** Kernel AdapterType names (see the A4 conventions above); never "mock". */
     interfaces: z.array(Label).max(20).optional(),
     platforms: z.array(Label).max(20).optional(),
   })
