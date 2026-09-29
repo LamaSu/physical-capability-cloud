@@ -284,8 +284,55 @@ export function resolveAcceptedProgram(
   return { ok: true, program: entry.program, programHash: entry.programHash };
 }
 
+/** Primitives whose verifier checks a signer against a pinned registry snapshot. */
+export const REGISTRY_BACKED_PRIMITIVES: readonly string[] = ["ident.registered_key"];
+
+/**
+ * A registry the accepted deal must pin. The committed CSD tier names the
+ * registry (`params.registryId`), and the deal seals the snapshotHash it read
+ * before compile (bus #3391, registry-pins-note.md).
+ */
+export interface RequiredRegistryPin {
+  primitiveId: string;
+  registryId: string;
+}
+
+const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * The registry pins a funded (CSD, tier k) needs sealed in the accepted deal:
+ * every registry-backed primitive in tiers 0..k, with the registry its params
+ * name. Deduped on (primitiveId, registryId), and sorted by primitiveId then
+ * registryId, in code-unit order. A registry-backed primitive that names no
+ * registry cannot be pinned, so it is refused.
+ */
+export function requiredRegistryPins(
+  evidence: Readonly<Record<string, CsdEvidenceTier>>,
+  k: number,
+): { ok: true; pins: RequiredRegistryPin[] } | { ok: false; reasons: string[] } {
+  const pins = new Map<string, RequiredRegistryPin>();
+  const reasons: string[] = [];
+  for (let t = 0; t <= k; t++) {
+    for (const p of evidence[`tier${t}`]?.primitives ?? []) {
+      if (!REGISTRY_BACKED_PRIMITIVES.includes(p.id)) continue;
+      const registryId = (p.params as { registryId?: unknown } | undefined)?.registryId;
+      if (typeof registryId !== "string" || registryId.length === 0) {
+        reasons.push(`tier${t}: "${p.id}" names no registryId, so the deal cannot pin its registry`);
+        continue;
+      }
+      pins.set(JSON.stringify([p.id, registryId]), { primitiveId: p.id, registryId });
+    }
+  }
+  if (reasons.length > 0) return { ok: false, reasons };
+  return {
+    ok: true,
+    pins: [...pins.values()].sort((a, b) => byCodeUnit(a.primitiveId, b.primitiveId) || byCodeUnit(a.registryId, b.registryId)),
+  };
+}
+
 export type AcceptedProgramGateResult =
-  | { ok: true }
+  /** `registryPins`: what the accepted deal must pin (`requiredRegistryPins`). */
+  | { ok: true; registryPins: RequiredRegistryPin[] }
   | {
       ok: false;
       code:
@@ -295,7 +342,8 @@ export type AcceptedProgramGateResult =
         | "program-on-tier-zero"
         | "tier-not-in-csd"
         | "tier-not-eligible"
-        | "program-fails-tier-check";
+        | "program-fails-tier-check"
+        | "registry-not-named";
       violations?: TierAssuranceViolation[];
       /** tier-not-eligible: why tiers 0..T cannot be verified end to end. */
       reasons?: string[];
@@ -312,7 +360,9 @@ export interface AcceptedProgramGateOptions {
  * plan or composition commitment carries (null when none). A non-zero tier
  * passes only when that hash equals the resolved program's hash exactly, the
  * CSD's tiers 0..T are eligible with implemented verifiers, and the program
- * passes `checkCommittedProgramForTier` for the CSD's own tier.
+ * passes `checkCommittedProgramForTier` for the CSD's own tier. On success it
+ * returns the registry pins the accepted deal must seal (`requiredRegistryPins`),
+ * taken from the same server-resolved CSD tiers the gate just checked.
  */
 export function assertAcceptedProgramForTier(
   input: {
@@ -327,7 +377,8 @@ export function assertAcceptedProgramForTier(
   const resolved = resolveAcceptedProgram(input.csd, input.tierKey, registry);
   if (!resolved.ok) return { ok: false, code: "no-committed-program" };
   if (resolved.program === null) {
-    return input.committedProgramHash === null ? { ok: true } : { ok: false, code: "program-on-tier-zero" };
+    if (input.committedProgramHash !== null) return { ok: false, code: "program-on-tier-zero" };
+    return pinsResult(input.evidence ?? {}, 0);
   }
   if (computeCommittedProgramHash(resolved.program) !== resolved.programHash) {
     return { ok: false, code: "registry-hash-mismatch" };
@@ -355,5 +406,10 @@ export function assertAcceptedProgramForTier(
   if (check.violations.length > 0) {
     return { ok: false, code: "program-fails-tier-check", violations: check.violations };
   }
-  return { ok: true };
+  return pinsResult(input.evidence, k);
+}
+
+function pinsResult(evidence: Readonly<Record<string, CsdEvidenceTier>>, k: number): AcceptedProgramGateResult {
+  const pins = requiredRegistryPins(evidence, k);
+  return pins.ok ? { ok: true, registryPins: pins.pins } : { ok: false, code: "registry-not-named", reasons: pins.reasons };
 }

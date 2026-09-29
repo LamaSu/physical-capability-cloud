@@ -7,6 +7,7 @@ import {
   PRINT_AND_MAIL_INDEPENDENCE_PROGRAM,
   PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH,
   assertAcceptedProgramForTier,
+  requiredRegistryPins,
   checkCommittedProgramForTier,
   computeCommittedProgramHash,
   resolveAcceptedProgram,
@@ -53,10 +54,14 @@ const PRINT_ONLY: CommittedProgram = {
  */
 function fixedTiers(): Record<string, CsdEvidenceTier> {
   const t = structuredClone(tiers);
-  for (const k of ["tier1", "tier2", "tier3"]) t[k]!.primitives!.push({ id: "ident.registered_key" });
+  for (const k of ["tier1", "tier2", "tier3"]) {
+    t[k]!.primitives!.push({ id: "ident.registered_key", params: { registryId: KERNEL_KEYS } });
+  }
   for (const k of ["tier2", "tier3"]) t[k]!.primitives!.push({ id: "approval.payer" });
   return t;
 }
+const KERNEL_KEYS = "pcc.registry.kernel-signing-keys.v1";
+const KERNEL_KEY_PIN = [{ primitiveId: "ident.registered_key", registryId: KERNEL_KEYS }];
 /** The v1 vocabulary as it reads once every verifier is registered and live. */
 const LIVE = new Map(EVIDENCE_PRIMITIVES.map((d) => [d.id, { ...d, verifierStatus: "live" as const }]));
 
@@ -208,9 +213,10 @@ describe("assertAcceptedProgramForTier — the pre-funding gate (required negati
     );
 
   it("tier2 with its exact program hash is accepted (hex case is not meaningful)", () => {
-    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH)).toEqual({ ok: true });
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
     expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH.toUpperCase().replace("0X", "0x"))).toEqual({
       ok: true,
+      registryPins: KERNEL_KEY_PIN,
     });
   });
 
@@ -238,7 +244,7 @@ describe("assertAcceptedProgramForTier — the pre-funding gate (required negati
       ok: false,
       code: "program-hash-mismatch",
     });
-    expect(gate("tier1", computeCommittedProgramHash(PRINT_ONLY), registry)).toEqual({ ok: true });
+    expect(gate("tier1", computeCommittedProgramHash(PRINT_ONLY), registry)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
   });
 
   it("a non-zero tier with no program hash is refused", () => {
@@ -246,7 +252,7 @@ describe("assertAcceptedProgramForTier — the pre-funding gate (required negati
   });
 
   it("tier0 takes no program, and refuses one", () => {
-    expect(gate("tier0", null)).toEqual({ ok: true });
+    expect(gate("tier0", null)).toEqual({ ok: true, registryPins: [] });
     expect(gate("tier0", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH)).toEqual({
       ok: false,
       code: "program-on-tier-zero",
@@ -295,7 +301,7 @@ describe("assertAcceptedProgramForTier — the funded tier must be verifiable en
   });
 
   it("the fixed CSD with every verifier live is funded", () => {
-    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, fixedTiers(), LIVE)).toEqual({ ok: true });
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, fixedTiers(), LIVE)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
   });
 
   it("eligibility covers tiers 0..T: a tier1 that is only self-attested blocks tier2", () => {
@@ -331,6 +337,38 @@ describe("assertAcceptedProgramForTier — the funded tier must be verifiable en
   });
 
   it("tier0 stays fundable with no program", () => {
-    expect(gate("tier0", null, tiers)).toEqual({ ok: true });
+    expect(gate("tier0", null, tiers)).toEqual({ ok: true, registryPins: [] });
+  });
+});
+
+describe("requiredRegistryPins — what the accepted deal must pin (bus #3391)", () => {
+  it("dedupes across tiers, sorts by primitiveId then registryId, and ignores non-registry primitives", () => {
+    const t = fixedTiers();
+    t["tier2"]!.primitives!.push({ id: "ident.registered_key", params: { registryId: "pcc.registry.a.v1" } });
+    t["tier2"]!.primitives!.push({ id: "artifact.hash", params: { registryId: "pcc.registry.ignored.v1" } } as never);
+    expect(requiredRegistryPins(t, 2)).toEqual({
+      ok: true,
+      pins: [
+        { primitiveId: "ident.registered_key", registryId: "pcc.registry.a.v1" },
+        { primitiveId: "ident.registered_key", registryId: KERNEL_KEYS },
+      ],
+    });
+    expect(requiredRegistryPins(t, 0)).toEqual({ ok: true, pins: [] });
+  });
+
+  it("a registry-backed primitive that names no registry is refused, at the gate too", () => {
+    const t = fixedTiers();
+    t["tier1"]!.primitives = t["tier1"]!.primitives!.map((p) => (p.id === "ident.registered_key" ? { id: p.id } : p));
+    expect(requiredRegistryPins(t, 1)).toEqual({
+      ok: false,
+      reasons: ['tier1: "ident.registered_key" names no registryId, so the deal cannot pin its registry'],
+    });
+    expect(requiredRegistryPins(t, 0)).toEqual({ ok: true, pins: [] });
+    const r = assertAcceptedProgramForTier(
+      { csd: CSD, tierKey: "tier2", evidence: t, committedProgramHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
+      COMMITTED_PROGRAM_REGISTRY,
+      { primitiveIndex: LIVE },
+    );
+    expect(r).toMatchObject({ ok: false, code: "registry-not-named" });
   });
 });
