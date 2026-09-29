@@ -80,12 +80,7 @@ def execute_ipp_print(device: Dict, job: Dict) -> Dict[str, Any]:
         f.write(content)
         filepath = f.name
 
-    printer_ip = (
-        device.get("host")
-        or device.get("address")
-        or device.get("ip")
-        or device.get("adapterConfig", {}).get("host", "")
-    )
+    printer_ip = _ipp_printer_host(device)
     printer_name = device.get("model", device.get("name", ""))
 
     try:
@@ -1472,6 +1467,45 @@ def _octoprint_headers(device: Dict) -> Dict[str, str]:
     return {"X-Api-Key": api_key} if api_key else {}
 
 
+def _device_key(device: Dict) -> str:
+    """The id a device is indexed by (and stored under in the awaiting registry)."""
+    return device.get("id") or device.get("host") or device.get("ip", "")
+
+
+def _ipp_printer_host(device: Dict) -> str:
+    """The printer host execute_ipp_print sends a device's jobs to."""
+    return (
+        device.get("host")
+        or device.get("address")
+        or device.get("ip")
+        or device.get("adapterConfig", {}).get("host", "")
+    )
+
+
+def _valid_stored_handle(kind: Any, handle: Any, device: Dict) -> bool:
+    """A handle read back from the awaiting registry that is safe to poll.
+
+    A stored record is re-checked as strictly as a fresh one.  Only IPP
+    handles are tracked: an OctoPrint print is acceptance-only (r31 round-2
+    findings 2 and 3), so a stored record of any other kind is refused.  The
+    device configured under the record's id must still send its jobs to the
+    handle's printer host: a CUPS job-id means something only on the printer
+    that issued it, so polling a printer the device was re-pointed to could
+    read ANOTHER job with the same id as ours.
+    """
+    if not isinstance(handle, dict):
+        return False
+    if kind == COMPLETION_KIND_IPP:
+        host, queue, job_id = handle.get("printer_ip"), handle.get("queue"), handle.get("cupsJobId")
+        return (
+            isinstance(host, str) and bool(_IPP_HOST.match(host))
+            and host == _ipp_printer_host(device)
+            and isinstance(queue, str) and bool(queue)
+            and isinstance(job_id, int) and not isinstance(job_id, bool) and 1 <= job_id <= IPP_INT_MAX
+        )
+    return False
+
+
 def octoprint_file_path(filename: Any) -> Optional[str]:
     """The job's file as a path in OctoPrint's local storage, or None.
 
@@ -1508,6 +1542,15 @@ class JobExecutor:
         Monotonic clock for every deadline (tests inject a fake one).
     sleep:
         Sleep between Opentrons run polls (tests inject a fake one).
+    outbox:
+        Durable retry for terminal status reports the gateway did not
+        acknowledge (outbox.StatusOutbox), or None to log only.
+    awaiting_store:
+        Durable registry of accepted jobs (awaiting_store.AwaitingStore), so
+        a restarted daemon resumes observing them; None keeps them in memory
+        only.
+    wall_clock:
+        Wall-clock seconds for the stored deadlines (tests inject one).
     """
 
     def __init__(
@@ -1516,13 +1559,16 @@ class JobExecutor:
         gateway_client=None,
         clock: Optional[Callable[[], float]] = None,
         sleep: Optional[Callable[[float], None]] = None,
+        outbox: Optional[Any] = None,
+        awaiting_store: Optional[Any] = None,
+        wall_clock: Optional[Callable[[], float]] = None,
     ):
         # Index by id and by protocol for fast lookup
         self._devices_by_id: Dict[str, Dict] = {}
         self._devices_by_protocol: Dict[str, List[Dict]] = {}
 
         for dev in devices:
-            dev_id = dev.get("id") or dev.get("host") or dev.get("ip", "")
+            dev_id = _device_key(dev)
             if dev_id:
                 self._devices_by_id[dev_id] = dev
             protocol = dev.get("protocol") or dev.get("type") or "generic"
@@ -1531,15 +1577,25 @@ class JobExecutor:
         self.gateway = gateway_client
         self._clock: Callable[[], float] = clock or time.monotonic
         self._sleep: Callable[[float], None] = sleep or time.sleep
+        self._wall_clock: Callable[[], float] = wall_clock or time.time
+        # Durable retry for terminal status reports the gateway did not
+        # acknowledge (outbox.StatusOutbox; r31 finding 7).  None: log only.
+        self.outbox = outbox
 
         # Jobs a device ACCEPTED whose completion is still to be observed, by
-        # job id (see poll_awaiting).  IN MEMORY ONLY: a daemon restart forgets
-        # them and they stay "running" upstream.  That is the safe side -- the
-        # job was claimed "running" before its side effect, so it is never
-        # dispatched as queued again (no second print), and no outcome nobody
-        # observed is reported -- but settling it then needs a human.
+        # job id (see poll_awaiting).  With an awaiting_store each entry is
+        # also on disk (public fields only; the device is looked up again by
+        # id), so a restarted daemon resumes observing it (r31 round-1
+        # dependency: "a restart can strand a running job").  Without one, a
+        # restart forgets them and they stay "running" upstream: the safe
+        # side -- the job was claimed "running" before its side effect, so it
+        # is never dispatched as queued again (no second print), and no
+        # outcome nobody observed is reported -- but settling it needs a human.
+        self.awaiting_store = awaiting_store
         self._awaiting: Dict[str, Dict[str, Any]] = {}
         self._last_ipp_request_id = 0
+        if awaiting_store is not None:
+            self._restore_awaiting()
 
     def execute(self, job: Dict) -> Dict[str, Any]:
         """Execute a job dict.  Returns the evidence bundle or error dict."""
@@ -1587,9 +1643,7 @@ class JobExecutor:
                     "capabilityType": capability_type,
                 }
                 if self.gateway:
-                    self.gateway.update_job_status(
-                        job_id, "failed", {"error": "no_device_found"}
-                    )
+                    self._report_terminal_failure(job_id, {"error": "no_device_found"})
                 return error_result
 
             result = self._execute_on_device(device, job)
@@ -1600,10 +1654,20 @@ class JobExecutor:
             if self.gateway:
                 # Evidence is pushed for every outcome -- a failed run must
                 # still reach the verifier so that it can dispute.
-                self.gateway.push_evidence(job_id, evidence)
+                pushed = self.gateway.push_evidence(job_id, evidence)
 
                 if verdict == RESULT_SUCCESS:
-                    self.gateway.update_job_status(job_id, "completed", result)
+                    # As for device-reported completion: 'completed' whose
+                    # execution_completed was never stored could not settle,
+                    # and pushing the bundle again risks a duplicate.
+                    if pushed:
+                        self._report_terminal(job_id, "completed", result, "device reported success")
+                    else:
+                        log.error(
+                            "Job %s: the device succeeded but the gateway did not store "
+                            "the completion evidence; NOT reporting 'completed' -- the "
+                            "job stays 'running' upstream", job_id,
+                        )
                 elif verdict == RESULT_FAILURE:
                     self._report_terminal_failure(
                         job_id,
@@ -1650,7 +1714,7 @@ class JobExecutor:
             log.error(f"Job {job_id} failed: {e}")
             error_info = {"error": str(e), "status": "failed"}
             if self.gateway:
-                self.gateway.update_job_status(job_id, "failed", error_info)
+                self._report_terminal_failure(job_id, error_info)
             return error_info
 
     def _report_terminal_failure(self, job_id: str, metadata: Dict) -> bool:
@@ -1662,22 +1726,30 @@ class JobExecutor:
         the job non-terminal, which matters beyond this node: the gateway's own
         completion route is gated on the job not already being 'failed'.
 
-        This does NOT close that hole -- it makes it observable rather than
-        silent.  Closing it needs a retry/outbox here or a change on the
-        gateway side, neither of which is in this module's scope.
+        With an outbox the unacknowledged report is queued and retried
+        (flush_outbox); without one it is only logged.
         """
-        acknowledged = bool(
-            self.gateway.update_job_status(job_id, "failed", metadata)
+        return self._report_terminal(job_id, "failed", metadata, metadata.get("error"))
+
+    def _report_terminal(self, job_id: str, status: str, metadata: Dict, reason: Any) -> bool:
+        """Report a terminal status; queue it durably when it is not acknowledged."""
+        acknowledged = bool(self.gateway.update_job_status(job_id, status, metadata))
+        if acknowledged:
+            return True
+        queued = self.outbox is not None and self.outbox.enqueue(job_id, status, metadata)
+        log.error(
+            "Job %s: the gateway did not acknowledge the %r status report (%s); %s",
+            job_id, status, reason,
+            "it is queued and will be retried" if queued
+            else "the job may still look non-terminal upstream",
         )
-        if not acknowledged:
-            log.error(
-                "Job %s: the gateway did not acknowledge the 'failed' status "
-                "report; the job may still look non-terminal upstream "
-                "(reason: %s)",
-                job_id,
-                metadata.get("error"),
-            )
-        return acknowledged
+        return False
+
+    def flush_outbox(self) -> int:
+        """Retry queued terminal reports that are due.  Returns how many landed."""
+        if self.outbox is None or self.gateway is None:
+            return 0
+        return self.outbox.flush(self.gateway.update_job_status)
 
     # ------------------------------------------------------------------
     # Deferred completion tracking
@@ -1756,7 +1828,7 @@ class JobExecutor:
             )
             return False
         accepted_at = self._clock()
-        self._awaiting[job_id] = {
+        entry = {
             "job_id": job_id,
             "binding": _resolve_binding(job_id, binding),
             "device": device,
@@ -1767,11 +1839,112 @@ class JobExecutor:
             "next_poll_at": accepted_at,
             "last_observation": None,
         }
+        self._awaiting[job_id] = entry
+        self._persist_awaiting(entry, timeout_s)
         log.info(
             "Job %s: awaiting device-reported completion via %s %s (budget %gs)",
             job_id, kind, handle, timeout_s,
         )
         return True
+
+    # ------------------------------------------------------------------
+    # The durable side of the awaiting registry (awaiting_store)
+    # ------------------------------------------------------------------
+
+    def _persist_awaiting(self, entry: Dict[str, Any], timeout_s: float) -> None:
+        """Store an accepted job so a restart resumes observing it.  A job that
+        cannot be stored is still tracked in memory, and the ERROR says so."""
+        if self.awaiting_store is None:
+            return
+        job_id = entry["job_id"]
+        device_id = _device_key(entry["device"])
+        if not device_id:
+            log.error("Job %s: its device has no id, so it is tracked in memory only", job_id)
+            return
+        wall = self._wall_clock()
+        record = {
+            "jobId": job_id,
+            "binding": dict(entry["binding"]),
+            "deviceId": device_id,
+            "kind": entry["kind"],
+            "handle": dict(entry["handle"]),
+            "acceptedAt": wall,
+            "deadline": wall + timeout_s,
+        }
+        try:
+            self.awaiting_store.put(record)
+        except (OSError, ValueError) as exc:
+            log.error(
+                "Job %s: could not store it in the awaiting registry (%s); it is "
+                "tracked in memory only, and a restart would strand it", job_id, exc,
+            )
+
+    def _forget_awaiting(self, job_id: str) -> bool:
+        """Stop tracking ``job_id``, in memory and on disk.
+
+        False when the stored record could not be removed.  The caller must
+        then NOT report the job: a restart would restore and observe it again,
+        and a report now would be a second terminal report later.  Skipping it
+        leaves exactly one report, made by the process that restores it.
+        """
+        self._awaiting.pop(job_id, None)
+        if self.awaiting_store is None:
+            return True
+        try:
+            self.awaiting_store.remove(job_id)
+        except OSError as exc:
+            log.error(
+                "Job %s: could not remove it from the awaiting registry (%s); not "
+                "reporting it now -- a restart will resume observing it", job_id, exc,
+            )
+            return False
+        return True
+
+    def _restore_awaiting(self) -> None:
+        """Resume the jobs a previous daemon left awaiting completion.
+
+        A record is dropped WITHOUT a status (the job stays "running" upstream,
+        with an ERROR naming it) when its device is no longer configured under
+        that id, when its handle is not safe to poll with that device, or when
+        its budget ran out while the daemon was down.
+        """
+        now = self._clock()
+        wall = self._wall_clock()
+        for record in self.awaiting_store.records():
+            job_id = record["jobId"]
+            device = self._devices_by_id.get(record["deviceId"])
+            remaining = min(record["deadline"] - wall, COMPLETION_POLL_TIMEOUT_MAX_S)
+            if device is None:
+                why = f"its device {record['deviceId']!r} is no longer configured"
+            elif not _valid_stored_handle(record["kind"], record["handle"], device):
+                why = f"its stored {record['kind']} handle does not fit the device configured as {record['deviceId']!r}"
+            elif remaining <= 0:
+                why = "its completion budget ran out while the daemon was down"
+            else:
+                self._awaiting[job_id] = {
+                    "job_id": job_id,
+                    "binding": dict(record["binding"]),
+                    "device": device,
+                    "kind": record["kind"],
+                    "handle": dict(record["handle"]),
+                    "accepted_at": now - max(0.0, wall - record["acceptedAt"]),
+                    "deadline": now + remaining,
+                    "next_poll_at": now,
+                    "last_observation": None,
+                }
+                log.info(
+                    "Job %s: resumed awaiting device-reported completion after a restart "
+                    "(%s %s, %gs left)", job_id, record["kind"], record["handle"], remaining,
+                )
+                continue
+            log.error(
+                "Job %s: not resuming completion tracking after a restart: %s; the job "
+                "stays 'running' upstream WITHOUT a status", job_id, why,
+            )
+            try:
+                self.awaiting_store.remove(job_id)
+            except OSError as exc:
+                log.error("Job %s: could not remove its stale record (%s)", job_id, exc)
 
     def poll_awaiting(self) -> None:
         """Check every awaiting job ONCE -- one request each, no sleeping.
@@ -1796,8 +1969,11 @@ class JobExecutor:
 
         A job is removed from the registry BEFORE anything is reported, so no
         failure part-way through can make a later cycle report it again: never
-        two terminal statuses, never two completion bundles.  One job's
-        exception is logged and does not stop the others.
+        two terminal statuses, never two completion bundles.  With an
+        awaiting_store that includes the disk: a job whose stored record
+        cannot be removed is not reported at all, so a restart cannot report
+        it a second time (_forget_awaiting).  One job's exception is logged
+        and does not stop the others.
         """
         for job_id in list(self._awaiting):
             entry = self._awaiting.get(job_id)
@@ -1814,7 +1990,7 @@ class JobExecutor:
     def _expire(self, entry: Dict[str, Any], why: str) -> None:
         """Stop tracking a job WITHOUT a status: its outcome is unknown."""
         job_id = entry["job_id"]
-        self._awaiting.pop(job_id, None)
+        self._forget_awaiting(job_id)
         log.error(
             "Job %s: %s (budget %gs from acceptance, %s %s); completion tracking "
             "stopped WITHOUT reporting completed or failed -- the outcome is "
@@ -1847,7 +2023,8 @@ class JobExecutor:
             log.debug("Job %s: still awaiting completion (%s)", job_id, observation.get("reason"))
             return
 
-        self._awaiting.pop(job_id, None)
+        if not self._forget_awaiting(job_id):
+            return  # see _forget_awaiting: reporting now could report twice
         if verdict == POLL_UNOBSERVABLE:
             log.error(
                 "Job %s: the device cannot report this job's outcome (%s); "
@@ -1889,6 +2066,15 @@ class JobExecutor:
         bundle again risks a duplicate -- so an unacknowledged push leaves the
         job "running" and says so at ERROR.  'failed' is reported either way,
         as execute() does: failing closed needs no evidence to be safe.
+
+        RECOVERY POLICY for an unacknowledged completion push (r31 round-1
+        dependency): the node does not retry it.  The gateway's evidence relay
+        does not deduplicate (bus #3307), so a retry after a lost
+        acknowledgement could store the bundle twice.  The job stays
+        "running" upstream, the ERROR names it and what the device reported,
+        and settling it is a human's call until the relay deduplicates by
+        bundle hash; a retry can be added then.  Terminal STATUS reports, which
+        are idempotent, are retried durably by the outbox.
         """
         job_id = entry["job_id"]
         result = {
@@ -1923,16 +2109,10 @@ class JobExecutor:
                     job_id, observation.get("reason"),
                 )
                 return
-            if self.gateway.update_job_status(job_id, "completed", result):
+            if self._report_terminal(job_id, "completed", result, observation.get("reason")):
                 log.info(
                     "Job %s completed: the device reported it (%s)",
                     job_id, observation.get("reason"),
-                )
-            else:
-                log.error(
-                    "Job %s: the gateway did not acknowledge the 'completed' "
-                    "status report; the job may still look 'running' upstream "
-                    "(the device reported: %s)", job_id, observation.get("reason"),
                 )
             return
 
