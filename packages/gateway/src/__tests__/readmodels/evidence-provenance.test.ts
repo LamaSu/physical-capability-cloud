@@ -248,6 +248,13 @@ describe("the DTO never claims what the gateway does not record", () => {
   });
 });
 
+/**
+ * PUT /complete starts the in-process evidence store (Helia by default), which takes about 4 s
+ * alone and more under a loaded machine's full suite; 5 s was too tight there at 5a947235 and
+ * after it. The wait is for startup, not for an answer the test could miss.
+ */
+const REAL_STORE_TIMEOUT_MS = 30_000;
+
 describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
   let app: FastifyInstance;
   const OPERATOR_NYC = "0x1111111111111111111111111111111111111111";
@@ -281,7 +288,7 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     await (await import("../../services.js")).stopEvidenceStorage();
     (await import("../../db.js")).closeStore();
     delete process.env.MOCK_SETTLEMENT;
-  });
+  }, REAL_STORE_TIMEOUT_MS);
 
   it("a real PUT /complete bundle: storage_envelope_match, gateway-stamped events that cover nothing, no signature, no verdict", async () => {
     const created = await app.inject({
@@ -307,7 +314,7 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     expect(b.tierCoverage.countedEvents).toBe(0);
     expect(b.tierCoverage.state).not.toBe("covers");
     expect(dto.verification.state).toBe("no_verdict_recorded");
-  });
+  }, REAL_STORE_TIMEOUT_MS);
 
   it("NEGATIVE (facts map item B): the legacy evidence reads count the bundle's real events, not 0", async () => {
     const created = await app.inject({
@@ -327,7 +334,7 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     expect(one.success && one.data.eventCount).toBe(events);
     const detail = await getJobFacade().getById(jobId);
     expect(detail.success && detail.data.evidenceBundles[0]!.eventCount).toBe(events);
-  });
+  }, REAL_STORE_TIMEOUT_MS);
 
   it("NEGATIVE: anonymous is 401; another principal gets the same 404 as a missing job", async () => {
     const created = await app.inject({
@@ -350,5 +357,5 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     });
     expect(claimed.statusCode).toBe(403);
     expect(claimed.json().error).toBe("identity_unverified");
-  });
+  }, REAL_STORE_TIMEOUT_MS);
 });
