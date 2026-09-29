@@ -202,7 +202,11 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     const recLine = line(rec);
     if (wouldExceedCap(WAITLIST_FILE, recLine)) return reply.code(503).send(STORE_FULL);
     append(WAITLIST_FILE, recLine);
-    if (leadKey && !presented) trackIssuedLead(leadKey);
+    // The lead's budget starts once its first save is recorded (that save counted
+    // against the per-IP window above), whoever made its token: the server, or the
+    // page itself (astra, pack 53: NEW-3 and new defect 1). A new lead still costs
+    // one per-IP hit, so inventing tokens mints no extra budget.
+    if (leadKey) trackIssuedLead(leadKey);
     return { status: "ok", id: rec.id, leadId, leadToken, message: "You're on the waitlist — we'll be in touch." };
   });
 
