@@ -144,20 +144,50 @@ When a tool call fails within a scope:
 
 The relay is `/api/relay/:kernelId/...` (`packages/gateway/src/routes/device-relay.ts`).
 It is default-deny and scoped to one kernel. Every route is listed in
-`RELAY_ROUTE_ACCESS`, and a route missing from that table is refused. A caller
-with no API key or SIWE session gets 401.
+`RELAY_ROUTE_ACCESS`, and a route missing from that table is refused (so is any
+method the table does not list, such as HEAD). A caller with no API key or SIWE
+session gets 401.
 
 | Who | May |
 |-----|-----|
 | The kernel's operator (its recorded `operatorAddress`) | Everything on that kernel, including the device side: claim pending calls, report results, push camera frames, read and answer chat, mint scopes |
-| An agent holding an active, unexpired scope on that kernel | Post tool calls under its own scope, read those calls' results, read and revoke its own scope and its audit, view the camera and chat |
+| An agent holding an active, unexpired scope on that kernel | Post tool calls under its own scope, view the camera and chat |
+| The creator of a scope, active or not | Read the scope, its audit and its calls' results, and revoke it. None of these commands or observes the device |
 | Anyone else | Nothing |
 
 A scope holder commands. It never acts as the device: claiming calls,
 reporting results and pushing frames are the operator's alone. A scope is used
-only on its own kernel: a call recorded on one kernel under another kernel's
-scope (rows the retired writer could leave) grants that scope's holder nothing,
-and a revoke or audit of the scope never reaches it.
+only on its own kernel.
+
+**Authority is checked again where it is used.** Admission is not the last check.
+
+- **Dispatch.** `GET /tool-call/pending` re-checks every queued call, oldest
+  first, before handing it to the device:
+  - a named scope must exist and be on the call's own kernel, for any tool;
+  - a call with no scope must be a safe tool;
+  - a write's scope must still be active and unexpired, must allow the tool,
+    and must pass the funding parity check below.
+
+  A refused call is closed as `rejected` with its reason, so no later poll can
+  claim it and it does not hold back the calls behind it. The reasons are
+  `scope_kernel_mismatch`, `scope_not_found`, `scope_required`,
+  `scope_not_active`, `scope_expired`, `tool_not_allowed` and
+  `escrow_not_funded`. A call whose escrow lookup fails stays queued, and a
+  claim that times out is re-checked the same way. So a call recorded on one
+  kernel under another kernel's scope (rows the retired writer could leave)
+  never reaches a device and grants that scope's holder nothing, and a revoke
+  or audit of the scope never reaches it.
+- **Camera stream.** Before every frame and every 15-second heartbeat the
+  stream checks two things again:
+  - its credential still stands: the API key is neither revoked nor expired,
+    or the SIWE session is still live;
+  - its caller is still the kernel's operator or holds an active, unexpired
+    scope there.
+
+  A stream that fails either check is ended and receives no further frame.
+  Revoking a scope ends the streams it held open at once. The camera's
+  `latest` and `snapshot` and all chat routes are single requests, checked each
+  time against the table.
 
 The legacy `/api/ot2/*` routes are retired: no handler for them remains. A request
 that reaches the retirement plugin gets 410 Gone with the replacement path; the
@@ -166,8 +196,10 @@ and none of them runs a legacy operation.
 
 **Funding (parity, not a funding gate).** A scoped, non-safe tool call bound to a
 job is refused while that job's escrow exists in a state other than `funded`,
-`active` or `completed`, and a lookup error refuses it (503). A job with no
-session, CWM or escrow record, or a `completed` escrow, does not stop the call.
+`active` or `completed`. The check runs at admission, where a lookup error
+refuses the call (503), and again at dispatch, where a lookup error leaves it
+queued. A job with no session, CWM or escrow record, or a `completed` escrow,
+does not stop the call.
 Binding every actuation to an accepted, funded job and its committed protocol is
 item 5 of board row N4b-gw (R30), not this table.
 
@@ -193,7 +225,17 @@ Check scope:
     ├── commandCount >= maxCommands? → REJECT ("command limit reached")
     │
     ▼
-ALLOW → increment commandCount → relay to executor
+ALLOW → increment commandCount → queue for the executor
+
+Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
+    │  each queued call, oldest first, until 5 are handed out:
+    ├── names a scope that is missing or on another kernel? → REJECTED
+    ├── no scope, and not a safe tool? → REJECTED
+    ├── a write whose scope is not active, has expired or does not allow the tool? → REJECTED
+    ├── a write whose job's escrow is not funded? → REJECTED (lookup error: stays queued)
+    │
+    ▼
+CLAIMED → handed to the executor
 ```
 
 ## Protocol Hash Enforcement
