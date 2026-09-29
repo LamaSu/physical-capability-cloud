@@ -7,6 +7,8 @@ export {
   CdpSpendPermissionInputError,
   CdpSpendPermissionListIncompleteError,
   CdpSpendPermissionNotFoundError,
+  CdpSpendPermissionRevokeUnconfirmedError,
+  CdpUserOperationFailedError,
   CdpSpendPermissionUnconfirmedError,
   type IssueSpendPermissionParams,
 } from "./spend-permission-service.js";

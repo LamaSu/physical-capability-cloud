@@ -101,6 +101,8 @@ export {
   CdpSpendPermissionInputError,
   CdpSpendPermissionListIncompleteError,
   CdpSpendPermissionNotFoundError,
+  CdpSpendPermissionRevokeUnconfirmedError,
+  CdpUserOperationFailedError,
   CdpSpendPermissionUnconfirmedError,
   cdpCredentialsComplete,
   type IssueSpendPermissionParams,

@@ -19,6 +19,7 @@ const sdk = vi.hoisted(() => ({
   createSpendPermission: vi.fn(),
   listSpendPermissions: vi.fn(),
   revokeSpendPermission: vi.fn(),
+  waitForUserOperation: vi.fn(),
 }));
 
 vi.mock("@coinbase/cdp-sdk", () => ({
@@ -27,6 +28,7 @@ vi.mock("@coinbase/cdp-sdk", () => ({
       createSpendPermission: sdk.createSpendPermission,
       listSpendPermissions: sdk.listSpendPermissions,
       revokeSpendPermission: sdk.revokeSpendPermission,
+      waitForUserOperation: sdk.waitForUserOperation,
     };
   },
 }));
@@ -39,10 +41,20 @@ const SPENDER = "0x3333333333333333333333333333333333333333" as const;
 const HASH_NEW = "0x" + "a".repeat(64);
 const HASH_OLD = "0x" + "b".repeat(64);
 
+const TX = "0x" + "d".repeat(64);
 beforeEach(() => {
   sdk.createSpendPermission.mockReset();
   sdk.listSpendPermissions.mockReset();
   sdk.revokeSpendPermission.mockReset();
+  sdk.waitForUserOperation.mockReset();
+  // By default a submitted user operation COMPLETES; tests override it.
+  sdk.revokeSpendPermission.mockResolvedValue({ userOpHash: "0x" + "e".repeat(64) });
+  sdk.waitForUserOperation.mockImplementation(async (o: { userOpHash: string; smartAccountAddress: string }) => ({
+    status: "complete",
+    transactionHash: TX,
+    userOpHash: o.userOpHash,
+    smartAccountAddress: o.smartAccountAddress,
+  }));
 });
 
 describe("real mode needs the full credential tuple", () => {
@@ -126,9 +138,8 @@ describe("issue identifies THIS permission, never an invented or older one", () 
     expect(sent.end).toBeInstanceOf(Date);
     expect((sent.end as Date).toISOString()).toBe(expiresAt);
 
-    // Revoking that id revokes the NEW permission, on the right account.
-    sdk.revokeSpendPermission.mockResolvedValue({});
-    expect(await svc.revoke(perm.permissionId)).toEqual({ permissionId: HASH_NEW, revoked: true });
+    // Revoking that id revokes the NEW permission, on the right account, once confirmed.
+    expect(await svc.revoke(perm.permissionId)).toEqual({ permissionId: HASH_NEW, revoked: true, transactionHash: TX });
     expect(sdk.revokeSpendPermission).toHaveBeenCalledWith(
       expect.objectContaining({ address: ACCT, permissionHash: HASH_NEW }),
     );
@@ -225,5 +236,45 @@ describe("round 8 (astra failclosed r2 FC-6 and new defect 4)", () => {
       code: "spend_permission_list_incomplete",
       statusCode: 502,
     });
+  });
+});
+
+describe("submission is not confirmation (round 8, astra failclosed r2: SDK submission-versus-confirmation)", () => {
+  async function issued() {
+    fakeChain((salt) => [{ permissionHash: HASH_NEW, revoked: false, permission: { spender: SPENDER, allowance: 5_000_000n, period: 3600, salt } }]);
+    const svc = new CdpSpendPermissionService(FULL);
+    const perm = await svc.issue({ account: ACCT, spender: SPENDER, allowanceUSDC: 5, periodSec: 3600 });
+    return { svc, perm };
+  }
+
+  it("[neg] a revoke whose user operation FAILED is an error, and the permission stays unrevoked", async () => {
+    const { svc, perm } = await issued();
+    sdk.waitForUserOperation.mockResolvedValueOnce({ status: "failed", userOpHash: "0x" + "e".repeat(64) });
+    await expect(svc.revoke(perm.permissionId)).rejects.toMatchObject({ code: "user_operation_failed", statusCode: 502 });
+    expect((await svc.get(perm.permissionId))?.revoked).toBe(false);
+  });
+
+  it("[neg] a revoke that is submitted but never confirmed is NOT reported as revoked", async () => {
+    const { svc, perm } = await issued();
+    sdk.waitForUserOperation.mockRejectedValueOnce(new Error("timed out"));
+    await expect(svc.revoke(perm.permissionId)).rejects.toMatchObject({ code: "revoke_unconfirmed", statusCode: 502 });
+    expect((await svc.get(perm.permissionId))?.revoked).toBe(false);
+  });
+
+  it("[neg] an issue whose user operation was DROPPED is an error, and nothing is cached", async () => {
+    fakeChain(() => []);
+    sdk.waitForUserOperation.mockResolvedValueOnce({ status: "dropped", userOpHash: "0x" + "c".repeat(64) });
+    const svc = new CdpSpendPermissionService(FULL);
+    await expect(svc.issue({ account: ACCT, spender: SPENDER, allowanceUSDC: 5, periodSec: 3600 })).rejects.toMatchObject({
+      code: "user_operation_failed",
+      statusCode: 502,
+    });
+    expect(sdk.listSpendPermissions).not.toHaveBeenCalled();
+  });
+
+  it("control: a confirmed revoke returns its transaction hash", async () => {
+    const { svc, perm } = await issued();
+    expect(await svc.revoke(perm.permissionId)).toEqual({ permissionId: HASH_NEW, revoked: true, transactionHash: TX });
+    expect(sdk.waitForUserOperation).toHaveBeenLastCalledWith(expect.objectContaining({ smartAccountAddress: ACCT }));
   });
 });

@@ -19,6 +19,8 @@ const USDC_DECIMALS = 1_000_000; // 6 dp
 const READ_BACK_DELAYS_MS = [0, 750, 1500];
 /** Bound on listSpendPermissions pages read for one account. */
 const MAX_LIST_PAGES = 20;
+/** How long an issue or revoke waits for its user operation to complete on-chain. */
+const USER_OP_WAIT = { timeoutSeconds: 30, intervalSeconds: 1 };
 
 // The errors below carry an HTTP statusCode, which the gateway's error handler honours,
 // so a route that just awaits the service answers 400 / 404 / 502 with no mapping code.
@@ -68,6 +70,45 @@ export class CdpSpendPermissionUnconfirmedError extends Error {
         `relying on it or revoking it.`,
     );
     this.name = "CdpSpendPermissionUnconfirmedError";
+  }
+}
+
+/**
+ * A spend-permission user operation that FAILED or was DROPPED on-chain (HTTP 502).
+ * Nothing changed: an issue created no permission, and a revoke left the allowance
+ * live (round 8, astra failclosed r2: submission is not confirmation).
+ */
+export class CdpUserOperationFailedError extends Error {
+  readonly code = "user_operation_failed";
+  readonly statusCode = 502;
+  constructor(
+    readonly operation: "issue" | "revoke",
+    readonly userOpHash: string,
+  ) {
+    super(
+      `The ${operation} user operation ${userOpHash} did not complete on-chain, so nothing changed.` +
+        (operation === "revoke" ? " The allowance is still live." : ""),
+    );
+    this.name = "CdpUserOperationFailedError";
+  }
+}
+
+/**
+ * A revoke that was SUBMITTED but not confirmed within the wait (HTTP 502). It is not
+ * reported as revoked, because the allowance may still be live. Retrying checks again.
+ */
+export class CdpSpendPermissionRevokeUnconfirmedError extends Error {
+  readonly code = "revoke_unconfirmed";
+  readonly statusCode = 502;
+  constructor(
+    readonly permissionId: string,
+    readonly userOpHash: string | null,
+  ) {
+    super(
+      "The revoke was submitted but not confirmed on-chain, so it is not reported as revoked: " +
+        "the allowance may still be live. Retry to check again.",
+    );
+    this.name = "CdpSpendPermissionRevokeUnconfirmedError";
   }
 }
 
@@ -206,7 +247,7 @@ export class CdpSpendPermissionService {
     const cdp = await this.cdp();
     // The salt makes THIS permission identifiable when it is read back below.
     const salt = BigInt("0x" + randomBytes(16).toString("hex"));
-    await cdp.evm.createSpendPermission({
+    const userOp = await cdp.evm.createSpendPermission({
       spendPermission: {
         account: params.account,
         spender: params.spender,
@@ -219,8 +260,10 @@ export class CdpSpendPermissionService {
       },
       network: this.network,
     });
-    // createSpendPermission returns a UserOperation; the revoke handle is the on-chain
-    // permission hash, read back from the list by salt. Defensive parse (smoke-validated).
+    // createSpendPermission only SUBMITS a user operation. Wait for it: a failed or dropped
+    // one created nothing. Then read the on-chain permission hash back by salt.
+    const done = await this.confirm(params.account, userOp);
+    if (!done.ok && done.failed) throw new CdpUserOperationFailedError("issue", done.userOpHash ?? "unknown");
     const permissionId = await this.readBackPermissionHash(params.account, salt);
     if (!permissionId) {
       throw new CdpSpendPermissionUnconfirmedError(params.account, salt.toString());
@@ -241,7 +284,7 @@ export class CdpSpendPermissionService {
     return perm;
   }
 
-  async revoke(permissionId: string): Promise<{ permissionId: string; revoked: true; mock?: true }> {
+  async revoke(permissionId: string): Promise<{ permissionId: string; revoked: true; transactionHash?: string; mock?: true }> {
     const known = this.store.get(permissionId);
     if (!known) throw new CdpSpendPermissionNotFoundError(permissionId);
     if (this.mock) {
@@ -249,13 +292,48 @@ export class CdpSpendPermissionService {
       return { permissionId, revoked: true, mock: true };
     }
     const cdp = await this.cdp();
-    await cdp.evm.revokeSpendPermission({
+    const userOp = await cdp.evm.revokeSpendPermission({
       address: known.account,
       permissionHash: permissionId as `0x${string}`,
       network: this.network,
     });
+    // Submission is not revocation (round 8): revoked:true only once the user operation
+    // COMPLETED. A failed or dropped one left the allowance live; an unconfirmed one
+    // might have.
+    const done = await this.confirm(known.account, userOp);
+    if (!done.ok) {
+      if (done.failed) throw new CdpUserOperationFailedError("revoke", done.userOpHash ?? "unknown");
+      throw new CdpSpendPermissionRevokeUnconfirmedError(permissionId, done.userOpHash);
+    }
     known.revoked = true;
-    return { permissionId, revoked: true };
+    return { permissionId, revoked: true, transactionHash: done.transactionHash };
+  }
+
+  /**
+   * Wait for a submitted user operation. ok with its transaction hash when it
+   * COMPLETED; failed when the network reports it failed or dropped; otherwise (no
+   * hash, a timeout, a read error) its outcome is unknown.
+   */
+  private async confirm(
+    account: `0x${string}`,
+    userOp: unknown,
+  ): Promise<{ ok: true; transactionHash: string } | { ok: false; failed: boolean; userOpHash: string | null }> {
+    const userOpHash = (userOp as { userOpHash?: unknown } | null)?.userOpHash;
+    if (typeof userOpHash !== "string") return { ok: false, failed: false, userOpHash: null };
+    try {
+      const cdp = await this.cdp();
+      const r = (await cdp.evm.waitForUserOperation({
+        smartAccountAddress: account,
+        userOpHash: userOpHash as `0x${string}`,
+        waitOptions: USER_OP_WAIT,
+      })) as { status?: string; transactionHash?: string };
+      if (r.status === "complete" && typeof r.transactionHash === "string") {
+        return { ok: true, transactionHash: r.transactionHash };
+      }
+      return { ok: false, failed: r.status === "failed" || r.status === "dropped", userOpHash };
+    } catch {
+      return { ok: false, failed: false, userOpHash };
+    }
   }
 
   async get(permissionId: string): Promise<SpendPermission | null> {
