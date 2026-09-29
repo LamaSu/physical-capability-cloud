@@ -534,11 +534,14 @@ OT_FAIL_TRANSPORT = {
 # CHANGED (r31 round-1 finding 3): what is printed is the job's private copy
 # (folder pcc-<job id>, copy, baseline read, then select + print), so the
 # accepted result names that copy and its print-history baseline.
+# CHANGED AGAIN (r31 round-3): the private-copy/baseline machinery was
+# removed entirely -- OctoPrint completion tracking is gone for good (its
+# REST API names no print attempt an answer could ever be bound to), so
+# select+print now runs directly against the job's own (sanitized) filename
+# and the accepted result names only that.
 OP_ACCEPTED = {
     "submitted": True,
     "filename": "benchy.gcode",
-    "printPath": "pcc-job-op/benchy.gcode",
-    "baseline": {"success": 0, "failure": 0},
     "status_code": 200,
     "device": "http://10.0.0.20:5000",
 }
@@ -585,12 +588,17 @@ GH_SUCCESS = {
 # RFC 9110 sec 15.3.3: 202 = accepted for processing, processing NOT completed.
 # The device's own statement that the work has not finished, so the flag is
 # `submitted`, never `executed`.  Captured from the live adapter -- see
-# TestAcceptanceIsNotCompletion.
+# TestAcceptanceIsNotCompletion.  CHANGED (r31 round-3): 202 is no longer
+# special-cased in the adapter -- it is just another clean 2xx, and every
+# clean 2xx now carries the same "note" explaining why it is not a
+# completion.
 GH_ACCEPTED_202 = {
     "submitted": True,
     "status_code": 202,
     "response": {"jobId": "abc", "status": "queued"},
     "device": "http://10.0.0.9",
+    "note": "acceptance only: generic HTTP never reads a completion (no reviewed "
+            "adapter binds this device's answer to this job's execution)",
 }
 GH_FAIL_NO_BASE_URL = {"error": "no_base_url", "executed": False}
 GH_FAIL_HTTP_ERROR = {
@@ -1506,7 +1514,8 @@ class TestTransportFailureSentinel:
             )
 
         assert result["status_code"] == 0
-        assert result["executed"] is False, "unreachable device reported as executed"
+        assert "executed" not in result
+        assert result["submitted"] is False, "unreachable device reported as submitted"
         assert result["error"], "transport error must surface at the top level"
         assert classify_execution_result(result) == RESULT_FAILURE
 
@@ -1958,6 +1967,9 @@ class TestDeviceReportedFailureInABody:
     # Bodies in which a device states, in the generic vocabulary, that the work
     # finished.  CHANGED (r31 round-1 finding 1): these used to release on
     # their own.  Without a completion contract they now never complete.
+    # CHANGED AGAIN (r31 round-3): the completion contract was removed
+    # entirely; these bodies state no failure, so they are simply accepted
+    # now (never unclassifiable).
     DEVICE_COMPLETION_STATEMENTS = [
         pytest.param(200, _json_body({"status": "completed"}), id="completed-status-200"),
         pytest.param(200, _json_body({"data": {"state": "done"}}), id="nested-done-200"),
@@ -1965,7 +1977,9 @@ class TestDeviceReportedFailureInABody:
         pytest.param(200, _json_body({"result": {"status": "SUCCEEDED"}}), id="result-succeeded-200"),
     ]
     # The same statements from a device whose contract names the field, and
-    # correlated to this job ("job-body"): these release.
+    # correlated to this job ("job-body"): these USED TO release.  CHANGED
+    # (r31 round-3): the completion contract mechanism was removed entirely;
+    # they are accepted now, like any other clean 2xx with no stated failure.
     DEVICE_CONTRACT_SUCCESSES = [
         pytest.param(200, _json_body({"status": "completed", "jobId": "job-body"}),
                      _contract("status", ["completed"], "jobId"), id="completed-status-200"),
@@ -1979,8 +1993,9 @@ class TestDeviceReportedFailureInABody:
     # CHANGED (r31 astra verdict item 1): these five bodies used to be
     # DEVICE_SUCCESSES and were asserted to release.  None of them states that
     # the work finished -- {"ok": true} and {"success": true} answer for the
-    # REQUEST, a job id is a receipt, and 204/"OK" carry no statement at all --
-    # so "2xx and no recognized error" is now unclassifiable and fails closed.
+    # REQUEST, a job id is a receipt, and 204/"OK" carry no statement at all.
+    # CHANGED AGAIN (r31 round-3): "2xx and no recognized failure" is accepted
+    # now, not unclassifiable -- every clean 2xx is, with no vocabulary check.
     DEVICE_OPAQUE_2XX = [
         pytest.param(200, _json_body({"ok": True}), id="ok-true-200"),
         pytest.param(200, _json_body({"success": True, "jobId": "abc"}), id="success-true-200"),
@@ -2019,8 +2034,9 @@ class TestDeviceReportedFailureInABody:
         with self._socket(status, raw):
             result = ex._execute_generic_http(self.GH_DEVICE, self._job())
 
-        assert result["executed"] is False, (
-            f"HTTP {status} with a device failure body reported as executed: {result!r}"
+        assert "executed" not in result
+        assert result["submitted"] is False, (
+            f"HTTP {status} with a device failure body reported as submitted: {result!r}"
         )
         assert result["error"], "the device's own reason must surface at the top level"
         assert classify_execution_result(result) == RESULT_FAILURE
@@ -2042,35 +2058,46 @@ class TestDeviceReportedFailureInABody:
 
     @pytest.mark.parametrize("status,raw,contract", DEVICE_CONTRACT_SUCCESSES)
     def test_a_genuine_success_still_succeeds(self, status, raw, contract):
-        """Negative control: reading the body must not dispute healthy runs
-        whose device says, under its contract, that THIS job finished."""
+        """Negative control: reading the body must not dispute a healthy run.
+        CHANGED (r31 round-3): the per-device completion contract these
+        bodies used to complete under was removed entirely; none of them
+        states a failure, so a healthy run is accepted now, never a success
+        (generic HTTP never completes, r31 round-2 finding 1)."""
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
             result = ex._execute_generic_http({**self.GH_DEVICE, "completionContract": contract}, self._job())
 
-        assert result["executed"] is True, f"healthy device disputed: {result!r}"
+        assert result["submitted"] is True, f"healthy device disputed: {result!r}"
         assert "error" not in result
-        assert classify_execution_result(result) == RESULT_SUCCESS
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     @pytest.mark.parametrize("status,raw", DEVICE_COMPLETION_STATEMENTS)
     def test_a_completion_statement_without_a_contract_is_not_a_success(self, status, raw):
-        """r31 round-1 finding 1: no device-agnostic completion vocabulary."""
+        """r31 round-1 finding 1: no device-agnostic completion vocabulary.
+        CHANGED (r31 round-3): these bodies state no failure, so they are
+        accepted now rather than unclassifiable (generic HTTP never
+        completes at all any more, r31 round-2 finding 1)."""
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
             result = ex._execute_generic_http(self.GH_DEVICE, self._job())
 
         assert "executed" not in result, result
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert result["submitted"] is True, result
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     @pytest.mark.parametrize("status,raw", DEVICE_OPAQUE_2XX)
     def test_a_2xx_without_a_completion_statement_is_not_a_success(self, status, raw):
-        """r31 item 1: absence of a recognised error is not completion."""
+        """r31 item 1: absence of a recognised error is not completion.
+        CHANGED (r31 round-3): every clean 2xx is now submitted (accepted),
+        not just the ones whose body happened to use a recognised acceptance
+        word -- that acceptance-word vocabulary was removed too."""
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
             result = ex._execute_generic_http(self.GH_DEVICE, self._job())
 
-        assert "executed" not in result and "submitted" not in result, result
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert "executed" not in result, result
+        assert result["submitted"] is True, result
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     @pytest.mark.parametrize("status", [300, 301, 302, 304, 308])
     def test_success_band_is_2xx_not_sub_400(self, status):
@@ -2079,7 +2106,8 @@ class TestDeviceReportedFailureInABody:
         with self._socket(status, ""):
             result = ex._execute_generic_http(self.GH_DEVICE, self._job())
 
-        assert result["executed"] is False, f"HTTP {status} reported as executed"
+        assert "executed" not in result
+        assert result["submitted"] is False, f"HTTP {status} reported as submitted"
         assert classify_execution_result(result) == RESULT_FAILURE
 
     # --- end to end ---------------------------------------------------------
@@ -2112,11 +2140,13 @@ class TestDeviceReportedFailureInABody:
         assert "completed" not in statuses
         gateway.push_evidence.assert_called_once()
 
-    def test_healthy_device_still_releases_end_to_end(self):
-        """CHANGED (r31 item 1): the body was {"ok": true}, which no longer
-        states completion.  CHANGED again (r31 round-1 finding 1): completion
-        needs the device's contract and this job's id echoed back; a device
-        that says so still releases."""
+    def test_healthy_device_stays_accepted_end_to_end(self):
+        """CHANGED (r31 round-3): this body used to release under a device's
+        completion contract (r31 round-1 finding 1).  The contract mechanism
+        was removed entirely -- generic HTTP never completes any more (r31
+        round-2 finding 1) -- so a device stating "completed" now just stays
+        accepted, same as any other clean 2xx with no failure in it.  Renamed
+        from test_healthy_device_still_releases_end_to_end."""
         gateway = self._gateway()
         device = {**self.GH_DEVICE, "completionContract": _contract("status", ["completed"], "jobId")}
         ex = JobExecutor(devices=[device], gateway_client=gateway)
@@ -2127,15 +2157,18 @@ class TestDeviceReportedFailureInABody:
         types = _event_types(bundle)
         statuses = self._statuses(gateway)
 
-        assert EVENT_EXECUTION_COMPLETED in types
+        assert EVENT_EXECUTION_COMPLETED not in types
+        assert EVENT_EXECUTION_PROGRESS in types
         assert EVENT_EXECUTION_FAILED not in types
-        assert "execution_failed" not in _bundle_text(bundle)
-        assert "completed" in statuses
-        assert "failed" not in statuses
+        assert "execution_completed" not in _bundle_text(bundle)
+        assert statuses == ["running"]
 
-    def test_an_opaque_2xx_fails_closed_end_to_end(self):
-        """r31 item 1: {"ok": true} used to release; now nothing is claimed
-        and the job is reported failed (unclassifiable)."""
+    def test_an_opaque_2xx_stays_accepted_end_to_end(self):
+        """r31 item 1: {"ok": true} used to release.  CHANGED (r31 round-3):
+        it then used to fail closed as unclassifiable; now every clean 2xx
+        with no stated failure is accepted, so the job stays running rather
+        than being reported failed.  Renamed from
+        test_an_opaque_2xx_fails_closed_end_to_end."""
         gateway = self._gateway()
         ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
 
@@ -2144,7 +2177,7 @@ class TestDeviceReportedFailureInABody:
 
         assert EVENT_EXECUTION_COMPLETED not in _event_types(bundle)
         assert "execution_completed" not in _bundle_text(bundle)
-        assert self._statuses(gateway) == ["running", "failed"]
+        assert self._statuses(gateway) == ["running"]
 
 
 # ---------------------------------------------------------------------------
@@ -2339,25 +2372,6 @@ class TestAcceptanceIsNotCompletion:
 
     # --- OctoPrint ------------------------------------------------------------
 
-    def _octoprint_sequence(self, job_id, select_status, select_raw):
-        """Answer the adapter's four requests in order -- create the job
-        folder, copy the file into it, read the copy (no print history yet),
-        select + print the copy -- and record each (method, url)."""
-        copy = f"pcc-{job_id}/benchy.gcode"
-        answers = iter([
-            _RawResponse(201, _json_body({"done": True, "folder": {"name": f"pcc-{job_id}"}})),
-            _RawResponse(201, _json_body({"name": "benchy.gcode", "path": copy, "origin": "local"})),
-            _RawResponse(200, _json_body({"name": "benchy.gcode", "path": copy, "origin": "local"})),
-            _RawResponse(select_status, select_raw),
-        ])
-        seen = []
-
-        def respond(req, *args, **kwargs):
-            seen.append((req.get_method(), req.full_url))
-            return next(answers)
-
-        return mock.patch("pcc_node.http_util.urlopen", side_effect=respond), seen
-
     @pytest.mark.parametrize("status,raw", [
         # 204 No Content is OctoPrint's documented answer to select + print.
         pytest.param(204, "", id="204-no-content"),
@@ -2365,9 +2379,18 @@ class TestAcceptanceIsNotCompletion:
         pytest.param(201, _json_body({"name": "benchy.gcode", "origin": "local"}), id="201"),
     ])
     def test_octoprint_2xx_is_accepted_not_printed(self, status, raw):
+        """CHANGED (r31 round-3): OctoPrint completion tracking (the private
+        per-job folder/copy/baseline dance) was removed entirely -- see
+        JobExecutor._execute_octoprint.  select+print is now the adapter's
+        ONLY request, straight to the job's own (sanitized) filename."""
         ex = JobExecutor(devices=[])
-        socket, seen = self._octoprint_sequence("job-op", status, raw)
-        with socket:
+        seen = []
+
+        def respond(req, *a, **k):
+            seen.append((req.get_method(), req.full_url))
+            return _RawResponse(status, raw)
+
+        with mock.patch("pcc_node.http_util.urlopen", side_effect=respond):
             result = ex._execute_octoprint(
                 self.OP_DEVICE, {"id": "job-op", "parameters": {"filename": "benchy.gcode"}}
             )
@@ -2377,15 +2400,8 @@ class TestAcceptanceIsNotCompletion:
         assert "error" not in result
         assert result == {**OP_ACCEPTED, "status_code": status}
         assert classify_execution_result(result) == RESULT_ACCEPTED
-        # r31 round-1 finding 3: the job's private copy is printed, never the
-        # requested file itself.
         base = "http://10.0.0.20:5000/api/files/local"
-        assert seen == [
-            ("POST", base),
-            ("POST", f"{base}/benchy.gcode"),
-            ("GET", f"{base}/pcc-job-op/benchy.gcode"),
-            ("POST", f"{base}/pcc-job-op/benchy.gcode"),
-        ]
+        assert seen == [("POST", f"{base}/benchy.gcode")]
 
     def test_octoprint_2xx_never_releases_end_to_end(self):
         gateway = self._gateway()
@@ -2395,8 +2411,7 @@ class TestAcceptanceIsNotCompletion:
             "capabilityType": "3d-print",
             "parameters": {"filename": "benchy.gcode"},
         }
-        socket, _ = self._octoprint_sequence("job-op-e2e", 204, "")
-        with socket:
+        with self._socket(204, ""):
             bundle = ex.execute(job)
 
         assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
@@ -2436,59 +2451,47 @@ class TestAcceptanceIsNotCompletion:
         pytest.param(201, _json_body({"jobId": "abc"}), id="201"),
         pytest.param(204, "", id="204"),
     ])
-    def test_generic_http_other_2xx_needs_a_completion_statement(self, status, raw):
+    def test_generic_http_other_2xx_is_accepted_only(self, status, raw):
         """CHANGED (r31 astra verdict item 1).  Old name/assertion:
         test_generic_http_other_2xx_is_still_executed_and_a_success asserted
-        executed=True and RESULT_SUCCESS for these bodies.  A 2xx whose body
-        states no completion is the transport answering, not the device saying
-        the work finished, so no flag is claimed and it is unclassifiable."""
+        executed=True and RESULT_SUCCESS for these bodies.  CHANGED AGAIN
+        (r31 round-3): generic HTTP never completes at all any more (r31
+        round-2 finding 1), so a 2xx whose body states no failure is simply
+        accepted -- it no longer falls through to unclassifiable either.
+        Renamed from test_generic_http_other_2xx_needs_a_completion_statement."""
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
             result = ex._execute_generic_http(self.GH_DEVICE, {"parameters": {"path": "/execute"}})
 
         assert "executed" not in result
-        assert "submitted" not in result
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
-
-    def test_generic_http_2xx_stating_completion_needs_a_contract(self):
-        """Positive control for the test above.  CHANGED (r31 round-1 finding
-        1): a completion word alone no longer completes; under the device's
-        contract, with this job's id echoed back, it does."""
-        ex = JobExecutor(devices=[])
-        body = _json_body({"status": "completed", "jobId": "job-gh"})
-        job = {"id": "job-gh", "parameters": {"path": "/execute"}}
-        with self._socket(200, body):
-            bare = ex._execute_generic_http(self.GH_DEVICE, job)
-        assert "executed" not in bare
-        assert classify_execution_result(bare) == RESULT_UNCLASSIFIABLE
-
-        device = {**self.GH_DEVICE, "completionContract": _contract("status", ["completed"], "jobId")}
-        with self._socket(200, body):
-            result = ex._execute_generic_http(device, job)
-        assert result["executed"] is True
-        assert classify_execution_result(result) == RESULT_SUCCESS
+        assert result["submitted"] is True
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     CONTRACT_GH_DEVICE = {**GH_DEVICE, "completionContract": _contract("status", ["completed"], "jobId")}
 
     @pytest.mark.parametrize("device,status,raw,expected_statuses,expected_types", [
         pytest.param(CONTRACT_GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e", "status": "completed"}),
-                     ["running", "completed"], [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_COMPLETED],
-                     id="200-completion-under-the-contract-completes"),
+                     ["running"], [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS],
+                     id="200-with-an-ignored-completionContract-key-stays-running"),
         pytest.param(GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e", "status": "completed"}),
-                     ["running", "failed"], [EVENT_EXECUTION_STARTED],
-                     id="200-completion-without-a-contract-fails-closed"),
-        pytest.param(CONTRACT_GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e"}), ["running", "failed"],
-                     [EVENT_EXECUTION_STARTED], id="200-without-completion-fails-closed"),
+                     ["running"], [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS],
+                     id="200-completion-statement-stays-running"),
+        pytest.param(CONTRACT_GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e"}), ["running"],
+                     [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS], id="200-without-completion-stays-running"),
         pytest.param(CONTRACT_GH_DEVICE, 202, _json_body({"jobId": "job-gh-e2e"}), ["running"],
                      [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS], id="202-stays-running"),
     ])
-    def test_generic_http_200_completes_but_202_stays_running_end_to_end(
+    def test_generic_http_2xx_always_stays_running_end_to_end(
         self, device, status, raw, expected_statuses, expected_types
     ):
         """CHANGED (r31 item 1): the 200 case used {"jobId": "abc"} and was
-        asserted to complete.  It now needs the device's completion statement;
-        without one the job fails closed.  CHANGED again (r31 round-1 finding
-        1): the statement counts only under the device's contract."""
+        asserted to complete.  CHANGED again (r31 round-1 finding 1): a
+        completion statement counted only under the device's contract.
+        CHANGED AGAIN (r31 round-3): the completion contract mechanism was
+        removed entirely -- generic HTTP never completes, full stop, whether
+        or not a device config carries a (now-ignored) completionContract
+        key -- so every one of these cases simply stays running now.
+        Renamed from test_generic_http_200_completes_but_202_stays_running_end_to_end."""
         gateway = self._gateway()
         ex = JobExecutor(devices=[device], gateway_client=gateway)
         job = {"id": "job-gh-e2e", "capabilityType": "generic", "parameters": {"path": "/execute"}}
@@ -2727,17 +2730,26 @@ class TestR31GenericHttpCompletionContract:
         pytest.param(_json_body({"result": {"success": False}}), RESULT_FAILURE, id="nested-failed-result"),
         pytest.param(_json_body([{"error": "jam"}]), RESULT_FAILURE, id="failure-in-list"),
         pytest.param(_json_body({"status": "jammed"}), RESULT_UNCLASSIFIABLE, id="unknown-status-word"),
-        pytest.param(_json_body({}), RESULT_UNCLASSIFIABLE, id="empty-object"),
-        pytest.param("null", RESULT_UNCLASSIFIABLE, id="null"),
+        pytest.param(_json_body({}), RESULT_ACCEPTED, id="empty-object"),
+        pytest.param("null", RESULT_ACCEPTED, id="null"),
         pytest.param(_json_body({"success": "false"}), RESULT_FAILURE, id="string-false-success"),
         pytest.param(_json_body({"ok": 0}), RESULT_FAILURE, id="zero-ok"),
         pytest.param(_json_body({"status": ["failed"]}), RESULT_FAILURE, id="status-list"),
         pytest.param(_json_body({"status": "completed", "data": {"state": "queued"}}),
-                     RESULT_UNCLASSIFIABLE, id="completion-and-acceptance-conflict"),
+                     RESULT_ACCEPTED, id="completion-and-acceptance-conflict"),
         pytest.param(_json_body({"done": "yes"}), RESULT_UNCLASSIFIABLE, id="non-boolean-done"),
         pytest.param(_json_body({"status": None}), RESULT_UNCLASSIFIABLE, id="null-status"),
     ])
     def test_the_reviewers_table_never_reaches_success(self, raw, expected):
+        """CHANGED (r31 round-3): generic HTTP never completes any more (r31
+        round-2 finding 1), and a clean 2xx is acceptance when the body states
+        no outcome or only a readable one.  So empty-object, null and
+        completion-and-acceptance-conflict moved from RESULT_UNCLASSIFIABLE to
+        RESULT_ACCEPTED.  unknown-status-word, non-boolean-done and
+        null-status stay RESULT_UNCLASSIFIABLE: an outcome statement the node
+        cannot read may be a refusal in words it does not know
+        (_unreadable_outcome), so it fails closed.  Success is never
+        reachable, for any of them."""
         result = self._run(200, raw)
         assert "executed" not in result or result["executed"] is not True, result
         assert classify_execution_result(result) == expected
@@ -2755,145 +2767,56 @@ class TestR31GenericHttpCompletionContract:
     ])
     def test_a_completion_statement_without_a_contract_is_never_executed(self, raw):
         """CHANGED (r31 round-1 finding 1): these used to be executed.  With no
-        device-agnostic completion vocabulary they are unclassifiable."""
+        device-agnostic completion vocabulary they were unclassifiable.
+        CHANGED AGAIN (r31 round-3): the completion contract that could once
+        have made them executed was removed entirely, and a clean 2xx that
+        states no failure is accepted now rather than unclassifiable."""
         result = self._run(200, raw)
         assert "executed" not in result, result
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert result["submitted"] is True, result
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     def test_a_202_stating_completion_is_still_only_accepted(self):
         result = self._run(202, _json_body({"status": "completed"}))
-        assert result == {"submitted": True, "status_code": 202,
-                          "response": {"status": "completed"}, "device": "http://10.0.0.9"}
+        assert result == {
+            "submitted": True, "status_code": 202,
+            "response": {"status": "completed"}, "device": "http://10.0.0.9",
+            "note": "acceptance only: generic HTTP never reads a completion (no reviewed "
+                    "adapter binds this device's answer to this job's execution)",
+        }
         assert classify_execution_result(result) == RESULT_ACCEPTED
 
-    # --- per-device contract ----------------------------------------------------
+    # --- the per-device completion contract (REMOVED in r31 round-3) -------
+    #
+    # validate_completion_contract, the COMPLETION_CONTRACT_* vocabulary, and
+    # every test that depended on a device['completionContract'] having an
+    # effect (locking the request to one method/path, granting completion on
+    # a field/value match, echoing the job id into the request body, refusing
+    # an unusable contract with no request sent) were removed along with the
+    # mechanism itself: device['completionContract'] is now silently ignored
+    # (see job_executor.py's CORRELATION_HEADER section comment).  Deleted
+    # here: test_a_contract_value_is_completion,
+    # test_under_a_contract_nothing_else_is_completion,
+    # test_an_unusable_contract_runs_nothing,
+    # test_a_job_cannot_pick_another_operation_on_a_contract_device,
+    # test_the_node_sends_the_job_id_for_the_device_to_echo,
+    # test_a_body_already_naming_another_job_is_refused.
+    # test_a_contract_never_overrides_a_failure is KEPT below because a
+    # device-stated failure still outranks everything else regardless of
+    # what an (ignored) completionContract key says -- that claim never
+    # depended on the contract mechanism actually working.  See
+    # tests/test_r31_round3.py for the adversarial acceptance-only coverage
+    # of the generic HTTP path that replaced the contract.
 
     CONTRACT = _contract("result.phase", ["FINISHED"], "result.jobId")
     CONTRACT_DEVICE = {**GH_DEVICE, "completionContract": CONTRACT}
-
-    def test_a_contract_value_is_completion(self):
-        result = self._run(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}}),
-                           self.CONTRACT_DEVICE)
-        assert result["executed"] is True
-        assert result["contract"] == {"version": 1, "completionField": "result.phase",
-                                      "correlationField": "result.jobId"}
-        assert classify_execution_result(result) == RESULT_SUCCESS
-
-    @pytest.mark.parametrize("raw,expected", [
-        pytest.param(_json_body({"result": {"phase": "QUEUED", "jobId": "job-contract"}}), RESULT_ACCEPTED,
-                     id="queued-by-contract"),
-        pytest.param(_json_body({"result": {"phase": "HOMING", "jobId": "job-contract"}}), RESULT_UNCLASSIFIABLE,
-                     id="other-value"),
-        pytest.param(_json_body({"status": "completed", "jobId": "job-contract"}), RESULT_UNCLASSIFIABLE,
-                     id="default-vocabulary-ignored-under-a-contract"),
-        pytest.param(_json_body({"result": "FINISHED"}), RESULT_UNCLASSIFIABLE, id="path-not-traversable"),
-        # r31 round-1 finding 1: the answer must be bound to THIS job ...
-        pytest.param(_json_body({"result": {"phase": "finished"}}), RESULT_UNCLASSIFIABLE,
-                     id="no-correlation-echo"),
-        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-other"}}), RESULT_UNCLASSIFIABLE,
-                     id="another-jobs-id"),
-        pytest.param(_json_body({"result": {"phase": "finished", "jobId": 7}}), RESULT_UNCLASSIFIABLE,
-                     id="non-string-correlation"),
-        # ... and no acceptance/running statement may appear anywhere.
-        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract",
-                                            "step": {"status": "queued"}}}),
-                     RESULT_UNCLASSIFIABLE, id="nested-queued-conflict"),
-        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract"},
-                                 "queue": [{"submitted": True}]}),
-                     RESULT_UNCLASSIFIABLE, id="acceptance-flag-in-a-list-conflict"),
-        # The scan is key-agnostic: "queued" under any key, or in a list, is a
-        # statement too (a key allowlist would miss another device's name for it).
-        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract"},
-                                 "job": {"stage": "queued"}}),
-                     RESULT_UNCLASSIFIABLE, id="queued-under-another-key-conflict"),
-        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract"},
-                                 "steps": ["homing", "Running"]}),
-                     RESULT_UNCLASSIFIABLE, id="running-in-a-list-conflict"),
-    ])
-    def test_under_a_contract_nothing_else_is_completion(self, raw, expected):
-        result = self._run(200, raw, self.CONTRACT_DEVICE)
-        assert "executed" not in result
-        assert classify_execution_result(result) == expected
 
     def test_a_contract_never_overrides_a_failure(self):
         result = self._run(200, _json_body({"result": {"phase": "FINISHED", "jobId": "job-contract",
                                                        "error": "tip crash"}}),
                            self.CONTRACT_DEVICE)
-        assert result["executed"] is False
+        assert result["submitted"] is False
         assert classify_execution_result(result) == RESULT_FAILURE
-
-    @pytest.mark.parametrize("contract", [
-        pytest.param({**CONTRACT, "completionField": None}, id="no-field"),
-        pytest.param({**CONTRACT, "completionField": ""}, id="empty-field"),
-        pytest.param({**CONTRACT, "completionField": 7}, id="numeric-field"),
-        pytest.param({**CONTRACT, "completionValues": ["queued"]}, id="acceptance-value"),
-        pytest.param({**CONTRACT, "completionValues": ["Running"]}, id="running-value"),
-        pytest.param({**CONTRACT, "completionValues": ["failed"]}, id="failure-value"),
-        pytest.param({**CONTRACT, "completionValues": [False]}, id="false-value"),
-        pytest.param({**CONTRACT, "completionValues": []}, id="no-values"),
-        pytest.param({**CONTRACT, "version": 2}, id="unknown-version"),
-        pytest.param({**CONTRACT, "version": True}, id="bool-version"),
-        pytest.param({**CONTRACT, "method": "GET"}, id="get-method"),
-        pytest.param({**CONTRACT, "path": "http://elsewhere/x"}, id="absolute-url"),
-        pytest.param({**CONTRACT, "path": "/a/../b"}, id="dot-dot-path"),
-        pytest.param({**CONTRACT, "correlationField": "result.phase"}, id="correlation-is-completion"),
-        pytest.param({**CONTRACT, "extra": 1}, id="unknown-key"),
-        pytest.param({k: v for k, v in CONTRACT.items() if k != "correlationField"}, id="no-correlation"),
-        pytest.param("result.phase", id="not-an-object"),
-    ])
-    def test_an_unusable_contract_runs_nothing(self, contract):
-        """r31 round-1 finding 1: a refused contract (a queued-means-finished
-        one included) sends no request at all and fails the job."""
-        ex = JobExecutor(devices=[])
-        with self._socket(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}})) as sock:
-            result = ex._execute_generic_http({**self.GH_DEVICE, "completionContract": contract},
-                                              {"id": self.JOB_ID, "parameters": {"path": "/execute"}})
-        assert sock.call_count == 0, "a refused contract must send nothing"
-        assert result["executed"] is False
-        assert "contract" in result["error"]
-        assert classify_execution_result(result) == RESULT_FAILURE
-
-    @pytest.mark.parametrize("params", [
-        pytest.param({"path": "/other"}, id="other-path"),
-        pytest.param({"path": "/execute", "method": "DELETE"}, id="other-method"),
-    ])
-    def test_a_job_cannot_pick_another_operation_on_a_contract_device(self, params):
-        ex = JobExecutor(devices=[])
-        with self._socket(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}})) as sock:
-            result = ex._execute_generic_http(self.CONTRACT_DEVICE, {"id": self.JOB_ID, "parameters": params})
-        assert sock.call_count == 0
-        assert result["executed"] is False
-        assert classify_execution_result(result) == RESULT_FAILURE
-
-    def test_the_node_sends_the_job_id_for_the_device_to_echo(self):
-        contract = {**self.CONTRACT, "correlationRequestField": "pccJobId"}
-        ex = JobExecutor(devices=[])
-        sent = {}
-
-        def respond(req, *args, **kwargs):
-            sent["headers"] = {k.lower(): v for k, v in req.header_items()}
-            sent["body"] = json.loads(req.data.decode("utf-8"))
-            return _RawResponse(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}}))
-
-        with mock.patch("pcc_node.http_util.urlopen", side_effect=respond):
-            result = ex._execute_generic_http(
-                {**self.GH_DEVICE, "completionContract": contract},
-                {"id": self.JOB_ID, "parameters": {"path": "/execute", "body": {"volume": 5}}},
-            )
-        assert sent["headers"]["x-pcc-job-id"] == "job-contract"
-        assert sent["body"] == {"volume": 5, "pccJobId": "job-contract"}
-        assert result["executed"] is True
-
-    def test_a_body_already_naming_another_job_is_refused(self):
-        contract = {**self.CONTRACT, "correlationRequestField": "pccJobId"}
-        ex = JobExecutor(devices=[])
-        with self._socket(200, _json_body({})) as sock:
-            result = ex._execute_generic_http(
-                {**self.GH_DEVICE, "completionContract": contract},
-                {"id": self.JOB_ID, "parameters": {"path": "/execute", "body": {"pccJobId": "job-other"}}},
-            )
-        assert sock.call_count == 0
-        assert result["executed"] is False
 
 
 # ---------------------------------------------------------------------------

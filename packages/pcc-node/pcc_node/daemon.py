@@ -7,7 +7,7 @@ Combines all node subsystems into a single long-running process:
   4. Announce capabilities (signed)
   5. Start HTTP polling loop:
      - Check jobs a device only accepted for device-reported completion
-       (JobExecutor.poll_awaiting: IPP job-state, OctoPrint /api/job)
+       (JobExecutor.poll_awaiting: the IPP job-state of our CUPS job-id)
      - Poll /api/operator/jobs every N seconds
      - Execute each job via JobExecutor
      - Push evidence bundle back to gateway
@@ -293,7 +293,7 @@ def run_daemon(config: NodeConfig):
 
     while running:
         # Device-reported completion for jobs a device only ACCEPTED earlier
-        # (IPP job-state, OctoPrint /api/job): one non-blocking check per job
+        # (the IPP job-state of our CUPS job-id): one non-blocking check per job
         # per cycle.  Guarded on its own, ahead of the job poll, so an error in
         # it neither kills the loop nor skips the poll below -- and an error
         # in the poll below never skips it.
