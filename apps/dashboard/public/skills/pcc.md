@@ -53,7 +53,7 @@ Pizza delivery is two capabilities: `pizza.order` (the shop) + `courier.dispatch
 
 ## Uploading files
 
-For any binary artifact (STL files, photo evidence, reference images), upload via `POST /api/storage`. Returns a CID. Pass the CID inside `requirements` (e.g. `requirements.stl_cid`). The operator retrieves the file from `GET /api/storage/:cid`.
+For any binary artifact (STL files, photo evidence, reference images), upload the raw bytes with a binary `Content-Type` such as `application/octet-stream` (JSON and multipart bodies are refused with 400) with `POST /api/storage`. Returns a CID. Pass the CID inside `requirements` (e.g. `requirements.stl_cid`). The operator retrieves the file from `GET /api/storage/:cid`.
 
 ## Authentication
 
@@ -123,13 +123,13 @@ PCC's catalog spans 15 categories. `capabilityType` is free-form text, but stay 
 
 ## Quick API reference
 
-API base: `https://capability.network`
+API base: the gateway you were given (`PCC_BASE`). Production is `https://capability.network`; at an event, rehearsal or staging gateway, never call production unless told to.
 
 ### Public endpoints (no auth)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/capabilities` | List capabilities. Filter `?type=<capability_type>&within=lat,lng,miles`. |
-| GET | `/api/capabilities/types` | All registered capability_type strings. |
+| GET | `/api/capabilities/types` | Every type the gateway knows: built-in templates, registered and CSD types. A listed type may have no operator yet. |
 | GET | `/api/capabilities/search?q=` | Full-text search. |
 | GET | `/api/capabilities/:id` | Single capability detail (with reputation + queue depth). |
 | GET | `/api/job-offers/open?capabilityType=` | Open offers operators can claim. |
@@ -145,8 +145,8 @@ API base: `https://capability.network`
 | GET | `/api/job-offers/:id` | Get offer status. |
 | POST | `/api/job-offers/:id/claim` | Operator claims an offer. Body: `{ kernelId }`. |
 | POST | `/api/job-offers/:id/heartbeat` | Poster keepalive (when `requireHeartbeat=true`). |
-| PATCH | `/api/job-offers/:id` | Update / add evidence CID. |
-| POST | `/api/storage` | Upload a binary artifact. Multipart/form-data. Returns `{ cid }`. |
+| PATCH | `/api/job-offers/:id` | Poster updates the offer (poster-only: an operator gets 403). |
+| POST | `/api/storage` | Upload a binary artifact: the raw bytes with a binary `Content-Type` (e.g. `application/octet-stream`); JSON and multipart bodies are refused. Returns `{ cid }`. |
 | POST | `/api/kernels` | Operator: register a kernel. |
 | POST | `/api/capabilities` | Operator: register a capability under a kernel. |
 
@@ -168,7 +168,7 @@ User: "Order me a pizza for delivery to 728 Geary St SF."
 
 User: "I have an STL file. Print it on an FDM printer near me."
 
-1. Upload STL via `POST /api/storage` (multipart/form-data). Save the returned CID.
+1. Upload the STL's raw bytes via `POST /api/storage` (`Content-Type: model/stl` or `application/octet-stream`). Save the returned CID.
 2. `GET /api/capabilities?type=manufacturing.fdm&within=<user-coords>,25` — find local print shops.
 3. Pick by price + material support. Present to user.
 4. `POST /api/job-offers` with `capabilityType=manufacturing.fdm`, `requirements={ stl_cid, material:'PLA', infill:0.2, layer_height:0.2 }`, `pricing={ model:'quote-required' }` (let operator quote).
@@ -186,7 +186,7 @@ User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 1. `GET /api/job-offers/open?capabilityType=manufacturing.fdm&within=<their-coords>,50` — list current offers.
 2. Format the list with price, deadline, requirements summary.
 3. If they want to claim one: `POST /api/job-offers/:id/claim` with their `kernelId`.
-4. Help them compose evidence after printing — `POST /api/storage` with a photo, then `PATCH` the offer with the evidence CID.
+4. Help them keep evidence after printing (`POST /api/storage` with the photo's raw bytes). On the current gateway an operator cannot deliver on an offer: PATCH is poster-only (403), so the offer stays `claimed` (board N81).
 
 ## When the user is an operator (not a buyer)
 

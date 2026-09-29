@@ -38,11 +38,15 @@ reporting success back to the user.
 
 ## Base URL
 
-```
-https://capability.network
+Use the PCC gateway you were given. The examples below read it from
+`PCC_BASE`. Production is `https://capability.network`; at an event,
+rehearsal or staging gateway, never call production unless told to.
+
+```bash
+export PCC_BASE="${PCC_BASE:-https://capability.network}"
 ```
 
-Every path below is relative to this. The full machine-readable surface is
+Every path below is relative to it. The full machine-readable surface is
 also published as an OpenAPI 3 document (`GET /openapi.json`) and as a
 single-file agent package (`GET /agent-package.json` — 250+ tools with
 JSON-Schema inputs and HTTP endpoint mappings, built for any LLM that isn't
@@ -54,7 +58,7 @@ Most reads are public. Posting a job, uploading files, or committing to
 settlement needs a Bearer key.
 
 ```bash
-curl -X POST https://capability.network/api/auth/provision \
+curl -X POST "$PCC_BASE/api/auth/provision" \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com", "name": "My Agent"}'
 ```
@@ -81,14 +85,14 @@ to know the exact vendor suffix.
 ### List all capability types (PUBLIC)
 
 ```bash
-curl https://capability.network/api/capabilities/types
+curl "$PCC_BASE/api/capabilities/types"
 # {"types": ["3d-printing", "cnc", "hplc", "laser-cutting", "pcb", ...]}
 ```
 
 ### Search the catalog
 
 ```bash
-curl "https://capability.network/api/capabilities/search?q=HPLC"
+curl "$PCC_BASE/api/capabilities/search?q=HPLC"
 ```
 
 Full-text search across names, types, and materials. Returns a paginated
@@ -105,7 +109,7 @@ match) or `?type=manufacturing` (prefix match — returns every
 For a single natural-language query instead of structuring a filter:
 
 ```bash
-curl -X POST https://capability.network/ask \
+curl -X POST "$PCC_BASE/ask" \
   -H "Content-Type: application/json" \
   -d '{"query": "who can do CNC milling in aluminum"}'
 ```
@@ -136,17 +140,17 @@ tolerance, infill, assurance tier) that changes the price.
 
 ```bash
 # 1. What can I configure?
-curl -X POST https://capability.network/api/build/options \
+curl -X POST "$PCC_BASE/api/build/options" \
   -H "Content-Type: application/json" \
   -d '{"type": "3d-printing"}'
 
 # 2. What will my selections cost?
-curl -X POST https://capability.network/api/build/price \
+curl -X POST "$PCC_BASE/api/build/price" \
   -H "Content-Type: application/json" \
   -d '{"type": "3d-printing", "selections": {"material": "PLA", "infill": 20, "layer_height": 0.2}}'
 
 # 3. Build the (unsigned) contract
-curl -X POST https://capability.network/api/build/contract \
+curl -X POST "$PCC_BASE/api/build/contract" \
   -H "Authorization: Bearer $PCC_KEY" -H "Content-Type: application/json" \
   -d '{"type": "3d-printing", "selections": {"material": "PLA", "infill": 20}, "assuranceTier": 1}'
 ```
@@ -176,7 +180,7 @@ For most everyday categories (pizza, courier, tutoring, drone surveys —
 anything without a rich configurator) this is the more direct path:
 
 ```bash
-curl -X POST https://capability.network/api/job-offers \
+curl -X POST "$PCC_BASE/api/job-offers" \
   -H "Authorization: Bearer $PCC_KEY" -H "Content-Type: application/json" \
   -d '{
     "capabilityType": "manufacturing.fdm",
@@ -194,8 +198,9 @@ for `status`. Browse what's currently open (no auth) with
 `GET /api/job-offers/open?capabilityType=<type>`.
 
 For a binary artifact the job needs (an STL file, a reference photo),
-upload it first — `POST /api/storage` (multipart/form-data) returns a
-`{cid}` you pass inside `requirements`.
+upload it first: `POST /api/storage` with the raw bytes and a binary
+`Content-Type` such as `application/octet-stream` (JSON and multipart bodies
+are refused) returns a `{cid}` you pass inside `requirements`.
 
 ### Check on a job or an escrow
 
@@ -242,12 +247,13 @@ everyday jobs; ask the user before committing to tier 2+.
 PCC also speaks MCP directly, so you don't have to hand-roll the HTTP calls
 above:
 
-- **Hosted (recommended)** — Streamable HTTP at `https://capability.network/mcp`.
+- **Hosted (recommended)** — Streamable HTTP at `$PCC_BASE/mcp` (production:
+  `https://capability.network/mcp`).
   Point any MCP client that supports remote HTTP servers at this URL; no
   install needed. Server card: `GET /.well-known/mcp/server-card.json`.
 - **Local / stdio** — for Claude Desktop or another local MCP host, run the
   bundled server: `node packages/mcp-server/dist/index.js` with
-  `PCC_URL=https://capability.network`.
+  `PCC_URL=$PCC_BASE`.
 
 Both surfaces expose read-only catalog tools without auth; write operations
 (posting an offer, funding escrow) still need the Bearer key from

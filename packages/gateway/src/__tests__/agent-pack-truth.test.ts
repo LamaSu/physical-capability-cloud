@@ -98,3 +98,100 @@ describe("the agent pack tells agents only true things", () => {
     }
   });
 });
+
+/**
+ * Dress rehearsal R0 (refvertical, returns/pcc-refvertical-work/rehearsal/
+ * R0-findings.md): a fresh agent onboarded a simulated instrument from this
+ * pack against a gateway built from master. Each check below is a place where
+ * the pack disagreed with that gateway. Each was re-verified in the code
+ * before the pack changed (returns/pcc-adk-work/r0-pack-triage.md).
+ */
+describe("rehearsal R0: the pack matches the gateway it describes", () => {
+  const full = pkg as unknown as {
+    system_prompt: string;
+    quickstart: unknown;
+    dtos: { JobOffer: { shape: Record<string, unknown> } };
+    tools: Array<{ name: string; description: string; input_schema: { required?: string[]; properties?: Record<string, any> } }>;
+  };
+  const sp = full.system_prompt;
+  const tool = (name: string) => {
+    const t = full.tools.find((x) => x.name === name);
+    if (!t) throw new Error(`no tool ${name}`);
+    return t;
+  };
+
+  it("P1: resolves against the gateway it was given, with production only the default", () => {
+    expect(sp).not.toContain("All endpoints resolve against https://capability.network.");
+    expect(sp).toContain("PCC_BASE");
+    const quick = JSON.stringify(full.quickstart);
+    expect(quick).not.toContain("const PCC_BASE = pkg.api_base;");
+    expect(quick.match(/process\.env\.PCC_BASE/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("P4: does not sell /api/capabilities/types as an authoritative list of operators' types", () => {
+    expect(sp).not.toContain("the complete, live list of every registered capability type");
+    expect(sp).not.toContain("returns the complete set of registered types");
+    expect(sp).toMatch(/may have no operator/);
+  });
+
+  it("P5: onboard_machine documents the operator it records", () => {
+    const t = tool("onboard_machine");
+    expect(t.input_schema.properties?.operator?.properties?.walletAddress).toBeDefined();
+    expect(t.description).toContain("0x0000000000000000000000000000000000000000");
+  });
+
+  it("P6: JobOffer names the fields the offer routes return", () => {
+    const shape = full.dtos.JobOffer.shape;
+    expect(shape.claimedByKernelId).toBeDefined();
+    expect(shape.claimedBy).toBeUndefined();
+    expect(shape.posterDid).toBeDefined();
+    expect(shape.requireHeartbeat).toBeDefined();
+  });
+
+  it("P7: finish a job with pcc_job_complete, never by setting completed first", () => {
+    expect(tool("operator_update_job_status").description).toContain("pcc_job_complete");
+    expect(tool("pcc_job_complete").description).toContain("409");
+  });
+
+  it("P8: does not claim settlement flows through oracle routes the gateway does not serve", () => {
+    for (const name of ["pcc_oracle_status", "pcc_oracle_verify"]) {
+      const d = tool(name).description;
+      expect(d).not.toMatch(/critical path|required for all escrow settlements/i);
+      expect(d).toContain("404");
+    }
+  });
+
+  it("G8: register-device requires exactly what POST /api/setup/register-device requires", () => {
+    // setup.ts: if (!kernelId || !deviceId || !type || !adapterType) -> 400 missing_required_fields
+    expect([...(tool("setup_register_device").input_schema.required ?? [])].sort()).toEqual(
+      ["adapterType", "deviceId", "kernelId", "type"],
+    );
+  });
+
+  it("P1 (skills and examples): calls go to PCC_BASE, never a hard-coded production API URL", () => {
+    for (const [file, text] of PACK) {
+      expect(text, file).not.toMatch(/curl[^\n]*https:\/\/capability\.network\/(?:api|ask)\b/);
+    }
+  });
+
+  it("G9 (everywhere): a storage line that mentions multipart says it is refused", () => {
+    for (const [file, text] of PACK) {
+      for (const line of text.split(/\\n|\n/)) {
+        if (line.includes("/api/storage") && /multipart/i.test(line)) expect(line, file).toMatch(/refused/);
+      }
+    }
+  });
+
+  it("G5/N81: an operator is never told to PATCH an offer with evidence", () => {
+    for (const [file, text] of PACK) {
+      for (const line of text.split(/\\n|\n/)) {
+        if (/PATCH/.test(line) && /evidence/i.test(line)) expect(line, file).toMatch(/poster-only|403/);
+      }
+    }
+  });
+
+  it("G9: storage uploads are the raw bytes, not a JSON body", () => {
+    expect(sp).toMatch(/POST \/api\/storage[^\n]*application\/octet-stream/);
+    expect(sp).toMatch(/JSON body is refused/);
+  });
+});
