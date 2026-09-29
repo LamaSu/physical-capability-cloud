@@ -113,6 +113,68 @@ export interface HeartbeatResult {
   resurrected: boolean;
   /** Seconds since the prior heartbeat (null on first heartbeat). */
   sinceLastHeartbeatSec: number | null;
+  /** Announced NEW capabilities that were not registered because their terms were not declared (board N23). */
+  capabilitiesSkipped: Array<{ type: string; reason: HeartbeatSkipReason }>;
+}
+
+// ── Declared terms only (board N23, steward #3538) ───────────────────────────────────────────────
+// A heartbeat used to register an announced capability with DEFAULT terms when it declared none:
+// tiers [0, 1] and "USDC 0". Every reader then took the default as the provider's own offer. The
+// catalog showed a price nobody set, and the plan re-read (R10, #355) would sell tier 1 on a kernel
+// that never offered it. Now only declared, well-formed terms are persisted; an announcement without
+// them is skipped and reported, never completed with invented values. Existing rows are untouched
+// (a heartbeat only refreshes their TTL), and capping tiers at the kernel's verified ceiling is N43's.
+
+export type HeartbeatSkipReason =
+  | "no-declared-tiers"
+  | "invalid-tiers"
+  | "no-declared-pricing"
+  | "invalid-pricing"
+  | "zero-price";
+
+const ASSURANCE_TIERS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
+const MAX_DECLARED_TIERS = 16;
+/** A plain non-negative decimal string, as the pricing column stores money (never a JS number). */
+const DECLARED_DECIMAL = /^[0-9]{1,30}(\.[0-9]{1,30})?$/;
+const DECLARED_CURRENCY = /^[A-Za-z0-9]{1,16}$/;
+const PRICE_COMPONENTS = ["baseCost", "minimum", "perMinute", "perGram", "perCm3"] as const;
+
+type DeclaredPricing = { currency: string; baseCost: string; minimum: string; perMinute?: string; perGram?: string; perCm3?: string };
+
+/** The announced tiers as a sorted set of integers 0..3, or why they cannot be registered. */
+export function declaredTiers(v: unknown): { ok: true; tiers: number[] } | { ok: false; reason: HeartbeatSkipReason } {
+  if (v === undefined || v === null) return { ok: false, reason: "no-declared-tiers" };
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_DECLARED_TIERS) return { ok: false, reason: "invalid-tiers" };
+  const tiers: number[] = [];
+  for (const t of v) {
+    if (typeof t !== "number" || !ASSURANCE_TIERS.has(t)) return { ok: false, reason: "invalid-tiers" };
+    tiers.push(t);
+  }
+  return { ok: true, tiers: [...new Set(tiers)].sort((a, b) => a - b) };
+}
+
+/**
+ * The announced pricing exactly as declared, or why it cannot be registered. The column's type needs a
+ * currency, `baseCost` and `minimum`; a variable component is kept only when declared. Every present
+ * component must be a plain decimal string, and at least one must be non-zero: "USDC 0" is not a price.
+ */
+export function declaredPricing(v: unknown): { ok: true; pricing: DeclaredPricing } | { ok: false; reason: HeartbeatSkipReason } {
+  if (v === undefined || v === null) return { ok: false, reason: "no-declared-pricing" };
+  if (typeof v !== "object" || Array.isArray(v)) return { ok: false, reason: "invalid-pricing" };
+  const p = v as Record<string, unknown>;
+  if (typeof p.currency !== "string" || !DECLARED_CURRENCY.test(p.currency)) return { ok: false, reason: "invalid-pricing" };
+  if (p.baseCost === undefined || p.minimum === undefined) return { ok: false, reason: "invalid-pricing" };
+  const pricing: Record<string, string> = { currency: p.currency };
+  let nonZero = false;
+  for (const k of PRICE_COMPONENTS) {
+    const x = p[k];
+    if (x === undefined) continue;
+    if (typeof x !== "string" || !DECLARED_DECIMAL.test(x)) return { ok: false, reason: "invalid-pricing" };
+    pricing[k] = x;
+    if (/[1-9]/.test(x)) nonZero = true;
+  }
+  if (!nonZero) return { ok: false, reason: "zero-price" };
+  return { ok: true, pricing: pricing as DeclaredPricing };
 }
 
 /**
@@ -514,6 +576,7 @@ export class KernelFacade extends BaseFacade {
 
       // Upsert capability announcements
       let capabilitiesReceived = 0;
+      const capabilitiesSkipped: HeartbeatResult["capabilitiesSkipped"] = [];
       if (capabilities && capabilities.length > 0) {
         for (const cap of capabilities) {
           const capType = (cap.type as string) ?? (cap.capability_type as string);
@@ -522,20 +585,29 @@ export class KernelFacade extends BaseFacade {
           try {
             const existing = repos.capabilities.findById(capId);
             if (!existing) {
-              repos.capabilities.insert({
-                id: capId,
-                kernelId,
-                type: capType,
-                name: (cap.name as string) ?? `${capType} — ${kernelId}`,
-                description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
-                materials: (cap.materials as string[]) ?? [],
-                assuranceTiers: (cap.assuranceTiers as number[]) ?? [0, 1],
-                pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
-                availability: (cap.availability as any) ?? {},
-                location: (cap.location as any) ?? { lat: 0, lng: 0 },
-                lastHeartbeatAt: now,
-                validUntil,
-              } as any);
+              // Only DECLARED terms are registered (see declaredTiers / declaredPricing above).
+              const tiers = declaredTiers(cap.assuranceTiers);
+              const pricing = declaredPricing(cap.pricing);
+              if (!tiers.ok) {
+                capabilitiesSkipped.push({ type: capType, reason: tiers.reason });
+              } else if (!pricing.ok) {
+                capabilitiesSkipped.push({ type: capType, reason: pricing.reason });
+              } else {
+                repos.capabilities.insert({
+                  id: capId,
+                  kernelId,
+                  type: capType,
+                  name: (cap.name as string) ?? `${capType} — ${kernelId}`,
+                  description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
+                  materials: (cap.materials as string[]) ?? [],
+                  assuranceTiers: tiers.tiers,
+                  pricing: pricing.pricing,
+                  availability: (cap.availability as any) ?? {},
+                  location: (cap.location as any) ?? { lat: 0, lng: 0 },
+                  lastHeartbeatAt: now,
+                  validUntil,
+                } as any);
+              }
             } else {
               // Existing capability — refresh its TTL.
               try {
@@ -603,6 +675,7 @@ export class KernelFacade extends BaseFacade {
         validUntil,
         resurrected,
         sinceLastHeartbeatSec,
+        capabilitiesSkipped,
       };
     });
   }

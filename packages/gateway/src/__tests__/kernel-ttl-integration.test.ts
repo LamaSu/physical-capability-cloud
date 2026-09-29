@@ -26,6 +26,9 @@ vi.mock("../telemetry.js", () => ({
   pipelineTelemetry: { emit: vi.fn() },
 }));
 
+// A heartbeat registers only DECLARED terms (board N23, steward #3538), so the announcement declares them.
+const TERMS = { assuranceTiers: [0], pricing: { currency: "USDC", baseCost: "5", minimum: "5" } };
+
 describe("kernel + capability TTL — end-to-end", () => {
   let app: FastifyInstance;
   let kernelId: string;
@@ -72,7 +75,7 @@ describe("kernel + capability TTL — end-to-end", () => {
       payload: {
         status: "online",
         capabilities: [
-          { type: "3d-printing", name: "TTL test cap" },
+          { type: "3d-printing", name: "TTL test cap", ...TERMS },
         ],
       },
     });
@@ -132,7 +135,7 @@ describe("kernel + capability TTL — end-to-end", () => {
       payload: {
         status: "online",
         capabilities: [
-          { type: "3d-printing", name: "TTL test cap (resurrected)" },
+          { type: "3d-printing", name: "TTL test cap (resurrected)", ...TERMS },
         ],
       },
     });
