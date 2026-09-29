@@ -42,6 +42,8 @@ import {
 } from "@pcc/spec";
 import {
   revalidatePlanSnapshots,
+  type LiveCapability,
+  type LiveKernel,
   type NodeVerdict,
   type ResolvedNodeTerms,
   type RevalidationDeps,
@@ -173,8 +175,15 @@ export function planIdForReservation(reservationId: string): string {
 /** An owned stand-in for a non-primitive where a primitive belongs: fails every check, holds no caller reference. */
 const NOT_DATA: object = Object.freeze(Object.create(null));
 
+/**
+ * A primitive is kept; anything else becomes NOT_DATA. A symbol is NOT_DATA too, and -0 becomes 0, so the
+ * snapshot never keeps two values that `tag` would encode alike: the submission digest stays collision-free
+ * over the values actually retained (astra, round 2 of #356). Both are semantics-preserving: a symbol fails
+ * every check NOT_DATA fails, and -0 === 0.
+ */
 function leaf(v: unknown): unknown {
-  return (typeof v === "object" && v !== null) || typeof v === "function" ? NOT_DATA : v;
+  if ((typeof v === "object" && v !== null) || typeof v === "function" || typeof v === "symbol") return NOT_DATA;
+  return Object.is(v, -0) ? 0 : v;
 }
 
 /** A list's elements, its length read once and capped; null for a non-array or a lying or over-cap length. */
@@ -367,8 +376,20 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   let economicsRaw: unknown;
   let unitGrossFn: unknown;
   let econSplitFn: unknown;
+  let loadCapabilitiesFn: unknown;
+  let loadKernelsFn: unknown;
+  let csdForTypeFn: unknown;
   try {
     revalidation = deps.revalidation;
+    // R10's callables are captured HERE, before any submission property is read, like every other
+    // dependency. Capturing the container alone let a submission getter swap a loader later (astra, round 2
+    // of #356).
+    if (typeof revalidation === "object" && revalidation !== null) {
+      const rv = revalidation as Record<string, unknown>;
+      loadCapabilitiesFn = rv.loadCapabilities;
+      loadKernelsFn = rv.loadKernels;
+      csdForTypeFn = rv.csdForType;
+    }
     resolveProgramFn = deps.resolveProgram;
     gateFn = deps.assertProgramForTier;
     evidenceForFn = deps.evidenceFor;
@@ -396,6 +417,9 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   if (
     typeof revalidation !== "object" ||
     revalidation === null ||
+    typeof loadCapabilitiesFn !== "function" ||
+    typeof loadKernelsFn !== "function" ||
+    typeof csdForTypeFn !== "function" ||
     typeof resolveProgram !== "function" ||
     typeof assertProgramForTier !== "function" ||
     typeof evidenceFor !== "function" ||
@@ -406,7 +430,27 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     reclaimAfterSec < 0 ||
     (economicsRaw !== undefined && (typeof unitGrossFn !== "function" || typeof econSplitFn !== "function"))
   ) {
-    throw new TypeError("acceptExternalPlan: malformed SeamDeps (functions, an integer reclaimAfterSec, and economics as { unitGross, splitNet } when present)");
+    throw new TypeError(
+      "acceptExternalPlan: malformed SeamDeps (functions, revalidation as { loadCapabilities, loadKernels, csdForType }, an integer reclaimAfterSec, and economics as { unitGross, splitNet } when present)",
+    );
+  }
+  // R10 gets ONLY this frozen object: the captured callables, each called with its original receiver.
+  const rvReceiver = revalidation as object;
+  const pinnedRevalidation: RevalidationDeps = Object.freeze({
+    loadCapabilities: (ids: string[]) => Reflect.apply(loadCapabilitiesFn as (...a: unknown[]) => unknown, rvReceiver, [ids]) as LiveCapability[],
+    loadKernels: (ids: string[]) => Reflect.apply(loadKernelsFn as (...a: unknown[]) => unknown, rvReceiver, [ids]) as LiveKernel[],
+    csdForType: (type: string) => Reflect.apply(csdForTypeFn as (...a: unknown[]) => unknown, rvReceiver, [type]) as string | null,
+  });
+
+  // The authenticated context, read once BEFORE the submission: a submission getter cannot change who is
+  // asking, or for which tenant (astra, round 2 of #356). The checks stay where they were.
+  let principal: unknown;
+  let tenantId: unknown;
+  try {
+    principal = leaf(ctx?.principal);
+    tenantId = leaf(ctx?.tenantId ?? null);
+  } catch {
+    principal = undefined;
   }
 
   // The submission, read once. Everything below uses only this copy.
@@ -440,15 +484,8 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   }
 
   // Authority first. The id in the submission is only a lookup key; authority is the stored record
-  // plus the authenticated principal, and an empty principal matches nothing.
-  let principal: unknown;
-  let tenantId: unknown;
-  try {
-    principal = leaf(ctx?.principal);
-    tenantId = leaf(ctx?.tenantId ?? null);
-  } catch {
-    principal = undefined;
-  }
+  // plus the authenticated principal (captured above, before the submission), and an empty principal
+  // matches nothing.
   if (typeof principal !== "string" || principal.length === 0) {
     return refuse({ stage: "reservation", reason: "wrong-principal" });
   }
@@ -466,7 +503,7 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
 
   // R10 on the COPIED nodes. Anything but `current` everywhere is refused with the verdicts (a stale
   // verdict carries the re-quote the agent can re-submit against).
-  const revalidated = revalidatePlanSnapshots(snap.nodes as unknown as SnapshotClaim[], revalidation as RevalidationDeps, {
+  const revalidated = revalidatePlanSnapshots(snap.nodes as unknown as SnapshotClaim[], pinnedRevalidation, {
     tenantId: (typeof tenantId === "string" ? tenantId : null) as string | null,
   });
   const verdicts = revalidated.verdicts;

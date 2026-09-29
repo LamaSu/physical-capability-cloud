@@ -763,3 +763,130 @@ describe("R15 through the seam (economics option b: royalties on top): the agree
     expect(b.calls).toEqual({ unitGross: 1, splitNet: 1 });
   });
 });
+
+describe("round 2 of #356 (astra review of a16095a5): capture order, and a snapshot that keeps no two values encoded alike", () => {
+  type Revalidation = SeamDeps["revalidation"];
+  /** Swap every nested R10 dependency for a fabricated one: any effect would change the outcome. */
+  const swapR10 = (rv: Revalidation) => {
+    const m = rv as { -readonly [K in keyof Revalidation]: Revalidation[K] };
+    m.loadCapabilities = () => [];
+    m.loadKernels = () => [];
+    m.csdForType = () => null;
+  };
+
+  it("A: a submission getter that swaps a nested R10 dependency changes nothing", () => {
+    const baseline = acceptExternalPlan(agentDag(), CTX, world().deps);
+    expect(baseline.ok).toBe(true);
+    const { deps } = world();
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        swapR10(deps.revalidation);
+        return "req-42";
+      },
+    });
+    expect(acceptExternalPlan(dag, CTX, deps)).toEqual(baseline);
+  });
+
+  it("A: a reservation callback that swaps a nested R10 dependency changes nothing", () => {
+    const baseline = acceptExternalPlan(agentDag(), CTX, world().deps);
+    const { deps } = world();
+    const sneaky: SeamDeps = {
+      ...deps,
+      loadReservation: (id) => {
+        swapR10(deps.revalidation); // the same object sneaky.revalidation points at
+        return deps.loadReservation(id);
+      },
+    };
+    expect(acceptExternalPlan(agentDag(), CTX, sneaky)).toEqual(baseline);
+  });
+
+  it("C: a submission getter cannot become the reservation's owner by editing the authenticated principal", () => {
+    const ctx: { principal: string; tenantId?: string | null } = { principal: "agent:intruder" };
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        ctx.principal = CTX.principal;
+        return "req-42";
+      },
+    });
+    expect(refusal(acceptExternalPlan(dag, ctx, world().deps))).toEqual({ stage: "reservation", reason: "wrong-principal" });
+  });
+
+  it("C: a submission getter cannot switch the tenant to see another tenant's capability", () => {
+    const { deps } = world();
+    const scoped: SeamDeps = {
+      ...deps,
+      revalidation: {
+        ...deps.revalidation,
+        loadCapabilities: (ids) => deps.revalidation.loadCapabilities(ids).map((c) => (c.id === "cap-print" ? { ...c, tenantId: "tenant-2" } : c)),
+      },
+    };
+    // Control: the tenant matters. Acting for tenant-2 sees the capability; acting for tenant-1 does not.
+    expect(acceptExternalPlan(agentDag(), { principal: CTX.principal, tenantId: "tenant-2" }, scoped).ok).toBe(true);
+    const asTenant1 = acceptExternalPlan(agentDag(), { principal: CTX.principal, tenantId: "tenant-1" }, scoped);
+    expect(asTenant1.ok === false && asTenant1.verdicts?.find((v) => v.nodeId === "print")).toEqual({ nodeId: "print", status: "missing", reason: "capability-not-found" });
+    const ctx: { principal: string; tenantId?: string | null } = { principal: CTX.principal, tenantId: "tenant-1" };
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        ctx.tenantId = "tenant-2";
+        return "req-42";
+      },
+    });
+    expect(acceptExternalPlan(dag, ctx, scoped)).toEqual(asTenant1);
+  });
+
+  it("A: an R10 callable that is not a function is a wiring fault raised BEFORE any submission property is read", () => {
+    const { deps } = world();
+    let reads = 0;
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return "req-42";
+      },
+    });
+    for (const key of ["loadCapabilities", "loadKernels", "csdForType"] as const) {
+      const broken = { ...deps, revalidation: { ...deps.revalidation, [key]: "not a function" } } as unknown as SeamDeps;
+      expect(() => acceptExternalPlan(dag, CTX, broken)).toThrow(/revalidation as \{ loadCapabilities, loadKernels, csdForType \}/);
+    }
+    expect(reads).toBe(0);
+  });
+
+  it("A: the pinned R10 dependencies keep their original receiver (method-style loaders still work)", () => {
+    const { deps } = world();
+    class Live {
+      constructor(private readonly base: SeamDeps["revalidation"]) {}
+      loadCapabilities(ids: string[]) {
+        return this.base.loadCapabilities(ids);
+      }
+      loadKernels(ids: string[]) {
+        return this.base.loadKernels(ids);
+      }
+      csdForType(t: string) {
+        return this.base.csdForType(t);
+      }
+    }
+    const baseline = acceptExternalPlan(agentDag(), CTX, deps);
+    expect(acceptExternalPlan(agentDag(), CTX, { ...deps, revalidation: new Live(deps.revalidation) })).toEqual(baseline);
+  });
+
+  it("B: a symbol is NOT_DATA and -0 is 0 in the snapshot, so the digest never collides on them; distinct values still differ", () => {
+    const withSymbol = snapshotSubmission({ ...agentDag(), requestId: Symbol("x") as unknown as string })!;
+    const withObject = snapshotSubmission({ ...agentDag(), requestId: {} as unknown as string })!;
+    expect(withSymbol.requestId).toBe(withObject.requestId); // one owned NOT_DATA
+    expect(submissionDigest(withSymbol)).toBe(submissionDigest(withObject));
+    const withPrice = (price: unknown) => ({ ...agentDag(), nodes: [{ ...agentDag().nodes[0]!, price: price as string }, agentDag().nodes[1]!] });
+    const negative = snapshotSubmission(withPrice(-0))!;
+    const positive = snapshotSubmission(withPrice(0))!;
+    expect(Object.is(negative.nodes[0]!.price, 0)).toBe(true);
+    expect(submissionDigest(negative)).toBe(submissionDigest(positive));
+    const digests = [withPrice(0), withPrice("0"), withPrice(null), withPrice(undefined)].map((d) => submissionDigest(snapshotSubmission(d)!));
+    expect(new Set(digests).size).toBe(4);
+  });
+});
