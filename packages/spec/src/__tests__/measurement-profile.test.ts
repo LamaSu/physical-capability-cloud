@@ -253,3 +253,63 @@ describe("measurement profile — result levels stay separate", () => {
  */
 const PINNED_PRINT_PILOT_DIGEST =
   "0x7efecb6c05ae4241a87dc5082f7c9d1bac9158060a78beb01dcdfb2496e9bb6a";
+
+describe("measurement profile — validation fails closed on unknown terms and non-finite values", () => {
+  it("the unmodified print pilot profile still validates with zero violations", () => {
+    expect(validateMeasurementProfile(printPilotProfile())).toEqual([]);
+  });
+
+  const cases: [string, (p: Record<string, unknown>) => void, string][] = [
+    ["an unknown root key", (p) => (p.extraTerm = "nope"), "extraTerm"],
+    [
+      "an unknown measurement key",
+      (p) => ((p.measurement as Record<string, unknown>).resolution = "1080p"),
+      "measurement.resolution",
+    ],
+    ["an unknown device key", (p) => ((p.device as Record<string, unknown>).serial = "SN-1"), "device.serial"],
+    [
+      "a non-finite maxIntervalMs",
+      (p) => ((p.measurement as { sampling: Record<string, unknown> }).sampling.maxIntervalMs = Infinity),
+      "measurement.sampling.maxIntervalMs",
+    ],
+    [
+      "a permittedAdapterVersions entry that is an empty string",
+      (p) => ((p.device as Record<string, unknown>).permittedAdapterVersions = [""]),
+      "device.permittedAdapterVersions",
+    ],
+    [
+      "a permittedAdapterVersions entry that is a number",
+      (p) => ((p.device as Record<string, unknown>).permittedAdapterVersions = [42]),
+      "device.permittedAdapterVersions",
+    ],
+    [
+      "a permittedFirmwareVersions entry that is an empty string",
+      (p) => ((p.device as Record<string, unknown>).permittedFirmwareVersions = [""]),
+      "device.permittedFirmwareVersions",
+    ],
+    [
+      "an evidenceTypeIds entry that is a number",
+      (p) => ((p.interpretation as Record<string, unknown>).evidenceTypeIds = [7]),
+      "interpretation.evidenceTypeIds",
+    ],
+    ["a non-boolean calibration.required", (p) => (p.calibration = { required: "yes" }), "calibration.required"],
+    [
+      "a non-finite calibration.validityWindowSeconds",
+      (p) => (p.calibration = { required: true, procedureId: "cal-1", validityWindowSeconds: Infinity }),
+      "calibration.validityWindowSeconds",
+    ],
+    [
+      "a witnesses.requiredRoles entry that is an empty string",
+      (p) => ((p.witnesses as Record<string, unknown>).requiredRoles = [""]),
+      "witnesses.requiredRoles",
+    ],
+  ];
+  for (const [name, mutate, path] of cases) {
+    it(`${name} is a violation at ${path}`, () => {
+      const p = printPilotProfile() as unknown as Record<string, unknown>;
+      mutate(p);
+      const violations = validateMeasurementProfile(p);
+      expect(violations.some((v) => v.path === path)).toBe(true);
+    });
+  }
+});

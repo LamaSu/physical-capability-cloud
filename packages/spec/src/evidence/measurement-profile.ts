@@ -78,11 +78,18 @@ export interface ProfileOutcome {
 
 export interface ProfileDevice {
   deviceId: string;
-  /** "machine" | "sensor" | "camera" — the kernel's device kinds. */
+  /**
+   * The device's evidence source type (`EVIDENCE_DEVICE_TYPES`, e.g. "camera",
+   * "controller"). Admission compares it with each observation's
+   * `source.deviceType`, and fails closed on a kind no evidence source can carry.
+   */
   kind: string;
-  /** Adapter type that must serve this device; a mock can never satisfy it. */
+  /** Adapter type that must serve this device (`source.adapterType`); a mock can never satisfy it. */
   adapterType: string;
-  /** Non-empty allowlists; an unlisted version invalidates the profile. */
+  /**
+   * Non-empty allowlists of exact strings, each checked against its own
+   * evidence field: `source.adapterVersion` and `source.firmwareVersion`.
+   */
   permittedAdapterVersions: string[];
   permittedFirmwareVersions: string[];
 }
@@ -92,14 +99,18 @@ export interface ProfileMeasurement {
   method: string;
   /** What is measured, e.g. "printed-page-image". */
   quantity: string;
-  /** Unit token; "none" for non-numeric observations such as an image. */
+  /**
+   * Unit token; "none" for non-numeric observations such as an image. Each
+   * qualifying observation restates it and, unless it is "none", carries its
+   * value as a decimal string (profile-admission.ts `ProfileObservation`).
+   */
   unit: string;
   /** Numeric tolerance; omitted for non-numeric observations. */
   tolerance?: { comparator: "<" | "<=" | "=" | ">=" | ">"; target: number; band?: number };
   sampling: {
     /** Minimum observations required; at least 1. */
     minSamples: number;
-    /** Max gap between samples for continuous capture; omit for one-shot. */
+    /** Max gap between samples for continuous capture; omit for one-shot (admission fails closed on it). */
     maxIntervalMs?: number;
   };
 }
@@ -114,9 +125,9 @@ export interface ProfileCapture {
   startCondition: string;
   endCondition: string;
   coverage: {
-    /** "one-shot" | "continuous" — what completeness means here. */
+    /** "one-shot" | "continuous" — what completeness means here. Admission evaluates only "one-shot". */
     policy: string;
-    /** Fraction of the window that must be covered, within (0,1]. */
+    /** Fraction of the window that must be covered, within (0,1]. One-shot capture evaluates only 1. */
     minFraction: number;
   };
 }
@@ -176,8 +187,43 @@ export interface ProfileViolation {
 const DECISION = new Set(["reject", "hold"]);
 const COMPARATORS = ["<", "<=", "=", ">=", ">"];
 
+/**
+ * The v1 terms, per object. Any other key is a violation: an unknown term
+ * would be committed by the digest but evaluated by nothing.
+ */
+const V1_FIELDS: Record<string, readonly string[]> = {
+  "": [
+    "profileVersion", "profileId", "outcome", "device", "measurement", "capture",
+    "calibration", "interpretation", "simulationProhibited", "witnesses", "onMissingData", "onContradiction",
+  ],
+  outcome: ["capabilityType", "statement", "objectIdentity"],
+  "outcome.objectIdentity": ["kind", "value"],
+  device: ["deviceId", "kind", "adapterType", "permittedAdapterVersions", "permittedFirmwareVersions"],
+  measurement: ["method", "quantity", "unit", "tolerance", "sampling"],
+  "measurement.tolerance": ["comparator", "target", "band"],
+  "measurement.sampling": ["minSamples", "maxIntervalMs"],
+  capture: ["startCondition", "endCondition", "coverage"],
+  "capture.coverage": ["policy", "minFraction"],
+  calibration: ["required", "procedureId", "validityWindowSeconds"],
+  interpretation: ["evidenceTypeIds", "acceptanceLevel", "onDeviceFailure"],
+  witnesses: ["requiredRoles", "independentOfClaimant"],
+};
+
 function nonEmptyString(v: unknown): boolean {
   return typeof v === "string" && v.trim().length > 0;
+}
+
+function positiveFinite(v: unknown): boolean {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+/** A non-empty array whose every entry is a non-empty string. */
+function nonEmptyStringList(v: unknown): boolean {
+  return Array.isArray(v) && v.length > 0 && v.every(nonEmptyString);
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 /**
@@ -194,6 +240,16 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
     return [{ path: "", message: "profile must be an object" }];
   }
   const p = profile as Record<string, unknown>;
+
+  for (const [path, allowed] of Object.entries(V1_FIELDS)) {
+    const at = path === "" ? p : path.split(".").reduce<unknown>((o, k) => (isObject(o) ? o[k] : undefined), p);
+    if (!isObject(at)) continue;
+    for (const key of Object.keys(at)) {
+      if (!allowed.includes(key)) {
+        push(path ? `${path}.${key}` : key, "unknown field: a v1 profile has only the v1 terms, and an unknown term would be committed but never evaluated");
+      }
+    }
+  }
 
   if (p.profileVersion !== 1) push("profileVersion", "must be 1");
   if (!nonEmptyString(p.profileId)) push("profileId", "required, non-empty");
@@ -229,11 +285,11 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
     if (device.adapterType === "mock") {
       push("device.adapterType", "a mock adapter can never satisfy a measurement profile");
     }
-    if (!Array.isArray(device.permittedAdapterVersions) || device.permittedAdapterVersions.length === 0) {
-      push("device.permittedAdapterVersions", "required, non-empty; an open version set is not a pinned device");
+    if (!nonEmptyStringList(device.permittedAdapterVersions)) {
+      push("device.permittedAdapterVersions", "required, non-empty list of non-empty strings; an open version set is not a pinned device");
     }
-    if (!Array.isArray(device.permittedFirmwareVersions) || device.permittedFirmwareVersions.length === 0) {
-      push("device.permittedFirmwareVersions", "required, non-empty");
+    if (!nonEmptyStringList(device.permittedFirmwareVersions)) {
+      push("device.permittedFirmwareVersions", "required, non-empty list of non-empty strings");
     }
   }
 
@@ -248,11 +304,8 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
       if (!Number.isInteger(m.sampling.minSamples) || m.sampling.minSamples < 1) {
         push("measurement.sampling.minSamples", "must be an integer >= 1; zero samples is vacuous");
       }
-      if (
-        m.sampling.maxIntervalMs !== undefined &&
-        !(typeof m.sampling.maxIntervalMs === "number" && m.sampling.maxIntervalMs > 0)
-      ) {
-        push("measurement.sampling.maxIntervalMs", "must be a positive number when present");
+      if (m.sampling.maxIntervalMs !== undefined && !positiveFinite(m.sampling.maxIntervalMs)) {
+        push("measurement.sampling.maxIntervalMs", "must be a positive finite number when present");
       }
     }
     if (m.tolerance !== undefined) {
@@ -280,9 +333,10 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
 
   const cal = p.calibration as ProfileCalibration | undefined;
   if (!cal || typeof cal !== "object") push("calibration", "required");
-  else if (cal.required === true) {
+  else if (typeof cal.required !== "boolean") push("calibration.required", "required boolean");
+  else if (cal.required) {
     if (!nonEmptyString(cal.procedureId)) push("calibration.procedureId", "required when calibration.required");
-    if (!(typeof cal.validityWindowSeconds === "number" && cal.validityWindowSeconds > 0)) {
+    if (!positiveFinite(cal.validityWindowSeconds)) {
       push(
         "calibration.validityWindowSeconds",
         "required positive window when calibration.required; without it stale calibration cannot be detected",
@@ -293,8 +347,8 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
   const i = p.interpretation as ProfileInterpretation | undefined;
   if (!i || typeof i !== "object") push("interpretation", "required");
   else {
-    if (!Array.isArray(i.evidenceTypeIds) || i.evidenceTypeIds.length === 0) {
-      push("interpretation.evidenceTypeIds", "required, non-empty");
+    if (!nonEmptyStringList(i.evidenceTypeIds)) {
+      push("interpretation.evidenceTypeIds", "required, non-empty list of primitive ids");
     }
     if (!ACCEPTANCE_LEVELS.includes(i.acceptanceLevel)) {
       push("interpretation.acceptanceLevel", `must be one of ${ACCEPTANCE_LEVELS.join("|")}`);
@@ -305,7 +359,9 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
   const w = p.witnesses as ProfileWitnesses | undefined;
   if (!w || typeof w !== "object") push("witnesses", "required");
   else {
-    if (!Array.isArray(w.requiredRoles)) push("witnesses.requiredRoles", "required array (may be empty)");
+    if (!Array.isArray(w.requiredRoles) || !w.requiredRoles.every(nonEmptyString)) {
+      push("witnesses.requiredRoles", "required array of role ids (may be empty)");
+    }
     if (typeof w.independentOfClaimant !== "boolean") push("witnesses.independentOfClaimant", "required boolean");
     if (Array.isArray(w.requiredRoles) && w.requiredRoles.length > 0 && w.independentOfClaimant !== true) {
       push("witnesses.independentOfClaimant", "required roles without independence do not constitute witnesses");
