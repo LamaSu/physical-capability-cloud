@@ -735,8 +735,11 @@ export async function setupRoutes(app: FastifyInstance) {
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
+        // Never echo the stored adapterConfig (N71, operator item 86): the device's
+        // connection config stays in the row, for dispatch.
+        const { adapterConfig: _storedConfig, ...echoed } = (device ?? {}) as Record<string, unknown>;
         return reply.code(action === "created" ? 201 : 200).send({
-          device,
+          device: device ? echoed : device,
           registered: true,
           action,
         });

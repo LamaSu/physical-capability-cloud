@@ -58,6 +58,11 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
+  // POST /api/devices/register is owner-only (N71): act as the seeded owner of
+  // kernel-nyc, the kernel these tests register devices on.
+  app.addHook("onRequest", async (req) => {
+    (req as unknown as { operatorId: string }).operatorId = "0x1111111111111111111111111111111111111111";
+  });
   await app.register(jobSubmitRoutes);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
