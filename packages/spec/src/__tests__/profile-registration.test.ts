@@ -47,6 +47,12 @@ const request = (profile: unknown, over: Partial<{ capabilityType: string; devic
 const codes = (r: ReturnType<typeof checkProfileRegistration>) => (r.ok ? [] : r.problems.map((p) => p.code));
 
 describe("profile registration — accepts a registrable profile", () => {
+  it("disjoint adapter and firmware pins are registrable: each pin is checked against its own evidence field", () => {
+    const p = cameraProfile();
+    p.device.permittedFirmwareVersions = ["cam-fw-2.1.0"];
+    expect(checkProfileRegistration(request(p)).ok).toBe(true);
+  });
+
   it("returns the server-computed digest", () => {
     const p = cameraProfile();
     const r = checkProfileRegistration(request(p));
@@ -88,10 +94,29 @@ describe("profile registration — refuses what could never govern the device's 
     expect(codes(r)).toEqual(["unverifiable-term"]);
   });
 
-  it("a profile whose version pins can never both be met", () => {
+  it("a version pin written as a pattern (pins are exact strings)", () => {
     const p = cameraProfile();
-    p.device.permittedFirmwareVersions = ["fw-4.0.1"];
+    p.device.permittedFirmwareVersions = ["*-unpinned-pilot"];
+    const r = checkProfileRegistration(request(p));
+    expect(codes(r)).toEqual(["unverifiable-term"]);
+    expect(r.ok ? "" : r.problems[0]!.detail).toContain("exact strings");
+  });
+
+  it("a device kind no evidence source can carry", () => {
+    const p = cameraProfile();
+    p.device.kind = "machine";
     expect(codes(checkProfileRegistration(request(p)))).toEqual(["unverifiable-term"]);
+  });
+
+  it("a primitive id that is not active in the vocabulary", () => {
+    const p = cameraProfile();
+    p.interpretation.evidenceTypeIds = ["capture.no_such_primitive"];
+    expect(codes(checkProfileRegistration(request(p)))).toEqual(["unverifiable-term"]);
+  });
+
+  it("a profile with an unknown term is invalid, so it can never be committed", () => {
+    const p = { ...cameraProfile(), extraTerm: "never evaluated" };
+    expect(codes(checkProfileRegistration(request(p)))).toEqual(["profile-invalid"]);
   });
 
   it("a client digest that is not the digest of the submitted profile", () => {
