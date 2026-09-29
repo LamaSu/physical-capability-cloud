@@ -259,13 +259,13 @@ describe("F5 — the public (method, path) set is pinned", () => {
       "GET exact /api/job-offers/open",
       "GET exact /api/job-offers/healthz",
       "GET exact /api/kernels",
-      "GET regex ^\\/api\\/capabilities\\/[^/]+(?:\\/button|\\/td)?$",
-      "GET regex ^\\/api\\/operators\\/[^/]+\\/ratings$",
-      "GET regex ^\\/api\\/kernels\\/[^/]+\\/agent-card\\.json$",
-      "GET regex ^\\/api\\/job-offers\\/[^/]+$",
-      "GET regex ^\\/api\\/courier-jobs\\/(?:jobs\\/)?[^/]+$",
-      "GET regex ^\\/api\\/artifacts(?:\\/[^/]+)?$",
-      "GET regex ^\\/api\\/compose\\/registry-snapshot(?:\\/[^/]+)?$",
+      "GET regex /^\\/api\\/capabilities\\/[^/]+(?:\\/button|\\/td)?$/",
+      "GET regex /^\\/api\\/operators\\/[^/]+\\/ratings$/",
+      "GET regex /^\\/api\\/kernels\\/[^/]+\\/agent-card\\.json$/",
+      "GET regex /^\\/api\\/job-offers\\/[^/]+$/",
+      "GET regex /^\\/api\\/courier-jobs\\/(?:jobs\\/)?[^/]+$/",
+      "GET regex /^\\/api\\/artifacts(?:\\/[^/]+)?$/",
+      "GET regex /^\\/api\\/compose\\/registry-snapshot(?:\\/[^/]+)?$/",
       "POST exact /api/auth/provision",
       "GET exact /api/auth/nonce",
       "POST exact /api/auth/verify",
@@ -281,6 +281,19 @@ describe("F5 — the public (method, path) set is pinned", () => {
       "POST exact /api/carrier/webhook/easypost",
       "POST exact /api/lob/webhook",
     ]);
+  });
+
+  it("[neg] a flag-only edit to a regex entry changes its snapshot line (review A3: .source dropped the flags)", async () => {
+    // Runs the gate's own serializer (publicRouteLines, which publicRouteSnapshot
+    // uses) on two entries that differ ONLY in a flag. Two regexes that match
+    // different sets of requests (case-sensitive vs not) must never render the
+    // same line.
+    const { publicRouteLines } = await import("../middleware/api-gate.js");
+    const base = { methods: ["GET"] as const, match: "regex" as const, why: "t" };
+    const strict = publicRouteLines({ ...base, methods: [...base.methods], path: /^\/api\/example$/ });
+    const loose = publicRouteLines({ ...base, methods: [...base.methods], path: /^\/api\/example$/i });
+    expect(strict).not.toEqual(loose);
+    expect(loose).toEqual(["GET regex /^\\/api\\/example$/i"]);
   });
 
   it("every public write is EXACT and carries a justification", async () => {

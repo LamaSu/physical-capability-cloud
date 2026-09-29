@@ -31,8 +31,22 @@ export function authPath(req: FastifyRequest): string {
   // it): a DECODED raw path still defeats the %73->s style attack — an encoded
   // /api/... normalizes back before the /api/ and money-prefix checks. decodeURI-
   // Component also collapses an encoded %2F, which only ever makes a money-prefix
-  // match MORE likely (fail-safe) and never turns a private path public (the
-  // public allowlist is exact / segment-anchored).
+  // match MORE likely (fail-safe).
+  //
+  // Precise safety claim (corrected, review finding A3; the previous wording here
+  // overstated it). Prefix entries are segment-anchored now (api-gate.ts
+  // pathMatches), but a decoded path CAN still land on a public entry: an unknown
+  // path under a public prefix. What makes this fallback safe is reachability,
+  // not the allowlist's shape: this branch runs only when Fastify's router
+  // already failed to match ANY real route for the request. So even when
+  // isPublicRoute(decoded, method) says "public", there is still no route
+  // handler behind it — the request falls through to a 404 (server.ts's
+  // SERVE_DASHBOARD notFoundHandler, or Fastify's own default 404 otherwise;
+  // both answer any unmatched /api/* or /sse/* path with a bare 404 and no
+  // side effects). That guarantee depends on no catch-all route existing under
+  // /api/* — verified true today (no wildcard/`*` route is registered under
+  // /api/*; see apigate-registered-public-surface.test.ts's wildcard-routes
+  // test) — and would need re-checking the day one is added.
   const raw = req.url.split("?")[0];
   try {
     return decodeURIComponent(raw);

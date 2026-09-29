@@ -36,10 +36,10 @@ import { resolveApiKey, provenWalletOfKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { authPath } from "./route-path.js";
 
-type PublicMethod = "GET" | "POST";
+export type PublicMethod = "GET" | "POST";
 
 /** One public allowlist entry. `why` is required; for a write it is the justification. */
-interface PublicRoute {
+export interface PublicRoute {
   methods: readonly PublicMethod[];
   match: "prefix" | "exact" | "regex";
   /** prefix / exact: a path string; regex: an anchored RegExp. */
@@ -52,6 +52,11 @@ const POST: readonly PublicMethod[] = ["POST"];
 
 // ── Public READS (GET) ──────────────────────────────────────────────
 // Prefix entries are GET-only now: a prefix can only ever open reads.
+//
+// A prefix entry matches at a path-SEGMENT boundary (pathMatches, review A3): one
+// ending in "/" (/api/dht/) covers the paths below it; one without (/api/health)
+// covers exactly that path and the paths below it, never a sibling that merely
+// starts with the same characters ("/api/healthcheck-debug" is NOT public).
 const PUBLIC_READ_PREFIXES: PublicRoute[] = [
   { methods: GET, match: "prefix", path: "/api/health", why: "liveness / health probes" },
   { methods: GET, match: "prefix", path: "/api/auth/validate", why: "key validation checks the presented key itself" },
@@ -149,7 +154,13 @@ const PUBLIC_ROUTES: readonly PublicRoute[] = [
 function pathMatches(entry: PublicRoute, path: string): boolean {
   if (entry.match === "regex") return (entry.path as RegExp).test(path);
   if (entry.match === "exact") return path === entry.path;
-  return path.startsWith(entry.path as string);
+  // Segment-anchored (WP-A round 6, review A3): a raw startsWith let "/api/health"
+  // also open "/api/healthcheck-debug", a route that does not exist yet but would
+  // have been public the moment it was registered. No registered route relied on
+  // that (the registered-surface snapshot is unchanged by this).
+  const prefix = entry.path as string;
+  if (prefix.endsWith("/")) return path.startsWith(prefix);
+  return path === prefix || path.startsWith(`${prefix}/`);
 }
 
 /**
@@ -184,14 +195,23 @@ export function isRetiredWrite(url: string, method?: string): boolean {
 
 /**
  * The public allowlist as stable lines — "<METHOD> <match> <path>" — for the
- * snapshot test (a regex renders as its source). Not used at runtime.
+ * snapshot test (a regex renders via String(), e.g. "/^\/api\/x$/i" — source
+ * AND flags). Not used at runtime.
  */
 export function publicRouteSnapshot(): string[] {
-  return PUBLIC_ROUTES.flatMap((entry) =>
-    entry.methods.map(
-      (method) =>
-        `${method} ${entry.match} ${entry.match === "regex" ? (entry.path as RegExp).source : (entry.path as string)}`,
-    ),
+  return PUBLIC_ROUTES.flatMap(publicRouteLines);
+}
+
+/** One allowlist entry as snapshot lines. Exported for tests. */
+export function publicRouteLines(entry: PublicRoute): string[] {
+  return entry.methods.map(
+    (method) =>
+      // String(re), not `.source` (review finding A3): `.source` silently drops
+      // flags, so a flag-only edit (adding "i", say) would leave this snapshot
+      // line unchanged while quietly widening which paths the entry matches —
+      // exactly the kind of unreviewed change this snapshot exists to catch.
+      // String(re) renders "/source/flags", so the flags are part of the diff.
+      `${method} ${entry.match} ${entry.match === "regex" ? String(entry.path as RegExp) : (entry.path as string)}`,
   );
 }
 
