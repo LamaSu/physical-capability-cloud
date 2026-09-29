@@ -3,6 +3,7 @@ import {
   DEVICE_REPORTED_EVENT_TYPES,
   EVIDENCE_LEVELS,
   EXECUTION_EVENT_TYPES,
+  GATEWAY_STAMPED_DEVICE_ID,
   INSPECTION_EVENT_TYPES,
   NO_OUTCOME_LEVEL_EVENT_TYPES,
   SUBMITTED_EVENT_TYPES,
@@ -174,6 +175,23 @@ describe("evidence levels — fail closed", () => {
     }
   });
 
+  it("events the gateway stamps itself (PUT /complete) prove no level, whatever types the caller chose", () => {
+    expect(GATEWAY_STAMPED_DEVICE_ID).toBe("gateway");
+    const gatewayOwn = ev("execution_completed", GATEWAY_STAMPED_DEVICE_ID, { toolCallCount: 0 });
+    const callerTyped = ev("cv_inspection_result", GATEWAY_STAMPED_DEVICE_ID, { passed: true });
+    expect(evidenceLevelOf(gatewayOwn, new Set())).toBeNull();
+    expect(evidenceLevelOfBundle([gatewayOwn, callerTyped])).toBeNull();
+    expect(evidenceLevelOfBundle([gatewayOwn, ev("execution_completed", PRINTER)])).toBe("device_reported");
+  });
+
+  it("a gateway-stamped execution record does not make a device's inspection look independent", () => {
+    const gatewayOwn = ev("execution_completed", GATEWAY_STAMPED_DEVICE_ID);
+    // The printer inspects its own output; only the gateway's stamp names an executor.
+    const selfInspection = ev("cv_inspection_result", PRINTER, { passed: true });
+    expect(executingDeviceIds([gatewayOwn, selfInspection]).size).toBe(0);
+    expect(evidenceLevelOfBundle([gatewayOwn, selfInspection])).toBe("device_reported");
+  });
+
   it("printer_job_verified (a log-stream summary with no success field) proves no level", () => {
     const events = [
       ev("printer_log_captured", PRINTER),
@@ -229,6 +247,11 @@ describe("deriveContradictions — the public contradiction rule the oracle sign
     expect(deriveContradictions([done(), inspect(undefined)])).toEqual([]);
     expect(deriveContradictions([done(), ev("temperature_log", PRINTER, { passed: false })])).toEqual([]);
     expect(inspectionFailed(ev("temperature_log", PRINTER, { passed: false }))).toBe(false);
+  });
+
+  it("a gateway-stamped completion still contradicts a failure (types decide; a contradiction only refuses)", () => {
+    const gatewayOwn = ev("execution_completed", GATEWAY_STAMPED_DEVICE_ID);
+    expect(deriveContradictions([gatewayOwn, failed()])).toEqual(["completion-and-failure"]);
   });
 
   it("fabricated events prove no contradiction", () => {

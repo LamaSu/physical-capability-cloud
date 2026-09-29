@@ -28,7 +28,11 @@
  * Classify only authenticated events: a bundle whose signature verified and
  * whose digest opens to its events for this job and kernel
  * (`verifyEvidenceSubjectBinding`). Fabricated events (`isFabricated`) prove no
- * level, and an event without a device attribution proves no level.
+ * level, and an event without a device attribution proves no level. The
+ * gateway's own stamp (`GATEWAY_STAMPED_DEVICE_ID`) is not a device
+ * attribution: those events are the gateway's record of a completion call, and
+ * the caller chose their types. A read model that shows levels for recorded,
+ * unauthenticated events gets the same answer.
  *
  * Every member of EVIDENCE_EVENT_TYPES is ruled on below, including the ones
  * that prove no outcome level, so a new event type cannot join the vocabulary
@@ -165,11 +169,19 @@ export function meetsEvidenceLevel(reached: EvidenceLevel | null, required: Evid
   return reached !== null && evidenceLevelRank(reached) >= evidenceLevelRank(required);
 }
 
+/**
+ * The `source.deviceId` the gateway stamps on events it writes itself. Its
+ * `PUT /api/jobs/:jobId/complete` writes its own `execution_completed` and the
+ * caller's `evidenceEvents`, of any type, under this id. No device reported
+ * them, so they prove no level and do not name an executing device.
+ */
+export const GATEWAY_STAMPED_DEVICE_ID = "gateway";
+
 function deviceIdOf(event: EvidenceEvent): string | null {
   const source: unknown = event.source;
   if (typeof source !== "object" || source === null) return null;
   const id = (source as { deviceId?: unknown }).deviceId;
-  return typeof id === "string" && id.length > 0 ? id : null;
+  return typeof id === "string" && id.length > 0 && id !== GATEWAY_STAMPED_DEVICE_ID ? id : null;
 }
 
 /** The devices that executed the job, read from a bundle's own events. */
@@ -240,7 +252,9 @@ export function inspectionFailed(event: EvidenceEvent): boolean {
  *   - "completion-and-failed-inspection": a device-reported completion and an
  *     inspection that reports its own negative verdict.
  * A failure with no completion is a device failure, not a contradiction.
- * Fabricated events prove nothing here either, so they are ignored. This is
+ * Fabricated events prove nothing here either, so they are ignored. Event
+ * types decide here, not who stamped them, so a gateway-stamped completion
+ * still counts: a contradiction can only refuse. This is
  * the public, deterministic rule: the oracle signs a reject only for what it
  * derives here (J4), and profile admission reads the same predicate.
  */
