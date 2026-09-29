@@ -15,7 +15,6 @@ import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-ga
  * needs the admin SECRET (X-Admin-Key = PCC_ADMIN_KEY). The AUDIT_ADMINS
  * operatorId allowlist grants nothing any more: an operatorId is asserted, not held.
  */
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export async function auditRoutes(app: FastifyInstance) {
   app.get<{
@@ -62,13 +61,9 @@ export async function auditRoutes(app: FastifyInstance) {
       if (!requireAdminSecret(req, reply)) return reply;
       return { stats: auditService.stats(), window: "24h", scoped: false };
     }
-    const own = auditService.query({ actor: operatorId, since: new Date(Date.now() - DAY_MS).toISOString(), limit: 1000 });
-    const counts = new Map<string, number>();
-    for (const e of own as Array<{ eventType?: string }>) {
-      const t = e.eventType ?? "unknown";
-      counts.set(t, (counts.get(t) ?? 0) + 1);
-    }
-    const stats = Array.from(counts, ([eventType, count]) => ({ eventType, count })).sort((a, b) => b.count - a.count);
+    // Counted in the database over the caller's WHOLE 24h window (WP-A round 7, astra
+    // r2 new defect 2): it used to count a query capped at 1000 rows and still say "24h".
+    const stats = auditService.stats(String(operatorId)).sort((a, b) => b.count - a.count);
     return { stats, window: "24h", scoped: true };
   });
 }

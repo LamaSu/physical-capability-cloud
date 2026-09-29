@@ -139,3 +139,21 @@ describe("admin handlers: an allowlisted identity grants nothing without the sec
     expect((await inj("POST", "/api/tools/reload", allowlisted)).statusCode).toBe(401);
   });
 });
+
+describe("audit stats count the caller's WHOLE 24h window (round 7, astra r2 new defect 2)", () => {
+  it("[neg] 1005 of the caller's events are counted as 1005: the scoped count was a 1000-row query labelled 24h", async () => {
+    const { auditService } = await import("../services/audit-service.js");
+    const heavy = seedKey("stats-heavy@x.test", ["operator"]);
+    for (let i = 0; i < 1005; i += 1) {
+      auditService.log({ eventType: "stats.heavy", actor: "stats-heavy@x.test", resourceType: "test", resourceId: `h-${i}`, action: "create" } as never);
+    }
+    const res = await inj("GET", "/api/audit/stats", heavy);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { stats: Array<{ eventType: string; count: number }>; scoped: boolean; window: string };
+    expect(body.scoped).toBe(true);
+    expect(body.window).toBe("24h");
+    expect(body.stats.find((s) => s.eventType === "stats.heavy")?.count).toBe(1005);
+    // Still scoped: tenant B's private event is not in the caller's counts.
+    expect(body.stats.some((s) => s.eventType === "admin_gates.tenant_b_private")).toBe(false);
+  });
+});
