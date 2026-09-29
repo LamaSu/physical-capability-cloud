@@ -11,10 +11,12 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-const DIR = `/mnt/sparkbulk/tmp/gw-p0/r5/waitlist-test-${process.pid}`;
-mkdirSync(DIR, { recursive: true });
+// A fresh temp dir wherever the runner's tmpdir is (CI runners cannot write the Spark's paths).
+const DIR = mkdtempSync(join(tmpdir(), "pcc-waitlist-test-"));
 process.env.PCC_DB_PATH = `${DIR}/pcc.sqlite`;
 process.env.PCC_ADMIN_KEY = "waitlist-test-admin-key"; // the admin secret gates the exports (round 7, AG-9)
 

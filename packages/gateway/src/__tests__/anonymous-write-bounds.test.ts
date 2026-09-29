@@ -10,7 +10,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BoundedWindowLimiter } from "../middleware/bounded-window-limiter.js";
 
 describe("BoundedWindowLimiter", () => {
@@ -48,13 +50,13 @@ describe("BoundedWindowLimiter", () => {
 });
 
 describe("the feedback and waitlist limiters are bounded per key", () => {
-  const DIR = `/mnt/sparkbulk/tmp/gw-p0/r7/bounds-${process.pid}`;
+  let DIR = "";
   let app: FastifyInstance;
   let waitlist: typeof import("../routes/waitlist.js");
   let feedback: typeof import("../routes/feedback.js");
 
   beforeAll(async () => {
-    mkdirSync(DIR, { recursive: true });
+    DIR = mkdtempSync(join(tmpdir(), "pcc-bounds-")); // wherever the runner's tmpdir is
     process.env.PCC_DB_PATH = `${DIR}/pcc.sqlite`;
     delete process.env.DISCORD_WEBHOOK_URL;
     vi.resetModules();
@@ -93,11 +95,11 @@ describe("the feedback and waitlist limiters are bounded per key", () => {
 });
 
 describe("retained data is bounded: a full store refuses new rows (503)", () => {
-  const DIR = `/mnt/sparkbulk/tmp/gw-p0/r7/stores-${process.pid}`;
+  let DIR = "";
   let app: FastifyInstance;
 
   beforeAll(async () => {
-    mkdirSync(DIR, { recursive: true });
+    DIR = mkdtempSync(join(tmpdir(), "pcc-stores-")); // wherever the runner's tmpdir is
     process.env.PCC_DB_PATH = `${DIR}/pcc.sqlite`;
     process.env.PCC_FEEDBACK_MAX_BYTES = "1024";
     process.env.PCC_WAITLIST_MAX_BYTES = "1024";
