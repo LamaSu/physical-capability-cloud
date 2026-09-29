@@ -161,7 +161,8 @@ const START_HTML = `<!doctype html>
           Install the PCC skill once. Then in any Claude Code session, ask for what you want -
           Claude routes through PCC.
         </p>
-        <div class="card-code">/skills install https://capability.network/skills/pcc.md</div>
+        <div class="card-code">mkdir -p ~/.claude/skills/pcc
+curl -fsSL https://capability.network/skills/pcc.md -o ~/.claude/skills/pcc/SKILL.md</div>
         <a class="card-link" href="/quickstart/claude-code">Full walkthrough -></a>
       </div>
 

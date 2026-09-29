@@ -26,7 +26,7 @@ Live at [capability.network](https://capability.network).
 | `packages/agent-kernel` | Kernel Agent: accept jobs, emit evidence |
 | `packages/agent-evaluator` | Evaluator Agent: quality assessment, attestation VCs |
 | `packages/agent-support` | Support Agent: diagnostics, escalation, setup guidance |
-| `packages/pcc-node` | Python CLI for operators (`pip install pcc-node`) |
+| `packages/pcc-node` | Python CLI for operators (not on PyPI: 0.1.0 was withdrawn, 0.1.1 is pending) |
 | `packages/dht` | WebSocket gossip DHT for decentralized discovery |
 | `packages/mcp-server` | 56 MCP tools over stdio |
 | `packages/contract-builder` | Interactive capability contract builder |
@@ -44,7 +44,7 @@ Live at [capability.network](https://capability.network).
 - Escrow settles only when evidence meets tier requirements
 - MCP server: `packages/mcp-server` (63 tools)
 - Agent package: `apps/dashboard/public/agent-package.json` (19 REST tools)
-- pcc-node: `pip install pcc-node` (Python operator CLI)
+- pcc-node: Python operator CLI in `packages/pcc-node` (not on PyPI: 0.1.0 was withdrawn, 0.1.1 is pending)
 
 ## Dev Commands
 

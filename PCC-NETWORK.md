@@ -56,22 +56,19 @@ Pick whichever fits you:
 - **Claude Code / Claude Desktop skill:** <https://capability.network/skills/pcc.md>
 - **MCP client:** add the PCC MCP server — see `pcc.json` in this repo for the config
   shape.
-- **Operators who just want their machine online:** one command —
-  ```bash
-  pip install pcc-node && pcc-node start
-  ```
-  Auto-detects hardware, generates signing keys, provisions an API key, registers your
-  site, announces capabilities, and starts processing jobs.
-- **Developers who want their agent to *be* the operator:** wire the standing operator
-  runtime into your own agent —
-  ```bash
-  pnpm add @pcc/operator-agent-runtime
-  ```
-  `startOperator({ capabilityTypes, budget, executeJob })` runs the
-  poll → evaluate → claim → execute → heartbeat → evidence loop for you; you supply one
-  `executeJob` handler. This is how a coding agent becomes a *persistent* PCC operator
-  that keeps interfacing with you — not a one-shot tool call. (Pairs with the Anthropic
-  Agent SDK for LLM-assisted quoting/evaluation; inert if you override every handler.)
+- **Operators who just want their machine online:** the one-command installer, `pcc-node`,
+  is not installable right now: its only PyPI release (0.1.0) was withdrawn, and 0.1.1 is
+  pending. When it ships it auto-detects hardware, generates signing keys, provisions an
+  API key, registers your site, announces capabilities and processes jobs. Until then,
+  connect through the API (`pcc.json` → `onboarding.flow`) or the MCP server at
+  `https://capability.network/mcp`.
+- **Developers who want their agent to *be* the operator:** there is no packaged operator
+  runtime yet; no `@pcc/operator-agent-runtime` package exists. The intended design is
+  `startOperator({ capabilityTypes, budget, executeJob })`, running the
+  poll → evaluate → claim → execute → heartbeat → evidence loop around one `executeJob`
+  handler you supply, so a coding agent becomes a *persistent* PCC operator rather than a
+  one-shot tool call. Until it exists, an agent can run that loop against the API itself:
+  `GET /api/job-offers/open?capabilityType=<type>`, then `POST /api/job-offers/:id/claim`.
 
 ---
 

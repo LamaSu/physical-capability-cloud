@@ -582,13 +582,7 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 ### 4.8 Alternative: pcc-node (one-command onboarding)
 
-For operators who prefer CLI:
-```bash
-pip install pcc-node
-pcc-node start
-```
-
-This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, announces capabilities, and starts a daemon. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+For operators who prefer a CLI: `pcc-node` is not installable right now (its only PyPI release, 0.1.0, was withdrawn; 0.1.1 is pending), so use the API flow above until it ships. Once available, `pcc-node start` auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, announces capabilities, and starts a daemon. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
 
 ---
 
@@ -993,16 +987,11 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 
 ## 13. pcc-node (Python Operator Node)
 
-`pcc-node` is a pip-installable Python CLI that turns any machine into a PCC operator node.
+`pcc-node` is a Python CLI that turns any machine into a PCC operator node.
 
 ### Install and run
 
-```bash
-pip install pcc-node
-pcc-node start
-```
-
-This single command:
+`pcc-node` is not installable right now: its only PyPI release (0.1.0) was withdrawn, and 0.1.1 is pending. Once it ships, `pcc-node start` is a single command that:
 1. Auto-detects connected hardware (printers, lab equipment, cameras)
 2. Generates Ed25519 signing keys
 3. Provisions an API key from the gateway

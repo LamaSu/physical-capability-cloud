@@ -6,21 +6,22 @@ operators, post job-offers, and verify outcomes on your behalf.
 
 ## Install the skill (one time)
 
-In a Claude Code session, run:
-
-```
-/skills install https://capability.network/skills/pcc.md
-```
-
-That fetches the skill file, stores it in `~/.claude/skills/pcc/SKILL.md`,
-and makes it available in every future Claude Code conversation.
-
-Alternative — manual install:
+Claude Code loads personal skills from `~/.claude/skills/<name>/SKILL.md`.
+Download the PCC skill there:
 
 ```bash
+mkdir -p ~/.claude/skills/pcc
 curl -fsSL https://capability.network/skills/pcc.md \
   -o ~/.claude/skills/pcc/SKILL.md
-mkdir -p ~/.claude/skills/pcc
+```
+
+Every new Claude Code session then has it, and `/skills` lists it.
+
+If you would rather give Claude the PCC tools than the skill, connect the
+hosted MCP server instead. There is nothing to install:
+
+```bash
+claude mcp add --transport http pcc https://capability.network/mcp
 ```
 
 ## Use it
@@ -75,19 +76,21 @@ The Claude Code skill is for one-off transactions. If you're an operator
 who wants to be alerted when a job-offer lands in your area, that's a
 different need:
 
-```bash
-npm install -g @pcc/operator-agent-runtime
-pcc-operator start --capability manufacturing.fdm --area "37.78,-122.42,10"
-```
+There is no packaged runtime for this yet: no `@pcc/operator-agent-runtime`
+package exists. Until there is, poll the open job-offers feed (public, no key
+needed) and claim a match with your API key:
 
-The runtime polls in the background and pings you (or your local printer)
-when there's a match.
+```bash
+curl "https://capability.network/api/job-offers/open?capabilityType=manufacturing.fdm"
+curl -X POST "https://capability.network/api/job-offers/<id>/claim" \
+  -H "Authorization: Bearer pcc_live_..."
+```
 
 ## Troubleshoot
 
 | Symptom | Fix |
 |---------|-----|
-| `/skills install` says "not found" | Make sure your Claude Code is up to date; the URL skill installer landed recently. Falls back to manual curl above. |
+| `/skills` doesn't list pcc | Check that `~/.claude/skills/pcc/SKILL.md` exists and starts with the `---` frontmatter block (`name: pcc`), then start a new session. |
 | Claude says "no operators offer pizza.order" | Either the capability isn't populated in your area yet, or the catalog can't reach your geofilter. Try without `within=`. |
 | POST /api/job-offers returns 401 | Bearer key isn't set. Re-provision: `curl -X POST https://capability.network/api/auth/provision -d '{"email":"you@example.com"}'` |
 | Status stays `open` past deadline | Nobody claimed it. Cancel via `DELETE /api/job-offers/:id` or re-post with higher pricing. |
@@ -95,6 +98,5 @@ when there's a match.
 ## More
 
 - Full skill source: https://capability.network/skills/pcc.md
-- Agent-package (249 tools): https://capability.network/agent-package.json
-- Programmatic packages: `@pcc/decompose-skill`, `@pcc/operator-agent-runtime`, `@pcc/evidence-judge`
+- Agent package: https://capability.network/agent-package.json
 - Other surfaces: [claude-desktop.md](./claude-desktop.md), [claude-web.md](./claude-web.md)
