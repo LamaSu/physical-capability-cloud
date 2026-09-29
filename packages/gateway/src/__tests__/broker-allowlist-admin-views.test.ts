@@ -178,11 +178,24 @@ describe("rule 7: no attached identity fails closed (route plugins with no auth 
     expect(res.body).not.toContain("some-kernel");
   });
 
-  it("[neg] a thread with no recorded owner cannot be answered by just anyone", async () => {
+  it("[neg] no identity cannot open a thread or upload a bundle, so no ownerless record exists", async () => {
+    // Records belong to the identity that created them (operator-support-diagnostics-ownership.test.ts).
     const th = await bare.inject({
       method: "POST",
       url: "/api/operator/support",
       payload: { kernelId: "ownerless-kernel", message: "no identity attached" },
+    });
+    expect(th.statusCode).toBe(401);
+    const up = await bare.inject({ method: "POST", url: "/api/operator/diagnostics", payload: bundle("ownerless-kernel") });
+    expect(up.statusCode).toBe(401);
+  });
+
+  it("[neg] another identity cannot answer an owned thread", async () => {
+    const th = await bare.inject({
+      method: "POST",
+      url: "/api/operator/support",
+      headers: { "x-test-operator": "owner@x.test" },
+      payload: { kernelId: "owned-kernel-2", message: "mine" },
     });
     const { threadId } = th.json() as { threadId: string };
     const res = await bare.inject({

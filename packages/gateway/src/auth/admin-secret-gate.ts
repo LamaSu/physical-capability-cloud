@@ -18,6 +18,7 @@
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { checkAdminKey, ADMIN_KEY_HEADER } from "./admin-key.js";
+import { sameIdentity } from "./identity-normalize.js";
 
 /** True when the admin secret checks out; otherwise sends its 401/403/503 and returns false. */
 export function requireAdminSecret(req: FastifyRequest, reply: FastifyReply): boolean {
@@ -48,4 +49,37 @@ export function requireAdminSecretStrict(req: FastifyRequest, reply: FastifyRepl
 /** True when the request PRESENTS an admin secret (valid or not). Absent means "not asking for admin". */
 export function presentsAdminSecret(req: FastifyRequest): boolean {
   return req.headers[ADMIN_KEY_HEADER] !== undefined;
+}
+
+/**
+ * Who is asking, for handlers whose records belong to the identity that created them
+ * (WP-A; astra, pack 47: support and diagnostics ownership).
+ * - A request that PRESENTS the admin secret is the admin when the secret checks out.
+ *   A wrong secret is refused (checkAdminKey's 401/403/503), never downgraded.
+ * - Otherwise the caller is the identity apiGate attached: an API key's operatorId,
+ *   or a SIWE session's address. None attached is 401 (rule 7: fail closed).
+ * Sends the refusal and returns null when neither holds.
+ */
+export type AdminOrCaller = { admin: true } | { admin: false; caller: string };
+
+export function adminOrCaller(req: FastifyRequest, reply: FastifyReply): AdminOrCaller | null {
+  if (presentsAdminSecret(req)) return requireAdminSecret(req, reply) ? { admin: true } : null;
+  const caller = callerIdentity(req);
+  if (caller === null) {
+    void reply.status(401).send({ error: "authentication_required" });
+    return null;
+  }
+  return { admin: false, caller };
+}
+
+/** The identity apiGate attached to this request, or null. */
+export function callerIdentity(req: FastifyRequest): string | null {
+  const r = req as unknown as { operatorId?: unknown; userId?: unknown };
+  const id = r.operatorId ?? r.userId;
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+/** The admin, or the identity recorded as the record's owner. A record with no owner is the admin's alone. */
+export function mayAccess(who: AdminOrCaller, owner: string | null | undefined): boolean {
+  return who.admin || sameIdentity(owner, who.caller);
 }
