@@ -93,6 +93,21 @@ export class KernelService {
     });
   }
 
+  /** The kernel this in-process service runs jobs for (from KERNEL_CONFIG). */
+  get kernelId(): string {
+    return this.config.kernelId;
+  }
+
+  /**
+   * Whether a machine runner for `deviceId` is loaded in this running service,
+   * i.e. a job on that device would actually execute here rather than on a
+   * remote operator node. Used by /api/setup/test-job to refuse a test it
+   * cannot honestly run.
+   */
+  hasRunner(deviceId: string): boolean {
+    return this.runners.has(deviceId);
+  }
+
   private initAdapters(): void {
     const adapters = createAdaptersFromConfig(this.config);
     this.sensors = adapters.sensors;

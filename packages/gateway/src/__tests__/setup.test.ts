@@ -11,10 +11,11 @@
  * that can crash the test process during teardown.
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { setupRoutes } from "../routes/setup.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+import * as kernelServiceModule from "../services/kernel-service.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -34,12 +35,16 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
   ];
 
   const mockService = {
+    kernelId: "kernel-setup-test",
     submitJob: vi
       .fn()
-      .mockResolvedValue({ jobId: "test-job-mock", deviceId: "dev-setup-machine", status: "accepted" }),
+      .mockResolvedValue({ jobId: "test-job-mock", deviceId: "dev-owned", status: "accepted" }),
     getJobStatus: vi.fn().mockResolvedValue({ status: "completed", progress: 100 }),
     listDevices: vi.fn().mockResolvedValue(_mockDevices),
     checkDeviceHealth: vi.fn().mockResolvedValue({ healthy: true, details: "idle" }),
+    // test-job (N59): whether a real runner is loaded here, and DB refresh.
+    hasRunner: vi.fn().mockReturnValue(true),
+    refreshDeviceFromDb: vi.fn().mockReturnValue({ installed: true }),
   };
 
   return {
@@ -96,9 +101,53 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
+  // Stand in for apiGate: an x-test-key header names the authenticated caller,
+  // as an API key or SIWE session would set req.userId/operatorId in production.
+  app.decorateRequest("userId", null);
+  app.decorateRequest("operatorId", null);
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    if (typeof key === "string") {
+      (req as { userId?: string }).userId = key;
+      (req as { operatorId?: string }).operatorId = key;
+    }
+  });
   await app.register(setupRoutes);
   await app.ready();
   return app;
+}
+
+// A kernel owned by OWNER, with one machine device, for the test-job cases.
+const OWNER = "op-owner";
+function seedOwnedKernelAndDevice(): void {
+  const repos = getRepos();
+  const now = new Date().toISOString();
+  repos.kernels.insert({
+    id: "kernel-owned",
+    name: "Owned Kernel",
+    operatorAddress: OWNER,
+    location: { lat: 0, lng: 0 },
+    physicalAddress: "1 Lab St",
+    maxAssuranceTier: 2,
+    publicKey: "pk",
+    reputation: 0,
+    totalJobsCompleted: 0,
+    status: "online",
+    registeredAt: now,
+    lastHeartbeat: now,
+    version: "1",
+  } as never);
+  repos.kernels.insertDevice({
+    id: "dev-owned",
+    kernelId: "kernel-owned",
+    type: "machine",
+    model: "SIM",
+    firmware: "1.0",
+    status: "idle",
+    contributesToCapabilities: [],
+    lastUpdated: now,
+    adapterType: "mock",
+  } as never);
 }
 
 // ---------------------------------------------------------------------------
@@ -635,43 +684,78 @@ describe("Setup API", () => {
   // ── POST /api/setup/test-job ─────────────────────────────────────────────
   // The KernelService is mocked — no real background timers or DB side-effects.
 
+  // N59 / ADK item 8: the test job is owner-gated and honest. It never lands
+  // on a mock fallback, and a self-attestation is never a pass.
   describe("POST /api/setup/test-job", () => {
-    it("submits a test job and returns result", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/setup/test-job",
-        payload: {},
-      });
+    const _svc = (kernelServiceModule as unknown as { _mockService: {
+      hasRunner: ReturnType<typeof vi.fn>;
+      getJobStatus: ReturnType<typeof vi.fn>;
+      submitJob: ReturnType<typeof vi.fn>;
+    } })._mockService;
+    const owner = { "x-test-key": OWNER };
+    const post = (payload: unknown, headers: Record<string, string> = owner) =>
+      app.inject({ method: "POST", url: "/api/setup/test-job", headers, payload });
+
+    beforeAll(() => seedOwnedKernelAndDevice());
+    beforeEach(() => {
+      _svc.hasRunner.mockReturnValue(true);
+      _svc.getJobStatus.mockResolvedValue({ status: "completed", progress: 100 });
+      _svc.submitJob.mockResolvedValue({ jobId: "test-job-mock", deviceId: "dev-owned", status: "accepted" });
+    });
+
+    it("requires kernelId", async () => {
+      const res = await post({ deviceId: "dev-owned" });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "kernel_id_required", ran: false, passed: false });
+    });
+
+    it("404s an unregistered kernel", async () => {
+      const res = await post({ kernelId: "kernel-ghost", deviceId: "dev-owned" });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error).toBe("kernel_not_found");
+    });
+
+    it("403s a caller who is not the kernel operator, and an anonymous caller", async () => {
+      const stranger = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" }, { "x-test-key": "someone-else" });
+      expect(stranger.statusCode).toBe(403);
+      expect(stranger.json()).toMatchObject({ error: "not_kernel_operator", ran: false, passed: false });
+      const anon = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" }, {});
+      expect(anon.statusCode).toBe(403);
+    });
+
+    it("requires a deviceId, and it must be on the kernel", async () => {
+      const missing = await post({ kernelId: "kernel-owned" });
+      expect(missing.statusCode).toBe(400);
+      expect(missing.json().error).toBe("device_id_required");
+      const foreign = await post({ kernelId: "kernel-owned", deviceId: "dev-elsewhere" });
+      expect(foreign.statusCode).toBe(404);
+      expect(foreign.json().error).toBe("device_not_on_kernel");
+    });
+
+    it("refuses a device this gateway does not run — never a self-attested pass", async () => {
+      _svc.hasRunner.mockReturnValue(false);
+      const res = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" });
+      expect(res.statusCode).toBe(409);
+      const body = res.json();
+      expect(body).toMatchObject({ error: "device_not_runnable_here", ran: false, passed: false });
+      expect(body.status).not.toBe("completed");
+      expect(_svc.submitJob).not.toHaveBeenCalled();
+    });
+
+    it("runs the operator's own device and passes only when the run completes", async () => {
+      const res = await post({ kernelId: "kernel-owned", deviceId: "dev-owned", assuranceTier: 0 });
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(typeof body.jobId).toBe("string");
+      expect(body).toMatchObject({ deviceId: "dev-owned", status: "completed", ran: true, passed: true });
       expect(body.jobId).toMatch(/^test-job-/);
-      expect(typeof body.status).toBe("string");
       expect(typeof body.duration).toBe("number");
-      expect(body.duration).toBeGreaterThanOrEqual(0);
     });
 
-    it("returns completed status (mock resolves immediately)", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/setup/test-job",
-        payload: { assuranceTier: 0 },
-      });
+    it("does not pass when the run does not complete", async () => {
+      _svc.getJobStatus.mockResolvedValue({ status: "failed", progress: 0 });
+      const res = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" });
       expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(["completed", "executing", "accepted", "queued", "unknown"]).toContain(body.status);
-    });
-
-    it("targets specific deviceId when provided", async () => {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/setup/test-job",
-        payload: { deviceId: "dev-setup-machine" },
-      });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      // The mock service returns "dev-setup-machine" from submitJob
-      expect(body.deviceId).toBe("dev-setup-machine");
+      expect(res.json()).toMatchObject({ ran: true, passed: false, status: "failed" });
     });
   });
 
