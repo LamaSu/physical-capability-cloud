@@ -34,10 +34,30 @@ describe("JobDetailPage reads the gateway read model", () => {
     expect(detail).not.toMatch(/sha256:[0-9a-f]{16,}/);
   });
 
-  it("tells not-found apart from unavailable", () => {
+  it("tells not-found, signed-out and unverified apart from unavailable", () => {
     expect(detail).toContain("Job not found");
+    expect(detail).toContain("Sign in to see this job");
+    expect(detail).toContain("Sign in with a wallet to see this job");
     expect(detail).toContain("Job details are unavailable right now");
-    expect(detail).toContain("status === 404");
+  });
+
+  it("NEGATIVE (r3): the latest read's refusal is decided before any data renders (jobPageState)", () => {
+    const decide = detail.indexOf("jobPageState(");
+    expect(decide).toBeGreaterThan(-1);
+    // No panel renders until the page state says data may be shown.
+    expect(detail.indexOf('state.show !== "data"')).toBeGreaterThan(decide);
+    expect(detail.indexOf("<SettlementPanel")).toBeGreaterThan(detail.indexOf('state.show !== "data"'));
+    expect(detail).not.toMatch(/if \(!data\) \{/);
+  });
+
+  it("NEGATIVE (r3): the payout badge goes through payoutBadge with the read's staleness", () => {
+    expect(detail).toContain("payoutBadge(s.payout, stale)");
+    expect(detail).not.toContain("PAYOUT_VIEW");
+  });
+
+  it("NEGATIVE (r3): the query cache is cleared when the signed-in identity changes", () => {
+    const app = read("../App.tsx");
+    expect(app).toContain("onIdentityChange(() => queryClient.clear())");
   });
 
   it("marks a failed refresh as stale instead of hiding it", () => {

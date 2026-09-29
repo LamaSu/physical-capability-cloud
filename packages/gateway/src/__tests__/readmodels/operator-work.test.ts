@@ -357,6 +357,10 @@ describe("GET /api/operator/work and /api/operator/income", () => {
     app.addHook("onRequest", async (req) => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string") (req as any).operatorId = p;
+      // WP-A's gate proves a wallet by SIWE (#353 r3): a wallet principal reads as proven.
+      const w = req.headers["x-test-proven-wallet"];
+      const proven = typeof w === "string" ? (w === "none" ? null : w) : typeof p === "string" ? p : null;
+      (req as any).provenWallet = typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven) ? proven.toLowerCase() : null;
     });
     await app.register(operatorWorkRoutes);
     await app.ready();
@@ -374,6 +378,20 @@ describe("GET /api/operator/work and /api/operator/income", () => {
   it("NEGATIVE: anonymous callers get 401 on both routes", async () => {
     expect((await get("/api/operator/work", null)).statusCode).toBe(401);
     expect((await get("/api/operator/income", null)).statusCode).toBe(401);
+  });
+
+  it("NEGATIVE (#353 r3): a key that only CLAIMS the operator's id, or an email, gets 403 and nothing", async () => {
+    for (const url of ["/api/operator/work", "/api/operator/income"]) {
+      const claimed = await app.inject({
+        method: "GET",
+        url,
+        headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": "none" },
+      });
+      expect(claimed.statusCode, url).toBe(403);
+      expect(claimed.json().error).toBe("identity_unverified");
+      expect(claimed.body).not.toMatch(/kernel-nyc|job-00/);
+      expect((await get(url, "someone-else@example.invalid")).statusCode, url).toBe(403);
+    }
   });
 
   it("lists the operator's own kernel jobs and matching offers, and nothing of another operator's", async () => {
@@ -395,8 +413,34 @@ describe("GET /api/operator/work and /api/operator/income", () => {
     expect(dto.kernels.map((k: any) => k.kernelId)).toEqual(["kernel-nyc"]);
   });
 
-  it("a caller with no kernels gets an empty, fully described read", async () => {
-    const dto = (await get("/api/operator/work", "someone-else@example.invalid")).json();
+  it("a kernel recorded under a checksummed (mixed-case) address belongs to that proven wallet", async () => {
+    // A SIWE session address is EIP-55 checksummed, so a kernel registered from one records
+    // mixed case, while the proven wallet is lowercase.
+    const checksummed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+    const { schema } = await import("@pcc/store");
+    (await import("../../db.js")).getStore().db.insert(schema.shopKernels).values({
+      id: "kernel-mixed", name: "Mixed", operatorAddress: checksummed, location: { lat: 0, lng: 0 },
+      physicalAddress: "x", maxAssuranceTier: 1, publicKey: "mixed-key", reputation: 0, totalJobsCompleted: 0,
+      status: "online", registeredAt: new Date().toISOString(), lastHeartbeat: new Date().toISOString(), version: "1",
+    } as any).run();
+    const dto = (await get("/api/operator/work", checksummed.toLowerCase())).json();
+    expect(dto.kernels.map((k: any) => k.kernelId)).toEqual(["kernel-mixed"]);
+  });
+
+  it("NEGATIVE (#353 r3): the operator is the PROVEN wallet, never the key's claimed operator id", async () => {
+    // A key claiming kernel-nyc's operator, proven as another wallet, sees that wallet's work: none.
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/operator/work",
+      headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": "0x9999999999999999999999999999999999999999" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kernels).toEqual([]);
+    expect(res.body).not.toMatch(/kernel-nyc|job-00/);
+  });
+
+  it("a proven wallet with no kernels gets an empty, fully described read", async () => {
+    const dto = (await get("/api/operator/work", "0x9999999999999999999999999999999999999999")).json();
     expect(dto.kernels).toEqual([]);
     expect(dto.items).toEqual([]);
     expect(dto.sources.kernel_job.state).toBe("read");
