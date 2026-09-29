@@ -499,9 +499,12 @@ describe("SafetyGovernor: N86 envelope gaps", () => {
     expect((await new SafetyGovernor({ maxForce: 0 }).validateCommand(move({ force: 5 }))).allowed).toBe(false);
   });
 
-  it("G1: an explicit undefined does not remove a limit", async () => {
+  it("G1: an explicit undefined does not remove a limit; the default still applies", async () => {
     const gov = new SafetyGovernor({ maxVelocity: undefined, maxTemperature: undefined, maxForce: undefined });
-    expect((await gov.validateCommand(move({ velocity: 600 }))).allowed).toBe(false);
+    const fast = await gov.validateCommand(move({ velocity: 600 }));
+    expect(fast.allowed).toBe(false);
+    expect(fast.reason).toBe("Velocity 600 exceeds max 500");
+    expect((await gov.validateCommand(move({ velocity: 100 }))).allowed).toBe(true);
     expect((await gov.validateCommand(move({ temperature: 900 }))).allowed).toBe(false);
     expect((await gov.validateCommand(move({ force: 900 }))).allowed).toBe(false);
   });
