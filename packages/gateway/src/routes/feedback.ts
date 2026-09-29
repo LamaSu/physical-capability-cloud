@@ -16,13 +16,14 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { redactSecrets } from "../redaction.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
-import { adminTokenMatches } from "../auth/admin-key.js";
+import { requireAdminSecretStrict } from "../auth/admin-secret-gate.js";
+import { BoundedWindowLimiter } from "../middleware/bounded-window-limiter.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // Migrate to a table later if volume warrants it.
@@ -34,34 +35,48 @@ const FEEDBACK_FILE = `${DATA_DIR}/feedback.jsonl`;
 // volume. Tunable via env for ops + tests.
 const RATE_MAX = Number.parseInt(process.env.PCC_FEEDBACK_RATE_MAX ?? "60", 10);
 const RATE_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_RATE_WINDOW_MS ?? "60000", 10);
-// Bounded (WP-A round 6, admingates "bound limiter state"): the map used to keep
-// every IP it ever saw. Past MAX_TRACKED_IPS the least recently seen IP is dropped,
-// as in waitlist.ts.
+// Bounded in both dimensions (WP-A rounds 6 and 7, admingates AG-20): at most
+// MAX_TRACKED_IPS IPs, least recently seen dropped first, and at most RATE_MAX
+// timestamps per IP. A refused request is not recorded, so a flood allocates nothing.
 export const MAX_TRACKED_IPS = 50_000;
-const hits = new Map<string, number[]>();
+const limiter = new BoundedWindowLimiter(RATE_MAX, RATE_WINDOW_MS, MAX_TRACKED_IPS);
 function rateLimited(ip: string): boolean {
-  const now = Date.now();
-  const arr = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
-  arr.push(now);
-  hits.delete(ip); // re-insert: Map order is insertion order, least recently seen first
-  hits.set(ip, arr);
-  if (hits.size > MAX_TRACKED_IPS) hits.delete(hits.keys().next().value as string);
-  return arr.length > RATE_MAX;
+  return limiter.limited(ip);
 }
 
 /** Reset the in-memory rate-limit counter. Test-only export. */
 export function __resetFeedbackRateLimit(): void {
-  hits.clear();
+  limiter.clear();
 }
 
 /** How many IPs the limiter tracks. Test-only export. */
 export function __feedbackRateLimitSize(): number {
-  return hits.size;
+  return limiter.size;
+}
+
+/** The longest per-IP timestamp list the limiter holds. Test-only export. */
+export function __feedbackRateLimitMaxPerIp(): number {
+  return limiter.maxPerKey();
 }
 
 /** Drive the limiter directly for one IP. Test-only export. */
 export function __feedbackRateLimited(ip: string): boolean {
   return rateLimited(ip);
+}
+
+// Retained data is bounded too (WP-A round 7, admingates AG-20): past this size the
+// store refuses new reports (503 feedback_store_full), rather than letting
+// anonymous submissions from many IPs fill the volume the gateway DB also lives on.
+const MAX_FEEDBACK_FILE_BYTES = (() => {
+  const n = Number.parseInt(process.env.PCC_FEEDBACK_MAX_BYTES ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 50 * 1024 * 1024;
+})();
+function storeFull(file: string, maxBytes: number): boolean {
+  try {
+    return statSync(file).size >= maxBytes;
+  } catch {
+    return false; // no file yet
+  }
 }
 
 // Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
@@ -118,17 +133,12 @@ function rid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Admin review is gated by a shared token (X-Admin-Token === WAITLIST_ADMIN_TOKEN),
-// independent of the API-key scope system. Mirrors routes/waitlist.ts adminOk so
-// the two admin surfaces share one operator token. Fails closed when the env var
-// is unset or blank. Compared in CONSTANT TIME (auth/admin-key.ts
-// adminTokenMatches, WP-A fold F7) — it used to be a short-circuiting `!==`.
+// The admin export needs the admin SECRET: X-Admin-Key = PCC_ADMIN_KEY, compared in
+// constant time, with no development bypass (WP-A round 7, admingates AG-9). The
+// same gate is used by routes/waitlist.ts and every other admin handler. It used
+// to be a separate token (X-Admin-Token = WAITLIST_ADMIN_TOKEN).
 function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
-  if (!adminTokenMatches(req)) {
-    reply.code(403).send({ error: "forbidden", message: "Admin token required (X-Admin-Token)." });
-    return false;
-  }
-  return true;
+  return requireAdminSecretStrict(req, reply);
 }
 
 // Canonical agent categories + the legacy dashboard categories. Unknown values
@@ -390,6 +400,9 @@ export async function feedbackRoutes(app: FastifyInstance) {
       });
     }
 
+    if (storeFull(FEEDBACK_FILE, MAX_FEEDBACK_FILE_BYTES)) {
+      return reply.code(503).send({ error: "feedback_store_full", message: "Feedback storage is full; the operators have been told. Try again later." });
+    }
     append(FEEDBACK_FILE, rec);
     // Mark the key only AFTER a successful append — a failed write must not
     // permanently dedup a report that never persisted (#3).
@@ -453,9 +466,9 @@ export async function feedbackRoutes(app: FastifyInstance) {
     });
   });
 
-  // Admin review / export (gated by X-Admin-Token === WAITLIST_ADMIN_TOKEN).
+  // Admin review / export (gated by the admin secret, X-Admin-Key).
   app.get("/api/admin/feedback", async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const items = readAll(FEEDBACK_FILE);
     return { total: items.length, items };
   });

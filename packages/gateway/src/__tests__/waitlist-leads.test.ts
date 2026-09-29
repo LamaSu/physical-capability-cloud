@@ -9,14 +9,14 @@
  * with a token this process issued draw on a per-lead budget, and every other
  * request counts against the per-IP window.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { mkdirSync, rmSync } from "node:fs";
 
 const DIR = `/mnt/sparkbulk/tmp/gw-p0/r5/waitlist-test-${process.pid}`;
 mkdirSync(DIR, { recursive: true });
 process.env.PCC_DB_PATH = `${DIR}/pcc.sqlite`;
-process.env.WAITLIST_ADMIN_TOKEN = "waitlist-test-admin-token";
+process.env.PCC_ADMIN_KEY = "waitlist-test-admin-key"; // the admin secret gates the exports (round 7, AG-9)
 
 let app: FastifyInstance;
 let reset: () => void;
@@ -40,7 +40,7 @@ beforeEach(() => reset());
 const post = (payload: Record<string, unknown>, ip = "203.0.113.10") =>
   app.inject({ method: "POST", url: "/api/waitlist", payload, remoteAddress: ip });
 const exportAll = async () =>
-  (await app.inject({ method: "GET", url: "/api/admin/waitlist", headers: { "x-admin-token": "waitlist-test-admin-token" } })).json()
+  (await app.inject({ method: "GET", url: "/api/admin/waitlist", headers: { "x-admin-key": "waitlist-test-admin-key" } })).json()
     .items as Array<Record<string, unknown>>;
 
 describe("waitlist leads", () => {
@@ -96,10 +96,20 @@ describe("waitlist leads", () => {
     expect(statuses[19]).toBe(429);
   });
 
-  it("the public count reflects a new lead right away (the cache is invalidated on write)", async () => {
-    const before = (await app.inject({ method: "GET", url: "/api/waitlist/count" })).json().count as number;
-    await post({ email: "counted@x.test", leadId: "lead-counted" }, `198.51.100.${++ipSeq}`);
-    const after = (await app.inject({ method: "GET", url: "/api/waitlist/count" })).json().count as number;
-    expect(after).toBe(before + 1);
+  it("[neg] a write does not force a count rebuild; the count catches up within 30 s (round 7, AG-23)", async () => {
+    // Alternating a write with a count used to force a full read and coalesce of both
+    // files every time. Now the count is rebuilt at most once per 30 s.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-09-28T12:00:00Z"));
+      const count = async () => (await app.inject({ method: "GET", url: "/api/waitlist/count" })).json().count as number;
+      const before = await count();
+      await post({ email: "counted@x.test", leadId: "lead-counted" }, `198.51.100.${++ipSeq}`);
+      expect(await count()).toBe(before); // cached: the write did not invalidate it
+      vi.setSystemTime(new Date("2026-09-28T12:00:31Z"));
+      expect(await count()).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

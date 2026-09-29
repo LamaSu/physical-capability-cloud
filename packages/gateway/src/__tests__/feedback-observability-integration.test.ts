@@ -130,7 +130,14 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
 
   it("also still lands in the durable admin feedback export", async () => {
     await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "durable + observable", endpoint: "/api/x" } });
-    const admin = await app.inject({ method: "GET", url: "/api/admin/feedback", headers: { "x-admin-token": "t" } });
+    // The export needs the admin secret, with no dev bypass (round 7, AG-9).
+    process.env.PCC_ADMIN_KEY = "feedback-export-test-secret";
+    let admin;
+    try {
+      admin = await app.inject({ method: "GET", url: "/api/admin/feedback", headers: { "x-admin-key": "feedback-export-test-secret" } });
+    } finally {
+      delete process.env.PCC_ADMIN_KEY;
+    }
     expect(admin.statusCode).toBe(200);
     expect((admin.json().items as unknown[]).some((i) => (i as { summary?: string }).summary === "durable + observable")).toBe(true);
   });

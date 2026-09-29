@@ -139,9 +139,10 @@ const ADMIN_SCOPES = ["admin"];
  * and requiring an `admin` scope here would make them unreachable for everyone.
  * "METHOD /path", exact. Keep this list as short as it is.
  *
- *   GET /api/admin/feedback — X-Admin-Token === WAITLIST_ADMIN_TOKEN, fails
- *     closed when the env var is unset (routes/feedback.ts adminOk); listed in
- *     api-gate PUBLIC_PREFIXES for exactly that reason.
+ *   GET /api/admin/feedback — X-Admin-Key === PCC_ADMIN_KEY, with no development
+ *     bypass, fails closed (503) when the env var is unset (routes/feedback.ts
+ *     adminOk, requireAdminSecretStrict; WP-A round 7); listed in api-gate
+ *     PUBLIC_PREFIXES for exactly that reason.
  *
  * Every OTHER /api/admin/** route requires an explicit `admin` scope here, on
  * top of whatever gate the route itself carries.

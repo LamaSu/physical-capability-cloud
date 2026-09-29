@@ -1,5 +1,9 @@
 /**
- * WP-A fold F7: the X-Admin-Token admin exports compare in CONSTANT TIME.
+ * WP-A fold F7, then round 7 (admingates AG-9): the admin exports compare in
+ * CONSTANT TIME, and since round 7 they use the admin SECRET, X-Admin-Key =
+ * PCC_ADMIN_KEY (requireAdminSecretStrict), with no development bypass. The
+ * separate X-Admin-Token = WAITLIST_ADMIN_TOKEN no longer opens them. The history
+ * below is kept: adminTokenMatches still exists and its unit tests stay.
  *
  * routes/waitlist.ts and routes/feedback.ts gated GET /api/admin/waitlist,
  * /api/admin/beta-apply and /api/admin/feedback on
@@ -30,7 +34,8 @@ vi.mock("../services/posthog-service.js", () => ({ trackServerEvent: vi.fn() }))
 vi.mock("../services/audit-service.js", () => ({ auditService: { log: vi.fn() } }));
 
 const TOKEN = "test-admin-token-7f3a9c";
-const saved = { db: process.env.PCC_DB_PATH, token: process.env.WAITLIST_ADMIN_TOKEN };
+const ADMIN_KEY = "test-admin-secret-4e1b8d";
+const saved = { db: process.env.PCC_DB_PATH, token: process.env.WAITLIST_ADMIN_TOKEN, key: process.env.PCC_ADMIN_KEY };
 let tmpDir: string;
 let app: FastifyInstance;
 
@@ -53,54 +58,65 @@ afterAll(async () => {
   else process.env.PCC_DB_PATH = saved.db;
   if (saved.token === undefined) delete process.env.WAITLIST_ADMIN_TOKEN;
   else process.env.WAITLIST_ADMIN_TOKEN = saved.token;
+  if (saved.key === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = saved.key;
 });
 
 beforeEach(() => {
   process.env.WAITLIST_ADMIN_TOKEN = TOKEN;
+  process.env.PCC_ADMIN_KEY = ADMIN_KEY;
   timingSafeEqualSpy.fn.mockClear();
 });
 
 const ADMIN_ROUTES = ["/api/admin/waitlist", "/api/admin/beta-apply", "/api/admin/feedback"];
 
-describe("F7 — X-Admin-Token is compared in constant time", () => {
-  it.each(ADMIN_ROUTES)("GET %s with the right token: 200, decided by timingSafeEqual", async (url) => {
-    const res = await app.inject({ method: "GET", url, headers: { "x-admin-token": TOKEN } });
+describe("AG-9 — the admin exports need X-Admin-Key = PCC_ADMIN_KEY, compared in constant time", () => {
+  it.each(ADMIN_ROUTES)("GET %s with the right key: 200, decided by timingSafeEqual", async (url) => {
+    const res = await app.inject({ method: "GET", url, headers: { "x-admin-key": ADMIN_KEY } });
     expect(res.statusCode).toBe(200);
     expect(timingSafeEqualSpy.fn).toHaveBeenCalled();
   });
 
-  it.each(ADMIN_ROUTES)("GET %s with a wrong token of the SAME length: 403, decided by timingSafeEqual", async (url) => {
-    const wrong = TOKEN.slice(0, -1) + (TOKEN.endsWith("c") ? "d" : "c");
-    const res = await app.inject({ method: "GET", url, headers: { "x-admin-token": wrong } });
+  it.each(ADMIN_ROUTES)("[neg] GET %s with the OLD credential (X-Admin-Token = WAITLIST_ADMIN_TOKEN): refused", async (url) => {
+    const res = await app.inject({ method: "GET", url, headers: { "x-admin-token": TOKEN } });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("admin_key_required");
+  });
+
+  it.each(ADMIN_ROUTES)("[neg] GET %s with a wrong key of the SAME length: 403, decided by timingSafeEqual", async (url) => {
+    const wrong = ADMIN_KEY.slice(0, -1) + (ADMIN_KEY.endsWith("d") ? "e" : "d");
+    const res = await app.inject({ method: "GET", url, headers: { "x-admin-key": wrong } });
     expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("forbidden");
+    expect(res.json().error).toBe("admin_key_invalid");
     expect(timingSafeEqualSpy.fn).toHaveBeenCalled();
   });
 
-  it.each(ADMIN_ROUTES)("GET %s with a wrong token of a DIFFERENT length: 403, still via timingSafeEqual (no length short-circuit)", async (url) => {
-    const res = await app.inject({ method: "GET", url, headers: { "x-admin-token": "x" } });
+  it.each(ADMIN_ROUTES)("[neg] GET %s with a wrong key of a DIFFERENT length: 403, still via timingSafeEqual", async (url) => {
+    const res = await app.inject({ method: "GET", url, headers: { "x-admin-key": "x" } });
     expect(res.statusCode).toBe(403);
     expect(timingSafeEqualSpy.fn).toHaveBeenCalled();
   });
 
-  it.each(ADMIN_ROUTES)("GET %s without the header: 403", async (url) => {
+  it.each(ADMIN_ROUTES)("[neg] GET %s without the header: 401", async (url) => {
     const res = await app.inject({ method: "GET", url });
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(401);
   });
 
-  it.each(ADMIN_ROUTES)("GET %s fails CLOSED when WAITLIST_ADMIN_TOKEN is unset or blank", async (url) => {
+  it.each(ADMIN_ROUTES)("[neg] GET %s fails CLOSED (503) when PCC_ADMIN_KEY is unset or blank, even under NODE_ENV=test", async (url) => {
+    expect(process.env.NODE_ENV).toBe("test"); // where checkAdminKey alone would be dev-open
     for (const value of [undefined, "", "   "]) {
-      if (value === undefined) delete process.env.WAITLIST_ADMIN_TOKEN;
-      else process.env.WAITLIST_ADMIN_TOKEN = value;
-      const res = await app.inject({ method: "GET", url, headers: { "x-admin-token": TOKEN } });
-      expect(res.statusCode, JSON.stringify(value)).toBe(403);
+      if (value === undefined) delete process.env.PCC_ADMIN_KEY;
+      else process.env.PCC_ADMIN_KEY = value;
+      const res = await app.inject({ method: "GET", url, headers: { "x-admin-key": ADMIN_KEY } });
+      expect(res.statusCode, JSON.stringify(value)).toBe(503);
+      expect(res.json().error).toBe("admin_key_not_configured");
     }
   });
 
-  it("the refusal body is unchanged and never echoes the token", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/admin/feedback", headers: { "x-admin-token": "nope" } });
-    expect(res.json()).toEqual({ error: "forbidden", message: "Admin token required (X-Admin-Token)." });
-    expect(res.body).not.toContain(TOKEN);
+  it("the refusal body never echoes the key", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/admin/feedback", headers: { "x-admin-key": "nope" } });
+    expect(res.body).not.toContain(ADMIN_KEY);
+    expect(res.body).not.toContain("nope");
   });
 });
 

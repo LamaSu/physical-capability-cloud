@@ -1,9 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { SUMMIT_HTML } from "./summit-page.js";
-import { adminTokenMatches } from "../auth/admin-key.js";
+import { requireAdminSecretStrict } from "../auth/admin-secret-gate.js";
+import { BoundedWindowLimiter } from "../middleware/bounded-window-limiter.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // One JSONL line per submission — churn-proof: optional fields ride in `details`,
@@ -25,23 +26,19 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 //   - updates carrying a token this process issued draw on a per-lead budget
 //     (LEAD_UPDATE_MAX per window). Every other request counts against the per-IP
 //     window, including invented tokens and the first save.
-//   - both maps are bounded.
+//   - both limiters are bounded in both dimensions (round 7, admingates AG-24 and
+//     new defect 1): at most MAX_TRACKED keys and at most `limit` timestamps per
+//     key, and a refused request is not recorded (middleware/bounded-window-limiter).
 const MAX_TRACKED = 50_000;
-const hits = new Map<string, number[]>();
-function rateLimited(ip: string, max = 80, windowMs = 60_000): boolean {
-  const now = Date.now();
-  const arr = (hits.get(ip) ?? []).filter((t) => now - t < windowMs);
-  arr.push(now);
-  hits.delete(ip); // re-insert: Map order is insertion order, oldest first
-  hits.set(ip, arr);
-  if (hits.size > MAX_TRACKED) hits.delete(hits.keys().next().value as string);
-  return arr.length > max;
+const ipLimiter = new BoundedWindowLimiter(80, 60_000, MAX_TRACKED);
+function rateLimited(ip: string): boolean {
+  return ipLimiter.limited(ip);
 }
 
 const LEAD_UPDATE_MAX = 20;
 const LEAD_WINDOW_MS = 10 * 60_000;
 /** leadKey -> update timestamps, only for leads THIS process issued a token to. */
-const issuedLeads = new Map<string, number[]>();
+const leadLimiter = new BoundedWindowLimiter(LEAD_UPDATE_MAX, LEAD_WINDOW_MS, MAX_TRACKED);
 
 function leadKeyOf(leadId: string, token: string): string {
   return `${leadId}~${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
@@ -49,19 +46,29 @@ function leadKeyOf(leadId: string, token: string): string {
 
 /** True when this update must be refused: over its lead's budget, or (unknown lead) over the IP window. */
 function leadRateLimited(ip: string, leadKey: string | null): boolean {
-  const known = leadKey !== null ? issuedLeads.get(leadKey) : undefined;
-  if (known === undefined) return rateLimited(ip);
-  const now = Date.now();
-  const arr = known.filter((t) => now - t < LEAD_WINDOW_MS);
-  arr.push(now);
-  issuedLeads.set(leadKey as string, arr);
-  return arr.length > LEAD_UPDATE_MAX;
+  if (leadKey === null || !leadLimiter.has(leadKey)) return rateLimited(ip);
+  return leadLimiter.limited(leadKey);
 }
 
 function trackIssuedLead(leadKey: string): void {
-  if (!issuedLeads.has(leadKey)) issuedLeads.set(leadKey, [Date.now()]);
-  if (issuedLeads.size > MAX_TRACKED) issuedLeads.delete(issuedLeads.keys().next().value as string);
+  leadLimiter.track(leadKey);
 }
+
+// Retained data is bounded (round 7, admingates AG-20/AG-23): past this size a store
+// refuses new rows (503 waitlist_store_full), rather than letting anonymous signups
+// fill the volume the gateway DB also lives on. It also bounds the work of a count rebuild.
+const MAX_WAITLIST_FILE_BYTES = (() => {
+  const n = Number.parseInt(process.env.PCC_WAITLIST_MAX_BYTES ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 50 * 1024 * 1024;
+})();
+function storeFull(file: string): boolean {
+  try {
+    return statSync(file).size >= MAX_WAITLIST_FILE_BYTES;
+  } catch {
+    return false; // no file yet
+  }
+}
+const STORE_FULL = { error: "waitlist_store_full", message: "Signups are paused while storage is full; the operators have been told." };
 
 function append(file: string, rec: unknown): void {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -106,30 +113,34 @@ function readCoalesced(file: string): Record<string, any>[] {
   return order.map((k) => byKey.get(k)!);
 }
 
+// The public count is rebuilt at most once per COUNT_CACHE_MS. A write does NOT
+// invalidate it (round 7, admingates AG-23): alternating a write with a count used
+// to force a full read and coalesce of both files on every request. The count may
+// lag a new signup by up to COUNT_CACHE_MS.
 const COUNT_CACHE_MS = 30_000;
 let countCache: { at: number; count: number; beta: number } | null = null;
 
 /** Test-only: forget limiter state and the count cache. */
 export function _resetWaitlistStateForTests(): void {
-  hits.clear();
-  issuedLeads.clear();
+  ipLimiter.clear();
+  leadLimiter.clear();
   countCache = null;
+}
+
+/** Test-only: the longest per-key timestamp list either limiter holds. */
+export function _waitlistLimiterMaxPerKeyForTests(): number {
+  return Math.max(ipLimiter.maxPerKey(), leadLimiter.maxPerKey());
 }
 
 function rid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Admin review is gated by a shared token (X-Admin-Token === WAITLIST_ADMIN_TOKEN),
-// independent of the API-key scope system so it works even mounted before apiGate.
-// Compared in CONSTANT TIME (auth/admin-key.ts adminTokenMatches, WP-A fold F7);
-// fails closed when the env var is unset or blank.
+// Admin review needs the admin SECRET: X-Admin-Key = PCC_ADMIN_KEY, compared in
+// constant time, with no development bypass (WP-A round 7, admingates AG-9). It
+// used to be a separate token (X-Admin-Token = WAITLIST_ADMIN_TOKEN).
 function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
-  if (!adminTokenMatches(req)) {
-    reply.code(403).send({ error: "forbidden", message: "Admin token required (X-Admin-Token)." });
-    return false;
-  }
-  return true;
+  return requireAdminSecretStrict(req, reply);
 }
 
 export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
@@ -175,8 +186,8 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       createdAt: new Date().toISOString(),
       ip: req.ip,
     };
+    if (storeFull(WAITLIST_FILE)) return reply.code(503).send(STORE_FULL);
     append(WAITLIST_FILE, rec);
-    countCache = null;
     if (leadKey && !presented) trackIssuedLead(leadKey);
     return { status: "ok", id: rec.id, leadId, leadToken, message: "You're on the waitlist — we'll be in touch." };
   });
@@ -230,8 +241,8 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       createdAt: new Date().toISOString(),
       ip: req.ip,
     };
+    if (storeFull(BETA_FILE)) return reply.code(503).send(STORE_FULL);
     append(BETA_FILE, rec);
-    countCache = null;
     return {
       status: "ok",
       id: rec.id,
@@ -257,14 +268,14 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     return { count: countCache.count, beta: countCache.beta };
   });
 
-  // Admin review / export (gated by X-Admin-Token).
+  // Admin review / export (gated by the admin secret, X-Admin-Key).
   app.get("/api/admin/waitlist", async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const items = readCoalesced(WAITLIST_FILE); // one merged record per lead
     return { total: items.length, items };
   });
   app.get("/api/admin/beta-apply", async (req, reply) => {
-    if (!adminOk(req, reply)) return;
+    if (!adminOk(req, reply)) return reply;
     const items = readAll(BETA_FILE);
     return { total: items.length, items };
   });

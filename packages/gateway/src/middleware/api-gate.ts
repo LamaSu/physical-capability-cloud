@@ -63,9 +63,10 @@ const PUBLIC_READ_PREFIXES: PublicRoute[] = [
   // apiGate is non-encapsulated, so registration order does NOT exempt routes;
   // public paths must be allowlisted here.
   { methods: GET, match: "prefix", path: "/api/waitlist", why: "public waitlist count (GET /api/waitlist/count)" },
-  // Admin feedback export — gated by X-Admin-Token (adminOk), NOT the API-key
-  // system, so it must bypass apiGate here. Mirrors the waitlist admin-token pattern.
-  { methods: GET, match: "prefix", path: "/api/admin/feedback", why: "admin export authenticated by X-Admin-Token in the route" },
+  // Admin feedback export: authenticated in the route by the admin secret
+  // (X-Admin-Key = PCC_ADMIN_KEY, no development bypass; round 7, AG-9), not the
+  // API-key system, so it must bypass apiGate here.
+  { methods: GET, match: "prefix", path: "/api/admin/feedback", why: "admin export authenticated by X-Admin-Key (PCC_ADMIN_KEY) in the route" },
   { methods: GET, match: "prefix", path: "/api/onboard/check/", why: "invite-code validation" },
   { methods: GET, match: "prefix", path: "/api/onboard/chat", why: "onboarding-chat health + transcript reads" },
   { methods: GET, match: "prefix", path: "/api/dht/", why: "DHT discovery is public (distributed capability queries)" },

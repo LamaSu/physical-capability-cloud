@@ -27,6 +27,24 @@ export function requireAdminSecret(req: FastifyRequest, reply: FastifyReply): bo
   return false;
 }
 
+/**
+ * requireAdminSecret with NO development bypass (WP-A round 7, admingates AG-9).
+ * checkAdminKey leaves an unset PCC_ADMIN_KEY open in test/development. The
+ * feedback and waitlist exports never allowed that: the X-Admin-Token check they
+ * replace had no bypass. So these refuse (503) whenever PCC_ADMIN_KEY is unset or
+ * blank, in every environment, then require X-Admin-Key = PCC_ADMIN_KEY.
+ */
+export function requireAdminSecretStrict(req: FastifyRequest, reply: FastifyReply): boolean {
+  if ((process.env.PCC_ADMIN_KEY ?? "").trim() === "") {
+    void reply.status(503).send({
+      error: "admin_key_not_configured",
+      message: "Set PCC_ADMIN_KEY: this export needs the admin secret (X-Admin-Key).",
+    });
+    return false;
+  }
+  return requireAdminSecret(req, reply);
+}
+
 /** True when the request PRESENTS an admin secret (valid or not). Absent means "not asking for admin". */
 export function presentsAdminSecret(req: FastifyRequest): boolean {
   return req.headers[ADMIN_KEY_HEADER] !== undefined;
