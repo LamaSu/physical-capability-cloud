@@ -78,7 +78,40 @@ export const NOTICE_TEXT: Readonly<Record<JobExecutionNoticeCode, string>> = Obj
     'The job record says "settled", but this job\'s milestone record does not show the money released, so the payment is shown as unknown.',
   settlement_link_conflict:
     "The records that tie this job to an escrow point at different escrows, so no payment record is shown.",
+  settlement_status_unrecognized:
+    "This job's milestone or escrow record has a status this view does not recognize, so the payment is shown as unknown.",
+  milestone_shared_by_jobs:
+    "Another job could claim this job's milestone (same escrow, same step), so no payment is attributed to this job.",
 });
+
+/**
+ * The payout badge for the read on screen. A stale read (its refresh failed, or it is too
+ * old) is never colored, whatever it says: the color is a claim about now, and a stale read
+ * cannot make it.
+ */
+export function payoutBadge(payout: PayoutState, stale: boolean): { label: string; color: MoneyBadgeColor } {
+  const v = PAYOUT_VIEW[payout];
+  return stale ? { label: `${v.label} (as of the last read)`, color: "gray" } : v;
+}
+
+/**
+ * What the page may show after the latest read. A 401, 403 or 404 on the LATEST read is
+ * final: the page shows that refusal and never the money cached from an earlier read, so a
+ * caller who is signed out, unproven or no longer a party stops seeing it. Any other failure
+ * keeps the last successful read, marked stale; with none, the page says it is unavailable.
+ */
+export type JobPageState =
+  | { show: "refusal"; kind: "not_found" | "signed_out" | "unverified" }
+  | { show: "unavailable" }
+  | { show: "data"; refreshFailed: boolean };
+
+export function jobPageState(hasData: boolean, errorStatus: number | null | undefined, hasError: boolean): JobPageState {
+  if (errorStatus === 404) return { show: "refusal", kind: "not_found" };
+  if (errorStatus === 401) return { show: "refusal", kind: "signed_out" };
+  if (errorStatus === 403) return { show: "refusal", kind: "unverified" };
+  if (!hasData) return { show: "unavailable" };
+  return { show: "data", refreshFailed: hasError };
+}
 
 /** One sentence for the settlement axis when there is no usable record. */
 export function settlementLinkText(s: SettlementAxis): string | null {
@@ -101,7 +134,16 @@ export function payoutBasisText(s: SettlementAxis): string | null {
   if (s.link !== "linked" || !s.record) return null;
   if (s.record.simulated) return "Simulated escrow.";
   if (s.payoutBasis === "milestone_record") {
-    if (s.payout === "unknown") return "This job's milestone and the escrow record disagree, so the payment is unknown.";
+    if (s.payout === "unknown") {
+      switch (s.payoutUnknownReason) {
+        case "status_unrecognized":
+          return "This job's milestone or escrow record has a status this view does not recognize, so the payment is unknown.";
+        case "status_ambiguous":
+          return 'This job\'s milestone says "completed", which may or may not mean released, so the payment is unknown.';
+        default:
+          return "This job's milestone and the escrow record disagree, so the payment is unknown.";
+      }
+    }
     if (s.payoutConfirmation === "record_only") {
       return "From this job's milestone in the gateway's escrow record. No settlement read or chain receipt confirms it.";
     }
@@ -114,6 +156,8 @@ export function payoutBasisText(s: SettlementAxis): string | null {
       return "The escrow has no milestone for this job's step.";
     case "ambiguous":
       return "More than one milestone claims this job's step.";
+    case "shared_by_jobs":
+      return `Another job could claim this step's milestone (${s.record.milestoneClaimants ?? "several"} jobs share it), so it is not attributed to this job.`;
     default:
       return null;
   }

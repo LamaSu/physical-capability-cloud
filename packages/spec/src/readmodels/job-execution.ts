@@ -303,9 +303,19 @@ export interface SettlementRecordView {
    *   step_not_in_escrow  milestones exist, none for this step: the record does not
    *                       cover this job, so other steps' releases say nothing about it
    *   ambiguous           more than one milestone claims this step
+   *   shared_by_jobs      exactly one milestone is for this step, but another job could
+   *                       claim it too (the same escrow and the same step, e.g. a re-run).
+   *                       A milestone records no job, so it is not called this job's and
+   *                       the payout is unknown. See `milestoneClaimants`.
    */
-  milestoneMatch: "exact" | "no_milestones" | "step_not_in_escrow" | "ambiguous";
-  /** The milestone for THIS job's step, when exactly one matches. */
+  milestoneMatch: "exact" | "no_milestones" | "step_not_in_escrow" | "ambiguous" | "shared_by_jobs";
+  /**
+   * How many jobs could claim this job's milestone: jobs with this escrow's CWM and this
+   * job's step, plus jobs whose negotiation session names this escrow, this job included.
+   * More than one is `shared_by_jobs`. Null when no single milestone matches the step.
+   */
+  milestoneClaimants: number | null;
+  /** The milestone for THIS job's step, when exactly one matches and no other job claims it. */
   milestone: {
     milestoneId: string;
     stepId: string;
@@ -362,6 +372,24 @@ export interface SettlementAxis {
   /** The job's own milestone record when it decided the payout; otherwise null. */
   payoutBasis: "milestone_record" | null;
   /**
+   * Why the payout is `unknown` although a record is linked and not simulated; null otherwise.
+   *   records_conflict     this job's milestone and the escrow record contradict each other
+   *   status_unrecognized  a milestone or escrow status is not in the canonical money map
+   *   status_ambiguous     the milestone says COMPLETED, which may or may not mean released
+   *   milestone_shared     another job could claim this job's milestone (`shared_by_jobs`)
+   *   no_single_milestone  no milestone, or more than one, is for this job's step
+   *   job_row_conflict     the job row says settled while this job's milestone record says not
+   *                        released or refunded: one of the two records is wrong (F1, #382)
+   */
+  payoutUnknownReason:
+    | "records_conflict"
+    | "job_row_conflict"
+    | "status_unrecognized"
+    | "status_ambiguous"
+    | "milestone_shared"
+    | "no_single_milestone"
+    | null;
+  /**
    * How far a `reported_released` or `refunded` claim is confirmed. `record_only`: it comes
    * from the gateway's escrow record; no settlement read, chain receipt or finalized read
    * confirms it. Null when the payout claims no movement of money.
@@ -400,6 +428,10 @@ export type JobExecutionNoticeCode =
   | "settlement_row_conflict"
   /** The job's recorded settlement identifiers point at different records. */
   | "settlement_link_conflict"
+  /** A milestone or escrow status is not in the canonical money map, so the payout is unknown. */
+  | "settlement_status_unrecognized"
+  /** Another job could claim this job's milestone (same escrow, same step), so it is not attributed. */
+  | "milestone_shared_by_jobs"
   /** The job-row status is not a documented job status. */
   | "unknown_execution_status";
 
