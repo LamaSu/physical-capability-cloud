@@ -31,22 +31,9 @@ const KNOWN: Record<string, string> = {
   "agent/agent-client.ts": `${SHELL}: deleted with the old agent chat by #354`,
   "pages/AgentChatPage.tsx": `${SHELL}: deleted by #354`,
   "components/CdpFundedKeyOnramp.tsx": `${SHELL}: no-production-mock PR (Wave 0)`,
-  "components/escrow/DisputeModal.tsx": "economics df42dbe5",
-  "pages/OperatorDashboardPage.tsx": "operator-ux f0734fab",
-  "pages/OperatorMobilePage.tsx": "operator-ux f0734fab",
-  "components/operator/DiscoverabilityPanel.tsx": "operator-ux f0734fab",
-  "components/operator/EditDeleteBar.tsx": "operator-ux f0734fab",
-  "components/operator/RateSubmitForm.tsx": "operator-ux f0734fab",
-  "routes/operator/OperatorA2APage.tsx": "operator-ux f0734fab",
-  "pages/AgentPackagePage.tsx": "adk 4f6668ed",
   "routes/orchestrator/[slug]/chat/index.tsx": "adk 4f6668ed",
   "lib/passkey-registration.ts": "adk 4f6668ed: sends to deps.apiBase, which usePasskey sets to the validated GATEWAY_BASE",
-  "pages/NegotiationSessionPage.tsx": "unassigned: steward to route",
   "pages/AnalyticsDashboardPage.tsx": "unassigned: steward to route",
-  "pages/BatchBoardPage.tsx": "unassigned (lab/OT-2 surfaces): steward to route",
-  "pages/ProtocolDetailPage.tsx": "unassigned (lab/OT-2 surfaces): steward to route",
-  "pages/ProtocolLibraryPage.tsx": "unassigned (lab/OT-2 surfaces): steward to route",
-  "pages/SensorDashboardPage.tsx": "unassigned (lab/OT-2 surfaces): steward to route",
 };
 
 function files(dir: string): string[] {
