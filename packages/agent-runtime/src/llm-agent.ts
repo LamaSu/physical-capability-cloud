@@ -55,6 +55,12 @@ export interface ChatOptions {
   system?: string;
   /** Per-iteration callback — useful for streaming UIs / progress logs. */
   onStep?: (step: { iteration: number; stop_reason: string | null; toolCalls: Anthropic.ToolUseBlock[] }) => void;
+  /** Earlier turns of this conversation, oldest first: user and assistant
+   *  messages, tool_use / tool_result pairs included. The new input is
+   *  appended after them, so a chat service can continue a conversation. It
+   *  must start with a user message and end with an assistant message.
+   *  Omitted: the conversation starts at `input`. */
+  history?: ReadonlyArray<Anthropic.MessageParam>;
 }
 
 export interface ChatResult {
@@ -211,7 +217,11 @@ export class LLMAgent {
 
   /** Run a multi-turn tool-use loop. Returns the full transcript + final message. */
   async chat(input: string, opts: ChatOptions = {}): Promise<ChatResult> {
-    const messages: Anthropic.MessageParam[] = [{ role: "user", content: input }];
+    const history = opts.history ?? [];
+    if (history.length > 0 && (history[0]!.role !== "user" || history[history.length - 1]!.role !== "assistant")) {
+      throw new Error("chat history must start with a user message and end with an assistant message");
+    }
+    const messages: Anthropic.MessageParam[] = [...history, { role: "user", content: input }];
     const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
     let toolCalls = 0;
     let totalInputTokens = 0;

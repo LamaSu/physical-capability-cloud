@@ -482,3 +482,30 @@ describe("runAgent (one-shot factory)", () => {
     expect(result.text).toBe("done");
   });
 });
+
+describe("LLMAgent.chat — continuing a conversation (history)", () => {
+  it("sends the history before the new input, and returns it in the transcript", async () => {
+    // The loop appends to the array it sent, so capture a copy at call time.
+    let sent: Anthropic.MessageParam[] = [];
+    const reply = msg({ stop_reason: "end_turn", content: [{ type: "text", text: "second answer", citations: null } as Anthropic.TextBlock] });
+    const create = vi.fn(async (req: { messages: Anthropic.MessageParam[] }) => ((sent = [...req.messages]), reply));
+    const agent = new LLMAgent([], {}, { client: { messages: { create } } as unknown as Anthropic });
+    const history: Anthropic.MessageParam[] = [
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "first answer" },
+    ];
+    const result = await agent.chat("second question", { history });
+    expect(sent.map((m) => m.content)).toEqual(["first question", "first answer", "second question"]);
+    expect(result.messages.slice(0, 3).map((m) => m.content)).toEqual(["first question", "first answer", "second question"]);
+    expect(result.text).toBe("second answer");
+    expect(history).toHaveLength(2); // the caller's array is not modified
+  });
+
+  it("a history that does not end with an assistant message is refused before any model call", async () => {
+    const { client, create } = makeFakeClient([]);
+    const agent = new LLMAgent([], {}, { client });
+    await expect(agent.chat("next", { history: [{ role: "user", content: "dangling" }] })).rejects.toThrow(/history/);
+    await expect(agent.chat("next", { history: [{ role: "assistant", content: "no user first" }] })).rejects.toThrow(/history/);
+    expect(create).not.toHaveBeenCalled();
+  });
+});
