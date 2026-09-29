@@ -23,7 +23,8 @@
     "@anthropic-ai/sdk": "^0.40.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@pcc/agent-runtime": "workspace:*",
-    "better-sqlite3": "^11.8.1"
+    "better-sqlite3": "^11.8.1",
+    "fastify": "^4.26.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
