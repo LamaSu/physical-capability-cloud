@@ -1,27 +1,37 @@
 /**
- * The one gateway this dashboard talks to: the only origin that may receive
- * an API key.
+ * The one gateway this dashboard talks to, and the one place an API key is
+ * put on a request.
  *
  * N50: /setup sent the signed-in user's key to a hard-coded
- * http://localhost:3200. The cross-family review of that fix (sol, #2857)
- * found the deeper weakness: the key was attached regardless of where a
- * request went. Relative /api calls went to the dashboard's origin,
- * VITE_PCC_URL calls went to another, and VITE_PCC_URL was never validated.
- * The rules:
+ * http://localhost:3200. The reviews of the fix (sol #2857, astra round 2)
+ * asked for a boundary that doesn't depend on scanning requests. It is
+ * structural:
  *
- * 1. There is ONE gateway origin. It is VITE_PCC_URL when set and valid: an
- *    absolute https: URL, or http: on a loopback host in a dev build.
- *    Otherwise it is the page's own origin (in production the gateway serves
- *    the dashboard). A VITE_PCC_URL that fails validation is a
- *    misconfiguration: no request gets a key (fail closed), and the reason is
- *    logged once.
- * 2. fetchWithKey() is the one place a key goes onto a request. It resolves
- *    the final URL, refuses any origin but the gateway's, and only then adds
- *    the Authorization header. Signed-in calls use authorizedFetch()
- *    (lib/authorized-fetch.ts), which passes it the stored key.
- * 3. The egress guard (installed at startup) backs up call sites that still
- *    build headers themselves. It rejects any fetch that carries a PCC key to
- *    another origin before the request leaves the browser.
+ * 1. There is ONE gateway origin, and it is validated.
+ *    - If VITE_PCC_URL is set, it must be an absolute https: URL, or http: on
+ *      a loopback host in a dev build.
+ *    - Otherwise the gateway is the page's own origin, which must itself be
+ *      https:, or http: on a loopback host. On loopback the key goes back to
+ *      the server that served this page and never crosses a network.
+ *    - Anything else fails closed: no request carries a key, and the reason
+ *      is logged once.
+ * 2. fetchWithKey() is the only code that puts a key on a request. It
+ *    resolves the final URL, refuses any other origin, refuses redirects, and
+ *    only then sets Authorization.
+ * 3. No other code can read the signed-in key. It is not in the auth store's
+ *    state: stores/auth-store.ts keeps it private, and its one accessor is
+ *    read only by lib/authorized-fetch.ts. __tests__/no-direct-auth-headers
+ *    enforces this, and also allows an Authorization header or a "Bearer "
+ *    string to be built nowhere but here.
+ * 4. The egress guard (installKeyEgressGuard) is defence in depth, not the
+ *    boundary. It inspects every request to another origin: the URL, the
+ *    headers, and a string, URLSearchParams, FormData, Blob, binary or Request
+ *    body, each raw, percent-decoded and base64-encoded. It rejects one that
+ *    carries a key, and one whose body it can't read (a stream, or a type it
+ *    doesn't recognise, such as a Blob from another realm). It can't see
+ *    a key transformed further (compressed or encrypted), which is why 1-3
+ *    are the boundary. sendBeacon and XMLHttpRequest don't pass through it;
+ *    the dashboard uses neither.
  *
  * This module does not import the auth store, so the store can use it.
  */
@@ -30,6 +40,22 @@ export type GatewayOriginResult = { ok: true; origin: string } | { ok: false; er
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
+/** The page's own origin as the gateway: https:, or http: back to this page's own server on loopback. */
+function checkPageOrigin(page: string): GatewayOriginResult {
+  let url: URL;
+  try {
+    url = new URL(page);
+  } catch {
+    return { ok: false, error: `the page origin is not a URL: "${page}"` };
+  }
+  if (url.protocol === "https:") return { ok: true, origin: url.origin };
+  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return { ok: true, origin: url.origin };
+  return {
+    ok: false,
+    error: `this dashboard is served over ${url.protocol.replace(/:$/, "")} from ${url.host}; an API key is sent only over https (or to this page's own server on localhost)`,
+  };
+}
+
 /** Resolve and validate the gateway origin. Pure, so every case can be tested. */
 export function resolveGatewayOrigin(
   configured: string | undefined,
@@ -37,7 +63,7 @@ export function resolveGatewayOrigin(
   isProdBuild: boolean,
 ): GatewayOriginResult {
   const raw = (configured ?? "").trim();
-  if (!raw) return { ok: true, origin: pageOrigin };
+  if (!raw) return checkPageOrigin(pageOrigin);
   let url: URL;
   try {
     url = new URL(raw);
@@ -62,12 +88,13 @@ function pageOrigin(): string {
 
 let warned = false;
 
-/** The validated gateway origin, or null when VITE_PCC_URL is misconfigured (fail closed). */
+/** The validated gateway origin, or null when there is none (fail closed). */
 export function gatewayOrigin(): string | null {
   // Read as import.meta.env.* so Vite substitutes the values at build time.
   const r = resolveGatewayOrigin(import.meta.env.VITE_PCC_URL as string | undefined, pageOrigin(), import.meta.env.PROD === true);
   if (r.ok) return r.origin;
-  if (!warned) {
+  // Outside a browser (tests, tooling) there is no page to warn about.
+  if (!warned && typeof window !== "undefined") {
     warned = true;
     console.error(`[pcc] ${r.error}. No request will carry an API key until this is fixed.`);
   }
@@ -115,7 +142,7 @@ export class KeyEgressRefused extends Error {
  */
 export function resolveGatewayTarget(target: string): { ok: true; url: string } | { ok: false; error: KeyEgressRefused } {
   const origin = gatewayOrigin();
-  if (origin === null) return { ok: false, error: new KeyEgressRefused(target, "the gateway origin is misconfigured") };
+  if (origin === null) return { ok: false, error: new KeyEgressRefused(target, "there is no valid gateway origin") };
   let url: URL;
   try {
     url = new URL(target, `${origin}/`);
@@ -132,47 +159,147 @@ export function resolveGatewayTarget(target: string): { ok: true; url: string } 
 /**
  * fetch() carrying `key`, only toward the gateway. A target that does not
  * resolve to the gateway origin is refused before any request is made. A
- * null key sends the request without one.
+ * redirect is refused too: it would carry the request, body included, to
+ * wherever the gateway pointed. A null key sends the request without one.
  */
 export async function fetchWithKey(target: string, key: string | null, init: RequestInit = {}): Promise<Response> {
   const resolved = resolveGatewayTarget(target);
   if (!resolved.ok) throw resolved.error;
   const headers = new Headers(init.headers);
   if (key) headers.set("Authorization", `Bearer ${key}`);
-  return fetch(resolved.url, { ...init, headers });
+  return fetch(resolved.url, { ...init, headers, redirect: "error" });
 }
 
 // ---------------------------------------------------------------------------
-// Egress guard
+// Egress guard (defence in depth; see rule 4 above)
 // ---------------------------------------------------------------------------
 
 /** The shape of every key the gateway issues (packages/gateway/src/auth/api-key-auth.ts). */
 const PCC_KEY = /pcc_(?:live|test)_[A-Za-z0-9]{8,}/;
 
-function carriesKey(text: string, storedKey: string | null): boolean {
+/** The stored key as it may appear after encoding: raw and base64 (standard and URL-safe). */
+function storedKeyForms(storedKey: string | null): string[] {
   // A stored value too short to be a key would match unrelated text.
-  return PCC_KEY.test(text) || (!!storedKey && storedKey.length >= 16 && text.includes(storedKey));
-}
-
-/**
- * True if a fetch of (input, init) would carry a PCC key, or `storedKey`, in
- * a header, the URL or a string body. Exported for tests.
- */
-export function requestCarriesKey(input: RequestInfo | URL, init: RequestInit | undefined, storedKey: string | null): boolean {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  if (carriesKey(url, storedKey)) return true;
-  const sources = [init?.headers, typeof input === "object" && "headers" in input ? input.headers : undefined];
-  for (const source of sources) {
-    if (!source) continue;
-    for (const [, value] of new Headers(source)) if (carriesKey(value, storedKey)) return true;
+  if (!storedKey || storedKey.length < 16) return [];
+  let b64: string;
+  try {
+    b64 = btoa(storedKey);
+  } catch {
+    return [storedKey];
   }
-  return typeof init?.body === "string" && carriesKey(init.body, storedKey);
+  const unpadded = b64.replace(/=+$/, "");
+  return [storedKey, b64, unpadded, unpadded.replace(/\+/g, "-").replace(/\//g, "_")];
+}
+
+/** `text`, plus what a recipient could percent-decode it into. */
+function decodedForms(text: string): string[] {
+  const forms = [text];
+  for (const t of [text, text.replace(/\+/g, " ")]) {
+    try {
+      const once = decodeURIComponent(t);
+      forms.push(once);
+      forms.push(decodeURIComponent(once));
+    } catch {
+      // A malformed escape: the raw text was already checked.
+    }
+  }
+  return forms;
+}
+
+function textCarriesKey(text: string, keyForms: string[]): boolean {
+  return decodedForms(text).some((t) => PCC_KEY.test(t) || keyForms.some((k) => t.includes(k)));
+}
+
+/** A Blob's text, through FileReader where Blob.text() is missing (older engines, jsdom). */
+function blobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === "function") return blob.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob);
+  });
+}
+
+const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+
+/** A real ArrayBuffer from any realm: the byteLength getter checks its receiver's internal slot. */
+function isArrayBuffer(value: unknown): value is ArrayBuffer {
+  if (!arrayBufferByteLength) return value instanceof ArrayBuffer;
+  try {
+    arrayBufferByteLength.call(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Wrap window.fetch so a request that carries a PCC key to any origin but
- * the gateway is rejected before it leaves the browser. Other requests,
- * including every request without a key, pass through untouched.
+ * Every string a request body turns into, or null when it can't be read
+ * without consuming it (a stream) or isn't a type we recognise. fetch reads a
+ * Blob, FormData or buffer from another realm by its contents, not String(),
+ * so an unrecognised object is never guessed to be clean.
+ */
+async function bodyTexts(body: unknown): Promise<string[] | null> {
+  if (body === undefined || body === null) return [];
+  if (typeof body === "string") return [body];
+  if (body instanceof URLSearchParams) return [body.toString()];
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    const out: string[] = [];
+    for (const [name, value] of body.entries()) {
+      out.push(name);
+      if (typeof value === "string") out.push(value);
+      else out.push(value.name, await blobText(value));
+    }
+    return out;
+  }
+  if (typeof Blob !== "undefined" && body instanceof Blob) return [await blobText(body)];
+  if (ArrayBuffer.isView(body) || isArrayBuffer(body)) return [new TextDecoder().decode(body)];
+  if (typeof body !== "object" && typeof body !== "function") return [String(body)];
+  return null;
+}
+
+export type RequestInspection = "clean" | "carries-key" | "uninspectable";
+
+/**
+ * Whether a fetch of (input, init) would carry a PCC key, or `storedKey`, in
+ * its URL, a header or its body. Exported for tests.
+ */
+export async function inspectRequest(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  storedKey: string | null,
+): Promise<RequestInspection> {
+  const keyForms = storedKeyForms(storedKey);
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (textCarriesKey(url, keyForms)) return "carries-key";
+  const request = typeof Request !== "undefined" && input instanceof Request ? input : null;
+  for (const source of [init?.headers, request?.headers]) {
+    if (!source) continue;
+    for (const [name, value] of new Headers(source)) {
+      if (textCarriesKey(name, keyForms) || textCarriesKey(value, keyForms)) return "carries-key";
+    }
+  }
+  let texts: string[] | null;
+  if (init?.body !== undefined && init.body !== null) {
+    texts = await bodyTexts(init.body);
+  } else if (request && request.body !== null) {
+    try {
+      texts = [await request.clone().text()];
+    } catch {
+      texts = null;
+    }
+  } else {
+    texts = [];
+  }
+  if (texts === null) return "uninspectable";
+  return texts.some((t) => textCarriesKey(t, keyForms)) ? "carries-key" : "clean";
+}
+
+/**
+ * Wrap window.fetch so a request to any origin but the gateway is inspected
+ * first, and rejected before it leaves the browser if it carries a key or has
+ * a body that can't be read. Requests to the gateway pass untouched.
  * `getStoredKey` supplies the signed-in key, which may predate the pcc_ key
  * format. Idempotent; returns an uninstall function.
  */
@@ -181,24 +308,33 @@ export function installKeyEgressGuard(getStoredKey: () => string | null): () => 
   const w = window as unknown as { __pccKeyEgressGuard?: boolean };
   if (w.__pccKeyEgressGuard) return () => {};
   const original = window.fetch;
-  const guarded: typeof window.fetch = (input, init) => {
-    let refusal: KeyEgressRefused | null = null;
+  const guarded: typeof window.fetch = async (input, init) => {
+    let target: URL;
     try {
-      if (requestCarriesKey(input, init, getStoredKey())) {
-        const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        const target = new URL(raw, window.location.href);
-        const origin = gatewayOrigin();
-        if (origin === null) refusal = new KeyEgressRefused(target.href, "the gateway origin is misconfigured");
-        else if (target.origin !== origin) refusal = new KeyEgressRefused(target.href, `it is not the gateway (${origin})`);
-      }
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      target = new URL(raw, window.location.href);
     } catch {
-      refusal = new KeyEgressRefused(String(input), "the request could not be checked");
+      // fetch itself rejects a URL it can't parse.
+      return original.call(window, input, init);
     }
-    if (refusal) {
-      console.error(`[pcc] ${refusal.message}`);
-      return Promise.reject(refusal);
+    const origin = gatewayOrigin();
+    if (origin !== null && target.origin === origin) return original.call(window, input, init);
+    let verdict: RequestInspection;
+    try {
+      verdict = await inspectRequest(input, init, getStoredKey());
+    } catch {
+      verdict = "uninspectable";
     }
-    return original.call(window, input, init);
+    if (verdict === "clean") return original.call(window, input, init);
+    const reason =
+      verdict === "uninspectable"
+        ? "its body can't be checked for a key"
+        : origin === null
+          ? "there is no valid gateway origin"
+          : `it is not the gateway (${origin})`;
+    const refusal = new KeyEgressRefused(target.href, reason);
+    console.error(`[pcc] ${refusal.message}`);
+    throw refusal;
   };
   window.fetch = guarded;
   w.__pccKeyEgressGuard = true;

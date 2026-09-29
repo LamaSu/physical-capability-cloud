@@ -306,7 +306,9 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
             12 words. Write them on paper. Whoever has these words can move your money. We don't keep
             them.
           </p>
+          {/* ph-no-capture: session recording and autocapture never see the words (N50). */}
           <div
+            className="ph-no-capture"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(3, 1fr)",
@@ -381,7 +383,10 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           <div style={codeBlock}>{response.walletAddress}</div>
 
           <div style={label}>Your API key (save it — we won't show it again)</div>
-          <div style={codeBlock}>{response.apiKey}</div>
+          {/* ph-no-capture: session recording and autocapture never see the key (N50). */}
+          <div className="ph-no-capture" style={codeBlock}>
+            {response.apiKey}
+          </div>
 
           <div style={label}>Your published rate</div>
           <div style={codeBlock}>
