@@ -93,7 +93,10 @@ export function resolveToolRequest(
   input: Record<string, unknown>,
   options: { baseUrl: string },
 ): ToolRequest {
-  const tool = (AGENT_TOOLS as Record<string, AgentToolEndpoint>)[name];
+  // Own keys only: "constructor", "__proto__" and the like are not tools.
+  const tool = Object.prototype.hasOwnProperty.call(AGENT_TOOLS, name)
+    ? (AGENT_TOOLS as Record<string, AgentToolEndpoint>)[name]
+    : undefined;
   if (!tool) throw new AdkToolError("unknown_tool", `no tool named "${name}" in agent package ${AGENT_PACKAGE_PIN.version}`);
   if (!tool.path.startsWith("/") || tool.path.startsWith("//")) {
     throw new AdkToolError(

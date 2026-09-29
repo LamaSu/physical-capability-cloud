@@ -83,6 +83,12 @@ describe("resolveToolRequest", () => {
     expect(errorCode(() => resolveToolRequest("get_kernel", {}, { baseUrl: GW }))).toBe("missing_input");
   });
 
+  it("treats names inherited from Object as unknown tools", () => {
+    for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+      expect(errorCode(() => resolveToolRequest(name, {}, { baseUrl: GW }))).toBe("unknown_tool");
+    }
+  });
+
   it("accepts only a plain http(s) gateway base URL", () => {
     for (const baseUrl of ["javascript:alert(1)", "ftp://gw", "not a url", "https://u:p@gw", "https://gw/?x=1"]) {
       expect(errorCode(() => resolveToolRequest("get_depin_stats", {}, { baseUrl }))).toBe("bad_base_url");
