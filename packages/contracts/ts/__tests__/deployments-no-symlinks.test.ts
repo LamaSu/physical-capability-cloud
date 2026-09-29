@@ -4,9 +4,10 @@
  * `foundry.toml` grants forge read-write on `deployments/vnext` only. That grant is NOT a containment boundary
  * against symlinks: Foundry authorizes a not-yet-existing path by lexical normalization, so a symlinked
  * directory, a dangling link, or a symlinked `deployments/vnext` itself could redirect a deploy-record write
- * outside it. The deploy script refuses symlinks BELOW the record root at run time
- * (`_assertNoSymlinksUnder`), but it cannot see the root itself. This test closes that gap for anything
- * committed (sol review of PR #339).
+ * outside it. The deploy script refuses all of these at run time, in the checkout it actually runs in
+ * (`_assertRecordRootContained`: the root, every directory above it, and the whole tree below it; astra review of
+ * PR #339). This test is the second line for anything COMMITTED: it fails the PR that adds such a link, before any
+ * deploy runs (sol review of PR #339).
  */
 import { lstatSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -1122,7 +1122,7 @@ contract DeployVNextSettlement is Script {
     }
 
     function _guardAgainstRivalDeployment(Inputs memory i, address predictedFactory) internal view {
-        _assertNoSymlinksUnder(_recordRoot());
+        _assertRecordRootContained(_recordRoot());
         string memory path = _artifactPath(i);
         if (!vm.exists(path)) return;
         address recorded = vm.parseJsonAddress(vm.readFile(path), ".factory");
@@ -1153,6 +1153,9 @@ contract DeployVNextSettlement is Script {
     }
 
     function _writeArtifact(Inputs memory i, Tuple memory t) internal {
+        // FIRST, before anything else here runs: no record is written unless the record root is contained (no
+        // symlink at, above or below it). `VNextDeployRecordTest`'s writer wiring tests rely on this order.
+        _assertRecordRootContained(_recordRoot());
         bool canonical = keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL));
 
         // ── GATE 3 + GATE 4, third and last enforcement point: the DEPLOYMENT ARTIFACT. ───────────────
@@ -1230,9 +1233,9 @@ contract DeployVNextSettlement is Script {
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
-        _assertNoSymlinksUnder(_recordRoot());
         // `vm.writeJson` does not create intermediate directories, and a deploy that succeeded on-chain
-        // but failed to record its tuple is the worst outcome available here.
+        // but failed to record its tuple is the worst outcome available here. The root itself exists (checked at
+        // the top), so this creates at most the network directory, in a root with no symlink at, above or below it.
         vm.createDir(string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeJson(finalJson, path);
         console2.log("wrote artifact:", path);
@@ -1280,11 +1283,16 @@ contract DeployVNextSettlement is Script {
     //                                          INPUT / OUTPUT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-    /// @dev The only directory the deploy record ever lives in. `foundry.toml` grants exactly this path.
-    ///      `virtual` only so the record test can point the guard at a fixture of symlinks.
+    /// @dev The only directory the deploy record ever lives in. `foundry.toml` grants exactly this path, and the
+    ///      directory is COMMITTED (`deployments/vnext/README.md`), so it exists before any run and a run never
+    ///      has to create it (see {_assertRecordRootIsReal}). `virtual` only so the record test can point the
+    ///      checks at committed fixtures.
     function _recordRoot() internal view virtual returns (string memory) {
         return "deployments/vnext";
     }
+
+    /// @dev A child of the record root that must never exist. {_assertRecordRootIsReal} asks forge about it.
+    string internal constant ROOT_PROBE = "/.record-root-probe-must-not-exist";
     uint256 internal constant MAX_LABEL_BYTES = 64;
 
     /// @dev `VNEXT_LABEL` goes into the record's FILENAME (`PROVISIONAL-<label>.json`) and into every CREATE2
@@ -1310,26 +1318,66 @@ contract DeployVNextSettlement is Script {
         }
     }
 
-    /// @dev `fs_permissions` is NOT a containment boundary against symlinks. Foundry authorizes a path it
-    ///      cannot canonicalize (it does not exist yet) by lexical normalization. So a symlinked directory or
-    ///      a dangling symlink under the grant lets a write CREATE a file outside it; forge 1.7.1 was observed
-    ///      doing both. `vm.exists`, `vm.fsMetadata` and `vm.readLink` all resolve the link first, so none of
-    ///      them can see it. `vm.readDir` does not follow links and reports them. The record root is therefore
-    ///      walked, and any symlink under it refuses the read and the write. Two gaps remain. A symlinked
-    ///      record root itself is out of reach here (the walk starts inside it); CI refuses a committed
-    ///      symlink anywhere under `deployments/` instead (`ts/__tests__/deployments-no-symlinks.test.ts`).
-    ///      And a link swapped in between this check and the write is a TOCTOU window no cheatcode closes.
-    function _assertNoSymlinksUnder(string memory root) internal view {
-        if (!vm.exists(root)) return; // nothing there yet: `createDir` below makes real directories
-        VmSafe.DirEntry[] memory entries = vm.readDir(root, 3);
+    /// @dev Runs before the record is read ({_guardAgainstRivalDeployment}) and before it is written
+    ///      ({_writeArtifact}): the record root, every directory above it, and the whole tree below it must be
+    ///      reachable without a symlink, or the run stops (sol and astra reviews of #339).
+    ///
+    ///      Why a check is needed at all: `fs_permissions` is NOT a containment boundary against symlinks. Forge
+    ///      1.7.1 resolves the links in a path that EXISTS, but authorizes a path that does not exist yet by its
+    ///      lexical form. So a symlink on the way to a NEW file or directory can put it outside the grant: forge
+    ///      was observed writing through a symlinked directory and through a dangling link under the root, and
+    ///      creating `deployments/vnext/<network>` inside a link's target when `deployments` was a symlink to a
+    ///      directory without `vnext`. `vm.exists`, `vm.isDir`, `vm.fsMetadata` and `vm.readLink` all resolve
+    ///      the link before they look, so none of them can see one.
+    ///
+    ///      Two limits remain; no cheatcode closes either. A link swapped in between these checks and the write
+    ///      (a TOCTOU window). And a filesystem mounted inside the tree, which `vm.readDir` does not enter.
+    function _assertRecordRootContained(string memory root) internal view {
+        _assertRecordRootIsReal(root);
+        _assertNoSymlinksBelow(root);
+    }
+
+    /// @dev The root itself, and every directory above it.
+    ///      1. The root must EXIST as a directory. It is committed, so a missing root means the checkout is not
+    ///         the reviewed one, and creating it here would follow a symlinked ancestor (the observed escape
+    ///         above). A dangling root fails here too, since `isDir` follows it to nothing.
+    ///      2. No symlink AT or ABOVE it. Forge resolves the links in the granted path, but checks a child that
+    ///         does not exist yet by its lexical form. Below a real root the two agree, and forge answers
+    ///         `exists` for such a child (false). When the root or any directory above it is a symlink they
+    ///         disagree, and forge refuses to answer. So the refusal IS the no-follow check that no cheatcode
+    ///         offers directly. `VNextDeployRecordTest` pins this against committed fixtures (a symlinked root, a
+    ///         symlinked ancestor), so a forge upgrade that changes the behavior turns the suite red.
+    function _assertRecordRootIsReal(string memory root) internal view {
+        require(
+            vm.isDir(root),
+            string.concat(
+                "the deployment record root is missing or not a directory (it is committed; a dangling link fails here too): ",
+                root
+            )
+        );
+        try vm.exists(string.concat(root, ROOT_PROBE)) returns (bool present) {
+            require(!present, string.concat("an entry exists at the deployment record root's probe path, refusing: ", root));
+        } catch {
+            revert(
+                string.concat(
+                    "the deployment record root, or a directory above it, is a symlink (forge refused to look below it): ",
+                    root
+                )
+            );
+        }
+    }
+
+    /// @dev The whole tree below the root, at every depth, without following links. Any symlink refuses. So does
+    ///      ANY entry forge reports it could not inspect: an error is never taken to mean the entry vanished.
+    function _assertNoSymlinksBelow(string memory root) internal view {
+        VmSafe.DirEntry[] memory entries = vm.readDir(root, type(uint64).max);
         for (uint256 k; k < entries.length; ++k) {
-            if (bytes(entries[k].errorMessage).length != 0) {
-                // An entry removed between the listing and its inspection is gone, not hidden: skip it. Any other
-                // failure to inspect fails closed. A dangling symlink is NOT an error here; `readDir` reports it
-                // with `isSymlink` set, which the next check refuses.
-                if (!vm.exists(entries[k].path)) continue;
-                revert(string.concat("cannot inspect the deployment record root: ", entries[k].errorMessage));
-            }
+            require(
+                bytes(entries[k].errorMessage).length == 0,
+                string.concat(
+                    "cannot inspect the deployment record root, refusing: ", entries[k].path, ": ", entries[k].errorMessage
+                )
+            );
             require(
                 !entries[k].isSymlink,
                 string.concat("symlink under the deployment record root, refusing to read or write through it: ", entries[k].path)

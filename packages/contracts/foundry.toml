@@ -13,11 +13,16 @@ optimizer_runs = 200
 # exactly that directory, nothing wider: the rest of `deployments/` holds the live Base Sepolia records
 # (PCCProtocolV2, CaptureClassRegistry, EASSchema, SampleEscrow), which no forge test or script may overwrite.
 # `VNextDeployRecordTest.test_Record_GrantDoesNotReachOtherDeploymentRecords` fails if this is widened.
-# The grant is NOT a containment boundary against symlinks: Foundry authorizes a not-yet-existing path by
-# lexical normalization, so a symlinked directory or a dangling link under it can redirect a write. The deploy
-# script therefore refuses any symlink under `deployments/vnext` before it reads or writes a record, and CI
-# refuses a committed symlink anywhere under `deployments/` (ts/__tests__/deployments-no-symlinks.test.ts).
-# The second entry is READ-only on a committed test fixture of symlinks, so that refusal is tested.
+# The two older scripts that write elsewhere in `deployments/` (DeployCaptureClassRegistry,
+# DeployReceiptAnchorRegistry) are RETIRED (steward ruling #3434): kept, never run, and not a reason to widen this.
+# The grant is NOT a containment boundary against symlinks: Foundry resolves the links in a path that exists but
+# authorizes a not-yet-existing path by its lexical form, so a symlink on the way to a new file can put it outside
+# the grant. The deploy script therefore refuses to read or write a record unless `deployments/vnext` (committed)
+# exists with no symlink at, above or below it, and CI refuses a committed symlink anywhere under `deployments/`
+# (ts/__tests__/deployments-no-symlinks.test.ts).
+# The other entries are READ-only, one per committed test fixture, so those refusals are tested
+# (test/fixtures/fs-symlinks/README.md). Keep them one per fixture root and none wider: a grant on a directory
+# above `roots/link` would authorize the probe path below it lexically, and the symlinked-root test would pass.
 #
 # NOTE — deliberately ABSENT: a `libraries = [...]` entry. {VNextSettlementLib} is an external linked
 # library, and pinning its address here would link the TEST build against an address holding no code,
@@ -25,7 +30,13 @@ optimizer_runs = 200
 # and assert the address they were linked against. See script/DeployVNextSettlement.s.sol.
 fs_permissions = [
     { access = "read-write", path = "./deployments/vnext" },
-    { access = "read", path = "./test/fixtures/fs-symlinks" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/walk" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/real" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/link" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/parent-link/root" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/dangling" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/absent" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/planted-link" },
 ]
 
 [profile.default.fmt]

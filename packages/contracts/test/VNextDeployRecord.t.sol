@@ -24,8 +24,12 @@ import {VNextDeploySpec} from "../script/vnext/VNextDeploySpec.sol";
  *           5. the grant does NOT reach the other tracked records under `deployments/` (least privilege);
  *           6. `VNEXT_LABEL` cannot steer the record path: traversal, separators, dots, control characters and
  *              over-long labels are refused, and a canonical run carries no label (sol review of #339);
- *           7. a symlink under the record root refuses the read and the write, because `fs_permissions` alone
- *              does not contain a write that goes through a symlinked directory or a dangling symlink.
+ *           7. the record root is contained, and the guard and the writer both check it before touching a record,
+ *              because `fs_permissions` alone does not contain a write that goes through a symlink:
+ *                - the root must exist as a directory (a missing or dangling root is refused);
+ *                - no symlink AT or ABOVE it (a symlinked root and a symlinked ancestor are refused);
+ *                - no symlink BELOW it at any depth (a directory link, a dangling link and a link five levels
+ *                  down are each refused on their own), and any entry forge cannot inspect is refused.
  *
  * @dev The guard is invoked through an explicit STATICCALL, as {VNextDeployGatesTest} does for the gates, so a
  *      passing test also proves the guard is read-only: it cannot rewrite the record it is checking.
@@ -43,10 +47,16 @@ contract VNextDeployRecordTest is Test {
     ///      real record, so that a test which wrongly succeeds leaves behind something obviously stray.
     string internal constant OUTSIDE_GRANT = "deployments/base-sepolia/ESCROW-TEST-MUST-NOT-BE-WRITABLE.json";
 
-    /// @dev A committed fixture holding a symlinked directory (`parent-link -> real`) and a dangling symlink
-    ///      (`dangling.json -> does-not-exist.json`). `foundry.toml` grants READ on it and nothing else, so the
-    ///      refusal is exercised without any test ever creating a link.
-    string internal constant SYMLINK_FIXTURE = "test/fixtures/fs-symlinks";
+    /// @dev Committed fixtures (test/fixtures/fs-symlinks/README.md). `foundry.toml` grants READ on each fixture
+    ///      root separately and on nothing wider, so every refusal is exercised without a test creating a link.
+    ///      `walk/*` each hold ONE kind of link, so each kind is refused on its own.
+    string internal constant WALK = "test/fixtures/fs-symlinks/walk";
+    string internal constant ROOTS = "test/fixtures/fs-symlinks/roots";
+
+    string internal constant BELOW = "symlink under the deployment record root";
+    string internal constant AT_OR_ABOVE = "the deployment record root, or a directory above it, is a symlink";
+    string internal constant NOT_A_DIR = "the deployment record root is missing or not a directory";
+    string internal constant UNINSPECTABLE = "cannot inspect the deployment record root";
 
     string internal constant LABEL_CHARSET = "VNEXT_LABEL may contain only A-Z a-z 0-9 - _";
     string internal constant LABEL_LENGTH = "VNEXT_LABEL must be 1-64 characters";
@@ -164,32 +174,105 @@ contract VNextDeployRecordTest is Test {
         _assertLabelRefused(VNextDeploySpec.MODE_CANONICAL, "x", "VNEXT_LABEL must be empty for a canonical deployment");
     }
 
-    // ── 7. symlinks under the record root ────────────────────────────────────────────────────────
+    // ── 7. the record root is contained ──────────────────────────────────────────────────────────
 
-    function test_Symlinks_AreRefused() public {
-        // A checkout without symlink support (git core.symlinks=false, e.g. some Windows setups) turns the links
-        // into plain files. The property is then untestable in that checkout, not false. CI (Linux) has real links.
-        if (_symlinkCount(SYMLINK_FIXTURE) < 2) vm.skip(true);
-        (bool ok, bytes memory ret) =
-            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertNoSymlinksUnder, (SYMLINK_FIXTURE)));
-        assertFalse(ok, "a symlink under the root was not refused");
-        string memory reason = _reason(ret);
-        assertTrue(_contains(reason, "symlink under the deployment record root"), string.concat("wrong refusal: ", reason));
-    }
-
-    /// @notice The WIRING: the rival-deployment guard refuses a symlinked record root before it reads any record.
-    function test_Symlinks_GuardRefusesBeforeReadingTheRecord() public {
-        if (_symlinkCount(SYMLINK_FIXTURE) < 2) vm.skip(true);
-        harness.setRecordRoot(SYMLINK_FIXTURE);
-        _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, "symlink under the deployment record root");
-    }
-
-    function test_Symlinks_RealRecordTreePasses() public {
+    /// @notice The real, committed record root passes, with a record in it.
+    function test_Root_RealRecordTreePasses() public {
         string memory path = _writeRecord(VNextDeploySpec.MODE_PROVISIONAL, "symlink-clean", FACTORY_A);
-        (bool ok, bytes memory ret) =
-            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertNoSymlinksUnder, ("deployments/vnext")));
-        assertTrue(ok, string.concat("a record tree with no symlinks was refused: ", _reason(ret)));
+        _assertContained("deployments/vnext");
         _clear(path);
+    }
+
+    function test_Root_RealFixtureRootPasses() public {
+        _requireLinks();
+        _assertContained(string.concat(ROOTS, "/real"));
+    }
+
+    /// @notice The root itself is a symlink (`roots/link -> real`). `isDir` follows the link and says yes; only
+    ///         forge's refusal to look below it gives it away.
+    function test_Root_SymlinkedRootIsRefused() public {
+        _requireLinks();
+        _assertRefused(string.concat(ROOTS, "/link"), AT_OR_ABOVE, "roots/link");
+    }
+
+    /// @notice A directory ABOVE the root is a symlink (`roots/parent-link -> parent-real`), the root below it real.
+    ///         This is the shape that let forge create `deployments/vnext/<network>` inside a link's target.
+    function test_Root_SymlinkedAncestorIsRefused() public {
+        _requireLinks();
+        _assertRefused(string.concat(ROOTS, "/parent-link/root"), AT_OR_ABOVE, "roots/parent-link/root");
+    }
+
+    function test_Root_DanglingRootIsRefused() public {
+        _requireLinks();
+        _assertRefused(string.concat(ROOTS, "/dangling"), NOT_A_DIR, "roots/dangling");
+    }
+
+    /// @notice A symlinked root whose target holds an entry at the probe path. Forge then CAN answer for the probe
+    ///         (it exists, so its links are resolved), and only the check's `!present` stands between that answer
+    ///         and a pass.
+    function test_Root_PlantedProbeIsRefused() public {
+        _requireLinks();
+        _assertRefused(string.concat(ROOTS, "/planted-link"), "an entry exists at the deployment record root's probe path", "roots/planted-link");
+    }
+
+    /// @notice A missing root is refused rather than created: creating it would follow a symlinked ancestor.
+    function test_Root_MissingRootIsRefused() public view {
+        _assertRefused(string.concat(ROOTS, "/absent"), NOT_A_DIR, "roots/absent");
+    }
+
+    function test_Walk_CleanTreePasses() public view {
+        _assertWalkPasses(string.concat(WALK, "/clean"));
+    }
+
+    function test_Walk_DirectoryLinkIsRefused() public {
+        _requireLinks();
+        _assertWalkRefused(string.concat(WALK, "/dir-link"), BELOW, "walk/dir-link/parent-link");
+    }
+
+    function test_Walk_DanglingLinkIsRefused() public {
+        _requireLinks();
+        _assertWalkRefused(string.concat(WALK, "/dangling"), BELOW, "walk/dangling/dangling.json");
+    }
+
+    /// @notice Five levels down. The walk used to stop at depth 3 and never saw this link.
+    function test_Walk_DeepLinkIsRefused() public {
+        _requireLinks();
+        _assertWalkRefused(string.concat(WALK, "/deep"), BELOW, "walk/deep/a/b/c/d/deep-link");
+    }
+
+    /// @notice An entry forge reports it could not inspect is refused, never taken to have vanished. `readDir` on a
+    ///         path that does not exist returns exactly such an entry, so this reaches the error branch for certain.
+    function test_Walk_InspectionErrorIsRefused() public view {
+        _assertWalkRefused(string.concat(WALK, "/no-such-dir"), UNINSPECTABLE, "walk/no-such-dir");
+    }
+
+    /// @notice The WIRING: the rival-deployment guard checks the root (at or above) before it reads any record...
+    function test_Wiring_GuardRefusesASymlinkedRoot() public {
+        _requireLinks();
+        harness.setRecordRoot(string.concat(ROOTS, "/link"));
+        _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, AT_OR_ABOVE);
+    }
+
+    /// @notice ...and walks the tree below it.
+    function test_Wiring_GuardRefusesALinkBelowTheRoot() public {
+        _requireLinks();
+        harness.setRecordRoot(string.concat(WALK, "/dir-link"));
+        _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, BELOW);
+    }
+
+    /// @notice The WIRING on the write side: `_writeArtifact` refuses before it creates or writes anything. Without
+    ///         its check, this empty tuple would fail the writer's next gate (the settlement-asset check), and a real
+    ///         one would reach forge's write refusal on the read-only fixture: a different message either way.
+    function test_Wiring_WriterRefusesASymlinkedRoot() public {
+        _requireLinks();
+        harness.setRecordRoot(string.concat(ROOTS, "/link"));
+        _assertWriterAborts(AT_OR_ABOVE);
+    }
+
+    function test_Wiring_WriterRefusesALinkBelowTheRoot() public {
+        _requireLinks();
+        harness.setRecordRoot(string.concat(WALK, "/dir-link"));
+        _assertWriterAborts(BELOW);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────
@@ -208,10 +291,56 @@ contract VNextDeployRecordTest is Test {
         }
     }
 
-    function _symlinkCount(string memory dir) internal view returns (uint256 count) {
-        Vm.DirEntry[] memory entries = vm.readDir(dir, 3);
+    /// @dev A checkout without symlink support (git core.symlinks=false, e.g. some Windows setups) turns the fixture
+    ///      links into plain files. The properties are then untestable in that checkout, not false, so the tests
+    ///      that need a link skip. CI (Linux) has real links. `walk/` holds three links; `roots/` is checked out the
+    ///      same way, and `roots/` itself is deliberately not granted, so it cannot be listed here.
+    function _requireLinks() internal {
+        uint256 count;
+        Vm.DirEntry[] memory entries = vm.readDir(WALK, type(uint64).max);
         for (uint256 k; k < entries.length; ++k) {
             if (entries[k].isSymlink) ++count;
+        }
+        if (count < 3) vm.skip(true);
+    }
+
+    function _assertContained(string memory root) internal view {
+        (bool ok, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertRecordRootContained, (root)));
+        assertTrue(ok, string.concat("a contained record root was refused: ", _reason(ret)));
+    }
+
+    /// @dev Refused by the FULL check, for the stated reason, naming the offending path.
+    function _assertRefused(string memory root, string memory fragment, string memory named) internal view {
+        (bool ok, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertRecordRootContained, (root)));
+        assertFalse(ok, string.concat("not refused: ", root));
+        string memory reason = _reason(ret);
+        assertTrue(_contains(reason, fragment), string.concat("refused for the wrong reason: ", reason));
+        assertTrue(_contains(reason, named), string.concat("the refusal does not name ", named, ": ", reason));
+    }
+
+    function _assertWalkPasses(string memory root) internal view {
+        (bool ok, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertNoSymlinksBelow, (root)));
+        assertTrue(ok, string.concat("a tree with no symlinks was refused: ", _reason(ret)));
+    }
+
+    /// @dev Refused by the WALK ALONE, so each walk property is proven without the root check in front of it.
+    function _assertWalkRefused(string memory root, string memory fragment, string memory named) internal view {
+        (bool ok, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.assertNoSymlinksBelow, (root)));
+        assertFalse(ok, string.concat("the walk did not refuse: ", root));
+        string memory reason = _reason(ret);
+        assertTrue(_contains(reason, fragment), string.concat("refused for the wrong reason: ", reason));
+        assertTrue(_contains(reason, named), string.concat("the refusal does not name ", named, ": ", reason));
+    }
+
+    function _assertWriterAborts(string memory fragment) internal {
+        try harness.writeArtifactProvisional("wiring") {
+            fail("_writeArtifact wrote under an uncontained record root");
+        } catch Error(string memory reason) {
+            assertTrue(_contains(reason, fragment), string.concat("_writeArtifact failed for the wrong reason: ", reason));
         }
     }
 
@@ -313,8 +442,22 @@ contract DeployRecordHarness is DeployVNextSettlement {
         return bytes(recordRootOverride).length != 0 ? recordRootOverride : super._recordRoot();
     }
 
-    function assertNoSymlinksUnder(string calldata root) external view {
-        _assertNoSymlinksUnder(root);
+    function assertRecordRootContained(string calldata root) external view {
+        _assertRecordRootContained(root);
+    }
+
+    function assertNoSymlinksBelow(string calldata root) external view {
+        _assertNoSymlinksBelow(root);
+    }
+
+    /// @dev The real writer, with an empty tuple. Its containment check is its first statement, so the tuple's
+    ///      content never matters to the wiring tests.
+    function writeArtifactProvisional(string calldata label) external {
+        Inputs memory i;
+        i.mode = VNextDeploySpec.MODE_PROVISIONAL;
+        i.label = label;
+        Tuple memory t;
+        _writeArtifact(i, t);
     }
 
     function removeFile(string calldata path) external {
