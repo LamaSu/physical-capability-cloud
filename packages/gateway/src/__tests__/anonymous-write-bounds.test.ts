@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BoundedWindowLimiter } from "../middleware/bounded-window-limiter.js";
@@ -138,3 +138,54 @@ describe("retained data is bounded: a full store refuses new rows (503)", () => 
     expect(beta.statusCode).toBe(503);
   });
 });
+
+describe("a record that would CROSS the cap is refused too (astra, pack 53, new defect 2)", () => {
+  let DIR = "";
+  let app: FastifyInstance;
+  const CAP = 1024;
+
+  beforeAll(async () => {
+    DIR = mkdtempSync(join(tmpdir(), "pcc-stores-boundary-")); // wherever the runner's tmpdir is
+    process.env.PCC_DB_PATH = `${DIR}/pcc.sqlite`;
+    process.env.PCC_FEEDBACK_MAX_BYTES = String(CAP);
+    process.env.PCC_WAITLIST_MAX_BYTES = String(CAP);
+    delete process.env.DISCORD_WEBHOOK_URL;
+    // Each store sits 10 bytes UNDER its cap: the old check (size >= cap) let the
+    // next whole record through, past the cap.
+    for (const f of ["feedback.jsonl", "waitlist.jsonl", "beta-applications.jsonl"]) {
+      writeFileSync(`${DIR}/${f}`, "x".repeat(CAP - 11) + "\n");
+    }
+    vi.resetModules();
+    const { feedbackRoutes } = await import("../routes/feedback.js");
+    const { waitlistRoutes } = await import("../routes/waitlist.js");
+    app = Fastify({ logger: false });
+    await app.register(feedbackRoutes);
+    await app.register(waitlistRoutes);
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+    delete process.env.PCC_FEEDBACK_MAX_BYTES;
+    delete process.env.PCC_WAITLIST_MAX_BYTES;
+    rmSync(DIR, { recursive: true, force: true });
+  });
+
+  const size = (f: string) => statSync(`${DIR}/${f}`).size;
+
+  it("[neg] feedback: 503, and the file stays within its cap", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "this record would cross the cap" }, remoteAddress: "192.0.2.20" });
+    expect(res.statusCode).toBe(503);
+    expect(size("feedback.jsonl")).toBeLessThanOrEqual(CAP);
+  });
+
+  it("[neg] waitlist and beta: 503, and both files stay within their cap", async () => {
+    const wl = await app.inject({ method: "POST", url: "/api/waitlist", payload: { email: "edge@x.test", leadId: "lead-edge" }, remoteAddress: "192.0.2.21" });
+    expect(wl.statusCode).toBe(503);
+    expect(size("waitlist.jsonl")).toBeLessThanOrEqual(CAP);
+    const beta = await app.inject({ method: "POST", url: "/api/beta-apply", payload: { email: "edge@x.test" }, remoteAddress: "192.0.2.22" });
+    expect(beta.statusCode).toBe(503);
+    expect(size("beta-applications.jsonl")).toBeLessThanOrEqual(CAP);
+  });
+});
+

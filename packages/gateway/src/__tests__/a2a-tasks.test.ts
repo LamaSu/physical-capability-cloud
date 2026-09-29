@@ -18,6 +18,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore, getStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 import { schema, eq } from "@pcc/store";
 
 const { shopKernels, capabilities } = schema;
@@ -570,6 +571,11 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
     // but CreateCapabilityInput previously omitted the field so the row
     // was always written with availability={}. Verifies the end-to-end
     // path now stores the operator-supplied availability verbatim.
+    //
+    // WP-C R6: the skill registers a kernel owned by the AUTHENTICATED caller,
+    // so the call carries a key even with PCC_A2A_AUTH_DISABLED. (Old: sent
+    // anonymously; the kernel was owned by the body's operatorAddress.)
+    const key = provisionApiKey({ operatorId: "0xavail", scopes: ["operator"] }).rawKey;
     const res = await app.inject({
       method: "POST",
       url: "/a2a/tasks/send",
@@ -591,7 +597,7 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
           },
         },
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();

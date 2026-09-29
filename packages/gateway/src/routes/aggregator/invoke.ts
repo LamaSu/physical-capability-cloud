@@ -42,10 +42,11 @@ import {
   signReceipt,
   requirePayment,
   recordSettlement,
+  isPaidPrice,
   type GateVerdict,
 } from "@pcc/aggregator";
 import { evaluateReceipt } from "@pcc/verifier";
-import { getAggregatorRegistry, getX402GateConfig } from "./index.js";
+import { getAggregatorRegistry, getX402GateConfig, x402GateMisconfigured } from "./index.js";
 import { getRepos } from "../../db.js";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
@@ -151,6 +152,14 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
     // ---- x402 payment gate ------------------------------------------------
     let gateVerdict: GateVerdict = { kind: "free" };
     const gateConfig = getX402GateConfig();
+    // N67: x402 is ON but its treasury is missing or invalid. A PRICED tool (the
+    // gate's own rule, isPaidPrice) fails closed here; it used to be served free.
+    if (!gateConfig && isPaidPrice(tool.pricing?.perCallUsdc) && x402GateMisconfigured()) {
+      return reply.status(503).send({
+        error: "payment_not_configured",
+        message: "Payments are enabled but the aggregator treasury is not configured; priced tools are unavailable.",
+      });
+    }
     if (gateConfig) {
       gateVerdict = await requirePayment(
         tool,

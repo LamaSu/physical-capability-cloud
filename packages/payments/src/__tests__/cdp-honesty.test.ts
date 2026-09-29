@@ -272,6 +272,19 @@ describe("submission is not confirmation (round 8, astra failclosed r2: SDK subm
     expect(sdk.listSpendPermissions).not.toHaveBeenCalled();
   });
 
+  it("[neg] an issue whose confirmation TIMES OUT is an error, even when a matching permission is listed; nothing cached (astra pack 58)", async () => {
+    // The listing is not confirmation: it can show a permission whose user operation
+    // never completed. Issue succeeds only on a COMPLETED user operation.
+    fakeChain((salt) => [{ permissionHash: HASH_NEW, revoked: false, permission: { spender: SPENDER, allowance: 5_000_000n, period: 3600, salt } }]);
+    sdk.waitForUserOperation.mockRejectedValueOnce(new Error("timed out"));
+    const svc = new CdpSpendPermissionService(FULL);
+    await expect(svc.issue({ account: ACCT, spender: SPENDER, allowanceUSDC: 5, periodSec: 3600 })).rejects.toMatchObject({
+      code: "spend_permission_unconfirmed",
+      statusCode: 502,
+    });
+    await expect(svc.revoke(HASH_NEW)).rejects.toMatchObject({ statusCode: 404 });
+  });
+
   it("control: a confirmed revoke returns its transaction hash", async () => {
     const { svc, perm } = await issued();
     expect(await svc.revoke(perm.permissionId)).toEqual({ permissionId: HASH_NEW, revoked: true, transactionHash: TX });
