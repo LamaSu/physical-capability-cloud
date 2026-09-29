@@ -30,7 +30,12 @@ print("signing key:", status)
 EOF
 chmod 600 .pcc/node-keys.json
 ```
-**Check:** status 200 or 201. `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows a non-null `signingKey`. If this refuses with "pynacl", go back to phase 0 step 2.
+**Check:** status 200 or 201. `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows a non-null `signingKey`.
+
+If it refuses with "pynacl" or `LogSigningRefused`:
+1. Install the crypto extra (phase 0 step 2).
+2. Delete `.pcc/node-keys.json`. Made without pynacl, it holds a placeholder key that can never sign, and it was never registered.
+3. Run this step again.
 
 ## 3. The capability (what buyers can order)
 Choose the type: search first (`GET $BASE/api/capabilities/search?q=absorbance`). If nothing fits, use a dotted `category.action` name such as `lab.absorbance`. The price is the human's (intake), never a default. Put the typed operation from `.pcc/operations.json` in the description, because **the current gateway drops `requirementsSchema`**.
