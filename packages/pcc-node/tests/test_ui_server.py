@@ -60,7 +60,9 @@ def server(ui_dir):
 def _get(port, path):
     """GET a path from the test server, return (status, parsed_body)."""
     url = f"http://127.0.0.1:{port}{path}"
-    req = Request(url, method="GET")
+    # The submission queue is for the agent, which identifies itself with this header.
+    hdrs = {"X-PCC-Node-Client": "1"} if path.startswith("/api/submissions") else {}
+    req = Request(url, method="GET", headers=hdrs)
     try:
         with urlopen(req, timeout=5) as resp:
             raw = resp.read().decode("utf-8")
@@ -251,12 +253,15 @@ class TestUIServerGenerate:
 
 
 class TestUIServerCORS:
-    def test_options_returns_cors_headers(self, server):
-        url = f"http://127.0.0.1:{server['port']}/api/submit"
-        req = Request(url, method="OPTIONS")
+    def test_options_grants_cors_only_to_own_origin(self, server):
+        # Wildcard CORS is gone: only this server's own origins get a grant
+        # (see test_ui_server_lockdown.py for the refusal cases).
+        own = f"http://127.0.0.1:{server['port']}"
+        url = f"{own}/api/submit"
+        req = Request(url, method="OPTIONS", headers={"Origin": own})
         with urlopen(req, timeout=5) as resp:
-            assert resp.status == 200
-            assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+            assert resp.status == 204
+            assert resp.headers.get("Access-Control-Allow-Origin") == own
             assert "POST" in resp.headers.get("Access-Control-Allow-Methods", "")
 
 
