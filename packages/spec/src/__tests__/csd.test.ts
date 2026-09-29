@@ -609,6 +609,9 @@ describe("loadBuiltinCsds", () => {
 
   // Registering it must not move the D2 compiler ABI: the snapshot takes only active CSDs with a composition
   // block, and this one is a draft with no composition block. So the digest is byte-identical with and without it.
+  // Today no builtin carries a composition block, so both snapshots hold no builtin contracts; this is a tripwire
+  // for the day this CSD becomes active WITH a composition block, not a proof of the adapter's filter. That filter
+  // is proven by registry-contract-adapter.test.ts and the gateway's "excludes draft and retired CSDs" test.
   it("leaves the D2 registry snapshot digest unchanged (draft, no composition block)", async () => {
     const withIt = loadBuiltinCsds();
     const without = new CsdRegistry();
