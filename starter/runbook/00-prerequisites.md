@@ -32,16 +32,30 @@ pcc-node --version                                   # pcc-node, version 0.1.1 (
 python3 -c "import nacl.signing" && echo "signing OK"
 ```
 
-## 3. An operator API key, captured without logging it
+## 3. The node's signing key, made here and never sent
+The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half. That way no private key ever travels: a provisioning request without a public key gets a server-made private key back in the response.
+```bash
+umask 077
+python3 - <<'EOF' > .pcc/node-public-key
+import nacl.signing                                 # refuses here if the crypto extra is missing
+from pcc_node.crypto import load_or_create_keys
+public_hex, _ = load_or_create_keys(".pcc/node-keys.json")
+print(public_hex, end="")
+EOF
+chmod 600 .pcc/node-keys.json
+```
+**Check:** `.pcc/node-public-key` holds 64 hex characters. `.pcc/node-keys.json` holds the private half; never print it or copy it anywhere.
+
+## 4. An operator API key, captured without logging it
 **Ask the human** (class C): "Which email should this operator account be registered under?" The key is issued to it.
 
-The provisioning response contains your **API key and a server-minted signing private key**. Write the response straight to a private file, and **never print it, echo it, or paste it into the conversation**.
+The response contains your **API key**. Write it straight to a private file, and **never print it, echo it, or paste it into the conversation**.
 
 ```bash
 umask 077
 curl -s -X POST "$(cat .pcc/base)/api/auth/provision" \
   -H 'Content-Type: application/json' \
-  -d '{"email": "operator@example.org", "name": "Bench plate reader"}' > .pcc/provision.json
+  -d "{\"email\": \"operator@example.org\", \"name\": \"Bench plate reader\", \"publicKey\": \"$(cat .pcc/node-public-key)\"}" > .pcc/provision.json
 python3 - <<'EOF'
 import json
 key = json.load(open(".pcc/provision.json"))["api_key"]
@@ -50,7 +64,7 @@ open(".pcc/auth.header", "w").write("Authorization: Bearer " + key + "\n")
 EOF
 chmod 600 .pcc/api-key .pcc/auth.header .pcc/provision.json
 ```
-Every later call sends the key with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once you no longer need the private key in it.
+Every later call sends the key with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written.
 
 **Check:**
 ```bash
@@ -58,7 +72,7 @@ curl -s "$(cat .pcc/base)/api/auth/validate" -H @.pcc/auth.header
 # → {"valid": true, ...}
 ```
 
-## 4. Open the attempt and report
+## 5. Open the attempt and report
 Every phase ends with one report, whether it worked or not. The first call creates `.pcc/attempt.json`, holding this attempt's `sessionId`.
 ```bash
 export PCC_HARNESS=claude-code      # or codex, pcc-hosted, other

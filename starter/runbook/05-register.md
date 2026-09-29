@@ -18,7 +18,7 @@ python3 -c "import json; print(json.load(open('.pcc/kernel.json'))['kernel']['id
 **Check:** HTTP 201, and `.pcc/kernel-id` holds an id such as `kernel_…`. The location comes from intake, as coarse as the human chose.
 
 ## 2. The kernel's signing key
-The node signs its evidence with this key, so its work can be checked against the kernel. pcc-node proves possession to the gateway. The key file lives in `.pcc/`, never in the working directory.
+Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves `.pcc/node-keys.json`.
 ```bash
 python3 - <<'EOF'
 from pcc_node.crypto import load_or_create_keys
@@ -34,8 +34,8 @@ chmod 600 .pcc/node-keys.json
 
 If it refuses with "pynacl" or `LogSigningRefused`:
 1. Install the crypto extra (phase 0 step 2).
-2. Delete `.pcc/node-keys.json`. Made without pynacl, it holds a placeholder key that can never sign, and it was never registered.
-3. Run this step again.
+2. Delete `.pcc/node-keys.json` and `.pcc/node-public-key`. Made without pynacl, the key file holds a placeholder that can never sign, and it was never registered.
+3. Run phase 0 step 3 again for a real key, then this step.
 
 ## 3. The capability (what buyers can order)
 Choose the type: search first (`GET $BASE/api/capabilities/search?q=absorbance`). If nothing fits, use a dotted `category.action` name such as `lab.absorbance`. The price is the human's (intake), never a default. Put the typed operation from `.pcc/operations.json` in the description, because **the current gateway drops `requirementsSchema`**.

@@ -72,6 +72,15 @@ class TestTruths(unittest.TestCase):
                 window = text[m.end(): m.end() + 400]
                 self.assertRegex(window, r"> \.pcc/", f"{path.name}: provision output must be written under .pcc/")
 
+    def test_every_provisioning_call_sends_its_own_public_key(self):
+        # Rehearsal R0's P9: without publicKey, the response carries a server-made private key.
+        calls = 0
+        for path, text in text_files():
+            for m in re.finditer(r"curl [^\n]*/api/auth/provision", text):
+                calls += 1
+                self.assertIn('\\"publicKey\\"', text[m.end(): m.end() + 300], f"{path.name}: provision without publicKey")
+        self.assertEqual(calls, 2)
+
     def test_no_key_is_expanded_onto_a_command_line(self):
         # A key in argv is readable by every user of the machine (ps, /proc/<pid>/cmdline).
         for path, text in text_files():

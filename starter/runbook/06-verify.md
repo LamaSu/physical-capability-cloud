@@ -9,11 +9,12 @@ BASE=$(cat .pcc/base); KID=$(cat .pcc/kernel-id); DEV=http://127.0.0.1:8765
 ```
 
 ## 1. Be your own test buyer
-Use a second key, so the test is a real buyer-to-operator job. Test mode moves no money.
+Use a second key, so the test is a real buyer-to-operator job. Test mode moves no money. A buyer signs nothing, so it sends a throwaway public key: that keeps a private key out of the response here too.
 ```bash
 umask 077
+BUYER_PUB=$(python3 -c "import nacl.signing; print(nacl.signing.SigningKey.generate().verify_key.encode().hex())")
 curl -s -X POST "$BASE/api/auth/provision" -H 'Content-Type: application/json' \
-  -d '{"email": "test-buyer@example.org", "name": "test buyer"}' \
+  -d "{\"email\": \"test-buyer@example.org\", \"name\": \"test buyer\", \"publicKey\": \"$BUYER_PUB\"}" \
   | python3 -c "import json,sys; print('Authorization: Bearer ' + json.load(sys.stdin)['api_key'])" > .pcc/buyer.header
 curl -s -X POST "$BASE/api/jobs/submit-from-discovery" -H @.pcc/buyer.header \
   -H 'Content-Type: application/json' -d "{
