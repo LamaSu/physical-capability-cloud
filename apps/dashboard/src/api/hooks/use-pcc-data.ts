@@ -28,7 +28,37 @@ import type {
   ComplianceReportDTO,
   DriftAlertDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../../types/dto.js";
+
+// ---------------------------------------------------------------------------
+// Wire guards
+// ---------------------------------------------------------------------------
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+const isText = (v: unknown): v is string => typeof v === "string" && v !== "";
+
+/**
+ * The rows of a list read, or a thrown error when the list or any row lacks
+ * a field the pages count or classify by. A malformed row makes the whole
+ * read unavailable: counting the rows that happen to parse would present a
+ * partial list as the answer.
+ */
+function rowsOrThrow<T>(list: unknown, route: string, rowOk: (row: Record<string, unknown>) => boolean): T[] {
+  if (!Array.isArray(list)) throw new Error(`unexpected response shape from ${route}`);
+  if (!list.every((row) => isRecord(row) && rowOk(row))) throw new Error(`unexpected row in the response from ${route}`);
+  return list as T[];
+}
+
+/** Every job is classified by its status, so a row without one is malformed. */
+const jobRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status);
+/** "Online" needs both the status and the staleness flag the gateway always sets. */
+const kernelRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status) && typeof r.isStale === "boolean";
+const escrowRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status);
+const capabilityRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.kernelId);
 
 // ---------------------------------------------------------------------------
 // Capabilities
@@ -46,7 +76,14 @@ export function useCapabilityTypes() {
 export function useCapabilityTemplates() {
   return useQuery({
     queryKey: ["capabilityTemplates"],
-    queryFn: () => api.getCapabilityTemplates(),
+    queryFn: async () => {
+      const res = await api.getCapabilityTemplates();
+      // Missing templates are a failed read, never "no capabilities available".
+      if (!isRecord(res) || !Array.isArray(res.templates)) {
+        throw new Error("unexpected response shape from /api/capabilities/templates");
+      }
+      return res as { templates: unknown[] };
+    },
     retry: 1,
     staleTime: 60_000,
   });
@@ -60,7 +97,52 @@ export function useCapabilityTemplates() {
 export function useCapabilities(params?: { offset?: number; limit?: number }) {
   return useQuery<PaginatedResult<CapabilityDTO>>({
     queryKey: ["capabilities", params],
-    queryFn: () => api.getCapabilities(params),
+    queryFn: async () => {
+      const res = await api.getCapabilities(params);
+      if (!isRecord(res) || typeof res.total !== "number") throw new Error("unexpected response shape from /api/capabilities");
+      rowsOrThrow<CapabilityDTO>(res.items, "/api/capabilities", capabilityRowOk);
+      return res;
+    },
+    retry: 1,
+    staleTime: 30_000,
+  });
+}
+
+/** GET /api/capabilities serves at most this many rows per request (routes/capabilities.ts). */
+export const CAPABILITIES_PAGE_LIMIT = 200;
+/** Stop paging after this many requests; what was read is then marked incomplete. */
+export const CAPABILITIES_MAX_PAGES = 25;
+
+/** Every capability the gateway lists, read page by page, and whether the read reached the end. */
+export interface AllCapabilities {
+  items: CapabilityDTO[];
+  /** The gateway's total when the read ended. */
+  total: number;
+  /** True when every listed capability was read; a ranking over fewer is only partial. */
+  complete: boolean;
+}
+
+/**
+ * All capability instances, for views that rank or total across the whole
+ * network (the kernel leaderboard). Pages through GET /api/capabilities, since
+ * one request returns at most CAPABILITIES_PAGE_LIMIT rows.
+ */
+export function useAllCapabilities() {
+  return useQuery<AllCapabilities>({
+    queryKey: ["capabilities", "all"],
+    queryFn: async () => {
+      const items: CapabilityDTO[] = [];
+      let total = 0;
+      for (let page = 0; page < CAPABILITIES_MAX_PAGES; page++) {
+        const res = await api.getCapabilities({ offset: items.length, limit: CAPABILITIES_PAGE_LIMIT });
+        if (!isRecord(res) || typeof res.total !== "number") throw new Error("unexpected response shape from /api/capabilities");
+        const rows = rowsOrThrow<CapabilityDTO>(res.items, "/api/capabilities", capabilityRowOk);
+        items.push(...rows);
+        total = res.total;
+        if (items.length >= total || rows.length === 0) break;
+      }
+      return { items, total, complete: items.length >= total };
+    },
     retry: 1,
     staleTime: 30_000,
   });
@@ -91,16 +173,19 @@ export function useComplianceReport(capabilityId: string | undefined) {
  * Route: GET /api/jobs → { jobs: JobDTO[] } (backward-compat envelope).
  * Returns JobDTO[] — envelope is unwrapped here so callers see a flat array.
  */
-export function useJobs(params?: { kernelId?: string; status?: string }) {
+export function useJobs(params?: { kernelId?: string; status?: string }, options?: { refetchInterval?: number }) {
   return useQuery<JobDTO[]>({
     queryKey: ["jobs", params],
     queryFn: async () => {
       const res = await api.getJobs(params);
-      // Route wraps result in { jobs: [...] } for backward compat.
-      return res.jobs ?? [];
+      // Route wraps result in { jobs: [...] } for backward compat. A response without that
+      // array, or with a row that has no id or status, is an error, never an empty or
+      // shorter list (absence is not evidence).
+      return rowsOrThrow<JobDTO>(res?.jobs, "/api/jobs", jobRowOk);
     },
     retry: 1,
     staleTime: 10_000,
+    refetchInterval: options?.refetchInterval,
   });
 }
 
@@ -146,16 +231,19 @@ export function useDriftAlerts(jobId: string | undefined) {
  * Backward-compat note: pages that previously accessed kernel.capabilities[]
  * should now use kernel.capabilityTypes[] (CapabilityType[]) instead.
  */
-export function useKernels(params?: { status?: string }) {
+export function useKernels(params?: { status?: string }, options?: { refetchInterval?: number }) {
   return useQuery<KernelDTO[]>({
     queryKey: ["kernels", params],
     queryFn: async () => {
       const res = await api.getKernels(params);
-      // Route wraps result in { kernels: [...] } for backward compat.
-      return res.kernels ?? [];
+      // Route wraps result in { kernels: [...] } for backward compat. A response without that
+      // array, or a kernel without its status or staleness flag (the populator always sets
+      // isStale), is an error, never a list to count: "0 kernels online" would be a guess.
+      return rowsOrThrow<KernelDTO>(res?.kernels, "/api/kernels", kernelRowOk);
     },
     retry: 1,
     staleTime: 15_000,
+    refetchInterval: options?.refetchInterval,
   });
 }
 
@@ -191,8 +279,9 @@ export function useEscrows(params?: { status?: string }) {
     queryKey: ["escrows", params],
     queryFn: async () => {
       const res = await api.getEscrows(params);
-      // Route wraps result in { escrows: [...] } for backward compat.
-      return res.escrows ?? [];
+      // Route wraps result in { escrows: [...] } for backward compat. A response without that
+      // array, or with a row that has no id or status, is an error, never an empty list.
+      return rowsOrThrow<EscrowSummaryDTO>(res?.escrows, "/api/escrow", escrowRowOk);
     },
     retry: 1,
     staleTime: 10_000,
@@ -244,11 +333,63 @@ export function useSettlementEpochs() {
 // Health
 // ---------------------------------------------------------------------------
 
-export function useGatewayHealth() {
+/**
+ * Gateway liveness (GET /api/health).
+ * `refetchInterval` lets always-visible chrome (the StatusBar) re-check
+ * periodically instead of reporting the state it saw at page load.
+ */
+export function useGatewayHealth(options?: { refetchInterval?: number }) {
   return useQuery({
     queryKey: ["health"],
     queryFn: () => api.health(),
     retry: 0,
     staleTime: 30_000,
+    refetchInterval: options?.refetchInterval,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the current API key's operator stands (GET /api/agent/me): identity,
+ * scopes, keys, kernels and in-flight work. Each section reports its own
+ * `unavailable` reason instead of failing the whole answer.
+ */
+export function useAgentMe() {
+  return useQuery<AgentMeDTO>({
+    queryKey: ["agentMe"],
+    queryFn: async () => {
+      const res = await api.getAgentMe();
+      // An answer without a complete identity block is not an account; treat it as a
+      // failed read. The other sections may each be unavailable; Settings reads them
+      // field by field (keyCounts).
+      const id = isRecord(res) ? res.identity : undefined;
+      const ok =
+        isRecord(id) &&
+        isText(id.operator) &&
+        isText(id.key_id) &&
+        (id.key_name === null || id.key_name === undefined || typeof id.key_name === "string") &&
+        Array.isArray(id.scopes) &&
+        id.scopes.every((s: unknown) => typeof s === "string");
+      if (!ok) throw new Error("unexpected response shape from /api/agent/me");
+      return res;
+    },
+    retry: 1,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * The key counts of GET /api/agent/me, or null when that section is
+ * unavailable. The gateway reports an unreadable key list as
+ * { active: null, wildcard_keys: 0, unavailable }, so wildcard_keys is only
+ * a count when active is one too.
+ */
+export function keyCounts(keys: unknown): { active: number; wildcardKeys: number } | null {
+  if (!isRecord(keys) || keys.unavailable || typeof keys.active !== "number" || typeof keys.wildcard_keys !== "number") {
+    return null;
+  }
+  return { active: keys.active, wildcardKeys: keys.wildcard_keys };
 }

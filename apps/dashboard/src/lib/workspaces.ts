@@ -32,9 +32,16 @@ export const APP_HOME = WORKSPACE_HOME.dashboard;
 /** Order the mode toggle cycles through. */
 export const WORKSPACE_CYCLE: readonly Workspace[] = ["spatial", "agent", "dashboard"];
 
+/**
+ * Which workspace renders `pathname`. Each workspace owns only the address it
+ * serves: the spatial workspace (SpatialApp) and the agent conversation never
+ * read the path, so /app/jobs/42 is not a spatial page. It falls through to
+ * the dashboard's routes, whose catch-all says "Page not found", instead of
+ * rendering the canvas at an address it doesn't serve.
+ */
 export function workspaceForPath(pathname: string): Workspace {
-  if (pathname === "/app" || pathname.startsWith("/app/")) return "spatial";
-  if (pathname === "/agent") return "agent";
+  if (pathname === "/app" || pathname === "/app/") return "spatial";
+  if (pathname === "/agent" || pathname === "/agent/") return "agent";
   return "dashboard";
 }
 

@@ -10,6 +10,7 @@ import type {
   DriftAlertDTO,
   EvidenceSummaryDTO,
   PaginatedResult,
+  AgentMeDTO,
 } from "../types/dto.js";
 
 const BASE_URL = "/api";
@@ -164,6 +165,11 @@ export const api = {
   /** Get a single escrow by ID or on-chain address. */
   getEscrow: (escrowId: string) =>
     fetchAPI<{ escrow: unknown; source: "on-chain" | "db" }>(`/escrow/${escrowId}`),
+
+  // ── Account ───────────────────────────────────────────────────────────────
+
+  /** Where the calling key's operator stands: identity, scopes, keys, work. */
+  getAgentMe: () => fetchAPI<AgentMeDTO>("/agent/me"),
 
   // ── Agents ────────────────────────────────────────────────────────────────
 
