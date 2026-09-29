@@ -36,8 +36,12 @@ describe("OnboardLandingPage — embedded snippet", () => {
     expect(source.toLowerCase()).toMatch(/buy|offer|connect|register/);
   });
 
-  it("includes the npx command", () => {
-    expect(source).toContain("npx @pcc/onboard");
+  it("gives the CLI's from-source command, never an unpublished npx or npm link (N26)", () => {
+    // CHANGED (N26): this used to require "npx @pcc/onboard", but @pcc/onboard
+    // is not published, so that command answers 404.
+    expect(source).toContain("node packages/onboard-cli/dist/cli.js");
+    expect(source).not.toMatch(/npx\s+(?:-y\s+)?@pcc\//);
+    expect(source).not.toContain("npmjs.com/package/@pcc");
   });
 });
 
@@ -65,8 +69,11 @@ describe("OnboardLandingPage — three-card hero", () => {
     expect(source).toContain("clipboard");
   });
 
-  it("links the npm page", () => {
-    expect(source).toContain("npmjs.com/package/@pcc/onboard");
+  it("links the CLI's source, not an npm page that answers 404 (N26)", () => {
+    // CHANGED (N26): this used to require the npmjs.com page, but
+    // @pcc/onboard is not published.
+    expect(source).toContain("/tree/master/packages/onboard-cli");
+    expect(source).not.toContain("npmjs.com/package/@pcc");
   });
 
   it("mentions the curl snippet.md path", () => {

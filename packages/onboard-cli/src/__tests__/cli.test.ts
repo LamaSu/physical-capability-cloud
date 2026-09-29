@@ -105,6 +105,10 @@ describe("main()", () => {
       const output = chunks.join("");
       expect(output).toContain("@pcc/onboard");
       expect(output).toContain("Usage:");
+      // N26: @pcc/onboard is not on npm, so the help must not tell anyone to
+      // npx or npm-install it; it gives the from-source command instead.
+      expect(output).not.toMatch(/npx\s+(?:-y\s+)?@pcc\/|npm\s+(?:i|install)\s+(?:-g\s+)?@pcc\//);
+      expect(output).toContain("node packages/onboard-cli/dist/cli.js");
     } finally {
       process.stdout.write = origWrite;
     }

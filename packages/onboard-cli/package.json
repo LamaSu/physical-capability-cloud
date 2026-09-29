@@ -1,7 +1,7 @@
 {
   "name": "@pcc/onboard",
   "version": "0.1.0",
-  "description": "Conversational PCC onboarding CLI. `npx @pcc/onboard` walks you through registering a capability on Physical Capability Cloud, end-to-end, in your terminal.",
+  "description": "Conversational PCC onboarding CLI: walks you through registering a capability on Physical Capability Cloud, end-to-end, in your terminal.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/cli.js",

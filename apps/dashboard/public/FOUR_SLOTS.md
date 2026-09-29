@@ -368,5 +368,5 @@ fills in during onboarding. They're the load-bearing infrastructure
 
 Whitepaper: `apps/dashboard/public/whitepaper.md` (rewrite PR #114) §17.
 
-This doc: `C:\Users\globa\pcc-onboard-ui\docs\FOUR_SLOTS.md` (and mirrored at
+This doc: `docs/FOUR_SLOTS.md` in the repository (and mirrored at
 `https://capability.network/FOUR_SLOTS.md` once deployed).

@@ -3,9 +3,9 @@
  * @pcc/onboard — npx walkthrough for Physical Capability Cloud.
  *
  * Run with:
- *   npx @pcc/onboard
- *   npx @pcc/onboard --role buyer
- *   npx @pcc/onboard --gateway https://staging.capability.network
+ *   node packages/onboard-cli/dist/cli.js
+ *   node packages/onboard-cli/dist/cli.js --role buyer
+ *   node packages/onboard-cli/dist/cli.js --gateway https://staging.capability.network
  *
  * Two modes:
  *   1. (Default) Drive a local chat loop against the user's Anthropic API
@@ -109,7 +109,8 @@ const HELP_TEXT = `${term.bold("@pcc/onboard")} v${CLI_VERSION}
 Conversational onboarding for Physical Capability Cloud.
 
 ${term.bold("Usage:")}
-  npx @pcc/onboard [options]
+  node packages/onboard-cli/dist/cli.js [options]
+  (from a clone of the repository: @pcc/onboard is not on npm yet)
 
 ${term.bold("Options:")}
   --api-key <key>      Anthropic API key (env: ANTHROPIC_API_KEY)
@@ -123,10 +124,10 @@ ${term.bold("Options:")}
   -v, --version        Show version
 
 ${term.bold("Examples:")}
-  npx @pcc/onboard
-  npx @pcc/onboard --role buyer
-  npx @pcc/onboard --gateway https://staging.capability.network
-  npx @pcc/onboard --print-snippet
+  node packages/onboard-cli/dist/cli.js
+  node packages/onboard-cli/dist/cli.js --role buyer
+  node packages/onboard-cli/dist/cli.js --gateway https://staging.capability.network
+  node packages/onboard-cli/dist/cli.js --print-snippet
 
 ${term.bold("Docs:")} https://capability.network
 `;
@@ -198,7 +199,7 @@ async function runInteractiveChat(args: ParsedArgs): Promise<number> {
     if (!fromPrompt) {
       process.stdout.write(
         `\n${term.yellow("Skipping live chat without an Anthropic key.")}\n` +
-          `${term.dim("Tip:")} run ${term.bold("npx @pcc/onboard --print-snippet")} to get the prompt for Claude.ai / ChatGPT / etc.\n`,
+          `${term.dim("Tip:")} run ${term.bold("node packages/onboard-cli/dist/cli.js --print-snippet")} to get the prompt for Claude.ai / ChatGPT / etc.\n`,
       );
       return 0;
     }

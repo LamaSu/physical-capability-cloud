@@ -3,11 +3,13 @@
  *
  *  1. Chat right now in the browser           → /onboard/chat (uses #159)
  *  2. Paste this into your existing AI        → copy-to-clipboard prompt
- *  3. Run it from your terminal               → `npx @pcc/onboard`
+ *  3. Run it from your terminal               → the CLI in packages/onboard-cli
  *
  * Closes the owner ask #178: laypersons should be able to onboard by
  * pasting a snippet into Claude.ai / ChatGPT / Gemini / Cursor or by
- * running an npx command — not just by visiting the dashboard.
+ * running a terminal command — not just by visiting the dashboard.  The
+ * @pcc packages are not on npm yet (N26), so the terminal card runs the CLI
+ * from source rather than advertising an npx command that answers 404.
  *
  * Below the hero we keep the original Add-Machine / Onboard-Kit /
  * Marketplace / Spaces tiles as "more options" so power users don't lose
@@ -30,7 +32,8 @@ Please:
 I'll tell you about my role and we'll go from there.
 `;
 
-const NPX_SNIPPET = `npx @pcc/onboard`;
+const REPO_URL = "https://github.com/LamaSu/physical-capability-cloud";
+const CLI_FROM_SOURCE = `git clone ${REPO_URL} && cd physical-capability-cloud && pnpm install && pnpm --filter "@pcc/onboard..." build && node packages/onboard-cli/dist/cli.js`;
 
 interface CopyableCodeProps {
   label: string;
@@ -201,18 +204,18 @@ export function OnboardLandingPage(): React.ReactElement {
 
         <HeroCard
           badge="3 — from your terminal"
-          title="Install via npx"
-          subtitle="Local CLI. Uses your own Anthropic key. Same loop the in-browser chat runs, but the transcript stays on your machine."
+          title="Run it from source"
+          subtitle="Local CLI. Uses your own Anthropic key. Same loop the in-browser chat runs, but the transcript stays on your machine. Not on npm yet, so it runs from the repository."
           glow="green"
         >
-          <CopyableCode label="npx install command" code={NPX_SNIPPET} />
+          <CopyableCode label="Run the CLI from source" code={CLI_FROM_SOURCE} />
           <a
-            href="https://www.npmjs.com/package/@pcc/onboard"
+            href={`${REPO_URL}/tree/master/packages/onboard-cli`}
             target="_blank"
             rel="noreferrer"
             className="block text-center text-[11px] text-white/40 hover:text-white/70 transition-colors"
           >
-            View on npm →
+            View the source →
           </a>
         </HeroCard>
       </div>

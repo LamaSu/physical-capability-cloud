@@ -1,9 +1,15 @@
 # @pcc/onboard
 
-`npx` walkthrough for **Physical Capability Cloud** (PCC).
+A terminal walkthrough for **Physical Capability Cloud** (PCC).
+
+The @pcc packages are not on npm yet, so run it from a clone of the repository:
 
 ```bash
-npx @pcc/onboard
+git clone https://github.com/LamaSu/physical-capability-cloud
+cd physical-capability-cloud
+pnpm install
+pnpm --filter "@pcc/onboard..." build
+node packages/onboard-cli/dist/cli.js
 ```
 
 The CLI talks to **capability.network** through your own Anthropic key,
@@ -18,8 +24,8 @@ Three ways for a layperson to onboard to PCC:
 
 1. **Chat in the browser** — https://capability.network/onboard/chat
 2. **Paste a prompt into your own AI** — Claude.ai, ChatGPT, Cursor,
-   Gemini, etc. Run `npx @pcc/onboard --print-snippet` to grab it.
-3. **`npx @pcc/onboard`** (this package) — talks to the gateway from
+   Gemini, etc. Run the CLI with `--print-snippet` to grab it.
+3. **This CLI** (`packages/onboard-cli`) — talks to the gateway from
    your laptop with your own Anthropic key, no browser required.
 
 All three paths end up at the same place: a real registered capability,
@@ -27,20 +33,14 @@ kernel, or channel on https://capability.network.
 
 ## Install / run
 
-```bash
-npx @pcc/onboard                                # default: live chat
-npx @pcc/onboard --role buyer                   # bias the opener
-npx @pcc/onboard --gateway http://localhost:3000  # local dev gateway
-npx @pcc/onboard --print-snippet                # print the prompt; exit
-npx @pcc/onboard --help                         # all flags
-```
-
-Global install also works:
+From the repository root, after the build above:
 
 ```bash
-npm i -g @pcc/onboard
-onboard                                         # binary: 'onboard'
-pcc-onboard-chat                                # also linked under this alias
+node packages/onboard-cli/dist/cli.js                                  # default: live chat
+node packages/onboard-cli/dist/cli.js --role buyer                     # bias the opener
+node packages/onboard-cli/dist/cli.js --gateway http://localhost:3000  # local dev gateway
+node packages/onboard-cli/dist/cli.js --print-snippet                  # print the prompt; exit
+node packages/onboard-cli/dist/cli.js --help                           # all flags
 ```
 
 ## Configuration
@@ -66,7 +66,7 @@ shells only). Use `--persist` to save the resolved settings to
 
 ```
 ┌──────────────┐    ┌──────────────────────────────────────────┐
-│  npx @pcc/   │    │  https://capability.network              │
+│  this CLI    │    │  https://capability.network              │
 │  onboard     │    │                                          │
 │              │    │  GET /agent-package.json                 │
 │ 1. fetch agent-pkg ──────────────────────────────────────→   │
