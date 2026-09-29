@@ -175,9 +175,11 @@ def verify_signature(announcement, signature_hex, public_key_hex):
         signature = _strict_hex(signature_hex, 64)
         nacl.signing.VerifyKey(public).verify(_announcement_payload(announcement), signature)
         return True
-    except Exception:  # noqa: BLE001 -- verification never raises; anything unexpected is "not verified"
+    except Exception:  # noqa: BLE001 -- any Exception is "not verified"
         # A bad signature, malformed hex, a non-dict or non-JSON announcement,
         # or an error such as RecursionError on a pathological payload.
+        # KeyboardInterrupt and SystemExit are not Exceptions: they propagate,
+        # so the call raises instead of returning, and never returns True.
         return False
 
 
