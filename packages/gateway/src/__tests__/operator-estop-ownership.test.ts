@@ -29,6 +29,9 @@ let attackerKey: string;
 const OWNER = "n31-operator-owner";
 const ATTACKER = "n31-operator-attacker";
 const ZERO = "0x0000000000000000000000000000000000000000";
+const ADMIN_SECRET = "n31-policy-read-admin-secret";
+const savedAdminKey = process.env.PCC_ADMIN_KEY;
+const asAdmin = () => ({ authorization: `Bearer ${attackerKey}`, "x-admin-key": ADMIN_SECRET });
 
 const asOwner = () => ({ authorization: `Bearer ${ownerKey}` });
 const asAttacker = () => ({ authorization: `Bearer ${attackerKey}` });
@@ -102,6 +105,7 @@ function approvalStatus(id: string): string | undefined {
 
 beforeAll(async () => {
   process.env.PCC_DB_PATH = ":memory:";
+  process.env.PCC_ADMIN_KEY = ADMIN_SECRET;
   initStore({ seed: false });
   ownerKey = provisionApiKey({ operatorId: OWNER, scopes: ["operator"] }).rawKey;
   attackerKey = provisionApiKey({ operatorId: ATTACKER, scopes: ["operator"] }).rawKey;
@@ -121,6 +125,8 @@ afterAll(async () => {
   await app.close();
   await bareApp.close();
   closeStore();
+  if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = savedAdminKey;
 });
 
 // ── Emergency stop / resume ─────────────────────────────────────────────────
@@ -483,5 +489,50 @@ describe("R2 approval submission and listing: no side door", () => {
     });
     expect(byKernel.statusCode).toBe(200);
     expect(byKernel.json().approvals.map((a: { id: string }) => a.id)).toContain(approvalId);
+  });
+});
+
+describe("N31 policy READ: owner-or-admin (adk #3972)", () => {
+  it("[neg] a non-owner cannot read another kernel's operator policy", async () => {
+    const kernelId = await ownedKernel("n31-policy-victim");
+    // Give it a distinctive policy so a leak would be visible.
+    const put = await app.inject({
+      method: "PUT",
+      url: `/api/operator/policy/${kernelId}`,
+      headers: asOwner(),
+      payload: { version: 1, approvalMode: "manual", emergencyStop: true },
+    });
+    expect(put.statusCode, put.body).toBeLessThan(300);
+    const res = await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asAttacker() });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("not_kernel_owner");
+  });
+
+  it("[neg] no identity is 401", async () => {
+    const kernelId = await ownedKernel("n31-policy-noauth");
+    const res = await bareApp.inject({ method: "GET", url: `/api/operator/policy/${kernelId}` });
+    expect([401, 403]).toContain(res.statusCode);
+  });
+
+  it("[neg] a policy on an unowned (placeholder) kernel is the admin's alone", async () => {
+    const kernelId = placeholderKernel("n31-policy-legacy");
+    expect((await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asAttacker() })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asAdmin() })).statusCode).toBe(200);
+  });
+
+  it("[neg] a caller whose own identity is the zero-address placeholder still cannot read an unowned kernel's policy", async () => {
+    const zeroKey = provisionApiKey({ operatorId: ZERO, scopes: ["operator"] }).rawKey;
+    const kernelId = placeholderKernel("n31-policy-zero");
+    const res = await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: { authorization: `Bearer ${zeroKey}` } });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("not_kernel_owner");
+  });
+
+  it("control: the owner reads its own policy, and the admin reads any", async () => {
+    const kernelId = await ownedKernel("n31-policy-owner");
+    const owner = await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asOwner() });
+    expect(owner.statusCode, owner.body).toBe(200);
+    const admin = await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asAdmin() });
+    expect(admin.statusCode, admin.body).toBe(200);
   });
 });

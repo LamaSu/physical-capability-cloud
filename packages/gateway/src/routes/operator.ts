@@ -12,6 +12,7 @@ import {
   requireKernelOwner,
   requireOwnerOf,
 } from "../auth/kernel-owner-guard.js";
+import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -73,10 +74,33 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Operator Policy — guardrails for job execution
   // ═════════════════════════════════════════════════════════════════
 
-  /** GET /api/operator/policy/:kernelId — Get operator policy */
+  /**
+   * GET /api/operator/policy/:kernelId — Get operator policy.
+   *
+   * OWNER-OR-ADMIN (WP-C, N31; adk #3972). The policy carries the approval mode,
+   * spend/rate limits and `emergencyStop`, so a kernel's guardrail posture is not
+   * public: any key could read any kernel's e-stop state and limits. Only the
+   * kernel's owner (sameIdentity) or the admin may read it now. A kernel with no
+   * recorded owner (missing, or the zero-address placeholder) is the admin's
+   * alone (fail closed), matching the write path. No identity -> 401; a
+   * non-owner -> 403 not_kernel_owner. The default-policy fallback for an
+   * unknown kernel is unchanged, but only for an authorized caller.
+   */
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
-    async (req) => {
+    async (req, reply) => {
+      // OWNER-OR-ADMIN, mirroring the PUT/PATCH writes below (same requireActor
+      // + requireOwnerOf), plus an admin read for observability. An admin secret
+      // presented (valid) reads any kernel; otherwise the actor must own the
+      // kernel. requireOwnerOf fails closed on an unowned/placeholder kernel and
+      // on an unknown one (404), via the hardened ownsKernel.
+      if (presentsAdminSecret(req)) {
+        if (!requireAdminSecret(req, reply)) return reply;
+      } else {
+        const actor = requireActor(req, reply);
+        if (!actor) return reply;
+        if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
+      }
       try {
         const { db } = getStore();
         const row = db.select().from(operatorPolicies)
