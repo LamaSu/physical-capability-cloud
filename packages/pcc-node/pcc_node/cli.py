@@ -967,7 +967,7 @@ def logs_cmd(ctx, config_file, pcc_base, api_key, max_lines, no_device_health, l
             "retrievalCode": result["retrieval_code"],
             "systemInfo": {
                 "platform": bundle_data.get("system", {}).get("platform", ""),
-                "nodeVersion": "0.1.0",
+                "nodeVersion": "0.1.1",
                 "daemonRunning": bundle_data.get("node_state", {}).get("daemon_running", False),
                 "gatewayReachable": bundle_data.get("network", {}).get("gateway_reachable", False),
             },
@@ -1136,7 +1136,7 @@ def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
     running, _ = _is_running()
     sys_info = {
         "platform": plat.platform(),
-        "nodeVersion": "0.1.0",
+        "nodeVersion": "0.1.1",
         "daemonRunning": running,
     }
 

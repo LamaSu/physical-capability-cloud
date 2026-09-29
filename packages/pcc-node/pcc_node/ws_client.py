@@ -26,7 +26,7 @@ import ssl
 
 log = logging.getLogger("pcc-node.ws")
 
-USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
+USER_AGENT = "PCC-Node/0.1.1 (https://capability.network)"
 
 # Relaxed SSL context for self-signed certs on local networks
 _relaxed_ctx = ssl.create_default_context()
