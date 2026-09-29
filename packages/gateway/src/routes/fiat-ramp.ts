@@ -233,6 +233,15 @@ function getCdp(): {
 //     so an address minted during a mock period stays refused after real
 //     credentials arrive.
 
+// ── A demo answer carries no payment instruction ────────────────────────────
+// The mock Yellowcard client answers with real-looking literals: a TRC20 deposit address
+// for a withdrawal and a bank account ("PAGA 4550440202") for a deposit. Under the
+// mock/demo flags they are still instructions someone could pay into, so a demo answer
+// replaces them with null and says nothing was issued (as the Coinbase demo already
+// builds no checkout URL). A demo balance is null, not a 0 USDC read.
+const DEMO_NO_INSTRUCTION =
+  "Demo mode: nothing was issued by a provider, so there is nothing to pay into or send to.";
+
 const MOCK_WALLET_NOTE =
   "MOCK wallet: this gateway has no CDP credentials, so this address is a " +
   "placeholder that NO key controls. Do not send funds to it — anything sent " +
@@ -548,10 +557,14 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/fiat-ramp/cdp/wallet/:address/balance", async (req, reply) => {
-    // A simulated balance (0 USDC for any address) reads as "this wallet is empty".
+    // A simulated balance (0 USDC for any address) reads as "this wallet is empty", so a
+    // demo answer reads nothing: usdc is null.
     const mode = providerMode(reply, "cdp");
     if (!mode) return reply;
     const { address } = req.params as { address: string };
+    if (mode === "demo") {
+      return markRamp(mode, "cdp", { address, usdc: null, network: null, note: "Demo mode: no balance was read." });
+    }
     return markRamp(mode, "cdp", await getCdp().wallet.getBalance(address as `0x${string}`));
   });
 
@@ -873,6 +886,9 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         createdBy: principalOf(req),
       });
 
+      if (mode === "demo") {
+        return markRamp(mode, "yellowcard", { ...result, depositAddress: null, provider: "yellowcard", note: DEMO_NO_INSTRUCTION });
+      }
       return markRamp(mode, "yellowcard", { ...result, provider: "yellowcard" });
     } catch (err) {
       return reply.status(502).send({
@@ -935,6 +951,9 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         createdBy: principalOf(req),
       });
 
+      if (mode === "demo") {
+        return markRamp(mode, "yellowcard", { ...result, bankInfo: null, provider: "yellowcard", note: DEMO_NO_INSTRUCTION });
+      }
       return markRamp(mode, "yellowcard", { ...result, provider: "yellowcard" });
     } catch (err) {
       return reply.status(502).send({

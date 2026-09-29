@@ -15,6 +15,8 @@
  *     nothing.
  *  G. A spend permission is money authority over a wallet: only the wallet's creator, or an
  *     X-Admin-Key holder, may issue one.
+ *  H. A demo answer carries no payment instruction: no deposit address, no bank account, and
+ *     no 0 USDC balance read.
  *
  * The real @pcc/payments clients run; only the CDP SDK handle inside CdpWalletClient is
  * faked, so a live CDP configuration never reaches a network and the test can see which
@@ -135,6 +137,14 @@ const YC_WITHDRAW = {
   sender: { name: "A", country: "NG", address: "x", dob: "1990-01-01", email: "a@example.invalid", idNumber: "1", idType: "passport" },
 };
 const WISE = { sourceAmount: 10, recipient: { name: "A", currency: "EUR", type: "iban", details: {} }, reference: "r" };
+const YC_DEPOSIT = {
+  fiatAmount: "1000",
+  fiatCurrency: "NGN",
+  country: "NG",
+  channelId: "ch-1",
+  recipient: { name: "A", country: "NG", phone: "1", address: "x", dob: "1990-01-01", idNumber: "1", idType: "passport" },
+  walletAddress: WALLET_A,
+};
 
 // ── A ─────────────────────────────────────────────────────────────────────────
 
@@ -409,5 +419,35 @@ describe("G. NEGATIVE: spend authority over a wallet belongs to its creator", ()
     for (const extra of bad) {
       expect((await issue(w, "OperatorA", {}, extra)).statusCode, JSON.stringify(extra)).toBe(400);
     }
+  });
+});
+
+// ── H ─────────────────────────────────────────────────────────────────────────
+
+describe("H. NEGATIVE: a demo answer carries no payment instruction", () => {
+  it("demo withdraw: no deposit address (the mock's TRC20 literal never reaches a caller)", async () => {
+    await buildApp({ PCC_DEMO_ROUTES: "true" });
+    const res = await call("POST", "/api/fiat-ramp/yellowcard/withdraw", YC_WITHDRAW);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ depositAddress: null, mock: true, demo: true });
+    expect(res.json().note).toMatch(/nothing to pay into or send to/);
+    expect(res.json().session.mode).toBe("simulated");
+    expect(res.body).not.toContain("TCM1FNSZ");
+  });
+
+  it("demo deposit: no bank account", async () => {
+    await buildApp({ PCC_DEMO_ROUTES: "true" });
+    const res = await call("POST", "/api/fiat-ramp/yellowcard/deposit", YC_DEPOSIT);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ bankInfo: null, mock: true, demo: true });
+    expect(res.json().session.mode).toBe("simulated");
+    expect(res.body).not.toMatch(/4550440202|PAGA|PCC Escrow/);
+  });
+
+  it("demo balance: null, not a 0 USDC read", async () => {
+    await buildApp({ PCC_DEMO_ROUTES: "true" });
+    const res = await call("GET", `/api/fiat-ramp/cdp/wallet/${WALLET_A}/balance`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ address: WALLET_A, usdc: null, network: null, mock: true, demo: true });
   });
 });
