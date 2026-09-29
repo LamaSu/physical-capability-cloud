@@ -353,6 +353,24 @@ describe("N46: gateway-paid escrow funding is capped before the signer is asked"
     expect(signer.writes).toEqual([]);
   });
 
+  it("[neg] createJobFromSession itself refuses before its first signer write, whoever calls it (the authoritative admission)", async () => {
+    const key = keyFor(uid("buyer-direct") + "@x.test");
+    const id = await reviewedSession(key, "1000.00");
+    const row = getStore().db.select().from(negotiationSessions).where(eq(negotiationSessions.id, id)).get()!;
+    const { createJobFromSession } = await import("../routes/paid-job-flow.js");
+    await expect(createJobFromSession(row)).rejects.toThrow(/gateway_pay_over_action_cap/);
+    expect(signer.writes).toEqual([]);
+  });
+
+  it("[neg] a spend refusal is classified pre-flight (no chain call was made), so retry-settlement may re-mint later", async () => {
+    const negotiation = (await import("../routes/negotiation.js")) as { settlementFailureClass?: (e: string | null) => string };
+    expect(typeof negotiation.settlementFailureClass).toBe("function");
+    const refused = "gateway_spend_refused:gateway_pay_over_action_cap: The gateway pays at most $25 per action";
+    expect(negotiation.settlementFailureClass!(refused)).toBe("settlement_failed:preflight_no_escrow");
+    // Any other failure with the key present stays ambiguous (fail closed).
+    expect(negotiation.settlementFailureClass!("test: signer write intercepted")).toBe("settlement_failed:onchain_maybe_minted");
+  });
+
   it("control: a commit within every cap reaches the signer (the guard does not block legitimate spending)", async () => {
     const key = keyFor(uid("buyer-ok") + "@x.test");
     const res = await commit(await reviewedSession(key, "10.00"), key);

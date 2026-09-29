@@ -98,7 +98,7 @@ const SETTLEMENT_FAILED_AMBIGUOUS = "settlement_failed:onchain_maybe_minted";
  * pre-flight. createJobFromSession admits the payment before its first signer
  * write, so a refusal means no chain call was made.
  */
-function settlementFailureClass(settlementError: string | null): string {
+export function settlementFailureClass(settlementError: string | null): string {
   if (settlementError && !process.env.PCC_GATEWAY_PRIVATE_KEY) {
     return SETTLEMENT_FAILED_PREFLIGHT;
   }
