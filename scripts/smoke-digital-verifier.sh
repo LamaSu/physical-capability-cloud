@@ -36,12 +36,12 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# N44: every line the script prints goes through say(). The message is redacted
-# and printed literally (%s, never echo -e), so neither key material nor an
-# escape sequence from a response reaches the terminal. Only the colour
-# constants are interpreted.
+# N44: every line the script prints about a response goes through say(). The
+# message is redacted, then stripped of control characters (escape sequences,
+# carriage returns and every other byte below 0x20 except tab and newline, and
+# DEL), then printed with %s. Only the colour constants are interpreted.
 say() {
-  printf '  %b%s%b %s\n' "$1" "$2" "$NC" "$(redact "$3")"
+  printf '  %b%s%b %s\n' "$1" "$2" "$NC" "$(redact "$3" | tr -d '\000-\010\013-\037\177')"
 }
 
 pass() {
@@ -66,6 +66,33 @@ info() {
 # N44: strip PCC key material from anything printed or written to the report.
 redact() {
   printf '%s' "$1" | sed -E 's/([Pp][Cc][Cc]_([Ll][Ii][Vv][Ee]|[Tt][Ee][Ss][Tt]|[Oo][Rr][Aa][Cc][Ll][Ee])_)[0-9A-Fa-f]+/\1<redacted>/g'
+}
+
+# N44: one HTTP request, judged by what came back. Sets HTTP_STATUS to the
+# status code, or to "transport-error" when curl failed at any point (even
+# after part of a body arrived), and HTTP_BODY to the body. curl's own
+# messages are discarded, never printed, and no temporary file is written.
+http_request() {
+  local out rc=0
+  out=$(curl -sS "$@" -w '\n%{http_code}' 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    HTTP_STATUS="transport-error"
+    HTTP_BODY=""
+  else
+    HTTP_STATUS="${out##*$'\n'}"
+    HTTP_BODY="${out%$'\n'*}"
+  fi
+}
+
+# N44: succeeds only when HTTP_BODY is exactly one JSON object (not empty, not
+# two documents, no trailing bytes) for which the jq condition $1 holds.
+json_object_where() {
+  printf '%s' "$HTTP_BODY" | jq -e -s "length == 1 and (.[0] | type) == \"object\" and (.[0] | $1)" >/dev/null 2>&1
+}
+
+# The value of jq path $1 in HTTP_BODY's single object (after json_object_where).
+json_field() {
+  printf '%s' "$HTTP_BODY" | jq -r -s ".[0] | $1" 2>/dev/null || true
 }
 
 add_check() {
@@ -292,10 +319,11 @@ else
     else
       info "Sending smoke verify request..."
       # The check passes only when the oracle PROCESSED an authenticated request:
-      # transport ok, HTTP 200, and a boolean result.verified. The smoke evidence is
-      # not expected to verify; a rejected key, a timeout or a malformed answer FAILs.
-      VERIFY_BODY_FILE=$(mktemp)
-      VERIFY_HTTP=$(curl -sS --max-time 15 -o "$VERIFY_BODY_FILE" -w '%{http_code}' -X POST "$ORACLE_URL_USED/verify" \
+      # transport ok, HTTP 200, and a body that is exactly one JSON object whose
+      # result.verified is a boolean. true and false both pass, since the smoke
+      # evidence is not expected to verify. A rejected key, a transport failure,
+      # an empty body, several JSON documents or trailing bytes FAIL.
+      http_request --max-time 15 -X POST "$ORACLE_URL_USED/verify" \
         -H "Content-Type: application/json" \
         -H "x-oracle-key: $ORACLE_KEY" \
         -d '{
@@ -305,20 +333,25 @@ else
           "evidenceHash": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
           "assuranceTier": 0,
           "chainId": 84532
-        }' 2>/dev/null) || VERIFY_HTTP="transport-error"
-      VERIFY_RESP=$(cat "$VERIFY_BODY_FILE" 2>/dev/null || true)
-      rm -f "$VERIFY_BODY_FILE"
-      VERIFIED=$(printf '%s' "$VERIFY_RESP" | jq -r 'if (.result.verified | type) == "boolean" then (.result.verified | tostring) else "invalid" end' 2>/dev/null || echo "invalid")
+        }'
+      VERIFY_HTTP="$HTTP_STATUS"
+      VERIFIED="invalid"
+      if json_object_where '(.result | type) == "object" and (.result.verified | type) == "boolean"'; then
+        VERIFIED=$(json_field '.result.verified | tostring')
+      fi
       case "$VERIFY_HTTP" in
         200)
-          if [ "$VERIFIED" = "invalid" ]; then
-            fail "Oracle verify answered 200 without a boolean result.verified"
-            add_check "oracle-verify" "FAIL" "200 without a boolean result.verified" "0"
-          else
-            REASON=$(printf '%s' "$VERIFY_RESP" | jq -r '.result.reason // ""' 2>/dev/null || echo "")
-            pass "Oracle processed the authenticated verify request (verified=$VERIFIED, reason: $REASON)"
-            add_check "oracle-verify" "PASS" "authenticated verify processed; verified=$VERIFIED" "0"
-          fi
+          case "$VERIFIED" in
+            true|false)
+              REASON=$(json_field '.result.reason // "" | tostring')
+              pass "Oracle processed the authenticated verify request (verified=$VERIFIED, reason: $REASON)"
+              add_check "oracle-verify" "PASS" "authenticated verify processed; verified=$VERIFIED" "0"
+              ;;
+            *)
+              fail "Oracle verify answered 200 without exactly one JSON object holding a boolean result.verified"
+              add_check "oracle-verify" "FAIL" "200 without one JSON object holding a boolean result.verified" "0"
+              ;;
+          esac
           ;;
         401|403)
           fail "Oracle rejected PCC_ORACLE_KEY (HTTP $VERIFY_HTTP)"
@@ -346,53 +379,61 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 echo "-- Check 6: End-to-End Flow ------------------------------------------"
 T0=$(millis)
+# N44: every step counted below must answer as its route does when it works:
+# transport ok, the route's success status, and exactly one JSON object of the
+# expected shape. Anything else fails the flow.
 E2E_OK=true
+API_KEY=""
+TYPE_COUNT=0
+KERNEL_COUNT=0
 
 # Step 1: Provision API key
 info "Step 1: Provisioning API key..."
-PROVISION_RESP=$(curl -sS --max-time 15 -X POST "$GW/api/auth/provision" \
+http_request --max-time 15 -X POST "$GW/api/auth/provision" \
   -H "Content-Type: application/json" \
-  -d '{"email":"smoke-dv-'"$(date +%s)"'@pcc.local","name":"Smoke DV Agent"}' 2>/dev/null || echo "")
-
-if [ -z "$PROVISION_RESP" ]; then
-  fail "API key provision failed (no response)"
-  E2E_OK=false
+  -d '{"email":"smoke-dv-'"$(date +%s)"'@pcc.local","name":"Smoke DV Agent"}'
+if [ "$HTTP_STATUS" = "201" ] && json_object_where '(.api_key | type) == "string" and (.api_key | length) > 0'; then
+  API_KEY=$(json_field '.api_key')
+  info "Got an API key (value not shown)"
 else
-  API_KEY=$(echo "$PROVISION_RESP" | jq -r .api_key 2>/dev/null || echo "")
-  if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-    fail "API key provision failed: $(redact "$PROVISION_RESP")"
-    E2E_OK=false
-  else
-    info "Got an API key (value not shown)"
-  fi
+  fail "API key provision failed (HTTP $HTTP_STATUS, or not one JSON object with an api_key)"
+  E2E_OK=false
 fi
 
 if $E2E_OK; then
   # Step 2: List capability types
   info "Step 2: Listing capability types..."
-  TYPES_RESP=$(curl -sS --max-time 10 \
-    -H "Authorization: Bearer $API_KEY" \
-    "$GW/api/capabilities/types" 2>/dev/null || echo "")
-  TYPE_COUNT=$(echo "$TYPES_RESP" | jq '.types | length' 2>/dev/null || echo "0")
-  info "Found $TYPE_COUNT capability types"
+  http_request --max-time 10 -H "Authorization: Bearer $API_KEY" "$GW/api/capabilities/types"
+  if [ "$HTTP_STATUS" = "200" ] && json_object_where '(.types | type) == "array"'; then
+    TYPE_COUNT=$(json_field '.types | length')
+    info "Found $TYPE_COUNT capability types"
+  else
+    fail "Listing capability types failed (HTTP $HTTP_STATUS, or no types array)"
+    E2E_OK=false
+  fi
 
   # Step 3: List kernels
   info "Step 3: Listing kernels..."
-  KERNELS_RESP=$(curl -sS --max-time 10 \
-    -H "Authorization: Bearer $API_KEY" \
-    "$GW/api/kernels" 2>/dev/null || echo "")
-  KERNEL_COUNT=$(echo "$KERNELS_RESP" | jq '.kernels | length' 2>/dev/null || echo "0")
-  info "Found $KERNEL_COUNT kernel(s)"
+  http_request --max-time 10 -H "Authorization: Bearer $API_KEY" "$GW/api/kernels"
+  if [ "$HTTP_STATUS" = "200" ] && json_object_where '(.kernels | type) == "array"'; then
+    KERNEL_COUNT=$(json_field '.kernels | length')
+    info "Found $KERNEL_COUNT kernel(s)"
+  else
+    fail "Listing kernels failed (HTTP $HTTP_STATUS, or no kernels array)"
+    E2E_OK=false
+  fi
 
   # Step 4: Check setup status (authenticated)
   info "Step 4: Setup status..."
-  STATUS_RESP=$(curl -sS --max-time 10 \
-    -H "Authorization: Bearer $API_KEY" \
-    "$GW/api/setup/status" 2>/dev/null || echo "")
-  OVERALL=$(echo "$STATUS_RESP" | jq -r .overall 2>/dev/null || echo "unknown")
-  info "Overall setup status: $OVERALL"
+  http_request --max-time 10 -H "Authorization: Bearer $API_KEY" "$GW/api/setup/status"
+  if [ "$HTTP_STATUS" = "200" ] && json_object_where '(.overall | type) == "string"'; then
+    info "Overall setup status: $(json_field '.overall')"
+  else
+    fail "Setup status failed (HTTP $HTTP_STATUS, or no overall status)"
+    E2E_OK=false
+  fi
 
-  # Step 5: Check integrations
+  # Step 5: Check integrations (informational; not a pass condition)
   info "Step 5: Integration status..."
   INT_RESP=$(curl -sS --max-time 10 "$GW/api/status/integrations" 2>/dev/null || echo "")
   if [ -n "$INT_RESP" ]; then
@@ -401,18 +442,14 @@ if $E2E_OK; then
     info "Lit=$LIT_LIVE Starknet=$STARKNET_LIVE"
   fi
 
-  # Step 6: Validate API key
+  # Step 6: Validate API key. Only HTTP 200 with the boolean valid: true counts.
   info "Step 6: Validating API key..."
-  VALIDATE_RESP=$(curl -sS --max-time 10 \
-    -H "Authorization: Bearer $API_KEY" \
-    "$GW/api/auth/validate" 2>/dev/null || echo "")
-  IS_VALID=$(echo "$VALIDATE_RESP" | jq -r .valid 2>/dev/null || echo "false")
-
-  if [ "$IS_VALID" = "true" ]; then
+  http_request --max-time 10 -H "Authorization: Bearer $API_KEY" "$GW/api/auth/validate"
+  if [ "$HTTP_STATUS" = "200" ] && json_object_where '.valid == true'; then
     info "API key validated successfully"
   else
     # A provisioned key that does not validate is a failed flow, not a note.
-    fail "API key validation failed: $VALIDATE_RESP"
+    fail "API key validation failed (HTTP $HTTP_STATUS, or valid is not the boolean true)"
     E2E_OK=false
   fi
 fi
@@ -421,8 +458,8 @@ T1=$(millis)
 DURATION=$((T1 - T0))
 
 if $E2E_OK; then
-  pass "E2E flow completed (provision, discover, status, integrations)"
-  add_check "e2e-flow" "PASS" "All E2E steps succeeded. Types=$TYPE_COUNT Kernels=$KERNEL_COUNT" "$DURATION"
+  pass "E2E flow completed: provisioning, capability types, kernels, setup status and key validation each answered as required"
+  add_check "e2e-flow" "PASS" "Provision 201; types, kernels, setup status and validate 200 with the expected JSON. Types=$TYPE_COUNT Kernels=$KERNEL_COUNT" "$DURATION"
 else
   fail "E2E flow failed"
   add_check "e2e-flow" "FAIL" "E2E flow failed (see the step that failed above)" "$DURATION"
