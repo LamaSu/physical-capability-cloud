@@ -18,7 +18,11 @@
  *                           bytes32 challengeNonce)): binds the block to one settlement
  *                           unit and one challenge, so evidence for unit A cannot be
  *                           replayed onto unit B
- *   kernelSignedEventsRoot  the bundle's `hashBundle` digest, as 0x + hex
+ *   kernelSignedEventsRoot  the bundle's `hashBundle` digest, as 0x + hex. ONE bundle:
+ *                           a settlement unit's evidence is one kernel-signed bundle
+ *                           holding every outcome-bearing event (terminal events and
+ *                           inspections), so nothing can be left out by choosing which
+ *                           bundle to commit (LO-EV-9 header; bus #3543)
  *   sessionKeyAuthDigest    0x + sha256(canonicalize(SessionKeyAuthorization))
  *   attestationSetRoot      0x + sha256(canonicalize(sorted role digests)); each role
  *                           digest binds roleId, the quorum config, the job and the
