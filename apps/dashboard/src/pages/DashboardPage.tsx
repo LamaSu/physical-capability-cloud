@@ -142,7 +142,15 @@ export function DashboardPage() {
             {!activeJobs ? (
               <UnavailableState what="jobs" error={jobsQ.error} onRetry={() => void jobsQ.refetch()} />
             ) : activeJobs.length === 0 ? (
-              <EmptyState title="No active jobs" description="Submit a job or discover capabilities to get started." />
+              jobsTruncated ? (
+                // One page was read: none active in it is not none active at all.
+                <EmptyState
+                  title={`No active jobs in the first ${JOBS_PAGE_SIZE}`}
+                  description={`The gateway returned its first ${JOBS_PAGE_SIZE} jobs and none of them is active; there may be active jobs beyond them.`}
+                />
+              ) : (
+                <EmptyState title="No active jobs" description="Submit a job or discover capabilities to get started." />
+              )
             ) : (
               <div className="space-y-3">
                 {jobsTruncated && (

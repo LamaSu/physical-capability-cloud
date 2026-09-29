@@ -5,7 +5,10 @@
  * committing jobs. Ordering is strictly by assuranceScore (desc by default).
  * Kernels with no score yet sink to the bottom.
  *
- * Data source: GET /api/capabilities (enriched PaginatedResult<CapabilityDTO>).
+ * Data source: GET /api/capabilities (enriched PaginatedResult<CapabilityDTO>),
+ * read page by page (useAllCapabilities): one request returns at most 200 rows,
+ * and a ranking over some of them is not the network's ranking. If paging
+ * stops early, the page says the ranking covers only what was read.
  * We roll capabilities up per-kernel because a kernel can offer many
  * capabilities, and the leaderboard surface is kernel-oriented.
  */
@@ -21,8 +24,8 @@ import {
   LoadingShell,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { useCapabilities, useKernels } from "../api/hooks/use-pcc-data.js";
-import { UnavailableState } from "../components/LiveState.js";
+import { useAllCapabilities, useKernels } from "../api/hooks/use-pcc-data.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
 import {
   AssuranceScoreBadge,
   scoreToColor,
@@ -53,9 +56,7 @@ export function KernelLeaderboardPage() {
     );
   }, [setPageMeta]);
 
-  const capabilitiesQ = useCapabilities({
-    limit: 500,
-  });
+  const capabilitiesQ = useAllCapabilities();
   const kernelsQ = useKernels();
 
   // Called before any early return: hooks must run in the same order on every render.
@@ -85,9 +86,13 @@ export function KernelLeaderboardPage() {
     );
   }
 
-  const capabilities = capabilitiesQ.data.items ?? [];
+  // useAllCapabilities rejects an answer without an items array.
+  const { items: capabilities, total, complete } = capabilitiesQ.data;
   const kernels = kernelsQ.data;
   const rows = buildLeaderboard(capabilities, kernels);
+  // A failed refresh leaves the last successful read on screen, labelled with its age.
+  const stale = capabilitiesQ.isError || kernelsQ.isError;
+  const count = (n: number) => (complete ? String(n) : `${n}+`);
 
   const filtered = minScore != null
     ? rows.filter((r) => r.avgScore != null && r.avgScore >= minScore)
@@ -102,13 +107,29 @@ export function KernelLeaderboardPage() {
 
   return (
     <div className="space-y-6">
+      {stale && (
+        <StaleNotice
+          what="the leaderboard"
+          updatedAt={Math.min(capabilitiesQ.dataUpdatedAt, kernelsQ.dataUpdatedAt)}
+          onRetry={() => {
+            void capabilitiesQ.refetch();
+            void kernelsQ.refetch();
+          }}
+        />
+      )}
+      {!complete && (
+        <p role="status" className="text-xs text-amber-200/70">
+          Ranked over the first {capabilities.length} of the {total} capabilities the gateway lists. Kernels
+          whose capabilities weren't read may be missing or placed differently.
+        </p>
+      )}
       {/* KPI strip */}
       <div className="grid grid-cols-3 gap-4">
         <GlassPanel padding="md">
-          <DataCell label="Kernels" value={rows.length} mono />
+          <DataCell label="Kernels" value={count(rows.length)} mono />
         </GlassPanel>
         <GlassPanel padding="md">
-          <DataCell label="With Scores" value={scored.length} mono />
+          <DataCell label="With Scores" value={count(scored.length)} mono />
         </GlassPanel>
         <GlassPanel
           padding="md"
@@ -121,6 +142,7 @@ export function KernelLeaderboardPage() {
                 <AssuranceScoreBadge score={avgOfAvgs} size="md" />
               </span>
             }
+            sub={complete ? undefined : "over the capabilities read"}
           />
         </GlassPanel>
       </div>
@@ -224,11 +246,7 @@ export function KernelLeaderboardPage() {
                     </span>
                   </div>
                   <div className="col-span-4 flex items-center gap-2 min-w-0">
-                    <PulseIndicator
-                      status={
-                        row.kernelStatus === "online" ? "online" : "offline"
-                      }
-                    />
+                    <PulseIndicator status={row.online ? "online" : "offline"} />
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-white/85 truncate">
                         {row.kernelName}
@@ -258,7 +276,7 @@ export function KernelLeaderboardPage() {
                   </div>
                   <div className="col-span-1 flex items-center justify-end">
                     <span className="font-mono text-xs text-white/60">
-                      {row.queueDepth}
+                      {row.queueDepth ?? "—"}
                     </span>
                   </div>
                   <div className="col-span-2 flex items-center justify-end">
