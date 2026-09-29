@@ -34,18 +34,34 @@ const FEEDBACK_FILE = `${DATA_DIR}/feedback.jsonl`;
 // volume. Tunable via env for ops + tests.
 const RATE_MAX = Number.parseInt(process.env.PCC_FEEDBACK_RATE_MAX ?? "60", 10);
 const RATE_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_RATE_WINDOW_MS ?? "60000", 10);
+// Bounded (WP-A round 6, admingates "bound limiter state"): the map used to keep
+// every IP it ever saw. Past MAX_TRACKED_IPS the least recently seen IP is dropped,
+// as in waitlist.ts.
+export const MAX_TRACKED_IPS = 50_000;
 const hits = new Map<string, number[]>();
 function rateLimited(ip: string): boolean {
   const now = Date.now();
   const arr = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
   arr.push(now);
+  hits.delete(ip); // re-insert: Map order is insertion order, least recently seen first
   hits.set(ip, arr);
+  if (hits.size > MAX_TRACKED_IPS) hits.delete(hits.keys().next().value as string);
   return arr.length > RATE_MAX;
 }
 
 /** Reset the in-memory rate-limit counter. Test-only export. */
 export function __resetFeedbackRateLimit(): void {
   hits.clear();
+}
+
+/** How many IPs the limiter tracks. Test-only export. */
+export function __feedbackRateLimitSize(): number {
+  return hits.size;
+}
+
+/** Drive the limiter directly for one IP. Test-only export. */
+export function __feedbackRateLimited(ip: string): boolean {
+  return rateLimited(ip);
 }
 
 // Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
