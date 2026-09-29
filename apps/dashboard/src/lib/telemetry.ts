@@ -33,9 +33,13 @@ export function initTelemetry(): void {
       capture_performance: true,
       session_recording: {
         recordCrossOriginIframes: true,
-        // networkPayloadCapture is a runtime-supported feature not yet in the PostHog TS types
-        networkPayloadCapture: { recordBody: true, recordHeaders: true },
-      } as any,
+        // Never record request or response headers and bodies, whatever the
+        // PostHog project's settings say (N50): requests carry the API key,
+        // and responses carry newly issued keys and recovery phrases. The
+        // client can only switch these off; the project settings switch them on.
+        recordHeaders: false,
+        recordBody: false,
+      },
       loaded: (ph) => {
         ph.register({
           app: "pcc-dashboard",

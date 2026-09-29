@@ -14,6 +14,9 @@
  *
  * These render the real pages, record every fetch, and fail if a request
  * leaves the configured gateway (same origin here) or carries the key off it.
+ * EarnFromYourWorkPage also shows the new key and, from the demo wallet
+ * adapter, a recovery phrase: session recording (lib/telemetry.ts) must never
+ * capture either, so both render only inside .ph-no-capture.
  *
  * @vitest-environment jsdom
  */
@@ -119,6 +122,60 @@ async function typeInto(input: HTMLInputElement, value: string) {
   });
 }
 
+/** Every text node on the page whose trimmed text is exactly `text`. */
+function textNodes(text: string): Node[] {
+  const out: Node[] = [];
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (n.textContent?.trim() === text) out.push(n);
+  return out;
+}
+
+/** `text` is on the page, and only inside an element session recording and autocapture skip. */
+function expectHiddenFromRecording(text: string) {
+  const nodes = textNodes(text);
+  expect(nodes.length, `"${text.slice(0, 12)}…" is shown`).toBeGreaterThan(0);
+  for (const n of nodes) expect(n.parentElement!.closest(".ph-no-capture"), "session recording never sees it").not.toBeNull();
+}
+
+function quickstartReply(apiKey: string, mnemonic: string | null) {
+  return {
+    apiKey,
+    keyId: "key-1",
+    walletAddress: "0xabc0000000000000000000000000000000000001",
+    walletProvider: "privy",
+    walletProviderUserId: "u-1",
+    mnemonic,
+    mnemonicWarning: null,
+    scheduleHash: "0xhash",
+    ratePercent: 10,
+    bps: 1000,
+    role: "developer",
+    contributionDescription: null,
+    profileId: "p-1",
+    links: { viewSchedule: "/x", addUsdc: "/y", agentPackage: "/z" },
+  };
+}
+
+/** Fill in the Earn form and submit it. */
+async function submitEarnForm() {
+  await act(async () => {
+    root.render(
+      <MemoryRouter>
+        <EarnFromYourWorkPage />
+      </MemoryRouter>,
+    );
+  });
+  await flush();
+  const email = container.querySelector('input[type="email"]') as HTMLInputElement | null;
+  expect(email, "the email field").not.toBeNull();
+  await typeInto(email!, "maker@example.com");
+  const form = container.querySelector("form")!;
+  await act(async () => {
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  await flush();
+}
+
 function expectNoKeyLeak() {
   expect(calls.length).toBeGreaterThan(0);
   for (const c of calls) {
@@ -212,44 +269,15 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
 
   it("EarnFromYourWorkPage sends the key it was just issued only to the gateway that issued it", async () => {
     const fresh = "pcc_test_fresh0123456789abcdef";
-    replies["/api/contributors/quickstart"] = {
-      apiKey: fresh,
-      keyId: "key-1",
-      walletAddress: "0xabc0000000000000000000000000000000000001",
-      walletProvider: "privy",
-      walletProviderUserId: "u-1",
-      mnemonic: null,
-      mnemonicWarning: null,
-      scheduleHash: "0xhash",
-      ratePercent: 10,
-      bps: 1000,
-      role: "developer",
-      contributionDescription: null,
-      profileId: "p-1",
-      links: { viewSchedule: "/x", addUsdc: "/y", agentPackage: "/z" },
-    };
+    replies["/api/contributors/quickstart"] = quickstartReply(fresh, null);
     adoptApiKey(null);
     vi.stubGlobal("alert", vi.fn());
-    await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <EarnFromYourWorkPage />
-        </MemoryRouter>,
-      );
-    });
-    await flush();
-    const email = container.querySelector('input[type="email"]') as HTMLInputElement | null;
-    expect(email, "the email field").not.toBeNull();
-    await typeInto(email!, "maker@example.com");
-    const form = container.querySelector("form")!;
-    await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
-    await flush();
+    await submitEarnForm();
     const quickstart = calls.find((c) => c.url.endsWith("/api/contributors/quickstart"));
     expect(quickstart, "quickstart request").toBeDefined();
     expect(quickstart!.url).toBe("/api/contributors/quickstart");
     expect(quickstart!.authorization).toBeUndefined();
+    expectHiddenFromRecording(fresh);
 
     await clickButton("Add $20 USDC");
     expectNoKeyLeak();
@@ -257,5 +285,14 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
     expect(onramp, "onramp request").toBeDefined();
     expect(onramp!.url).toBe("/api/fiat-ramp/onramp/session");
     expect(onramp!.authorization).toBe(`Bearer ${fresh}`);
+  });
+
+  it("EarnFromYourWorkPage keeps the recovery words out of session recording", async () => {
+    const words = "zebra zoo wrist yard yellow young zone vapor vendor vivid walnut wasp".split(" ");
+    replies["/api/contributors/quickstart"] = quickstartReply("pcc_test_fresh0123456789abcdef", words.join(" "));
+    adoptApiKey(null);
+    await submitEarnForm();
+    expect(container.textContent).toContain("it's your wallet key");
+    for (const w of words) expectHiddenFromRecording(w);
   });
 });
