@@ -1,9 +1,7 @@
 import React from "react";
 import { GlassPanel, GlowBadge, DataCell, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
-
-const API = import.meta.env.VITE_PCC_URL ?? "";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -186,9 +184,7 @@ export function NegotiationSessionPage() {
     setLoading(true);
     setError(null);
     setSession(null);
-    fetch(`${API}/api/negotiate/session/${sessionId.trim()}`, {
-      headers: { ...getAuthHeaders() },
-    })
+    authorizedFetch(`/api/negotiate/session/${sessionId.trim()}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -204,9 +200,9 @@ export function NegotiationSessionPage() {
   function handleCreate(data: { userAgentId: string; kernelId: string; capabilityType: string }) {
     setSubmitting(true);
     setError(null);
-    fetch(`${API}/api/negotiate/session`, {
+    authorizedFetch("/api/negotiate/session", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     })
       .then((r) => {
