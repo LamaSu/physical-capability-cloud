@@ -25,4 +25,5 @@ export {
 export { GenericHttpAdapter } from "./templates/generic-http-adapter.js";
 export { GenericSensorAdapter } from "./templates/generic-sensor-adapter.js";
 export { GenericCameraAdapter } from "./templates/generic-camera-adapter.js";
-export { quickStart } from "./quick-start.js";
+export { quickStart, QuickStartConfigError } from "./quick-start.js";
+export type { QuickStartConfig, QuickStartMode, QuickStartResult } from "./quick-start.js";
