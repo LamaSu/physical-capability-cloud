@@ -1,0 +1,76 @@
+/**
+ * Which DISTINCT stored identities would the gateway treat as ONE owner under
+ * normalizeIdentity? (WP-A round 8, astra authz r2: "check existing identities
+ * for collisions before enabling the broader normalization policy".)
+ *
+ * READ-ONLY. It reads every identity-bearing column that identity binding
+ * covers (auth/reserved-identities.ts CLAIM_QUERIES), groups the raw values by
+ * normalizeIdentity, and returns each group holding more than one spelling.
+ * `newMerge` marks a group whose spellings were DISTINCT under the comparison
+ * master uses (trim + toLowerCase). Those are the principals this change would
+ * join, so the operator resolves them before deploying.
+ * scripts/identity-collision-audit.mjs runs it against a database.
+ */
+import { normalizeIdentity } from "./identity-normalize.js";
+
+export interface IdentityCollision {
+  normalized: string;
+  spellings: string[];
+  sources: string[];
+  newMerge: boolean;
+}
+
+interface Reader {
+  prepare(sql: string): { all(): unknown[] };
+}
+
+/** One source per identity column; a missing table or column is skipped and reported. */
+const SOURCES: ReadonlyArray<{ source: string; sql: string }> = [
+  { source: "api_keys.operator_id", sql: "SELECT DISTINCT operator_id AS v FROM api_keys" },
+  { source: "shop_kernels.operator_address", sql: "SELECT DISTINCT operator_address AS v FROM shop_kernels" },
+  { source: "machine_registrations.tenant_id", sql: "SELECT DISTINCT tenant_id AS v FROM machine_registrations" },
+  {
+    source: "machine_registrations.operator.walletAddress",
+    sql: "SELECT DISTINCT CASE WHEN json_valid(operator) THEN json_extract(operator, '$.walletAddress') END AS v FROM machine_registrations",
+  },
+  {
+    source: "machine_registrations.operator.email",
+    sql: "SELECT DISTINCT CASE WHEN json_valid(operator) THEN json_extract(operator, '$.email') END AS v FROM machine_registrations",
+  },
+  { source: "job_offers.poster_did", sql: "SELECT DISTINCT poster_did AS v FROM job_offers" },
+  { source: "ui_artifacts.owner", sql: "SELECT DISTINCT owner AS v FROM ui_artifacts" },
+];
+
+export function findIdentityCollisions(db: Reader): { collisions: IdentityCollision[]; read: string[]; skipped: string[] } {
+  const groups = new Map<string, { spellings: Set<string>; sources: Set<string> }>();
+  const read: string[] = [];
+  const skipped: string[] = [];
+  for (const { source, sql } of SOURCES) {
+    let rows: unknown[];
+    try {
+      rows = db.prepare(sql).all();
+    } catch {
+      skipped.push(source); // table or column absent in this deployment
+      continue;
+    }
+    read.push(source);
+    for (const row of rows as Array<{ v?: unknown }>) {
+      if (typeof row.v !== "string") continue;
+      const normalized = normalizeIdentity(row.v);
+      if (!normalized) continue;
+      let g = groups.get(normalized);
+      if (!g) groups.set(normalized, (g = { spellings: new Set(), sources: new Set() }));
+      g.spellings.add(row.v);
+      g.sources.add(source);
+    }
+  }
+  const collisions: IdentityCollision[] = [];
+  for (const [normalized, g] of groups) {
+    if (g.spellings.size < 2) continue;
+    const spellings = [...g.spellings].sort();
+    const masterForms = new Set(spellings.map((s) => s.trim().toLowerCase()));
+    collisions.push({ normalized, spellings, sources: [...g.sources].sort(), newMerge: masterForms.size > 1 });
+  }
+  collisions.sort((a, b) => a.normalized.localeCompare(b.normalized));
+  return { collisions, read, skipped };
+}

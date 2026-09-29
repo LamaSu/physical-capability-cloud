@@ -102,6 +102,18 @@ and `BROKER_OPERATORS`. The same refusal applies to
    presses emergency stop or resume, decides an approval or changes policy. Do
    Steps 1 to 4 for those holders first. For a node that must keep relaying
    through the deploy, narrow its key in place (Step 4).
+4. **Check identity collisions (read-only).** This build compares identities with
+   NFKC plus Unicode full case folding. Master used trim plus lowercase. Two stored
+   identities that master kept apart could now be ONE owner, for example
+   `STRASSE@x` and `straße@x`, or a fullwidth spelling. Before deploying, run the
+   audit against the production database, from `/app` in the production image:
+   ```sh
+   node packages/gateway/scripts/identity-collision-audit.mjs          # hashed spellings
+   node packages/gateway/scripts/identity-collision-audit.mjs --show   # raw spellings (PII)
+   ```
+   Exit code 0 means no new merge. Exit code 3 lists groups with `newMerge: true`.
+   Resolve each one before the deploy, for example by revoking or re-issuing one side's
+   keys. Dotless `ı` stays distinct from `i`.
 
 ## Step 1: Inventory
 
