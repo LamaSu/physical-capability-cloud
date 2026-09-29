@@ -15,6 +15,7 @@
  * imported, so #357 is never touched).
  */
 
+import { SETTLEMENT_TOKEN_DECIMALS } from "@pcc/spec";
 import type { Money, PlanPresentation, PlanState } from "./plan-presentation.js";
 
 export type PlanEditOp =
@@ -98,25 +99,30 @@ const KNOWN_OPS = new Set(["exclude-capability", "exclude-operator", "max-node-p
 const LAYOUT_OPS = new Set(["move-node", "collapse"]);
 
 /**
- * Money context for max-node-price/max-total: currency and decimals come ONLY from the presentation.
- * If `preview` exists, use it. Otherwise scan the nodes for the first `live.currency` and (possibly a
- * different node's) `money.gross.decimals`. Anything not a trustworthy string/non-negative integer is
- * treated as absent, never guessed at.
+ * Money context for max-node-price/max-total. The CURRENCY comes only from the presentation: the
+ * compiled preview's, or else the one live currency the server re-read for every node that has live
+ * terms (two different live currencies mean the plan needs a requote: no context). The DECIMALS come
+ * only from the server's own settlement-token table for that currency, never from the edit, and a
+ * preview that disagrees with the table is not trusted. So price edits work before compilation too,
+ * which is when a user most needs them.
  */
 function moneyContext(presentation: PlanPresentation): { currency: string; decimals: number } | null {
   const preview = presentation.preview;
+  let currency: string;
   if (preview) {
-    const currency = preview.gross?.currency;
-    const decimals = preview.gross?.decimals;
-    return isNonEmptyStr(currency) && isNonNegInt(decimals) ? { currency, decimals } : null;
+    const c = preview.gross?.currency;
+    if (!isNonEmptyStr(c)) return null;
+    currency = c;
+  } else {
+    const live = new Set<string>();
+    for (const n of presentation.nodes) if (n.live && isNonEmptyStr(n.live.currency)) live.add(n.live.currency);
+    if (live.size !== 1) return null;
+    currency = [...live][0]!;
   }
-  let currency: string | null = null;
-  let decimals: number | null = null;
-  for (const n of presentation.nodes) {
-    if (currency === null && n.live && isNonEmptyStr(n.live.currency)) currency = n.live.currency;
-    if (decimals === null && n.money && isNonNegInt(n.money.gross?.decimals)) decimals = n.money.gross.decimals;
-  }
-  return currency !== null && decimals !== null ? { currency, decimals } : null;
+  if (!Object.prototype.hasOwnProperty.call(SETTLEMENT_TOKEN_DECIMALS, currency)) return null;
+  const decimals = SETTLEMENT_TOKEN_DECIMALS[currency]!;
+  if (preview && preview.gross?.decimals !== decimals) return null;
+  return { currency, decimals };
 }
 
 type EditOutcome = { kind: "constraint"; constraint: PlanConstraint } | { kind: "layout"; pref: LayoutPreference } | { kind: "refused"; op: string | null; reason: EditRefusal };
@@ -240,17 +246,21 @@ export function planEditsToIntent(presentation: PlanPresentation, edits: unknown
   };
   const schema = "pcc.plan-edit-intent.v1" as const;
 
-  if (!Array.isArray(edits)) {
-    return { schema, basis, constraints: [], layout: [], refused: [{ index: 0, op: null, reason: "unreadable" }] };
+  // `edits` may be a Proxy: Array.isArray throws on a revoked one, and a proxied `length` can throw or
+  // lie. So both are read once, guarded, and the length must be a safe non-negative integer.
+  const unreadable = (): PlanEditIntent => ({ schema, basis, constraints: [], layout: [], refused: [{ index: 0, op: null, reason: "unreadable" }] });
+  let n: number;
+  try {
+    if (!Array.isArray(edits)) return unreadable();
+    const len: unknown = edits.length;
+    if (typeof len !== "number" || !Number.isSafeInteger(len) || len < 0) return unreadable();
+    n = len;
+  } catch {
+    return unreadable();
   }
-  // A real Array's `.length` can never be a throwing accessor (it is non-configurable), so this single
-  // read is always safe — the read-once discipline below is about EACH EDIT's own fields, not this.
-  const n = edits.length;
-  if (n > MAX_EDITS) {
-    const refused: PlanEditIntent["refused"] = [];
-    for (let i = 0; i < n; i++) refused.push({ index: i, op: null, reason: "too-many-edits" });
-    return { schema, basis, constraints: [], layout: [], refused };
-  }
+  // Over the limit, the batch is refused as a whole with ONE entry (at the first position past the
+  // limit): the work never grows with a caller-chosen length (a sparse array can claim 2^32 - 1).
+  if (n > MAX_EDITS) return { schema, basis, constraints: [], layout: [], refused: [{ index: MAX_EDITS, op: null, reason: "too-many-edits" }] };
 
   const knownNodeIds = new Set(presentation.nodes.map((node) => node.nodeId));
   const sealed = presentation.state === "sealed" || presentation.layer === "B";

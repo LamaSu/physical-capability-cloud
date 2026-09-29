@@ -314,6 +314,21 @@ describe("read-once discipline", () => {
     expect(out.refused).toEqual([{ index: 0, op: "max-node-price", reason: "unreadable" }]);
   });
 
+  it("a proxied edits array whose length throws or lies, or a revoked proxy, is one 'unreadable' refusal, never a throw", () => {
+    const p = compiledPresentation();
+    const throwing = new Proxy([], { get: (t, k) => (k === "length" ? (() => { throw new Error("boom"); })() : Reflect.get(t, k)) });
+    const lying = new Proxy([], { get: (t, k) => (k === "length" ? -1 : Reflect.get(t, k)) });
+    const fractional = new Proxy([], { get: (t, k) => (k === "length" ? 1.5 : Reflect.get(t, k)) });
+    const { proxy: revoked, revoke } = Proxy.revocable([], {});
+    revoke();
+    for (const edits of [throwing, lying, fractional, revoked]) {
+      let out: ReturnType<typeof planEditsToIntent> | undefined;
+      expect(() => (out = planEditsToIntent(p, edits))).not.toThrow();
+      expect(out!.refused).toEqual([{ index: 0, op: null, reason: "unreadable" }]);
+      expect(out!.constraints).toEqual([]);
+    }
+  });
+
   it("a throwing getter on the array index itself refuses that edit as unreadable", () => {
     const p = compiledPresentation();
     const edits: unknown[] = [{ op: "remove-node", nodeId: "mail" }, null, { op: "remove-node", nodeId: "print" }];
@@ -327,7 +342,7 @@ describe("read-once discipline", () => {
     expect(out.refused).toEqual([{ index: 1, op: null, reason: "unreadable" }]);
   });
 
-  it("exactly 256 edits is processed normally; 257 refuses every edit as too-many-edits", () => {
+  it("exactly 256 edits is processed normally; 257 refuses the batch as a whole, with ONE entry", () => {
     const p = compiledPresentation();
     const ok256 = Array.from({ length: 256 }, () => ({ op: "note", text: "x" }));
     const out256 = planEditsToIntent(p, ok256);
@@ -338,9 +353,13 @@ describe("read-once discipline", () => {
     const out257 = planEditsToIntent(p, bad257);
     expect(out257.constraints).toEqual([]);
     expect(out257.layout).toEqual([]);
-    expect(out257.refused).toHaveLength(257);
-    expect(out257.refused.every((r) => r.reason === "too-many-edits" && r.op === null)).toBe(true);
-    expect(out257.refused.map((r) => r.index)).toEqual(Array.from({ length: 257 }, (_, i) => i));
+    expect(out257.refused).toEqual([{ index: 256, op: null, reason: "too-many-edits" }]);
+    // The work never grows with a caller-chosen length: a sparse array claiming ~2^32 entries is one refusal.
+    const sparse: unknown[] = [];
+    sparse.length = 2 ** 32 - 1;
+    const started = Date.now();
+    expect(planEditsToIntent(p, sparse).refused).toEqual([{ index: 256, op: null, reason: "too-many-edits" }]);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });
 
@@ -462,7 +481,7 @@ describe("unknown op, unknown node, and every malformed value", () => {
 
 // ── Money context (rule 4) ───────────────────────────────────────────────────────────────────────
 
-describe("money context: currency and decimals come ONLY from the presentation", () => {
+describe("money context: the currency from the presentation, the decimals from the server's settlement table", () => {
   it("compiled presentation (has preview): max-node-price and max-total succeed with the preview's currency/decimals", () => {
     const p = compiledPresentation();
     const out = planEditsToIntent(p, [
@@ -492,15 +511,30 @@ describe("money context: currency and decimals come ONLY from the presentation",
     expect(out.constraints.map((c) => c.kind).sort()).toEqual(["exclude-capability", "min-tier", "remove-node"]);
   });
 
-  it("needs-requote presentation (has live, but no money anywhere since nothing compiled): still no-money-context", () => {
+  it("before compilation (needs-requote: live terms, no money yet) price edits WORK: the live currency, the table's decimals", () => {
     const p = needsRequotePresentation();
     expect(p.state).toBe("needs-requote");
     expect(p.preview).toBeUndefined();
     const out = planEditsToIntent(p, [{ op: "max-total", maxBaseUnits: "100" }]);
-    expect(out.refused).toEqual([{ index: 0, op: "max-total", reason: "no-money-context" }]);
+    expect(out.refused).toEqual([]);
+    expect(out.constraints).toEqual([{ kind: "max-total", max: { baseUnits: "100", currency: "USDC", decimals: 6 } }]);
   });
 
-  it("otherwise branch: no preview, currency from one node's `live`, decimals from a DIFFERENT node's `money` — succeeds, ignoring that node's own currency", () => {
+  it("no trustworthy context: two different live currencies, an unsettleable currency, or a preview whose decimals disagree with the table", () => {
+    const base = needsRequotePresentation();
+    const withLive = (currencies: string[]) =>
+      ({ ...base, nodes: base.nodes.map((n, i) => (n.live ? { ...n, live: { ...n.live, currency: currencies[i % currencies.length]! } } : n)) }) as PlanPresentation;
+    const livesCount = base.nodes.filter((n) => n.live).length;
+    expect(livesCount).toBeGreaterThanOrEqual(2); // the fixture has two live nodes, so the mixed case is real
+    for (const p of [withLive(["USDC", "USDT"]), withLive(["EUR"])]) {
+      expect(planEditsToIntent(p, [{ op: "max-total", maxBaseUnits: "100" }]).refused).toEqual([{ index: 0, op: "max-total", reason: "no-money-context" }]);
+    }
+    const compiled = compiledPresentation();
+    const skewed = { ...compiled, preview: { ...compiled.preview!, gross: { ...compiled.preview!.gross, decimals: 18 } } } as PlanPresentation;
+    expect(planEditsToIntent(skewed, [{ op: "max-total", maxBaseUnits: "100" }]).refused).toEqual([{ index: 0, op: "max-total", reason: "no-money-context" }]);
+  });
+
+  it("no preview: the currency from the node's live terms, the decimals from the server's table (a node's own money decimals are not the source)", () => {
     const p = fallbackMoneyPresentation();
     expect(p.preview).toBeUndefined();
     const out = planEditsToIntent(p, [{ op: "max-node-price", nodeId: "a", maxBaseUnits: "42" }]);
@@ -518,6 +552,14 @@ describe("money context: currency and decimals come ONLY from the presentation",
 // ── Sealed and invalid presentations (rule 5, 6) ─────────────────────────────────────────────────
 
 describe("sealed and invalid presentations: every semantic edit refused, layout still accepted", () => {
+  it("layer B alone is enough to freeze a plan, even if a presentation's state disagrees (defense in depth)", () => {
+    const p = { ...compiledPresentation(), layer: "B" } as PlanPresentation;
+    expect(p.state).toBe("compiled");
+    const out = planEditsToIntent(p, [{ op: "remove-node", nodeId: "mail" }, { op: "move-node", nodeId: "mail", x: 1, y: 2 }]);
+    expect(out.refused).toEqual([{ index: 0, op: "remove-node", reason: "plan-sealed" }]);
+    expect(out.layout).toEqual([{ kind: "position", nodeId: "mail", x: 1, y: 2 }]);
+  });
+
   it("sealed (layer B): semantic edits are plan-sealed; layout edits on real nodes still work", () => {
     const p = sealedPresentation();
     expect(p.layer).toBe("B");
