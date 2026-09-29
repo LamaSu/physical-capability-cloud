@@ -344,27 +344,25 @@ contract VNextAbiFreezeTest is Test {
         assertEq(usdc.balanceOf(address(e)), GOLDEN_TOTAL_GROSS);
     }
 
-    // ── 4. boundary parity with the compiler (astra review of #367) ─────────────────────────────
+    // ── 4. boundary parity with the compiler (astra reviews of #367) ────────────────────────────
     // The same pairs are tested against `compileVNextPolicy` in `vnext-compiler.test.ts` ("boundary parity
-    // with fund()"). Each ACCEPTED side is funded into an escrow whose committed root does NOT match: every
-    // per-unit check in the freeze loop runs first, so reaching `PolicyRootMismatch` proves the loop accepted
-    // the value. Each REFUSED side must revert with the exact limit error. No signature is needed: the payer
-    // sends, and both outcomes are decided before the acceptance is verified.
+    // with fund()"). Each ACCEPTED side is FUNDED for real (`_fundForReal`): an escrow whose committed root is
+    // exactly those configs, the operator's signature over the digest the escrow recomputes, the payer sending,
+    // and the escrow holding exactly the sum of g afterwards. (Round 1 stopped the accepted side at
+    // `PolicyRootMismatch`, which proved only that the per-unit checks let the value through.) Each REFUSED side
+    // must revert with the exact limit error, funded into an escrow whose root matches nothing (`_fundExpecting`).
 
     function test_Boundary_ReclaimAtFitsUint64() public {
         uint256 edge = type(uint64).max;
         vm.warp(edge - VNextSettlementLib.MIN_RECLAIM_DELAY); // the relative window is valid on both sides
-        _fundExpecting(_unit(0, 5, 0, address(0), edge, 1), abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector));
+        _fundForReal(_unit(0, 5, 0, address(0), edge, 1), "reclaim-u64");
         vm.warp(edge + 1 - VNextSettlementLib.MIN_RECLAIM_DELAY);
         _fundExpecting(_unit(0, 5, 0, address(0), edge + 1, 1), abi.encodeWithSelector(ValueOverflow.selector));
     }
 
     function test_Boundary_GrossFitsUint128() public {
         uint256 reclaimAt = block.timestamp + 30 days;
-        _fundExpecting(
-            _unit(0, type(uint128).max, 0, address(0), reclaimAt, 1),
-            abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector)
-        );
+        _fundForReal(_unit(0, type(uint128).max, 0, address(0), reclaimAt, 1), "gross-u128");
         _fundExpecting(
             _unit(0, uint256(type(uint128).max) + 1, 0, address(0), reclaimAt, 1),
             abi.encodeWithSelector(ValueOverflow.selector)
@@ -374,7 +372,7 @@ contract VNextAbiFreezeTest is Test {
     /// @dev Positive bps whose fee floors to zero: legal, creates no fee leg, but still needs a fee recipient.
     function test_Boundary_PositiveBpsZeroFee() public {
         uint256 reclaimAt = block.timestamp + 30 days;
-        _fundExpecting(_unit(0, 5, 1, FEE_DEST, reclaimAt, 1), abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector));
+        _fundForReal(_unit(0, 5, 1, FEE_DEST, reclaimAt, 1), "bps-zero-fee");
         _fundExpecting(_unit(0, 5, 1, address(0), reclaimAt, 1), abi.encodeWithSignature("Error(string)", "V1: fee>0 recipient==0"));
     }
 
@@ -384,7 +382,7 @@ contract VNextAbiFreezeTest is Test {
         for (uint256 i; i < 16; ++i) {
             full[i] = _unit(i, 1_000, 0, address(0), reclaimAt, 16)[0];
         }
-        _fundExpecting(full, abi.encodeWithSelector(VNextSettlementEscrow.PolicyRootMismatch.selector));
+        _fundForReal(full, "16x16");
 
         VNextSettlementEscrow.UnitConfig[] memory seventeen = new VNextSettlementEscrow.UnitConfig[](17);
         for (uint256 i; i < 17; ++i) {
@@ -392,6 +390,44 @@ contract VNextAbiFreezeTest is Test {
         }
         _fundExpecting(seventeen, abi.encodeWithSelector(VNextSettlementEscrow.BadUnitCount.selector));
         _fundExpecting(_unit(0, 1_000, 0, address(0), reclaimAt, 17), abi.encodeWithSelector(VNextSettlementEscrow.BadLegCount.selector));
+    }
+
+    /// @dev The acceptance expiry is INCLUSIVE. The factory refuses `block.timestamp > expiry`, so funding at exactly
+    ///      `expiry` succeeds, and an acceptance that expired one second ago is `PolicyExpired`. The compiler's pair
+    ///      refuses `fundingTime > expiry`.
+    function test_Boundary_ExpiryIsInclusive() public {
+        uint256 reclaimAt = block.timestamp + 30 days;
+        _fundForRealWithExpiry(_unit(0, 5, 0, address(0), reclaimAt, 1), "expiry-now", block.timestamp);
+
+        VNextSettlementEscrow.UnitConfig[] memory c = _unit(1, 5, 0, address(0), reclaimAt, 1);
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(_realIdentity(c, "expiry-past")));
+        usdc.mint(PAYER, 5);
+        uint256 expiry = block.timestamp - 1;
+        VNextSettlementEscrow.PolicyAcceptance memory acc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: expiry,
+            payerSignature: "",
+            operatorSignature: _sign(OPERATOR_PK, _realDigest(address(e), c, "expiry-past", expiry))
+        });
+        vm.expectRevert(VNextSettlementEscrowFactory.PolicyExpired.selector);
+        vm.prank(PAYER);
+        e.fund(c, acc);
+    }
+
+    /// @dev `reclaimAfterDeadline` is due AT `reclaimAt`: one second earlier is `TooEarlyToReclaim`, and at exactly
+    ///      `reclaimAt` the payer is refunded in full (doc §6, the exits from state 1). A state-machine boundary, so
+    ///      it has no compiler pair.
+    function test_Boundary_ReclaimIsDueExactlyAtReclaimAt() public {
+        uint256 reclaimAt = block.timestamp + 30 days;
+        VNextSettlementEscrow e = _fundForReal(_unit(0, 5, 0, address(0), reclaimAt, 1), "reclaim-due");
+        bytes32 unitId = e.unitIdAt(0);
+        vm.warp(reclaimAt - 1);
+        vm.expectRevert(VNextSettlementEscrow.TooEarlyToReclaim.selector);
+        e.reclaimAfterDeadline(unitId);
+        vm.warp(reclaimAt);
+        uint256 before = usdc.balanceOf(PAYER);
+        e.reclaimAfterDeadline(unitId);
+        assertEq(usdc.balanceOf(PAYER), before + 5, "the payer is not refunded at exactly reclaimAt");
+        assertEq(uint256(e.unitState(unitId)), uint256(UnitState.SETTLED_REFUNDED), "state after the reclaim");
     }
 
     /// @dev A relayer without the payer's signature is refused before anything else is read (`OnlyPayer`).
@@ -455,6 +491,85 @@ contract VNextAbiFreezeTest is Test {
         vm.expectRevert(revertData);
         vm.prank(PAYER);
         e.fund(configs, acc);
+    }
+
+    /// @dev The ACCEPTED side, for real: see the section comment.
+    function _fundForReal(VNextSettlementEscrow.UnitConfig[] memory configs, string memory tag)
+        internal
+        returns (VNextSettlementEscrow)
+    {
+        return _fundForRealWithExpiry(configs, tag, block.timestamp + 1 hours);
+    }
+
+    function _fundForRealWithExpiry(VNextSettlementEscrow.UnitConfig[] memory configs, string memory tag, uint256 expiry)
+        internal
+        returns (VNextSettlementEscrow e)
+    {
+        e = VNextSettlementEscrow(factory.createEscrow(_realIdentity(configs, tag)));
+        uint256 total;
+        for (uint256 i; i < configs.length; ++i) {
+            total += configs[i].g;
+        }
+        usdc.mint(PAYER, total);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: expiry,
+            payerSignature: "", // the payer sends
+            operatorSignature: _sign(OPERATOR_PK, _realDigest(address(e), configs, tag, expiry))
+        });
+        vm.prank(PAYER);
+        e.fund(configs, acc);
+        assertEq(usdc.balanceOf(address(e)), total, string.concat(tag, ": the escrow does not hold exactly the sum of g"));
+        assertEq(e.unitCount(), configs.length, string.concat(tag, ": unit count"));
+        for (uint256 i; i < configs.length; ++i) {
+            assertEq(uint256(e.unitState(e.unitIdAt(i))), uint256(UnitState.FUNDED_ACTIVE), string.concat(tag, ": unit state"));
+        }
+    }
+
+    /// @dev The golden parties with a job of its own per case, committing to exactly `configs`.
+    function _realIdentity(VNextSettlementEscrow.UnitConfig[] memory configs, string memory tag)
+        internal
+        pure
+        returns (PolicyIdentity memory id)
+    {
+        id = _goldenIdentity();
+        id.jobIdHash = keccak256(bytes(string.concat("pcc:vnext:boundary:", tag)));
+        id.prePolicyRoot = keccak256(abi.encode(configs));
+    }
+
+    /// @dev doc §3's acceptance digest, `keccak(0x1901 ‖ domainSeparator ‖ jobPolicyHash)`, from the pinned §1
+    ///      constants. The domain's verifyingContract is the clone.
+    function _realDigest(address escrow, VNextSettlementEscrow.UnitConfig[] memory configs, string memory tag, uint256 expiry)
+        internal
+        view
+        returns (bytes32)
+    {
+        PolicyIdentity memory id = _realIdentity(configs, tag);
+        bytes32 unitsRoot;
+        for (uint256 i; i < configs.length; ++i) {
+            bytes32 uid = VNextSettlementLib.computeSettlementUnitId(
+                block.chainid, escrow, id.jobIdHash, configs[i].milestoneIndex, configs[i].stepId
+            );
+            unitsRoot = keccak256(abi.encode(unitsRoot, uid));
+        }
+        bytes32 policyHash = keccak256(
+            bytes.concat(
+                abi.encode(
+                    GOLDEN_JOB_POLICY_TYPEHASH,
+                    block.chainid,
+                    address(factory),
+                    factory.implementation(),
+                    escrow,
+                    uint256(2), // policyVersion
+                    id.payer,
+                    id.operator
+                ),
+                abi.encode(id.jobIdHash, id.termsHash, id.policyNonce, id.prePolicyRoot, unitsRoot, expiry, id.acceptedPolicyDigest)
+            )
+        );
+        bytes32 domain = keccak256(
+            abi.encode(GOLDEN_EIP712_DOMAIN_TYPEHASH, GOLDEN_EIP712_NAME_HASH, GOLDEN_EIP712_VERSION_HASH, block.chainid, escrow)
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domain, policyHash));
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────────────────────────

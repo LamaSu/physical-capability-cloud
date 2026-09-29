@@ -317,6 +317,13 @@ describe("V-next compiler: boundary parity with fund()", () => {
     expectCode(() => at(edge + 1n - VNEXT.MIN_RECLAIM_DELAY, [unit({ g: 5n, reclaimAt: edge + 1n })]), "VALUE_OVERFLOW");
   });
 
+  it("expiry is inclusive: expiry == fundingTime compiles, one second earlier is POLICY_EXPIRED (the factory refuses block.timestamp > expiry)", () => {
+    const T = G.inputs.fundingTime;
+    const units = [unit({ g: 5n, reclaimAt: T + 30n * 86_400n })];
+    expect(() => compileVNextPolicy({ ...goldenInput(units), fundingTime: T, expiry: T })).not.toThrow();
+    expectCode(() => compileVNextPolicy({ ...goldenInput(units), fundingTime: T, expiry: T - 1n }), "POLICY_EXPIRED");
+  });
+
   it("gross: 2^128-1 is accepted, 2^128 overflows uint128 (ValueOverflow)", () => {
     const T = G.inputs.fundingTime;
     expect(() => at(T, [unit({ g: (1n << 128n) - 1n, reclaimAt: T + 30n * 86_400n })])).not.toThrow();
