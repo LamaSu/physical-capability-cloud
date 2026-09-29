@@ -328,6 +328,18 @@ describe("N10a: /api/ip/* authorization", () => {
       expect(res.json<{ error: string }>().error).toBe("already_settled");
     });
 
+    it("a Story service built in real mode is refused even when STORY_MOCK no longer says so (astra #385 r2)", async () => {
+      const { child, jobId } = await settled();
+      // The instance fixed its mode when it was built; the environment now says mock. Only the instance signs.
+      (getStoryIPService() as unknown as { mock: boolean }).mock = false;
+      expect(process.env.STORY_MOCK).toBe("true");
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(501);
+      expect(res.json<{ error: string }>().error).toBe("not_executed");
+      expect(pay).not.toHaveBeenCalled();
+    });
+
     it("two escrows for one workflow are ambiguous, and nothing is settled (astra #385 r2)", async () => {
       const { child, jobId } = await settled();
       const job = getRepos().jobs.findById(jobId)!;
