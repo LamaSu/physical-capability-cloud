@@ -24,6 +24,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import ssl
 
+from .declared_terms import skipped_by_gateway
+
 log = logging.getLogger("pcc-node.ws")
 
 USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
@@ -101,6 +103,8 @@ class PCCGatewayClient:
         self._thread: Optional[threading.Thread] = None
         # Track seen job IDs in this session to avoid double-execution
         self._seen_jobs: set = set()
+        # The gateway's capabilitiesSkipped from the last announcement (#437)
+        self.capabilities_skipped: List[Dict[str, str]] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -126,7 +130,13 @@ class PCCGatewayClient:
             self._thread.join(timeout=self.poll_interval + 2)
 
     def announce_capabilities(self, capabilities: List[Dict]) -> bool:
-        """POST capability announcement to gateway heartbeat endpoint."""
+        """POST capability announcement to gateway heartbeat endpoint.
+
+        ``capabilities`` carry the operator's declared terms
+        (pcc_node.declared_terms.announcement_plan).  What the gateway
+        refused to register (``capabilitiesSkipped``, #437) is logged and
+        kept in ``capabilities_skipped`` for ``pcc-node status``.
+        """
         payload = {
             "kernelId": self.kernel_id,
             "status": "online",
@@ -135,6 +145,9 @@ class PCCGatewayClient:
         }
         status, resp = self._post("/api/operator/heartbeat", payload)
         if status in (200, 201):
+            self.capabilities_skipped = skipped_by_gateway(resp)
+            for entry in self.capabilities_skipped:
+                log.warning("The gateway did not register capability %s: %s", entry["type"], entry["reason"])
             log.info(f"Announced {len(capabilities)} capabilities")
             return True
         log.warning(f"Capability announce failed HTTP {status}: {resp}")

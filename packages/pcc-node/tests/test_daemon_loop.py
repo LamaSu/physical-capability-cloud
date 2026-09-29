@@ -9,7 +9,6 @@ from unittest import mock
 import pytest
 
 from pcc_node.daemon import (
-    _build_capabilities_from_devices,
     _write_pid,
     _remove_pid,
     _write_state,
@@ -43,65 +42,14 @@ def clean_pid_files():
 
 
 # ---------------------------------------------------------------------------
-# Capability builder
+# Daemon state files
 # ---------------------------------------------------------------------------
-
-class TestBuildCapabilitiesFromDevices:
-    def test_printer_maps_to_document_printing(self):
-        devices = [{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}]
-        caps = _build_capabilities_from_devices(devices)
-        types = [c["type"] for c in caps]
-        assert "document-printing" in types
-
-    def test_opentrons_maps_to_liquid_handler(self):
-        devices = [{"id": "ot1", "type": "opentrons", "url": "http://ot2:31950"}]
-        caps = _build_capabilities_from_devices(devices)
-        types = [c["type"] for c in caps]
-        assert "liquid-handler" in types
-
-    def test_octoprint_maps_to_3d_print(self):
-        devices = [{"id": "op1", "protocol": "octoprint", "url": "http://op:5000"}]
-        caps = _build_capabilities_from_devices(devices)
-        types = [c["type"] for c in caps]
-        assert "3d-print" in types
-
-    def test_no_duplicates_from_same_protocol(self):
-        devices = [
-            {"id": "p1", "protocol": "ipp"},
-            {"id": "p2", "protocol": "ipp"},
-        ]
-        caps = _build_capabilities_from_devices(devices)
-        types = [c["type"] for c in caps]
-        # document-printing should only appear once
-        assert types.count("document-printing") == 1
-
-    def test_empty_devices_returns_empty(self):
-        caps = _build_capabilities_from_devices([])
-        assert caps == []
-
-    def test_mixed_devices(self):
-        devices = [
-            {"id": "p1", "protocol": "ipp"},
-            {"id": "ot1", "type": "opentrons"},
-            {"id": "cam1", "type": "camera"},
-        ]
-        caps = _build_capabilities_from_devices(devices)
-        types = [c["type"] for c in caps]
-        assert "document-printing" in types
-        assert "liquid-handler" in types
-        assert "visual-inspection" in types
-
-    def test_capability_has_device_id(self):
-        devices = [{"id": "d1", "protocol": "ipp", "host": "10.0.0.1"}]
-        caps = _build_capabilities_from_devices(devices)
-        for cap in caps:
-            if cap["type"] == "document-printing":
-                assert cap["deviceId"] == "d1"
-
-
-# ---------------------------------------------------------------------------
-# Daemon state files (inherited from original daemon.py, now using new module)
-# ---------------------------------------------------------------------------
+# NOTE: the old capability-builder (_build_capabilities_from_devices, and its
+# ad hoc device-type -> capability-slug map) was removed in #3560. Capability
+# derivation is now pcc_node.declared_terms.announcement_plan, which requires
+# each device to carry its own DECLARED terms (assuranceTiers/pricing) --
+# see tests/test_declared_terms.py for its full coverage (mirrors gateway PR
+# #437 plus the node's own stricter checks).
 
 class TestPidFile:
     def test_write_and_read(self):
@@ -129,6 +77,29 @@ class TestStateFile:
 
     def test_read_missing(self):
         assert read_state() is None
+
+    def test_announcement_defaults_to_empty_dict(self):
+        """_write_state's ``announcement`` parameter is optional; when
+        omitted the state file still has the key (#3560: cli status reads
+        state.get("announcement") unconditionally)."""
+        cfg = NodeConfig(kernel_id="k-test", kernel_name="test-node")
+        _write_state(cfg, time.time(), 0)
+        state = read_state()
+        assert state["announcement"] == {}
+
+    def test_announcement_round_trips(self):
+        """#3560: the state file records what was announced, what was not
+        (and why), and what the gateway refused -- so pcc-node status can
+        print it (cli._echo_announcement)."""
+        cfg = NodeConfig(kernel_id="k-test", kernel_name="test-node")
+        announcement = {
+            "announced": ["3d-print"],
+            "notAnnounced": [{"device": "cam-1", "reason": "this node executes no capability on protocol 'camera'"}],
+            "skipped": [{"type": "3d-print", "reason": "zero-price"}],
+        }
+        _write_state(cfg, time.time(), 3, announcement)
+        state = read_state()
+        assert state["announcement"] == announcement
 
 
 class TestIsRunning:
@@ -203,6 +174,10 @@ class TestRunDaemonLoop:
                 pcc_base="http://pcc-test",
                 pcc_api_key="test-key",
                 poll_interval=0,
+                # No declared terms: the device offers "document-printing" in
+                # principle (protocol "ipp"), but with nothing declared it is
+                # never announced (#3560) -- irrelevant to this test, which
+                # only exercises job polling/execution.
                 devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}],
             )
 
@@ -265,7 +240,10 @@ class TestRunDaemonLoop:
         assert "j-order" in execute_calls
 
     def test_daemon_announces_capabilities_on_startup(self):
-        """Capabilities are announced once at startup."""
+        """Capabilities are announced once at startup -- but only when a
+        device actually declares terms (#3560): announce_capabilities is
+        called from run_daemon only `if capabilities:`, and a device with no
+        assuranceTiers/pricing produces none."""
         from pcc_node import daemon as daemon_module
 
         with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
@@ -286,7 +264,11 @@ class TestRunDaemonLoop:
                 pcc_base="http://pcc-test",
                 pcc_api_key="key",
                 poll_interval=0,
-                devices=[{"id": "p1", "protocol": "ipp"}],
+                devices=[{
+                    "id": "p1", "protocol": "ipp",
+                    "assuranceTiers": [0],
+                    "pricing": {"currency": "USDC", "baseCost": "5", "minimum": "5"},
+                }],
             )
 
             try:

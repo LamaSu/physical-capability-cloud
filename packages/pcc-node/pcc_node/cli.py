@@ -18,7 +18,8 @@ from datetime import datetime
 import click
 
 from . import __version__
-from .config import NodeConfig, generate_config, save_config, load_config
+from .config import NodeConfig, generate_config, save_config, load_config, merge_detected_devices
+from .declared_terms import DeclaredTermsError, declared_tiers, validate_device_terms
 from .crypto import load_or_create_keys
 from .daemon import run_daemon, is_running, read_state
 from .detect import detect_all
@@ -208,11 +209,18 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     # Try loading existing config
     config = None
     if os.path.exists(os.path.abspath(config_file)):
+        # A config that exists but does not load (including a malformed terms
+        # declaration, #3560) stops the node.  It used to be logged and then
+        # replaced by a freshly generated config, saved over the operator's
+        # file below.
         try:
             config = load_config(config_file)
-            click.echo(f"Loaded config from {os.path.abspath(config_file)}")
         except Exception as e:
-            log.warning(f"Failed to load config: {e}")
+            raise click.ClickException(
+                f"Could not load {os.path.abspath(config_file)}: {e}. "
+                "The file was left unchanged; fix it, or move it away to generate a new one."
+            )
+        click.echo(f"Loaded config from {os.path.abspath(config_file)}")
 
     # Network discovery (optional)
     network_devices = []
@@ -253,8 +261,9 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
         click.echo("Generating kernel config...")
         config = generate_config(devices)
     else:
-        # Merge newly detected devices into existing config
-        config.devices = devices
+        # Keep the operator's configured devices (and their declared terms);
+        # add the detected devices none of them describes.
+        config.devices = merge_detected_devices(config.devices, devices)
 
     # Apply CLI overrides
     config.pcc_base = pcc_base
@@ -290,7 +299,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
         config.pcc_base,
         config.pcc_api_key,
         config.kernel_id,
-        devices,
+        config.devices,
     )
 
     # Prove possession of the node's Ed25519 signing key (Option C, #52 producer
@@ -309,13 +318,13 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     except LogSigningRefused as exc:
         click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
-    # Announce capabilities
-    if devices:
+    # Announce the capabilities whose terms the operator declared
+    if config.devices:
         announce_capabilities(
             config.pcc_base,
             config.pcc_api_key,
             config.kernel_id,
-            devices,
+            config.devices,
             secret_key=secret_key,
         )
 
@@ -448,6 +457,19 @@ def status():
     click.echo(f"Jobs completed: {state.get('jobs_completed', 0)}")
     click.echo(f"Camera: {state.get('camera_device', 'none')}")
     click.echo(f"PCC: connected ({state.get('pcc_base', 'unknown')})")
+    _echo_announcement(state.get("announcement") or {})
+
+
+def _echo_announcement(announcement):
+    """The capability announcement as ``pcc-node status`` shows it (#3560)."""
+    announced = announcement.get("announced") or []
+    click.echo(f"Announced: {', '.join(announced) if announced else 'nothing'}")
+    for entry in announcement.get("notAnnounced") or []:
+        click.echo(f"  not announced: {entry.get('device')}: {entry.get('reason')}")
+    for entry in announcement.get("skipped") or []:
+        click.echo(f"  refused by the gateway: {entry.get('type')}: {entry.get('reason')}")
+    if announced:
+        click.echo("  (the gateway keeps a capability's terms from its first announcement)")
 
 
 @main.command("config")
@@ -481,9 +503,6 @@ def config_cmd(output):
         default="manual",
     )
 
-    base_rate = click.prompt("Pricing - base rate ($)", type=float, default=10.0)
-    per_minute = click.prompt("Pricing - per minute ($)", type=float, default=0.15)
-
     pcc_base = click.prompt("PCC gateway URL", default="https://capability.network")
 
     # Build config
@@ -504,10 +523,12 @@ def config_cmd(output):
             "name": equipment,
         })
 
+    if devices:
+        _prompt_declared_terms(devices[0])
+
     config = generate_config(devices)
     config.pcc_base = pcc_base
     config.approval_mode = approval
-    config.pricing = {"base": base_rate, "per_minute": per_minute}
 
     # Confirm and save
     click.echo("")
@@ -515,7 +536,12 @@ def config_cmd(output):
     click.echo(f"Kernel name: {config.kernel_name}")
     click.echo(f"Devices: {len(devices)}")
     click.echo(f"Approval: {approval}")
-    click.echo(f"Pricing: ${base_rate} base + ${per_minute}/min")
+    for dev in devices:
+        if dev.get("pricing"):
+            p = dev["pricing"]
+            click.echo(f"Terms: tiers {dev['assuranceTiers']}, {p['currency']} {p['baseCost']} base, {p['minimum']} minimum")
+        else:
+            click.echo("Terms: none declared, so nothing will be announced")
 
     if click.confirm(f"\nSave config to {output}?", default=True):
         saved = save_config(config, output)
@@ -523,6 +549,45 @@ def config_cmd(output):
         click.echo(f"\nRun 'pcc-node start -c {output}' to start the node.")
     else:
         click.echo("Config not saved.")
+
+
+def _prompt_declared_terms(device):
+    """Ask the operator for the device's terms (board N23, #3560).
+
+    Nothing is filled in: an empty tier list declares no terms, and the
+    device then announces nothing.  The answers are checked with the
+    gateway's own rules (pcc_node.declared_terms) before anything is saved.
+    """
+    click.echo("")
+    click.echo("Terms for this device's capabilities. Nothing is announced without them,")
+    click.echo("and nothing is filled in for you.")
+    tiers_text = click.prompt(
+        "Assurance tiers you offer (comma-separated, each 0-3; empty for none)",
+        default="", show_default=False,
+    ).strip()
+    if not tiers_text:
+        return
+    try:
+        tiers = [int(part) for part in tiers_text.split(",")]
+    except ValueError:
+        raise click.ClickException(f"Assurance tiers must be integers 0-3, not {tiers_text!r}")
+    if declared_tiers(tiers)[0] is None:
+        raise click.ClickException(f"Assurance tiers must be 1-16 values, each 0, 1, 2 or 3, not {tiers_text!r}")
+    pricing = {
+        "currency": click.prompt("Currency code (letters and digits, e.g. USDC)").strip(),
+        "baseCost": click.prompt("Base cost (a plain decimal such as 12.50)").strip(),
+        "minimum": click.prompt("Minimum charge (a plain decimal)").strip(),
+    }
+    for key, label in (("perMinute", "Per-minute rate"), ("perGram", "Per-gram rate"), ("perCm3", "Per-cm3 rate")):
+        value = click.prompt(f"{label} (a plain decimal; empty for none)", default="", show_default=False).strip()
+        if value:
+            pricing[key] = value
+    device["assuranceTiers"] = tiers
+    device["pricing"] = pricing
+    try:
+        validate_device_terms(device)
+    except DeclaredTermsError as e:
+        raise click.ClickException(str(e))
 
 
 @main.command("import-job")
