@@ -4,6 +4,7 @@ import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 // ── WoT Thing Description helpers ────────────────────────────────────────────
 //
@@ -711,6 +712,15 @@ export async function capabilityRoutes(app: FastifyInstance) {
     }
     const { capability, created } = result.data;
     if (created) {
+      // Operator-onboarding funnel (ADK track item 4): capability_published.
+      // Telemetry must never break capability creation.
+      try {
+        recordOperatorStage(kernelId, "capability_published", {
+          capabilityId: (capability as { id?: string } | undefined)?.id ?? null,
+        });
+      } catch {
+        /* funnel tracking must never break capability creation */
+      }
       return reply.code(201).send({ capability, created: true });
     }
     return { capability, created: false };

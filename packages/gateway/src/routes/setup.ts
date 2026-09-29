@@ -16,6 +16,7 @@ import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
@@ -682,6 +683,17 @@ export async function setupRoutes(app: FastifyInstance) {
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
+
+        // Operator-onboarding funnel (ADK track item 4): device_registered.
+        // Fires on both create and update — recordOperatorStage dedupes
+        // per (kernelId, stage) so a re-registration is a no-op after the
+        // first. Telemetry must never break device registration.
+        try {
+          recordOperatorStage(kernelId, "device_registered", { deviceId });
+        } catch {
+          /* funnel tracking must never break device registration */
+        }
+
         return reply.code(action === "created" ? 201 : 200).send({
           device,
           registered: true,
@@ -858,6 +870,23 @@ export async function setupRoutes(app: FastifyInstance) {
       } catch {
         // continue polling
       }
+    }
+
+    // Operator-onboarding funnel (ADK track item 4): test_job_passed. Only
+    // the real device path can reach here (the deviceless self-attest branch
+    // returns earlier, above); still gate on finalStatus + a non-empty
+    // submitResult.deviceId, and — critically — on the CALLER having
+    // supplied kernelId explicitly (never the "kernel_dev_001" default),
+    // per the stage inventory's self-attest/shared-placeholder trap.
+    try {
+      if (kernelId && finalStatus === "completed" && submitResult.deviceId) {
+        recordOperatorStage(kernelId, "test_job_passed", {
+          deviceId: submitResult.deviceId,
+          jobId,
+        });
+      }
+    } catch {
+      /* funnel tracking must never break the test-job response */
     }
 
     return {

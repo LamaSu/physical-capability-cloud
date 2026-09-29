@@ -26,6 +26,27 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
+
+/**
+ * Adapters that never count toward the operator-onboarding funnel's
+ * adapter_ready stage: "mock" is the test/simulator adapter and
+ * "generic-http" is the catch-all placeholder adapter — neither proves a
+ * real machine is reachable. Mirrors the unmerged onboarding-readiness.ts's
+ * NON_EXECUTING_ADAPTERS set (see item4-stage-inventory.md). Exported so it
+ * can be unit-tested independent of KernelService/adapter wiring.
+ */
+export function isRealAdapterHealthy(
+  healthy: boolean,
+  adapterType: string | null | undefined,
+): boolean {
+  return (
+    healthy === true &&
+    !!adapterType &&
+    adapterType !== "mock" &&
+    adapterType !== "generic-http"
+  );
+}
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -432,6 +453,24 @@ export class JobFacade extends BaseFacade {
         );
       } catch {
         // non-fatal
+      }
+
+      // Operator-onboarding funnel (ADK track item 4): adapter_ready. Only a
+      // REAL adapter (not mock/generic-http) that is actually healthy
+      // counts. kernelId + adapterType are resolved from the device's own
+      // DB row (the health-check route only has deviceId) — if the row
+      // can't be found, there's nothing to attribute the stage to, so we
+      // don't record. Telemetry must never break a health-check response.
+      try {
+        const deviceRow = this.repos.kernels.findDeviceById(deviceId);
+        if (
+          deviceRow?.kernelId &&
+          isRealAdapterHealthy(result.healthy, deviceRow.adapterType)
+        ) {
+          recordOperatorStage(deviceRow.kernelId, "adapter_ready", { deviceId });
+        }
+      } catch {
+        /* funnel tracking must never break a health-check response */
       }
 
       return { healthy: result.healthy, details: result.details ?? null };
