@@ -61,4 +61,6 @@ bin/pcc-report prerequisites ok "gateway healthy, pcc-node 0.1.1 with crypto, ke
 ```
 If something failed, report it with `failed` or `blocked` and what you saw. Then stop or continue as the phase says. Reports never block the onboarding.
 
+On the current gateway, `/api/feedback` keeps only each report's summary and detail. The phase, outcome and attempt fields are stored once painpoints' #458 merges, so write summaries that make sense on their own.
+
 **Next:** [identify](01-identify.md).
