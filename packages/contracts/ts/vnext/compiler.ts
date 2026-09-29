@@ -14,9 +14,11 @@
  * The literals were computed by a third implementation that read only the doc.
  *
  * Pure: no I/O, no clock, no randomness. Integers are `bigint`, except the uint8/uint16 fields,
- * which are range-checked `number`s. Fails closed on every STATIC funding rule (doc §5.1): an input
- * that `fund()` or `initialize()` would reject for its content alone throws {@link VNextCompileError}
- * before any hash is returned.
+ * which are range-checked `number`s. Fails closed on the static funding rules doc §5.1 assigns to it:
+ * a config or party set that `fund()` or `initialize()` would reject for its content throws
+ * {@link VNextCompileError} before any hash is returned. It judges them under the assumptions it is given (the
+ * deployment addresses and the expected `fundingTime`). It never sees an acceptance, so the acceptance-shape
+ * rules belong to {@link checkAcceptance}, and the calldata bound to `encodeFundCalldata`.
  *
  * Compiling is NOT proof of fundability. Whether a job funds also depends on live chain state that
  * a pure function cannot see (doc §5.2): cohorts enabled, the policy nonce not revoked or superseded,

@@ -58,10 +58,13 @@ export const VNextSettlementEscrowABI = parseAbi([
   "event BuyerApproved(bytes32 indexed unitId, uint256 approvalNonce)",
   "event EscalationResolved(bytes32 indexed unitId, bytes32 indexed adjudicationId, uint8 role, bool upheld)",
   "event ClaimDischarged(bytes32 indexed claimId, bytes32 indexed unitId, address destination, uint256 amount)",
-  // EVERY revert reachable from fund(), including the factory's acceptPolicy, so a preflight simulation can
-  // name any failure instead of printing a raw selector. The static ones are the reverts a compile pre-empts
-  // (VNextCompileErrorCode names each); the live ones are what preflightVNextFunding surfaces. The V1 fee-schedule
-  // invariants revert with Error(string) reasons ("V1: ..."), which decode without a declaration.
+  // Every custom error the ESCROW, the FACTORY's acceptPolicy and SafeERC20 can raise on the fund() path, so a
+  // preflight simulation names those instead of printing a raw selector. The static ones are the reverts a compile
+  // pre-empts (VNextCompileErrorCode names each); the live ones are what preflightVNextFunding surfaces. The V1
+  // fee-schedule invariants revert with Error(string) reasons ("V1: ..."), which decode without a declaration.
+  // NOT covered: revert data from the TOKEN itself (or from an ERC-1271 signer). A token can bubble up errors of its
+  // own, which describeRevert then reports undecoded. The list is enumerated by hand from the Solidity, and
+  // vnext-preflight.test.ts checks that each one is declared; that is not a proof that nothing else is reachable.
   "error NotInitialized()",
   "error AlreadySealed()",
   "error Reentrancy()",

@@ -148,35 +148,41 @@ The escrow computes these itself. A compiler mirrors them to display, verify and
 
 ## 5. Funding rules
 
-### 5.1 Static rules: the compiler refuses these
+### 5.1 Static rules: refused before the chain is read, under stated assumptions
 
-Each is a `fund()` or `initialize()` revert decided by the config's content alone. `compileVNextPolicy` refuses every one, and a config that breaks one can never be funded.
+Each is a `fund()` or `initialize()` revert decided by content the caller already holds: the configs, the parties, and the acceptance. Three helpers refuse them, each named below. None of them reads the chain, so each check holds only under the assumptions the caller gives it: the deployment addresses (factory, implementation, token) and the expected funding time. The preflight (§5.2) checks those assumptions against the chain.
 
-- **Unit count:** `1 <= configs.length <= 16`. The total number of payout legs across the job is `<= 256`. That total can never be exceeded while the per-unit caps hold (16 × 16), but the escrow checks it anyway.
-- **Per unit:**
+- A config refused for its **content** (a count, a bound, conservation, a recipient, the parties) cannot be funded at that deployment at any time.
+- A config refused only for its **timing** (the expiry, a reclaim window) is refused for the `fundingTime` it was compiled with. It may be fundable at another time.
+
+- **Unit count** (`compileVNextPolicy`): `1 <= configs.length <= 16`. The total number of payout legs across the job is `<= 256`. That total can never be exceeded while the per-unit caps hold (16 × 16), but the escrow checks it anyway.
+- **Per unit** (`compileVNextPolicy`, and `buildUnitConfig` for one unit):
   - Every `UnitConfig` rule in §2, including the `uint128` bound on `g` and the `uint64` bound on `reclaimAt`.
   - The fee is exactly `f = floor(g * feeBps / 10000)` and `n = g - f`, with no other rounding. A positive `feeBps` whose fee floors to 0 is legal: it still needs an allowed fee recipient, and creates no fee leg.
   - The payouts **conserve exactly**: `Σ payouts[j].amount == n`. Over-allocation and under-allocation both revert `PayoutSumMismatch`, including a difference of 1 base unit.
   - Unit ids are unique (`DuplicateUnit`).
-- **Allowed recipient:** not `0x0`, not the escrow clone, not the settlement token, not the factory. This applies to every payout recipient, to the fee recipient when `feeBps > 0`, and to the operator. The payer and the operator *may* be payout recipients.
-- **Parties:** the payer is nonzero, and `operator != payer`.
-- **Acceptance shape:** each signature is `<= 1024` bytes, and a sender other than the payer must carry the payer's signature (`OnlyPayer`). `checkAcceptance` checks both when it is given the sender.
-- **Calldata:** the complete `fund()` calldata is `<= 26372` bytes. Any config inside the limits above, with signatures of at most 1024 bytes, fits by construction. `encodeFundCalldata` checks it anyway.
-- **Relative to the expected funding time:** `expiry` and every reclaim window are checked against the `fundingTime` the compile is given. The contract checks them against `block.timestamp`, so they are re-checked live (§5.2).
+- **Allowed recipient** (`compileVNextPolicy`): not `0x0`, not the escrow clone, not the settlement token, not the factory. The clone, token and factory are the ones the compile was GIVEN; the preflight confirms them on-chain. This applies to every payout recipient, to the fee recipient when `feeBps > 0`, and to the operator. The payer and the operator *may* be payout recipients.
+- **Parties** (`compileVNextPolicy`): the payer is nonzero, and `operator != payer`.
+- **Acceptance shape** (`checkAcceptance`, not the compile, which never sees an acceptance): each signature is `<= 1024` bytes, and a sender other than the payer must carry the payer's signature (`OnlyPayer`). The second check needs the sender. The preflight runs `checkAcceptance` with it.
+- **Calldata** (`encodeFundCalldata`): the complete `fund()` calldata is `<= 26372` bytes. Any config inside the limits above, with signatures of at most 1024 bytes, fits by construction; the helper checks it anyway.
+- **Relative to the expected funding time** (`compileVNextPolicy`): `expiry` and every reclaim window are checked against the `fundingTime` the compile is given. The expiry is inclusive (`fundingTime > expiry` is refused, as the factory refuses `block.timestamp > expiry`). The contract checks both against `block.timestamp`, so they are re-checked live (§5.2).
 
 ### 5.2 Live prerequisites: only the chain can answer these
 
 A pure compiler cannot see any of these. `preflightVNextFunding` reads each one, then **simulates the exact signed `fund()` from the actual sender**. The simulation is the authority; the named checks only explain a failure.
 
+- **One block.** The preflight pins one block first: the latest block, or the caller's `blockNumber`. Every read, the code lookup, the time checks and the simulation then run at that block, and the result returns it (`blockNumber`, `blockHash`, `blockTimestamp`). So `ok` is a statement about one named block, never a mix of several heads.
+- **This policy.** The acceptance's own `expiry` must equal the compiled expiry. The signatures cover a digest that includes the expiry, so an acceptance signed for a different expiry is a different policy. The chain might fund it, but it is not the policy that was compiled.
+
 - The deployment the compile assumed: the chain id, `factory.implementation()`, `factory.predictEscrow(identity)`, and the implementation's settlement token (`USDC()`).
 - The clone: created, `initialized`, not `configurationSealed`, and holding the compiled identity with no accepted policy yet.
 - **Both cohorts enabled.** `fund()` reverts `InvalidOrDisabledCohort` if the primary or the escalation attester is disabled.
 - **The policy generation is live:** `policyNonce >= policyNonceFloor[policyKey]` (not revoked, not superseded), and no escrow has been funded for `policyKey` yet.
-- **The live clock:** `block.timestamp <= expiry`, and every reclaim window holds at the live block time.
+- **The live clock:** `block.timestamp <= expiry` (inclusive), and every reclaim window holds, at the pinned block's time.
 - **Signature validity** for each signer: an EOA uses ECDSA with low `s` and `v ∈ {27, 28}`; a contract account uses ERC-1271, called with the clone as the caller. Only the contract decides this, so the simulation checks it.
-- **The exact pull:** the payer's balance and allowance to the escrow cover `Σ g`, and the token delivers exactly that (fee-on-transfer or short-delivering tokens are refused with `FundingDeltaMismatch`).
+- **The exact pull:** the payer's balance and allowance to the escrow cover `Σ g`, and the token delivers exactly that (fee-on-transfer or short-delivering tokens are refused with `FundingDeltaMismatch`). The balance and allowance reads are diagnostics only. Whether the token actually delivers is shown by the simulation alone.
 
-State can change between a preflight and the transaction. The contract re-checks everything at execution, and nothing here replaces an on-chain check.
+State can change between the pinned block and the block the transaction lands in. The contract re-checks everything at execution, and nothing here replaces an on-chain check.
 
 ## 6. Unit states: settled vs refunded
 
@@ -359,7 +365,8 @@ The gate-1 inputs for the last anchor are: `chainId 8453`; escrow `0x00000000000
 Changes fall into three classes. They have very different costs, and **a documentation correction must never force a change to correct Solidity or a recomputation of unchanged golden values.**
 
 1. **A change to a committed encoding or domain.** This covers any constant, struct, field order or width, preimage, compile-sequence step, or selector in §1–§4 and §7.
-   - It moves predicted escrow addresses, invalidates acceptance signatures, and fails `VNextAbiFreeze.t.sol` and `vnext-compiler.test.ts`. That is intended.
+   - What it moves depends on what it touches. A change to the escrow identity, the salt preimage or the clone init code moves predicted escrow addresses. A change to the JobPolicy struct, its typehash or the EIP-712 domain moves the acceptance digest, and so invalidates acceptance signatures. A change confined to one derived value (the evidence commitment, a claim id, a fee-schedule or payout-config hash) or to a selector moves NEITHER. It moves only its own pinned value. The evidence preimage, for one, shares nothing with the policy salt.
+   - Every one of those values is pinned as a literal in `VNextAbiFreeze.t.sol` (against the real contracts) and in `vnext-compiler.test.ts`. So any such change fails at least the assertion on the value it moved, in both suites. That is intended.
    - It requires: changing the Solidity; recomputing the golden outputs **with an implementation other than the contracts**, for example by updating the committed generator from this document, never from the Solidity (and never by copying `forge` output back into a test); updating both pinned literal sets; bumping the affected domain tag (`:vN`) so an old builder fails loudly rather than subtly; and posting the re-pin on the coordination bus to the composition, economics, oracle, evidence and VCR lanes before merge.
 2. **A change to contract behavior that commits nothing new.** This covers a funding limit (§5), a check, or a state transition (§6).
    - It need not change any hash. The calldata bound, for example, feeds no preimage.
