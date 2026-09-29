@@ -32,6 +32,7 @@ import { receiptsRoutes } from "./receipts.js";
 import { randomBytes } from "node:crypto";
 import { agntcyAdminRoutes } from "./agntcy.js";
 import { configuredAddress } from "../../config/payment-recipient.js";
+import { Sentry } from "../../sentry.js";
 
 /** Process-singleton registry used by every aggregator route. */
 let _registry: IndexedToolRegistry | undefined;
@@ -45,6 +46,25 @@ export function getAggregatorRegistry(): IndexedToolRegistry {
 export function _resetAggregatorRegistryForTests(): void {
   _registry = undefined;
   _x402Gate = undefined;
+  _x402Misconfigured = false;
+  _x402MisconfiguredAlerted = false;
+}
+
+/**
+ * N67 (operator item 80; astra pack 58 verdict, weakest link): x402 is ON, but the
+ * treasury (PCC_AGGREGATOR_TREASURY) is missing or fails the recipient policy.
+ * Priced invocations then fail CLOSED (503 payment_not_configured); they used to
+ * be served free, because the gate switched itself off. A free tool needs no
+ * treasury and is unaffected. An alert is raised once per process (an error log
+ * and Sentry).
+ */
+let _x402Misconfigured = false;
+let _x402MisconfiguredAlerted = false;
+
+/** True when x402 is ON but its treasury is missing or invalid (see above). */
+export function x402GateMisconfigured(): boolean {
+  getX402GateConfig();
+  return _x402Misconfigured;
 }
 
 /** Process-singleton x402 gate config — built once from env at first use. */
@@ -67,7 +87,10 @@ let _x402Gate: X402GateConfig | undefined;
 export function getX402GateConfig(): X402GateConfig | undefined {
   if (_x402Gate) return _x402Gate;
   const enabled = (process.env.PCC_X402_ENABLED ?? "").toLowerCase() === "true";
-  if (!enabled) return undefined;
+  if (!enabled) {
+    _x402Misconfigured = false;
+    return undefined;
+  }
   const chain = (process.env.PCC_X402_CHAIN ?? "base-sepolia").toLowerCase();
   const { network, usdcAddress, defaultFacilitatorUrl } =
     resolveChainConfig(chain);
@@ -79,13 +102,25 @@ export function getX402GateConfig(): X402GateConfig | undefined {
   // payee be advertised in every priceTag.
   const payTo = configuredAddress(process.env.PCC_AGGREGATOR_TREASURY) as Address | null;
   if (!payTo) {
-    // Misconfigured: log + treat as disabled so we don't gate calls with no payee.
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[x402] PCC_X402_ENABLED=true but PCC_AGGREGATOR_TREASURY is missing or invalid; gate disabled",
-    );
+    // Misconfigured: priced calls FAIL CLOSED (invoke.ts answers 503
+    // payment_not_configured). Never treated as payments being off (N67).
+    _x402Misconfigured = true;
+    if (!_x402MisconfiguredAlerted) {
+      _x402MisconfiguredAlerted = true;
+      const msg =
+        "[x402] PCC_X402_ENABLED=true but PCC_AGGREGATOR_TREASURY is missing or invalid: " +
+        "priced aggregator calls are REFUSED (503 payment_not_configured) until it is fixed";
+      // eslint-disable-next-line no-console
+      console.error(msg);
+      try {
+        Sentry.captureMessage(msg, "error");
+      } catch {
+        // Alerting never changes the gate's answer.
+      }
+    }
     return undefined;
   }
+  _x402Misconfigured = false;
   const hmacSecretHex = resolveHmacKey();
   _x402Gate = {
     enabled,
