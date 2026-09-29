@@ -70,7 +70,8 @@ export type SigningPreimageErrorCode =
   | "malformed-signature"
   | "malformed-public-key"
   | "malformed-session-key"
-  | "malformed-revocation";
+  | "malformed-revocation"
+  | "malformed-json";
 
 export class SigningPreimageError extends Error {
   readonly code: SigningPreimageErrorCode;
@@ -80,6 +81,54 @@ export class SigningPreimageError extends Error {
     this.name = "SigningPreimageError";
     this.code = code;
   }
+}
+
+/**
+ * The deepest container nesting a signing input's JSON text may have; the
+ * top-level value is depth 1. The bound is part of the contract because the
+ * two parsers differ past it: V8's JSON.parse reads arbitrarily deep text,
+ * while CPython's json raises RecursionError near depth 1000.
+ */
+export const SIGNING_JSON_MAX_DEPTH = 64;
+
+/**
+ * The JSON boundary for a signing input that arrives as text, such as a
+ * delegation or revocation read off the wire. It accepts exactly RFC 8259 JSON
+ * as JSON.parse reads it, which means:
+ *   - no NaN, Infinity or other non-standard token anywhere, including in
+ *     fields the preimage ignores;
+ *   - every number decodes to an IEEE-754 double;
+ *   - at most SIGNING_JSON_MAX_DEPTH containers deep.
+ * pcc-node's `loads_strict` mirrors it, so both languages accept and refuse
+ * the same texts (goldens.json `parity_vectors`). Never throws anything but
+ * SigningPreimageError.
+ */
+export function parseSigningInputJson(text: unknown): unknown {
+  if (typeof text !== "string") throw new SigningPreimageError("malformed-json", "expected JSON text");
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new SigningPreimageError("malformed-json", "not RFC 8259 JSON");
+  }
+  if (nestingExceeds(value, SIGNING_JSON_MAX_DEPTH)) {
+    throw new SigningPreimageError("malformed-json", `nested deeper than ${SIGNING_JSON_MAX_DEPTH}`);
+  }
+  return value;
+}
+
+/** Is any container in `value` deeper than `limit`? Iterative, so any depth is safe to scan. */
+function nestingExceeds(value: unknown, limit: number): boolean {
+  const stack: Array<[unknown, number]> = [[value, 1]];
+  while (stack.length > 0) {
+    const [v, depth] = stack.pop()!;
+    if (typeof v !== "object" || v === null) continue;
+    if (depth > limit) return true;
+    for (const child of Array.isArray(v) ? v : Object.values(v)) {
+      if (typeof child === "object" && child !== null) stack.push([child, depth + 1]);
+    }
+  }
+  return false;
 }
 
 export function isTaggedDigest(value: unknown): value is SHA256 {
