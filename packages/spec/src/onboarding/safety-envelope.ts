@@ -264,6 +264,23 @@ function rangeProblem(min: unknown, max: unknown): string | null {
   return null;
 }
 
+const ESTOP_MECHANISMS: readonly string[] = ["hardware", "adapter-stop", "none"];
+
+/** Why an e-stop cannot stand in a confirmed envelope for this class, or null. */
+function eStopProblem(eStop: EStopDeclaration | null | undefined, template: DeviceClassTemplate): string | null {
+  if (!eStop) return "no e-stop declared";
+  if (!ESTOP_MECHANISMS.includes(eStop.mechanism)) {
+    return `e-stop mechanism ${JSON.stringify(String(eStop.mechanism))} is not hardware, adapter-stop or none`;
+  }
+  if (eStop.mechanism === "none" && template.movesOrHeats) return "a device that moves or heats needs an e-stop";
+  if (eStop.mechanism === "adapter-stop" && !nonEmpty(eStop.stopCommand)) return "an adapter stop needs its command";
+  return null;
+}
+
+function rateProblem(rate: unknown): string | null {
+  return Number.isInteger(rate) && (rate as number) >= 1 ? null : "maxCommandsPerMinute must be an integer >= 1";
+}
+
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {
   const reasons: string[] = [];
   const template = Object.prototype.hasOwnProperty.call(DEVICE_CLASS_TEMPLATES, input?.deviceClass)
@@ -372,7 +389,7 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
   const eStop = input.intake.eStop ?? null;
   if (eStop === null) {
     questions.push({ about: "e-stop", ask: "How is this device stopped in an emergency?", why: "every device needs a declared stop" });
-  } else if (!["hardware", "adapter-stop", "none"].includes(eStop.mechanism)) {
+  } else if (!ESTOP_MECHANISMS.includes(eStop.mechanism)) {
     throw new EnvelopeRefused([`intake.eStop.mechanism ${JSON.stringify(String(eStop.mechanism))} is not hardware, adapter-stop or none`]);
   } else if (eStop.mechanism === "none" && template.movesOrHeats) {
     questions.push({
@@ -500,18 +517,22 @@ export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: Enve
   for (const req of template.requires) {
     if (!limits.has(req.quantity)) reasons.push(`no confirmed limit for ${req.quantity}`);
   }
-  if (!eStop) reasons.push("no e-stop declared");
-  else if (eStop.mechanism === "none" && template.movesOrHeats) reasons.push("a device that moves or heats needs an e-stop");
-  else if (eStop.mechanism === "adapter-stop" && !nonEmpty(eStop.stopCommand)) reasons.push("an adapter stop needs its command");
-  if (!Number.isInteger(rate) || (rate as number) < 1) reasons.push("maxCommandsPerMinute must be an integer >= 1");
-  if (reasons.length > 0) throw new EnvelopeRefused(reasons);
+  const stopProblem = eStopProblem(eStop, template);
+  if (stopProblem) reasons.push(stopProblem);
+  const rateIssue = rateProblem(rate);
+  if (rateIssue) reasons.push(rateIssue);
+  if (reasons.length > 0 || !eStop) throw new EnvelopeRefused(reasons);
 
   const envelope: SafetyEnvelopeBody = {
     envelopeVersion: 1,
     deviceClass: draft.deviceClass,
     device: { ...draft.device },
     limits: template.requires.map((r) => limits.get(r.quantity)!),
-    eStop: eStop as EStopDeclaration,
+    // Only the declaration's own fields are committed.
+    eStop: {
+      mechanism: eStop.mechanism,
+      ...(eStop.mechanism === "adapter-stop" ? { stopCommand: eStop.stopCommand } : {}),
+    },
     maxCommandsPerMinute: rate as number,
   };
   return {
@@ -546,6 +567,11 @@ export function compileSafetyEnvelope(confirmed: ConfirmedSafetyEnvelope): Compi
   }
   const template = DEVICE_CLASS_TEMPLATES[envelope.deviceClass];
   if (!template) throw new EnvelopeRefused([`unknown deviceClass ${JSON.stringify(envelope.deviceClass)}`]);
+  // A digest anyone can recompute, so the committed rules are checked again here.
+  const bodyProblems = [eStopProblem(envelope.eStop, template), rateProblem(envelope.maxCommandsPerMinute)].filter(
+    (p): p is string => p !== null,
+  );
+  if (bodyProblems.length > 0) throw new EnvelopeRefused(bodyProblems);
 
   const parameters: CsdParameter[] = [];
   const definitions: ParameterDefinition[] = [];
