@@ -695,7 +695,9 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
   const byId = new Map<string, AcceptedPlanNode>(nodes.map((n) => [n.nodeId, n]));
   const tierOf = new Map<string, number>(nodes.map((n) => [n.nodeId, tierFromKey(n.tierKey)!]));
 
-  // Edges and order.
+  // Edges and order. `edges` is required: a non-array is refused, never read as "no dependencies"
+  // (astra round 6, D). Dropping the edges silently would seal an execution order nobody agreed to.
+  if (!Array.isArray(input.edges)) v.push({ code: "invalid-plan-field", field: "edges" });
   const edges = Array.isArray(input.edges) ? input.edges : [];
   const seenEdges = new Set<string>();
   let edgesOk = true;
@@ -815,11 +817,12 @@ export function compileAcceptedPlan(untrusted: AcceptedPlanInput, deps: CompileD
     if (!split.ok) return { ok: false, violations: sortViolations(split.violations) };
     // The operator's floor, checked HERE as well as by economics (neither side trusts the other): the legs
     // to the node's own payout address carry at least what the operator's quote alone would have paid.
+    // The quote is `quoteOf`, the SAME value the splitter received: an omitted quote is the gross, so
+    // omitting it can never skip this check (astra round 6, F).
     const below = order.filter((id) => {
       const node = byId.get(id)!;
-      if (node.quoteBaseUnits === undefined) return false;
       const own = split.payouts.get(id)!.filter((p) => p.recipient.toLowerCase() === node.payoutAddress.toLowerCase()).reduce((a, p) => a + p.amount, 0n);
-      return own < unitEconomics(node.quoteBaseUnits, input.feeBps).n;
+      return own < unitEconomics(quoteOf(node, econOf.get(id)!.g), input.feeBps).n;
     });
     if (below.length > 0) return { ok: false, violations: sortViolations(below.map((nodeId) => ({ code: "operator-below-quote" as const, nodeId }))) };
     for (const [id, legs] of split.payouts) payoutsOf.set(id, legs);
@@ -1062,7 +1065,7 @@ function splitPayouts(
     order.map((id) => {
       const node = byId.get(id)!;
       const e = econOf.get(id)!;
-      return { nodeId: id, operator: node.operator, payoutAddress: node.payoutAddress, quote: node.quoteBaseUnits ?? e.g, g: e.g, f: e.f, n: e.n };
+      return { nodeId: id, operator: node.operator, payoutAddress: node.payoutAddress, quote: quoteOf(node, e.g), g: e.g, f: e.f, n: e.n };
     }),
   );
   const snap = snapshotSplit(res, order.length);
@@ -1122,6 +1125,15 @@ function splitPayouts(
 }
 
 /** Deterministic total order over violations, so a rejected plan's diagnostics are permutation-stable. */
+/**
+ * The quote a unit is held to: its operator's quote, or the gross when the plan names none. The splitter
+ * and the operator's floor BOTH use this one definition, so they can never disagree about an omitted
+ * quote (astra round 6, F).
+ */
+function quoteOf(node: AcceptedPlanNode, gross: bigint): bigint {
+  return node.quoteBaseUnits ?? gross;
+}
+
 function sortViolations(v: CompileViolation[]): CompileViolation[] {
   return [...v].sort((a, b) => {
     const x = canonicalize(a);

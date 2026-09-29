@@ -184,6 +184,50 @@ describe("copyPlanJson: exactly JSON, bounded, owned, read once", () => {
   });
 });
 
+describe("astra round 6: copyPlanJson bounds and well-formedness", () => {
+  it("(B) an array element must be the array's own: a prototype cannot fill a hole", () => {
+    const holey: unknown[] = new Array(1); // length 1, index 0 a hole
+    Object.setPrototypeOf(holey, Object.create(Array.prototype, { 0: { value: "inherited", enumerable: true } }));
+    expect(holey[0]).toBe("inherited"); // the premise: a plain read sees the inherited value
+    expect(copyPlanJson({ a: holey })).toEqual({ ok: false, reason: "unsupported-value" });
+  });
+
+  it("(B) the key count is bounded before any descriptor is read, and counts non-enumerable keys", () => {
+    let descriptorReads = 0;
+    const target: Record<string, number> = {};
+    for (let i = 0; i < 1000; i++) target[`k${i}`] = i;
+    const counting = new Proxy(target, {
+      getOwnPropertyDescriptor: (t, k) => {
+        descriptorReads++;
+        return Reflect.getOwnPropertyDescriptor(t, k);
+      },
+    });
+    expect(copyPlanJson({ a: counting })).toEqual({ ok: false, reason: "too-many-keys" });
+    expect(descriptorReads).toBe(0); // astra observed 1,000 descriptor reads before the old guard ran
+    const hidden = Object.fromEntries(Array.from({ length: PLAN_JSON_LIMITS.maxKeysPerObject }, (_, i) => [`k${i}`, 0]));
+    Object.defineProperty(hidden, "extra", { value: 1, enumerable: false });
+    expect(copyPlanJson(hidden)).toEqual({ ok: false, reason: "too-many-keys" });
+    // Under the bound, a non-enumerable key is still ignored, as JSON.stringify ignores it.
+    expect(copyPlanJson(Object.defineProperty({ a: 1 }, "b", { value: 2, enumerable: false }))).toEqual({ ok: true, value: { a: 1 } });
+  });
+
+  it("(B) key checks run before any sort, with a fixed priority: the refusal never depends on insertion order", () => {
+    const long = "k".repeat(PLAN_JSON_LIMITS.maxKeyLength + 1);
+    expect(copyPlanJson(JSON.parse(`{"__proto__": 1, "${long}": 2}`))).toEqual({ ok: false, reason: "reserved-key" });
+    expect(copyPlanJson(JSON.parse(`{"${long}": 2, "__proto__": 1}`))).toEqual({ ok: false, reason: "reserved-key" });
+    expect(copyPlanJson({ [long]: 1, ["\ud800"]: 2 })).toEqual({ ok: false, reason: "key-too-long" });
+    expect(copyPlanJson({ ["\ud800"]: 2, [long]: 1 })).toEqual({ ok: false, reason: "key-too-long" });
+  });
+
+  it("(E) ill-formed UTF-16 (a lone surrogate) is refused in values and keys; surrogate pairs pass", () => {
+    for (const bad of ["\ud800", "a\udc00", "\udbff\u0041", "x\ud83d"]) {
+      expect([bad, copyPlanJson({ a: bad })]).toEqual([bad, { ok: false, reason: "ill-formed-string" }]);
+      expect([bad, copyPlanJson({ [bad]: 1 })]).toEqual([bad, { ok: false, reason: "ill-formed-string" }]);
+    }
+    expect(copyPlanJson({ a: "\ud83d\ude00", ["\ud83d\ude00"]: "\u00e9" })).toEqual({ ok: true, value: { a: "\u{1F600}", "\u{1F600}": "\u00e9" } });
+  });
+});
+
 describe("reviewer-alpha self-check fixes (before astra round 6)", () => {
   it("#1 D5: an integer outside +-(2^53-1) is refused (VCR, the oracle and #359 refuse to hash one); safe integers and fractions pass", () => {
     for (const x of [2 ** 53, -(2 ** 53), 1e21, Number.MAX_VALUE, 1727200000000000000]) {
