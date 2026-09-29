@@ -163,6 +163,23 @@ def register_kernel(pcc_base, api_key, config):
 # a credential (an OctoPrint api_key, a token in a URL) must never be in it.
 PUBLIC_DEVICE_FIELDS = ("type", "protocol", "model", "name", "host", "ip", "port", "url", "path")
 
+# The kernel's AdapterType names (packages/kernel/src/kernel-config.ts, minus
+# "mock", which a node never advertises).  Kit manifests match devices by these
+# names in compatibility.interfaces (kits #3407 A4), so pcc-node advertises its
+# devices under them: its own labels "http"/"generic" are the kernel's
+# "generic-http" and "printer" is "ipp" (kits #3777, refvertical #3571).  A
+# label with no AdapterType (a camera, a serial port) is advertised unchanged,
+# and so matches no kit.
+ADAPTER_TYPES = ("octoprint", "modbus", "opcua", "sila", "ipp", "opentrons", "hamilton", "generic-http")
+_ADAPTER_TYPE_SYNONYMS = {"http": "generic-http", "generic": "generic-http", "printer": "ipp"}
+
+
+def advertised_adapter_type(device):
+    """The adapter type a device is advertised under: an AdapterType name
+    when one applies (:data:`ADAPTER_TYPES`), else its own label."""
+    label = device.get("adapterType") or device.get("protocol") or device.get("type", "unknown")
+    return _ADAPTER_TYPE_SYNONYMS.get(label, label)
+
 
 def public_device_config(device):
     """The device's non-secret fields: :data:`PUBLIC_DEVICE_FIELDS` only, and a
@@ -193,7 +210,7 @@ def register_devices(pcc_base, api_key, kernel_id, devices):
             "id": device_id,
             "type": device_type,
             "model": device.get("model") or device.get("name") or device_type,
-            "adapterType": device.get("adapterType") or device.get("protocol") or device_type,
+            "adapterType": advertised_adapter_type(device),
             "adapterConfig": public_device_config(device),
             "capabilities": device.get("capabilities", []),
         }

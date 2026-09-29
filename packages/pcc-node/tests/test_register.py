@@ -312,3 +312,31 @@ class TestRegisterSigningKey:
             with pytest.raises(LogSigningRefused):
                 register_signing_key("http://pcc", "key", "k1", pub, sec)
         mock_pcc.assert_not_called()
+
+
+class TestAdvertisedAdapterType:
+    """kits #3777 / refvertical #3571: devices are advertised under the kernel's
+    AdapterType names, so a generic-http kit matches a pcc-node HTTP device."""
+
+    @pytest.mark.parametrize("device,expected", [
+        ({"protocol": "http", "url": "http://10.0.0.9"}, "generic-http"),
+        ({"protocol": "generic"}, "generic-http"),
+        ({"type": "printer", "host": "10.0.0.5"}, "ipp"),
+        ({"protocol": "ipp"}, "ipp"),
+        ({"type": "octoprint"}, "octoprint"),
+        ({"protocol": "opentrons"}, "opentrons"),
+        ({"adapterType": "generic-http", "protocol": "http"}, "generic-http"),
+        ({"type": "camera"}, "camera"),
+        ({}, "unknown"),
+    ])
+    def test_advertised_names(self, device, expected):
+        from pcc_node.register import advertised_adapter_type
+        assert advertised_adapter_type(device) == expected
+
+    def test_register_devices_sends_the_adapter_type_name(self):
+        from pcc_node.register import register_devices, ADAPTER_TYPES
+        with mock.patch("pcc_node.register.pcc_request", return_value=(201, {})) as m:
+            register_devices("http://pcc", "key", "k1", [{"protocol": "http", "url": "http://10.0.0.9"}])
+        body = m.call_args.kwargs.get("body") or m.call_args.args[2]
+        assert body["adapterType"] == "generic-http"
+        assert "generic-http" in ADAPTER_TYPES and "mock" not in ADAPTER_TYPES
