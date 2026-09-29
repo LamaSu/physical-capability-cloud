@@ -37,6 +37,12 @@ declare module "fastify" {
      * apiGate on every /api request; see auth/api-key-auth.ts provenWalletOfKey.
      */
     provenWallet: string | null;
+    /**
+     * The email identity the caller's KEY is bound to under F3 (a server-written
+     * mark; see auth/api-key-auth.ts boundIdentityOfKey), or null. It is NOT proof
+     * of mailbox control. It is set by apiGate, never from a session.
+     */
+    boundIdentity: string | null;
   }
 }
 

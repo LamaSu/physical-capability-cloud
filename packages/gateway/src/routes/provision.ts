@@ -15,6 +15,7 @@ import { canProvision } from "../middleware/security-hardening.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import {
   decideUnverifiedIdentity,
+  identityBindingForMint,
   IDENTITY_CLAIMED_RESPONSE,
   callerMayDelegate,
   parseStoredScopes,
@@ -94,6 +95,7 @@ export async function provisionRoutes(app: FastifyInstance) {
      * (F3): the scopes of the caller's own key, which bound what may be minted.
      */
     let delegatingScopes: string[] | null = null;
+    let identityBinding: ReturnType<typeof identityBindingForMint> = null;
     /**
      * On that same path, the caller key's own expiry: the new key expires no
      * later (R4). null = the caller's key does not expire.
@@ -201,6 +203,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       if (decision.kind === "refuse") {
         return reply.status(409).send(IDENTITY_CLAIMED_RESPONSE);
       }
+      identityBinding = identityBindingForMint(decision, decision.kind === "self" ? decision.caller.operatorId : email);
       if (decision.kind === "self") {
         operatorId = decision.caller.operatorId;
         delegatingScopes = parseStoredScopes(decision.caller.scopes);
@@ -279,6 +282,9 @@ export async function provisionRoutes(app: FastifyInstance) {
           // provenWalletOfKey), so an owner check can accept this key as the
           // proven wallet. Only this branch writes it; the email path never does.
           ...(siweVerified ? { siweVerified: true, provenAddress: operatorId.toLowerCase() } : {}),
+          // The F3 identity binding (auth/api-key-auth.ts boundIdentityOfKey): only the
+          // email path writes it, and only for a fresh claim or a marked lineage.
+          ...(identityBinding ? { identityBinding } : {}),
         },
         publicKey: body.publicKey,
       });

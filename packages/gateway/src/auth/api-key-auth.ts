@@ -18,6 +18,7 @@ import {
   type Ed25519Keypair,
 } from "./ed25519.js";
 import { scopeColumnFits, MAX_SCOPES, MAX_SCOPE_CHARS, MAX_SCOPE_COLUMN_BYTES } from "./scope-limits.js";
+import { sameIdentity } from "./identity-normalize.js";
 
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
@@ -103,6 +104,47 @@ export function provenWalletOfKey(
   if (siweVerified !== true || typeof provenAddress !== "string") return null;
   if (!/^0x[0-9a-f]{40}$/.test(provenAddress)) return null;
   return provenAddress === record.operatorId.toLowerCase() ? provenAddress : null;
+}
+
+/** The server-written mark for a key bound to its email identity under F3 (identity binding). */
+export const F3_EMAIL_BINDING = "f3_email";
+
+/**
+ * The email identity this key is BOUND to under F3, or null (readmodels #3714;
+ * decision #3713 option b).
+ *
+ * Provisioning writes the mark into the key's metadata (routes/provision.ts,
+ * routes/contributors.ts):
+ *   - root: the identity was UNCLAIMED when the key was minted, so the key is the
+ *     first claim of that string since identity binding existed;
+ *   - delegated: the key was minted by a caller authenticated AS the identity, and
+ *     that caller's OWN key carries the mark.
+ * A key delegated from an UNMARKED key is never marked. That includes every key
+ * minted before identity binding: back then several parties could hold keys for
+ * the same string, so a legacy lineage proves nothing.
+ *
+ * The mark proves "this key's lineage first claimed this string under binding".
+ * It does NOT prove control of the mailbox: there is no email verification.
+ *
+ * Contract (the same as provenWalletOfKey): null unless the key's own
+ * server-written mark names the key's own operatorId (under normalizeIdentity).
+ */
+export function boundIdentityOfKey(
+  record: { operatorId?: unknown; metadata?: unknown } | null | undefined,
+): string | null {
+  if (!record || typeof record.operatorId !== "string" || typeof record.metadata !== "string") return null;
+  let meta: unknown;
+  try {
+    meta = JSON.parse(record.metadata);
+  } catch {
+    return null;
+  }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const b = (meta as { identityBinding?: unknown }).identityBinding;
+  if (!b || typeof b !== "object" || Array.isArray(b)) return null;
+  const { kind, id } = b as { kind?: unknown; id?: unknown };
+  if (kind !== F3_EMAIL_BINDING || typeof id !== "string") return null;
+  return sameIdentity(id, record.operatorId) ? record.operatorId : null;
 }
 
 /**

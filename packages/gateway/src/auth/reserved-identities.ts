@@ -31,7 +31,7 @@ import type { FastifyRequest } from "fastify";
 import { getRepos, getStore } from "../db.js";
 import { getJobOffersStore } from "../services/job-offers-store.js";
 import { normalizeIdentity, sameIdentity } from "./identity-normalize.js";
-import { resolveApiKey } from "./api-key-auth.js";
+import { resolveApiKey, boundIdentityOfKey, F3_EMAIL_BINDING } from "./api-key-auth.js";
 import { SCOPES_NOT_CARRIED_BY_WILDCARD, parseScopeColumn } from "../middleware/scope-checker.js";
 
 /** Every env var that grants elevated access by operatorId allowlist. */
@@ -295,6 +295,22 @@ export function decideUnverifiedIdentity(req: FastifyRequest, requested: string)
   }
   const claimed = isClaimedIdentity(requested);
   return reserved || claimed ? { kind: "refuse" } : { kind: "fresh" };
+}
+
+/**
+ * The F3 mark a NEW email key carries (see auth/api-key-auth.ts boundIdentityOfKey),
+ * or null. A fresh claim is a root. A delegation is marked only when the delegating
+ * key itself carries the mark, so a legacy lineage never gains it.
+ */
+export function identityBindingForMint(
+  decision: UnverifiedIdentityDecision,
+  operatorId: string,
+): { kind: typeof F3_EMAIL_BINDING; id: string; root: boolean; parentKeyId?: string } | null {
+  if (decision.kind === "fresh") return { kind: F3_EMAIL_BINDING, id: operatorId, root: true };
+  if (decision.kind === "self" && boundIdentityOfKey(decision.caller) !== null) {
+    return { kind: F3_EMAIL_BINDING, id: operatorId, root: false, parentKeyId: decision.caller.id };
+  }
+  return null;
 }
 
 /**

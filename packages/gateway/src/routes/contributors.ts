@@ -35,6 +35,7 @@ import { getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import {
   decideUnverifiedIdentity,
+  identityBindingForMint,
   IDENTITY_CLAIMED_RESPONSE,
   callerMayDelegate,
   parseStoredScopes,
@@ -550,6 +551,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     if (decision.kind === "refuse") {
       return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
     }
+    const identityBinding = identityBindingForMint(decision, decision.kind === "self" ? decision.caller.operatorId : body.email);
     if (decision.kind === "self") {
       operatorId = decision.caller.operatorId;
       keyScopes = callerMayDelegate(parseStoredScopes(decision.caller.scopes), keyScopes);
@@ -588,6 +590,8 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
           walletProvider: adapter.providerId,
           walletAddress: wallet.address,
           contributorRole: body.role,
+          // The F3 identity binding (auth/api-key-auth.ts boundIdentityOfKey).
+          ...(identityBinding ? { identityBinding } : {}),
         },
       });
       if (!result.record) {
