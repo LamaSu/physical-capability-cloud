@@ -28,10 +28,12 @@ a page that stops before the robot's own ``totalLength``, a command without an i
 a type, or a duplicate id. A trace that silently drops commands would prove a run the
 robot did not perform.
 
-Each entry is timed by the command's ``completedAt``. A command that never completed
-(the run stopped first) is timed by the run's own end, which the caller passes as
-``run_ended_at`` and which may not be earlier than any completion, so the chain's
-``capturedAt`` never runs backwards for it. Its ``createdAt`` stays in ``rawContent``.
+``capturedAt`` never decreases along the chain (equal is fine): the #52 verifier
+enforces that (evidence #3553). A completed command is timed by its own
+``completedAt``, and a list whose completions run backwards fails closed. A command
+that never completed is timed by its ``createdAt``, clamped to no earlier than the
+entry before it. No completion is invented for it, and its real fields stay in
+``rawContent``.
 """
 
 import re
@@ -171,7 +173,6 @@ def build_command_trace_events(
     run_id,
     settlement_unit_id=None,
     challenge_nonce=None,
-    run_ended_at=None,
 ):
     """One chained, kernel-signed ``log_hash_chain_entry`` event per command.
 
@@ -180,8 +181,6 @@ def build_command_trace_events(
     content hash of the protocol the job committed to. ``run_id`` is the robot's run id.
     ``settlement_unit_id`` and ``challenge_nonce``, when the gateway issued them for the
     unit being settled, are stamped on every event, as LO-EV-9 requires.
-    ``run_ended_at`` is the run's own ``completedAt`` (``GET /runs/{runId}``). It is
-    required when a command never completed, and times that command's entry.
     """
     for name, value in (
         ("job_id", job_id),
@@ -197,15 +196,6 @@ def build_command_trace_events(
             raise CommandTraceError(f"{name} must be 0x + 64 lowercase hex")
     if not commands:
         raise CommandTraceError("a run with no commands has no trace")
-    completions = [
-        _instant(c["completedAt"], f"command {c.get('id')!r} completedAt")
-        for c in commands
-        if isinstance(c, dict) and c.get("completedAt") is not None
-    ]
-    if run_ended_at is not None:
-        ended = _instant(run_ended_at, "run_ended_at")
-        if completions and ended < max(completions):
-            raise CommandTraceError("run_ended_at is earlier than a command's completedAt")
     binding = {
         "jobId": job_id,
         "kernelId": kernel_id,
@@ -220,15 +210,23 @@ def build_command_trace_events(
 
     source = f"opentrons-run:{run_id}"
     events = []
+    previous = None  # (instant, capturedAt text) of the entry before
     for command in commands:
         raw = command_log_line(command)
-        captured_at = command.get("completedAt")
-        if captured_at is None:
-            if run_ended_at is None:
+        if command.get("completedAt") is not None:
+            captured_at = command["completedAt"]
+            instant = _instant(captured_at, f"command {command['id']!r} completedAt")
+            if previous is not None and instant < previous[0]:
                 raise CommandTraceError(
-                    f"command {command['id']} never completed; pass run_ended_at, the run's own completedAt"
+                    f"command {command['id']} completed before the entry ahead of it; "
+                    "capturedAt must not decrease along the chain"
                 )
-            captured_at = run_ended_at
+        else:
+            captured_at = command.get("createdAt")
+            instant = _instant(captured_at, f"command {command['id']!r} createdAt")
+            if previous is not None and instant < previous[0]:
+                instant, captured_at = previous  # clamp: never earlier than the entry before
+        previous = (instant, captured_at)
         entry = capture.capture(
             raw_content=raw,
             source=source,

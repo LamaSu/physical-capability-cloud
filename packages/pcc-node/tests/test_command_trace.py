@@ -31,7 +31,6 @@ KERNEL = "kernel_mqse6f60_wshx"
 DEVICE = "ot2-falling-bush"
 PROTOCOL = "sha256:" + "ab" * 32
 RUN = "run-1c2d"
-RUN_ENDED = "2026-09-24T20:00:03.400Z"  # the run's own completedAt
 EVIDENCE_TS = os.path.join(os.path.dirname(__file__), "..", "..", "spec", "src", "types", "evidence.ts")
 
 
@@ -79,7 +78,7 @@ def _capture():
 
 
 def _build(commands=None, **overrides):
-    kwargs = dict(job_id=JOB, kernel_id=KERNEL, device_id=DEVICE, protocol_hash=PROTOCOL, run_id=RUN, run_ended_at=RUN_ENDED)
+    kwargs = dict(job_id=JOB, kernel_id=KERNEL, device_id=DEVICE, protocol_hash=PROTOCOL, run_id=RUN)
     kwargs.update(overrides)
     return build_command_trace_events(commands if commands is not None else _commands(), _capture(), **kwargs)
 
@@ -181,16 +180,38 @@ def test_events_form_one_signed_chain_in_the_robots_order():
         vk.verify(p["entryHash"].encode("utf-8"), bytes.fromhex(p["kernelSignature"]["value"]))
         assert p["kernelSignature"]["algorithm"] == "ed25519"
         previous = p["entryHash"]
-    # A command that never completed is timed by the run's end, never by its creation,
-    # so capturedAt does not run backwards.
+    # A command that never completed is timed by its creation: no completion is invented.
     assert [e["payload"]["capturedAt"] for e in events] == [
-        "2026-09-24T20:00:00.200Z", "2026-09-24T20:00:02.500Z", RUN_ENDED,
+        "2026-09-24T20:00:00.200Z", "2026-09-24T20:00:02.500Z", "2026-09-24T20:00:03.000Z",
     ]
 
 
-def test_a_run_whose_commands_all_completed_needs_no_run_end():
-    events = _build(_commands()[:2], run_ended_at=None)
-    assert [e["payload"]["capturedAt"] for e in events] == ["2026-09-24T20:00:00.200Z", "2026-09-24T20:00:02.500Z"]
+def _captured(events):
+    return [e["payload"]["capturedAt"] for e in events]
+
+
+def test_a_never_completed_command_is_clamped_to_the_entry_before_it():
+    # Created before the previous command completed (it was queued), and never run:
+    # its entry is no earlier than the one ahead of it (evidence #3553).
+    queued = {"id": "cmd-q", "commandType": "home", "status": "queued", "createdAt": "2026-09-24T20:00:01.000Z"}
+    events = _build([*_commands()[:2], queued])
+    assert _captured(events)[-1] == "2026-09-24T20:00:02.500Z"
+    assert "completedAt" not in json.loads(events[-1]["payload"]["rawContent"])  # nothing invented
+
+
+def test_capturedAt_never_decreases_even_with_later_completed_commands():
+    failed = {"id": "cmd-f", "commandType": "aspirate", "status": "failed", "createdAt": "2026-09-24T20:00:02.000Z"}
+    recovered = {"id": "cmd-r", "commandType": "home", "status": "succeeded",
+                 "createdAt": "2026-09-24T20:00:04.000Z", "completedAt": "2026-09-24T20:00:05.000Z"}
+    events = _build([*_commands()[:2], failed, recovered])
+    times = _captured(events)
+    assert times == sorted(times) and times[2] == "2026-09-24T20:00:02.500Z"
+
+
+def test_completions_that_run_backwards_fail_closed():
+    early = {"id": "cmd-e", "commandType": "home", "createdAt": "2026-09-24T19:00:00.000Z", "completedAt": "2026-09-24T19:00:01.000Z"}
+    with pytest.raises(CommandTraceError, match="must not decrease"):
+        _build([*_commands()[:2], early])
 
 
 def test_events_are_evidence_events_with_a_unique_id_and_the_kernels_device_type():
@@ -251,10 +272,9 @@ def test_changing_any_committed_field_changes_the_event_hash():
     "commands, overrides, match",
     [
         ([], {}, "no commands"),
-        (None, {"run_ended_at": None}, "never completed"),
-        (None, {"run_ended_at": "2026-09-24T20:00:02.000Z"}, "earlier than"),
-        (None, {"run_ended_at": "yesterday"}, "ISO-8601"),
-        (None, {"run_ended_at": "2026-09-24T20:00:04"}, "no time zone"),
+        ([{"id": "c", "commandType": "home"}], {}, "is not a timestamp"),
+        ([{"id": "c", "commandType": "home", "createdAt": "yesterday"}], {}, "ISO-8601"),
+        ([{"id": "c", "commandType": "home", "createdAt": "2026-09-24T20:00:04"}], {}, "no time zone"),
         ([{"id": "c", "commandType": "home", "completedAt": "soon"}], {}, "ISO-8601"),
         (None, {"job_id": ""}, "job_id"),
         (None, {"protocol_hash": None}, "protocol_hash"),
