@@ -40,6 +40,19 @@ describe("the kernel signing-key registry snapshot", () => {
     expect(SNAP.snapshotHash).toBe("0x38ff407cb60d5a24aa977dd3684fe66f83cea2fb62e644dbf68b4789f1d428db");
   });
 
+  it("orders punctuation kernel ids by code unit, never locale collation (oracle #3348)", () => {
+    // ICU would order these kernel_a, kernel-1, kernel-a, kernel:a, kernel.a, kernela.
+    const ids = ["kernel_a", "kernel-1", "kernel-a", "kernel:a", "kernel.a", "kernela"];
+    const entries = ids.map((kernelId, i) => ({
+      kernelId,
+      devicePrincipalId: `ed25519:0x${(i + 1).toString(16).padStart(2, "0").repeat(32)}`,
+    }));
+    const hash = computeKernelSigningKeySnapshotHash(entries);
+    expect(computeKernelSigningKeySnapshotHash([...entries].reverse())).toBe(hash);
+    // Pinned, and reproduced in Python over byte-sorted keys; the ICU order would hash to 0x3f68b28d…2d71.
+    expect(hash).toBe("0xdc7e41004bdeba49e24f968e3138cd5cd5a1249823089ec6052651ddb867dd58");
+  });
+
   it("refuses rows the registry must never hold", () => {
     const leaked = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!;
     for (const bad of [
