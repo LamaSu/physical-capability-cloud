@@ -9,11 +9,13 @@
  * `PrimitiveVerifier`s here, one primitive at a time, fail-closed throughout.
  *
  * Bound so far:
- *   - #52 machine.execution_log → `makeExecutionLogVerifier` over
- *     `verifyLogChain` (chain + kernel-signature checks), with the
- *     registered-key check injected by the consumer (`VerifyKernelSignature` —
- *     kernel wraps `KernelKeychain.verifySignature`; the oracle resolves the
- *     signer against its registered-key snapshot, #47).
+ *   - #52 machine.execution_log → `makeExecutionLogVerifier`. It verifies the
+ *     kernel-signed BUNDLE that carries the log: the bundle signature, LO-EV-9
+ *     subject binding, then one linear chain from GENESIS through
+ *     `verifyLogChain`. The registered signer and the registered-key checks
+ *     are injected by the consumer (the kernel wraps
+ *     `KernelKeychain.verifySignature`; the oracle resolves the signer against
+ *     its registered-key snapshot, #47).
  *
  * Still fail-closed stubs (`met:false`, never a silent pass):
  *   - #53 telemetry.envelope_conformance → will wrap `detectDrifts`
@@ -31,7 +33,13 @@
  */
 
 import { makeStubVerifier, type PrimitiveVerifier, type PrimitiveVerifyResult } from "../verifier-interface.js";
+import { parseEd25519SignatureHex } from "../signing-preimage.js";
+import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../subject-binding.js";
+import type { Signature } from "../../types/common.js";
+import type { EvidenceEvent } from "../../types/evidence.js";
+import { plainDataCopy } from "../../util/plain-data.js";
 import {
+  GENESIS_HASH,
   verifyLogChain,
   type LogChainEntryView,
   type VerifyKernelSignature,
@@ -50,45 +58,145 @@ export type IndustrialPrimitiveId = (typeof INDUSTRIAL_PRIMITIVE_IDS)[number];
 /** Valid `logKind` values per the #52 paramsSchema in `primitives.ts`. */
 const EXECUTION_LOG_KINDS = new Set(["job_log", "command_trace", "alarm_log", "program_transcript"]);
 
-/** Everything the consumer must inject to bind #52. */
+/**
+ * Everything the consumer must inject to bind #52. The signer and both keys come
+ * from the registry for the job's kernel, never from the evidence.
+ */
 export interface ExecutionLogVerifierDeps {
-  /** Signature check over `entryHash` for the expected kernel signer. */
+  /**
+   * The kernel's registered signer (`Signature.signer`). The bundle's signature
+   * and every entry's must carry exactly this signer, so a relabelled signature
+   * fails here before any key is consulted.
+   */
+  expectedSigner: string;
+  /** Registered-key check over `signingPreimage(bundleHash)` (LO-EV-1). A throw is a failure. */
+  verifyBundleSignature: (bundleHash: string, signature: Signature) => Promise<boolean> | boolean;
+  /** Registered-key check over `signingPreimage(entryHash)`. A throw is a failure. */
   verifyKernelSignature: VerifyKernelSignature;
-  /** Floor on chain length; a zero-entry chain is vacuous, never `met`. */
+  /** Floor on chain length: an integer >= 1 (default 1). Anything else throws when the verifier is built. */
   minEntries?: number;
 }
 
-const SIGNATURE_ALGORITHMS = new Set(["ed25519", "secp256k1"]);
+/**
+ * The #52 `instance`: the kernel-signed bundle that carries the log, as stored.
+ * Not the entries alone: an entry's signature covers its own content but not
+ * its predecessor, its position or its run (`computeLogEntryHash` is over
+ * `{capturedAt, rawContent, source}`), so entries alone cannot show that a
+ * chain is the one the kernel produced. The bundle's signature covers every
+ * event it carries, and with them every link.
+ */
+export interface ExecutionLogInstance {
+  bundleHash: string;
+  events: readonly unknown[];
+  kernelSignature: unknown;
+}
+
+/** `Signature.algorithm` for logs: every log producer signs Ed25519 (LO-EV-1). */
+const LOG_SIGNATURE_ALGORITHM = "ed25519";
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Why `s` is not the registered signer's Ed25519 `Signature` object, or null. */
+function signatureProblem(s: unknown, expectedSigner: string): string | null {
+  if (!isRecord(s)) return "must be a Signature object {signer, algorithm, value}, not a bare value";
+  if (s.signer !== expectedSigner) return `signer ${JSON.stringify(String(s.signer))} is not the registered signer`;
+  if (s.algorithm !== LOG_SIGNATURE_ALGORITHM) return `algorithm must be ${LOG_SIGNATURE_ALGORITHM}`;
+  try {
+    parseEd25519SignatureHex(s.value);
+  } catch {
+    return "value is not a 64-byte Ed25519 signature in lowercase hex";
+  }
+  return null;
+}
 
 /**
  * Why `x` is not a verifiable log-chain entry, or null if it is.
  *
- * `kernelSignature` must be the common `Signature` object
- * `{signer, algorithm, value}` — the shape the kernel's LogCaptureService and
- * pcc-node's log_capture.py both emit. A bare string is not accepted: no
- * producer emits one, and the gateway relay stores a bare-string bundle
- * signature as unsigned.
+ * `kernelSignature` must be the registered signer's Ed25519 `Signature` object
+ * `{signer, algorithm, value}`: the shape the kernel's LogCaptureService and
+ * pcc-node's log_capture.py both emit. A redacted entry (no `rawContent`) cannot
+ * have its entryHash recomputed, so it fails closed.
  */
-function entryViewProblem(x: unknown): string | null {
-  if (typeof x !== "object" || x === null) return "not an object";
-  const e = x as Record<string, unknown>;
+function entryViewProblem(x: unknown, expectedSigner: string): string | null {
+  if (!isRecord(x)) return "not an object";
   for (const field of ["entryId", "entryHash", "previousHash", "source", "capturedAt"] as const) {
-    if (typeof e[field] !== "string") return `${field} missing or not a string`;
+    if (typeof x[field] !== "string") return `${field} missing or not a string`;
   }
-  if (typeof e.rawContent !== "string") {
+  if (typeof x.rawContent !== "string") {
     return "rawContent absent (a redacted entry): its entryHash cannot be recomputed, so it cannot be verified here";
   }
-  const s = e.kernelSignature;
-  if (typeof s !== "object" || s === null) {
-    return "kernelSignature must be a Signature object {signer, algorithm, value}, not a bare value";
+  const problem = signatureProblem(x.kernelSignature, expectedSigner);
+  return problem === null ? null : `kernelSignature: ${problem}`;
+}
+
+/**
+ * The one `logKind` chain in the bound events, in chain order. Two carriers
+ * exist, and a bundle may use either, never both:
+ *   - one event whose payload is `{primitive: "machine.execution_log",
+ *     params: {logKind}, entries: [...]}` (the kernel path, LO-SE-3); the
+ *     array is the chain;
+ *   - one `log_hash_chain_entry` event per entry, with `payload.logKind`
+ *     (pcc-node's producers, e.g. #417's command trace); the entries are ordered
+ *     by their links, from GENESIS.
+ * Anything but exactly one linear chain from GENESIS that uses every entry
+ * (no second log, fork, gap, second GENESIS or leftover) fails closed. A
+ * truncated or reordered chain cannot reach here: the bundle's signature covers
+ * every event.
+ */
+function extractChain(
+  events: readonly EvidenceEvent[],
+  logKind: string,
+): { ok: true; entries: unknown[] } | { ok: false; reason: string } {
+  const carried = events.filter(
+    (e) =>
+      isRecord(e.payload) &&
+      e.payload.primitive === "machine.execution_log" &&
+      isRecord(e.payload.params) &&
+      e.payload.params.logKind === logKind,
+  );
+  const perEntry = events.filter(
+    (e) => e.type === "log_hash_chain_entry" && isRecord(e.payload) && e.payload.logKind === logKind,
+  );
+  if (carried.length + perEntry.length === 0) {
+    return { ok: false, reason: `the bundle carries no ${logKind} execution log` };
   }
-  const sig = s as Record<string, unknown>;
-  if (typeof sig.signer !== "string" || sig.signer.length === 0) return "kernelSignature.signer missing";
-  if (typeof sig.algorithm !== "string" || !SIGNATURE_ALGORITHMS.has(sig.algorithm)) {
-    return `kernelSignature.algorithm must be ed25519 or secp256k1`;
+  if (carried.length > 1 || (carried.length === 1 && perEntry.length > 0)) {
+    return { ok: false, reason: `the bundle carries more than one ${logKind} log, so which one is the execution's is ambiguous` };
   }
-  if (typeof sig.value !== "string" || sig.value.length === 0) return "kernelSignature.value missing";
-  return null;
+  if (carried.length === 1) {
+    const entries = (carried[0]!.payload as Record<string, unknown>).entries;
+    if (!Array.isArray(entries)) return { ok: false, reason: "payload.entries is not an array" };
+    return { ok: true, entries };
+  }
+  // One event per entry: follow the links from GENESIS; every entry exactly once.
+  const byPrevious = new Map<unknown, Record<string, unknown>>();
+  for (const e of perEntry) {
+    const entry = e.payload as Record<string, unknown>;
+    if (byPrevious.has(entry.previousHash)) {
+      return { ok: false, reason: `two ${logKind} entries follow ${String(entry.previousHash)}: the log forks or holds a second chain` };
+    }
+    byPrevious.set(entry.previousHash, entry);
+  }
+  const ordered: Record<string, unknown>[] = [];
+  let next = byPrevious.get(GENESIS_HASH);
+  while (next !== undefined && ordered.length < perEntry.length) {
+    ordered.push(next);
+    next = byPrevious.get(next.entryHash);
+  }
+  if (ordered.length !== perEntry.length) {
+    return { ok: false, reason: `${perEntry.length - ordered.length} ${logKind} entr(ies) are not on the chain from GENESIS (a gap or a second chain)` };
+  }
+  return { ok: true, entries: ordered };
+}
+
+async function legPasses(leg: () => Promise<boolean> | boolean): Promise<boolean> {
+  try {
+    return (await leg()) === true;
+  } catch {
+    return false;
+  }
 }
 
 function fail(detail: string[]): PrimitiveVerifyResult {
@@ -98,16 +206,30 @@ function fail(detail: string[]): PrimitiveVerifyResult {
 /**
  * Real PrimitiveVerifier for #52 machine.execution_log.
  *
- * `instance` contract: the captured chain as `readonly LogChainEntryView[]`
- * (the kernel's `LogEntry[]` is assignable), each `kernelSignature` a
- * `Signature` object. `instance == null` means the data is not yet available
- * → `met:"pending"` per the verifier-interface contract; anything
- * present-but-malformed fails CLOSED with the first bad entry's defect.
+ * `instance`: the kernel-signed bundle that carries the log
+ * (`ExecutionLogInstance`). `ctx.subject`: the job (and kernel, unit, challenge)
+ * the evidence must be for, from the job record, never from the evidence. Both
+ * are copied once, as plain data, and only the copies are read. `instance ==
+ * null` means the data is not yet available, so `met:"pending"`; anything
+ * present but malformed fails CLOSED with its first defect.
+ *
+ * In order:
+ *   1. the bundle's signature is the registered signer's Ed25519 signature
+ *      (`deps.expectedSigner`, then `deps.verifyBundleSignature`);
+ *   2. the bundle binds to the job and kernel (LO-EV-9,
+ *      `verifyEvidenceSubjectBinding`): its digest opens to its events, and
+ *      every event commits the subject;
+ *   3. the `logKind` chain is extracted from the BOUND snapshots (`extractChain`):
+ *      one linear chain from GENESIS;
+ *   4. every entry carries the registered signer's Ed25519 signature;
+ *   5. `verifyLogChain`: each entryHash recomputes, each link holds, and each
+ *      entry signature verifies (`deps.verifyKernelSignature`).
  *
  * Param semantics (schema in `primitives.ts` #52):
  *   - `logKind` (required): must be one of the declared kinds, else fail.
  *   - `minCadenceMs` (optional): enforced — no gap between consecutive
- *     `capturedAt` timestamps may exceed it.
+ *     `capturedAt` timestamps may exceed it. Independently of it, `capturedAt`
+ *     must never decrease along the chain (equal allowed; evidence, bus #3553).
  *   - `alarmPolicy` (optional): NOT generically enforceable by this binding
  *     (needs log-content interpretation) → its presence fails CLOSED rather
  *     than being silently ignored. Nobody weakens a check to pass it.
@@ -115,28 +237,44 @@ function fail(detail: string[]): PrimitiveVerifyResult {
  *     "redacted-commit" entry carries no rawContent, so its entryHash cannot
  *     be recomputed and the entry fails closed. This binding verifies only
  *     full-disclosure chains.
+ *
+ * What this does not decide: whether the logged execution SUCCEEDED. A log
+ * that faithfully records a failure is authentic; outcome policy is the
+ * evaluator's (evidence levels, contradictions, admission).
  */
 export function makeExecutionLogVerifier(deps: ExecutionLogVerifierDeps): PrimitiveVerifier {
   const minEntries = deps.minEntries ?? 1;
+  if (!Number.isInteger(minEntries) || minEntries < 1) {
+    throw new TypeError(`makeExecutionLogVerifier: minEntries must be an integer >= 1 (got ${String(minEntries)})`);
+  }
+  if (typeof deps.expectedSigner !== "string" || deps.expectedSigner.length === 0) {
+    throw new TypeError("makeExecutionLogVerifier: expectedSigner (the kernel's registered signer) is required");
+  }
+  const { expectedSigner } = deps;
+  const verifyEntrySignature: VerifyKernelSignature = (entryHash, signature) =>
+    legPasses(() => deps.verifyKernelSignature(entryHash, signature));
+
   return {
     id: "machine.execution_log",
-    async verify(instance, params, _ctx): Promise<PrimitiveVerifyResult> {
+    async verify(instance, params, ctx): Promise<PrimitiveVerifyResult> {
       if (instance === null || instance === undefined) {
         return { met: "pending", detail: ["execution log not yet available"] };
       }
-      if (!Array.isArray(instance)) {
-        return fail(["instance is not an array of log-chain entries — fails closed"]);
+      const bundleCopy = plainDataCopy(instance);
+      if (!bundleCopy.ok || !isRecord(bundleCopy.value)) {
+        return fail(["instance is not the plain-data bundle that carries the log — fails closed"]);
       }
-      for (let i = 0; i < instance.length; i++) {
-        const problem = entryViewProblem(instance[i]);
-        if (problem !== null) return fail([`entry ${i}: ${problem} — fails closed`]);
+      const bundle = bundleCopy.value;
+      if (typeof bundle.bundleHash !== "string" || !Array.isArray(bundle.events)) {
+        return fail(["instance must be the kernel-signed bundle {bundleHash, events, kernelSignature}, not bare entries — fails closed"]);
       }
-      const entries = instance as LogChainEntryView[];
+      const bundleSigProblem = signatureProblem(bundle.kernelSignature, expectedSigner);
+      if (bundleSigProblem !== null) return fail([`bundle kernelSignature: ${bundleSigProblem} — fails closed`]);
 
       const p = (params ?? {}) as Record<string, unknown>;
       const detail: string[] = [];
       if (typeof p.logKind !== "string" || !EXECUTION_LOG_KINDS.has(p.logKind)) {
-        return fail([`params.logKind missing or invalid (got ${JSON.stringify(p.logKind)}) — required by #52 schema`]);
+        return fail([`params.logKind missing or invalid (got ${typeof p.logKind === "string" ? JSON.stringify(p.logKind) : typeof p.logKind}) — required by #52 schema`]);
       }
       if (p.alarmPolicy !== undefined) {
         return fail(["params.alarmPolicy declared but not enforceable by this binding — fails closed rather than silently ignored"]);
@@ -145,33 +283,63 @@ export function makeExecutionLogVerifier(deps: ExecutionLogVerifierDeps): Primit
         detail.push(`params.disclosure=${String(p.disclosure)} noted; only entries carrying rawContent can be verified`);
       }
 
+      const subjectCopy = plainDataCopy(isRecord(ctx) ? (ctx as Record<string, unknown>).subject : undefined);
+      if (!subjectCopy.ok || !isRecord(subjectCopy.value)) {
+        return fail(["ctx.subject (the job the evidence must be for, from the job record) is missing — fails closed"]);
+      }
+
+      if (!(await legPasses(() => deps.verifyBundleSignature(bundle.bundleHash as string, bundle.kernelSignature as Signature)))) {
+        return fail(["bundle signature does not verify under the registered key — fails closed"]);
+      }
+      const binding = await verifyEvidenceSubjectBinding({
+        bundleHash: bundle.bundleHash,
+        events: bundle.events as readonly unknown[],
+        subject: subjectCopy.value as unknown as EvidenceSubject,
+      });
+      if (!binding.ok) {
+        const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
+        return fail([`bundle does not bind to the job: ${binding.reason}${at} — fails closed`]);
+      }
+
+      const chain = extractChain(binding.events, p.logKind);
+      if (!chain.ok) return fail([`${chain.reason} — fails closed`]);
+      for (let i = 0; i < chain.entries.length; i++) {
+        const problem = entryViewProblem(chain.entries[i], expectedSigner);
+        if (problem !== null) return fail([`entry ${i}: ${problem} — fails closed`]);
+      }
+      const entries = chain.entries as LogChainEntryView[];
+
       if (entries.length < minEntries) {
         return fail([`chain has ${entries.length} entries; minimum is ${minEntries} — an empty/short chain is vacuous, never met`]);
       }
 
-      if (typeof p.minCadenceMs === "number" && entries.length > 1) {
-        for (let i = 1; i < entries.length; i++) {
-          const prev = Date.parse(entries[i - 1]!.capturedAt);
-          const cur = Date.parse(entries[i]!.capturedAt);
-          if (!Number.isFinite(prev) || !Number.isFinite(cur)) {
-            return fail([`entry ${i - 1} or ${i} has an unparseable capturedAt — cadence unverifiable, fails closed`]);
-          }
-          const gap = cur - prev;
-          if (gap > p.minCadenceMs) {
-            return fail([`cadence gap of ${gap}ms between entries ${i - 1} and ${i} exceeds minCadenceMs=${p.minCadenceMs}`]);
-          }
+      // capturedAt never goes backwards along the chain (equal is allowed;
+      // evidence ruling, bus #3553), and, when declared, no gap exceeds
+      // minCadenceMs. A producer times a never-completed entry no earlier than
+      // its predecessor; it never invents a completion.
+      for (let i = 1; i < entries.length; i++) {
+        const prev = Date.parse(entries[i - 1]!.capturedAt);
+        const cur = Date.parse(entries[i]!.capturedAt);
+        if (!Number.isFinite(prev) || !Number.isFinite(cur)) {
+          return fail([`entry ${i - 1} or ${i} has an unparseable capturedAt — order unverifiable, fails closed`]);
+        }
+        if (cur < prev) {
+          return fail([`capturedAt goes backwards between entries ${i - 1} and ${i} — a log chain's capture times never decrease`]);
+        }
+        if (typeof p.minCadenceMs === "number" && cur - prev > p.minCadenceMs) {
+          return fail([`cadence gap of ${cur - prev}ms between entries ${i - 1} and ${i} exceeds minCadenceMs=${p.minCadenceMs}`]);
         }
       }
 
-      const chain = await verifyLogChain(entries, deps.verifyKernelSignature);
-      if (!chain.valid) {
+      const verified = await verifyLogChain(entries, verifyEntrySignature);
+      if (!verified.valid) {
         return fail([
-          `log chain invalid (first break at index ${chain.brokenAt})`,
-          ...chain.errors.slice(0, 5),
+          `log chain invalid (first break at index ${verified.brokenAt})`,
+          ...verified.errors.slice(0, 5),
         ]);
       }
 
-      detail.unshift(`verified ${chain.entries}-entry kernel-signed chain (logKind=${p.logKind})`);
+      detail.unshift(`verified ${verified.entries}-entry chain in a kernel-signed bundle bound to the job (logKind=${p.logKind})`);
       return { met: true, detail };
     },
   };

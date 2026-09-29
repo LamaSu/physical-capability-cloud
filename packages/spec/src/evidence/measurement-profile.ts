@@ -41,6 +41,7 @@ import { createHash } from "node:crypto";
 
 import { canonicalize } from "../util/canonical.js";
 import { EVIDENCE_LEVELS, type EvidenceLevel } from "./evidence-level.js";
+import { plainDataCopy } from "../util/plain-data.js";
 
 /** Domain separator — a profile digest can never collide with another digest. */
 export const MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1";
@@ -218,8 +219,17 @@ function positiveFinite(v: unknown): boolean {
 }
 
 /** A non-empty array whose every entry is a non-empty string. */
+/** Every slot holds a non-empty string. Index-based, so a sparse array's holes fail (`.every` skips them). */
+function denseStringList(v: unknown[]): boolean {
+  for (let i = 0; i < v.length; i++) {
+    if (!(i in v) || !nonEmptyString(v[i])) return false;
+  }
+  return true;
+}
+
+/** A non-empty, dense array whose every entry is a non-empty string. */
 function nonEmptyStringList(v: unknown): boolean {
-  return Array.isArray(v) && v.length > 0 && v.every(nonEmptyString);
+  return Array.isArray(v) && v.length > 0 && denseStringList(v);
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -342,6 +352,14 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
         "required positive window when calibration.required; without it stale calibration cannot be detected",
       );
     }
+  } else {
+    // Inert terms: with calibration not required, nothing evaluates them, so a
+    // digest must not commit them (they would read as a requirement).
+    for (const field of ["procedureId", "validityWindowSeconds"] as const) {
+      if (cal[field] !== undefined) {
+        push(`calibration.${field}`, "only allowed when calibration.required is true; with calibration not required it would be committed but never evaluated");
+      }
+    }
   }
 
   const i = p.interpretation as ProfileInterpretation | undefined;
@@ -359,7 +377,7 @@ export function validateMeasurementProfile(profile: unknown): ProfileViolation[]
   const w = p.witnesses as ProfileWitnesses | undefined;
   if (!w || typeof w !== "object") push("witnesses", "required");
   else {
-    if (!Array.isArray(w.requiredRoles) || !w.requiredRoles.every(nonEmptyString)) {
+    if (!Array.isArray(w.requiredRoles) || !denseStringList(w.requiredRoles)) {
       push("witnesses.requiredRoles", "required array of role ids (may be empty)");
     }
     if (typeof w.independentOfClaimant !== "boolean") push("witnesses.independentOfClaimant", "required boolean");
@@ -392,18 +410,39 @@ function digestProfile(profile: MeasurementProfileV1): MeasurementProfileDigest 
   return `0x${hex}`;
 }
 
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
+}
+
+/** Re-exported: the one-pass copy every check here runs on (util/plain-data.ts). */
+export { plainDataCopy };
+
+/** A diagnostic for any value that cannot throw (JSON.stringify can, on a bigint or a cycle). */
+function describeValue(v: unknown): string {
+  return typeof v === "string" ? JSON.stringify(v) : `a value of type ${typeof v}`;
+}
+
 /**
  * The committed digest of a measurement profile:
  *   "0x" + hex(sha256(canonicalize({ domain, profile })))
  * using the PRODUCTION canonicalizer, so the digest a producer computes and the
- * digest a verifier recomputes share one preimage. Refuses invalid profiles.
+ * digest a verifier recomputes share one preimage. It is computed over a plain-
+ * data copy (`plainDataCopy`), validated first; an invalid profile is refused.
  */
 export function computeMeasurementProfileDigest(
   profile: MeasurementProfileV1,
 ): MeasurementProfileDigest {
-  const violations = validateMeasurementProfile(profile);
+  const copy = plainDataCopy(profile);
+  if (!copy.ok) {
+    throw new InvalidMeasurementProfileError([{ path: "", message: `not plain JSON data (${copy.reason})` }]);
+  }
+  const violations = validateMeasurementProfile(copy.value);
   if (violations.length > 0) throw new InvalidMeasurementProfileError(violations);
-  return digestProfile(profile);
+  return digestProfile(copy.value as MeasurementProfileV1);
 }
 
 /** Why a presented profile does not govern; null when it does. */
@@ -415,6 +454,13 @@ export interface ProfileGovernanceResult {
   code: ProfileGovernanceCode | null;
   /** Digest recomputed from the presented profile. */
   presentedDigest: MeasurementProfileDigest | null;
+  /**
+   * The profile that governs: a deep-frozen, plain-data copy of the presented
+   * profile, validated and digested exactly as returned. Null unless it
+   * governs. Evaluate only this, never the caller's object, whose fields could
+   * change, or answer differently, after this check.
+   */
+  profile: MeasurementProfileV1 | null;
   reasons: string[];
 }
 
@@ -423,45 +469,44 @@ export interface ProfileGovernanceResult {
  *
  * This is the mutation gate the memo asks for: change a sampling rate or a
  * tolerance after acceptance and the recomputed digest differs, so the old
- * acceptance cannot authorize the changed profile. Never throws — a malformed
- * committed digest, an invalid profile, or a mismatch returns `governs:false`
- * with reasons.
+ * acceptance cannot authorize the changed profile. The check runs on one
+ * plain-data copy, and that copy is what it returns. Never throws: a
+ * malformed committed digest, a profile JSON cannot carry, an invalid profile,
+ * or a mismatch returns `governs:false` with a code and reasons.
  */
 export function profileGoverns(
   committedDigest: string,
   presentedProfile: MeasurementProfileV1,
 ): ProfileGovernanceResult {
+  const refuse = (
+    code: ProfileGovernanceCode,
+    reasons: string[],
+    presentedDigest: MeasurementProfileDigest | null = null,
+  ): ProfileGovernanceResult => ({ governs: false, code, presentedDigest, profile: null, reasons });
+
   if (typeof committedDigest !== "string" || !MEASUREMENT_PROFILE_DIGEST_PATTERN.test(committedDigest)) {
-    return {
-      governs: false,
-      code: "digest-wrong-family",
-      presentedDigest: null,
-      reasons: [
-        `committed digest ${JSON.stringify(committedDigest)} is not a measurement-profile commitment: expected 0x + 64 lowercase hex; a sha256:-tagged value is the evidence-event family`,
-      ],
-    };
+    return refuse("digest-wrong-family", [
+      `committed digest ${describeValue(committedDigest)} is not a measurement-profile commitment: expected 0x + 64 lowercase hex; a sha256:-tagged value is the evidence-event family`,
+    ]);
   }
-  const violations = validateMeasurementProfile(presentedProfile);
+  const copy = plainDataCopy(presentedProfile);
+  if (!copy.ok) return refuse("profile-invalid", [`<root>: not plain JSON data (${copy.reason})`]);
+  const violations = validateMeasurementProfile(copy.value);
   if (violations.length > 0) {
-    return {
-      governs: false,
-      code: "profile-invalid",
-      presentedDigest: null,
-      reasons: violations.map((x) => `${x.path || "<root>"}: ${x.message}`),
-    };
+    return refuse("profile-invalid", violations.map((x) => `${x.path || "<root>"}: ${x.message}`));
   }
-  const presentedDigest = digestProfile(presentedProfile);
+  const profile = deepFreeze(copy.value) as MeasurementProfileV1;
+  const presentedDigest = digestProfile(profile);
   if (presentedDigest !== committedDigest) {
-    return {
-      governs: false,
-      code: "digest-mismatch",
-      presentedDigest,
-      reasons: [
+    return refuse(
+      "digest-mismatch",
+      [
         `profile digest mismatch: committed ${committedDigest}, presented ${presentedDigest} — the accepted agreement did not authorize this profile`,
       ],
-    };
+      presentedDigest,
+    );
   }
-  return { governs: true, code: null, presentedDigest, reasons: [] };
+  return { governs: true, code: null, presentedDigest, profile, reasons: [] };
 }
 
 /**

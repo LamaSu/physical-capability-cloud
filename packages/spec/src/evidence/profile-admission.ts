@@ -22,25 +22,56 @@
  *   - PRIMITIVE: each qualifying observation is verified as an instance of the
  *     primitive it claims (`verifyPrimitiveInstance`, composed by the oracle
  *     from its verifier registry, where an unimplemented verifier fails closed).
+ *     The comparisons here only prove the record says the committed things;
+ *     the leg must prove the record is TRUE of this event: that its sampleId
+ *     commits the raw capture this event carries or references, that the
+ *     capture is of the committed object (its nonce or document binding), and
+ *     that the measurement relation holds. A leg that only checks some
+ *     artifact hash, or finds a valid nonce anywhere in the set, would let a
+ *     matching record ride on evidence about another object. Distinct sample
+ *     ids meeting the physical sampling requirement is the leg's to establish
+ *     too; here they only stop reissue.
  * A throw from a supplied leg counts as a failure.
  *
- * Callers and the set pin (evidence #3419, oracle #3426):
+ * Callers and the set pin (evidence #3419 and #3543, oracle #3426):
  *   - The authoritative evaluation is the oracle's, inside /settle, on the
  *     evidence the on-chain-committed package names. Gateway /complete may run
  *     admission as a pre-check; its result is never authoritative.
+ *   - v1 rule (evidence #3543): a settlement unit's evidence is ONE
+ *     kernel-signed bundle that holds every outcome-bearing event, terminal and
+ *     inspection alike, so a failure cannot sit in a bundle nobody presents.
+ *     kernel-sdk (one bundle per job) and the kernel EvidenceEmitter (one per
+ *     step, camera and sensors included) already emit that way. At /settle the
+ *     pin degenerates to that one bundle:
+ *     `computeBundleSetDigest(subject, [committedRoot])`, with `committedRoot`
+ *     read from the committed package, never from the presentation.
  *   - The pin's source, now (a): the gateway reads EVERY stored bundle row for
  *     the job (and settlement unit) in one snapshot, and pins
  *     `computeBundleSetDigest` over all the rows that verify, never the first
  *     that verifies. The pin is immutable and recorded with the decision;
  *     recovery re-verifies it, so a bundle stored later cannot silently change
  *     a settled set. This trusts the gateway's store at pin time.
- *   - Later (b): the kernel signs the set at job close, over a domain-separated
- *     message, and the committed evidence carries the seal. That is the only
- *     pin the oracle can enforce. It needs a set commitment in the evidence
- *     block (today it commits one bundle root): an evidence contract change,
- *     for the operator to approve.
+ *   - (b), a kernel-signed seal over a multi-bundle set, is NOT adopted for v1
+ *     (evidence #3543); the one-bundle rule makes it unnecessary while a unit's
+ *     evidence is one bundle.
  *   - Either way, the pin is never recomputed from `bundles` at evaluation
  *     time; that would make the check vacuous.
+ *   - Still OPEN on the caller side, and required before this gates money
+ *     (astra, pack 39 round 2):
+ *       - finalize collection atomically with pinning: define job closure,
+ *         sequencing, and what happens to evidence that arrives late;
+ *       - authenticate and classify EVERY stored row: a row that fails
+ *         validation must end in an explicit terminal state (reject or
+ *         quarantine), never be silently left out of the pin;
+ *       - persist the exact manifest and context with the decision: bundle
+ *         roots, profile commitment, subject, unit and challenge, and the
+ *         verifier and program identity, so recovery re-evaluates the same set;
+ *       - under v1, present exactly the committed bundle at /settle, and hold
+ *         producers to the one-bundle rule (evidence states it in LO-EV-9 and
+ *         EvidenceBlockV2); a multi-bundle set would need the seal seam;
+ *       - exercise the real seam: omitted failure, concurrent failure arrival,
+ *         mutation across awaits, recovery after pinning, and gateway/oracle
+ *         set disagreement.
  *
  * Evaluate only what was hashed: every check reads the verified canonical
  * snapshots that binding returns (the JSON text `hashEvent` hashed, parsed
@@ -78,7 +109,12 @@
  *      profile has only v1 terms;
  *   2. terms this version cannot evaluate fail closed with `unverifiable-term`
  *      (`unverifiableProfileTerms`; registration refuses the same terms);
- *   3. the set, then the signature and binding legs, per bundle;
+ *   3. the set: a malformed pin rejects (it is no commitment at all). A set
+ *      that is not the pinned one can never be admitted, but evaluation goes
+ *      on, so a hard reject in what was presented still decides (a set
+ *      mismatch under `onMissingData: "hold"` must not hide a contradiction
+ *      the profile rejects on). Then the signature and binding legs, per
+ *      bundle;
  *   4. simulation: the profile prohibits it, so ANY fabricated event
  *      (`isFabricated`) rejects;
  *   5. contradiction (evidence's `deriveContradictions`, which the oracle signs
@@ -137,7 +173,7 @@ import {
   INSPECTION_EVENT_TYPES,
   type EvidenceLevel,
 } from "./evidence-level.js";
-import { profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
+import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
 import { getPrimitive } from "./primitives.js";
 import { isTaggedDigest } from "./signing-preimage.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "./subject-binding.js";
@@ -199,6 +235,7 @@ export type ProfileAdmissionCode =
   | "digest-mismatch"
   | "unverifiable-term"
   | "no-bundles"
+  | "bundle-set-pin-invalid"
   | "bundle-set-mismatch"
   | "unauthenticated-bundle"
   | "unbound-bundle"
@@ -239,16 +276,20 @@ export interface ProfileAdmissionInput {
   subject: EvidenceSubject;
   /** Every bundle in the job's pinned evidence set. */
   bundles: readonly AdmissionBundle[];
-  /** The pinned set's digest (`computeBundleSetDigest`), from where it was pinned (see the caller contract). */
+  /** The pinned set's digest (`computeBundleSetDigest`), from where it was pinned (see the caller contract). A malformed pin rejects. */
   pinnedBundleSetDigest: string;
   /** The registered-key signature leg. */
   verifyBundleSignature: (bundle: AdmissionBundle) => boolean | Promise<boolean>;
   /**
    * The primitive leg: is `observation` an authentic instance of `primitiveId`
-   * for this job? Both arguments are deep-frozen copies of the verified
-   * snapshots: `events` is the job's whole bound, de-duplicated event set, so
-   * a verifier that needs another event (a capture nonce, say) reads the same
-   * hashed evidence admission evaluated instead of fetching its own.
+   * for this job, and is its `profileObservation` record TRUE of it? It must
+   * check this exact observation: its sampleId against the raw capture the
+   * event carries or references, the capture against the committed object,
+   * and the measurement relation (see the header). Both arguments are
+   * deep-frozen copies of the verified snapshots: `events` is the job's whole
+   * bound, de-duplicated event set, so a verifier that needs another event (a
+   * capture nonce, say) reads the same hashed evidence admission evaluated
+   * instead of fetching its own.
    */
   verifyPrimitiveInstance: (
     primitiveId: string,
@@ -435,53 +476,89 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
 /**
  * Admit, reject or hold the evidence for one job against its committed
  * measurement profile. Never throws.
+ *
+ * Every input is copied once, as frozen plain data, before the first `await`:
+ * the profile (through `profileGoverns`, which returns the snapshot it
+ * validated and digested), the subject, the pin and the bundles. Everything
+ * after reads only the copies, so nothing the caller changes, or a getter
+ * answers, after that point can reach the decision.
  */
 export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
-  const { profile, committedDigest, subject, bundles, pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance } =
-    input;
+  const pinnedBundleSetDigest: unknown = input.pinnedBundleSetDigest;
+  const verifyBundleSignature = input.verifyBundleSignature;
+  const verifyPrimitiveInstance = input.verifyPrimitiveInstance;
+  const subjectCopy = plainDataCopy(input.subject);
+  const bundlesCopy = plainDataCopy(input.bundles);
 
-  const governance = profileGoverns(committedDigest, profile);
-  if (!governance.governs) {
+  const governance = profileGoverns(input.committedDigest, input.profile);
+  if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
     return reject(governance.code ?? "profile-invalid", governance.reasons.join("; "));
   }
+  const profile = governance.profile;
+  const committedDigest = governance.presentedDigest;
+
+  if (!subjectCopy.ok || !isRecord(subjectCopy.value)) {
+    return reject("unbound-bundle", "the subject (the job record's job and kernel) is not plain JSON data");
+  }
+  const subject = deepFreeze(subjectCopy.value) as unknown as EvidenceSubject;
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
 
-  if (!Array.isArray(bundles) || bundles.length === 0) {
+  if (!bundlesCopy.ok) return reject("unbound-bundle", "the bundles are not plain JSON data");
+  const presented: unknown = deepFreeze(bundlesCopy.value);
+  if (!Array.isArray(presented) || presented.length === 0) {
     return result(policyDecision(profile.onMissingData), [
       { code: "no-bundles", detail: "no evidence bundle was presented for the job" },
     ]);
   }
 
-  // SET leg: the presented bundles are exactly the pinned set.
-  const hashes: string[] = [];
-  for (let i = 0; i < bundles.length; i++) {
-    const hash = (bundles[i] as Partial<AdmissionBundle> | null | undefined)?.bundleHash;
-    if (!isTaggedDigest(hash)) return reject("unbound-bundle", `bundle ${i}: bundleHash is not a sha256: tagged digest`);
-    hashes.push(hash);
+  // The pin is authority: a malformed one is refused outright, never read as
+  // missing data.
+  if (!isTaggedDigest(pinnedBundleSetDigest)) {
+    return reject(
+      "bundle-set-pin-invalid",
+      "the pinned bundle-set digest is not a sha256: tagged digest, so there is no valid commitment to evaluate against",
+    );
   }
+
+  // SET leg: the presented bundles are exactly the pinned set.
+  const bundles: AdmissionBundle[] = [];
+  for (let i = 0; i < presented.length; i++) {
+    const b: unknown = presented[i];
+    if (!isRecord(b) || !isTaggedDigest(b.bundleHash) || !Array.isArray(b.events)) {
+      return reject("unbound-bundle", `bundle ${i}: not a bundle with a sha256: tagged bundleHash and an events array`);
+    }
+    bundles.push(b as unknown as AdmissionBundle);
+  }
+  const hashes = bundles.map((b) => b.bundleHash);
+  const findings: { decision: ProfileAdmissionDecision; reason: ProfileAdmissionReason }[] = [];
   let presentedSet: string;
   try {
     presentedSet = await computeBundleSetDigest(subject, hashes);
   } catch (err) {
     presentedSet = `(not computable: ${err instanceof Error ? err.message : String(err)})`;
   }
-  if (!isTaggedDigest(pinnedBundleSetDigest) || presentedSet !== pinnedBundleSetDigest) {
-    return result(policyDecision(profile.onMissingData), [
-      {
+  if (presentedSet !== pinnedBundleSetDigest) {
+    // Never admit, but keep evaluating: a set that is not the pinned one must
+    // not hide a hard reject in what WAS presented (reject outranks hold).
+    findings.push({
+      decision: policyDecision(profile.onMissingData),
+      reason: {
         code: "bundle-set-mismatch",
-        detail: `the ${new Set(hashes).size} presented bundle(s) digest to ${presentedSet}, not the pinned set ${isTaggedDigest(pinnedBundleSetDigest) ? pinnedBundleSetDigest : "(a malformed pin)"}: a bundle is missing or was not pinned`,
+        detail: `the ${new Set(hashes).size} presented bundle(s) digest to ${presentedSet}, not the pinned set ${pinnedBundleSetDigest}: a bundle is missing or was not pinned`,
       },
-    ]);
+    });
   }
+  const rejectNow = (code: ProfileAdmissionCode, detail: string): ProfileAdmissionResult =>
+    result("reject", [...findings.map((f) => f.reason), { code, detail }]);
 
   const events: EvidenceEvent[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
     if (!(await legPasses(() => verifyBundleSignature(bundle)))) {
-      return reject("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
     }
     const binding = await verifyEvidenceSubjectBinding({
       bundleHash: bundle.bundleHash,
@@ -490,10 +567,9 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     });
     if (!binding.ok) {
       const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
-      return reject("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
+      return rejectNow("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
     }
-    // Evaluate only what was hashed: the verified canonical snapshots, never
-    // the caller's objects (a getter or non-enumerable field could differ).
+    // Evaluate only what was hashed: the verified canonical snapshots.
     for (const e of binding.events) {
       if (seen.has(e.hash)) continue;
       seen.add(e.hash);
@@ -503,13 +579,12 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
 
   const fabricated = events.filter(isFabricated).length;
   if (fabricated > 0) {
-    return reject(
+    return rejectNow(
       "simulated-evidence",
       `${fabricated} fabricated event(s); the profile prohibits simulation, so the evidence is not authentic`,
     );
   }
 
-  const findings: { decision: ProfileAdmissionDecision; reason: ProfileAdmissionReason }[] = [];
   // Contradiction is evidence's one public rule, the same one the oracle signs
   // rejects on (evidence-level.ts deriveContradictions); a failure with no
   // completion is a device failure, judged here under onDeviceFailure.

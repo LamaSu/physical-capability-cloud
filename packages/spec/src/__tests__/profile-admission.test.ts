@@ -10,7 +10,9 @@
  * field (F4). Evidence's rulings (bus #3419): value is a decimal string, and
  * the set digest binds the settlement unit.
  */
-import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { describe, it, expect } from "vitest";
 
@@ -24,7 +26,11 @@ import {
   type ProfileAdmissionResult,
   type ProfileObservation,
 } from "../evidence/profile-admission.js";
-import { computeMeasurementProfileDigest, type MeasurementProfileV1 } from "../evidence/measurement-profile.js";
+import {
+  computeMeasurementProfileDigest,
+  profileGoverns,
+  type MeasurementProfileV1,
+} from "../evidence/measurement-profile.js";
 import { signingPreimage } from "../evidence/signing-preimage.js";
 import { hashBundle, hashEvent } from "../util/canonical.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../evidence/subject-binding.js";
@@ -709,33 +715,53 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
     const b2 = await toBundle(FAILURE, p);
     const pin = await computeBundleSetDigest(subject, [b1.bundleHash]);
     const r = await admit(p, [b1, b2], { pinnedBundleSetDigest: pin });
-    expect(codes(r)).toEqual(["bundle-set-mismatch"]);
+    expect(r.decision).toBe("reject");
+    // b2 (the extra, unpinned bundle) is a failure bundle: since evaluation
+    // does not stop at the mismatch, the contradiction it makes with b1's
+    // completion is also found.
+    expect(codes(r)).toContain("bundle-set-mismatch");
+    expect(codes(r)).toContain("contradictory-evidence");
   });
 
   it("a malformed pin is rejected, never recomputed", async () => {
     const p = inspectedPageProfile();
     const r = await admit(p, [await toBundle(PILOT, p)], { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
-    expect(codes(r)).toEqual(["bundle-set-mismatch"]);
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["bundle-set-pin-invalid"]);
+
+    // A malformed pin is invalid authority, not merely missing data: it must
+    // reject even under onMissingData: "hold".
+    const held = inspectedPageProfile();
+    held.onMissingData = "hold";
+    const r2 = await admit(held, [await toBundle(PILOT, held)], { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
+    expect(r2.decision).toBe("reject");
+    expect(codes(r2)).toEqual(["bundle-set-pin-invalid"]);
   });
 
-  it("no leg runs on a mismatched set", async () => {
+  it("a mismatched set is never admitted, and the evidence presented is still evaluated", async () => {
     const p = inspectedPageProfile();
+    p.onMissingData = "hold";
+    p.onContradiction = "reject";
+    const b1 = await toBundle(PILOT, p);
+    const b2 = await toBundle(FAILURE, p);
+    const b3 = await toBundle([{ type: "camera_snapshot", t: 25, device: CAMERA, observation: null }], p);
+    const pin = await computeBundleSetDigest(subject, [b1.bundleHash, b2.bundleHash]);
     let signatureCalls = 0;
-    let primitiveCalls = 0;
-    const r = await admit(p, [await toBundle(PILOT, p)], {
-      pinnedBundleSetDigest: "0x" + "a".repeat(64),
+    const r = await admit(p, [b1, b2, b3], {
+      pinnedBundleSetDigest: pin,
       verifyBundleSignature: (b) => {
         signatureCalls++;
         return verifySignature(b);
       },
-      verifyPrimitiveInstance: () => {
-        primitiveCalls++;
-        return true;
-      },
     });
-    expect(codes(r)).toEqual(["bundle-set-mismatch"]);
-    expect(signatureCalls).toBe(0);
-    expect(primitiveCalls).toBe(0);
+    // Never admit on a mismatch, but a hard reject in what WAS presented
+    // still decides: the mismatch (hold) cannot hide the contradiction
+    // (reject), so reject outranks hold. Mismatch is found first.
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["bundle-set-mismatch", "contradictory-evidence"]);
+    // Every presented bundle's leg ran, including the extra one: a mismatch
+    // no longer short-circuits authentication and binding.
+    expect(signatureCalls).toBe(3);
   });
 });
 
@@ -873,5 +899,238 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F4: split
     const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source: { adapterType: undefined } }];
     const r = await admit(p, [await toBundle(drafts, p)]);
     expect(r.reasons[0]!.detail).toContain("from another device kind or adapter");
+  });
+});
+
+describe("profile admission — round 3 (astra pack 39): one snapshot, precedence, leg obligations", () => {
+  const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+  const FAILURE: Draft[] = [{ type: "execution_failed", t: 11, device: PRINTER }];
+
+  it("39-A: popping a presented bundle right after the call started does not remove it from what is evaluated", async () => {
+    const p = inspectedPageProfile();
+    const pilotBundle = await toBundle(PILOT, p);
+    const failureBundle = await toBundle(FAILURE, p);
+    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, [pilotBundle.bundleHash, failureBundle.bundleHash]);
+    const bundles = [pilotBundle, failureBundle];
+    // Built by hand: admit() awaits internally before calling
+    // profileAdmitsBundle, which would leave nothing to pop before the
+    // snapshot is taken.
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles,
+      pinnedBundleSetDigest,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const pending = profileAdmitsBundle(input);
+    bundles.pop(); // the old code evaluated only the surviving pilot bundle, and admitted
+    const r = await pending;
+    expect(r.decision).not.toBe("admit");
+    expect(codes(r)).toContain("contradictory-evidence");
+  });
+
+  it("39-A: mutating an already-presented bundle's events right after the call started changes nothing", async () => {
+    const p = inspectedPageProfile();
+    const bundle = await toBundle(PILOT, p);
+    const bundles = [bundle];
+    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, [bundle.bundleHash]);
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles,
+      pinnedBundleSetDigest,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const pending = profileAdmitsBundle(input);
+    const events = bundle.events as unknown as EvidenceEvent[];
+    (events[2] as unknown as { payload: Record<string, unknown> }).payload.passed = false;
+    events.push({
+      id: "junk-event",
+      type: "camera_snapshot",
+      timestamp: at(999),
+      source: { deviceId: CAMERA, deviceType: "camera", kernelId: KERNEL },
+      payload: {},
+      hash: "sha256:" + "9".repeat(64),
+    } as unknown as EvidenceEvent);
+    const r = await pending;
+    expect(r.decision).toBe("admit"); // exactly as without the mutation
+  });
+
+  it("39-B: the profile's minSamples changed during suspension does not weaken the committed threshold", async () => {
+    const p = inspectedPageProfile();
+    p.measurement.sampling.minSamples = 2;
+    const bundle = await toBundle(PILOT, p); // one qualifying observation
+    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, [bundle.bundleHash]);
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles: [bundle],
+      pinnedBundleSetDigest,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const pending = profileAdmitsBundle(input);
+    p.measurement.sampling.minSamples = 1; // would satisfy the weakened threshold
+    const r = await pending;
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["missing-measurements"]);
+  });
+
+  it("39-B: the profile's onContradiction changed during suspension does not soften the committed policy", async () => {
+    const p = inspectedPageProfile();
+    p.onContradiction = "reject";
+    const bundle = await toBundle([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p);
+    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, [bundle.bundleHash]);
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles: [bundle],
+      pinnedBundleSetDigest,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const pending = profileAdmitsBundle(input);
+    p.onContradiction = "hold"; // would turn the reject into a hold
+    const r = await pending;
+    expect(r.decision).toBe("reject");
+  });
+
+  it("39-B: profileGoverns's snapshot is frozen", () => {
+    const p = inspectedPageProfile();
+    const digest = computeMeasurementProfileDigest(p);
+    const governance = profileGoverns(digest, p);
+    expect(governance.governs).toBe(true);
+    expect(Object.isFrozen(governance.profile)).toBe(true);
+  });
+
+  it("the subject changed during suspension does not change which job is evaluated", async () => {
+    const p = inspectedPageProfile();
+    const mutableSubject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const bundle = await toBundle(PILOT, p);
+    const pinnedBundleSetDigest = await computeBundleSetDigest(mutableSubject, [bundle.bundleHash]);
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: mutableSubject,
+      bundles: [bundle],
+      pinnedBundleSetDigest,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    };
+    const pending = profileAdmitsBundle(input);
+    mutableSubject.jobId = "job-other";
+    const r = await pending;
+    const baseline = await admit(p, [bundle]);
+    expect(r).toEqual(baseline);
+    expect(r.decision).toBe("admit");
+  });
+
+  it("39-C: a mismatch with a fabricated event among what was presented rejects on the mismatch first, then the fabrication", async () => {
+    const p = inspectedPageProfile();
+    const b1 = await toBundle(PILOT, p);
+    const drafts2 = PILOT.map((d) => (d.device === CAMERA ? { ...d, simulated: true } : d));
+    const b2 = await toBundle(drafts2, p);
+    const pin = await computeBundleSetDigest(subject, [b1.bundleHash]);
+    const r = await admit(p, [b1, b2], { pinnedBundleSetDigest: pin });
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toEqual(["bundle-set-mismatch", "simulated-evidence"]);
+  });
+
+  it("39-D: the leg's obligation — a sampleId that truly commits the capture admits", async () => {
+    const p = inspectedPageProfile();
+    const captureHash = "sha256:" + "d".repeat(64);
+    const drafts = [
+      ...PILOT.slice(0, 2),
+      { type: "cv_inspection_result", t: 20, device: CAMERA, payload: { passed: true, captureHash }, observation: { sampleId: captureHash } },
+    ];
+    // The obligation pattern an oracle verifier must meet: check that the
+    // claimed sampleId actually commits the raw capture, not just that it is
+    // shaped like one. A leg of () => true proves nothing.
+    const capturesMatch = (_id: string, obs: EvidenceEvent): boolean => {
+      const payload = obs.payload as Record<string, unknown>;
+      const observation = payload[PROFILE_OBSERVATION_FIELD] as { sampleId: string };
+      return observation.sampleId === payload.captureHash;
+    };
+    const r = await admit(p, [await toBundle(drafts, p)], { verifyPrimitiveInstance: capturesMatch });
+    expect(r.decision).toBe("admit");
+  });
+
+  it("39-E: the leg's obligation — a record attached to another capture is excluded", async () => {
+    const p = inspectedPageProfile();
+    const claimedSampleId = "sha256:" + "d".repeat(64);
+    const actualCaptureHash = "sha256:" + "e".repeat(64); // a different capture
+    const drafts = [
+      ...PILOT.slice(0, 2),
+      {
+        type: "cv_inspection_result",
+        t: 20,
+        device: CAMERA,
+        payload: { passed: true, captureHash: actualCaptureHash },
+        observation: { sampleId: claimedSampleId },
+      },
+    ];
+    const capturesMatch = (_id: string, obs: EvidenceEvent): boolean => {
+      const payload = obs.payload as Record<string, unknown>;
+      const observation = payload[PROFILE_OBSERVATION_FIELD] as { sampleId: string };
+      return observation.sampleId === payload.captureHash;
+    };
+    const r = await admit(p, [await toBundle(drafts, p)], { verifyPrimitiveInstance: capturesMatch });
+    expect(r.decision).toBe("reject");
+    expect(r.reasons[0]!.detail).toContain("not verified as capture.photo_nonced");
+  });
+});
+
+describe("profile admission — the LO-SE-3 failure-bearing negative is refused by outcome policy (astra pack 40, finding 40-9)", () => {
+  const FIXTURE = JSON.parse(
+    readFileSync(fileURLToPath(new URL("./fixtures/lose3-execution-log-bundle.json", import.meta.url)), "utf8"),
+  ) as {
+    kernelPublicKeyHex: string;
+    bundle: AdmissionBundle;
+    negatives: { failureBearingBundle: AdmissionBundle };
+  };
+  const fixtureKey = createPublicKey({
+    key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(FIXTURE.kernelPublicKeyHex, "hex")]),
+    format: "der",
+    type: "spki",
+  });
+  const verifyFixture = (b: AdmissionBundle) =>
+    verify(null, signingPreimage(b.bundleHash), fixtureKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+  const lose3Subject = { jobId: "job-lose3-consumer-run-001", kernelId: "kernel-hp-3301-golden" };
+
+  async function run(bundle: AdmissionBundle) {
+    const p = deviceReportedProfile();
+    p.device = { ...p.device, deviceId: "dev-hp-3301-0D253A" };
+    return profileAdmitsBundle({
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: lose3Subject,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(lose3Subject, [bundle.bundleHash]),
+      verifyBundleSignature: verifyFixture,
+      verifyPrimitiveInstance: () => true,
+    });
+  }
+
+  it("the failure-bearing bundle authenticates and binds, then is rejected as a completion-and-failure contradiction", async () => {
+    const r = await run(FIXTURE.negatives.failureBearingBundle);
+    expect(codes(r)).not.toContain("unauthenticated-bundle");
+    expect(codes(r)).not.toContain("unbound-bundle");
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toContain("contradictory-evidence");
+    expect(r.reasons.find((x) => x.code === "contradictory-evidence")!.detail).toContain("completion-and-failure");
+  });
+
+  it("the positive bundle raises no contradiction; it is refused only because it carries no profile observation", async () => {
+    const r = await run(FIXTURE.bundle);
+    expect(codes(r)).not.toContain("unauthenticated-bundle");
+    expect(codes(r)).not.toContain("unbound-bundle");
+    expect(codes(r)).not.toContain("contradictory-evidence");
+    expect(r.decision).not.toBe("admit");
   });
 });
