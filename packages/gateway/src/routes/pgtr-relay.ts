@@ -11,6 +11,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
+import { admitRelay, requestCaller } from "../services/gateway-spend-guard.js";
 
 export async function pgtrRelayRoutes(app: FastifyInstance) {
   // ── Status ──────────────────────────────────────────────────────────
@@ -115,6 +116,13 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
       return reply
         .status(400)
         .send({ error: "expired", message: "Relay request has expired" });
+    }
+
+    // N46: the relayer key pays this transaction's gas. Throttled per caller
+    // (hourly) and globally (daily). A relay is counted as soon as it is admitted.
+    const relayAdmit = admitRelay(requestCaller(req));
+    if (!relayAdmit.ok) {
+      return reply.status(relayAdmit.status).send({ error: relayAdmit.error, message: relayAdmit.message });
     }
 
     try {

@@ -52,7 +52,8 @@ import type {
 } from "@pcc/spec";
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
-import { createJobFromSession } from "./paid-job-flow.js";
+import { createJobFromSession, gatewayFundingDecision, isMockSettlement } from "./paid-job-flow.js";
+import { GatewaySpendRefusedError, type GatewaySpender } from "../services/gateway-spend-guard.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
@@ -397,6 +398,7 @@ export async function createPccQuote(
 
 export async function commitPccSession(
   sessionId: string,
+  spender: GatewaySpender = { action: "a2a_submit" },
 ): Promise<{ status: SessionStatus; artifacts: A2AArtifact[] }> {
   const { db } = getStore();
   const row = db
@@ -454,6 +456,13 @@ export async function commitPccSession(
     token: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",
   };
 
+  // N46: in real settlement the gateway signer funds this escrow. Refuse here,
+  // before the session changes, when a spend cap says no.
+  if (!isMockSettlement()) {
+    const decision = gatewayFundingDecision({ quote, contractTerms }, spender);
+    if (!decision.ok) throw new GatewaySpendRefusedError(decision);
+  }
+
   const jobId = `job-${crypto.randomUUID().slice(0, 12)}`;
   const cwmId = `cwm-${crypto.randomUUID().slice(0, 12)}`;
   const now = new Date().toISOString();
@@ -501,7 +510,7 @@ export async function commitPccSession(
       .from(negotiationSessions)
       .where(eq(negotiationSessions.id, sessionId))
       .get();
-    if (committedRow) paidJob = await createJobFromSession(committedRow);
+    if (committedRow) paidJob = await createJobFromSession(committedRow, spender);
   } catch {
     // best-effort
   }
@@ -890,9 +899,14 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
   }];
 }
 
+/**
+ * @param spender - the authenticated caller, for the spend caps on the
+ *   gateway-paid pcc-submit skill (N46). Resolved by the route.
+ */
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
+  spender: GatewaySpender = { action: "a2a_submit" },
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
   const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
@@ -952,7 +966,7 @@ async function dispatchTasksSend(
 
       case "pcc-submit": {
         const quote = await createPccQuote(skillParams as PccSubmitParams);
-        const commit = await commitPccSession(quote.sessionId);
+        const commit = await commitPccSession(quote.sessionId, spender);
         emitAtomicSessionIntent(skillParams as PccSubmitParams, userAgentId);
         const task: A2ATask = {
           ...baseTask,
@@ -1039,6 +1053,10 @@ async function dispatchTasksSend(
         return rpcError(rpcId, -32602, `Unknown skill: ${skill}`, { skill });
     }
   } catch (err) {
+    if (err instanceof GatewaySpendRefusedError) {
+      // N46: a spend cap refused a gateway-paid skill. Nothing was committed.
+      return rpcError(rpcId, -32000, err.message, { skill, status: err.status, error: err.code });
+    }
     return rpcError(
       rpcId,
       -32603,
@@ -1225,9 +1243,15 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     //
     // Every tasks/send stores a task in the in-memory a2aTasks map, so the
     // anonymous path is per-IP rate-limited. Public is not unbounded.
+    //
+    // N46: the caller is also the spender the spend caps count for the
+    // gateway-paid pcc-submit skill. It is taken from the gate's own resolution,
+    // and with PCC_A2A_AUTH_DISABLED every caller shares one "unknown" bucket.
+    let spender: GatewaySpender = { action: "a2a_submit" };
     if (process.env.PCC_A2A_AUTH_DISABLED !== "true") {
       const apiKey = resolveApiKey(req);
       const session = !apiKey ? resolveSession(req) : null;
+      spender = { action: "a2a_submit", principal: apiKey?.operatorId ?? session?.address, apiKeyId: apiKey?.id };
       if (!apiKey && !session) {
         if (!isPublicDiscoverCall(method, params)) {
           return reply.status(200).send(
@@ -1253,7 +1277,7 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     let result: JsonRpcSuccess | JsonRpcError;
     switch (method) {
       case "tasks/send":
-        result = await dispatchTasksSend(rpcId, params);
+        result = await dispatchTasksSend(rpcId, params, spender);
         break;
       case "tasks/get":
         result = await dispatchTasksGet(rpcId, params);
