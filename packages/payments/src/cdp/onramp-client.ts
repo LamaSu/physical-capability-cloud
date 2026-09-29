@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { CdpConfig, CdpNetwork, OnrampSession } from "./types.js";
+import { cdpCredentialsComplete } from "./mode.js";
 
 export interface CreateOnrampParams {
   /** Where the bought USDC lands (the CDP smart wallet). */
@@ -12,7 +13,8 @@ export interface CreateOnrampParams {
  * CdpOnrampClient — card -> USDC on Base, into a destination wallet. The single human
  * step in the whole flow is opening `onrampUrl` and paying once.
  *
- * Mock/real switch is presence-of-creds. Onramp is real-money, so it targets Base
+ * Mock/real switch: the full credential tuple (cdpCredentialsComplete), the same rule
+ * as the wallet client, and a mock session says `mock: true`. Onramp is real-money, so it targets Base
  * MAINNET; on testnet there's nothing to buy — fund via the wallet client's faucet
  * instead. Real-mode builds the hosted Coinbase Onramp URL from the project's
  * Onramp App ID (cfg.onrampAppId / CDP_ONRAMP_APP_ID).
@@ -25,7 +27,9 @@ export class CdpOnrampClient {
   constructor(cfg: CdpConfig = {}) {
     this.cfg = cfg;
     this.network = cfg.network ?? "base-sepolia";
-    this.mock = cfg.mock ?? !cfg.apiKeyId;
+    // cfg.mock can force MOCK, never REAL: without the full tuple the client is mock
+    // whatever cfg.mock says (round 8, astra failclosed r2 FC-6).
+    this.mock = cfg.mock === true || !cdpCredentialsComplete(cfg);
   }
 
   get isMock(): boolean {
@@ -46,6 +50,7 @@ export class CdpOnrampClient {
         network: this.network,
         status: "created",
         createdAt: new Date().toISOString(),
+        mock: true,
       };
     }
     // Real hosted Coinbase Onramp URL. Funds settle on Base mainnet (onramp is real money).

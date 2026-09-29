@@ -7,27 +7,14 @@
 
 import type { FastifyInstance } from "fastify";
 import { auditService } from "../services/audit-service.js";
+import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
 
 /**
- * Audit log admins (env var: comma-separated wallet addresses or operator IDs).
- * Members of this list get unscoped audit log access. Everyone else sees only
- * their own entries.
- *
- * Set in Railway: AUDIT_ADMINS=0xabc...,operator@example.com
+ * Who sees what (WP-A round 5; coord-watch #2883). Every caller sees only their
+ * own entries. A cross-tenant view (an explicit `actor` filter, or global stats)
+ * needs the admin SECRET (X-Admin-Key = PCC_ADMIN_KEY). The AUDIT_ADMINS
+ * operatorId allowlist grants nothing any more: an operatorId is asserted, not held.
  */
-function getAuditAdmins(): Set<string> {
-  const raw = process.env.AUDIT_ADMINS ?? "";
-  return new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-}
-
-function isAuditAdmin(operatorId: string): boolean {
-  return getAuditAdmins().has(operatorId.toLowerCase());
-}
 
 export async function auditRoutes(app: FastifyInstance) {
   app.get<{
@@ -39,8 +26,6 @@ export async function auditRoutes(app: FastifyInstance) {
       limit?: string;
     };
   }>("/api/audit/log", async (req, reply) => {
-    // Scope to caller unless caller is in AUDIT_ADMINS env var.
-    // Previously returned ALL operators' data to any authenticated user (red team #33).
     const operatorId = (req as any).operatorId ?? (req as any).userId;
     if (!operatorId) {
       return reply.code(401).send({ error: "authentication_required" });
@@ -49,8 +34,10 @@ export async function auditRoutes(app: FastifyInstance) {
     const { eventType, resourceType, since } = req.query;
     const limit = req.query.limit ? Math.min(parseInt(req.query.limit, 10), 1000) : 100;
 
-    // Admins can pass an explicit actor filter; everyone else is forced to self.
-    const isAdmin = isAuditAdmin(operatorId);
+    // Asking for the admin view means presenting the secret; a wrong one is refused,
+    // never silently downgraded. Without it the caller is scoped to themselves.
+    const isAdmin = presentsAdminSecret(req);
+    if (isAdmin && !requireAdminSecret(req, reply)) return reply;
     const actorFilter = isAdmin ? req.query.actor : operatorId;
 
     const entries = auditService.query({
@@ -68,8 +55,15 @@ export async function auditRoutes(app: FastifyInstance) {
     if (!operatorId) {
       return reply.code(401).send({ error: "authentication_required" });
     }
-    // Stats remain unscoped for now (counts only, no PII) but require auth.
-    const stats = auditService.stats();
-    return { stats, window: "24h" };
+    // Global counts are cross-tenant data: admin secret only. Everyone else gets
+    // the same counts over their own entries.
+    if (presentsAdminSecret(req)) {
+      if (!requireAdminSecret(req, reply)) return reply;
+      return { stats: auditService.stats(), window: "24h", scoped: false };
+    }
+    // Counted in the database over the caller's WHOLE 24h window (WP-A round 7, astra
+    // r2 new defect 2): it used to count a query capped at 1000 rows and still say "24h".
+    const stats = auditService.stats(String(operatorId)).sort((a, b) => b.count - a.count);
+    return { stats, window: "24h", scoped: true };
   });
 }

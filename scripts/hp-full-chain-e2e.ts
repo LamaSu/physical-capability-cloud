@@ -32,10 +32,25 @@ if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
   process.exit(1);
 }
 
-const PCCAPIKEY = "pcc_live_97739a42afdfd22db33f75b25bec61daf92ef656b84a6b102a811266c297b63b";
+/**
+ * Read a required secret from the environment and exit with a clear message
+ * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
+ * the literals that used to sit here were exposed and are listed for
+ * revocation in docs/security/WILDCARD_KEY_ROTATION.md).
+ */
+function requireEnv(name: string, what: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+    process.exit(1);
+  }
+  return value;
+}
+
+const PCCAPIKEY = requireEnv("PCC_API_KEY", "a PCC API key (pcc_live_/pcc_test_)");
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "http://localhost:4100"; // oracle is on the same Spark host
-const ORACLE_KEY = "pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa";
+const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
 const KERNEL = "kernel-hp-printer";
 const PROTOCOL = "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23" as Address;
 const REPO = "/home/ryangeorge/projects/physical-capability-cloud";

@@ -59,8 +59,8 @@ describe("POST /api/kernels authentication and ownership", () => {
   });
 
   it("does not let one authenticated actor bind a kernel owned by another", async () => {
-    const owner = provisionApiKey({ operatorId: "operator-owner" }).rawKey;
-    const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
+    const owner = provisionApiKey({ operatorId: "operator-owner", scopes: ["operator"] }).rawKey;
+    const attacker = provisionApiKey({ operatorId: "operator-attacker", scopes: ["operator"] }).rawKey;
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
@@ -85,8 +85,8 @@ describe("POST /api/kernels authentication and ownership", () => {
   });
 
   it("rejects an authenticated non-owner mutation without a signing proof", async () => {
-    const owner = provisionApiKey({ operatorId: "operator-owner" }).rawKey;
-    const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
+    const owner = provisionApiKey({ operatorId: "operator-owner", scopes: ["operator"] }).rawKey;
+    const attacker = provisionApiKey({ operatorId: "operator-attacker", scopes: ["operator"] }).rawKey;
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",

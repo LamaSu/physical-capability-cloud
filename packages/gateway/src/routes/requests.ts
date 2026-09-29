@@ -27,6 +27,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { sameIdentity } from "../auth/identity-normalize.js";
 import { createHash } from "node:crypto";
 import type {
   CapabilityRequest,
@@ -826,6 +827,17 @@ export async function requestRoutes(app: FastifyInstance) {
         targetOperator = callerId;
       }
 
+      // A node another operator holds is theirs: only a broker moves it (WP-A; astra
+      // pack 47, "broader ownership gaps"). It used to be reassigned unconditionally,
+      // so any key could take over a claimed node and then complete it. Claiming an
+      // OPEN node for yourself, or again one you hold, is unchanged.
+      if (node.assignedOperator && !sameIdentity(node.assignedOperator, targetOperator) && !isBrokerOperator(callerId)) {
+        return reply.status(409).send({
+          error: "node_already_assigned",
+          message: "This node is assigned to another operator; only a broker can reassign it",
+        });
+      }
+
       node.assignedOperator = targetOperator;
       node.status = "assigned";
 
@@ -873,11 +885,15 @@ export async function requestRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "node_not_found" });
       }
 
+      // The assigned operator sets its node's status, and a broker may set any. An
+      // UNASSIGNED node has no operator to match, so only a broker may (rule 7: this
+      // check used to be skipped whenever the node had no assigned operator).
       const { isBrokerOperator } = await import("../middleware/security-hardening.js");
-      if (node.assignedOperator && node.assignedOperator !== callerId && !isBrokerOperator(callerId)) {
+      const holds = typeof node.assignedOperator === "string" && sameIdentity(node.assignedOperator, callerId);
+      if (!holds && !isBrokerOperator(callerId)) {
         return reply.status(403).send({
           error: "forbidden",
-          message: "Only the assigned operator can update this node's status",
+          message: "Only the assigned operator (or a broker) can update this node's status",
         });
       }
 

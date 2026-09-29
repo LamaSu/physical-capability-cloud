@@ -23,27 +23,9 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DemandAggregator } from "@pcc/demand-intel";
 import type { DemandSnapshot } from "@pcc/spec";
 import { getRepos } from "../db.js";
+import { requireAdminSecret } from "../auth/admin-secret-gate.js";
 
 // ── Auth gate ─────────────────────────────────────────────────────────────
-
-/**
- * Returns true if the operator is on the PCC_DEMAND_ADMINS allowlist.
- * Comma-separated env var of operator IDs / wallet addresses (lower-cased).
- *
- * If the env var is empty / unset, NO admin is allowed (closed-by-default).
- * Production must explicitly opt-in operators.
- */
-function isDemandAdmin(operatorId: string | undefined | null): boolean {
-  if (!operatorId) return false;
-  const raw = process.env.PCC_DEMAND_ADMINS ?? "";
-  const set = new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  return set.has(operatorId.toLowerCase());
-}
 
 function requireDemandAdmin(req: FastifyRequest, reply: FastifyReply): string | null {
   const callerId =
@@ -53,14 +35,9 @@ function requireDemandAdmin(req: FastifyRequest, reply: FastifyReply): string | 
     void reply.status(401).send({ error: "authentication_required" });
     return null;
   }
-  if (!isDemandAdmin(callerId)) {
-    void reply.status(403).send({
-      error: "forbidden",
-      message:
-        "Demand-intel admin endpoints require operator on PCC_DEMAND_ADMINS allowlist.",
-    });
-    return null;
-  }
+  // WP-A round 5 (coord-watch #2883): the admin SECRET grants this, not an
+  // asserted operatorId on PCC_DEMAND_ADMINS (the allowlist only reserves those names now).
+  if (!requireAdminSecret(req, reply)) return null;
   return callerId;
 }
 
@@ -182,7 +159,7 @@ export async function adminDemandRoutes(app: FastifyInstance) {
   //                   the snapshot windowStart >= since
   //   limit=50     - cap on returned compositions (default 50)
   app.get("/api/admin/demand/composites", async (req, reply) => {
-    if (!requireDemandAdmin(req, reply)) return;
+    if (!requireDemandAdmin(req, reply)) return reply;
     const q = req.query as Record<string, string | undefined>;
     const limit = Math.min(parseInt(q.limit ?? "50", 10) || 50, 50);
     const since = q.since;
@@ -219,7 +196,7 @@ export async function adminDemandRoutes(app: FastifyInstance) {
   app.get<{ Params: { window: string } }>(
     "/api/admin/demand/snapshot/:window",
     async (req, reply) => {
-      if (!requireDemandAdmin(req, reply)) return;
+      if (!requireDemandAdmin(req, reply)) return reply;
       const w = req.params.window;
       if (w !== "hour" && w !== "day") {
         return reply.status(400).send({
@@ -237,7 +214,7 @@ export async function adminDemandRoutes(app: FastifyInstance) {
 
   // ── GET /api/admin/demand/status ────────────────────────────────────────
   app.get("/api/admin/demand/status", async (req, reply) => {
-    if (!requireDemandAdmin(req, reply)) return;
+    if (!requireDemandAdmin(req, reply)) return reply;
     const repos = getRepos();
     const hourly = latestSnapshot("hour");
     const daily = latestSnapshot("day");
@@ -272,7 +249,7 @@ export async function adminDemandRoutes(app: FastifyInstance) {
   app.get<{ Params: { signature: string } }>(
     "/api/admin/demand/composite/:signature",
     async (req, reply) => {
-      if (!requireDemandAdmin(req, reply)) return;
+      if (!requireDemandAdmin(req, reply)) return reply;
       const sig = req.params.signature;
       if (!/^0x[a-f0-9]{64}$/i.test(sig)) {
         return reply.status(400).send({
