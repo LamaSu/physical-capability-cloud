@@ -64,6 +64,23 @@ class TestRedaction(unittest.TestCase):
         for secret in ("abcdefghijklmnopqrstuvwxyz0123", "pcc_live_", "eyJhbGci", "ab" * 32, "sk-proj-", "ghp_", "ops@example.com"):
             self.assertNotIn(secret, clean)
 
+    def test_removes_the_private_keys_a_provisioning_response_carries(self):
+        # Built at runtime so no literal here looks like a key to a secret scanner.
+        b64 = "MC4CAQAwBQYDK2VwBCIEI" + "Gx9Qm2Rt7Vb3Kp8Wz1Lc5Nd" + "Yh4Fs6Uj0"
+        pem = "-----BEGIN " + "PRIVATE KEY-----\n" + b64 + "\n-----END " + "PRIVATE KEY-----"
+        field = '{"private_' + 'key_pkcs8_base64": "' + b64 + '", "name": "bench"}'
+        for text in (pem, pem[:60], field, "the key was " + b64):
+            clean = pcc_report.redact(text)
+            self.assertNotIn(b64[:24], clean, text[:30])
+        self.assertIn('"name": "bench"', pcc_report.redact(field))
+        short = '{"pass' + 'word": "not-long-but-secret"}'  # too short for the base64 rule
+        self.assertNotIn("not-long-but-secret", pcc_report.redact(short))
+
+    def test_keeps_paths_and_prose_that_only_look_long(self):
+        for text in ("POST /api/operators/operator/status/channels/test answered 404",
+                     "registerdeviceanswered500twiceandthenstoppedcompletely"):
+            self.assertEqual(pcc_report.redact(text), text)
+
     def test_keeps_a_40_hex_public_address(self):
         address = "0x" + "12" * 20
         self.assertIn(address, pcc_report.redact(f"payout to {address}"))

@@ -36,13 +36,29 @@ TARGETS = ["runbook", "agent-package", "docs", "code", "process", "other"]
 STATE = ".pcc"
 
 _REDACTIONS = [
+    # A PEM private key, whole or cut off: the provisioning response carries one.
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.S), "[redacted-pem]"),
+    # The value of any secret-named JSON field ("private_key_pkcs8_base64": "...", "api_key": "...").
+    (re.compile(r'("[A-Za-z0-9_]*(?:private_?key|secret|api_?key|password|mnemonic|seed)[A-Za-z0-9_]*"\s*:\s*")[^"]*"', re.I), r'\1[redacted]"'),
     (re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}"), "Bearer [redacted]"),
-    (re.compile(r"\bpcc_(?:live|test|oracle)_[A-Za-z0-9]{8,}"), "[redacted-key]"),
+    (re.compile(r"\bpcc_(?:live|test|oracle)_[A-Za-z0-9_-]{8,}"), "[redacted-key]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "[redacted-jwt]"),
     (re.compile(r"\b(?:0x)?[0-9a-fA-F]{64,}\b"), "[redacted-hex]"),
     (re.compile(r"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|gh[po]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"), "[redacted-key]"),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[redacted-email]"),
 ]
+
+# Base64 key material (a PKCS#8 key, a seed) has no fixed prefix. A run of 40 or more
+# base64 characters is treated as one when it mixes upper case, lower case and digits,
+# which an endpoint path or a sentence almost never does.
+_BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}")
+
+
+def _base64_secret(match):
+    run = match.group(0)
+    if re.search(r"[a-z]", run) and re.search(r"[A-Z]", run) and re.search(r"[0-9]", run):
+        return "[redacted-b64]"
+    return run
 
 
 def redact(text):
@@ -52,7 +68,7 @@ def redact(text):
     text = str(text)
     for pattern, replacement in _REDACTIONS:
         text = pattern.sub(replacement, text)
-    return text
+    return _BASE64_RUN.sub(_base64_secret, text)
 
 
 def _state_path(name):
