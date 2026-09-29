@@ -14,8 +14,13 @@
  *   - A CHAIN escrow (V2/V3): the refund is DECIDED here but not executed. The escrow and its milestones read
  *     "refund_pending". Executing it on-chain is a separate step (V3: the payer-only `reclaimAfterDeadline`,
  *     after `fundedAt` + the reclaim deadline; V2: only through `resolveDispute`), and nothing here sends a
- *     transaction. A refund-pending escrow is never released: `/complete` refuses it, and so does the
- *     settlement keeper.
+ *     transaction.
+ *
+ * NEVER RELEASED. The gateway never moves an escrow it has given back toward a release. Each release path refuses
+ * it: PUT /api/jobs/:id/complete and POST /api/jobs/:id/resume-settlement (409 `escrow_refunded`), the settlement
+ * keeper, the raw chain routes for evidence, attestation and release (409), and SettlementService.releaseMilestone
+ * (POST /api/settlement/release and the automatic release after evidence), which also never reports the job settled.
+ * A dispute stays open: V2 refunds only through `resolveDispute`.
  *
  * CONSERVATIVE BY DESIGN. It gives an escrow back only when nothing has started to settle it:
  *   - the job was not already in a settlement phase before this write (a late `failed` report must not
@@ -25,6 +30,7 @@
  * Anything else is left to the settlement or dispute path, and reported as `skipped` with the reason.
  * Repeating the write is harmless: an escrow already refunded or refund-pending is skipped.
  */
+import { getAddress, isAddress } from "viem";
 import { getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 // The words this module writes live in @pcc/spec, so the job read (readmodels) reads the same ones.
@@ -86,6 +92,34 @@ export function escrowForJob(jobId: string) {
     .get();
   if (!session?.cwmId) return undefined;
   return getRepos().escrows.findByCwm(session.cwmId);
+}
+
+/**
+ * The escrow row at an on-chain address, matched in any letter case: rows are written checksummed (paid-job-flow),
+ * while callers often send lowercase.
+ */
+export function escrowByContractAddress(contractAddress: string) {
+  const escrows = getRepos().escrows;
+  const candidates = new Set<string>([contractAddress, contractAddress.toLowerCase()]);
+  if (isAddress(contractAddress)) candidates.add(getAddress(contractAddress));
+  for (const candidate of candidates) {
+    const row = escrows.findByContractAddress(candidate);
+    if (row) return row;
+  }
+  return undefined;
+}
+
+/**
+ * The escrow a release would touch that the gateway has already given back (`refund_pending` or `refunded`), if any:
+ * the job's own escrow, and the escrow at `contractAddress` when one is named. A release must refuse when this
+ * returns a row.
+ */
+export function givenBackEscrow(ref: { jobId?: string; contractAddress?: string }) {
+  const rows = [
+    ref.jobId ? escrowForJob(ref.jobId) : undefined,
+    ref.contractAddress ? escrowByContractAddress(ref.contractAddress) : undefined,
+  ];
+  return rows.find((row) => row !== undefined && NON_RELEASABLE_ESCROW_STATUSES.has(row.status));
 }
 
 /**

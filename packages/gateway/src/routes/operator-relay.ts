@@ -13,11 +13,11 @@
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
+import { setJobStatusWithRefund } from "../services/escrow-refund.js";
 import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
-import { setJobStatusWithRefund } from "../services/escrow-refund.js";
 import { v4 as uuidv4 } from "uuid";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {

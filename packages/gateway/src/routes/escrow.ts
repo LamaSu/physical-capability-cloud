@@ -22,6 +22,7 @@ import {
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
+import { NON_RELEASABLE_ESCROW_STATUSES } from "../services/escrow-refund.js";
 
 /**
  * Look up an escrow row by its on-chain contract address. The single DB query
@@ -46,6 +47,35 @@ function findEscrowRow(contractAddress: string) {
     if (row) return row;
   }
   return undefined;
+}
+
+/**
+ * N79: an escrow the gateway has given back (its job failed or was cancelled: `refund_pending` on a chain escrow,
+ * `refunded` once the refund is done) is never moved toward a release. The evidence, attestation and release routes
+ * call this first, on every path (V1, V2, V3). A dispute stays open: V2 refunds only through resolveDispute.
+ * Replies 409 and returns true when it refuses. Fails closed: when the escrow registry cannot be read, replies 503
+ * and sends nothing.
+ */
+function refuseGivenBackEscrow(reply: FastifyReply, contractAddress: string): boolean {
+  let row: ReturnType<typeof findEscrowRow>;
+  try {
+    row = findEscrowRow(contractAddress);
+  } catch {
+    reply.status(503).send({
+      error: "escrow_registry_unavailable",
+      message: "The escrow registry could not be read, so nothing was sent. Try again shortly.",
+    });
+    return true;
+  }
+  if (row && NON_RELEASABLE_ESCROW_STATUSES.has(row.status)) {
+    reply.status(409).send({
+      error: "escrow_refunded",
+      message: "This escrow was given back; it can no longer be released.",
+      escrowStatus: row.status,
+    });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -359,6 +389,7 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
       // V2 (EAS) path: release takes ONLY the milestone index — the binding
       // attestation was supplied at submitAttestation time (by UID), so no
       // attestation struct is re-passed here (unlike V1). Challenge window must
@@ -501,6 +532,7 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
       const body = req.body as { evidenceBundleHash?: string } | undefined;
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
@@ -555,6 +587,7 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      if (refuseGivenBackEscrow(reply, address)) return reply; // N79: given back, never released
       // V2 (EAS) path: the body carries an EAS UID (bytes32) instead of the full
       // oracle attestation struct. The contract validates the UID against EAS
       // on-chain. Accept `easUid` (preferred) or legacy `attestationHash`.

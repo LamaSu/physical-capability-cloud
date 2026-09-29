@@ -40,6 +40,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { escrowForJob, NON_RELEASABLE_ESCROW_STATUSES } from "../services/escrow-refund.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -54,7 +55,6 @@ import {
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
-import { escrowForJob, NON_RELEASABLE_ESCROW_STATUSES } from "../services/escrow-refund.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,

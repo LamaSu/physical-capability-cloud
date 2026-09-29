@@ -249,7 +249,8 @@ export const releaseMilestoneByJobActivity = defineActivity<
     initialIntervalMs: 2_000,
     maximumAttempts: 5,
     backoffCoefficient: 2,
-    nonRetryableErrorPatterns: ["write_disabled", "BadRequestError"],
+    // escrow_refunded (N79): the escrow was given back; retrying cannot change that.
+    nonRetryableErrorPatterns: ["write_disabled", "BadRequestError", "escrow_refunded"],
   },
   deriveKey: (ctx) => {
     const [jobId, milestoneIdx] = ctx.args;

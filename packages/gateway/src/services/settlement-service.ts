@@ -16,6 +16,7 @@ import { isFabricated } from "@pcc/spec";
 import type { Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
+import { givenBackEscrow } from "./escrow-refund.js";
 import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
@@ -436,6 +437,12 @@ export class SettlementService {
     attestation: OracleAttestation,
     contractAddress?: string,
   ): Promise<ReleaseResult> {
+    // N79: never release an escrow the gateway has given back (the job's own, or the one named here), and never
+    // report its job settled. The route and the automatic release after evidence both come through here.
+    if (givenBackEscrow({ jobId, contractAddress: contractAddress ?? process.env.ESCROW_CONTRACT_ADDRESS })) {
+      return { jobId, txHash: "", status: "failed", error: "escrow_refunded" };
+    }
+
     if (!isWriteEnabled()) {
       return {
         jobId,

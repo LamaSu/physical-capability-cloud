@@ -5,10 +5,12 @@
  * (POST /api/operator/job-status), the settlement read then said "cancelled", but the escrow and its
  * milestone stayed "funded": nothing ever refunded it.
  *
- * The rule under test: when a job ends without completing (`failed` or `cancelled`), its escrow
+ * The rule under test: when a job ends without completing (`failed` or `cancelled`; the spec's `timed_out` too),
+ * its escrow
  *   - under MOCK settlement is refunded at once: every unreleased milestone and the escrow read "refunded";
  *   - on a CHAIN escrow is marked "refund_pending": the refund is decided, but executing it on-chain is a
- *     separate step, and a refund-pending escrow can never be released or reported settled.
+ *     separate step, and the gateway never releases a refund-pending escrow.
+ * The escrow rows are asserted directly: they are what this change writes. The settlement READ is readmodels'.
  * An escrow that already completed (released) or was refunded is never touched.
  *
  * These tests live in their own file because paid-job-flow.test.ts is excluded from the vitest run
@@ -108,16 +110,6 @@ async function reportFailed(app: FastifyInstance, jobId: string) {
   return res.json() as { updated: boolean; escrowRefund?: { outcome: string; reason?: string } };
 }
 
-async function settlementOf(app: FastifyInstance, jobId: string) {
-  const res = await app.inject({ method: "GET", url: `/api/jobs/${jobId}/settlement` });
-  expect(res.statusCode).toBe(200);
-  return res.json() as {
-    status: string;
-    escrow: { escrowStatus: string } | null;
-    milestones: Array<{ status: string }>;
-  };
-}
-
 describe("N79: a failed or cancelled job's escrow is refunded, never left funded", () => {
   let app: FastifyInstance;
 
@@ -132,8 +124,8 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
 
   it("R0 G2: the operator node reports the job failed, and the mock escrow is refunded", async () => {
     const jobId = await submitPaidJob(app, "user-n79-failed");
-    const before = await settlementOf(app, jobId);
-    expect(before.escrow?.escrowStatus).toBe("funded");
+    const before = escrowOf(jobId);
+    expect(before.escrow.status).toBe("funded");
     expect(before.milestones.every((m) => m.status === "funded")).toBe(true);
 
     const res = await app.inject({
@@ -143,8 +135,8 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     });
     expect(res.statusCode).toBe(200);
 
-    const after = await settlementOf(app, jobId);
-    expect(after.escrow?.escrowStatus).toBe("refunded");
+    const after = escrowOf(jobId);
+    expect(after.escrow.status).toBe("refunded");
     expect(after.milestones.map((m) => m.status)).toEqual(before.milestones.map(() => "refunded"));
   });
 
@@ -156,8 +148,8 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
       payload: { status: "cancelled" },
     });
     expect(res.statusCode).toBeLessThan(300);
-    const after = await settlementOf(app, jobId);
-    expect(after.escrow?.escrowStatus).toBe("refunded");
+    const after = escrowOf(jobId);
+    expect(after.escrow.status).toBe("refunded");
     expect(after.milestones.every((m) => m.status === "refunded")).toBe(true);
     expect(getRepos().jobs.findById(jobId)?.status).toBe("cancelled");
   });
