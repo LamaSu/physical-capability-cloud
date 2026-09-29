@@ -142,7 +142,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     const entry = entryFor(req, reply);
     if (!entry) return;
     sessions.delete(req.headers[SESSION_HEADER] as string);
-    return { report: await entry.session.close() };
+    return await entry.session.close();
   });
 
   return app;

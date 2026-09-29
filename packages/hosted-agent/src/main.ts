@@ -21,6 +21,7 @@ import Database from "better-sqlite3";
 import { BudgetMeter, type BudgetCaps, type MessagesClient, type ModelPrice } from "./budget.js";
 import { loadPinnedPack, type PackPin } from "./pack.js";
 import { buildServer } from "./server.js";
+import type { AttemptReport } from "./session.js";
 import { connectMcp } from "./tools.js";
 
 export class ConfigError extends Error {
@@ -100,6 +101,33 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
   };
 }
 
+/**
+ * Send an attempt report to painpoints' store: the gateway's public
+ * /api/feedback (contract v1). It sends NO credential (the user's key is never
+ * reused for the service's own reporting), and a failed send never blocks a
+ * session from closing.
+ */
+export function attemptSink(
+  gatewayBase: string,
+  log: (line: string) => void = (l) => console.log(l),
+): (report: AttemptReport) => Promise<void> {
+  const url = new URL("/api/feedback", gatewayBase).toString();
+  return async (report) => {
+    log(JSON.stringify({ attempt: report }));
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(report),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) log(JSON.stringify({ attemptNotStored: res.status }));
+    } catch (err) {
+      log(JSON.stringify({ attemptNotSent: err instanceof Error ? err.name : "error" }));
+    }
+  };
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`the pack at ${url} answered ${res.status}`);
@@ -119,8 +147,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       anthropic: new Anthropic() as unknown as MessagesClient,
       connect: (credential) => connectMcp(cfg.gatewayBase, credential),
       l2Enabled: cfg.l2Enabled,
-      // Metadata only, until painpoints' store takes it (item 3) and operator item 99 settles transcripts.
-      report: (r) => console.log(JSON.stringify({ attempt: r })),
+      // Contract v1, metadata only (no transcript until operator item 99).
+      report: attemptSink(cfg.gatewayBase),
     },
   });
   await app.listen({ host: cfg.host, port: cfg.port });

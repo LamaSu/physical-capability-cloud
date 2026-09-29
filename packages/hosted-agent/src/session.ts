@@ -6,7 +6,7 @@
  * LLMAgent. The user's credential goes only into the transport; the session
  * never stores, logs or reports it.
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 import { LLMAgent, BudgetExceededError, validateToolNames } from "@pcc/agent-runtime";
 import { BudgetStop, meteredClient, type BudgetMeter, type MessagesClient, type ModelPrice } from "./budget.js";
@@ -23,18 +23,33 @@ export const HOSTED_PREAMBLE = [
   "- Price, payout, availability and safety settings are the user's decisions: ask, never assume.",
 ].join("\n");
 
-export type AttemptOutcome = "ok" | "budget-stop" | "error";
+export type AttemptOutcome = "ok" | "budget_stop" | "failed";
 
-/** Metadata only: no transcript until operator item 99 settles consent. */
+export const HARNESS_VERSION = "0.1.0";
+
+/** The session roll-up, in painpoints' attempt-reporting contract v1 (item 3).
+ * Metadata only: no transcript until operator item 99 settles consent. Its
+ * sessionId is a random UUID for reporting, never the session's own id (a
+ * bearer capability), because reports can go out while a session is live. */
 export interface AttemptReport {
   readonly kind: "attempt";
-  readonly harness: "pcc-hosted";
+  readonly contract: 1;
   readonly sessionId: string;
-  readonly packVersion: string;
-  readonly packSha256: string;
+  readonly seq: number;
+  readonly phase: "session";
   readonly outcome: AttemptOutcome;
-  readonly turns: number;
   readonly durationMs: number;
+  readonly summary: string;
+  readonly harness: { readonly name: "pcc-hosted"; readonly version: string; readonly model: string };
+  readonly pack: { readonly version: string; readonly digest: string };
+  readonly tokens: { readonly in: number; readonly out: number; readonly source: "metered" };
+  readonly consent: { readonly transcript: false };
+}
+
+/** What close() returns: the report, plus what stays local (never sent). */
+export interface SessionClose {
+  readonly report: AttemptReport;
+  readonly turns: number;
   readonly spentNanoUsd: number;
 }
 
@@ -65,6 +80,8 @@ export class HostedSession {
   private turns = 0;
   private outcome: AttemptOutcome = "ok";
   private closed = false;
+  private seq = 0;
+  private readonly reportId = randomUUID();
 
   private constructor(
     readonly id: string,
@@ -74,6 +91,7 @@ export class HostedSession {
     private readonly gate: ConfirmationGate,
     private readonly agent: LLMAgent,
     private readonly startedAt: number,
+    private readonly tokens: { in: number; out: number },
   ) {}
 
   static async open(deps: SessionDeps, opts: { readonly userKey: string; readonly credential: string | null }): Promise<HostedSession> {
@@ -93,10 +111,22 @@ export class HostedSession {
       }
     });
     const callers = Object.fromEntries(defs.map((d) => [d.name, offered.callers[d.name]!]));
-    const client = meteredClient(deps.anthropic, deps.meter, { sessionId: id, userKey: opts.userKey }, deps.price);
+    // Count the tokens each response reports (the metered source), then meter the spend.
+    const tokens = { in: 0, out: 0 };
+    const counting: MessagesClient = {
+      messages: {
+        create: async (request) => {
+          const response = await deps.anthropic.messages.create(request);
+          tokens.in += response.usage?.input_tokens ?? 0;
+          tokens.out += response.usage?.output_tokens ?? 0;
+          return response;
+        },
+      },
+    };
+    const client = meteredClient(counting, deps.meter, { sessionId: id, userKey: opts.userKey }, deps.price);
     // LLMAgent calls only messages.create on its client.
     const agent = new LLMAgent(defs, callers, { client: client as unknown as Anthropic, model: deps.model, maxTokens: deps.maxTokens });
-    return new HostedSession(id, opts.userKey, deps, transport, gate, agent, (deps.now ?? Date.now)());
+    return new HostedSession(id, opts.userKey, deps, transport, gate, agent, (deps.now ?? Date.now)(), tokens);
   }
 
   /** One user message. The history advances only when the turn completes. */
@@ -114,7 +144,7 @@ export class HostedSession {
       return { reply: result.text, pending: this.gate.pending(this.id) };
     } catch (err) {
       if (err instanceof BudgetStop) {
-        this.outcome = "budget-stop";
+        this.outcome = "budget_stop";
         return {
           reply: "This session has reached its spending limit, so the agent has stopped. Nothing was charged beyond it.",
           pending: this.gate.pending(this.id),
@@ -128,7 +158,7 @@ export class HostedSession {
           stopped: err.budget,
         };
       }
-      this.outcome = "error";
+      this.outcome = "failed";
       throw err;
     }
   }
@@ -155,25 +185,32 @@ export class HostedSession {
   }
 
   /** End the session: report the attempt (metadata only) and drop the transport. */
-  async close(): Promise<AttemptReport> {
+  async close(): Promise<SessionClose> {
     if (this.closed) throw new Error("the session is closed");
     this.closed = true;
     const report: AttemptReport = {
       kind: "attempt",
-      harness: "pcc-hosted",
-      sessionId: this.id,
-      packVersion: this.deps.pack.version,
-      packSha256: this.deps.pack.sha256,
+      contract: 1,
+      sessionId: this.reportId,
+      seq: this.seq++,
+      phase: "session",
       outcome: this.outcome,
-      turns: this.turns,
       durationMs: (this.deps.now ?? Date.now)() - this.startedAt,
-      spentNanoUsd: this.deps.meter.spent({ sessionId: this.id, userKey: this.userKey }).session,
+      summary: `session: ${this.outcome}`,
+      harness: { name: "pcc-hosted", version: HARNESS_VERSION, model: this.deps.model },
+      pack: { version: this.deps.pack.version, digest: `sha256:${this.deps.pack.sha256}` },
+      tokens: { in: this.tokens.in, out: this.tokens.out, source: "metered" },
+      consent: { transcript: false },
     };
     try {
       await this.deps.report?.(report);
     } finally {
       await this.transport.close();
     }
-    return report;
+    return {
+      report,
+      turns: this.turns,
+      spentNanoUsd: this.deps.meter.spent({ sessionId: this.id, userKey: this.userKey }).session,
+    };
   }
 }

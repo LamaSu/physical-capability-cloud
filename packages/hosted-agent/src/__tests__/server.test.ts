@@ -157,7 +157,7 @@ describe("the hosted agent's HTTP surface", () => {
     const { app, reports } = setup();
     const id = await open(app);
     const res = await app.inject({ method: "DELETE", url: "/session", headers: { "x-hosted-session": id } });
-    expect(res.json().report).toMatchObject({ kind: "attempt", harness: "pcc-hosted" });
+    expect(res.json().report).toMatchObject({ kind: "attempt", contract: 1, phase: "session", harness: { name: "pcc-hosted" } });
     expect(reports).toHaveLength(1);
     expect((await say(app, id, "hi")).statusCode).toBe(404);
   });

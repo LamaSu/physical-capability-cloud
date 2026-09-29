@@ -72,9 +72,13 @@ describe("a hosted session", () => {
     const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
     expect(h.connect).toHaveBeenCalledWith(CREDENTIAL);
     await s.send("hi");
-    const report = await s.close();
+    const { report } = await s.close();
     expect(JSON.stringify(h.requests)).not.toContain(CREDENTIAL);
     expect(JSON.stringify(report)).not.toContain(CREDENTIAL);
+    // The report's sessionId is its own UUID, never the session id (a bearer capability).
+    expect(report.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(report.sessionId).not.toBe(s.id);
+    expect(JSON.stringify(report)).not.toContain(s.id);
   });
 
   it("the model gets the preamble and the pack prompt, and only the tools the policy offers", async () => {
@@ -143,9 +147,21 @@ describe("a hosted session", () => {
     const turn = await s.send("hi");
     expect(turn.stopped).toBe("per-session");
     expect(h.create).not.toHaveBeenCalled();
-    const report = await s.close();
-    expect(report).toMatchObject({ kind: "attempt", harness: "pcc-hosted", outcome: "budget-stop", turns: 0, packVersion: "2.19.1" });
-    expect(h.reports).toEqual([report]);
+    const closed = await s.close();
+    expect(closed.report).toMatchObject({
+      kind: "attempt",
+      contract: 1,
+      seq: 0,
+      phase: "session",
+      outcome: "budget_stop",
+      summary: "session: budget_stop",
+      harness: { name: "pcc-hosted", model: "claude-test" },
+      pack: { version: "2.19.1", digest: `sha256:${"a".repeat(64)}` },
+      tokens: { in: 0, out: 0, source: "metered" },
+      consent: { transcript: false },
+    });
+    expect(closed.turns).toBe(0);
+    expect(h.reports).toEqual([closed.report]);
     expect(h.transport.closed).toBe(true);
   });
 
@@ -156,10 +172,11 @@ describe("a hosted session", () => {
     await expect(s.send("two")).rejects.toThrow("upstream down");
     await s.send("three");
     expect(h.requests[2]!.messages.map((m) => m.content)).toEqual(["one", h.requests[2]!.messages[1]!.content, "three"]);
-    const report = await s.close();
-    expect(report.outcome).toBe("error");
-    expect(report.turns).toBe(2);
-    expect(report.spentNanoUsd).toBeGreaterThan(0);
+    const closed = await s.close();
+    expect(closed.report.outcome).toBe("failed");
+    expect(closed.turns).toBe(2);
+    expect(closed.spentNanoUsd).toBeGreaterThan(0);
+    expect(closed.report.tokens).toEqual({ in: 20, out: 10, source: "metered" });
   });
 
   it("only the pinned tools the connected surface serves are offered", async () => {

@@ -73,3 +73,27 @@ describe("the hosted agent's configuration", () => {
     expect(refusal({ ...ENV, PCC_HOSTED_PORT: "70000" })).toBe("PCC_HOSTED_PORT");
   });
 });
+
+describe("the attempt sink", () => {
+  it("POSTs the report to the public /api/feedback with no credential; a failure never throws", async () => {
+    const http = await import("node:http");
+    const { attemptSink } = await import("../main.js");
+    const seen: Array<{ url: string; auth: string | undefined; body: unknown }> = [];
+    const server = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      seen.push({ url: req.url ?? "", auth: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      res.statusCode = 201;
+      res.end("{}");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const lines: string[] = [];
+    const report = { kind: "attempt", contract: 1, sessionId: "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90", seq: 0 } as never;
+    await attemptSink(`http://127.0.0.1:${port}`, (l) => lines.push(l))(report);
+    expect(seen).toEqual([{ url: "/api/feedback", auth: undefined, body: report }]);
+    await new Promise<void>((r) => server.close(() => r()));
+    await attemptSink(`http://127.0.0.1:${port}`, (l) => lines.push(l))(report); // nothing listens now
+    expect(lines.some((l) => l.includes("attemptNotSent"))).toBe(true);
+  });
+});
