@@ -107,7 +107,12 @@ function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp
 function wiseProfileId(): number | null {
   const raw = process.env.WISE_PROFILE_ID?.trim();
   if (!raw || !/^[1-9][0-9]{0,18}$/.test(raw)) return null;
-  return Number(raw);
+  // Exactly representable, or refused (round 8, astra FC-1): Number() silently rounds
+  // integers above 2^53, so 9007199254740993 became 9007199254740992, a different
+  // account, before the payout. An id must survive the round trip unchanged.
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || String(n) !== raw) return null;
+  return n;
 }
 
 /** 503 for a live Wise token with no valid profile id; null when the payout may proceed. */

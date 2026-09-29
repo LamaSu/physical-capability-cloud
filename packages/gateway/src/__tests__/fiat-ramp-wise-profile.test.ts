@@ -67,6 +67,23 @@ describe("Wise payouts need a real profile id", () => {
     expect(fetchCalls.join(" ")).not.toContain("12345");
   });
 
+  it("[neg] a profile id above 2^53 is refused (503), never rounded to a different account (round 8, astra FC-1)", async () => {
+    process.env.WISE_API_TOKEN = "live-looking-wise-token";
+    process.env.WISE_PROFILE_ID = "9007199254740993"; // Number() gives ...992
+    app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/wise/payout", payload: payout });
+    expect(res.statusCode).toBe(503);
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("control: the largest exactly representable id (2^53 - 1) reaches Wise unchanged", async () => {
+    process.env.WISE_API_TOKEN = "live-looking-wise-token";
+    process.env.WISE_PROFILE_ID = "9007199254740991";
+    app = await buildApp();
+    await app.inject({ method: "POST", url: "/api/fiat-ramp/wise/payout", payload: payout });
+    expect(fetchCalls.join(" ")).toContain("9007199254740991");
+  });
+
   it("control: a live token with a valid profile does reach Wise, with that profile", async () => {
     process.env.WISE_API_TOKEN = "live-looking-wise-token";
     process.env.WISE_PROFILE_ID = "4242";
