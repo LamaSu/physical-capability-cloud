@@ -28,8 +28,9 @@ optimizer_runs = 200
 #
 # NOTE — deliberately ABSENT: a `libraries = [...]` entry. {VNextSettlementLib} is an external linked
 # library, and pinning its address here would link the TEST build against an address holding no code,
-# breaking every funding test. The V-next deploy scripts link per-invocation with `--libraries` instead
-# and assert the address they were linked against. See script/DeployVNextSettlement.s.sol.
+# breaking every funding test. Never pass `--libraries` either: it changes the library's own bytecode. The V-next
+# deploy script lets forge deploy and link the library during the run, and asserts the address forge chose. See
+# the header of script/DeployVNextSettlement.s.sol.
 fs_permissions = [
     { access = "read-write", path = "./deployments/vnext" },
     { access = "read", path = "./test/fixtures/fs-symlinks/walk" },

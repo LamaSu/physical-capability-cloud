@@ -63,6 +63,11 @@ contract VNextDeployRecordTest is Test {
 
     function setUp() public {
         harness = new DeployRecordHarness();
+        // The real record root must be contained BEFORE any test here writes, reads or removes a record in it.
+        // Without this, a pre-existing symlinked `deployments/vnext` let the helpers below write OUTSIDE the tree
+        // on forge 1.8.0 before the guard under test refused the checkout (astra round 2 on #339; reproduced:
+        // three DRYRUN records landed in the link's target). The helpers also check the root they are pointed at.
+        harness.assertRecordRootContained("deployments/vnext");
     }
 
     // ── 1. round trip ─────────────────────────────────────────────────────────────────────────────
@@ -272,6 +277,7 @@ contract VNextDeployRecordTest is Test {
         _requireLinks();
         harness.setRecordRoot(string.concat(ROOTS, "/link"));
         _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, AT_OR_ABOVE);
+        _assertGuardAbortNames(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, "roots/link");
     }
 
     /// @notice ...and walks the tree below it.
@@ -279,6 +285,25 @@ contract VNextDeployRecordTest is Test {
         _requireLinks();
         harness.setRecordRoot(string.concat(WALK, "/dir-link"));
         _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, BELOW);
+        _assertGuardAbortNames(VNextDeploySpec.MODE_PROVISIONAL, "run-1", FACTORY_A, "walk/dir-link/parent-link");
+    }
+
+    /// @notice The test helpers are guarded too: pointed at a symlinked root, the record writer and the cleanup both
+    ///         refuse before touching anything (astra round 2 on #339: the helpers used to mutate the real root before
+    ///         any check).
+    function test_Helpers_RefuseAnUncontainedRoot() public {
+        _requireLinks();
+        harness.setRecordRoot(string.concat(ROOTS, "/link"));
+        try this.writeRecordFor("helper-wiring") {
+            fail("_writeRecord wrote under an uncontained record root");
+        } catch Error(string memory reason) {
+            assertTrue(_contains(reason, AT_OR_ABOVE), string.concat("_writeRecord failed for the wrong reason: ", reason));
+        }
+        try this.clearFor(string.concat(ROOTS, "/link/README.md")) {
+            fail("_clear ran under an uncontained record root");
+        } catch Error(string memory reason) {
+            assertTrue(_contains(reason, AT_OR_ABOVE), string.concat("_clear failed for the wrong reason: ", reason));
+        }
     }
 
     /// @notice The WIRING on the write side: `_writeArtifact` refuses before it creates or writes anything. Without
@@ -287,13 +312,13 @@ contract VNextDeployRecordTest is Test {
     function test_Wiring_WriterRefusesASymlinkedRoot() public {
         _requireLinks();
         harness.setRecordRoot(string.concat(ROOTS, "/link"));
-        _assertWriterAborts(AT_OR_ABOVE);
+        _assertWriterAborts(AT_OR_ABOVE, "roots/link");
     }
 
     function test_Wiring_WriterRefusesALinkBelowTheRoot() public {
         _requireLinks();
         harness.setRecordRoot(string.concat(WALK, "/dir-link"));
-        _assertWriterAborts(BELOW);
+        _assertWriterAborts(BELOW, "walk/dir-link/parent-link");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────
@@ -322,7 +347,13 @@ contract VNextDeployRecordTest is Test {
         for (uint256 k; k < entries.length; ++k) {
             if (entries[k].isSymlink) ++count;
         }
-        if (count < 3) vm.skip(true);
+        if (count >= 3) return;
+        // No silent skip (astra round 2 on #339). If forge stopped reporting the fixture links, the production walk
+        // would miss real links too, so this FAILS. The one escape hatch is explicit and never set in CI: a checkout
+        // without symlink support (git core.symlinks=false) may set PCC_NO_SYMLINK_FIXTURES=1 to skip. The vitest
+        // `deployments-no-symlinks.test.ts` checks the same links with lstat, independently of forge.
+        if (vm.envOr("PCC_NO_SYMLINK_FIXTURES", false)) vm.skip(true);
+        revert("the committed symlink fixtures are not reported as symlinks (set PCC_NO_SYMLINK_FIXTURES=1 only on a checkout without symlink support)");
     }
 
     function _assertContained(string memory root) internal view {
@@ -357,22 +388,35 @@ contract VNextDeployRecordTest is Test {
         assertTrue(_contains(reason, named), string.concat("the refusal does not name ", named, ": ", reason));
     }
 
-    function _assertWriterAborts(string memory fragment) internal {
+    function _assertWriterAborts(string memory fragment, string memory named) internal {
         try harness.writeArtifactProvisional("wiring") {
             fail("_writeArtifact wrote under an uncontained record root");
         } catch Error(string memory reason) {
             assertTrue(_contains(reason, fragment), string.concat("_writeArtifact failed for the wrong reason: ", reason));
+            assertTrue(_contains(reason, named), string.concat("the refusal does not name ", named, ": ", reason));
         }
     }
 
+    /// @dev Every helper that mutates a record root checks that root first, the one it is actually pointed at.
     function _writeRecord(string memory mode, string memory label, address factory) internal returns (string memory path) {
+        harness.assertRecordRootContained(harness.recordRoot());
         path = harness.artifactPath(mode, label);
-        vm.createDir(string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid)), true);
+        vm.createDir(string.concat(harness.recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeFile(path, string.concat('{"factory":"', vm.toString(factory), '"}'));
     }
 
     function _clear(string memory path) internal {
+        harness.assertRecordRootContained(harness.recordRoot());
         if (vm.exists(path)) vm.removeFile(path);
+    }
+
+    /// @dev External entry points so a test can catch a helper's refusal.
+    function writeRecordFor(string calldata label) external returns (string memory) {
+        return _writeRecord(VNextDeploySpec.MODE_PROVISIONAL, label, FACTORY_A);
+    }
+
+    function clearFor(string calldata path) external {
+        _clear(path);
     }
 
     function _assertGuardPasses(string memory mode, string memory label, address predicted) internal {
@@ -389,6 +433,16 @@ contract VNextDeployRecordTest is Test {
         assertFalse(ok, "the guard did NOT abort");
         string memory reason = _reason(ret);
         assertTrue(_contains(reason, fragment), string.concat("aborted for the wrong reason: ", reason));
+    }
+
+    function _assertGuardAbortNames(string memory mode, string memory label, address predicted, string memory named)
+        internal
+        view
+    {
+        (, bytes memory ret) =
+            address(harness).staticcall(abi.encodeCall(DeployRecordHarness.guardAgainstRivalDeployment, (mode, label, predicted)));
+        string memory reason = _reason(ret);
+        assertTrue(_contains(reason, named), string.concat("the refusal does not name ", named, ": ", reason));
     }
 
     /// @dev Unwrap `Error(string)`. Returns the empty string for any other revert shape.
@@ -469,6 +523,10 @@ contract DeployRecordHarness is DeployVNextSettlement {
 
     function assertNoSymlinksBelow(string calldata root) external view {
         _assertNoSymlinksBelow(root);
+    }
+
+    function recordRoot() external view returns (string memory) {
+        return _recordRoot();
     }
 
     function readDirOnce(string calldata path) external view returns (uint256) {

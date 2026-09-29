@@ -1233,9 +1233,13 @@ contract DeployVNextSettlement is Script {
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
+        // Checked again right here, next to the write: the check at the top guarantees nothing runs against an
+        // uncontained root, and this one keeps the unavoidable check-to-write window as short as it was before the
+        // top check moved (astra round 2 on #339).
+        _assertRecordRootContained(_recordRoot());
         // `vm.writeJson` does not create intermediate directories, and a deploy that succeeded on-chain
-        // but failed to record its tuple is the worst outcome available here. The root itself exists (checked at
-        // the top), so this creates at most the network directory, in a root with no symlink at, above or below it.
+        // but failed to record its tuple is the worst outcome available here. The root itself exists (checked
+        // above), so this creates at most the network directory, in a root with no symlink at, above or below it.
         vm.createDir(string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeJson(finalJson, path);
         console2.log("wrote artifact:", path);
@@ -1350,8 +1354,10 @@ contract DeployVNextSettlement is Script {
     ///         a symlinked checkout path. With the root or an ancestor a symlink, 1.7.1 refuses to look (its
     ///         resolved grant no longer prefixes the lexical path), and 1.8.0 answers at the RESOLVED path. Both
     ///         are refused. An entry that exists at the probe path is refused too. `VNextDeployRecordTest` pins
-    ///         this against committed fixtures, and CI runs it on the pinned forge, so a forge change that alters
-    ///         any of it turns the suite red.
+    ///         this against committed fixtures on the forge CI pins. A forge change that altered these answers
+    ///         fails the root tests, and one that stopped reporting the fixture links fails the tests outright
+    ///         instead of skipping them (`_requireLinks`). `ts/__tests__/deployments-no-symlinks.test.ts` checks the
+    ///         same links with lstat, independently of forge.
     function _assertRecordRootIsReal(string memory root) internal view {
         require(
             vm.isDir(root),
