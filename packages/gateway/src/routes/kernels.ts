@@ -145,7 +145,7 @@ export async function kernelRoutes(app: FastifyInstance) {
       // Telemetry must never break kernel registration.
       try {
         recordOperatorStage(kernel.id, "kernel_created", {
-          operatorId: (req as any).operatorId ?? null,
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
         });
       } catch {
         /* funnel tracking must never break kernel registration */

@@ -513,7 +513,11 @@ export function getOperatorFunnel(opts: { since?: string } = {}): OperatorFunnel
   });
 }
 
-/** Ordered list of operator-funnel stages a single kernelId reached. */
+/**
+ * Ordered list of operator-funnel stages a single kernelId reached. The audit
+ * query can't filter by resource id, so this scans at most 10,000 operator-funnel
+ * rows: for full history on a busy gateway, use the private observability store.
+ */
 export function getOperatorStagesForKernel(kernelId: string): OperatorStage[] {
   const rows = auditService.query({ eventType: OPERATOR_FUNNEL_AUDIT_EVENT, limit: 10000 });
   const found = new Set<OperatorStage>();

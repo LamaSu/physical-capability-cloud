@@ -689,7 +689,10 @@ export async function setupRoutes(app: FastifyInstance) {
         // per (kernelId, stage) so a re-registration is a no-op after the
         // first. Telemetry must never break device registration.
         try {
-          recordOperatorStage(kernelId, "device_registered", { deviceId });
+          recordOperatorStage(kernelId, "device_registered", {
+            deviceId,
+            operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+          });
         } catch {
           /* funnel tracking must never break device registration */
         }
@@ -883,6 +886,7 @@ export async function setupRoutes(app: FastifyInstance) {
         recordOperatorStage(kernelId, "test_job_passed", {
           deviceId: submitResult.deviceId,
           jobId,
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
         });
       }
     } catch {

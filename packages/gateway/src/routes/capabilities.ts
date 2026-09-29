@@ -717,6 +717,7 @@ export async function capabilityRoutes(app: FastifyInstance) {
       try {
         recordOperatorStage(kernelId, "capability_published", {
           capabilityId: (capability as { id?: string } | undefined)?.id ?? null,
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
         });
       } catch {
         /* funnel tracking must never break capability creation */
