@@ -3,11 +3,13 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import { randomUUID } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { apiGate } from "../middleware/api-gate.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
-import { schema, sql } from "@pcc/store";
+import { schema, sql, eq } from "@pcc/store";
 
 // ───────────────────────────────────────────────────────────────────────────
 // N4b-gw behind the REAL auth (astra r1 on #400, items 1, 2 and 8).
@@ -176,6 +178,8 @@ describe("N4b-gw behind the real apiGate: URL variants never reach a relay handl
 
   it("HEAD is refused like GET, and a CORS preflight performs no relay operation", async () => {
     expect((await app.inject({ method: "HEAD", url: PENDING, headers: bearer(strangerKey) })).statusCode).toBe(403);
+    // HEAD has no entry in the access table, so nobody is served one, the operator included.
+    expect((await app.inject({ method: "HEAD", url: PENDING, headers: bearer(operatorKey) })).statusCode).toBe(403);
     const preflight = await app.inject({
       method: "OPTIONS",
       url: "/api/relay/kernel-a/tool-call",
@@ -207,6 +211,146 @@ describe("N4b-gw behind the real apiGate: the relay guard is encapsulated", () =
       expect(res.statusCode).toBe(403);
     } finally {
       await prefixed.close();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Round 3 (astra r2 on 68c20e9f, finding 4): the relay guard runs once, when
+// the camera stream opens. The stream must not outlive the authority that
+// opened it: a revoked or expired scope, or a revoked key, gets no later frame.
+// These run on a real socket, since an SSE response never completes.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("N4b-gw behind the real apiGate: a camera stream never outlives its authority", () => {
+  let base: string;
+  beforeAll(async () => {
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  });
+
+  function openStream(token: string) {
+    const chunks: string[] = [];
+    let ended = false;
+    const req = http.get(`${base}/api/relay/kernel-a/camera/stream`, { headers: bearer(token) }, (res) => {
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => chunks.push(chunk));
+      res.on("end", () => { ended = true; });
+    });
+    req.on("error", () => { ended = true; });
+    return { text: () => chunks.join(""), ended: () => ended, close: () => req.destroy() };
+  }
+
+  async function until(done: () => boolean, ms = 3_000) {
+    const start = Date.now();
+    while (!done()) {
+      if (Date.now() - start > ms) throw new Error("timed out waiting for the stream");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  async function pushFrame(): Promise<string> {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-a/camera/frame", headers: bearer(operatorKey), payload: { frame: "AAAA" },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id;
+  }
+
+  async function grant(holder: string): Promise<string> {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-a/scope", headers: bearer(operatorKey),
+      payload: { createdBy: holder, allowedTools: ["run_create"] },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id;
+  }
+
+  /** Push a frame, give any delivery time to arrive, and say whether it did. */
+  async function frameReaches(stream: ReturnType<typeof openStream>): Promise<boolean> {
+    const frame = await pushFrame();
+    await new Promise((r) => setTimeout(r, 150));
+    return stream.text().includes(frame);
+  }
+
+  it("control: a live scope holder and the operator both receive frames", async () => {
+    const viewer = provisionApiKey({ operatorId: "viewer-live" }).rawKey;
+    await grant("viewer-live");
+    const holder = openStream(viewer);
+    const operator = openStream(operatorKey);
+    try {
+      await until(() => holder.text().includes("event: connected") && operator.text().includes("event: connected"));
+      const frame = await pushFrame();
+      await until(() => holder.text().includes(frame) && operator.text().includes(frame));
+    } finally {
+      holder.close();
+      operator.close();
+    }
+  });
+
+  it("revoking the holder's scope ends its stream, and later frames never reach it", async () => {
+    const viewer = provisionApiKey({ operatorId: "viewer-revoked" }).rawKey;
+    const scope = await grant("viewer-revoked");
+    const stream = openStream(viewer);
+    try {
+      await until(() => stream.text().includes("event: connected"));
+      const res = await app.inject({ method: "POST", url: `/api/relay/kernel-a/scope/${scope}/revoke`, headers: bearer(operatorKey) });
+      expect(res.statusCode).toBe(200);
+      expect(await frameReaches(stream)).toBe(false);
+      await until(() => stream.ended());
+    } finally {
+      stream.close();
+    }
+  });
+
+  it("an expired scope gets no later frame, and its stream ends", async () => {
+    const viewer = provisionApiKey({ operatorId: "viewer-expired" }).rawKey;
+    const scope = await grant("viewer-expired");
+    const stream = openStream(viewer);
+    try {
+      await until(() => stream.text().includes("event: connected"));
+      getStore().db.update(executionScopes)
+        .set({ expiresAt: new Date(Date.now() - 1_000).toISOString() })
+        .where(eq(executionScopes.id, scope))
+        .run();
+      expect(await frameReaches(stream)).toBe(false);
+      await until(() => stream.ended());
+    } finally {
+      stream.close();
+    }
+  });
+
+  it("a revoked API key's stream gets no later frame, even with its scope still live", async () => {
+    const viewer = provisionApiKey({ operatorId: "viewer-keyrevoked" });
+    await grant("viewer-keyrevoked");
+    const stream = openStream(viewer.rawKey);
+    try {
+      await until(() => stream.text().includes("event: connected"));
+      getRepos().apiKeys.revoke(viewer.record!.id);
+      expect(await frameReaches(stream)).toBe(false);
+      await until(() => stream.ended());
+    } finally {
+      stream.close();
+    }
+  });
+
+  it("an ended SIWE session's stream gets no later frame", async () => {
+    const token = randomUUID();
+    const now = new Date();
+    getRepos().sessions.insert({
+      id: randomUUID(), walletAddress: SIWE_ADDRESS, token, createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 3_600_000).toISOString(), lastActiveAt: now.toISOString(),
+    });
+    // The SIWE wallet is kernel-siwe's operator; give it a scope on kernel-a to view this camera.
+    await grant(SIWE_ADDRESS);
+    const stream = openStream(token);
+    try {
+      await until(() => stream.text().includes("event: connected"));
+      getRepos().sessions.deleteByToken(token);
+      expect(await frameReaches(stream)).toBe(false);
+      await until(() => stream.ended());
+    } finally {
+      stream.close();
     }
   });
 });

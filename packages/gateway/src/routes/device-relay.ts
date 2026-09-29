@@ -43,11 +43,19 @@
  *     unexpired execution scope on this kernel.
  *   - object_owner: routes addressing one scope or one call. The handler
  *     allows the kernel operator or the scope's creator, and the object must
- *     belong to the :kernelId in the path.
+ *     belong to the :kernelId in the path. The creator keeps these records
+ *     after its scope ends; nothing here commands or observes the device.
+ *
+ * Authority is checked again where it is used later (astra r2 on #400):
+ *   - GET /tool-call/pending re-checks every queued call before handing it
+ *     to the device (dispatchRefusal), and closes a refused call as rejected.
+ *   - A camera stream re-checks its caller before every frame and heartbeat,
+ *     and a revoke ends the streams the scope was holding open.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getStore, getRepos } from "../db.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
@@ -103,18 +111,9 @@ function validateToolCall(
     return { allowed: true, reason: "safe_tool" };
   }
 
-  // Check scope is active and not expired
-  if (scope.status !== "active") {
-    return { allowed: false, reason: "scope_not_active" };
-  }
-  if (new Date(scope.expiresAt) < new Date()) {
-    return { allowed: false, reason: "scope_expired" };
-  }
-
-  // Check tool is in allowed list
-  const allowedTools = scope.allowedTools as string[];
-  if (!allowedTools.includes(toolName)) {
-    return { allowed: false, reason: "tool_not_allowed" };
+  const refusal = scopeWriteRefusal(scope, toolName);
+  if (refusal) {
+    return { allowed: false, reason: refusal };
   }
 
   // Check command count
@@ -123,6 +122,14 @@ function validateToolCall(
   }
 
   return { allowed: true, reason: "scope_approved" };
+}
+
+/** Why `scope` does not authorize a write of `toolName` now, or null. */
+function scopeWriteRefusal(scope: typeof executionScopes.$inferSelect, toolName: string): string | null {
+  if (scope.status !== "active") return "scope_not_active";
+  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (!(scope.allowedTools as string[]).includes(toolName)) return "tool_not_allowed";
+  return null;
 }
 
 // ── Access control (N4b-gw item 4) ──────────────────────────────────────────
@@ -286,14 +293,86 @@ function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | nul
   return null;
 }
 
-// ── Active SSE clients for camera streams (per kernel) ──────────────────────
-const cameraStreamClients = new Map<string, Set<FastifyReply>>();
+/**
+ * Why a queued call may not be handed to the device now, or null when it may.
+ * GET /tool-call/pending is where a call leaves the gateway, so it re-checks
+ * what admission checked: a row can wait while its scope expires or is
+ * revoked, and older writers stored rows that admission never saw.
+ *   - A named scope must exist and be on the call's own kernel, for any tool.
+ *   - A call with no scope must be a safe tool; admission lets only the
+ *     operator queue one.
+ *   - A write's scope must still be active and unexpired, allow the tool, and
+ *     pass the escrow parity check.
+ * The command count is not re-checked: admission already counted this call.
+ * Throws when the escrow lookup fails; the caller then leaves the call queued.
+ */
+function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: string): string | null {
+  const safe = isToolSafe(deviceType, call.toolName);
+  if (!call.scopeId) return safe ? null : "scope_required";
+  const { db } = getStore();
+  const scope = db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get();
+  if (!scope) return "scope_not_found";
+  if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
+  if (safe) return null;
+  return scopeWriteRefusal(scope, call.toolName) ?? (escrowRefusal(scope) ? "escrow_not_funded" : null);
+}
 
-function getStreamClients(kernelId: string): Set<FastifyReply> {
+// ── Camera streams (per kernel) ─────────────────────────────────────────────
+// The relay guard admits a stream once, when it opens. Each subscriber keeps
+// how it was admitted, and before every frame and every heartbeat the stream
+// checks again that its credential still stands and that its principal is
+// still the kernel's operator or holds an active, unexpired scope there. A
+// revoke ends the streams a scope was holding open. A stream that loses its
+// authority is ended and never receives another frame.
+
+interface CameraSubscriber {
+  reply: FastifyReply;
+  /** Still allowed to watch this kernel's camera? Fails closed on any error. */
+  authorized: () => boolean;
+  heartbeat?: ReturnType<typeof setInterval>;
+}
+
+const cameraStreamClients = new Map<string, Set<CameraSubscriber>>();
+
+function getStreamClients(kernelId: string): Set<CameraSubscriber> {
   if (!cameraStreamClients.has(kernelId)) {
     cameraStreamClients.set(kernelId, new Set());
   }
   return cameraStreamClients.get(kernelId)!;
+}
+
+/**
+ * Whether the credential apiGate resolved for `req` still stands for
+ * `principal`: an API key neither revoked nor expired, or a live SIWE session.
+ */
+function credentialStands(req: FastifyRequest, principal: string): boolean {
+  if (req.apiKeyId) {
+    const key = getRepos().apiKeys.findById(req.apiKeyId);
+    return (
+      !!key &&
+      !key.revokedAt &&
+      (!key.expiresAt || new Date(key.expiresAt).getTime() > Date.now()) &&
+      key.operatorId === principal
+    );
+  }
+  return resolveSession(req)?.address === principal;
+}
+
+function closeCameraStream(kernelId: string, subscriber: CameraSubscriber, reason: string): void {
+  getStreamClients(kernelId).delete(subscriber);
+  clearInterval(subscriber.heartbeat);
+  try {
+    subscriber.reply.raw.end(`event: closed\ndata: ${JSON.stringify({ reason })}\n\n`);
+  } catch {
+    // The socket is already gone.
+  }
+}
+
+/** End every stream on `kernelId` that is no longer authorized. */
+function closeLapsedCameraStreams(kernelId: string, reason: string): void {
+  for (const subscriber of [...getStreamClients(kernelId)]) {
+    if (!subscriber.authorized()) closeCameraStream(kernelId, subscriber, reason);
+  }
 }
 
 // ── Route Registration ──────────────────────────────────────────────────────
@@ -609,7 +688,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         .run();
     }
 
-    const pending = db
+    const queued = db
       .select()
       .from(toolCallRelay)
       .where(
@@ -619,16 +698,35 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         ),
       )
       .orderBy(toolCallRelay.createdAt)
-      .limit(5)
       .all();
 
-    // Mark them as claimed
+    // Hand out up to 5 calls, oldest first, each re-checked on the way out
+    // (dispatchRefusal). A refused call is closed as rejected with its reason,
+    // so no later poll can claim it and it does not hold back the calls behind
+    // it. A call whose escrow lookup fails stays queued for the next poll.
+    const deviceType = resolveDeviceType(kernelId);
     const now = new Date().toISOString();
-    for (const call of pending) {
+    const pending: Array<typeof toolCallRelay.$inferSelect> = [];
+    for (const call of queued) {
+      if (pending.length === 5) break;
+      let refusal: string | null;
+      try {
+        refusal = dispatchRefusal(call, deviceType);
+      } catch {
+        continue;
+      }
+      if (refusal) {
+        db.update(toolCallRelay)
+          .set({ status: "rejected", error: refusal, completedAt: now })
+          .where(eq(toolCallRelay.id, call.id))
+          .run();
+        continue;
+      }
       db.update(toolCallRelay)
         .set({ status: "claimed", claimedAt: now })
         .where(eq(toolCallRelay.id, call.id))
         .run();
+      pending.push(call);
     }
 
     return {
@@ -992,6 +1090,9 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
     }
 
+    // Streams this scope was holding open end now, not at their next frame.
+    closeLapsedCameraStreams(kernelId, "scope_revoked");
+
     return {
       id: scopeId,
       status: "revoked",
@@ -1112,14 +1213,17 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
     }
 
-    // Notify SSE clients for this kernel
-    const clients = getStreamClients(kernelId);
+    // Notify this kernel's stream subscribers that are still authorized.
     const ssePayload = `event: frame\ndata: ${JSON.stringify({ id, kernelId, capturedAt: now })}\n\n`;
-    for (const client of clients) {
+    for (const subscriber of [...getStreamClients(kernelId)]) {
+      if (!subscriber.authorized()) {
+        closeCameraStream(kernelId, subscriber, "authorization_ended");
+        continue;
+      }
       try {
-        client.raw.write(ssePayload);
+        subscriber.reply.raw.write(ssePayload);
       } catch {
-        clients.delete(client);
+        closeCameraStream(kernelId, subscriber, "write_failed");
       }
     }
 
@@ -1214,21 +1318,39 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected", kernelId })}\n\n`);
 
-    const clients = getStreamClients(kernelId);
-    clients.add(reply);
+    // The guard admitted this caller as the operator or an active scope
+    // holder; the stream keeps checking that it still is.
+    const principal = relayPrincipal(req)!;
+    const subscriber: CameraSubscriber = {
+      reply,
+      authorized: () => {
+        try {
+          return (
+            credentialStands(req, principal) &&
+            (isKernelOperator(kernelId, principal) || holdsActiveScope(kernelId, principal))
+          );
+        } catch {
+          return false;
+        }
+      },
+    };
+    getStreamClients(kernelId).add(subscriber);
 
-    const heartbeat = setInterval(() => {
+    subscriber.heartbeat = setInterval(() => {
+      if (!subscriber.authorized()) {
+        closeCameraStream(kernelId, subscriber, "authorization_ended");
+        return;
+      }
       try {
         reply.raw.write(": heartbeat\n\n");
       } catch {
-        clearInterval(heartbeat);
-        clients.delete(reply);
+        closeCameraStream(kernelId, subscriber, "write_failed");
       }
     }, 15_000);
 
     req.raw.on("close", () => {
-      clearInterval(heartbeat);
-      clients.delete(reply);
+      clearInterval(subscriber.heartbeat);
+      getStreamClients(kernelId).delete(subscriber);
     });
 
     await new Promise<void>(() => {});

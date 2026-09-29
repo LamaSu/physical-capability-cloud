@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
-import { initStore, closeStore, getStore } from "../db.js";
+import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { deviceRelayRoutes, RELAY_ROUTE_ACCESS } from "../routes/device-relay.js";
 import { getSafetyGateway } from "@pcc/kernel";
 import { schema, sql, eq } from "@pcc/store";
@@ -1386,5 +1386,214 @@ describe("N4b-gw: a call linked to another kernel's scope stays on its own kerne
     expect(res.statusCode).toBe(200);
     const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, foreignScope)).get();
     expect(scope!.retryCount).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// N4b-gw round 3 (astra r2 on 68c20e9f, finding 2): dispatch re-checks every
+// queued call. GET /tool-call/pending is where a call leaves the gateway for
+// the device, so a row without execution authority is refused there, whoever
+// wrote it and however long it waited.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
+  const poll = async () =>
+    (await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/tool-call/pending", headers: op })).json();
+  const row = (id: string) => getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get()!;
+  const setScope = (id: string, fields: Partial<typeof executionScopes.$inferInsert>) =>
+    getStore().db.update(executionScopes).set(fields).where(eq(executionScopes.id, id)).run();
+
+  /** A queued row as any writer may have left it: the admission route, or an older one. */
+  function queue(id: string, toolName: string, scopeId: string | null, createdAt = new Date().toISOString()) {
+    getStore().db.insert(toolCallRelay).values({
+      id, scopeId, kernelId: "kernel-test-1", toolName, toolArgs: {}, status: "pending", createdAt,
+    }).run();
+  }
+
+  /** Queue a write through the admission route, as the scope's holder. */
+  async function admit(holder: string, scopeId: string, toolName = "run_create") {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: asKey(holder), payload: { scopeId, toolName },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  }
+
+  it("never hands out a call that names another kernel's scope, and the refusal is final", async () => {
+    const foreign = await mintScope("holder-2", ["run_create"], "kernel-test-2");
+    queue("tc-cross", "run_create", foreign);
+    expect((await poll()).count).toBe(0);
+    expect(row("tc-cross")).toMatchObject({ status: "rejected", error: "scope_kernel_mismatch" });
+    expect((await poll()).count).toBe(0);
+  });
+
+  it("refuses the other kernel's scope for a safe tool too", async () => {
+    const foreign = await mintScope("holder-2", ["run_create"], "kernel-test-2");
+    queue("tc-cross-safe", "health", foreign);
+    expect((await poll()).count).toBe(0);
+    expect(row("tc-cross-safe")).toMatchObject({ status: "rejected", error: "scope_kernel_mismatch" });
+  });
+
+  it("never hands out a call whose scope does not exist", async () => {
+    queue("tc-ghost", "run_create", "scope_gone");
+    expect((await poll()).count).toBe(0);
+    expect(row("tc-ghost")).toMatchObject({ status: "rejected", error: "scope_not_found" });
+  });
+
+  it("never hands out a write whose scope expired while it waited", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    const id = await admit("agent-q", scope);
+    setScope(scope, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect((await poll()).count).toBe(0);
+    expect(row(id)).toMatchObject({ status: "rejected", error: "scope_expired" });
+  });
+
+  it("never hands out a write whose scope is no longer active", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    const id = await admit("agent-q", scope);
+    setScope(scope, { status: "expired" }); // what a read of an expired scope records
+    expect((await poll()).count).toBe(0);
+    expect(row(id)).toMatchObject({ status: "rejected", error: "scope_not_active" });
+  });
+
+  it("never hands out a write its scope does not allow", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    queue("tc-shell", "shell", scope);
+    expect((await poll()).count).toBe(0);
+    expect(row("tc-shell")).toMatchObject({ status: "rejected", error: "tool_not_allowed" });
+  });
+
+  it("never hands out a write with no scope", async () => {
+    queue("tc-noscope", "run_create", null);
+    expect((await poll()).count).toBe(0);
+    expect(row("tc-noscope")).toMatchObject({ status: "rejected", error: "scope_required" });
+  });
+
+  it("still hands out the operator's scope-free safe call and a live scope's allowed write", async () => {
+    queue("tc-safe", "health", null, new Date(Date.now() - 10).toISOString());
+    const scope = await mintScope("agent-q", ["run_create"]);
+    const write = await admit("agent-q", scope);
+    const body = await poll();
+    expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-safe", write]);
+    expect(row("tc-safe").status).toBe("claimed");
+    expect(row(write).status).toBe("claimed");
+  });
+
+  it("refused calls at the head of the queue do not hold back a valid one", async () => {
+    const foreign = await mintScope("holder-2", ["run_create"], "kernel-test-2");
+    const t0 = Date.now() - 1_000;
+    for (let i = 0; i < 6; i++) queue(`tc-bad-${i}`, "run_create", foreign, new Date(t0 + i).toISOString());
+    queue("tc-good", "health", null, new Date(t0 + 10).toISOString());
+    const body = await poll();
+    expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-good"]);
+    for (let i = 0; i < 6; i++) expect(row(`tc-bad-${i}`).status).toBe("rejected");
+  });
+
+  it("re-checks a timed-out claim before handing it out again", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    const id = await admit("agent-q", scope);
+    expect((await poll()).count).toBe(1);
+    getStore().db.update(toolCallRelay)
+      .set({ claimedAt: new Date(Date.now() - 300_000).toISOString() })
+      .where(eq(toolCallRelay.id, id))
+      .run();
+    setScope(scope, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect((await poll()).count).toBe(0);
+    expect(row(id)).toMatchObject({ status: "rejected", error: "scope_expired" });
+  });
+
+  describe("escrow parity at dispatch", () => {
+    /** A job on kernel-test-1 whose negotiated escrow is funded. */
+    function seedFundedJob(jobId: string) {
+      const { db } = getStore();
+      const now = new Date().toISOString();
+      getRepos().capabilities.insert({
+        id: `cap-${jobId}`, kernelId: "kernel-test-1", type: "liquid-handling", name: jobId, description: "",
+        location: { lat: 0, lng: 0 }, pricing: { currency: "USDC", baseCost: "1", minimum: "1" },
+        materials: [], assuranceTiers: [0], availability: {},
+      } as never);
+      db.insert(schema.jobs).values({
+        id: jobId, stepId: "step-1", cwmId: `cwm-${jobId}`, capabilityId: `cap-${jobId}`, kernelId: "kernel-test-1",
+        status: "queued", assignedDevices: [], progress: 0,
+      } as never).run();
+      db.insert(schema.negotiationSessions).values({
+        id: `ns-${jobId}`, status: "committed", userAgentId: "buyer", kernelId: "kernel-test-1",
+        capabilityType: "liquid-handling", operatorConstraints: {}, jobId, cwmId: `cwm-${jobId}`,
+        createdAt: now, expiresAt: now,
+      } as never).run();
+      getRepos().escrows.insert({
+        id: `esc-${jobId}`, cwmId: `cwm-${jobId}`, contractAddress: "0x5555555555555555555555555555555555555555",
+        payer: "0x3333333333333333333333333333333333333333", totalAmount: "10.00", currency: "USDC",
+        status: "funded", createdAt: now, deadline: new Date(Date.now() + 86_400_000).toISOString(),
+      } as never);
+    }
+
+    async function jobScope(holder: string, jobId: string) {
+      const res = await app.inject({
+        method: "POST", url: "/api/relay/kernel-test-1/scope", headers: op,
+        payload: { createdBy: holder, allowedTools: ["run_create"], jobId },
+      });
+      expect(res.statusCode).toBe(201);
+      return res.json().id as string;
+    }
+
+    it("never hands out a write whose job's escrow stopped being funded after admission", async () => {
+      seedFundedJob("job-refunded");
+      const scope = await jobScope("agent-e", "job-refunded");
+      const id = await admit("agent-e", scope);
+      getRepos().escrows.updateStatus("esc-job-refunded", "refunded");
+      expect((await poll()).count).toBe(0);
+      expect(row(id)).toMatchObject({ status: "rejected", error: "escrow_not_funded" });
+    });
+
+    it("an escrow lookup failure leaves the write queued, neither handed out nor refused", async () => {
+      seedFundedJob("job-lookup");
+      const scope = await jobScope("agent-e", "job-lookup");
+      const id = await admit("agent-e", scope);
+      const spy = vi.spyOn(getRepos().escrows, "findByCwm").mockImplementation(() => {
+        throw new Error("store unavailable");
+      });
+      try {
+        expect((await poll()).count).toBe(0);
+        expect(row(id).status).toBe("pending");
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await poll()).calls.map((c: { id: string }) => c.id)).toEqual([id]);
+    });
+  });
+});
+
+// Astra r2 finding 3 noted that object-owner routes do not require an ACTIVE
+// scope. That is the policy: a scope's creator keeps its own records (its
+// calls' results, the scope and its audit) and may still revoke it after the
+// scope ends. Nothing that commands or observes the device stays open to it.
+describe("N4b-gw: a scope's creator keeps its own records after the scope ends", () => {
+  it("reads its call's result, the scope and its audit, and may revoke; it can't queue, watch or chat", async () => {
+    const scope = await mintScope("agent-past", ["run_create"]);
+    const who = asKey("agent-past");
+    const call = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: who, payload: { scopeId: scope, toolName: "run_create" },
+    });
+    expect(call.statusCode).toBe(201);
+    getStore().db.update(executionScopes)
+      .set({ expiresAt: new Date(Date.now() - 1_000).toISOString() })
+      .where(eq(executionScopes.id, scope))
+      .run();
+
+    const get = (url: string) => app.inject({ method: "GET", url, headers: who });
+    expect((await get(`/api/relay/kernel-test-1/tool-result/${call.json().id}`)).statusCode).toBe(200);
+    expect((await get(`/api/relay/kernel-test-1/scope/${scope}`)).statusCode).toBe(200);
+    expect((await get(`/api/relay/kernel-test-1/scope/${scope}/audit`)).statusCode).toBe(200);
+
+    const queued = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: who, payload: { scopeId: scope, toolName: "health" },
+    });
+    expect(queued.statusCode).toBe(403);
+    expect((await get("/api/relay/kernel-test-1/camera/snapshot")).statusCode).toBe(403);
+    expect((await get("/api/relay/kernel-test-1/chat/messages")).statusCode).toBe(403);
+
+    const revoke = await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope}/revoke`, headers: who });
+    expect(revoke.statusCode).toBe(200);
   });
 });
