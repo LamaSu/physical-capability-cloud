@@ -4654,7 +4654,7 @@
     },
     {
       "name": "operator_update_job_status",
-      "description": "Operator reports a job's progress (in_progress, failed). It only sets the status: `completed` here builds no evidence and settles nothing, and afterwards pcc_job_complete refuses the job (409). To finish a job, call pcc_job_complete instead.",
+      "description": "Operator reports a job's status (in_progress, completed, failed). The node path finishes a job in two calls: submit its evidence (POST /api/operator/evidence; pcc-node does this), then set status completed here. On the current gateway, completed marks the job done and its timeline then says settled, but the escrow is not released yet (board G1). Do not call pcc_job_complete after this: it answers 409.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4731,7 +4731,7 @@
     },
     {
       "name": "pcc_job_complete",
-      "description": "Complete a job: gathers tool call audit trail from execution scopes, builds evidence bundle with SHA-256 hash, stores evidence, revokes scopes, and settles escrow (mock or real). Call this to finish a job. Do not set status `completed` with operator_update_job_status first: this then returns 409 (\"Job already completed or completion in progress\").",
+      "description": "Complete a job: gathers tool call audit trail from execution scopes, builds evidence bundle with SHA-256 hash, stores evidence, revokes scopes, and settles escrow (mock or real). This is how a job run through execution scopes is finished. A node that submitted its evidence and set status completed (operator_update_job_status) must not call it: it then answers 409 (\"Job already completed or completion in progress\").",
       "input_schema": {
         "type": "object",
         "properties": {

@@ -148,9 +148,15 @@ describe("rehearsal R0: the pack matches the gateway it describes", () => {
     expect(shape.requireHeartbeat).toBeDefined();
   });
 
-  it("P7: finish a job with pcc_job_complete, never by setting completed first", () => {
-    expect(tool("operator_update_job_status").description).toContain("pcc_job_complete");
+  // P7: the node path (pcc-node: POST /api/operator/evidence, then job-status
+  // completed) and pcc_job_complete (execution scopes) are two ways to finish a
+  // job. After the first, the second answers 409 (paid-job-flow.ts claim guard).
+  it("P7: names the node's two-call finish and says pcc_job_complete then answers 409", () => {
+    const status = tool("operator_update_job_status").description;
+    expect(status).toContain("/api/operator/evidence");
+    expect(status).toContain("pcc_job_complete");
     expect(tool("pcc_job_complete").description).toContain("409");
+    expect(tool("pcc_job_complete").description).toContain("execution scopes");
   });
 
   it("P8: does not claim settlement flows through oracle routes the gateway does not serve", () => {
