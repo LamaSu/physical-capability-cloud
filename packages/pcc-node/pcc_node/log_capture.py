@@ -69,25 +69,62 @@ def _json_string(s):
     return json.dumps(s, ensure_ascii=False, separators=(",", ":"))
 
 
-def _number_string(n):
-    """JS ``String(<number>)`` equivalent for the values this producer emits.
+def _es_number_to_string(x):
+    """ECMAScript ``Number::toString(x)`` (ES2023 sec 6.1.6.1.20) for a float.
 
-    Only strings are hashed in the #52 entry payload, so the number path is not
-    parity-critical for the money seam; it is provided for a faithful mirror.
-    JS has one numeric type: an integer-valued float renders without a
-    fractional part (``String(5.0) === "5"``), unlike Python ``str(5.0) ==
-    "5.0"`` -- normalized here. NaN/Infinity follow ``String()`` (raw JSON has
-    no such literals, but canonicalize predates JSON.stringify here, matching TS).
+    Python ``repr`` already picks the shortest digit string that round-trips
+    to ``x`` -- the digits JS picks -- so only the LAYOUT differs: ``repr``
+    switches to exponent form below 1e-4 and zero-pads the exponent
+    (``5e-05``), while JS writes decimal for decimal exponents -7..20 and an
+    unpadded exponent otherwise (``0.00005``, ``1e-7``, ``1e+21``). The
+    digits ``s`` (``k`` of them) and the decimal exponent ``n`` (``x = s *
+    10**(n-k)``) are read from ``repr`` and laid out by the spec's steps.
     """
-    if n != n:  # NaN
+    if x != x:
         return "NaN"
-    if n == float("inf"):
+    if x == 0:
+        return "0"  # +0 and -0 alike
+    if x < 0:
+        return "-" + _es_number_to_string(-x)
+    if x == float("inf"):
         return "Infinity"
-    if n == float("-inf"):
-        return "-Infinity"
-    if isinstance(n, float) and n.is_integer():
-        return str(int(n))
-    return repr(n) if isinstance(n, float) else str(n)
+    mantissa, _, exponent = repr(x).partition("e")
+    int_part, _, frac_part = mantissa.partition(".")
+    digits = int_part + frac_part
+    n = len(int_part) + (int(exponent) if exponent else 0)
+    significant = digits.lstrip("0")
+    n -= len(digits) - len(significant)
+    s = significant.rstrip("0")
+    k = len(s)
+    if k <= n <= 21:
+        return s + "0" * (n - k)
+    if 0 < n <= 21:
+        return s[:n] + "." + s[n:]
+    if -6 < n <= 0:
+        return "0." + "0" * (-n) + s
+    e = n - 1
+    sign = "+" if e >= 0 else "-"
+    head = s if k == 1 else s[0] + "." + s[1:]
+    return head + "e" + sign + str(abs(e))
+
+
+def _number_string(n):
+    """JS ``String(<number>)`` equivalent.
+
+    JS has one numeric type: every number, integer or not, is a double, and
+    ``String()`` lays it out by Number::toString (see _es_number_to_string).
+    So a Python ``int`` is first rounded to the double JS would hold (an
+    integer above 2**53 loses its low digits; one beyond the double range
+    becomes Infinity, as ``JSON.parse`` gives), and ``String(5.0) === "5"``.
+    Byte parity matters wherever a hashed payload carries a number (sensors
+    #3458: ``5e-05`` against JS ``0.00005`` changes the hash).
+    """
+    if isinstance(n, int):  # bool never reaches here (canonicalize tests it first)
+        try:
+            n = float(n)
+        except OverflowError:
+            return "Infinity" if n > 0 else "-Infinity"
+    return _es_number_to_string(n)
 
 
 def canonicalize(value):

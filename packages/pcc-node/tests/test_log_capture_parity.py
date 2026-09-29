@@ -95,6 +95,36 @@ def test_canonicalize_string_parity(g):
     )
 
 
+@pytest.mark.parametrize(
+    "g", _GOLDENS_DATA["numbers"], ids=lambda g: repr(g["value"])
+)
+def test_number_parity_with_js_string(g):
+    """Every double in the generator's sweep canonicalizes as JS String() does
+    (sensors #3458: Python repr wrote 5e-05 and 1e-07 where JS writes 0.00005
+    and 1e-7)."""
+    assert canonicalize(g["value"]) == g["expected"]
+
+
+@pytest.mark.parametrize("value,expected", [
+    pytest.param(-0.0, "0", id="negative-zero"),
+    pytest.param(0.0, "0", id="positive-zero"),
+    # JS has one numeric type: an integer is a double once parsed.
+    pytest.param(2 ** 53 + 1, "9007199254740992", id="int-above-2^53-rounds-like-js"),
+    pytest.param(10 ** 21, "1e+21", id="int-1e21-is-exponent-form"),
+    pytest.param(10 ** 20, "100000000000000000000", id="int-1e20-is-decimal"),
+    pytest.param(-(10 ** 22), "-1e+22", id="negative-big-int"),
+    pytest.param(10 ** 400, "Infinity", id="int-beyond-double-is-infinity-like-js"),
+    pytest.param(-(10 ** 400), "-Infinity", id="negative-int-beyond-double"),
+    pytest.param(float("nan"), "NaN", id="nan"),
+    pytest.param(float("inf"), "Infinity", id="inf"),
+    pytest.param(5.0, "5", id="integral-float"),
+])
+def test_number_edges_python_cannot_round_trip_through_json(value, expected):
+    """Values a JSON golden cannot carry from JS to Python (-0 serializes as 0,
+    big integers arrive already rounded), checked directly against JS rules."""
+    assert canonicalize(value) == expected
+
+
 def test_oracle_shared_vector_triple_lock():
     """oracle test == gen_goldens.mjs == Python, all on one vector."""
     # 1) Python reproduces the oracle's hardcoded golden directly.

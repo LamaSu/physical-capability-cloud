@@ -127,7 +127,36 @@ const CANONICAL_FIXTURES = [
   { name: "string_escapes", value: { q: "a" + DQ + "b", bs: "a" + BS + "b", ws: CONTROL_STR } },
   { name: "unicode_key_val", value: { "café": "☕", emoji: "🚀", ascii: "z" } },
   { name: "slash_not_escaped", value: { url: "cups://job/1?x=2" } },
+  // Number::toString edges (sensors #3458): JS writes decimal for exponents
+  // -7..20 and exponent form otherwise, with no zero-padded exponent.
+  { name: "small_floats", value: { a: 0.00005, b: 1.5e-5, c: 1e-7, d: 1e-6, e: 0.0001 } },
+  { name: "large_numbers", value: { a: 1e20, b: 1e21, c: 123456789012345680000, d: 1.7976931348623157e308 } },
+  { name: "extreme_doubles", value: [5e-324, -2.5e-8, 9007199254740992, -1e21] },
 ];
+
+// A deterministic number sweep: String(x) for many doubles, so the Python
+// mirror is checked against JS itself, not against a reading of the spec.
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const NUMBER_SWEEP = [
+  0, 1, -1, 0.1, 0.2, 0.3, 1 / 3, 2 / 3, 92.86, 100, 0.5, 5e-324, Number.MAX_VALUE,
+  Number.MIN_VALUE, Number.EPSILON, 2 ** 53, 2 ** 53 + 2, -(2 ** 53), 2 ** 31, 2 ** 32, 2 ** 64,
+];
+for (let e = -12; e <= 25; e++) {
+  NUMBER_SWEEP.push(10 ** e, 1.5 * 10 ** e, -7.25 * 10 ** e, 123456789 * 10 ** e);
+}
+const rand = mulberry32(3458);
+for (let i = 0; i < 200; i++) {
+  const exponent = Math.floor(rand() * 64) - 32;
+  const sign = rand() < 0.5 ? -1 : 1;
+  NUMBER_SWEEP.push(sign * rand() * 10 ** exponent);
+}
 
 const goldens = {
   _comment:
@@ -144,6 +173,7 @@ const goldens = {
     value: f.value,
     expected: canonicalize(f.value),
   })),
+  numbers: NUMBER_SWEEP.map((value) => ({ value, expected: canonicalize(value) })),
 };
 
 const outPath = join(dirname(fileURLToPath(import.meta.url)), "goldens.json");
