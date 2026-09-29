@@ -36,7 +36,7 @@ import {
   initCarrierShipmentStore,
   nextStatus,
 } from "../services/carrier-shipment-store.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { computeCid, type ICidBlobStorage } from "../services/cid-blob-storage.js";
 
@@ -44,6 +44,21 @@ const WEBHOOK_SECRET = "whsec_test_carrier_suite";
 const OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const STRANGER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const KERNEL = "kernel-hp-printer-test";
+
+/** A capability ON a kernel, so a job's (kernel, capability) pair is consistent (N69). */
+function addCapability(id: string, kernelId: string): void {
+  getRepos().capabilities.insert({
+    id,
+    kernelId,
+    type: "print-mail",
+    name: "test print and mail",
+    materials: [],
+    assuranceTiers: [0, 1, 2],
+    pricing: { baseCost: "0", minimum: "0", currency: "USDC" },
+    availability: {},
+    location: { lat: 0, lng: 0 },
+  } as never);
+}
 const JOB = "job-print-mail-1";
 const documentHash = createHash("sha256").update("court filing.pdf").digest("hex");
 
@@ -148,6 +163,14 @@ beforeAll(async () => {
     OWNER,
   );
   if (!k.success) throw new Error(`kernel register failed: ${JSON.stringify(k.error)}`);
+  addCapability("cap-test-print-mail", KERNEL);
+  // Another operator's kernel, and a capability on it, for "a job on another kernel".
+  const other = await getKernelFacade().register(
+    { id: "kernel-somebody-else", name: "someone else's kernel", operatorAddress: STRANGER, location: { lat: 1, lng: 1 }, physicalAddress: "2 Other Way", maxAssuranceTier: 0 } as never,
+    STRANGER,
+  );
+  if (!other.success) throw new Error(`other kernel register failed: ${JSON.stringify(other.error)}`);
+  addCapability("cap-x", "kernel-somebody-else");
   const j = await getJobFacade().submit({ jobId: JOB, stepId: "step-print-mail", kernelId: KERNEL, capabilityId: "cap-test-print-mail" }, OWNER);
   if (!j.success) throw new Error(`job submit failed: ${JSON.stringify(j.error)}`);
   const j2 = await getJobFacade().submit({ jobId: "job-on-other-kernel", stepId: "s", kernelId: "kernel-somebody-else", capabilityId: "cap-x" }, STRANGER);

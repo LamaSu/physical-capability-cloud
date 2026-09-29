@@ -17,7 +17,7 @@ import { verifyEventHash } from "@pcc/spec";
 import { lobRoutes } from "../routes/lob.js";
 import { LobClient, _setLobClientForTests } from "../services/lob-client.js";
 import { _resetLobLetterStoreForTests, getLobLetterStore } from "../services/lob-letter-store.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 
 const WEBHOOK_SECRET = "whsec_test_lob_suite";
@@ -26,6 +26,21 @@ const WEBHOOK_SECRET = "whsec_test_lob_suite";
 // route now requires the caller to be the operator of the job's assigned kernel.
 const OWNER = "0x1111lob0000000000000000000000000000owner";
 const STRANGER = "0x2222lob00000000000000000000000000stranger";
+
+/** A capability ON a kernel, so a job's (kernel, capability) pair is consistent (N69). */
+function addCapability(id: string, kernelId: string): void {
+  getRepos().capabilities.insert({
+    id,
+    kernelId,
+    type: "print-mail",
+    name: "test print and mail",
+    materials: [],
+    assuranceTiers: [0, 1, 2],
+    pricing: { baseCost: "0", minimum: "0", currency: "USDC" },
+    availability: {},
+    location: { lat: 0, lng: 0 },
+  } as never);
+}
 const asOwner = { "x-test-operator": OWNER };
 
 beforeAll(async () => {
@@ -36,6 +51,7 @@ beforeAll(async () => {
     OWNER,
   );
   if (!k.success) throw new Error(`kernel register failed: ${JSON.stringify(k.error)}`);
+  addCapability("cap-test-print-mail", "kernel-hp-printer");
   const j = await getJobFacade().submit({ jobId: "job-print-mail-1", stepId: "step-print-mail", kernelId: "kernel-hp-printer", capabilityId: "cap-test-print-mail" }, OWNER);
   if (!j.success) throw new Error(`job submit failed: ${JSON.stringify(j.error)}`);
 });
