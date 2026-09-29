@@ -325,7 +325,7 @@ else
     fail "API key provision failed: $PROVISION_RESP"
     E2E_OK=false
   else
-    info "Got API key: ${API_KEY:0:20}..."
+    info "Got an API key (${#API_KEY} chars; not printed)"
   fi
 fi
 
