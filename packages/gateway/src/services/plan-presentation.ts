@@ -108,6 +108,13 @@ export interface PlanNodePresentation {
    * them as data.
    */
   execution?: { planHash: string; inputs: PlanJsonObject; constraints: PlanJsonObject };
+  /**
+   * Evidence strength actually committed for this node (item 6): tier, program hash, and the evidence
+   * required at that tier. Taken ONLY from the intact, bound plan's `canonicalPlan.assurance` — never
+   * the proposal — so a caller cannot claim strength it did not earn. Evidence entries keep the
+   * canonicalPlan's order; `requirementId` is not copied, since it is a non-semantic label.
+   */
+  assurance?: { tier: number; program: string | null; evidence: Array<{ evidenceTypeId: string; tier: number }> };
 }
 
 export interface PlanPresentation {
@@ -124,6 +131,11 @@ export interface PlanPresentation {
   asOf: string;
   nodes: PlanNodePresentation[];
   edges: Array<{ from: string; to: string }>;
+  /**
+   * Preview facts PCC has no trusted source for (item 6): named honestly so a UI renders "unknown" and
+   * never invents one. Always present, in every state. Today that is exactly `["time-estimate"]`.
+   */
+  unknowns: string[];
   /** Totals and obligations of the compiled deal (item 6); absent before compilation. */
   preview?: {
     gross: Money;
@@ -132,6 +144,17 @@ export interface PlanPresentation {
     payoutsByRecipient: Array<{ recipient: string; amount: Money }>;
     tierByNode: Array<{ nodeId: string; tier: number }>;
     reclaimAt: string;
+  };
+  /**
+   * The reservation's expiry (item 6), shown only when the caller supplied a `reservation` naming
+   * THIS submission's reservation (see `PresentPlanArgs.reservation`). Absent when no reservation was
+   * supplied.
+   */
+  expiry?: {
+    /** ISO 8601 of the reservation's `expiresAt`. */
+    reservationExpiresAt: string;
+    /** The compiled deal's reclaim time — the same string as `preview.reclaimAt`. Present only once compiled. */
+    reclaimAt?: string;
   };
   /** The compiled deal's commitments (item 8): immutable once sealed. */
   deal?: {
@@ -153,12 +176,28 @@ export interface SealRecord {
   acceptedDealDigest: string;
 }
 
+/**
+ * The reservation store's expiry preview (item 6): a minimal, server-truth projection — deliberately
+ * NOT the full store record (no principal, payer, state — the seam already enforces those).
+ */
+export interface ReservationWindow {
+  reservationId: string;
+  /** Unix seconds. */
+  expiresAt: number;
+}
+
 export interface PresentPlanArgs {
   submission: ExternalPlanSubmission;
   /** The seam's answer for THIS submission, once evaluated. */
   outcome?: SeamResult;
   /** The store's seal record for the submission's reservation, if the consume has happened (R13). */
   sealed?: SealRecord | null;
+  /**
+   * The reservation store's live expiry for the submission's reservation, if supplied (item 6). Must
+   * name the SAME reservation as the submission; a mismatch or malformed window makes the whole
+   * presentation `invalid` (never mixed in, like the deal's own binding).
+   */
+  reservation?: ReservationWindow | null;
   /** Server time of the evaluation, ISO 8601. */
   asOf: string;
 }
@@ -201,6 +240,23 @@ function listOf<T>(x: unknown, max: number, item: (v: unknown) => T): T[] {
   const out: T[] = [];
   for (let i = 0; i < (n as number); i++) out.push(item((x as unknown[])[i]));
   return out;
+}
+
+/**
+ * `{ reservationId, expiresAt }` if well-formed (non-empty id; expiresAt a non-negative safe integer,
+ * unix seconds); else null. Never throws — unlike the shape-readers above, a malformed `reservation`
+ * arg is a MISMATCH-style refusal ("plan-binding"), not a generic parse failure, because it is checked
+ * against another already-trusted input (the submission's own reservationId), exactly like the plan's
+ * own binding check.
+ */
+function readReservationWindow(x: unknown): ReservationWindow | null {
+  if (typeof x !== "object" || x === null) return null;
+  const o = x as Record<string, unknown>;
+  const reservationId = o.reservationId;
+  const expiresAt = o.expiresAt;
+  if (typeof reservationId !== "string" || reservationId.length === 0) return null;
+  if (!isInt(expiresAt, 0, Number.MAX_SAFE_INTEGER)) return null;
+  return { reservationId, expiresAt };
 }
 
 const VERDICT_STATUSES = new Set(["current", "stale", "missing", "unavailable", "unpriceable", "incompatible", "invalid-claim"]);
@@ -473,9 +529,19 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
     const submissionRaw = a.submission;
     const outcomeRaw = a.outcome;
     const sealedRaw = a.sealed;
+    const reservationRaw = a.reservation;
     asOf = str(a.asOf);
     snap = snapshotSubmission(submissionRaw);
     if (!snap || !isStr(snap.requestId) || !isStr(snap.reservationId)) return invalid("malformed-submission", asOf, snap);
+
+    // The reservation preview (item 6): read once. A window naming another reservation, or malformed,
+    // is a binding mismatch — mismatched server inputs never mix, exactly like the plan's own binding.
+    let reservation: ReservationWindow | undefined;
+    if (reservationRaw !== undefined && reservationRaw !== null) {
+      const win = readReservationWindow(reservationRaw);
+      if (!win || win.reservationId !== snap.reservationId) return invalid("plan-binding", asOf, snap);
+      reservation = win;
+    }
 
     const nodes = snap.nodes.filter((n): n is NonNullable<typeof n> => n !== null && isStr(n.nodeId));
     const nodeIds = nodes.map((n) => n.nodeId as string);
@@ -541,6 +607,11 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
             payouts: u.payouts.map((p) => ({ recipient: p.recipient, amount: money(p.amount, plan) })),
           };
           out.execution = { planHash: b.planHash, inputs: b.canonicalPlan.inputs, constraints: b.canonicalPlan.constraints };
+          out.assurance = {
+            tier: b.canonicalPlan.assurance.tier,
+            program: b.canonicalPlan.assurance.committedProgramHash,
+            evidence: b.canonicalPlan.assurance.evidence.map((e) => ({ evidenceTypeId: e.evidenceTypeId, tier: e.tier })),
+          };
         }
         return out;
       })
@@ -557,6 +628,7 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
       edges: snap.edges
         .filter((e): e is NonNullable<typeof e> => e !== null && isStr(e.from) && isStr(e.to))
         .map((e) => ({ from: e.from as string, to: e.to as string })),
+      unknowns: ["time-estimate"],
     };
     if (outcome && !outcome.ok) {
       const { verdicts: _v, ...refusal } = outcome.refusal;
@@ -599,6 +671,12 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
         sealed,
       };
     }
+    if (reservation) {
+      presentation.expiry = {
+        reservationExpiresAt: new Date(reservation.expiresAt * 1000).toISOString(),
+        ...(presentation.preview ? { reclaimAt: presentation.preview.reclaimAt } : {}),
+      };
+    }
     return presentation;
   } catch {
     return invalid(snap ? "malformed-outcome" : "malformed-input", asOf, snap);
@@ -616,5 +694,6 @@ function invalid(reason: InvalidReason, asOf: string, snap: SubmissionSnapshot |
     asOf,
     nodes: [],
     edges: [],
+    unknowns: ["time-estimate"],
   };
 }

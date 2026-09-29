@@ -588,7 +588,7 @@ describe("PlanPresentation: the product read model, built only from server truth
     expect(() => {
       p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
     }).not.toThrow();
-    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [] });
+    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [], unknowns: ["time-estimate"] });
   });
 });
 
