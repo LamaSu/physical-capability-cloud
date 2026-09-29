@@ -205,7 +205,9 @@ function genericStatusToCourier(status: string): CourierJobStatus {
     case "cancelled": return "cancelled";
     case "expired": return "expired";
     case "settled": return "delivered";
+    case "completed": return "delivered";
     case "disputed": return "delivered";
+    case "lapsed": return "expired";
     default: return "open";
   }
 }
@@ -332,6 +334,7 @@ export class CourierJobsStore {
     | { ok: true; job: CourierJob }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: CourierJobStatus; claimedBy: string | null }
+    | { ok: false; reason: "recently_released"; retryAfterMs: number }
   > {
     const result = await getJobOffersStore().claim(id, {
       kernelId: claim.driverAgent,    // v0.2 names this driverAgent
@@ -350,8 +353,9 @@ export class CourierJobsStore {
           claimedBy: result.claimedBy,
         };
       }
+      return { ok: false, reason: "recently_released", retryAfterMs: result.retryAfterMs };
     }
-    return { ok: true, job: offerToCourierJob((result as { ok: true; offer: JobOffer }).offer) };
+    return { ok: true, job: offerToCourierJob(result.offer) };
   }
 
   recordEvent(

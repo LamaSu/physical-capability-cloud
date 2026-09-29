@@ -16,6 +16,8 @@ import {
   getJobOffersStore,
   initJobOffersStore,
   _resetJobOffersStoreForTests,
+  REVIEW_WINDOW_MS,
+  RECLAIM_BLOCK_MS,
   type JobOfferStatus,
 } from "../services/job-offers-store.js";
 
@@ -77,6 +79,22 @@ async function offerIn(status: JobOfferStatus): Promise<string> {
       break;
     case "expired":
       nowMs += 3 * 60 * 60 * 1000; // past the offer's validity
+      await getJobOffersStore().sweep();
+      break;
+    case "completed":
+      await claim();
+      await ev("delivered");
+      await ev("confirmed");
+      break;
+    case "disputed":
+      await claim();
+      await ev("delivered");
+      await ev("disputed");
+      break;
+    case "lapsed":
+      await claim();
+      await ev("delivered");
+      nowMs += REVIEW_WINDOW_MS + 1;
       await getJobOffersStore().sweep();
       break;
     case "settled":
@@ -184,5 +202,116 @@ describe("the courier shim shares the rule", () => {
     expect(claimed.statusCode).toBe(200);
     const pickup = await app.inject({ method: "POST", url: "/api/courier-jobs/cj-1/events", payload: { event: "pickup" } });
     expect(pickup.statusCode).toBe(200);
+  });
+});
+
+describe("how a delivered offer ends (kits #3989)", () => {
+  it("the poster's 'confirmed' completes a delivered offer, once; nothing else completes it", async () => {
+    const id = await offerIn("delivered");
+    const r = await event_(id, "confirmed");
+    expect(r.statusCode).toBe(200);
+    expect(r.json().status).toBe("completed");
+    expect(getJobOffersStore().get(id)!.completedAt).toBeTruthy();
+    expect((await event_(id, "confirmed")).json().status).toBe("completed");
+    for (const from of ["open", "claimed", "in_progress"] as JobOfferStatus[]) {
+      const other = await offerIn(from);
+      expect((await event_(other, "confirmed")).statusCode).toBe(409);
+    }
+  });
+
+  it("'disputed' is allowed only within the review window", async () => {
+    const inWindow = await offerIn("delivered");
+    expect((await event_(inWindow, "disputed")).json().status).toBe("disputed");
+    const late = await offerIn("delivered");
+    nowMs += REVIEW_WINDOW_MS + 1;
+    const r = await event_(late, "disputed");
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe("review_window_closed");
+  });
+
+  it.each(["open", "claimed", "in_progress", "delivered", "completed"] as JobOfferStatus[])(
+    "a posted 'settled' is refused on a %s offer: only the server settles",
+    async (from) => {
+      const id = await offerIn(from);
+      const r = await event_(id, "settled");
+      expect(r.statusCode).toBe(409);
+      expect(getJobOffersStore().get(id)!.status).toBe(from);
+    },
+  );
+
+  it("a delivery nobody confirms or disputes lapses after the window, never before, and never as success", async () => {
+    const id = await offerIn("delivered");
+    nowMs += REVIEW_WINDOW_MS - 1_000;
+    await getJobOffersStore().sweep();
+    expect(getJobOffersStore().get(id)!.status).toBe("delivered");
+    nowMs += 2_000;
+    const swept = await getJobOffersStore().sweep();
+    expect(swept.lapsed).toBe(1);
+    expect(getJobOffersStore().get(id)!.status).toBe("lapsed");
+    expect(getJobOffersStore().getEvents(id).at(-1)).toMatchObject({ event: "lapsed", reason: "delivery_unconfirmed" });
+    const done = await offerIn("completed");
+    nowMs += REVIEW_WINDOW_MS * 2;
+    await getJobOffersStore().sweep();
+    expect(getJobOffersStore().get(done)!.status).toBe("completed");
+  });
+
+  it.each(["completed", "disputed", "lapsed"] as JobOfferStatus[])("a %s offer is final", async (from) => {
+    const id = await offerIn(from);
+    for (const ev of ["in_progress", "delivered", "release", "cancelled", from === "completed" ? "disputed" : "confirmed"]) {
+      expect((await event_(id, ev)).statusCode, ev).toBe(409);
+    }
+    expect(getJobOffersStore().get(id)!.status).toBe(from);
+  });
+});
+
+describe("a claimant's release (kits #3989)", () => {
+  const claimAs = (id: string, kernelId: string) =>
+    app.inject({ method: "POST", url: `/api/job-offers/${id}/claim`, headers: POSTER, payload: { kernelId } });
+
+  it("puts a claimed or in-progress offer back to open and clears the claim; not after delivery", async () => {
+    for (const from of ["claimed", "in_progress"] as JobOfferStatus[]) {
+      const id = await offerIn(from);
+      expect((await event_(id, "release")).json().status).toBe("open");
+      const o = getJobOffersStore().get(id)!;
+      expect(o.claimedByKernelId).toBeNull();
+      expect(o.claimedAt).toBeNull();
+    }
+    const delivered = await offerIn("delivered");
+    expect((await event_(delivered, "release")).statusCode).toBe(409);
+  });
+
+  it("the releasing kernel cannot re-claim that offer for an hour; another kernel can at once", async () => {
+    const id = await offerIn("claimed"); // claimed by k-1
+    await event_(id, "release");
+    const again = await claimAs(id, "k-1");
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe("recently_released");
+    expect(again.json().retryAfterMs).toBe(RECLAIM_BLOCK_MS);
+    expect((await claimAs(id, "k-2")).statusCode).toBe(200);
+  });
+
+  it("after the hour, the releasing kernel may claim it again", async () => {
+    const id = await offerIn("claimed");
+    await event_(id, "release");
+    nowMs += RECLAIM_BLOCK_MS;
+    expect((await claimAs(id, "k-1")).statusCode).toBe(200);
+  });
+
+  it("the courier shim refuses the re-claim too, and projects completed and lapsed statuses", async () => {
+    const created = await app.inject({
+      method: "POST", url: "/api/courier-jobs", headers: POSTER,
+      payload: { deliveryId: "cj-rel", pickup: { name: "A" }, dropoff: { name: "B" } },
+    });
+    expect(created.statusCode).toBe(201);
+    await app.inject({ method: "POST", url: "/api/courier-jobs/cj-rel/claim", payload: { driverAgent: "d1" } });
+    await event_("cj-rel", "release");
+    const again = await app.inject({ method: "POST", url: "/api/courier-jobs/cj-rel/claim", payload: { driverAgent: "d1" } });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe("recently_released");
+    const done = await offerIn("completed");
+    const lapsed = await offerIn("lapsed");
+    const courierStatus = async (id: string) => (await app.inject({ method: "GET", url: `/api/courier-jobs/${id}` })).json();
+    expect(JSON.stringify(await courierStatus(done))).toContain('"status":"delivered"');
+    expect(JSON.stringify(await courierStatus(lapsed))).toContain('"status":"expired"');
   });
 });

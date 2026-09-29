@@ -221,8 +221,13 @@ export async function courierJobsRoutes(app: FastifyInstance) {
           claimedBy: result.claimedBy,
         });
       }
+      if (result.reason === "recently_released") {
+        return reply.code(409).send({ error: "recently_released", retryAfterMs: result.retryAfterMs });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "claim_refused" });
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: result.job };
   });
 
   // ── POST /api/courier-jobs/:id/events ───────────────────────────────────

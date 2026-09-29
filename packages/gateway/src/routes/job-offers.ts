@@ -286,8 +286,13 @@ export async function jobOffersRoutes(app: FastifyInstance) {
           claimedBy: result.claimedBy,
         });
       }
+      if (result.reason === "recently_released") {
+        return reply.code(409).send({ error: "recently_released", retryAfterMs: result.retryAfterMs });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "claim_refused" });
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: result.offer };
   });
 
   // ── POST /api/job-offers/:id/events ────────────────────────────────────
@@ -313,8 +318,8 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       b.note ?? null,
     );
     if (!result.ok) {
-      if (result.reason === "invalid_transition") {
-        return reply.code(409).send({ error: "invalid_transition", event: eventKind, currentStatus: result.currentStatus });
+      if (result.reason === "invalid_transition" || result.reason === "review_window_closed") {
+        return reply.code(409).send({ error: result.reason, event: eventKind, currentStatus: result.currentStatus });
       }
       return reply.code(404).send({ error: "not_found" });
     }

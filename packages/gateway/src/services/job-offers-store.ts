@@ -93,18 +93,36 @@ export type JobOfferStatus =
   | "claimed"
   | "in_progress"
   | "delivered"
+  | "completed"
   | "settled"
   | "cancelled"
   | "expired"
+  | "lapsed"
   | "disputed";
 
-/** The statuses from which each status-changing event may be recorded (N81).
- * An event not listed here changes no status and is always recorded. */
+/** After 'delivered', the poster has this long to dispute; with no confirm or
+ * dispute by then, the sweeper lapses the offer (kits #3989). */
+export const REVIEW_WINDOW_MS = 72 * 60 * 60 * 1000;
+/** A kernel that released an offer cannot claim that offer again for this long (kits #3989). */
+export const RECLAIM_BLOCK_MS = 60 * 60 * 1000;
+
+/** The statuses from which each status-changing event may be recorded (N81;
+ * the rules are kits' #3989). An event not listed here changes no status and
+ * is always recorded. Who may post each event is authorization (#395).
+ *   - delivered is the claimant's assertion: never terminal, never success;
+ *   - confirmed (poster) ends it in 'completed' (success; no money moves);
+ *   - disputed (poster, within REVIEW_WINDOW_MS of delivery) ends it in 'disputed';
+ *   - release (claimant, before delivery) puts the offer back to 'open';
+ *   - settled comes only from the server (a linked job's settlement): posted, it is refused. */
 const EVENT_ALLOWED_FROM: Readonly<Record<string, ReadonlySet<JobOfferStatus>>> = {
   in_progress: new Set<JobOfferStatus>(["claimed", "in_progress"]),
   pickup: new Set<JobOfferStatus>(["claimed", "in_progress"]),
   delivered: new Set<JobOfferStatus>(["claimed", "in_progress", "delivered"]),
+  release: new Set<JobOfferStatus>(["claimed", "in_progress"]),
   cancelled: new Set<JobOfferStatus>(["open", "claimed", "in_progress", "cancelled"]),
+  confirmed: new Set<JobOfferStatus>(["delivered", "completed"]),
+  disputed: new Set<JobOfferStatus>(["delivered", "disputed"]),
+  settled: new Set<JobOfferStatus>(),
 };
 
 export interface JobOffer {
@@ -140,6 +158,9 @@ export interface JobOffer {
   deliveredAt: string | null;
   cancelledAt: string | null;
   expiredAt: string | null;
+  completedAt?: string | null;
+  disputedAt?: string | null;
+  lapsedAt?: string | null;
 }
 
 export interface JobOfferEvent {
@@ -363,6 +384,8 @@ export class JobOffersStore {
   private readonly offers = new Map<string, JobOffer>();
   private readonly events = new Map<string, JobOfferEvent[]>();
   private readonly claimLocks = new Map<string, Promise<void>>();
+  /** offerId -> the kernel that released it, and until when it may not re-claim it. */
+  private readonly releaseGuard = new Map<string, { kernelId: string; untilMs: number }>();
   private readonly idempotencyIndex = new Map<string, string>(); // key -> id
   private readonly verify: VerifyFn;
   private readonly validateSchema: CapabilitySchemaValidator;
@@ -554,6 +577,9 @@ export class JobOffersStore {
       deliveredAt: null,
       cancelledAt: null,
       expiredAt: null,
+      completedAt: null,
+      disputedAt: null,
+      lapsedAt: null,
     };
 
     this.offers.set(offer.id, offer);
@@ -615,6 +641,7 @@ export class JobOffersStore {
     | { ok: true; offer: JobOffer }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: JobOfferStatus; claimedBy: string | null }
+    | { ok: false; reason: "recently_released"; retryAfterMs: number }
   > {
     const prev = this.claimLocks.get(id) ?? Promise.resolve();
     let release!: () => void;
@@ -631,6 +658,10 @@ export class JobOffersStore {
           currentStatus: o.status,
           claimedBy: o.claimedByKernelId,
         };
+      }
+      const guard = this.releaseGuard.get(id);
+      if (guard && guard.kernelId === claim.kernelId && this.nowMs() < guard.untilMs) {
+        return { ok: false, reason: "recently_released", retryAfterMs: guard.untilMs - this.nowMs() };
       }
       o.status = "claimed";
       o.claimedByKernelId = claim.kernelId;
@@ -684,12 +715,19 @@ export class JobOffersStore {
   ):
     | { ok: true; status: JobOfferStatus; event: JobOfferEvent }
     | { ok: false; reason: "not_found" }
-    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus } {
+    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus }
+    | { ok: false; reason: "review_window_closed"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
     const allowedFrom = EVENT_ALLOWED_FROM[event];
     if (allowedFrom && !allowedFrom.has(o.status)) {
       return { ok: false, reason: "invalid_transition", currentStatus: o.status };
+    }
+    if (event === "disputed" && o.status === "delivered") {
+      const deliveredMs = isoToMs(o.deliveredAt);
+      if (deliveredMs == null || this.nowMs() - deliveredMs > REVIEW_WINDOW_MS) {
+        return { ok: false, reason: "review_window_closed", currentStatus: o.status };
+      }
     }
     const evt: JobOfferEvent = {
       at: this.nowIso(),
@@ -711,6 +749,24 @@ export class JobOffersStore {
     if (event === "cancelled" && o.status !== "cancelled") {
       o.status = "cancelled";
       o.cancelledAt = evt.at;
+    }
+    if (event === "release") {
+      const kernelId = o.claimedByKernelId;
+      o.status = "open";
+      o.claimedByKernelId = null;
+      o.claimedAt = null;
+      o.claimSignature = null;
+      o.driverEtaMin = null;
+      o.driverContact = null;
+      if (kernelId) this.releaseGuard.set(o.id, { kernelId, untilMs: this.nowMs() + RECLAIM_BLOCK_MS });
+    }
+    if (event === "confirmed" && o.status !== "completed") {
+      o.status = "completed";
+      o.completedAt = evt.at;
+    }
+    if (event === "disputed" && o.status !== "disputed") {
+      o.status = "disputed";
+      o.disputedAt = evt.at;
     }
     this.persistOffer(o);
     return { ok: true, status: o.status, event: evt };
@@ -801,16 +857,29 @@ export class JobOffersStore {
    * Run one sweep tick. Idempotent; safe to call from interval timers OR
    * directly in tests for deterministic state. Returns counts for observability.
    */
-  async sweep(): Promise<{ expired: number; reverified: number; autoCancelled: number }> {
+  async sweep(): Promise<{ expired: number; reverified: number; autoCancelled: number; lapsed: number }> {
     const now = this.nowMs();
     const HEARTBEAT_GRACE_MS = 5 * 60 * 1000;
     const REVERIFY_EARLY_INTERVAL_MS = 60 * 1000;
     const REVERIFY_LATE_INTERVAL_MS = 5 * 60 * 1000;
     const REVERIFY_EARLY_WINDOW_MS = 10 * 60 * 1000;
 
-    let expired = 0, reverified = 0, autoCancelled = 0;
+    let expired = 0, reverified = 0, autoCancelled = 0, lapsed = 0;
 
     for (const o of this.offers.values()) {
+      // 0) a delivery nobody confirmed or disputed within the review window
+      //    lapses: terminal, and never counted as success (kits #3989).
+      if (o.status === "delivered") {
+        const deliveredMs = isoToMs(o.deliveredAt);
+        if (deliveredMs != null && now - deliveredMs > REVIEW_WINDOW_MS) {
+          o.status = "lapsed";
+          o.lapsedAt = this.nowIso();
+          this.persistOffer(o);
+          this.appendEvent(o.id, { at: o.lapsedAt, event: "lapsed", reason: "delivery_unconfirmed" });
+          lapsed++;
+        }
+        continue;
+      }
       if (o.status !== "open") continue;
 
       // 1) TTL
@@ -873,7 +942,7 @@ export class JobOffersStore {
       }
     }
 
-    return { expired, reverified, autoCancelled };
+    return { expired, reverified, autoCancelled, lapsed };
   }
 }
 
