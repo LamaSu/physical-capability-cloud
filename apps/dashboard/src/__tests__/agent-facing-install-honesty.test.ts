@@ -61,9 +61,12 @@ const TEXT = new Set([".md", ".html", ".json", ".txt", ".xml", ".yaml", ".yml"])
 
 const read = (rel: string) => readFileSync(join(REPO, rel), "utf8");
 
-/** pcc-node installs that don't name 0.1.1+ with crypto. JSON strings carry `\n` escapes, so split on those too. */
+/**
+ * pcc-node installs that don't name 0.1.1+ with crypto. Shell line continuations are joined first,
+ * and JSON strings carry `\n` escapes, so those split lines too.
+ */
 const unflooredInstalls = (text: string) =>
-  [...text.replace(/\\n/g, "\n").matchAll(PIP_PCC_NODE)]
+  [...text.replace(/\\\r?\n\s*/g, " ").replace(/\\n/g, "\n").matchAll(PIP_PCC_NODE)]
     .map((m) => m[0].trim())
     .filter((cmd) => !FLOORED.test(cmd));
 
@@ -76,6 +79,27 @@ function publicTextFiles(dir: string): string[] {
 }
 
 describe("agent-facing install instructions install the right thing", () => {
+  it("the install check flags every unfloored form a doc might use, and passes the floored ones", () => {
+    const unfloored = [
+      "pip install pcc-node",
+      "pip3 install pcc-node && pcc-node start",
+      "python -m pip install --user pcc-node",
+      "pip install pcc-node==0.1.0",
+      'pip install "pcc-node>=0.1.1"',
+      "pip install \\\n  pcc-node",
+      "uvx pcc-node start",
+    ];
+    const floored = [
+      'pip install "pcc-node[crypto]>=0.1.1"',
+      "pip install 'pcc-node[crypto]>=0.1.1' && pcc-node start",
+      'pip install "pcc-node[all]>=0.1.1"',
+      'uvx --from "pcc-node[crypto]>=0.1.1" pcc-node start',
+      "pcc-node is a pip-installable Python CLI",
+    ];
+    expect(unfloored.filter((cmd) => unflooredInstalls(cmd).length === 0), "missed").toEqual([]);
+    expect(floored.filter((cmd) => unflooredInstalls(cmd).length > 0), "wrongly flagged").toEqual([]);
+  });
+
   it("every listed file exists", () => {
     for (const rel of AGENT_FACING) expect(() => read(rel), rel).not.toThrow();
   });
