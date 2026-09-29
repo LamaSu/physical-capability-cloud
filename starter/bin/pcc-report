@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Report one phase of an onboarding attempt to PCC (attempt reporting contract v1).
+
+    pcc-report PHASE OUTCOME "one-line summary" [--detail TEXT]
+               [--proposal-target T --proposal-path P --proposal-text TEXT]
+               [--kernel-id ID] [--capability-id ID] [--job-id ID]
+
+PHASE is one of the runbook's phases (prerequisites, identify, intake, research,
+build, register, verify, operate, publish) or "session" for the final roll-up.
+OUTCOME is ok, failed, blocked, skipped, budget_stop, abandoned or in_progress.
+
+State lives in ./.pcc/ so it survives shells that forget variables:
+  .pcc/base          the gateway URL (else $PCC_BASE)
+  .pcc/attempt.json  this attempt's sessionId and the last seq sent
+  .pcc/phases.jsonl  one line per phase reported, for the session roll-up
+
+Keys, tokens, email addresses and long hex strings are removed from every text
+field before sending. No transcript is ever sent. Standard library only.
+Prints the HTTP status the gateway answered, and exits 0 even when reporting
+fails, so a report never blocks the onboarding itself.
+"""
+
+import argparse
+import json
+import os
+import platform
+import re
+import sys
+import urllib.error
+import urllib.request
+import uuid
+
+PHASES = ["prerequisites", "identify", "intake", "research", "build", "register", "verify", "operate", "publish", "session"]
+OUTCOMES = ["ok", "failed", "blocked", "skipped", "budget_stop", "abandoned", "in_progress"]
+TARGETS = ["runbook", "agent-package", "docs", "code", "process", "other"]
+STATE = ".pcc"
+
+_REDACTIONS = [
+    (re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}"), "Bearer [redacted]"),
+    (re.compile(r"\bpcc_(?:live|test|oracle)_[A-Za-z0-9]{8,}"), "[redacted-key]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "[redacted-jwt]"),
+    (re.compile(r"\b(?:0x)?[0-9a-fA-F]{64,}\b"), "[redacted-hex]"),
+    (re.compile(r"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|gh[po]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"), "[redacted-key]"),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[redacted-email]"),
+]
+
+
+def redact(text):
+    """Remove secrets and email addresses from free text (client-side layer)."""
+    if text is None:
+        return None
+    text = str(text)
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _state_path(name):
+    return os.path.join(STATE, name)
+
+
+def _read_json(name, default):
+    try:
+        with open(_state_path(name)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def next_seq():
+    """This attempt's sessionId and the next seq, persisted in .pcc/attempt.json."""
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    attempt = _read_json("attempt.json", {})
+    if not isinstance(attempt.get("sessionId"), str):
+        attempt = {"sessionId": str(uuid.uuid4()), "seq": -1}
+    attempt["seq"] = int(attempt.get("seq", -1)) + 1
+    with open(_state_path("attempt.json"), "w") as f:
+        json.dump(attempt, f)
+    return attempt["sessionId"], attempt["seq"]
+
+
+def gateway():
+    try:
+        with open(_state_path("base")) as f:
+            base = f.read().strip()
+    except OSError:
+        base = ""
+    return (base or os.environ.get("PCC_BASE", "")).rstrip("/")
+
+
+def _pcc_node_version():
+    try:
+        import importlib.metadata as md
+        return md.version("pcc-node")
+    except Exception:
+        return None
+
+
+def build_body(args, session_id, seq):
+    ids = {k: v for k, v in {"kernelId": args.kernel_id, "capabilityId": args.capability_id, "jobId": args.job_id}.items() if v}
+    body = {
+        "kind": "attempt",
+        "contract": 1,
+        "sessionId": session_id,
+        "seq": seq,
+        "phase": args.phase,
+        "outcome": args.outcome,
+        "summary": redact(args.summary)[:5000],
+        "harness": {"name": os.environ.get("PCC_HARNESS", "other"), "model": os.environ.get("PCC_MODEL") or None},
+        "env": {"os": platform.system().lower(), "python": platform.python_version(), "pccNode": _pcc_node_version()},
+        "tokens": {"in": None, "out": None, "source": "unknown"},
+        "consent": {"transcript": False},
+    }
+    if args.detail:
+        body["detail"] = redact(args.detail)[:20000]
+    if ids:
+        body["ids"] = ids
+    if args.proposal_text:
+        body["proposal"] = {"target": args.proposal_target or "other", "path": (args.proposal_path or "").split("?")[0][:2000],
+                            "text": redact(args.proposal_text)[:5000]}
+    if args.phase == "session":
+        phases = []
+        try:
+            with open(_state_path("phases.jsonl")) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if entry.get("sessionId") == session_id:
+                        phases.append({"phase": entry["phase"], "outcome": entry["outcome"]})
+        except OSError:
+            pass
+        body["phases"] = phases[-16:]
+    return body
+
+
+def remember(body):
+    if body["phase"] == "session":
+        return
+    with open(_state_path("phases.jsonl"), "a") as f:
+        f.write(json.dumps({"sessionId": body["sessionId"], "phase": body["phase"], "outcome": body["outcome"]}) + "\n")
+
+
+def send(body, base, timeout=15):
+    request = urllib.request.Request(
+        f"{base}/api/feedback", data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as err:
+        return err.code
+    except (urllib.error.URLError, OSError):
+        return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Report one onboarding phase to PCC (contract v1).")
+    parser.add_argument("phase", choices=PHASES)
+    parser.add_argument("outcome", choices=OUTCOMES)
+    parser.add_argument("summary")
+    parser.add_argument("--detail")
+    parser.add_argument("--proposal-target", choices=TARGETS)
+    parser.add_argument("--proposal-path")
+    parser.add_argument("--proposal-text")
+    parser.add_argument("--kernel-id")
+    parser.add_argument("--capability-id")
+    parser.add_argument("--job-id")
+    parser.add_argument("--dry-run", action="store_true", help="print the body instead of sending it")
+    args = parser.parse_args(argv)
+
+    base = gateway()
+    if not base and not args.dry_run:
+        print("pcc-report: no gateway: write it to .pcc/base or set PCC_BASE", file=sys.stderr)
+        return 0
+    session_id, seq = next_seq()
+    body = build_body(args, session_id, seq)
+    if args.dry_run:
+        print(json.dumps(body, indent=2))
+        return 0
+    remember(body)
+    print(send(body, base))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
