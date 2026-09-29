@@ -25,6 +25,7 @@ import { getSettlementFacade } from "../facades/index.js";
 import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
 import { buildSettlementStatusRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
+import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import {
   isBatchEnabled,
@@ -229,8 +230,9 @@ export async function settlementRoutes(app: FastifyInstance) {
     }
 
     const loaded = loadLegacySettlement(req, jobId);
-    if (loaded.kind === "unauthenticated") {
-      return reply.status(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
+      return reply.status(refusal.status).send(refusal.body);
     }
     if (loaded.kind === "unavailable") {
       return reply.status(503).send({

@@ -55,6 +55,7 @@ import {
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
 import { buildJobSettlementRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
+import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
@@ -1858,8 +1859,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
-    if (loaded.kind === "unauthenticated") {
-      return reply.status(401).send({ error: "unauthenticated", message: "Sign in or send an API key to read a job." });
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
+      return reply.status(refusal.status).send(refusal.body);
     }
     if (loaded.kind === "unavailable") {
       return reply.status(503).send({

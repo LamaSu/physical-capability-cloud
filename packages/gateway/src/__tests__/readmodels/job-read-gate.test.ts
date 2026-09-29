@@ -1,14 +1,16 @@
 /**
  * The job read family is object-authorized (readmodels F3; gateway #2831): every route that
  * returns a job, its status, evidence, drift alerts or money runs gateJobRead first, the same
- * predicate as GET /api/jobs/:jobId/execution (#353). Only an admin, the job's kernel
- * operator or its recorded buyer reads it. Anonymous callers get 401. Anyone else gets exactly
- * the route's answer for a job that does not exist, so the refusal reveals nothing.
+ * predicate as GET /api/jobs/:jobId/execution (#353). Only an admin, or a PROVEN wallet (SIWE)
+ * that is the job's kernel operator or its recorded buyer, reads it. Anonymous callers get 401
+ * and unproven ones 403, both before the job is read. Anyone else gets exactly the route's
+ * answer for a job that does not exist, so no refusal reveals anything.
  *
  * Before: any API key read any job's record, status, evidence, drift alerts and settlement.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { provenWalletFor } from "../helpers/job-read-party.js";
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -48,7 +50,7 @@ vi.setConfig({ testTimeout: 20000 });
 
 const OPERATOR_NYC = "0x1111111111111111111111111111111111111111"; // seeded kernel-nyc operator
 const STRANGER = "0x9999999999999999999999999999999999999999";
-const BUYER = "agent-buyer-f3";
+const BUYER = "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3";
 const ADMIN = "test-admin-key-f3";
 const JOB = "job-f3";
 const now = "2026-09-24T10:00:00.000Z";
@@ -97,10 +99,11 @@ describe("F3: the job read family is object-authorized", () => {
     const { paidJobFlowRoutes } = await import("../../routes/paid-job-flow.js");
     const { settlementRoutes } = await import("../../routes/settlement.js");
     app = Fastify({ logger: false });
-    // Stand-in for the API gate.
+    // Stand-in for the API gate: the key's operatorId, and (WP-A) the proven wallet.
     app.addHook("onRequest", async (req) => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string") (req as any).operatorId = p;
+      (req as any).provenWallet = provenWalletFor(req.headers["x-test-proven-wallet"], typeof p === "string" ? p : null);
       const t = req.headers["x-test-tenant"];
       if (typeof t === "string") (req as any).tenantId = t;
     });
@@ -124,10 +127,23 @@ describe("F3: the job read family is object-authorized", () => {
 
   for (const [label, url] of FAMILY) {
     describe(label, () => {
-      it("NEGATIVE: anonymous is 401", async () => {
+      it("NEGATIVE: anonymous is 401, the same for a job that does not exist", async () => {
         const res = await get(url(JOB));
+        const missing = await get(url("job-f3-does-not-exist"));
         expect(res.statusCode).toBe(401);
         expect(res.json().error).toBe("unauthenticated");
+        expect(res.body).toBe(missing.body);
+      });
+
+      it("NEGATIVE (#353 r3): a key CLAIMING the operator's or buyer's id, without a proven wallet, is 403", async () => {
+        for (const who of [OPERATOR_NYC, BUYER]) {
+          const res = await get(url(JOB), { "x-test-principal": who, "x-test-proven-wallet": "none" });
+          const missing = await get(url("job-f3-does-not-exist"), { "x-test-principal": who, "x-test-proven-wallet": "none" });
+          expect(res.statusCode, who).toBe(403);
+          expect(res.json().error).toBe("identity_unverified");
+          expect(res.body).toBe(missing.body);
+          expect(res.body).not.toMatch(/executing|kernel-nyc|step-f3/);
+        }
       });
 
       it("NEGATIVE: a stranger gets exactly the answer for a job that does not exist", async () => {

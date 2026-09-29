@@ -6,11 +6,9 @@ import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import {
-  authorizeJobRead,
   buildJobExecutionDTO,
   loadJobExecutionSources,
   type JobExecutionRepos,
-  type JobRow,
 } from "../readmodels/job-execution.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
@@ -83,10 +81,11 @@ export async function jobRoutes(app: FastifyInstance) {
    * naming its source; nothing is inferred across axes, and a source that cannot be
    * read is reported `unavailable`, never defaulted.
    *
-   * Object-authorized before any axis is read (authorizeJobRead): an admin, the job's
-   * kernel operator, or its recorded buyer. Anonymous callers get 401; anyone else gets
-   * 404 (no existence oracle), whatever TENANT_ENFORCE says. Under TENANT_ENFORCE a job
-   * of another tenant is also a 404.
+   * Behind the job read family's gate (gateJobRead): identity is checked before the job is
+   * read, so no refusal depends on whether the job exists. No credential is 401, and a
+   * credential without a proven wallet is 403 identity_unverified. Then only an admin, or a
+   * proven wallet that is the job's kernel operator or recorded buyer, reads it. Anyone else
+   * gets the same 404 as a missing job, whatever TENANT_ENFORCE says.
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/execution", async (req, reply) => {
     const asOf = new Date().toISOString();
