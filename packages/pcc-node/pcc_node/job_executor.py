@@ -9,7 +9,8 @@ This module handles the full job execution lifecycle:
   6. For a job the device only ACCEPTED (an ``lp`` spool, an OctoPrint print
      start), keep checking the device once per daemon cycle
      (:meth:`JobExecutor.poll_awaiting`) and report the outcome the DEVICE
-     reports -- IPP ``job-state``, OctoPrint ``/api/job``
+     records for THIS job -- the IPP ``job-state`` of the spooled job-id, and
+     OctoPrint's own print history for the job's private copy of the file
 """
 
 import json
@@ -24,6 +25,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 log = logging.getLogger("pcc-node.job-executor")
 
@@ -303,7 +305,11 @@ STATUS_FIELD_KEYS = ("status", "state")
 
 # The device-body scan walks nested dicts and lists (a failure is as real at
 # data.result[0].error as at the top level).  A body deeper or larger than
-# these bounds cannot be verified, and the scan says so as a failure.
+# these bounds cannot be verified, and the scan says so as a failure.  EVERY
+# value is a node -- the root, each dict value and list item, scalars included
+# (r31 round-1 finding 4: counting only the containers visited let a flat
+# 6,000-field body through) -- and a container at depth >= 8 (root 0) is too
+# deep.  _body_shape_problem checks both before any reader looks at the body.
 DEVICE_BODY_MAX_DEPTH = 8
 DEVICE_BODY_MAX_NODES = 5000
 
@@ -334,21 +340,26 @@ HTTP_ACCEPTED = 202
 
 OCTOPRINT_SUCCESS_STATUSES = (200, 201, 204)
 
-# Generic HTTP completion contract (r31 astra verdict item 1, bus #2476).  A 2xx
-# is only the TRANSPORT's answer; "2xx and no recognized error" is not the
-# device saying the work finished.  _execute_generic_http therefore claims
-# `executed` only on the device's POSITIVE completion statement:
-#   * a per-device contract, when configured -- ``device["completionField"]``
-#     (a dot path into the JSON body, e.g. "result.phase") and
-#     ``device["completionValues"]`` (the values meaning finished; default
-#     [True]).  With a contract, the default vocabulary below is not used; or
-#   * by default, a completion word in ``status``/``state``, or a completion
-#     boolean set to True, at the body's top level or in one of
-#     GENERIC_OUTCOME_ENVELOPES.
-# A recognised queueing/running statement is acceptance (``submitted``).
-# Anything else -- {}, null, {"ok": true}, an unknown status word, a malformed
-# value, or completion and acceptance stated at once -- carries no flag at
-# all and classifies as unclassifiable, which fails the job closed.
+# Generic HTTP completion (r31 round-1 finding 1).  A 2xx is only the
+# TRANSPORT's answer, and a top-level "completed" may be a wrapper saying the
+# REQUEST completed while the device operation inside is still queued.  So
+# there is no device-agnostic completion vocabulary any more: a generic HTTP
+# answer completes a job ONLY under a reviewed, versioned per-device contract
+# (validate_completion_contract) that names the operation, the exact field and
+# values meaning "finished", and a field that must echo THIS job's id.
+#   * The contract lives in the operator's LOCAL device config,
+#     ``device["completionContract"]`` (NodeConfig devices; discovery never
+#     writes one).  A job can only choose among configured devices; it can
+#     never supply a contract, and for a contract device it cannot choose the
+#     method or path either.
+#   * Any recognised acceptance/running statement ANYWHERE in the body -- a
+#     string value that is exactly one of the words below, under ANY key or in
+#     any list, or an acceptance boolean set to True, at any depth -- blocks
+#     completion, as any recognised failure statement does.
+#   * Without a contract a recognised acceptance statement (with no completion
+#     statement anywhere) is acceptance (``submitted``, non-terminal);
+#     everything else -- {"status": "completed"} included -- carries no flag
+#     and classifies as unclassifiable, which fails the job closed.
 # "ok" and "success" are deliberately NOT completion words: many APIs use them
 # for "your REQUEST succeeded", which says nothing about the work.
 GENERIC_COMPLETION_STATUS_VALUES = frozenset({
@@ -361,7 +372,26 @@ GENERIC_ACCEPTANCE_STATUS_VALUES = frozenset({
 })
 GENERIC_COMPLETION_BOOL_KEYS = ("completed", "complete", "done", "finished")
 GENERIC_ACCEPTANCE_BOOL_KEYS = ("submitted", "accepted", "queued")
-GENERIC_OUTCOME_ENVELOPES = ("result", "data", "response", "body", "payload")
+
+# The contract (device["completionContract"]), version 1:
+#   {"version": 1,
+#    "method": "POST", "path": "/run",       # the one operation it covers
+#    "completionField": "result.phase",      # exact dot path into the JSON body
+#    "completionValues": ["finished"],       # exact values meaning finished
+#    "correlationField": "result.jobId",     # must hold THIS job's id, exactly
+#    "correlationRequestField": "jobId"}     # optional: body key the node sets
+#                                            # to the job id for the device to echo
+# The node always sends the job id in the CORRELATION_HEADER header too.
+COMPLETION_CONTRACT_VERSIONS = frozenset({1})
+COMPLETION_CONTRACT_METHODS = frozenset({"POST", "PUT", "PATCH"})
+COMPLETION_CONTRACT_REQUIRED = (
+    "version", "method", "path", "completionField", "completionValues", "correlationField",
+)
+COMPLETION_CONTRACT_OPTIONAL = ("correlationRequestField",)
+CORRELATION_HEADER = "X-PCC-Job-Id"
+
+# RFC 9110 sec 15.3.5: a 204 has no content, so it can state no outcome.
+HTTP_NO_CONTENT = 204
 
 OUTCOME_COMPLETED = "completed"
 OUTCOME_ACCEPTED = "accepted"
@@ -384,6 +414,14 @@ OPENTRONS_TERMINAL_FAILURE = frozenset({"failed", "stopped"})
 # run-completion watcher is the fix; releasing on "the run was accepted" is not.
 OPENTRONS_RUN_POLL_TIMEOUT_S = 120.0
 OPENTRONS_RUN_POLL_INTERVAL_S = 2.0
+# Deadlines (r31 round-1 finding 5).  A per-device budget is clamped to this
+# maximum and an interval to this minimum, so no finite override can hold the
+# daemon for days or flood the device (an interval of 0 used to poll as fast
+# as the device answered).  Every request's timeout is min(cap, remaining)
+# with no floor, and the deadline is checked again after every answer: an
+# answer that arrives after the deadline is discarded, never a completion.
+OPENTRONS_RUN_POLL_TIMEOUT_MAX_S = 3600.0
+MIN_POLL_INTERVAL_S = 0.5
 # Upper bound for a single poll request; the remaining budget can lower it.
 POLL_REQUEST_TIMEOUT_MAX_S = 30.0
 
@@ -453,15 +491,44 @@ def _extract_device_error(body: Any) -> Optional[str]:
     Being the only reader of a device body, it is the single place a new
     failure envelope has to be taught.
     """
-    budget = [DEVICE_BODY_MAX_NODES]
-    return _scan_device_body(body, "", 0, budget)
+    problem = _body_shape_problem(body)
+    if problem:
+        return problem
+    return _scan_device_body(body, "", 0)
 
 
-def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Optional[str]:
-    """Depth-first failure scan behind :func:`_extract_device_error`."""
-    budget[0] -= 1
-    if budget[0] < 0:
-        return "device body too large to verify"
+def _body_shape_problem(body: Any) -> Optional[str]:
+    """Why a device body is too large or too deep to verify, or None.
+
+    Iterative and bounded: it stops at the first bound crossed, and it adds a
+    container's children to the count before walking them, so a huge flat
+    container is refused without being walked.
+    """
+    count = 1  # the root
+    stack: List[Tuple[Any, int]] = [(body, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, (list, tuple)):
+            children = node
+        else:
+            continue
+        if depth >= DEVICE_BODY_MAX_DEPTH:
+            return "device body too deeply nested to verify"
+        count += len(node)
+        if count > DEVICE_BODY_MAX_NODES:
+            return "device body too large to verify"
+        stack.extend((child, depth + 1) for child in children)
+    return None
+
+
+def _scan_device_body(node: Any, path: str, depth: int) -> Optional[str]:
+    """Depth-first failure scan behind :func:`_extract_device_error`.
+
+    Only called on a body that passed :func:`_body_shape_problem`; the depth
+    guards below are a second line, not the bound.
+    """
     where = f" (at {path})" if path else ""
 
     if isinstance(node, str):
@@ -476,7 +543,7 @@ def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Op
         if depth >= DEVICE_BODY_MAX_DEPTH:
             return "device body too deeply nested to verify"
         for index, item in enumerate(node):
-            message = _scan_device_body(item, f"{path}[{index}]", depth + 1, budget)
+            message = _scan_device_body(item, f"{path}[{index}]", depth + 1)
             if message:
                 return message
         return None
@@ -506,7 +573,7 @@ def _scan_device_body(node: Any, path: str, depth: int, budget: List[int]) -> Op
     for key, value in node.items():
         if isinstance(value, (dict, list, tuple)) or (isinstance(value, str) and "<" in value):
             child = f"{path}.{key}" if path else str(key)
-            message = _scan_device_body(value, child, depth + 1, budget)
+            message = _scan_device_body(value, child, depth + 1)
             if message:
                 return message
 
@@ -530,84 +597,185 @@ def _nested_device_error(result: Dict) -> Optional[str]:
     return None
 
 
-def _contract_outcome(data: Any, field: Any, values: Any) -> Tuple[str, str]:
-    """Outcome under a device's own completion contract (see the constants)."""
-    if not isinstance(field, str) or not field.strip():
-        return OUTCOME_UNKNOWN, "completionField is not a usable path"
-    node: Any = data
-    for part in field.strip().split("."):
-        if not isinstance(node, dict) or part not in node:
-            return OUTCOME_UNKNOWN, f"completionField {field!r} is absent from the body"
-        node = node[part]
-    wanted = values if isinstance(values, list) and values else [True]
-    for want in wanted:
-        if isinstance(want, bool):
-            matched = node is want
-        elif isinstance(want, int):
-            matched = isinstance(node, int) and not isinstance(node, bool) and node == want
-        elif isinstance(want, str):
-            matched = isinstance(node, str) and node.strip().lower() == want.strip().lower()
-        else:
-            matched = False
-        if matched:
-            return OUTCOME_COMPLETED, f"completionField {field!r} = {_short(node)}"
-    if isinstance(node, str) and node.strip().lower() in GENERIC_ACCEPTANCE_STATUS_VALUES:
-        return OUTCOME_ACCEPTED, f"completionField {field!r} = {_short(node)}"
-    return OUTCOME_UNKNOWN, f"completionField {field!r} = {_short(node)} is not a completion value"
+def _usable_dot_path(path: Any) -> bool:
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and not any(ch.isspace() for ch in path)
+        and all(path.split("."))
+    )
 
 
-def _generic_http_outcome(data: Any, device: Dict) -> Tuple[str, str]:
-    """What a 2xx device body positively states: completed, accepted or unknown.
+def validate_completion_contract(contract: Any) -> Optional[str]:
+    """None when ``contract`` is a usable completion contract, else why not.
 
-    Called only after the failure scan found nothing, and never for a 202.
-    Returns ``(outcome, reason)``.  Only an explicit, well-formed statement
-    counts; everything else is unknown.
+    Strict on purpose: an unknown key, an unsupported version, or a
+    completion value that names an acceptance/running or failure word (a
+    contract saying "queued" means finished) is refused, and a device with a
+    refused contract runs nothing.
     """
-    if "completionField" in device:
-        return _contract_outcome(data, device.get("completionField"), device.get("completionValues"))
+    if not isinstance(contract, dict):
+        return "the completion contract is not an object"
+    unknown = sorted(set(contract) - set(COMPLETION_CONTRACT_REQUIRED) - set(COMPLETION_CONTRACT_OPTIONAL))
+    if unknown:
+        return f"unknown contract key(s): {', '.join(map(str, unknown))}"
+    missing = [key for key in COMPLETION_CONTRACT_REQUIRED if key not in contract]
+    if missing:
+        return f"missing contract key(s): {', '.join(missing)}"
+    version = contract["version"]
+    if type(version) is not int or version not in COMPLETION_CONTRACT_VERSIONS:
+        return f"unsupported contract version {version!r}"
+    method = contract["method"]
+    if not isinstance(method, str) or method.upper() not in COMPLETION_CONTRACT_METHODS:
+        return f"contract method {method!r} is not one of {sorted(COMPLETION_CONTRACT_METHODS)}"
+    path = contract["path"]
+    if not (
+        isinstance(path, str)
+        and path.startswith("/")
+        and not any(ch.isspace() for ch in path)
+        and "://" not in path
+        and ".." not in path.split("?", 1)[0].split("/")
+    ):
+        return f"contract path {path!r} is not an absolute path on the device"
+    for key in ("completionField", "correlationField"):
+        if not _usable_dot_path(contract[key]):
+            return f"{key} {contract[key]!r} is not a usable dot path"
+    if contract["completionField"] == contract["correlationField"]:
+        return "correlationField must differ from completionField"
+    values = contract["completionValues"]
+    if not isinstance(values, list) or not values:
+        return "completionValues must be a non-empty list"
+    for value in values:
+        if value is True:
+            continue
+        if isinstance(value, bool):
+            return "completionValues may not hold false"
+        if isinstance(value, int):
+            continue
+        if isinstance(value, str) and value.strip():
+            word = value.strip().lower()
+            if word in GENERIC_ACCEPTANCE_STATUS_VALUES:
+                return f"completionValues names the acceptance/running value {value!r}"
+            if word in FAILURE_STATUS_VALUES:
+                return f"completionValues names the failure value {value!r}"
+            continue
+        return f"completionValues holds an unusable value {value!r}"
+    if "correlationRequestField" in contract:
+        field = contract["correlationRequestField"]
+        if not (isinstance(field, str) and field and "." not in field and not any(ch.isspace() for ch in field)):
+            return f"correlationRequestField {field!r} is not a usable top-level key"
+    return None
 
-    if not isinstance(data, dict):
-        return OUTCOME_UNKNOWN, "the device body states no outcome"
-    containers = [data] + [
-        data[key] for key in GENERIC_OUTCOME_ENVELOPES if isinstance(data.get(key), dict)
-    ]
 
-    completed = accepted = unreadable = False
-    for container in containers:
-        for key in STATUS_FIELD_KEYS:
-            if key not in container:
-                continue
-            value = container[key]
-            if isinstance(value, dict):
-                continue  # an object under "state" is a container, not a statement
-            word = value.strip().lower() if isinstance(value, str) else None
-            if word in GENERIC_COMPLETION_STATUS_VALUES:
-                completed = True
-            elif word in GENERIC_ACCEPTANCE_STATUS_VALUES:
+def _outcome_statements(body: Any) -> Tuple[bool, bool]:
+    """``(acceptance_stated, completion_stated)`` ANYWHERE in a device body.
+
+    A statement is any string value, under ANY key or in any list, that is
+    exactly (trimmed, case-folded) a word of the acceptance/running or the
+    completion vocabulary -- ``{"phase": "queued"}`` and ``["running"]``
+    count as much as ``{"status": "queued"}`` -- or an acceptance/completion
+    boolean key set to True, at any depth.  Key-agnostic on purpose: a scan
+    that trusted only some key names would miss a device that says "queued"
+    under another one.  A device whose body carries its state history
+    therefore never completes (fail closed).  Only called on a body that
+    passed :func:`_body_shape_problem`.
+    """
+    accepted = completed = False
+    stack: List[Any] = [body]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            word = node.strip().lower()
+            if word in GENERIC_ACCEPTANCE_STATUS_VALUES:
                 accepted = True
-            else:
-                unreadable = True  # unknown word, number, list, null
-        for key in GENERIC_COMPLETION_BOOL_KEYS:
-            if key in container:
-                if container[key] is True:
-                    completed = True
-                else:
-                    unreadable = True
-        for key in GENERIC_ACCEPTANCE_BOOL_KEYS:
-            if key in container:
-                if container[key] is True:
-                    accepted = True
-                else:
-                    unreadable = True
+            elif word in GENERIC_COMPLETION_STATUS_VALUES:
+                completed = True
+        elif isinstance(node, dict):
+            if any(node.get(key) is True for key in GENERIC_ACCEPTANCE_BOOL_KEYS):
+                accepted = True
+            if any(node.get(key) is True for key in GENERIC_COMPLETION_BOOL_KEYS):
+                completed = True
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return accepted, completed
 
-    if unreadable:
-        return OUTCOME_UNKNOWN, "the device body carries an outcome field this node cannot read"
-    if completed and accepted:
-        return OUTCOME_UNKNOWN, "the device body states both completion and acceptance"
+
+def _resolve_dot_path(data: Any, path: str) -> Tuple[bool, Any]:
+    """``(found, value)`` at ``path`` ("a.b.c") in nested dicts."""
+    node: Any = data
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
+def _matches_completion_value(node: Any, want: Any) -> bool:
+    if want is True:
+        return node is True
+    if isinstance(want, int) and not isinstance(want, bool):
+        return isinstance(node, int) and not isinstance(node, bool) and node == want
+    if isinstance(want, str):
+        return isinstance(node, str) and node.strip().lower() == want.strip().lower()
+    return False
+
+
+def _contract_outcome(data: Any, contract: Dict, job_id: str) -> Tuple[str, str]:
+    """Outcome of a 2xx answer under a VALIDATED completion contract.
+
+    Completed only when all three hold: the completion field holds a
+    completion value, the correlation field holds exactly ``job_id``, and no
+    acceptance/running statement appears anywhere in the body.
+    """
+    completion_field = contract["completionField"]
+    correlation_field = contract["correlationField"]
+    accepted_anywhere, _ = _outcome_statements(data)
+    found, value = _resolve_dot_path(data, completion_field)
+    if found and any(_matches_completion_value(value, want) for want in contract["completionValues"]):
+        if accepted_anywhere:
+            return OUTCOME_UNKNOWN, (
+                f"completionField {completion_field!r} = {_short(value)}, but the body "
+                "also states acceptance or running: conflicting statements"
+            )
+        found_id, echoed = _resolve_dot_path(data, correlation_field)
+        if not found_id:
+            return OUTCOME_UNKNOWN, (
+                f"correlationField {correlation_field!r} is absent: the answer is not bound to this job"
+            )
+        if not (isinstance(echoed, str) and echoed == job_id):
+            return OUTCOME_UNKNOWN, (
+                f"correlationField {correlation_field!r} = {_short(echoed)} is not this job's id"
+            )
+        return OUTCOME_COMPLETED, (
+            f"completionField {completion_field!r} = {_short(value)}, correlated to this job "
+            f"(contract v{contract['version']})"
+        )
+    if accepted_anywhere or (
+        found and isinstance(value, str) and value.strip().lower() in GENERIC_ACCEPTANCE_STATUS_VALUES
+    ):
+        return OUTCOME_ACCEPTED, "the device states acceptance or running"
+    if not found:
+        return OUTCOME_UNKNOWN, f"completionField {completion_field!r} is absent from the body"
+    return OUTCOME_UNKNOWN, (
+        f"completionField {completion_field!r} = {_short(value)} is not a completion value"
+    )
+
+
+def _uncontracted_outcome(data: Any) -> Tuple[str, str]:
+    """Outcome of a 2xx answer from a device with NO completion contract.
+
+    Never completed.  A recognised acceptance statement, with no completion
+    statement anywhere, is acceptance; everything else is unknown.
+    """
+    accepted, completed = _outcome_statements(data)
     if completed:
-        return OUTCOME_COMPLETED, "the device body states completion"
+        return OUTCOME_UNKNOWN, (
+            "the body states completion, but this device has no completionContract: "
+            "generic HTTP completes a job only under a contract"
+        )
     if accepted:
-        return OUTCOME_ACCEPTED, "the device body states acceptance"
+        return OUTCOME_ACCEPTED, "the device states acceptance or running"
     return OUTCOME_UNKNOWN, "the device body states no outcome"
 
 
@@ -996,8 +1164,13 @@ DEFAULT_COMPLETION_POLL_TIMEOUT_S = {
     COMPLETION_KIND_IPP: IPP_COMPLETION_POLL_TIMEOUT_S,
     COMPLETION_KIND_OCTOPRINT: OCTOPRINT_COMPLETION_POLL_TIMEOUT_S,
 }
-# Per request.  Checks run inside the daemon loop, so keep a dead device from
-# stalling it for long.
+# A per-device completionPollTimeout is clamped to this (7 days).
+COMPLETION_POLL_TIMEOUT_MAX_S = 7 * 24 * 3600.0
+# At most one request per job per this many seconds, however fast the daemon
+# cycles.
+COMPLETION_POLL_MIN_INTERVAL_S = 5.0
+# Per request, and never more than the job's remaining budget.  Checks run
+# inside the daemon loop, so keep a dead device from stalling it for long.
 COMPLETION_POLL_REQUEST_TIMEOUT_S = 10
 
 # --- IPP (RFC 8010 encoding, RFC 8011 semantics) ---------------------------
@@ -1047,6 +1220,12 @@ IPP_JOB_STATES_NOT_COMPLETED = frozenset({3, 4, 5, 6})   # sec 5.3.7.2
 IPP_REASON_QUEUED_IN_DEVICE = "queued-in-device"
 IPP_REASONS_COMPLETED_WITH_ERRORS = frozenset({
     "job-completed-with-errors", "completed-with-errors",
+})
+# Reasons that contradict a plain 'completed': the job was canceled or aborted,
+# or is being stopped (sec 5.3.8).  With state 9 they are a failure.
+IPP_REASONS_STOPPED = frozenset({
+    "job-canceled-by-user", "job-canceled-by-operator", "job-canceled-at-device",
+    "aborted-by-system", "processing-to-stop-point",
 })
 
 # `lp` announces the spooled job as "request id is <queue>-<N> (1 file(s))".
@@ -1109,9 +1288,11 @@ def encode_ipp_get_job_attributes(printer_uri: str, job_id: int, request_id: int
 
     Operation attributes in the order RFC 8011 secs 4.1.4-4.1.5 require:
     attributes-charset, attributes-natural-language, printer-uri, job-id --
-    then requested-attributes = job-state, job-state-reasons.  The reasons ride
-    along because 'completed' alone can mean "handed to a device that cannot
-    report" or "finished with errors" (see IPP_REASON_QUEUED_IN_DEVICE).
+    then requested-attributes = job-id, job-state, job-state-reasons.  The
+    job-id comes back so the verdict can check the answer is about THIS job
+    (r31 round-1 finding 2); the reasons ride along because 'completed' alone
+    can mean "handed to a device that cannot report" or "finished with errors"
+    (see IPP_REASON_QUEUED_IN_DEVICE).
     """
     if not 1 <= job_id <= IPP_INT_MAX:
         raise ValueError(f"job-id out of range: {job_id!r}")
@@ -1126,7 +1307,8 @@ def encode_ipp_get_job_attributes(printer_uri: str, job_id: int, request_id: int
         _ipp_value(IPP_VALUE_NATURAL_LANGUAGE, b"attributes-natural-language", b"en"),
         _ipp_value(IPP_VALUE_URI, b"printer-uri", printer_uri.encode("ascii")),
         _ipp_value(IPP_VALUE_INTEGER, b"job-id", struct.pack(">i", job_id)),
-        _ipp_value(IPP_VALUE_KEYWORD, b"requested-attributes", b"job-state"),
+        _ipp_value(IPP_VALUE_KEYWORD, b"requested-attributes", b"job-id"),
+        _ipp_value(IPP_VALUE_KEYWORD, b"", b"job-state"),
         _ipp_value(IPP_VALUE_KEYWORD, b"", b"job-state-reasons"),
         bytes((IPP_TAG_END_OF_ATTRIBUTES,)),
     ))
@@ -1238,19 +1420,75 @@ def ipp_job_state(response: Dict[str, Any]) -> Tuple[Optional[int], List[str], s
     return state, reasons, ""
 
 
-def ipp_completion_verdict(
-    http_status: int, body: Any, request_id: int
-) -> Tuple[str, Dict[str, Any]]:
-    """Verdict for one Get-Job-Attributes exchange.  Pure; never raises.
+def _ipp_single_attribute(response: Dict[str, Any], name: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The one attribute called ``name`` in the one Job Attributes group."""
+    job_groups = [g for g in response["groups"] if g["tag"] == IPP_TAG_JOB_ATTRIBUTES]
+    if len(job_groups) != 1:
+        return None, f"{len(job_groups)} job attribute groups (expected 1)"
+    found = [a for a in job_groups[0]["attributes"] if a["name"] == name]
+    if len(found) != 1:
+        return None, f"{len(found)} {name} attributes (expected 1)"
+    return found[0], ""
 
-    Returns ``(verdict, observation)``.  COMPLETED only for job-state 9
-    without 'queued-in-device' or a completed-with-errors reason; FAILED for 7
-    canceled / 8 aborted and for 9 with errors; UNOBSERVABLE for 9 with
-    'queued-in-device'.  Everything else -- 3-6, an unknown or unreadable
-    state, a non-success IPP status-code (e.g. 0x0406 not-found: the job may
-    have been purged), a request-id that is not ours, a malformed body, a
-    non-200 HTTP status (RFC 8010 sec 3.4.3) or a transport failure (status
-    0) -- is WAITING.
+
+def ipp_job_id(response: Dict[str, Any]) -> Tuple[Optional[int], str]:
+    """The job-id an answer is about: exactly one integer(1:MAX), else None + why."""
+    attribute, problem = _ipp_single_attribute(response, "job-id")
+    if attribute is None:
+        return None, problem
+    values = attribute["values"]
+    if len(values) != 1:
+        return None, f"job-id has {len(values)} values (expected 1)"
+    value_tag, value = values[0]
+    if value_tag != IPP_VALUE_INTEGER or len(value) != 4:
+        return None, f"job-id is not a 4-octet integer (tag 0x{value_tag:02x}, {len(value)} octets)"
+    (job_id,) = struct.unpack(">i", value)
+    if not 1 <= job_id <= IPP_INT_MAX:
+        return None, f"job-id {job_id} is out of range"
+    return job_id, ""
+
+
+def ipp_job_state_reasons(response: Dict[str, Any]) -> Tuple[Optional[List[str]], str]:
+    """job-state-reasons read strictly (RFC 8011 sec 5.3.8: REQUIRED, and
+    'none' when no reason applies): exactly one attribute whose every value is
+    a non-empty US-ASCII keyword.  None + why otherwise."""
+    attribute, problem = _ipp_single_attribute(response, "job-state-reasons")
+    if attribute is None:
+        return None, problem
+    reasons: List[str] = []
+    for value_tag, value in attribute["values"]:
+        if value_tag != IPP_VALUE_KEYWORD:
+            return None, f"a job-state-reasons value is not a keyword (tag 0x{value_tag:02x})"
+        try:
+            keyword = value.decode("ascii")
+        except UnicodeDecodeError:
+            return None, "a job-state-reasons value is not US-ASCII"
+        if not keyword:
+            return None, "an empty job-state-reasons value"
+        reasons.append(keyword)
+    if not reasons:
+        return None, "job-state-reasons has no values"
+    return reasons, ""
+
+
+def ipp_completion_verdict(
+    http_status: int, body: Any, request_id: int, job_id: int
+) -> Tuple[str, Dict[str, Any]]:
+    """Verdict for one Get-Job-Attributes exchange about spooled job ``job_id``.
+
+    Pure; never raises.  Returns ``(verdict, observation)``.
+
+    No terminal verdict without proof the answer is about THIS job (r31
+    round-1 finding 2): exactly one integer job-id equal to ``job_id``, else
+    WAITING.  COMPLETED only for job-state 9 with a well-formed, non-empty
+    job-state-reasons (explicit 'none' included) naming neither
+    'queued-in-device' (-> UNOBSERVABLE) nor errors, cancellation or abort
+    (-> FAILED); missing, duplicated or malformed reasons -> WAITING.  FAILED
+    for 7 canceled / 8 aborted.  Everything else -- 3-6, an unknown or
+    unreadable state, a non-success IPP status-code (e.g. 0x0406 not-found:
+    the job may have been purged), a request-id that is not ours, a malformed
+    body, a non-200 HTTP status (RFC 8010 sec 3.4.3) or a transport failure
+    (status 0) -- is WAITING.
     """
     observation: Dict[str, Any] = {"httpStatus": http_status}
     if http_status != 200:
@@ -1286,23 +1524,46 @@ def ipp_completion_verdict(
     observation["jobStateCode"] = state
     observation["jobState"] = IPP_JOB_STATE_NAMES.get(state) if state is not None else None
     observation["jobStateReasons"] = reasons
+
+    reported_job_id, id_problem = ipp_job_id(response)
+    observation["reportedJobId"] = reported_job_id
+    if reported_job_id is None:
+        observation["reason"] = f"the answer names no usable job-id: {id_problem}"
+        return POLL_WAITING, observation
+    if reported_job_id != job_id:
+        observation["reason"] = f"the answer is about job {reported_job_id}, not our job {job_id}"
+        return POLL_WAITING, observation
+
     if state is None:
         observation["reason"] = f"no readable job-state: {problem}"
         return POLL_WAITING, observation
 
     name = IPP_JOB_STATE_NAMES.get(state, str(state))
     if state in IPP_JOB_STATES_COMPLETED:
-        if IPP_REASON_QUEUED_IN_DEVICE in reasons:
+        strict_reasons, reasons_problem = ipp_job_state_reasons(response)
+        if strict_reasons is None:
+            observation["reason"] = (
+                f"job-state completed, but job-state-reasons is unusable ({reasons_problem}); "
+                "RFC 8011 requires it, so the completion cannot be read"
+            )
+            return POLL_WAITING, observation
+        if IPP_REASON_QUEUED_IN_DEVICE in strict_reasons:
             observation["reason"] = (
                 "job-state completed with 'queued-in-device': the job was "
                 "handed to a device that cannot report its outcome"
             )
             return POLL_UNOBSERVABLE, observation
-        errors = sorted(IPP_REASONS_COMPLETED_WITH_ERRORS.intersection(reasons))
+        errors = sorted(IPP_REASONS_COMPLETED_WITH_ERRORS.intersection(strict_reasons))
         if errors:
             observation["reason"] = f"job-state completed with errors ({', '.join(errors)})"
             return POLL_FAILED, observation
-        observation["reason"] = "job-state completed"
+        stopped = sorted(IPP_REASONS_STOPPED.intersection(strict_reasons))
+        if stopped:
+            observation["reason"] = (
+                f"job-state completed, but the printer also reports {', '.join(stopped)}"
+            )
+            return POLL_FAILED, observation
+        observation["reason"] = f"job-state completed ({', '.join(strict_reasons)})"
         return POLL_COMPLETED, observation
     if state in IPP_JOB_STATES_FAILED:
         observation["reason"] = f"job-state {name}"
@@ -1314,15 +1575,51 @@ def ipp_completion_verdict(
     return POLL_WAITING, observation
 
 
-# --- OctoPrint (REST API, GET /api/job) -------------------------------------
+# --- OctoPrint (REST API, the job's own copy and its print history) --------
 #
-# The docs call the state list "not exhaustive", so every set below is an
-# ALLOWLIST: a state string not named here is always WAITING.
-OCTOPRINT_STATES_IDLE = frozenset({"operational"})
-OCTOPRINT_STATES_ACTIVE = frozenset({"printing", "pausing", "paused"})
-OCTOPRINT_STATES_CANCELLING = frozenset({"cancelling"})
-OCTOPRINT_STATES_FAILED = frozenset({"error", "offline", "offline after error"})
-OCTOPRINT_COMPLETE_PERCENT = 100.0   # progress.completion is a percentage
+# An /api/job snapshot describes the printer's CURRENT job: it names a file,
+# not a print attempt, and "Operational at 100 %" is an inference, not a
+# verdict (r31 round-1 finding 3).  So the adapter never prints the requested
+# file itself.  It makes a folder for the PCC job, copies the file into it and
+# prints that private copy; completion is then read from OctoPrint's own,
+# durable per-file print history for the copy (GET /api/files/local/<path> ->
+# "prints": {"success", "failure", "last": {"success", "date"}}).  OctoPrint
+# writes that history itself: a success only on PrintDone, a failure on a
+# cancelled or failed print (octoprint/printer/standard.py log_print).  The
+# counts are compared with a baseline read before the print command, because
+# a copy may carry the source file's metadata.
+OCTOPRINT_JOB_FOLDER_PREFIX = "pcc-"
+_OCTOPRINT_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
+OCTOPRINT_FOLDER_CREATED_STATUSES = (200, 201)
+OCTOPRINT_COPY_CREATED_STATUS = 201
+
+
+def octoprint_job_folder(job_id: str) -> str:
+    """The folder that holds a PCC job's private copy of its print file."""
+    return OCTOPRINT_JOB_FOLDER_PREFIX + _OCTOPRINT_UNSAFE_NAME.sub("_", job_id)
+
+
+def octoprint_print_history(body: Any) -> Tuple[Optional[Tuple[int, int]], Optional[Dict], str]:
+    """``((success, failure), last, problem)`` from an OctoPrint file answer.
+
+    No ``prints`` key means never printed: ``(0, 0)``.  A present but
+    malformed history gives ``None`` and says why.
+    """
+    if not isinstance(body, dict):
+        return None, None, "the file answer is not an object"
+    if "prints" not in body:
+        return (0, 0), None, ""
+    prints = body["prints"]
+    if not isinstance(prints, dict):
+        return None, None, "prints is not an object"
+    counts: List[int] = []
+    for key in ("success", "failure"):
+        value = prints.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None, None, f"prints.{key} is not a non-negative integer"
+        counts.append(value)
+    last = prints.get("last")
+    return (counts[0], counts[1]), (last if isinstance(last, dict) else None), ""
 
 
 def _octoprint_base_url(device: Dict) -> str:
@@ -1337,99 +1634,54 @@ def _octoprint_headers(device: Dict) -> Dict[str, str]:
     return {"X-Api-Key": api_key} if api_key else {}
 
 
-def _octoprint_file_is_ours(job: Any, filename: str) -> bool:
-    """True when ``job.file`` is the local file this node selected.
+def octoprint_history_verdict(
+    http_status: int, body: Any, path: str, baseline: Dict[str, int]
+) -> Tuple[str, str]:
+    """Verdict for one ``GET /api/files/local/<path>`` of the job's private copy.
 
-    ``path`` is the path within the location (``folder/file.gco``), which is
-    what the adapter selected by; ``name`` has no folder, so it is only the
-    fallback when ``path`` is absent.
-    """
-    if not isinstance(job, dict):
-        return False
-    selected = job.get("file")
-    if not isinstance(selected, dict) or selected.get("origin") != "local":
-        return False
-    wanted = filename.lstrip("/")
-    path = selected.get("path")
-    if isinstance(path, str):
-        return path == wanted
-    name = selected.get("name")
-    return isinstance(name, str) and name == wanted
+    Pure; never raises.  Returns ``(verdict, reason)``.  ``baseline`` is the
+    copy's ``{"success", "failure"}`` counts read before the print command.
 
-
-def _octoprint_completion_percent(progress: Any) -> Optional[float]:
-    if not isinstance(progress, dict):
-        return None
-    completion = progress.get("completion")
-    if isinstance(completion, bool) or not isinstance(completion, (int, float)):
-        return None
-    return float(completion) if math.isfinite(completion) else None
-
-
-def octoprint_completion_verdict(
-    http_status: int, body: Any, filename: str, seen_active: bool
-) -> Tuple[str, str, bool]:
-    """Verdict for one ``GET /api/job``.  Pure; never raises.
-
-    Returns ``(verdict, reason, active)``; ``active`` is True when OUR file is
-    printing/pausing/paused, and the caller remembers it as ``seen_active``.
-
-    * our file is not the current job (another file, none, not local) -> WAITING
-    * printing / pausing / paused                                      -> WAITING
-    * cancelling (irreversible; a select+print is refused while a print
-      is active, so after our acceptance this is our print)            -> FAILED
-    * error / offline / offline after error, below 100 %               -> FAILED
-      ... at 100 % (it may have finished before the connection went)   -> WAITING
-    * operational, never seen active (the selection may show a PREVIOUS
-      run of the same file, or the print has not started)              -> WAITING
-    * operational after active, completion >= 100, no error message   -> COMPLETED
-    * operational after active, completion < 100 (stopped early)      -> FAILED
-    * operational after active, completion unreadable / error message -> WAITING
-    * any other state, a non-200 answer, an unreadable body            -> WAITING
+    * a non-200 answer, an unreadable body, an answer about another path or
+      another origin, or a malformed history                     -> WAITING
+    * a count BELOW its baseline (the copy was replaced or reset) -> UNOBSERVABLE
+    * failure count above its baseline (a failed or cancelled print of the
+      copy, whatever else happened since)                          -> FAILED
+    * success count above its baseline and the last print recorded as a
+      success                                                       -> COMPLETED
+    * anything else                                                 -> WAITING
     """
     if http_status != 200:
         return POLL_WAITING, (
             "transport failure: OctoPrint unreachable"
             if not isinstance(http_status, int) or http_status <= 0
             else f"HTTP {http_status}"
-        ), False
+        )
     if not isinstance(body, dict):
-        return POLL_WAITING, "unreadable /api/job body", False
-    state = body.get("state")
-    if not isinstance(state, str) or not state.strip():
-        return POLL_WAITING, "no state in /api/job", False
-    normalized = state.strip().lower()
-    if not _octoprint_file_is_ours(body.get("job"), filename):
-        return POLL_WAITING, f"{state}: our file is not the current job", False
-
-    completion = _octoprint_completion_percent(body.get("progress"))
-    finished = completion is not None and completion >= OCTOPRINT_COMPLETE_PERCENT
-    shown = "unknown" if completion is None else f"{completion:g}%"
-
-    if normalized in OCTOPRINT_STATES_ACTIVE:
-        return POLL_WAITING, f"{state} at {shown}", True
-    if normalized in OCTOPRINT_STATES_CANCELLING:
-        return POLL_FAILED, f"print cancelled ({state} at {shown})", False
-    if normalized in OCTOPRINT_STATES_FAILED:
-        if finished:
-            return POLL_WAITING, (
-                f"{state} at {shown}: it may have finished before this state"
-            ), False
-        return POLL_FAILED, f"printer reported {state!r} at {shown}", False
-    if normalized in OCTOPRINT_STATES_IDLE:
-        if not seen_active:
-            return POLL_WAITING, (
-                f"{state} at {shown}, but our print was never seen running"
-            ), False
-        error = body.get("error")
-        if isinstance(error, str) and error.strip():
-            return POLL_WAITING, f"{state} with an error reported: {error}", False
-        if finished:
-            return POLL_COMPLETED, f"{state} at {shown} after printing", False
-        if completion is None:
-            return POLL_WAITING, f"{state}, completion unreadable", False
-        return POLL_FAILED, f"print stopped at {shown} (cancelled before completion)", False
-    return POLL_WAITING, f"unrecognised state {state!r}", False
+        return POLL_WAITING, "unreadable file answer"
+    if "path" in body and body.get("path") != path:
+        return POLL_WAITING, f"the answer is about {_short(body.get('path'))}, not our copy {path}"
+    if "origin" in body and body.get("origin") != "local":
+        return POLL_WAITING, f"the answer is about origin {_short(body.get('origin'))}, not local"
+    counts, last, problem = octoprint_print_history(body)
+    if counts is None:
+        return POLL_WAITING, f"unreadable print history: {problem}"
+    success, failure = counts
+    base_success, base_failure = baseline["success"], baseline["failure"]
+    if success < base_success or failure < base_failure:
+        return POLL_UNOBSERVABLE, (
+            f"the print history of our copy went backwards (success {base_success}->{success}, "
+            f"failure {base_failure}->{failure}): the file was replaced"
+        )
+    if failure > base_failure:
+        return POLL_FAILED, (
+            f"OctoPrint recorded {failure - base_failure} failed or cancelled print(s) of our copy"
+        )
+    if success > base_success:
+        if isinstance(last, dict) and last.get("success") is True:
+            return POLL_COMPLETED, "OctoPrint recorded a finished print of our copy (PrintDone)"
+        return POLL_WAITING, "the success count rose, but the last print is not recorded as a success"
+    return POLL_WAITING, "no finished print of our copy is recorded yet"
 
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1698,9 @@ class JobExecutor:
     gateway_client:
         A PCCGatewayClient instance for pushing status + evidence.
     clock:
-        Monotonic clock for completion deadlines (tests inject a fake one).
+        Monotonic clock for every deadline (tests inject a fake one).
+    sleep:
+        Sleep between Opentrons run polls (tests inject a fake one).
     """
 
     def __init__(
@@ -1454,6 +1708,7 @@ class JobExecutor:
         devices: List[Dict],
         gateway_client=None,
         clock: Optional[Callable[[], float]] = None,
+        sleep: Optional[Callable[[float], None]] = None,
     ):
         # Index by id and by protocol for fast lookup
         self._devices_by_id: Dict[str, Dict] = {}
@@ -1468,6 +1723,7 @@ class JobExecutor:
 
         self.gateway = gateway_client
         self._clock: Callable[[], float] = clock or time.monotonic
+        self._sleep: Callable[[float], None] = sleep or time.sleep
 
         # Jobs a device ACCEPTED whose completion is still to be observed, by
         # job id (see poll_awaiting).  IN MEMORY ONLY: a daemon restart forgets
@@ -1636,7 +1892,8 @@ class JobExecutor:
           printer host (``lp -h``).  No request id (e.g. the Windows
           ``notepad /p`` path), a local queue (``lp -d``/``lp``, no host) or a
           host that is not a plain name/IPv4 -> no handle.
-        * OctoPrint: the base URL and the file the adapter selected.
+        * OctoPrint: the base URL, the job's private copy (``printPath``) and
+          that copy's print-history baseline, as the adapter recorded them.
         """
         if not isinstance(result, dict):
             return None
@@ -1654,12 +1911,22 @@ class JobExecutor:
 
         if protocol in ("octoprint", "3d-printer"):
             base_url = result.get("device")
-            filename = result.get("filename")
+            print_path = result.get("printPath")
+            baseline = result.get("baseline")
             if not (isinstance(base_url, str) and base_url.startswith(("http://", "https://"))):
                 return None
-            if not (isinstance(filename, str) and filename.strip()):
+            if not (isinstance(print_path, str) and print_path.startswith(OCTOPRINT_JOB_FOLDER_PREFIX)):
                 return None
-            return COMPLETION_KIND_OCTOPRINT, {"base_url": base_url, "filename": filename}
+            if not isinstance(baseline, dict):
+                return None
+            counts = [baseline.get("success"), baseline.get("failure")]
+            if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
+                return None
+            return COMPLETION_KIND_OCTOPRINT, {
+                "base_url": base_url,
+                "path": print_path,
+                "baseline": {"success": counts[0], "failure": counts[1]},
+            }
 
         return None
 
@@ -1686,6 +1953,7 @@ class JobExecutor:
         )
         if not math.isfinite(timeout_s):
             timeout_s = DEFAULT_COMPLETION_POLL_TIMEOUT_S[kind]
+        timeout_s = min(timeout_s, COMPLETION_POLL_TIMEOUT_MAX_S)
         if timeout_s <= 0:
             log.info(
                 "Job %s: completion tracking disabled (completionPollTimeout=%g); "
@@ -1707,7 +1975,7 @@ class JobExecutor:
             "handle": handle,
             "accepted_at": accepted_at,
             "deadline": accepted_at + timeout_s,
-            "seen_active": False,        # OctoPrint: our print observed running
+            "next_poll_at": accepted_at,
             "last_observation": None,
         }
         log.info(
@@ -1722,8 +1990,11 @@ class JobExecutor:
         Called by the daemon once per cycle.  Per job:
 
         * past its deadline -> dropped WITHOUT a status, ERROR naming it
-          (outcome unknown; it stays "running" upstream).  Checked first, so a
-          job is never polled after its budget.
+          (outcome unknown; it stays "running" upstream).  Checked before the
+          request, which gets at most the remaining budget, and again after
+          the answer: an answer that arrives late is discarded the same way,
+          even when the device said completed.
+        * polled again sooner than COMPLETION_POLL_MIN_INTERVAL_S -> skipped.
         * the device reports COMPLETED -> dropped, then one bundle
           ``[execution_completed {level: device_reported, ...}]`` and one
           ``completed`` status (only if that evidence was acknowledged).
@@ -1751,25 +2022,40 @@ class JobExecutor:
                     job_id, type(exc).__name__, exc,
                 )
 
+    def _expire(self, entry: Dict[str, Any], why: str) -> None:
+        """Stop tracking a job WITHOUT a status: its outcome is unknown."""
+        job_id = entry["job_id"]
+        self._awaiting.pop(job_id, None)
+        log.error(
+            "Job %s: %s (budget %gs from acceptance, %s %s); completion tracking "
+            "stopped WITHOUT reporting completed or failed -- the outcome is "
+            "unknown and the job stays 'running' upstream (last observation: %s)",
+            job_id, why, entry["deadline"] - entry["accepted_at"], entry["kind"],
+            entry["handle"], entry["last_observation"],
+        )
+
     def _poll_one(self, entry: Dict[str, Any]) -> None:
         job_id = entry["job_id"]
-        if self._clock() >= entry["deadline"]:
-            self._awaiting.pop(job_id, None)
-            log.error(
-                "Job %s: the device reported no outcome within %gs of its "
-                "acceptance (%s %s); completion tracking stopped WITHOUT "
-                "reporting completed or failed -- the outcome is unknown and the "
-                "job stays 'running' upstream (last observation: %s)",
-                job_id, entry["deadline"] - entry["accepted_at"], entry["kind"],
-                entry["handle"], entry["last_observation"],
-            )
+        now = self._clock()
+        remaining = entry["deadline"] - now
+        if remaining <= 0:
+            self._expire(entry, "the device reported no outcome within the budget")
             return
+        if now < entry.get("next_poll_at", now):
+            return
+        entry["next_poll_at"] = now + COMPLETION_POLL_MIN_INTERVAL_S
 
+        # r31 round-1 finding 5: the request may not outlive the budget, and an
+        # answer that arrives after the deadline is discarded, never reported.
+        timeout = min(COMPLETION_POLL_REQUEST_TIMEOUT_S, remaining)
         if entry["kind"] == COMPLETION_KIND_IPP:
-            verdict, observation = self._check_ipp(entry)
+            verdict, observation = self._check_ipp(entry, timeout)
         else:
-            verdict, observation = self._check_octoprint(entry)
+            verdict, observation = self._check_octoprint(entry, timeout)
         entry["last_observation"] = observation
+        if self._clock() >= entry["deadline"]:
+            self._expire(entry, "the device's answer arrived after the deadline and is discarded")
+            return
 
         if verdict == POLL_WAITING:
             log.debug("Job %s: still awaiting completion (%s)", job_id, observation.get("reason"))
@@ -1790,7 +2076,7 @@ class JobExecutor:
         self._last_ipp_request_id = self._last_ipp_request_id % IPP_INT_MAX + 1
         return self._last_ipp_request_id
 
-    def _check_ipp(self, entry: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    def _check_ipp(self, entry: Dict[str, Any], timeout: float) -> Tuple[str, Dict[str, Any]]:
         """One IPP Get-Job-Attributes for an awaiting job."""
         from .http_util import http_bytes
 
@@ -1801,38 +2087,32 @@ class JobExecutor:
         status, body = http_bytes(
             "POST", url, data=request,
             headers={"Content-Type": "application/ipp"},
-            timeout=COMPLETION_POLL_REQUEST_TIMEOUT_S,
+            timeout=timeout,
         )
-        return ipp_completion_verdict(status, body, request_id)
+        return ipp_completion_verdict(status, body, request_id, handle["cupsJobId"])
 
-    def _check_octoprint(self, entry: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-        """One ``GET /api/job`` for an awaiting OctoPrint job."""
+    def _check_octoprint(self, entry: Dict[str, Any], timeout: float) -> Tuple[str, Dict[str, Any]]:
+        """One print-history read of an awaiting OctoPrint job's private copy."""
         from .http_util import http
 
         handle = entry["handle"]
         try:
             status, body = http(
-                "GET", f"{handle['base_url']}/api/job",
+                "GET", f"{handle['base_url']}/api/files/local/{quote(handle['path'], safe='/')}",
                 headers=_octoprint_headers(entry["device"]),
-                timeout=COMPLETION_POLL_REQUEST_TIMEOUT_S,
+                timeout=timeout,
                 verify_ssl=False,
             )
-        except Exception as exc:  # e.g. a body that is not UTF-8
+        except Exception as exc:  # the retry loop must survive a failing request
             status, body = 0, {"error": f"{type(exc).__name__}: {exc}"}
 
-        verdict, reason, active = octoprint_completion_verdict(
-            status, body, handle["filename"], entry["seen_active"]
-        )
-        if active:
-            entry["seen_active"] = True
+        verdict, reason = octoprint_history_verdict(status, body, handle["path"], handle["baseline"])
         observation: Dict[str, Any] = {"httpStatus": status, "reason": reason}
         if isinstance(body, dict):
-            job = body.get("job")
             observation.update(
-                deviceState=body.get("state"),
-                file=job.get("file") if isinstance(job, dict) else None,
-                progress=body.get("progress"),
-                error=body.get("error"),
+                path=body.get("path"),
+                origin=body.get("origin"),
+                prints=body.get("prints"),
             )
         else:
             observation["body"] = _short(body)
@@ -2048,7 +2328,10 @@ class JobExecutor:
         # submitted, and reporting that as a completion is the OH-1 defect one
         # layer up from the play guard above.  So wait for the run's own
         # terminal status and report THAT.
-        timeout_s = _as_float(device.get("runPollTimeout"), OPENTRONS_RUN_POLL_TIMEOUT_S)
+        timeout_s = min(
+            _as_float(device.get("runPollTimeout"), OPENTRONS_RUN_POLL_TIMEOUT_S),
+            OPENTRONS_RUN_POLL_TIMEOUT_MAX_S,
+        )
         interval_s = _as_float(device.get("runPollInterval"), OPENTRONS_RUN_POLL_INTERVAL_S)
         run_status, run_body = self._await_opentrons_run(
             base_url, run_id, ot2_headers, timeout_s, interval_s
@@ -2121,26 +2404,38 @@ class JobExecutor:
         run never reached a terminal state inside the budget, or when the poll
         could not be read -- both of which the caller must treat as "outcome
         unknown", never as a success.
+
+        r31 round-1 finding 5: the budget is clamped to
+        OPENTRONS_RUN_POLL_TIMEOUT_MAX_S and the interval to at least
+        MIN_POLL_INTERVAL_S, so the request count is bounded; each request
+        gets min(cap, remaining) with no floor; and an answer that arrives
+        after the deadline is discarded (outcome unknown).  Only a body about
+        THIS run (``data.id == run_id``) is read at all; another run's body is
+        ignored, so it can neither settle nor fail this run.
         """
         from .http_util import http
 
-        if timeout_s <= 0:
+        timeout_s = min(timeout_s, OPENTRONS_RUN_POLL_TIMEOUT_MAX_S)
+        if not timeout_s > 0:
             return None, None
+        interval_s = min(max(interval_s, MIN_POLL_INTERVAL_S), timeout_s)
+        max_requests = int(timeout_s / interval_s) + 1
 
-        deadline = time.monotonic() + timeout_s
+        deadline = self._clock() + timeout_s
         last_body: Any = None
-        while True:
-            # Each request gets at most the remaining budget (r31 item 4): a
-            # device that stops answering cannot hold the poll past its deadline.
-            remaining = deadline - time.monotonic()
+        for _ in range(max_requests):
+            remaining = deadline - self._clock()
             if remaining <= 0:
                 return None, last_body
             status, body = http(
                 "GET", f"{base_url}/runs/{run_id}", headers=headers, verify_ssl=False,
-                timeout=max(1.0, min(POLL_REQUEST_TIMEOUT_MAX_S, remaining)),
+                timeout=min(POLL_REQUEST_TIMEOUT_MAX_S, remaining),
             )
-            last_body = body
-            if status in (200, 201):
+            if self._clock() >= deadline:
+                return None, last_body  # this answer came too late: discarded
+            data = _opentrons_run_data(body)
+            if status in (200, 201) and data is not None and data.get("id") == run_id:
+                last_body = body
                 run_status = _opentrons_run_status(body)
                 if (
                     run_status in OPENTRONS_TERMINAL_SUCCESS
@@ -2149,10 +2444,11 @@ class JobExecutor:
                 ):
                     return run_status, body
 
-            remaining = deadline - time.monotonic()
+            remaining = deadline - self._clock()
             if remaining <= 0:
                 return None, last_body
-            time.sleep(min(max(interval_s, 0.0), remaining))
+            self._sleep(min(interval_s, remaining))
+        return None, last_body
 
     def _execute_octoprint(self, device: Dict, job: Dict) -> Dict[str, Any]:
         """Start an OctoPrint print job.
@@ -2169,20 +2465,75 @@ class JobExecutor:
         line, for the same reason as :meth:`_execute_generic_http`: a printer
         that replies ``{"error": "E_JAM: carriage jam, job aborted"}`` in a 200
         body has failed.  A failure stated in the body outranks the status code.
+
+        What is printed is the job's PRIVATE COPY, never the requested file
+        itself (r31 round-1 finding 3; see OCTOPRINT_JOB_FOLDER_PREFIX): the
+        adapter creates the job's folder, copies the file into it, reads the
+        copy's print-history baseline and only then selects and prints the
+        copy.  The first step that fails stops the sequence, so nothing is
+        printed after a failed copy or an unreadable baseline.
         """
-        from .http_util import http
+        from .http_util import http, http_form
 
         base_url = _octoprint_base_url(device)
         params = job.get("parameters", {})
         filename = params.get("filename", "")
+        job_id = job.get("id")
 
         headers = _octoprint_headers(device)
 
         if not filename:
             return {"error": "no_filename", "note": "octoprint job requires filename in parameters"}
+        if not isinstance(filename, str) or not isinstance(job_id, str) or not job_id.strip():
+            return {"error": "no_job_id", "submitted": False, "filename": filename,
+                    "note": "an OctoPrint job needs a job id to name its private copy"}
+
+        source = filename.lstrip("/")
+        name = source.rsplit("/", 1)[-1]
+        folder = octoprint_job_folder(job_id)
+        print_path = f"{folder}/{name}"
+        result: Dict[str, Any] = {
+            "submitted": False,
+            "filename": filename,
+            "printPath": print_path,
+            "device": base_url,
+        }
+
+        def refused(step: str, status: int, data: Any, error: Optional[str] = None) -> Dict[str, Any]:
+            reason = error or _extract_device_error(data) or _describe_transport_status(status, data)
+            return {**result, "status_code": status, "response": data, "error": f"{step}: {reason}"}
+
+        status, data = http_form(
+            "POST", f"{base_url}/api/files/local", {"foldername": folder},
+            headers=headers, verify_ssl=False,
+        )
+        if status not in OCTOPRINT_FOLDER_CREATED_STATUSES or _extract_device_error(data):
+            return refused(f"creating the job folder {folder!r}", status, data)
 
         status, data = http(
-            "POST", f"{base_url}/api/files/local/{filename}",
+            "POST", f"{base_url}/api/files/local/{quote(source, safe='/')}",
+            body={"command": "copy", "destination": folder},
+            headers=headers, verify_ssl=False,
+        )
+        if status != OCTOPRINT_COPY_CREATED_STATUS or _extract_device_error(data):
+            return refused(f"copying {source!r} into {folder!r}", status, data)
+
+        status, data = http(
+            "GET", f"{base_url}/api/files/local/{quote(print_path, safe='/')}",
+            headers=headers, verify_ssl=False,
+        )
+        if status != 200 or not isinstance(data, dict):
+            return refused(f"reading the copy {print_path!r}", status, data)
+        if "path" in data and data.get("path") != print_path:
+            return refused(f"reading the copy {print_path!r}", status, data,
+                           f"the answer is about {_short(data.get('path'))}")
+        counts, _, problem = octoprint_print_history(data)
+        if counts is None:
+            return refused(f"reading the copy's print history {print_path!r}", status, data, problem)
+        result["baseline"] = {"success": counts[0], "failure": counts[1]}
+
+        status, data = http(
+            "POST", f"{base_url}/api/files/local/{quote(print_path, safe='/')}",
             body={"command": "select", "print": True},
             headers=headers,
             verify_ssl=False,
@@ -2190,14 +2541,8 @@ class JobExecutor:
 
         transport_ok = status in OCTOPRINT_SUCCESS_STATUSES
         device_error = _extract_device_error(data)
-
-        result: Dict[str, Any] = {
-            # Accepted-and-started, never printed -- see the docstring.
-            "submitted": transport_ok and device_error is None,
-            "filename": filename,
-            "status_code": status,
-            "device": base_url,
-        }
+        # Accepted-and-started, never printed -- see the docstring.
+        result.update(submitted=transport_ok and device_error is None, status_code=status)
         if device_error is not None:
             result["error"] = device_error
         elif not transport_ok:
@@ -2228,30 +2573,72 @@ class JobExecutor:
         * 202 Accepted is ACCEPTANCE, not completion (:data:`HTTP_ACCEPTED`):
           the device took the request and has not finished it.  A 202 reports
           the acceptance flag ``submitted`` instead of ``executed``, derived
-          the same way.
-        * any other clean 2xx claims ``executed`` ONLY when the body positively
-          states completion (the device's contract, or the default completion
-          vocabulary -- see GENERIC_COMPLETION_STATUS_VALUES).  A recognised
-          queueing/running statement reports ``submitted``.  Anything else
-          (``{}``, ``null``, ``{"ok": true}``, an unknown status word, a
-          malformed value) carries NO flag, so it classifies as unclassifiable
-          and the job fails closed: "2xx and no recognised error" is the
-          transport answering, not the device saying the work finished (r31
-          astra verdict item 1).
+          the same way.  A 204 has no content, so it states no outcome.
+        * any other clean 2xx claims ``executed`` ONLY under the device's
+          completion contract (r31 round-1 finding 1; see
+          :func:`validate_completion_contract` and :func:`_contract_outcome`):
+          the contract names the operation, the exact field and values
+          meaning finished, and a field that must echo THIS job's id, and no
+          acceptance/running statement may appear anywhere in the body.  A
+          device without a contract never completes: a recognised
+          queueing/running statement reports ``submitted``, and anything else
+          -- ``{"status": "completed"}`` included -- carries NO flag, so it
+          classifies as unclassifiable and the job fails closed.
+        * a contract device runs only the contract's method and path.  A job
+          naming another, an invalid contract, or a body that cannot carry the
+          correlation id is refused before anything is sent.
         """
         from .http_util import http
 
         base_url = device.get("url") or device.get("baseUrl") or ""
         params = job.get("parameters", {})
-        method = params.get("method", "POST")
-        path = params.get("path", "/execute")
+        job_id = job.get("id")
         body = params.get("body") or params
 
         if not base_url:
             return {"error": "no_base_url", "executed": False}
 
+        has_contract = "completionContract" in device
+        contract = device.get("completionContract")
+        headers: Dict[str, str] = {}
+        if isinstance(job_id, str) and job_id:
+            headers[CORRELATION_HEADER] = job_id
+
+        if has_contract:
+            problem = validate_completion_contract(contract)
+            if problem is None and not (isinstance(job_id, str) and job_id):
+                problem = "the job has no id to correlate the answer with"
+            if problem is None:
+                method = contract["method"].upper()
+                path = contract["path"]
+                asked_method = params.get("method")
+                asked_path = params.get("path")
+                if asked_method is not None and (
+                    not isinstance(asked_method, str) or asked_method.upper() != method
+                ):
+                    problem = f"the job asks for method {asked_method!r}; this device's contract runs only {method}"
+                elif asked_path is not None and asked_path != path:
+                    problem = f"the job asks for path {asked_path!r}; this device's contract runs only {path!r}"
+            if problem is None and "correlationRequestField" in contract:
+                field = contract["correlationRequestField"]
+                if not isinstance(body, dict):
+                    problem = "the request body must be an object to carry the correlation id"
+                elif field in body and body[field] != job_id:
+                    problem = f"the request body already holds {field}={_short(body[field])}, not this job's id"
+                else:
+                    body = {**body, field: job_id}
+            if problem is not None:
+                return {
+                    "executed": False,
+                    "error": f"completion contract refused: {problem}; nothing was sent",
+                    "device": base_url,
+                }
+        else:
+            method = params.get("method", "POST")
+            path = params.get("path", "/execute")
+
         url = f"{base_url.rstrip('/')}{path}"
-        status, data = http(method, url, body=body, verify_ssl=False)
+        status, data = http(method, url, body=body, headers=headers, verify_ssl=False)
 
         transport_ok = HTTP_SUCCESS_MIN <= status < HTTP_SUCCESS_MAX_EXCLUSIVE
         device_error = _extract_device_error(data)
@@ -2259,17 +2646,28 @@ class JobExecutor:
         flag = "submitted" if status == HTTP_ACCEPTED else "executed"
 
         result: Dict[str, Any] = {"status_code": status, "response": data, "device": base_url}
+        if has_contract:
+            result["contract"] = {
+                "version": contract["version"],
+                "completionField": contract["completionField"],
+                "correlationField": contract["correlationField"],
+            }
         if device_error is not None:
             return {flag: False, **result, "error": device_error}
         if not transport_ok:
             return {flag: False, **result, "error": _describe_transport_status(status, data)}
         if status == HTTP_ACCEPTED:
             return {"submitted": True, **result}
+        if status == HTTP_NO_CONTENT:
+            return {**result, "outcome": "unrecognized", "note": "204 No Content states no outcome"}
 
-        outcome, reason = _generic_http_outcome(data, device)
+        if has_contract:
+            outcome, reason = _contract_outcome(data, contract, job_id)
+        else:
+            outcome, reason = _uncontracted_outcome(data)
         if outcome == OUTCOME_COMPLETED:
-            return {"executed": True, **result}
+            return {"executed": True, **result, "note": reason}
         if outcome == OUTCOME_ACCEPTED:
-            return {"submitted": True, **result}
+            return {"submitted": True, **result, "note": reason}
         # No flag: the classifier reads this as unclassifiable (fail closed).
         return {**result, "outcome": "unrecognized", "note": reason}
