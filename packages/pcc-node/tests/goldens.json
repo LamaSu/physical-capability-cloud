@@ -35,6 +35,13 @@
       "source": "octoprint://printer-1",
       "capturedAt": "2026-07-09T00:04:00.000Z",
       "expected": "sha256:77ba5d2d0bbece8ecdb0304b7669e66d49ce4d026d60f39ccd91a057ab6ece8c"
+    },
+    {
+      "name": "lone_surrogate_raw",
+      "rawContent": "log \ud800 tail \udfff",
+      "source": "serial://tty1",
+      "capturedAt": "2026-07-09T00:05:00.000Z",
+      "expected": "sha256:003d7741bfe2ca0794736ef20ac71afd857e3a19019566253d77f2e4669793d7"
     }
   ],
   "canonical": [
@@ -155,6 +162,46 @@
         -1e+21
       ],
       "expected": "[5e-324,-2.5e-8,9007199254740992,-1e+21]"
+    },
+    {
+      "name": "key_sort_utf16",
+      "value": {
+        "￿": 1,
+        "𐀀": 2,
+        "": 3,
+        "a": 4,
+        "😀": 5,
+        "\ud800": 6,
+        "ﬁ": 7
+      },
+      "expected": "{\"a\":4,\"\\ud800\":6,\"𐀀\":2,\"😀\":5,\"\":3,\"ﬁ\":7,\"￿\":1}"
+    },
+    {
+      "name": "key_sort_utf16_nested",
+      "value": {
+        "outer": {
+          "𝄞": [
+            1,
+            {
+              "�": "x",
+              "𠀀": "y"
+            }
+          ],
+          "": 0
+        }
+      },
+      "expected": "{\"outer\":{\"𝄞\":[1,{\"𠀀\":\"y\",\"�\":\"x\"}],\"\":0}}"
+    },
+    {
+      "name": "lone_surrogates",
+      "value": {
+        "high": "a\ud800b",
+        "low": "\udc00",
+        "pair": "😀",
+        "reversed": "\ude00\ud83d",
+        "end": "z\udbff"
+      },
+      "expected": "{\"end\":\"z\\udbff\",\"high\":\"a\\ud800b\",\"low\":\"\\udc00\",\"pair\":\"😀\",\"reversed\":\"\\ude00\\ud83d\"}"
     }
   ],
   "numbers": [

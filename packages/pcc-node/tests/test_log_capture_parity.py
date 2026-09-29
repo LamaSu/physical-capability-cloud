@@ -149,6 +149,52 @@ def test_forward_slash_not_escaped():
     assert canonicalize("cups://job/1") == '"cups://job/1"'
 
 
+# N60 K1: JS sorts keys by UTF-16 code unit and holds strings as code units.
+# The goldens above prove the JS side; these pin what only Python can express.
+
+# Built with chr() on purpose: an escaped pair in a literal is easy to lose to
+# an editor or a transport that decodes it into the one character.
+PAIR = chr(0xD83D) + chr(0xDE00)   # two code points, one UTF-16 pair
+ASTRAL = chr(0x1F600)              # the one character that pair encodes
+
+
+def test_a_surrogate_pair_written_as_two_code_points_is_its_character():
+    # One JS string, two Python spellings: they must canonicalize (and hash) alike.
+    assert len(PAIR) == 2 and len(ASTRAL) == 1
+    assert canonicalize({"k": PAIR}) == canonicalize({"k": ASTRAL})
+    assert canonicalize({PAIR: 1}) == canonicalize({ASTRAL: 1})
+    assert compute_entry_hash(PAIR, "s", "t") == compute_entry_hash(ASTRAL, "s", "t")
+
+
+def test_a_lone_surrogate_is_escaped_and_hashable():
+    assert canonicalize("a\ud800b") == '"a\\ud800b"'
+    assert canonicalize("\udfff") == '"\\udfff"'
+    # json.dumps alone emits it raw, which UTF-8 cannot encode; the hash must not raise.
+    assert compute_entry_hash("x\udc00", "s", "t").startswith("sha256:")
+
+
+def test_keys_sort_by_utf16_code_unit_not_code_point():
+    bmp_top, astral = chr(0xFFFF), chr(0x10000)  # code units FFFF and D800 DC00
+    value = {bmp_top: 1, astral: 2}
+    assert sorted(value) == [bmp_top, astral]  # Python's own order (code point)
+    assert canonicalize(value) == '{"' + astral + '":2,"' + bmp_top + '":1}'  # JS's order
+
+
+def test_a_non_string_key_is_refused():
+    # A JS object key is always a string; json.dumps(1) would write the key unquoted.
+    with pytest.raises(TypeError):
+        canonicalize({1: "a"})
+    with pytest.raises(TypeError):
+        canonicalize({"ok": {None: 1}})
+
+
+def test_two_keys_that_are_one_js_string_are_refused():
+    value = {PAIR: 1, ASTRAL: 2}
+    assert len(value) == 2  # two Python keys ...
+    with pytest.raises(ValueError):  # ... but one JS key
+        canonicalize(value)
+
+
 # ---------------------------------------------------------------------------
 # Ed25519 signing + chain (real pynacl)
 # ---------------------------------------------------------------------------

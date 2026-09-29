@@ -113,6 +113,13 @@ const ENTRY_HASH_FIXTURES = [
     source: "octoprint://printer-1",
     capturedAt: "2026-07-09T00:04:00.000Z",
   },
+  {
+    // N60 K1: a raw device line with a lone surrogate still hashes the same.
+    name: "lone_surrogate_raw",
+    rawContent: "log " + CC(0xd800) + " tail " + CC(0xdfff),
+    source: "serial://tty1",
+    capturedAt: "2026-07-09T00:05:00.000Z",
+  },
 ];
 
 // Structural fixtures: compare the raw canonical STRING (keys sorted, escaping,
@@ -132,6 +139,14 @@ const CANONICAL_FIXTURES = [
   { name: "small_floats", value: { a: 0.00005, b: 1.5e-5, c: 1e-7, d: 1e-6, e: 0.0001 } },
   { name: "large_numbers", value: { a: 1e20, b: 1e21, c: 123456789012345680000, d: 1.7976931348623157e308 } },
   { name: "extreme_doubles", value: [5e-324, -2.5e-8, 9007199254740992, -1e21] },
+  // N60 K1: .sort() compares UTF-16 code units, so a key above U+FFFF (lead
+  // unit D800-DBFF) sorts BEFORE one in U+E000-U+FFFF; code-point order puts
+  // it after.  A lone surrogate key sorts by its one unit.
+  { name: "key_sort_utf16", value: { "\u{FFFF}": 1, "\u{10000}": 2, "\u{E000}": 3, a: 4, "\u{1F600}": 5, "\u{D800}": 6, "\u{FB01}": 7 } },
+  { name: "key_sort_utf16_nested", value: { outer: { "\u{1D11E}": [1, { "\u{FFFD}": "x", "\u{20000}": "y" }], "\u{F8FF}": 0 } } },
+  // Well-formed JSON.stringify (ES2019): a lone surrogate is written as a
+  // lowercase \udxxx escape; a valid pair is the character it encodes.
+  { name: "lone_surrogates", value: { high: "a\u{D800}b", low: "\u{DC00}", pair: "\u{D83D}\u{DE00}", reversed: "\u{DE00}\u{D83D}", end: "z\u{DBFF}" } },
 ];
 
 // A deterministic number sweep: String(x) for many doubles, so the Python

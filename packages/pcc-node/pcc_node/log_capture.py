@@ -27,6 +27,7 @@ key), signing raises :class:`LogSigningRefused` -- fail CLOSED.
 import hashlib
 import json
 import logging
+import re
 
 log = logging.getLogger("pcc-node.log_capture")
 
@@ -57,6 +58,20 @@ class LogSigningRefused(RuntimeError):
 # Canonicalization  (faithful Python mirror of spec/src/util/canonical.ts)
 # ---------------------------------------------------------------------------
 
+def _js_string(s):
+    """``s`` as the string JS would hold (N60 K1).
+
+    A JS string is a sequence of UTF-16 code units, so a surrogate PAIR that a
+    Python str carries as two code points is, in JS, the one character above
+    U+FFFF it encodes; it is joined here.  A lone surrogate stays lone.
+    """
+    return s.encode("utf-16-be", "surrogatepass").decode("utf-16-be", "surrogatepass")
+
+
+# Code points left in a str after _js_string that are surrogates are lone ones.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def _json_string(s):
     """JS ``JSON.stringify(<string>)`` equivalent.
 
@@ -65,8 +80,22 @@ def _json_string(s):
     \\r`` shortcuts, else ``\\u00xx`` lowercase). Non-ASCII is emitted raw
     (UTF-8); ``/`` is NOT escaped. ``separators`` are irrelevant for a bare
     string but passed for intent-parity with the binding wire contract.
+
+    Surrogates follow JS too (N60 K1): a pair becomes its character
+    (:func:`_js_string`), and a lone surrogate is written as a lowercase
+    ``\\udxxx`` escape, as ES2019's well-formed ``JSON.stringify`` writes it.
+    ``json.dumps`` would emit it raw, which is not even encodable as UTF-8.
     """
-    return json.dumps(s, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(_js_string(s), ensure_ascii=False, separators=(",", ":"))
+    return _LONE_SURROGATE.sub(lambda m: "\\u%04x" % ord(m.group()), text)
+
+
+def _utf16_order(key):
+    """Sort key giving JS ``Array.prototype.sort`` order: strings compared by
+    UTF-16 code unit.  Big-endian UTF-16 bytes compare the same way.  Python's
+    own str order (by code point) differs for a key above U+FFFF (code units
+    D800-DBFF first) against one in U+E000-U+FFFF (N60 K1, sensors #3496)."""
+    return key.encode("utf-16-be", "surrogatepass")
 
 
 def _es_number_to_string(x):
@@ -140,6 +169,9 @@ def canonicalize(value):
       5. object -> keys sorted, ``JSON.stringify(k)+":"+canonicalize(v)`` joined
          by ``,``, wrapped in ``{}``. (JS omits ``undefined`` values; Python has
          no ``undefined`` so ``None`` maps to JSON ``null`` and is INCLUDED.)
+         Keys sort by UTF-16 code unit, as JS ``.sort()`` does
+         (:func:`_utf16_order`).  A key must be a str (a JS key always is), and
+         two keys that are the same JS string are refused.
     """
     if value is None:
         return "null"
@@ -153,10 +185,17 @@ def canonicalize(value):
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(canonicalize(v) for v in value) + "]"
     if isinstance(value, dict):
-        keys = sorted(value.keys())
+        entries = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"canonical JSON object keys are strings, not {type(key).__name__}")
+            js_key = _js_string(key)
+            if js_key in entries:
+                raise ValueError(f"two keys are the same JS string {_json_string(js_key)}")
+            entries[js_key] = item
         pairs = [
-            _json_string(k) + ":" + canonicalize(value[k])
-            for k in keys
+            _json_string(k) + ":" + canonicalize(entries[k])
+            for k in sorted(entries, key=_utf16_order)
         ]
         return "{" + ",".join(pairs) + "}"
     return str(value)
