@@ -360,9 +360,17 @@ export class CourierJobsStore {
     by: string | null,
     proof: unknown,
     note: string | null,
-  ): { ok: true; status: CourierJobStatus; event: CourierJobEvent } | { ok: false; reason: "not_found" } {
+  ):
+    | { ok: true; status: CourierJobStatus; event: CourierJobEvent }
+    | { ok: false; reason: "not_found" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: CourierJobStatus } {
     const result = getJobOffersStore().recordEvent(id, event, by, proof, note);
-    if (!result.ok) return { ok: false, reason: "not_found" };
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        return { ok: false, reason: "invalid_transition", currentStatus: genericStatusToCourier(result.currentStatus) };
+      }
+      return { ok: false, reason: "not_found" };
+    }
     // Re-project status: generic "in_progress" → v0.2 "in_transit"
     const o = getJobOffersStore().get(id)!;
     return { ok: true, status: offerToCourierJob(o).status, event: result.event };

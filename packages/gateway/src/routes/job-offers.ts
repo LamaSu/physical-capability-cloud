@@ -312,7 +312,12 @@ export async function jobOffersRoutes(app: FastifyInstance) {
       b.payload ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: eventKind, currentStatus: result.currentStatus });
+      }
+      return reply.code(404).send({ error: "not_found" });
+    }
     return { ok: true, status: result.status, event: result.event };
   });
 

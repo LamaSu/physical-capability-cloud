@@ -98,6 +98,15 @@ export type JobOfferStatus =
   | "expired"
   | "disputed";
 
+/** The statuses from which each status-changing event may be recorded (N81).
+ * An event not listed here changes no status and is always recorded. */
+const EVENT_ALLOWED_FROM: Readonly<Record<string, ReadonlySet<JobOfferStatus>>> = {
+  in_progress: new Set<JobOfferStatus>(["claimed", "in_progress"]),
+  pickup: new Set<JobOfferStatus>(["claimed", "in_progress"]),
+  delivered: new Set<JobOfferStatus>(["claimed", "in_progress", "delivered"]),
+  cancelled: new Set<JobOfferStatus>(["open", "claimed", "in_progress", "cancelled"]),
+};
+
 export interface JobOffer {
   id: string;
   capabilityType: string;            // e.g. "courier.dispatch", "pizza.order", "lab.hplc", "opentrons.runProtocol"
@@ -655,6 +664,16 @@ export class JobOffersStore {
    * Courier-shim aliases pickup → in_progress and stays the convention
    * of v0.2 callers without leaking courier semantics into the generic
    * surface.
+   *
+   * An event that would move the offer outside its lifecycle is refused, and
+   * nothing is recorded (N81):
+   *   - in_progress / pickup: only on a claimed offer (a repeat is a no-op);
+   *   - delivered: only on a claimed or in-progress offer (a repeat is a no-op);
+   *   - cancelled: only before delivery;
+   *   - so nothing advances an unclaimed offer, and settled, cancelled and
+   *     expired offers stay as they are.
+   * Events that change no status (note, progress_update, error, ...) are
+   * always recorded.
    */
   recordEvent(
     id: string,
@@ -662,9 +681,16 @@ export class JobOffersStore {
     by: string | null,
     payload: unknown,
     note: string | null,
-  ): { ok: true; status: JobOfferStatus; event: JobOfferEvent } | { ok: false; reason: "not_found" } {
+  ):
+    | { ok: true; status: JobOfferStatus; event: JobOfferEvent }
+    | { ok: false; reason: "not_found" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
+    const allowedFrom = EVENT_ALLOWED_FROM[event];
+    if (allowedFrom && !allowedFrom.has(o.status)) {
+      return { ok: false, reason: "invalid_transition", currentStatus: o.status };
+    }
     const evt: JobOfferEvent = {
       at: this.nowIso(),
       event,
@@ -676,13 +702,13 @@ export class JobOffersStore {
     // Status transitions — opt-in by event kind. Unknown event kinds leave
     // status alone (caller can post "progress_update" repeatedly).
     if (event === "in_progress" || event === "pickup") {
-      if (o.status === "claimed" || o.status === "open") o.status = "in_progress";
+      if (o.status === "claimed") o.status = "in_progress";
     }
-    if (event === "delivered") {
+    if (event === "delivered" && o.status !== "delivered") {
       o.status = "delivered";
       o.deliveredAt = evt.at;
     }
-    if (event === "cancelled") {
+    if (event === "cancelled" && o.status !== "cancelled") {
       o.status = "cancelled";
       o.cancelledAt = evt.at;
     }
