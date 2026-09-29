@@ -13,15 +13,24 @@ import json
 import time
 import sys
 import os
-import ssl
 import subprocess
 import logging
 import glob as globmod
 import base64
-import ipaddress
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+
+# N4a guard. Without this module the executor cannot start (fail closed).
+# UNSAFE_LOCAL_FLAG and local_base are re-exported for the guard tests.
+from ot2_local_guard import (  # noqa: F401
+    GUARD,
+    UNSAFE_LOCAL_FLAG,
+    http as guarded_http,
+    local_base,
+    require_mode,
+    require_robot,
+    require_started,
+    start_guard,
+    upload_protocol,
+)
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -45,83 +54,31 @@ log = logging.getLogger("ot2-exec")
 # The relay does not yet bind a call to an accepted, funded job with a committed
 # protocol hash, so any holder of a PCC API key (self-service keys are free)
 # could drive this robot. Until that is fixed (status board row N4b), the script
-# refuses to start unless it is run explicitly as an unsafe, local-only tool.
-# See scripts/README-ot2-executor.md.
-
-UNSAFE_LOCAL_FLAG = "--unsafe-local"
-
-
-def _is_local_host(host):
-    """True for loopback, private and link-local IPs, localhost, *.local and bare names."""
-    h = host.lower().rstrip(".")
-    if h == "localhost" or h.endswith(".localhost") or h.endswith(".local"):
-        return True
-    try:
-        ip = ipaddress.ip_address(h)
-    except ValueError:
-        # A single-label name only resolves on this network; any FQDN counts as public.
-        return "." not in h
-    return ip.is_loopback or ip.is_private or ip.is_link_local
-
-
-def start_guard(argv, pcc_base, name):
-    """Return None when the script may start, else the reason it must not."""
-    if UNSAFE_LOCAL_FLAG not in argv:
-        return (
-            f"REFUSED: {name} is not safe to run. Any PCC API key holder could make it run "
-            "shell commands and arbitrary protocols on this robot (status board row N4b). "
-            "For development against a gateway on your own machine or private network, "
-            f"re-run with {UNSAFE_LOCAL_FLAG}. See scripts/README-ot2-executor.md."
-        )
-    host = urlparse(pcc_base).hostname or ""
-    if not host or not _is_local_host(host):
-        return (
-            f"REFUSED: {UNSAFE_LOCAL_FLAG} allows only a gateway on this machine or a private "
-            f"network, but PCC_BASE is {pcc_base!r}. Never point {name} at a public PCC gateway."
-        )
-    return None
+# refuses to start unless it is run explicitly as an unsafe, local-only tool,
+# and every request goes to the local addresses that start_guard() checked.
+# The rules live in ot2_local_guard.py; see scripts/README-ot2-executor.md.
 
 
 # ── HTTP helpers ────────────────────────────────────────────────────────
 
-_ctx = ssl.create_default_context()
-_ctx.check_hostname = False
-_ctx.verify_mode = ssl.CERT_NONE
+USER_AGENT = "PCC-OT2-Executor/2.0 (falling-bush)"
 
 
 def http(method, url, body=None, headers=None, timeout=30):
-    hdrs = headers or {}
-    hdrs.setdefault("User-Agent", "PCC-OT2-Executor/2.0 (falling-bush)")
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        hdrs.setdefault("Content-Type", "application/json")
-    req = Request(url, data=data, headers=hdrs, method=method)
-    try:
-        with urlopen(req, timeout=timeout, context=_ctx) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return resp.status, json.loads(raw)
-            except json.JSONDecodeError:
-                return resp.status, raw
-    except HTTPError as e:
-        raw = e.read().decode("utf-8")
-        try:
-            return e.code, json.loads(raw)
-        except json.JSONDecodeError:
-            return e.code, raw
-    except (URLError, Exception) as e:
-        return 0, {"error": str(e)}
+    """Every request goes through the guard's one transport (ot2_local_guard.request):
+    only after an accepted start, only to the bases it accepted, no proxies, no
+    redirects, verified TLS."""
+    return guarded_http(method, url, body, headers, timeout, user_agent=USER_AGENT)
 
 
 def ot2(method, path, body=None):
-    url = f"{OT2_BASE}{path}"
+    url = f"{require_robot('ot2()')}{path}"
     headers = {"opentrons-version": OT2_API_VERSION}
     return http(method, url, body, headers)
 
 
 def pcc(method, path, body=None):
-    url = f"{PCC_BASE}{path}"
+    url = f"{require_started('pcc()')}{path}"
     headers = {"Authorization": f"Bearer {PCC_API_KEY}"}
     return http(method, url, body, headers)
 
@@ -289,7 +246,12 @@ def capture_frame_jpeg():
 # ── Tool Execution (same as before, no Claude needed) ───────────────────
 
 def execute_tool(name, args):
-    """Execute a tool call against the OT-2 hardware. Returns result string."""
+    """Execute a tool call against the OT-2 hardware. Returns result string.
+
+    Refuses (exit 2) unless start_guard() accepted this process: the shell tool
+    below must not be reachable by importing this module.
+    """
+    require_mode("execute_tool()")
     try:
         if name == "ot2_health":
             s, r = ot2("GET", "/health")
@@ -320,18 +282,11 @@ def execute_tool(name, args):
             return json.dumps(r, indent=2)
 
         elif name == "ot2_protocol_upload":
-            filename = args.get("filename", "protocol.py")
-            content = args["content"]
-            tmppath = f"/tmp/{filename}"
-            with open(tmppath, "w") as f:
-                f.write(content)
-            result = subprocess.run(
-                ["curl", "-s", "-H", f"opentrons-version: {OT2_API_VERSION}",
-                 "-F", f"files=@{tmppath}", f"{OT2_BASE}/protocols"],
-                capture_output=True, text=True, timeout=30,
+            # Multipart upload through the guard's transport: no subprocess, no temp file.
+            s, r = upload_protocol(
+                OT2_API_VERSION, args.get("filename", "protocol.py"), args["content"], user_agent=USER_AGENT,
             )
-            os.remove(tmppath)
-            return result.stdout or result.stderr
+            return json.dumps(r, indent=2)
 
         elif name == "ot2_runs_list":
             s, r = ot2("GET", "/runs")
@@ -485,15 +440,18 @@ def handle_simple_chat(msg):
 
 
 def run():
-    """Main executor loop."""
+    """Main executor loop. Refuses (exit 2) unless start_guard() authorised this process."""
+    pcc_base = require_started("run()")
+    ot2_base = require_robot("run()")
+
     # Verify OT-2
     s, health = ot2("GET", "/health")
     if s != 200:
-        print(f"ERROR: Cannot reach OT-2 at {OT2_BASE}")
+        print(f"ERROR: Cannot reach OT-2 at {ot2_base}")
         sys.exit(1)
 
     log.info(f"Connected to OT-2 '{health.get('name')}' (API {health.get('api_version')})")
-    log.info(f"Executor mode. Polling {PCC_BASE} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
+    log.info(f"Executor mode. Polling {pcc_base} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
 
     # Probe camera at startup
     cam = detect_camera_device()
@@ -531,7 +489,7 @@ def run():
             }
         ],
         "endpoints": [
-            {"transport": "http-poll", "url": f"{PCC_BASE}/api/ot2/tool-call", "priority": 1},
+            {"transport": "http-poll", "url": f"{pcc_base}/api/ot2/tool-call", "priority": 1},
         ],
         "ttlSeconds": 300,
     })
@@ -568,13 +526,13 @@ def run():
 
 
 if __name__ == "__main__":
-    refusal = start_guard(sys.argv[1:], PCC_BASE, "ot2-executor.py")
+    refusal = start_guard(sys.argv[1:], PCC_BASE, "ot2-executor.py", ot2_base=OT2_BASE)
     if refusal:
         print(refusal, file=sys.stderr)
         sys.exit(2)
     log.warning(
         "UNSAFE LOCAL MODE: every tool call relayed by %s runs on this robot, "
-        "including shell commands (status board row N4b).", PCC_BASE,
+        "including shell commands (status board row N4b).", GUARD.pcc_base,
     )
     if not PCC_API_KEY:
         print("ERROR: Set PCC_API_KEY")

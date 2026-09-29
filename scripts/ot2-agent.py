@@ -16,13 +16,25 @@ import json
 import time
 import sys
 import os
-import ssl
 import hashlib
-import ipaddress
 import logging
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode
+
+# N4a guard. Without this module the agent cannot start (fail closed).
+# UNSAFE_LOCAL_FLAG and local_base are re-exported for the guard tests.
+from ot2_local_guard import (  # noqa: F401
+    GUARD,
+    UNSAFE_LOCAL_FLAG,
+    allow_external,
+    http as guarded_http,
+    local_base,
+    require_mode,
+    require_robot,
+    require_started,
+    start_guard,
+    start_interactive,
+    upload_protocol,
+)
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -48,97 +60,42 @@ log = logging.getLogger("ot2-agent")
 # tool and arbitrary protocol uploads (an Opentrons protocol is Python code).
 # The relay does not yet bind a call to an accepted, funded job with a committed
 # protocol hash, so any holder of a PCC API key (self-service keys are free)
-# could drive this robot. Until that is fixed (status board row N4b), the script
-# refuses to start unless it is run explicitly as an unsafe, local-only tool.
-# See scripts/README-ot2-executor.md.
-
-UNSAFE_LOCAL_FLAG = "--unsafe-local"
-
-
-def _is_local_host(host):
-    """True for loopback, private and link-local IPs, localhost, *.local and bare names."""
-    h = host.lower().rstrip(".")
-    if h == "localhost" or h.endswith(".localhost") or h.endswith(".local"):
-        return True
-    try:
-        ip = ipaddress.ip_address(h)
-    except ValueError:
-        # A single-label name only resolves on this network; any FQDN counts as public.
-        return "." not in h
-    return ip.is_loopback or ip.is_private or ip.is_link_local
-
-
-def start_guard(argv, pcc_base, name):
-    """Return None when the script may start, else the reason it must not."""
-    if UNSAFE_LOCAL_FLAG not in argv:
-        return (
-            f"REFUSED: {name} is not safe to run. Any PCC API key holder could make it run "
-            "shell commands and arbitrary protocols on this robot (status board row N4b). "
-            "For development against a gateway on your own machine or private network, "
-            f"re-run with {UNSAFE_LOCAL_FLAG}. See scripts/README-ot2-executor.md."
-        )
-    host = urlparse(pcc_base).hostname or ""
-    if not host or not _is_local_host(host):
-        return (
-            f"REFUSED: {UNSAFE_LOCAL_FLAG} allows only a gateway on this machine or a private "
-            f"network, but PCC_BASE is {pcc_base!r}. Never point {name} at a public PCC gateway."
-        )
-    return None
+# could drive this robot. Until that is fixed (status board row N4b), every mode
+# refuses to start unless it is run explicitly as an unsafe, local-only tool, and
+# every request goes through the guard's one transport to the addresses it
+# checked. The rules live in ot2_local_guard.py; see scripts/README-ot2-executor.md.
 
 
 # ── HTTP helpers (stdlib only) ──────────────────────────────────────────
 
-# Skip SSL verification for self-signed certs on embedded devices
-_ctx = ssl.create_default_context()
-_ctx.check_hostname = False
-_ctx.verify_mode = ssl.CERT_NONE
+USER_AGENT = "PCC-OT2-Agent/1.0 (falling-bush)"
+ANTHROPIC_API = "https://api.anthropic.com"
 
 
 def http(method, url, body=None, headers=None, timeout=30):
-    """Make an HTTP request using stdlib. Returns (status, parsed_json | text)."""
-    hdrs = headers or {}
-    hdrs.setdefault("User-Agent", "PCC-OT2-Agent/1.0 (falling-bush)")
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        hdrs.setdefault("Content-Type", "application/json")
-    req = Request(url, data=data, headers=hdrs, method=method)
-    try:
-        with urlopen(req, timeout=timeout, context=_ctx) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return resp.status, json.loads(raw)
-            except json.JSONDecodeError:
-                return resp.status, raw
-    except HTTPError as e:
-        raw = e.read().decode("utf-8")
-        try:
-            return e.code, json.loads(raw)
-        except json.JSONDecodeError:
-            return e.code, raw
-    except URLError as e:
-        return 0, {"error": str(e)}
-    except Exception as e:
-        return 0, {"error": str(e)}
+    """Every request goes through the guard's one transport (ot2_local_guard.request):
+    only after an accepted start, only to the bases it accepted (and, once main()
+    allows it, the Anthropic API), no proxies, no redirects, verified TLS."""
+    return guarded_http(method, url, body, headers, timeout, user_agent=USER_AGENT)
 
 
 def ot2(method, path, body=None):
-    """Call the OT-2 robot API at localhost:31950."""
-    url = f"{OT2_BASE}{path}"
+    """Call the OT-2 robot API (the local OT2_BASE the guard accepted)."""
+    url = f"{require_robot('ot2()')}{path}"
     headers = {"opentrons-version": OT2_API_VERSION}
     return http(method, url, body, headers)
 
 
 def pcc(method, path, body=None):
-    """Call the PCC gateway at capability.network."""
-    url = f"{PCC_BASE}{path}"
+    """Call the PCC gateway (the local PCC_BASE start_guard() accepted)."""
+    url = f"{require_started('pcc()')}{path}"
     headers = {"Authorization": f"Bearer {PCC_API_KEY}"}
     return http(method, url, body, headers)
 
 
 def claude(messages, tools, system_prompt):
     """Call the Claude Messages API with tools. Supports API key or OAuth token."""
-    url = "https://api.anthropic.com/v1/messages"
+    url = f"{ANTHROPIC_API}/v1/messages"
     headers = {
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
@@ -350,6 +307,11 @@ OT2_TOOLS = [
 
 
 def execute_tool(name, args):
+    require_mode("execute_tool()")  # the shell tool below must not run on import alone
+    return _execute_tool(name, args)
+
+
+def _execute_tool(name, args):
     """Execute a tool call and return the result as a string."""
     try:
         if name == "ot2_health":
@@ -381,25 +343,11 @@ def execute_tool(name, args):
             return json.dumps(r, indent=2)
 
         elif name == "ot2_protocol_upload":
-            # Write protocol to temp file, then upload via multipart
-            filename = args.get("filename", "protocol.py")
-            content = args["content"]
-            tmppath = f"/tmp/{filename}"
-            with open(tmppath, "w") as f:
-                f.write(content)
-            # Use curl for multipart upload since urllib multipart is painful
-            import subprocess
-            result = subprocess.run(
-                [
-                    "curl", "-s",
-                    "-H", f"opentrons-version: {OT2_API_VERSION}",
-                    "-F", f"files=@{tmppath}",
-                    f"{OT2_BASE}/protocols",
-                ],
-                capture_output=True, text=True, timeout=30,
+            # Multipart upload through the guard's transport: no subprocess, no temp file.
+            s, r = upload_protocol(
+                OT2_API_VERSION, args.get("filename", "protocol.py"), args["content"], user_agent=USER_AGENT,
             )
-            os.remove(tmppath)
-            return result.stdout or result.stderr
+            return json.dumps(r, indent=2)
 
         elif name == "ot2_runs_list":
             s, r = ot2("GET", "/runs")
@@ -436,22 +384,12 @@ def execute_tool(name, args):
             return json.dumps(r, indent=2)
 
         elif name == "ot2_self_update":
-            url = args.get("url", f"{PCC_BASE}/api/ot2/agent-code")
-            import subprocess
-            r = subprocess.run(
-                f"curl -sL '{url}' -o /data/ot2-agent-new.py",
-                shell=True, capture_output=True, text=True, timeout=30,
-            )
-            # Verify it's valid Python
-            r2 = subprocess.run(
-                "python3 -c 'compile(open(\"/data/ot2-agent-new.py\").read(), \"agent\", \"exec\")'",
-                shell=True, capture_output=True, text=True, timeout=10,
-            )
-            if r2.returncode == 0:
-                subprocess.run("cp /data/ot2-agent-new.py /data/ot2-agent.py", shell=True)
-                return json.dumps({"updated": True, "message": "Agent updated. Restart required."})
-            else:
-                return json.dumps({"updated": False, "error": r2.stderr[:500]})
+            # N4a: disabled. It downloaded code from any URL (following redirects)
+            # and installed it over this agent. N4b-robot removes the tool.
+            return json.dumps({
+                "updated": False,
+                "error": "ot2_self_update is disabled (N4a): it installed code fetched from any URL.",
+            })
 
         elif name == "ot2_shell":
             import subprocess
@@ -709,8 +647,13 @@ def push_camera_frame():
 
 
 def daemon_mode():
-    """Daemon mode — poll PCC for jobs and chat, push camera frames."""
-    log.info(f"Daemon mode. Polling {PCC_BASE} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
+    """Daemon mode: poll PCC for jobs and chat, push camera frames.
+
+    Refuses (exit 2) unless start_guard() authorised this process.
+    """
+    pcc_base = require_started("daemon_mode()")
+    require_robot("daemon_mode()")
+    log.info(f"Daemon mode. Polling {pcc_base} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
 
     # Register as online
     pcc("POST", f"/api/kernels/{KERNEL_ID}/heartbeat", {"status": "online"})
@@ -754,17 +697,25 @@ def daemon_mode():
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "interactive"
+    if mode not in ("interactive", "daemon", "health"):
+        print(f"Usage: {sys.argv[0]} [interactive|daemon|health] {UNSAFE_LOCAL_FLAG}")
+        sys.exit(1)
 
-    # N4a: daemon mode feeds relayed PCC jobs and chat to an LLM that holds a
-    # shell and a self-update tool, so it gets the same start guard.
+    # N4a: every mode drives this robot, and interactive and daemon give an LLM a
+    # shell on it, so every mode needs --unsafe-local and local addresses. Daemon
+    # mode also polls PCC, so it needs a local PCC_BASE too.
     if mode == "daemon":
-        refusal = start_guard(sys.argv[2:], PCC_BASE, "ot2-agent.py daemon")
-        if refusal:
-            print(refusal, file=sys.stderr)
-            sys.exit(2)
+        refusal = start_guard(sys.argv[2:], PCC_BASE, "ot2-agent.py daemon", ot2_base=OT2_BASE)
+    else:
+        refusal = start_interactive(sys.argv[2:], OT2_BASE, f"ot2-agent.py {mode}")
+    if refusal:
+        print(refusal, file=sys.stderr)
+        sys.exit(2)
+    if mode in ("interactive", "daemon"):
+        allow_external(ANTHROPIC_API)  # the Claude API, the one non-local destination
         log.warning(
-            "UNSAFE LOCAL MODE: jobs and chat relayed by %s drive an LLM with a shell "
-            "on this robot (status board row N4b).", PCC_BASE,
+            "UNSAFE LOCAL MODE: %s drives an LLM with a shell on this robot (status board row N4b).",
+            f"jobs and chat relayed by {GUARD.pcc_base}" if mode == "daemon" else "the local terminal",
         )
 
     # Only require auth for modes that use Claude
@@ -776,7 +727,7 @@ def main():
     # Verify OT-2 connection
     s, health = ot2("GET", "/health")
     if s != 200:
-        print(f"ERROR: Cannot reach OT-2 at {OT2_BASE} (status={s})")
+        print(f"ERROR: Cannot reach OT-2 at {GUARD.ot2_base} (status={s})")
         sys.exit(1)
 
     robot_name = health.get("name", "unknown")
@@ -792,9 +743,6 @@ def main():
         interactive_mode()
     elif mode == "health":
         print(json.dumps(health, indent=2))
-    else:
-        print(f"Usage: {sys.argv[0]} [interactive|daemon --unsafe-local|health]")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
