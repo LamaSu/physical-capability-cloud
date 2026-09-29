@@ -238,6 +238,7 @@ describe("revealed secrets", () => {
     expect(panel?.textContent).toContain(FRESH);
     expect(panel?.textContent).toContain("for maker@example.com");
     expect(panel?.textContent).toContain("shown once");
+    expect(panel?.classList.contains("ph-no-capture"), "session recording never sees the credential").toBe(true);
     const stored = setItem.mock.calls.filter(([, v]) => String(v).includes(FRESH));
     expect(stored).toEqual([]);
   });

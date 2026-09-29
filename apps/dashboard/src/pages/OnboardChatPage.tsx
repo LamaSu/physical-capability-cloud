@@ -439,7 +439,12 @@ export function OnboardChatPage({ variant = "onboard" }: { variant?: ChatVariant
     return (
       <div className="mt-3 space-y-2" role="alert">
         {revealed.map((r, i) => (
-          <div key={i} data-revealed-secret className="rounded-lg border border-emerald-500/40 bg-emerald-500/[0.08] p-3 space-y-2">
+          // ph-no-capture: session recording and autocapture never see the credential (N50).
+          <div
+            key={i}
+            data-revealed-secret
+            className="ph-no-capture rounded-lg border border-emerald-500/40 bg-emerald-500/[0.08] p-3 space-y-2"
+          >
             <p className="text-sm font-semibold text-emerald-200">
               New credential{r.boundTo ? ` for ${r.boundTo}` : ""} ({r.path}). Save it now: it is shown once, and PCC can't show it
               again.
