@@ -11,7 +11,8 @@
  *     while the package holds 253;
  *   - kernel_announce_capabilities claimed to register capabilities, but the
  *     route acknowledges and stores nothing;
- *   - `pip install pcc-node` resolves to nothing while 0.1.0 is yanked.
+ *   - `pip install pcc-node` resolves to nothing while 0.1.0 is yanked, and
+ *     without the crypto extra a node cannot sign evidence at all.
  */
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -86,10 +87,13 @@ describe("the agent pack tells agents only true things", () => {
     expect(announce!.description).toContain("create_capability");
   });
 
-  it("installs a pcc-node that exists: 0.1.0 is yanked, so every pip install asks for >=0.1.1", () => {
+  // 0.1.0 is yanked, so >=0.1.1. And without pynacl (the crypto extra) the node
+  // cannot sign evidence or register a signing key: log_capture.py and
+  // register.py fail closed, so a plain install can never reach a verified run.
+  it("installs a pcc-node that exists and can sign: pcc-node[crypto]>=0.1.1", () => {
     for (const [file, text] of PACK) {
       for (const m of text.matchAll(/pip3? install [^\n`]*pcc-node[^\n`]*/g)) {
-        expect(m[0], file).toMatch(/pcc-node(\[[^\]]*\])?>=0\.1\.1/);
+        expect(m[0], file).toMatch(/pcc-node\[(?:[^\]]*,\s*)?(?:crypto|all)(?:\s*,[^\]]*)?\]>=0\.1\.1/);
       }
     }
   });

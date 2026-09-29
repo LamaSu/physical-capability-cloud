@@ -190,7 +190,7 @@ User: "I run a 3D-print shop. Tell me when there's an FDM job in my area."
 
 ## When the user is an operator (not a buyer)
 
-If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding flow (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) handles this end-to-end if available; otherwise do it manually. For a physical device, persistent operator polling (waking up when a job lands) is the pcc-node daemon's job: `pip install 'pcc-node>=0.1.1'`, then `pcc-node start` on the machine next to the device.
+If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (`POST /api/kernels`), then a capability per offering (`POST /api/capabilities`). The agentic onboarding flow (`POST /api/onboard/start`, tool `pcc_onboard_session_start`) handles this end-to-end if available; otherwise do it manually. For a physical device, persistent operator polling (waking up when a job lands) is the pcc-node daemon's job: `pip install 'pcc-node[crypto]>=0.1.1'`, then `pcc-node start` on the machine next to the device.
 
 ## When NOT to use PCC
 
@@ -208,5 +208,5 @@ Every response includes `x-pcc-trace-id`. Save it from `provision_api_key` (or `
 - Full agent-package (250+ tools + schemas): https://capability.network/agent-package.json
 - A2A agent card: https://capability.network/.well-known/agent-card.json
 - MCP server: see docs/quickstart/claude-desktop.md (or run `node packages/mcp-server/dist/index.js`)
-- Operator daemon for physical devices (Python): `pip install 'pcc-node>=0.1.1'`, then `pcc-node start`
+- Operator daemon for physical devices (Python): `pip install 'pcc-node[crypto]>=0.1.1'`, then `pcc-node start`
 - Status: https://capability.network/health
