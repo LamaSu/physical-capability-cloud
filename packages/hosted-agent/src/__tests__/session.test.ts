@@ -161,6 +161,14 @@ describe("a hosted session", () => {
     expect(report.spentNanoUsd).toBeGreaterThan(0);
   });
 
+  it("a tool name LLMAgent reserves is dropped, not fatal", async () => {
+    const h = harness({ replies: [text("ok")] });
+    const reserved = { ...h.deps, pack: { ...PACK, tools: [...PACK.tools, tool("delete_preview", "GET", "/api/preview")] } };
+    const s = await HostedSession.open(reserved, { userKey: "user:alice", credential: null });
+    await s.send("hi");
+    expect(h.requests[0]!.tools.map((t) => t.name)).toEqual(["list_open_jobs", "onboard_machine"]);
+  });
+
   it("a closed session refuses further use", async () => {
     const h = harness({ replies: [] });
     const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });

@@ -37,15 +37,15 @@ describe("the policy table against the served agent package", () => {
   it.each([
     "pcc_relay_tool_call", "pcc_relay_generic_tool_call", "pcc_create_scope", "pcc_chat_send", "start_protocol_run",
     "cancel_protocol_run", "kernel_heartbeat", "kernel_announce_capabilities", "operator_heartbeat",
-    "provision_api_key", "list_api_keys", "pcc_generate_ui",
-  ])("%s is never offered (device, impersonation, credential or absolute URL)", (name) => {
+    "provision_api_key", "list_api_keys", "pcc_generate_ui", "delete_operator_channel", "fund_escrow",
+  ])("%s is never offered (device, impersonation, credential, absolute URL, or a name LLMAgent reserves)", (name) => {
     expect(level(name)).toBe("never");
   });
 
   it.each([
     "pcc_submit_paid_job", "marketplace_place_order", "distribute_royalties", "create_kernel", "create_capability",
     "prove_registration", "activate_registration", "pcc_job_complete", "operator_push_evidence", "claim_bounty",
-    "fund_escrow", "execute_composition", "revoke_api_key",
+    "release_milestone", "execute_composition", "revoke_api_key",
   ])("%s is L2 (money, work, authority)", (name) => {
     expect(level(name)).toBe("l2");
   });
@@ -70,5 +70,15 @@ describe("the policy table against the served agent package", () => {
   it("an unlisted non-GET tool, and any absolute-URL tool, is never offered", () => {
     expect(classify({ name: "brand_new_tool", method: "POST", path: "/api/new" })).toBe("never");
     expect(classify({ name: "list_things", method: "GET", path: "https://elsewhere.example/api" })).toBe("never");
+  });
+});
+
+describe("the policy and LLMAgent's reserved names", () => {
+  it("every tool the policy can offer (read, write or L2) is a name LLMAgent accepts", async () => {
+    const { validateToolNames } = await import("@pcc/agent-runtime");
+    const offerable = pkg.tools.filter((t) => classify(spec(t)) !== "never");
+    for (const t of offerable) {
+      expect(() => validateToolNames([{ name: t.name, description: "", input_schema: { type: "object" } }]), t.name).not.toThrow();
+    }
   });
 });

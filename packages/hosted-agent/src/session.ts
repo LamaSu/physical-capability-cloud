@@ -8,7 +8,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
-import { LLMAgent, BudgetExceededError } from "@pcc/agent-runtime";
+import { LLMAgent, BudgetExceededError, validateToolNames } from "@pcc/agent-runtime";
 import { BudgetStop, meteredClient, type BudgetMeter, type MessagesClient, type ModelPrice } from "./budget.js";
 import { ConfirmationGate, type HeldCall } from "./confirm.js";
 import type { PinnedPack } from "./pack.js";
@@ -80,7 +80,18 @@ export class HostedSession {
     const id = randomBytes(24).toString("base64url");
     const transport = await deps.connect(opts.credential);
     const gate = new ConfirmationGate({ now: deps.now });
-    const { defs, callers } = gate.forSession(id, packTools(deps.pack, transport), { l2Enabled: deps.l2Enabled });
+    const offered = gate.forSession(id, packTools(deps.pack, transport), { l2Enabled: deps.l2Enabled });
+    // LLMAgent refuses reserved tool names (delete_*, fund_*, ...). The policy
+    // never offers the ones it knows; any other is dropped here, never renamed.
+    const defs = offered.defs.filter((d) => {
+      try {
+        validateToolNames([d]);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const callers = Object.fromEntries(defs.map((d) => [d.name, offered.callers[d.name]!]));
     const client = meteredClient(deps.anthropic, deps.meter, { sessionId: id, userKey: opts.userKey }, deps.price);
     // LLMAgent calls only messages.create on its client.
     const agent = new LLMAgent(defs, callers, { client: client as unknown as Anthropic, model: deps.model, maxTokens: deps.maxTokens });

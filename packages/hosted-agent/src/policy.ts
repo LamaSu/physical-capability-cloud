@@ -35,14 +35,14 @@ const WRITE = [
   "propose_composition", "submit_demand",
   "submit_feedback", "pcc_report", "report_anomaly", "report_protocol_failure", "resolve_anomaly", "emit_telemetry",
   "send_diagnostics", "send_support_message", "reply_to_support_thread",
-  "attach_operator_channel", "update_operator_channel", "delete_operator_channel", "test_operator_channels",
+  "attach_operator_channel", "update_operator_channel", "test_operator_channels",
   "pcc_contributor_register", "pcc_schedule_publish", "pcc_schedule_evaluate", "pcc_training_manifest_set",
   "save_dashboard", "fork_dashboard", "update_dashboard", "archive_evidence",
 ] as const;
 
 /** Money, accepting or completing work, price, payout, evidence and authority. */
 const L2 = [
-  "calculate_price", "fund_escrow", "release_milestone", "file_escrow_dispute", "deposit_bond",
+  "calculate_price", "release_milestone", "file_escrow_dispute", "deposit_bond",
   "submit_evidence_hash", "submit_attestation", "protocol_create_escrow",
   "pay_ip_royalty", "claim_ip_revenue", "distribute_royalties", "register_capability_ip", "register_job_evidence_ip", "raise_ip_dispute",
   "claim_bounty", "verify_bounty", "stake_in_pool", "claim_pool", "create_investment_pool", "close_pool", "convert_bounty_to_pool",
@@ -69,6 +69,8 @@ const NEVER = [
   "provision_api_key", "list_api_keys",
   // requests to an absolute URL
   "pcc_generate_ui",
+  // names LLMAgent reserves (validateToolNames: delete_*, fund_*, ...); the loop will not run with them
+  "delete_operator_channel", "fund_escrow",
 ] as const;
 
 export const DEFAULT_TOOL_POLICY: ToolPolicy = {
