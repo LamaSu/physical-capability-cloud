@@ -58,7 +58,7 @@ There are three "lanes" — three economic-agent shapes:
 
 Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (prove → auto-activate).
 
-CLI alternative: the `pcc-node` operator CLI is not installable right now (its only PyPI release, 0.1.0, was withdrawn; 0.1.1 is pending). Until it ships, use the API flow above, or the MCP server at `https://capability.network/mcp` (Claude Code: `claude mcp add --transport http pcc https://capability.network/mcp`).
+CLI alternative: `pip install "pcc-node[crypto]>=0.1.1" && pcc-node start` auto-detects hardware, generates keys, provisions, registers, and starts the job daemon.
 
 ## Core API surface
 

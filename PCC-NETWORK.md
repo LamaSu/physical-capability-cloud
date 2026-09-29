@@ -56,12 +56,12 @@ Pick whichever fits you:
 - **Claude Code / Claude Desktop skill:** <https://capability.network/skills/pcc.md>
 - **MCP client:** add the PCC MCP server — see `pcc.json` in this repo for the config
   shape.
-- **Operators who just want their machine online:** the one-command installer, `pcc-node`,
-  is not installable right now: its only PyPI release (0.1.0) was withdrawn, and 0.1.1 is
-  pending. When it ships it auto-detects hardware, generates signing keys, provisions an
-  API key, registers your site, announces capabilities and processes jobs. Until then,
-  connect through the API (`pcc.json` → `onboarding.flow`) or the MCP server at
-  `https://capability.network/mcp`.
+- **Operators who just want their machine online:** one command —
+  ```bash
+  pip install "pcc-node[crypto]>=0.1.1" && pcc-node start
+  ```
+  Auto-detects hardware, generates signing keys, provisions an API key, registers your
+  site, announces capabilities, and starts processing jobs.
 - **Developers who want their agent to *be* the operator:** there is no packaged operator
   runtime yet; no `@pcc/operator-agent-runtime` package exists. The intended design is
   `startOperator({ capabilityTypes, budget, executeJob })`, running the

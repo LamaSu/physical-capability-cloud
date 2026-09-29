@@ -258,9 +258,9 @@ Both surfaces expose read-only catalog tools without auth; write operations
 If the user says "I run a print shop" or "I have an OT-2" or "I'm a
 courier," they're offering capability, not buying it. Provision a key, then
 `POST /api/kernels` to register their site and `POST /api/capabilities` to
-publish what it offers. The one-command CLI, `pcc-node`, is not
-installable right now (its only PyPI release was withdrawn; 0.1.1 is
-pending), so use the API directly.
+publish what it offers. `pip install pcc-node && pcc-node start` does
+hardware auto-detection, key provisioning, and kernel registration in one
+command for operators who'd rather run a CLI than call the API directly.
 
 ## When NOT to use PCC
 

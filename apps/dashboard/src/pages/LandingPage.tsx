@@ -955,7 +955,7 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
               flexWrap: "wrap",
             }}
           >
-            <TerminalCTA text="claude mcp add --transport http pcc https://capability.network/mcp" />
+            <TerminalCTA text='pip install "pcc-node[crypto]>=0.1.1"' href="https://pypi.org/project/pcc-node/" />
           </div>
         </div>
 
@@ -1586,7 +1586,7 @@ function HowItWorksSection() {
 // ---------------------------------------------------------------------------
 
 const TERMINAL_LINES = [
-  { prefix: "# ", text: "pcc-node 0.1.1 (PyPI release pending): a preview of its first run", color: TEXT_MUTED, delay: 0 },
+  { prefix: "$ ", text: 'pip install "pcc-node[crypto]>=0.1.1"', color: TEXT_PRIMARY, delay: 0 },
   { prefix: "$ ", text: "pcc-node start", color: TEXT_PRIMARY, delay: 600 },
   { prefix: "  ", text: "Detecting hardware...", color: TEXT_MUTED, delay: 1000 },
   { prefix: "  ✓ ", text: "OT-2 liquid handler found at 192.168.1.105", color: GREEN, delay: 1500 },
@@ -1685,8 +1685,8 @@ const STEPS = [
   {
     step: "1",
     title: "Install",
-    text: "pcc-node, Python 3.9+, for Raspberry Pi, Ubuntu, macOS and Windows. Its PyPI release (0.1.1) is pending; until then, connect through the API or MCP.",
-    badge: "pending",
+    text: 'pip install "pcc-node[crypto]>=0.1.1" — Python 3.9+. Works on Raspberry Pi, Ubuntu, macOS, Windows.',
+    badge: "30 sec",
   },
   {
     step: "2",
@@ -1885,7 +1885,7 @@ function ForOperatorsSection() {
           <Reveal>
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
-                <TerminalCTA text="claude mcp add --transport http pcc https://capability.network/mcp" />
+                <TerminalCTA text='pip install "pcc-node[crypto]>=0.1.1" && pcc-node start' />
                 <GhostLink text="Operator guide" href="https://capability.network/docs" />
               </div>
               <p
@@ -2958,7 +2958,8 @@ function Footer() {
               }}
             >
               <TerminalCTA
-                text="claude mcp add --transport http pcc https://capability.network/mcp"
+                text='pip install "pcc-node[crypto]>=0.1.1"'
+                href="https://pypi.org/project/pcc-node/"
               />
               <GhostLink text="View on GitHub" href="https://github.com/LamaSu/physical-capability-cloud" />
             </div>
@@ -3014,6 +3015,7 @@ function Footer() {
               { text: "capability.network", href: "https://capability.network" },
               { text: "GitHub", href: "https://github.com/LamaSu/physical-capability-cloud" },
               { text: "Docs", href: "https://capability.network/docs" },
+              { text: "PyPI", href: "https://pypi.org/project/pcc-node/" },
             ].map((link, i, arr) => (
               <React.Fragment key={link.text}>
                 <a

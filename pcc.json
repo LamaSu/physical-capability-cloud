@@ -18,8 +18,7 @@
     "env": { "PCC_URL": "https://capability.network" }
   },
   "onboarding": {
-    "one_command": null,
-    "one_command_status": "pcc-node is not installable right now: its only PyPI release (0.1.0) was withdrawn, and 0.1.1 is pending. Until it ships, use provision_key and the flow below, or the MCP server at https://capability.network/mcp.",
+    "one_command": "pip install \"pcc-node[crypto]>=0.1.1\" && pcc-node start",
     "operator_runtime": {
       "status": "not built: no @pcc/operator-agent-runtime package exists yet, so there is nothing to install",
       "package": "@pcc/operator-agent-runtime",

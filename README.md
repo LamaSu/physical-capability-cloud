@@ -22,7 +22,12 @@ curl https://capability.network/agent-package.json
 # 230+ tools as JSON Schema. Paste into Claude, GPT, or any LLM tool harness.
 ```
 
-**Connect a machine (Python operator node):** `pcc-node` auto-discovers hardware, provisions an API key, registers a kernel and accepts jobs, but it is not installable right now: its only PyPI release (0.1.0) was withdrawn, and 0.1.1 is pending. Until it ships, register through the API ([docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md)) or the MCP server below.
+**Connect a machine (Python operator node):**
+```bash
+pip install "pcc-node[crypto]>=0.1.1"
+pcc-node start
+# Auto-discovers hardware, provisions an API key, registers a kernel, accepts jobs.
+```
 
 **MCP server (Claude Code / Codex):** the gateway serves MCP over Streamable HTTP, so there is nothing to install:
 ```bash
