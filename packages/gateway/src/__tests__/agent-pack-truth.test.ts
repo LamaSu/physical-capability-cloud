@@ -195,3 +195,45 @@ describe("rehearsal R0: the pack matches the gateway it describes", () => {
     expect(sp).toMatch(/JSON body is refused/);
   });
 });
+
+/**
+ * Item 2b: the pack reports whole onboarding attempts in painpoints' contract v1
+ * (returns/pcc-painpoints-work/item3-attempt-reporting-contract-v1.md): every
+ * phase, success or failure, and a session roll-up. The lists below are the
+ * contract's; if they change, the contract version changes first.
+ */
+describe("item 2b: attempt reporting follows painpoints' contract v1", () => {
+  const PHASES = ["prerequisites", "identify", "intake", "research", "build", "register", "verify", "operate", "publish", "session"];
+  const OUTCOMES = ["ok", "failed", "blocked", "skipped", "budget_stop", "abandoned", "in_progress"];
+  const full = pkg as unknown as {
+    system_prompt: string;
+    attempt_reporting?: { contract: number; endpoint: { method: string; path: string }; phases: string[] };
+    tools: Array<{ name: string; endpoint: { method: string; path: string }; input_schema: { required?: string[]; properties: Record<string, any> } }>;
+  };
+  const report = full.tools.find((t) => t.name === "pcc_report_attempt");
+
+  it("ships a typed pcc_report_attempt tool on POST /api/feedback", () => {
+    expect(report).toBeDefined();
+    expect(report!.endpoint).toEqual({ method: "POST", path: "/api/feedback" });
+    const p = report!.input_schema.properties;
+    expect(p.kind.enum).toEqual(["attempt"]);
+    expect(p.contract.enum).toEqual([1]);
+    expect(p.phase.enum).toEqual(PHASES);
+    expect(p.outcome.enum).toEqual(OUTCOMES);
+    expect(p.proposal.properties.target.enum).toEqual(["runbook", "agent-package", "docs", "code", "process", "other"]);
+    expect(p.tokens.properties.source.enum).toEqual(["self_reported", "harness", "metered", "unknown"]);
+  });
+
+  it("requires what today's server needs, and never carries a transcript", () => {
+    expect([...(report!.input_schema.required ?? [])].sort()).toEqual(["kind", "outcome", "phase", "seq", "sessionId", "summary"]);
+    expect(report!.input_schema.properties.transcript).toBeUndefined();
+    expect(report!.input_schema.properties.consent.properties.transcript.enum).toEqual([false]);
+  });
+
+  it("describes the contract at the top level and in the operator path", () => {
+    expect(full.attempt_reporting?.contract).toBe(1);
+    expect(full.attempt_reporting?.endpoint).toEqual({ method: "POST", path: "/api/feedback" });
+    expect(full.attempt_reporting?.phases).toEqual(PHASES);
+    expect(full.system_prompt).toContain("pcc_report_attempt");
+  });
+});
