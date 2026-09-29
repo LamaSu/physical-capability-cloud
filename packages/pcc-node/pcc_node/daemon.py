@@ -26,6 +26,7 @@ from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
 from .job_executor import JobExecutor
+from .awaiting_store import AwaitingStore
 from .outbox import StatusOutbox
 from .register import register_kernel, announce_capabilities
 from .ws_client import PCCGatewayClient
@@ -37,6 +38,9 @@ PID_FILE = os.path.expanduser("~/.pcc-node.pid")
 STATE_FILE = os.path.expanduser("~/.pcc-node-state.json")
 # Terminal status reports the gateway has not acknowledged yet (r31 finding 7).
 OUTBOX_FILE = os.path.expanduser("~/.pcc-node/status-outbox.json")
+# Accepted jobs still awaiting device-reported completion, so a restart
+# resumes observing them (r31 round-1 dependency; awaiting_store.py).
+AWAITING_FILE = os.path.expanduser("~/.pcc-node/awaiting.json")
 
 
 def _write_pid():
@@ -244,6 +248,7 @@ def run_daemon(config: NodeConfig):
         devices=all_devices,
         gateway_client=gateway_client,
         outbox=StatusOutbox(OUTBOX_FILE),
+        awaiting_store=AwaitingStore(AWAITING_FILE),
     )
 
     # ------------------------------------------------------------------
