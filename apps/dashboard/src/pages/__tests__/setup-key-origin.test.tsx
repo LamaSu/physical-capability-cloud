@@ -22,7 +22,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useAuthStore } from "../../stores/auth-store.js";
+import { adoptApiKey } from "../../stores/auth-store.js";
 import { SetupWizardPage } from "../SetupWizardPage.js";
 import { SetupAgentPage } from "../SetupAgentPage.js";
 import { EarnFromYourWorkPage } from "../EarnFromYourWorkPage.js";
@@ -54,7 +54,7 @@ beforeEach(() => {
   replies = {};
   // jsdom does not implement scrolling; the chat page scrolls to its last message.
   Element.prototype.scrollIntoView = () => {};
-  useAuthStore.setState({ apiKey: "pcc_test_secret_key", isAuthenticated: true });
+  adoptApiKey("pcc_test_secret_key");
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -80,7 +80,7 @@ afterEach(async () => {
   container.remove();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
-  useAuthStore.setState({ apiKey: null, isAuthenticated: false });
+  adoptApiKey(null);
 });
 
 async function flush() {
@@ -228,7 +228,7 @@ describe("N50: setup pages keep the API key on the configured gateway", () => {
       profileId: "p-1",
       links: { viewSchedule: "/x", addUsdc: "/y", agentPackage: "/z" },
     };
-    useAuthStore.setState({ apiKey: null, isAuthenticated: false });
+    adoptApiKey(null);
     vi.stubGlobal("alert", vi.fn());
     await act(async () => {
       root.render(

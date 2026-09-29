@@ -95,10 +95,10 @@ describe("runPasskeyRegistration", () => {
     expect(passedOptions.challenge).toBe(CHALLENGE.challenge);
   });
 
-  it("sends a Bearer header when operatorId + apiKey are supplied", async () => {
+  it("binding an operator sends the challenge through the authorized fetch, and builds no key itself", async () => {
+    const authorizedFetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(CHALLENGE));
     const fetchFn = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(CHALLENGE))
       .mockResolvedValueOnce(
         jsonResponse({
           sessionId: "s",
@@ -115,16 +115,21 @@ describe("runPasskeyRegistration", () => {
       {
         apiBase: "",
         operatorId: "op@example.com",
-        apiKey: "pcc_live_secret",
+        authorizedFetchFn,
         fetchFn: fetchFn as any,
         startRegistration,
       },
       "rand1234",
     );
 
-    const challengeInit = fetchFn.mock.calls[0][1];
-    expect(challengeInit.headers.authorization).toBe("Bearer pcc_live_secret");
+    expect(authorizedFetchFn).toHaveBeenCalledTimes(1);
+    const [challengePath, challengeInit] = authorizedFetchFn.mock.calls[0]!;
+    expect(challengePath).toBe("/api/onboard/passkey/register-challenge");
+    expect(JSON.stringify(challengeInit.headers).toLowerCase()).not.toContain("authorization");
     expect(JSON.parse(challengeInit.body).operatorId).toBe("op@example.com");
+    // Only the verify call used the plain fetch.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn.mock.calls[0][0]).toContain("/api/onboard/passkey/verify-attestation");
   });
 
   it("throws the gateway message when the challenge is rejected (e.g. 401)", async () => {
