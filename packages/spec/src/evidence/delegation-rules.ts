@@ -31,9 +31,10 @@
  *     key signs the bundle once, after every event, while it is valid, so an
  *     event outside that window contradicts its own signature;
  *   - when a settlement package carries `evidenceTimeBounds`, its `start` and
- *     `end` use the event timestamps' grammar (RFC 3339, explicit offset;
- *     bus #3542), `start <= end`, and every event lies in
- *     `[start - skew, end + skew]`.
+ *     `end` are decimal strings of Unix seconds, as in the canonical integrated
+ *     settlement-vector golden (bus #3567, which corrects #3542). Also
+ *     `start <= end`, and every event lies in `[start - skew, end + skew]`. The
+ *     bounds stay claimed-only: they may narrow the window, never widen it.
  *
  * `EVIDENCE_CLOCK_SKEW_SECONDS` (300) is the one tolerance both sides use.
  * Seconds are whole: a fractional part is dropped before comparing.
@@ -145,10 +146,19 @@ export interface EventTimeWindow {
   notAfter: number;
 }
 
-/** A settlement package's `evidenceTimeBounds`: RFC 3339 strings with an explicit offset. */
+/** A settlement package's `evidenceTimeBounds`: decimal strings of Unix seconds (FinalMilestonePackageV2). */
 export interface EvidenceTimeBounds {
   start: string;
   end: string;
+}
+
+const UNIX_SECONDS = /^(0|[1-9][0-9]*)$/;
+
+/** Unix seconds from a bound's decimal string; null for anything else (a number included). */
+export function parseEvidenceTimeBound(value: unknown): number | null {
+  if (typeof value !== "string" || !UNIX_SECONDS.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
 }
 
 /**
@@ -176,8 +186,8 @@ export function checkEventTimes(
   let start: number | null = null;
   let end: number | null = null;
   if (bounds !== undefined) {
-    start = parseEvidenceTimestamp((bounds as { start?: unknown } | null)?.start);
-    end = parseEvidenceTimestamp((bounds as { end?: unknown } | null)?.end);
+    start = parseEvidenceTimeBound((bounds as { start?: unknown } | null)?.start);
+    end = parseEvidenceTimeBound((bounds as { end?: unknown } | null)?.end);
     if (start === null || end === null) return { ok: false, reason: "malformed-time-bounds" };
     if (start > end) return { ok: false, reason: "time-bounds-inverted" };
   }

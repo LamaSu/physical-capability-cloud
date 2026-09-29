@@ -8,6 +8,7 @@ import {
   EVIDENCE_CLOCK_SKEW_SECONDS,
   checkDelegationScope,
   checkEventTimes,
+  parseEvidenceTimeBound,
   parseEvidenceTimestamp,
   type DelegationScopeExpectation,
   type EventTimeWindow,
@@ -26,6 +27,16 @@ describe("parseEvidenceTimestamp", () => {
 
   it("refuses non-strings", () => {
     for (const bad of [undefined, null, 1790251200, new Date(0)]) expect(parseEvidenceTimestamp(bad)).toBeNull();
+  });
+});
+
+describe("parseEvidenceTimeBound (a package's evidenceTimeBounds: decimal Unix seconds)", () => {
+  it("reads the canonical golden's form and refuses every other", () => {
+    expect(parseEvidenceTimeBound("1699999500")).toBe(1699999500);
+    expect(parseEvidenceTimeBound("0")).toBe(0);
+    for (const bad of ["", "01", "-1", "1.5", "1e9", " 1", "2026-08-20T00:00:00Z", "9007199254740992", 1699999500, null]) {
+      expect(parseEvidenceTimeBound(bad), String(bad)).toBeNull();
+    }
   });
 });
 

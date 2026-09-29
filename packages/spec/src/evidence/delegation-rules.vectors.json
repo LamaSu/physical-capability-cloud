@@ -359,8 +359,8 @@
         "notAfter": 1790251200
       },
       "bounds": {
-        "start": "2026-09-24T11:50:00Z",
-        "end": "2026-09-24T12:00:00Z"
+        "start": "1790250600",
+        "end": "1790251200"
       },
       "result": "ok"
     },
@@ -374,13 +374,58 @@
         "notAfter": 1790251200
       },
       "bounds": {
-        "start": "2026-09-24T12:00:00Z",
-        "end": "2026-09-24T11:50:00Z"
+        "start": "1790251200",
+        "end": "1790250600"
       },
       "result": "time-bounds-inverted"
     },
     {
-      "name": "bounds_unix_seconds_refused",
+      "name": "bounds_rfc3339_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "2026-09-24T11:50:00Z",
+        "end": "2026-09-24T12:00:00Z"
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "bounds_leading_zero_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "01790250600",
+        "end": "1790251200"
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "bounds_number_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": 1790250600,
+        "end": 1790251200
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "bounds_above_max_safe_refused",
       "events": [
         "2026-09-24T11:59:00Z"
       ],
@@ -390,7 +435,7 @@
       },
       "bounds": {
         "start": "1790250600",
-        "end": "1790251200"
+        "end": "9007199254740992"
       },
       "result": "malformed-time-bounds"
     },
@@ -404,11 +449,27 @@
         "notAfter": 1790251200
       },
       "bounds": {
-        "start": "2026-09-24T11:50:00Z",
-        "end": "2026-09-24T12:00:00Z"
+        "start": "1790250600",
+        "end": "1790251200"
       },
       "result": "event-outside-bounds",
       "eventIndex": 0
+    },
+    {
+      "name": "canonical_golden_bounds",
+      "events": [
+        "2023-11-14T22:10:00Z"
+      ],
+      "window": {
+        "notBefore": 1699999000,
+        "notAfter": 1700000000
+      },
+      "bounds": {
+        "start": "1699999500",
+        "end": "1700000000"
+      },
+      "result": "ok"
     }
-  ]
+  ],
+  "boundsGrammar": "decimal Unix seconds as a string: ^(0|[1-9][0-9]*)$, a safe integer (the canonical settlement-vector golden: start 1699999500, end 1700000000)"
 }
