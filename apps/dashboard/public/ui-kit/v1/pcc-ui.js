@@ -271,6 +271,20 @@
     return cur;
   }
 
+  // A settlement record's economics.amount is a raw integer in the token's BASE units (read-surface
+  // contract rule 14). It becomes a display amount only with the record's own tokenDecimals (exact
+  // string arithmetic, no float); without them it is shown as labelled base units, because
+  // 1000000 base units of a 6-decimal token is 1, not 1,000,000.00. Anything else: null.
+  function baseUnitsText(raw, decimals) {
+    var s = typeof raw === 'number' && isFinite(raw) && raw % 1 === 0 && raw >= 0 ? String(raw) : raw;
+    if (typeof s !== 'string' || !/^\d+$/.test(s)) return null;
+    if (typeof decimals !== 'number' || decimals % 1 !== 0 || decimals < 0 || decimals > 36) {
+      return s.replace(/^0+(?=\d)/, '') + ' base units (decimals not reported)';
+    }
+    while (s.length <= decimals) s = '0' + s;
+    var ip = s.slice(0, s.length - decimals).replace(/^0+(?=\d)/, ''), fp = s.slice(s.length - decimals).replace(/0+$/, '');
+    return ip.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fp ? '.' + fp : '');
+  }
   function fmtUsd(v) {
     var n = Number(v);
     if (!isFinite(n)) return String(v == null ? '' : v);
@@ -366,6 +380,13 @@
     SETTLED_RELEASED:  ['st-settled',  'released - payout distribution discharged'],
     SETTLED_REFUNDED:  ['st-refunded', 'refunded - payer refunded, payees NOT paid']
   });
+  // The read models' `phase` per reachable state (gateway unit-state-mapper PHASE_BY_STATE).
+  var VNEXT_PHASE = Object.freeze({
+    FUNDED_ACTIVE: 'active', PRIMARY_ASSERTED: 'contest', CHALLENGED: 'contest',
+    BACKUP_PENDING: 'escalation', BACKUP_ASSERTED: 'escalation',
+    RELEASE_ALLOCATED: 'allocated', REFUND_ALLOCATED: 'allocated',
+    SETTLED_RELEASED: 'settled', SETTLED_REFUNDED: 'settled'
+  });
   // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass).
   var GENERIC_STATES = Object.freeze({
     RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
@@ -404,33 +425,49 @@
   function isVNextRecord(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && (ownKey(o, 'unitState') || ownKey(o, 'finalState')); }
   // A record classified by its SOURCE SCHEMA -> [pillClass, label or null, pill text]. Mirrors
   // classifySettlementRecord in @pcc/spec (the conformance test compares them over wire fixtures).
+  // The read models' own field semantics (gateway unit-state-mapper): isTerminal is true for 8/9
+  // only; isAllocated means "outcome decided, money NOT fully moved" (6/7 ONLY), so a settled
+  // record says isAllocated:false; finalState names 8/9, else null; phase follows VNEXT_PHASE.
+  // Every field present must agree, and a FINAL state needs them all (mirrors the spec).
   function settlementRecordClass(o) {
     if (!o || typeof o !== 'object' || Array.isArray(o)) return ['st-unknown', 'not a settlement record', 'no settlement state'];
+    var DISAGREE = 'settlement fields disagree - not shown as final', INCOMPLETE = 'incomplete settlement record - not shown as final';
     if (ownKey(o, 'unitState')) {
       var name = vnextUnitStateName(o.unitState);
       if (name === null) return ['st-unknown', 'unreadable unit state', String(o.unitState)];
-      var ord = VNEXT_UNIT_STATES.indexOf(name), terminal = ord >= 8, allocated = ord >= 6;
+      var ord = VNEXT_UNIT_STATES.indexOf(name), terminal = ord >= 8, allocated = ord === 6 || ord === 7;
       var fs = o.finalState === undefined ? null : o.finalState;
       if ((ownKey(o, 'finalState') && fs !== (terminal ? name : null)) ||
           (ownKey(o, 'isAllocated') && o.isAllocated !== allocated) ||
-          (ownKey(o, 'isTerminal') && o.isTerminal !== terminal)) {
-        return ['st-unknown', 'settlement fields disagree - not shown as final', name];
+          (ownKey(o, 'isTerminal') && o.isTerminal !== terminal) ||
+          (ownKey(o, 'phase') && o.phase !== VNEXT_PHASE[name])) {
+        return ['st-unknown', DISAGREE, name];
       }
-      // A FINAL state needs every corroborating field present: absence is not corroboration.
-      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'isTerminal'))) {
-        return ['st-unknown', 'incomplete settlement record - not shown as final', name];
+      // A FINAL state needs unitState, finalState, isAllocated and phase present: absence is not
+      // corroboration. isTerminal is cross-checked above when present; /receipt (which gains
+      // unitState, escrow #3163) does not carry it. The 6-vs-7 direction comes from unitState.
+      if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'phase'))) {
+        return ['st-unknown', INCOMPLETE, name];
       }
       return [VNEXT_STATE_PRESENTATION[name][0], VNEXT_STATE_PRESENTATION[name][1], name];
     }
+    // A /receipt carries finalState, phase and isAllocated (no unitState, no isTerminal).
     if (ownKey(o, 'finalState')) {
-      var f = o.finalState;
-      if (f === 'SETTLED_RELEASED' || f === 'SETTLED_REFUNDED') {
-        if (!ownKey(o, 'isAllocated')) return ['st-unknown', 'incomplete settlement record - not shown as final', f];
-        if (o.isAllocated !== true) return ['st-unknown', 'settlement fields disagree - not shown as final', f];
+      var f = o.finalState, final = f === 'SETTLED_RELEASED' || f === 'SETTLED_REFUNDED';
+      if (ownKey(o, 'isTerminal') && o.isTerminal !== final) return ['st-unknown', DISAGREE, String(f)];
+      if (final) {
+        if (!ownKey(o, 'isAllocated') || !ownKey(o, 'phase')) return ['st-unknown', INCOMPLETE, f];
+        if (o.isAllocated !== false || o.phase !== 'settled') return ['st-unknown', DISAGREE, f];
         return [VNEXT_STATE_PRESENTATION[f][0], VNEXT_STATE_PRESENTATION[f][1], f];
       }
-      if (f === null && o.isAllocated === true) return ['st-waiting', 'outcome decided - not yet paid out', String(o.phase || 'allocated')];
-      if (f === null && o.isAllocated === false) return ['st-waiting', 'in progress - no outcome decided', String(o.phase || 'in progress')];
+      if (f === null && o.isAllocated === true) {
+        if (ownKey(o, 'phase') && o.phase !== 'allocated') return ['st-unknown', DISAGREE, String(o.phase)];
+        return ['st-waiting', 'outcome decided - not yet paid out', String(o.phase || 'allocated')];
+      }
+      if (f === null && o.isAllocated === false) {
+        if (ownKey(o, 'phase') && !(o.phase === 'active' || o.phase === 'contest' || o.phase === 'escalation')) return ['st-unknown', DISAGREE, String(o.phase)];
+        return ['st-waiting', 'in progress - no outcome decided', String(o.phase || 'in progress')];
+      }
       return ['st-unknown', 'unreadable final state', String(f)];
     }
     if (typeof o.status === 'string' && (ownKey(o, 'contractAddress') || ownKey(o, 'escrowAddress') || Array.isArray(o.milestones) || ownKey(o, 'cwmId') || ownKey(o, 'totalAmount'))) {
@@ -1092,11 +1129,15 @@
       // Nothing is invented: an amount, currency, payer, payee or rail the record does not carry is
       // shown as not reported, never defaulted ("USDC", "payer", "escrow-milestone").
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
-      var amount = e.totalAmount != null ? e.totalAmount : (e.amount != null ? e.amount : econ.amount);
+      var amount = e.totalAmount != null ? e.totalAmount : e.amount;
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
+      var econText = (amount == null || amount === '') && econ.amount != null ? baseUnitsText(econ.amount, econ.tokenDecimals) : null;
       if (amount != null && amount !== '') {
         amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
         if (typeof e.currency === 'string' && e.currency) amtRow.appendChild(el('span', 'pcc-receipt-cur', ' ' + e.currency));
+      } else if (econText !== null) {
+        // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
+        amtRow.appendChild(el('span', 'pcc-receipt-num', econText));
       } else {
         amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', 'amount not reported'));
       }

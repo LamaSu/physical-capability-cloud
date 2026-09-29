@@ -7,7 +7,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useJobs, useEscrows } from "../api/hooks/use-pcc-data.js";
 import { useNavigate } from "react-router-dom";
 import { formatCount, isActiveJob, mayBeTruncated } from "../lib/live-status.js";
-import { UnavailableState } from "../components/LiveState.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
 
 const FINISHED = new Set(["completed", "failed", "cancelled"]);
 
@@ -54,9 +54,21 @@ export function RevenueDashboardPage() {
     : null;
 
   const isEmpty = jobs.length === 0 && escrows.length === 0;
+  // A failed refresh leaves the last successful read on screen, labelled with its age.
+  const staleWhat = jobsQ.isError && escrowsQ.isError ? "jobs and escrows" : jobsQ.isError ? "jobs" : escrowsQ.isError ? "escrows" : null;
 
   return (
     <div className="space-y-6">
+      {staleWhat && (
+        <StaleNotice
+          what={staleWhat}
+          updatedAt={Math.min(jobsQ.dataUpdatedAt, escrowsQ.dataUpdatedAt)}
+          onRetry={() => {
+            void jobsQ.refetch();
+            void escrowsQ.refetch();
+          }}
+        />
+      )}
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <GlassPanel padding="md">

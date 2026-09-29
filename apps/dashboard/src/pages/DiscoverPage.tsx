@@ -4,7 +4,7 @@ import type { CapabilityType } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useCapabilityTemplates, useKernels } from "../api/hooks/use-pcc-data.js";
 import { useNavigate } from "react-router-dom";
-import { UnavailableState } from "../components/LiveState.js";
+import { UnavailableState, StaleNotice } from "../components/LiveState.js";
 import {
   AssuranceScoreBadge,
   scoreToColor,
@@ -25,7 +25,7 @@ export function DiscoverPage() {
   React.useEffect(() => { setPageMeta("Discover Capabilities", "Search and browse available capabilities"); }, [setPageMeta]);
 
   const templatesQ = useCapabilityTemplates();
-  const { data: kernels = [], isLoading: kernelsLoading } = useKernels();
+  const kernelsQ = useKernels();
 
   // Parse min-score: accepts "0.7" or "70" (percent). Empty → no filter.
   // (Called before any early return: hooks must run in the same order on every render.)
@@ -38,10 +38,11 @@ export function DiscoverPage() {
     return n > 1 ? n / 100 : n;
   }, [minScoreInput]);
 
-  if (templatesQ.isLoading || kernelsLoading) return <LoadingShell rows={4} />;
+  if (templatesQ.isLoading || kernelsQ.isLoading) return <LoadingShell rows={4} />;
 
-  // Kernels only decorate each card with a site name, so a failed kernel read
-  // leaves names blank; a failed capability read is the page's whole answer.
+  // A failed capability read is the page's whole answer. Kernels only add a
+  // site name to each card; when they couldn't be read the page says so
+  // instead of leaving the names silently blank.
   if (!templatesQ.data) {
     return (
       <GlassPanel padding="lg">
@@ -50,7 +51,9 @@ export function DiscoverPage() {
     );
   }
 
-  const templates = (templatesQ.data.templates ?? []) as any[];
+  // useCapabilityTemplates rejects an answer without a templates array.
+  const templates = templatesQ.data.templates as any[];
+  const kernels = kernelsQ.isSuccess ? kernelsQ.data : undefined;
 
   const filtered = templates.filter((cap: any) => {
     if (typeFilter !== "all" && cap.type !== typeFilter) return false;
@@ -84,6 +87,9 @@ export function DiscoverPage() {
 
   return (
     <div className="space-y-6">
+      {templatesQ.isError && (
+        <StaleNotice what="capabilities" updatedAt={templatesQ.dataUpdatedAt} onRetry={() => void templatesQ.refetch()} />
+      )}
       {/* Search + filters */}
       <GlassPanel padding="md">
         <input
@@ -180,6 +186,11 @@ export function DiscoverPage() {
         </GlassPanel>
       ) : (
         <>
+          {!kernels && (
+            <p className="text-xs text-amber-200/70">
+              Site names couldn't be loaded, so the cards don't say where each capability runs.
+            </p>
+          )}
           <div className="text-xs text-white/30">
             {sorted.length} capabilit{sorted.length === 1 ? "y" : "ies"} found
             {typeFilter !== "all" && <> in <GlowBadge color="teal">{typeFilter}</GlowBadge></>}
@@ -189,7 +200,7 @@ export function DiscoverPage() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {sorted.map((cap: any) => {
-              const kernel = kernels.find((k: any) => k.id === cap.kernelId);
+              const kernel = kernels?.find((k) => k.id === cap.kernelId);
               const color = scoreToColor(cap.assuranceScore);
               return (
                 <GlassPanel

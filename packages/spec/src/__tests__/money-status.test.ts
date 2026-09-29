@@ -141,12 +141,14 @@ describe("canonical money-status map", () => {
 
   // ── source-schema classification (escrow #2580, product-qa #2594, steward #2688) ─────────────
   const NAMES = VNEXT_UNIT_STATES;
+  // The routes' OWN field semantics (gateway unit-state-mapper): isAllocated is true for 6/7 ONLY
+  // ("outcome decided, money not fully moved"), isTerminal for 8/9 only; phase per PHASE_BY_STATE.
+  const PHASE = [undefined, "active", "contest", "contest", "escalation", "escalation", "allocated", "allocated", "settled", "settled"];
   const lifecycle = (n: number) => ({
-    chainId: 84532, escrow: "0xE", unitId: "u1", unitState: n,
-    phase: n >= 8 ? "settled" : n >= 6 ? "allocated" : "active",
-    finalState: n >= 8 ? NAMES[n] : null, isTerminal: n >= 8, isAllocated: n >= 6,
+    chainId: 84532, escrow: "0xE", unitId: "u1", unitState: n, phase: PHASE[n],
+    finalState: n >= 8 ? NAMES[n] : null, isTerminal: n >= 8, isAllocated: n === 6 || n === 7,
   });
-  const receipt = (finalState: unknown, isAllocated: unknown) => ({ chainId: 84532, escrow: "0xE", unitId: "u1", finalState, isAllocated, phase: "x", economics: null });
+  const receipt = (finalState: unknown, isAllocated: unknown, phase: unknown) => ({ chainId: 84532, escrow: "0xE", unitId: "u1", finalState, isAllocated, phase, economics: null });
 
   it("a /lifecycle read with a NUMERIC unitState 1..9 classifies by its ordinal (wire shape)", () => {
     const tones = [null, "running", "waiting", "waiting", "waiting", "waiting", "waiting", "waiting", "settled", "refunded"];
@@ -173,12 +175,14 @@ describe("canonical money-status map", () => {
     // a final state with missing corroboration is not final (absence is not corroboration)
     expect(classifySettlementRecord({ unitState: "SETTLED_RELEASED" }).tone).toBe("unknown");
     expect(classifySettlementRecord({ unitState: 8, finalState: "SETTLED_RELEASED", isAllocated: true }).tone).toBe("unknown");
+    expect(classifySettlementRecord({ unitState: 8, finalState: "SETTLED_RELEASED", isAllocated: false, isTerminal: true }).tone).toBe("unknown"); // no phase
     expect(classifySettlementRecord({ finalState: "SETTLED_RELEASED" }).tone).toBe("unknown");
   });
 
-  it("any disagreement between unitState, finalState, isAllocated and isTerminal fails closed", () => {
+  it("any disagreement between unitState, finalState, isAllocated, isTerminal and phase fails closed", () => {
     for (const bad of [
-      { ...lifecycle(8), finalState: null }, { ...lifecycle(8), isAllocated: false }, { ...lifecycle(8), isTerminal: false },
+      { ...lifecycle(8), finalState: null }, { ...lifecycle(8), isAllocated: true }, { ...lifecycle(8), isTerminal: false },
+      { ...lifecycle(8), phase: "allocated" }, { ...lifecycle(6), isAllocated: false }, { ...lifecycle(2), phase: "active" },
       { ...lifecycle(6), finalState: "SETTLED_RELEASED" }, { ...lifecycle(9), finalState: "SETTLED_RELEASED" },
       { ...lifecycle(3), isAllocated: true }, { ...lifecycle(8), finalState: "SETTLED_REFUNDED" },
     ]) {
@@ -186,16 +190,23 @@ describe("canonical money-status map", () => {
     }
   });
 
-  it("a /receipt (no unitState) counts finalState only when terminal and isAllocated agrees", () => {
-    expect(classifySettlementRecord(receipt("SETTLED_RELEASED", true)).tone).toBe("settled");
-    expect(classifySettlementRecord(receipt("SETTLED_REFUNDED", true)).tone).toBe("refunded");
-    expect(classifySettlementRecord(receipt("SETTLED_RELEASED", false)).tone).toBe("unknown");
-    const decided = classifySettlementRecord(receipt(null, true));
+  it("a /receipt (no unitState) is final only when finalState, isAllocated:false and phase:'settled' agree (the route's own shape)", () => {
+    expect(classifySettlementRecord(receipt("SETTLED_RELEASED", false, "settled")).tone).toBe("settled");
+    expect(classifySettlementRecord(receipt("SETTLED_REFUNDED", false, "settled")).tone).toBe("refunded");
+    expect(classifySettlementRecord(receipt("SETTLED_RELEASED", true, "settled")).tone).toBe("unknown");   // allocated = money not fully moved
+    expect(classifySettlementRecord(receipt("SETTLED_RELEASED", false, "allocated")).tone).toBe("unknown");
+    expect(classifySettlementRecord({ finalState: "SETTLED_RELEASED", isAllocated: false }).tone).toBe("unknown"); // no phase: incomplete
+    expect(classifySettlementRecord({ ...receipt("SETTLED_RELEASED", false, "settled"), isTerminal: false }).tone).toBe("unknown");
+    const decided = classifySettlementRecord(receipt(null, true, "allocated"));
     expect(decided.tone).toBe("waiting");
     expect(decided.label).toContain("not yet paid out");
-    expect(classifySettlementRecord(receipt(null, false)).tone).toBe("waiting");
+    expect(classifySettlementRecord(receipt(null, true, "settled")).tone).toBe("unknown");
+    const inFlight = classifySettlementRecord(receipt(null, false, "contest"));
+    expect(inFlight.tone).toBe("waiting");
+    expect(inFlight.label).toContain("no outcome decided");
+    expect(classifySettlementRecord(receipt(null, false, "allocated")).tone).toBe("unknown");
     for (const f of [8, "RELEASED", "SETTLED", "released", "RELEASE_ALLOCATED", undefined]) {
-      expect(classifySettlementRecord(receipt(f, true)).tone, JSON.stringify(f)).toBe("unknown");
+      expect(classifySettlementRecord(receipt(f, false, "settled")).tone, JSON.stringify(f)).toBe("unknown");
     }
   });
 

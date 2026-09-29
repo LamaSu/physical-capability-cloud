@@ -44,19 +44,31 @@ export function formatCount(value: number, atLeast: boolean): string {
 }
 
 /**
- * A kernel is online only if it reports "online" and its heartbeat is fresh.
- * The gateway sets `isStale` when an online kernel has not sent a heartbeat
- * recently (facades/populators/kernel.populator.ts).
+ * A kernel is online only if it reports "online" and says its heartbeat is
+ * fresh. The gateway always sets `isStale` (facades/populators/kernel.populator.ts),
+ * true when an online kernel has not sent a heartbeat recently; a kernel that
+ * doesn't say is not counted as fresh.
  */
 export function isKernelOnline(kernel: Pick<KernelDTO, "status" | "isStale">): boolean {
-  return kernel.status === "online" && kernel.isStale !== true;
+  return kernel.status === "online" && kernel.isStale === false;
 }
+
+/**
+ * The oldest a count may be and still be shown as current. The status bar
+ * re-reads its counts every 30 s, so a count older than this missed at least
+ * two reads.
+ */
+export const COUNT_MAX_AGE_MS = 75_000;
 
 /** The parts of a react-query result the status bar reads. */
 export interface QueryView<T> {
   data: T | undefined;
   isSuccess: boolean;
   isError: boolean;
+  /** When `data` was last read successfully (ms since epoch; 0 if never). */
+  dataUpdatedAt: number;
+  /** When the latest failed read happened (ms since epoch; 0 if none). */
+  errorUpdatedAt: number;
 }
 
 export type GatewayConnectivity = "connected" | "disconnected" | "unknown";
@@ -89,14 +101,17 @@ export function buildLabel(health: QueryView<{ status: string; commit?: unknown;
  * The StatusBar from ProductHomeDTO (readmodels #409): exact counts the gateway
  * made over its own records, not a count over one page. A section the gateway
  * could not read, like a failed read, leaves its count undefined ("—"). The
- * reachability rule is the same as deriveLiveStatus's.
+ * reachability and freshness rules are deriveLiveStatus's (isCurrent).
  */
-export function deriveHomeStatus(reads: {
-  health: QueryView<{ status: string; commit?: unknown; commitSource?: unknown }>;
-  home: QueryView<ProductHomeDTO>;
-}): LiveStatus {
+export function deriveHomeStatus(
+  reads: {
+    health: QueryView<{ status: string; commit?: unknown; commitSource?: unknown }>;
+    home: QueryView<ProductHomeDTO>;
+  },
+  now: number = Date.now(),
+): LiveStatus {
   const networkStatus = gatewayConnectivity(reads.health);
-  const home = networkStatus === "connected" && reads.home.isSuccess ? reads.home.data : undefined;
+  const home = isCurrent(reads.home, reads.health, now) ? reads.home.data : undefined;
   const kernels = readSection(home?.kernels);
   const jobs = readSection(home?.jobs);
   return {
@@ -109,6 +124,29 @@ export function deriveHomeStatus(reads: {
   };
 }
 
+/**
+ * Whether a read may be shown as current. All of these must hold:
+ * - the gateway is confirmed reachable now;
+ * - the read's latest attempt succeeded;
+ * - it happened after the gateway's last failed health check;
+ * - it is at most COUNT_MAX_AGE_MS old.
+ * A recovered health check vouches for the gateway, not for a count cached
+ * before the outage.
+ */
+export function isCurrent<T>(
+  q: QueryView<T>,
+  health: QueryView<{ status: string }>,
+  now: number,
+): q is QueryView<T> & { data: T } {
+  return (
+    gatewayConnectivity(health) === "connected" &&
+    q.isSuccess &&
+    q.data !== undefined &&
+    q.dataUpdatedAt > health.errorUpdatedAt &&
+    now - q.dataUpdatedAt <= COUNT_MAX_AGE_MS
+  );
+}
+
 /** "connected" only after /api/health answered ok; "unknown" until it has answered. */
 export function gatewayConnectivity(health: QueryView<{ status: string }>): GatewayConnectivity {
   if (health.isError) return "disconnected";
@@ -119,25 +157,30 @@ export function gatewayConnectivity(health: QueryView<{ status: string }>): Gate
 /**
  * Turn the live reads into what the StatusBar shows.
  *
- * A count is shown only when its latest read succeeded AND the gateway is
- * confirmed reachable right now. Otherwise it is left undefined, which the
- * bar renders as unavailable rather than as 0. A count read before an outage
- * is not presented as current. The gateway is "connected" only after
- * /api/health answered ok.
+ * A count is shown only when all of these hold:
+ * - the gateway is confirmed reachable right now;
+ * - the count's latest read succeeded;
+ * - that read happened after the gateway's last failed health check;
+ * - the read is at most COUNT_MAX_AGE_MS old.
+ *
+ * Otherwise the count is left undefined, which the bar renders as
+ * unavailable rather than as 0. So a count read before an outage is never
+ * presented as current, not even once the gateway answers again: the
+ * recovered health check vouches for the gateway, not for the count. The
+ * gateway is "connected" only after /api/health answered ok.
  */
-export function deriveLiveStatus(reads: {
-  health: QueryView<{ status: string }>;
-  kernels: QueryView<KernelDTO[]>;
-  jobs: QueryView<JobDTO[]>;
-}): LiveStatus {
+export function deriveLiveStatus(
+  reads: {
+    health: QueryView<{ status: string }>;
+    kernels: QueryView<KernelDTO[]>;
+    jobs: QueryView<JobDTO[]>;
+  },
+  now: number = Date.now(),
+): LiveStatus {
   const { health, kernels, jobs } = reads;
   const networkStatus = gatewayConnectivity(health);
-  const reachable = networkStatus === "connected";
-
-  const kernelsOnline =
-    reachable && kernels.isSuccess && kernels.data ? kernels.data.filter(isKernelOnline).length : undefined;
-
-  const activeJobs = reachable && jobs.isSuccess && jobs.data ? jobs.data.filter(isActiveJob).length : undefined;
+  const kernelsOnline = isCurrent(kernels, health, now) ? kernels.data.filter(isKernelOnline).length : undefined;
+  const activeJobs = isCurrent(jobs, health, now) ? jobs.data.filter(isActiveJob).length : undefined;
   const activeJobsAtLeast = Boolean(activeJobs !== undefined && jobs.data && mayBeTruncated(jobs.data));
 
   return { networkStatus, kernelsOnline, activeJobs, activeJobsAtLeast };
