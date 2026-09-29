@@ -9,6 +9,8 @@ Regenerate goldens after any canonical.ts change:
     node packages/pcc-node/tests/gen_goldens.mjs
 """
 
+import datetime
+import decimal
 import hashlib
 import json
 from pathlib import Path
@@ -186,6 +188,16 @@ def test_a_non_string_key_is_refused():
         canonicalize({1: "a"})
     with pytest.raises(TypeError):
         canonicalize({"ok": {None: 1}})
+
+
+@pytest.mark.parametrize("value", [
+    decimal.Decimal("1.5"), b"raw", {1, 2}, object(),
+    {"nested": datetime.date(2026, 9, 29)},
+])
+def test_a_value_with_no_json_form_is_refused(value):
+    # TS only ever sees the JSON on the wire, so it could never rebuild these bytes.
+    with pytest.raises(TypeError):
+        canonicalize(value)
 
 
 def test_two_keys_that_are_one_js_string_are_refused():

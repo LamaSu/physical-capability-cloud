@@ -198,7 +198,10 @@ def canonicalize(value):
             for k in sorted(entries, key=_utf16_order)
         ]
         return "{" + ",".join(pairs) + "}"
-    return str(value)
+    # Anything else (Decimal, datetime, bytes, set, ...) has no JSON form, so
+    # the TS verifier, which only ever sees the JSON on the wire, could never
+    # rebuild these bytes.  str(value) used to hash it anyway.
+    raise TypeError(f"not a JSON value: {type(value).__name__}")
 
 
 def sha256_hex(canonical):
