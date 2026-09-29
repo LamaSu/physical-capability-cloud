@@ -106,6 +106,7 @@ export class YellowcardOfframp {
       provider: "yellowcard",
       direction: "offramp",
       status: "processing",
+      mode: this.client.sessionMode,
       fiatCurrency: params.fiatCurrency,
       fiatAmount: String(data.convertedAmount ?? "0"),
       cryptoCurrency: params.cryptoCurrency ?? "USDT",

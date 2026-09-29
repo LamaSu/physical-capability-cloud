@@ -95,6 +95,7 @@ export class WisePayoutService {
       provider: "wise",
       direction: "offramp",
       status: "processing",
+      mode: this.client.sessionMode,
       fiatCurrency: params.recipient.currency,
       fiatAmount: String(quote.targetAmount),
       cryptoCurrency: "USDC",

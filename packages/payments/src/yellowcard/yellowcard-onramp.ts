@@ -107,6 +107,7 @@ export class YellowcardOnramp {
       provider: "yellowcard",
       direction: "onramp",
       status: "pending_payment",
+      mode: this.client.sessionMode,
       fiatCurrency: params.fiatCurrency,
       fiatAmount: params.fiatAmount,
       cryptoCurrency: params.cryptoCurrency ?? "USDC",

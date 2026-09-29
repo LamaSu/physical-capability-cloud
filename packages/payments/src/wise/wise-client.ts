@@ -8,6 +8,7 @@
  *
  * Auth: Bearer token (API token generated from Wise Business account).
  */
+import type { RampSessionMode } from "@pcc/spec";
 
 export interface WiseConfig {
   apiToken: string;
@@ -67,6 +68,12 @@ export class WiseClient {
   constructor(config: WiseConfig) {
     this.config = config;
     this.baseUrl = config.environment === "production" ? PRODUCTION_URL : SANDBOX_URL;
+  }
+
+  /** What sessions built on this client are: simulated in mock mode, else the environment it calls. */
+  get sessionMode(): RampSessionMode {
+    if (this.config.mock) return "simulated";
+    return this.baseUrl === PRODUCTION_URL ? "production" : "sandbox";
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
