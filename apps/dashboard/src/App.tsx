@@ -116,6 +116,15 @@ const queryClient = new QueryClient({
   },
 });
 
+// Cached reads belong to the API key that made them. Signing in or out empties
+// the cache, so the next person at this browser never sees the previous
+// account's jobs, kernels or escrows, not even for the moment before a
+// refetch. The key changes only through sign-in (LoginPage, shown only when
+// signed out) and sign-out, so these transitions cover every key change.
+useAuthStore.subscribe((state, prev) => {
+  if (state.isAuthenticated !== prev.isAuthenticated) queryClient.clear();
+});
+
 // ---------------------------------------------------------------------------
 // Agent workspace (/agent) — the live agent conversation, no sidebar
 // ---------------------------------------------------------------------------

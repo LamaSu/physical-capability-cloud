@@ -10,7 +10,11 @@ import {
 describe("workspaceForPath", () => {
   it("maps /app to the spatial workspace", () => {
     expect(workspaceForPath("/app")).toBe("spatial");
-    expect(workspaceForPath("/app/jobs")).toBe("spatial");
+    // The spatial workspace serves /app only; anything below it is not a spatial page.
+    expect(workspaceForPath("/app/")).toBe("spatial");
+    expect(workspaceForPath("/app/jobs")).toBe("dashboard");
+    expect(workspaceForPath("/app/no-such-page")).toBe("dashboard");
+    expect(workspaceForPath("/application")).toBe("dashboard");
   });
 
   it("maps /agent to the agent workspace", () => {

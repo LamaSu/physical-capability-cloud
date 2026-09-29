@@ -54,6 +54,18 @@ async function settle() {
   }
 }
 
+/** Settle until `text` appears (lazy pages load their chunk first), up to `ms`. */
+async function waitForText(text: string, ms = 8_000): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if ((container.textContent ?? "").includes(text)) return true;
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 25));
+    });
+  }
+  return (container.textContent ?? "").includes(text);
+}
+
 async function renderAt(path: string, { signedIn }: { signedIn: boolean }) {
   window.history.replaceState(null, "", path);
   const { useAuthStore } = await import("../stores/auth-store.js");
@@ -73,15 +85,20 @@ async function renderAt(path: string, { signedIn }: { signedIn: boolean }) {
 const DASHBOARD_NAV_MARK = "Protocol Library"; // a sidebar item only the dashboard shell renders
 
 describe("signed-in deep links open their page, not the spatial canvas", () => {
-  it("/dashboard renders the dashboard shell", async () => {
+  // "Command Center" is also a sidebar group title, so these check each
+  // page's own subtitle (setPageMeta), which only that page sets.
+  it("/dashboard renders the dashboard shell and the Command Center page", async () => {
     const r = await renderAt("/dashboard", { signedIn: true });
     expect(r.text()).toContain(DASHBOARD_NAV_MARK);
+    expect(await waitForText("System overview and active operations")).toBe(true);
     expect(r.spatial()).toBe(false);
   });
 
-  it("/jobs/:id renders inside the dashboard shell", async () => {
+  it("/jobs/:id renders that job's page inside the dashboard shell", async () => {
     const r = await renderAt("/jobs/job-123", { signedIn: true });
     expect(r.text()).toContain(DASHBOARD_NAV_MARK);
+    expect(await waitForText("Job progress, evidence, and escrow details")).toBe(true);
+    expect(r.text()).toContain("Back to jobs");
     expect(r.spatial()).toBe(false);
   });
 
@@ -94,6 +111,45 @@ describe("signed-in deep links open their page, not the spatial canvas", () => {
   it("an unknown app path says so instead of rendering a blank area", async () => {
     const r = await renderAt("/no-such-page", { signedIn: true });
     expect(r.text()).toContain("Page not found");
+  });
+
+  it.each(["/app/no-such-page", "/app/jobs/job-123"])(
+    "%s is not a spatial page: it says Page not found (astra round 2, #354 finding 1)",
+    async (path) => {
+      const r = await renderAt(path, { signedIn: true });
+      expect(r.spatial()).toBe(false);
+      expect(r.text()).toContain("Page not found");
+    },
+  );
+});
+
+describe("one account's cached reads never reach the next (astra round 2, #354 finding 3)", () => {
+  it("signing out and in as someone else shows only the new account's jobs", async () => {
+    const jobsFor: Record<string, string> = { pcc_test_key: "job-first-account", pcc_test_key_b: "job-second-account" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (!url.includes("/api/jobs")) throw new TypeError("Failed to fetch");
+        const key = (new Headers(init?.headers).get("Authorization") ?? "").replace(/^Bearer /, "");
+        const id = jobsFor[key];
+        return new Response(JSON.stringify({ jobs: id ? [{ id, status: "in_progress", capabilityId: "cap-1" }] : [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    const r = await renderAt("/jobs", { signedIn: true });
+    expect(await waitForText("job-first-account")).toBe(true);
+
+    const { useAuthStore } = await import("../stores/auth-store.js");
+    await act(async () => useAuthStore.setState({ isAuthenticated: false, apiKey: null }));
+    await settle();
+    expect(r.text()).not.toContain("job-first-account");
+
+    await act(async () => useAuthStore.setState({ isAuthenticated: true, apiKey: "pcc_test_key_b" }));
+    expect(await waitForText("job-second-account")).toBe(true);
+    expect(r.text()).not.toContain("job-first-account");
   });
 });
 
