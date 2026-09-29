@@ -174,6 +174,37 @@ describe("OrchestratorPage source", () => {
   it("falls KPI tiles back to an em dash instead of a fabricated zero", () => {
     expect(source).toContain("—");
   });
+
+  it("says the claim status is unknown instead of fabricating Available/Ready", () => {
+    // Mixed state (N34 / PX-3): claims can be not-ok while graphs are ok, so
+    // the node badges must not default to "Available"/"Ready".
+    expect(source).toContain("Claim status unknown");
+  });
+
+  it('reaches the "Available" node badge only behind a claimRead ok check', () => {
+    // `: "Available"}` is the ternary's else-branch text (node grid); it must
+    // sit close behind a `claimRead?.state === "ok"` guard, not fire unconditionally.
+    const index = source.indexOf(': "Available"}');
+    expect(index, 'expected to find `: "Available"}` in the source').toBeGreaterThan(-1);
+    const preceding = source.slice(Math.max(0, index - 500), index);
+    expect(preceding).toContain('claimRead?.state === "ok"');
+  });
+
+  it('reaches the "Ready" node badge only behind a claimRead ok check', () => {
+    // `>Ready<` is the Instrument Status section's JSX text node; it must sit
+    // close behind a `claimRead?.state === "ok"` guard, not fire unconditionally.
+    const index = source.indexOf(">Ready<");
+    expect(index, "expected to find `>Ready<` in the source").toBeGreaterThan(-1);
+    const preceding = source.slice(Math.max(0, index - 300), index);
+    expect(preceding).toContain('claimRead?.state === "ok"');
+  });
+
+  it("gates the Instrument Status section on the graphs read", () => {
+    const sectionIndex = source.indexOf(">Instrument Status<");
+    expect(sectionIndex, "expected to find the Instrument Status heading").toBeGreaterThan(-1);
+    const preceding = source.slice(Math.max(0, sectionIndex - 300), sectionIndex);
+    expect(preceding).toContain('graphRead?.state === "ok"');
+  });
 });
 
 describe("ProtocolBuilderPage source", () => {

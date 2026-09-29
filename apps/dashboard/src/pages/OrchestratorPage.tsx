@@ -255,13 +255,18 @@ export function OrchestratorPage() {
                   <div className="text-[10px] text-white/30 mb-2">
                     {node.capabilities.join(", ")}
                   </div>
-                  {/* Claim status */}
-                  <div className="flex items-center gap-1.5 text-[10px]">
-                    <span className={`w-2 h-2 rounded-full ${claim ? "bg-amber-400" : "bg-green-400"}`} />
-                    <span className="text-white/40">
-                      {claim ? `Claimed by ${claim.claimedBy}` : "Available"}
-                    </span>
-                  </div>
+                  {/* Claim status: unknown (never a fabricated "Available") when the
+                      claims read isn't ok, even though graphs are (PX-3 mixed state) */}
+                  {claimRead?.state === "ok" ? (
+                    <div className="flex items-center gap-1.5 text-[10px]">
+                      <span className={`w-2 h-2 rounded-full ${claim ? "bg-amber-400" : "bg-green-400"}`} />
+                      <span className="text-white/40">
+                        {claim ? `Claimed by ${claim.claimedBy}` : "Available"}
+                      </span>
+                    </div>
+                  ) : (
+                    <GlowBadge color="gray">Claim status unknown</GlowBadge>
+                  )}
                   {/* Sample present */}
                   {sampleHere && (
                     <div className="mt-1.5 text-[10px] text-cyan-400/70">
@@ -394,37 +399,55 @@ export function OrchestratorPage() {
         </GlassPanel>
       </div>
 
-      {/* Instrument Status */}
-      <GlassPanel padding="md">
-        <h3 className="text-sm font-medium text-white/60 mb-3">Instrument Status</h3>
-        <div className="grid grid-cols-5 gap-3">
-          {allNodes.map((node) => {
-            const claim = claimByNode[node.id];
-            return (
-              <div
-                key={node.id}
-                className="px-3 py-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06] text-xs"
-              >
-                <div className="flex items-center gap-2">
-                  <span className={`w-2.5 h-2.5 rounded-full ${claim ? "bg-amber-400 animate-pulse" : "bg-green-400"}`} />
-                  <span className="text-white/70 font-medium">{node.label}</span>
-                </div>
-                {claim && (
-                  <div className="mt-1.5 text-[10px] text-amber-400/60">
-                    Claimed by <span className="font-mono">{claim.claimedBy}</span>
-                    {claim.expiresAt && (
-                      <span className="text-white/20"> · expires {new Date(claim.expiresAt).toLocaleTimeString()}</span>
-                    )}
+      {/* Instrument Status: gated on graphs (its data source), same rule as the
+          Transfer Graphs / Active Samples / Instrument Workflows sections above */}
+      {graphRead?.state === "ok" && (
+        <GlassPanel padding="md">
+          <h3 className="text-sm font-medium text-white/60 mb-3">Instrument Status</h3>
+          <div className="grid grid-cols-5 gap-3">
+            {allNodes.map((node) => {
+              const claim = claimByNode[node.id];
+              return (
+                <div
+                  key={node.id}
+                  className="px-3 py-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06] text-xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full ${
+                        claimRead?.state !== "ok"
+                          ? "bg-white/20"
+                          : claim
+                            ? "bg-amber-400 animate-pulse"
+                            : "bg-green-400"
+                      }`}
+                    />
+                    <span className="text-white/70 font-medium">{node.label}</span>
                   </div>
-                )}
-                {!claim && (
-                  <div className="mt-1.5 text-[10px] text-green-400/50">Ready</div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </GlassPanel>
+                  {/* Claim status: unknown (never a fabricated "Ready") when the
+                      claims read isn't ok, even though graphs are (PX-3 mixed state) */}
+                  {claimRead?.state !== "ok" && (
+                    <div className="mt-1.5">
+                      <GlowBadge color="gray">Claim status unknown</GlowBadge>
+                    </div>
+                  )}
+                  {claimRead?.state === "ok" && claim && (
+                    <div className="mt-1.5 text-[10px] text-amber-400/60">
+                      Claimed by <span className="font-mono">{claim.claimedBy}</span>
+                      {claim.expiresAt && (
+                        <span className="text-white/20"> · expires {new Date(claim.expiresAt).toLocaleTimeString()}</span>
+                      )}
+                    </div>
+                  )}
+                  {claimRead?.state === "ok" && !claim && (
+                    <div className="mt-1.5 text-[10px] text-green-400/50">Ready</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </GlassPanel>
+      )}
     </div>
   );
 }
