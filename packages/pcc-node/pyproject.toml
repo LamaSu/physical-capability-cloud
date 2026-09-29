@@ -1,6 +1,6 @@
 [project]
 name = "pcc-node"
-version = "0.1.0"
+version = "0.1.1"
 description = "Physical Capability Cloud node - join the network with any equipment"
 requires-python = ">=3.9"
 license = {text = "MIT"}

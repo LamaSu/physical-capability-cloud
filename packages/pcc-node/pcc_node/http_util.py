@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 
 log = logging.getLogger("pcc-node.http")
 
-USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
+USER_AGENT = "PCC-Node/0.1.1 (https://capability.network)"
 
 # Relaxed SSL context for local-network device probing (OctoPrint, OT-2, etc.)
 _relaxed_ctx = ssl.create_default_context()

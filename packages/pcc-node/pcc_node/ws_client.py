@@ -24,7 +24,7 @@ from .http_util import gateway_request
 
 log = logging.getLogger("pcc-node.ws")
 
-USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
+USER_AGENT = "PCC-Node/0.1.1 (https://capability.network)"
 
 def _http(
     method: str,
