@@ -14,6 +14,8 @@ import {
   PHASE_VIEW,
   evidenceSummaryText,
   freshness,
+  jobPageState,
+  payoutBadge,
   payoutBasisText,
   recordStatusBadge,
   settlementLinkText,
@@ -75,6 +77,7 @@ const settlement = (over: Partial<SettlementAxis>): SettlementAxis => ({
   record: null,
   payout: "unknown",
   payoutBasis: null,
+  payoutUnknownReason: null,
   payoutConfirmation: null,
   error: null,
   ...over,
@@ -139,6 +142,7 @@ describe("settlement wording", () => {
         simulated: false,
         escrow: { sourceStatus: "active", vocabulary: "escrow_record", tone: "running", label: "active", known: true },
         milestoneMatch: "exact",
+        milestoneClaimants: 1,
         milestone: null,
         escrowTotal: { amount: "1", currency: "USDC" },
         createdAt: "2026-09-01T00:00:00Z",
@@ -155,7 +159,26 @@ describe("settlement wording", () => {
   });
 
   it("says when the milestone and escrow records disagree", () => {
-    expect(payoutBasisText(linkedRecord({ payout: "unknown", payoutBasis: "milestone_record" }))).toMatch(/disagree/);
+    expect(
+      payoutBasisText(linkedRecord({ payout: "unknown", payoutBasis: "milestone_record", payoutUnknownReason: "records_conflict" })),
+    ).toMatch(/disagree/);
+  });
+
+  it("(r3) names an unrecognized or ambiguous status instead of calling it a disagreement", () => {
+    const unrecognized = payoutBasisText(
+      linkedRecord({ payout: "unknown", payoutBasis: "milestone_record", payoutUnknownReason: "status_unrecognized" }),
+    );
+    expect(unrecognized).toMatch(/does not recognize/);
+    expect(unrecognized).not.toMatch(/disagree/);
+    expect(
+      payoutBasisText(linkedRecord({ payout: "unknown", payoutBasis: "milestone_record", payoutUnknownReason: "status_ambiguous" })),
+    ).toMatch(/may or may not mean released/);
+  });
+
+  it("(r3) says when another job could claim this job's milestone", () => {
+    const base = linkedRecord({ payout: "unknown", payoutUnknownReason: "milestone_shared" }) as any;
+    base.record = { ...base.record, milestoneMatch: "shared_by_jobs", milestoneClaimants: 2 };
+    expect(payoutBasisText(base)).toMatch(/Another job could claim this step's milestone \(2 jobs share it\)/);
   });
 
   it("explains a step missing from the escrow instead of guessing", () => {
@@ -170,6 +193,7 @@ describe("settlement wording", () => {
           simulated: false,
           escrow: { sourceStatus: "completed", vocabulary: "escrow_record", tone: "settled", label: "released", known: true },
           milestoneMatch: "step_not_in_escrow",
+          milestoneClaimants: null,
           milestone: null,
           escrowTotal: { amount: "1", currency: "USDC" },
           createdAt: "2026-09-01T00:00:00Z",
@@ -221,5 +245,30 @@ describe("notices", () => {
     ] as const) {
       expect(NOTICE_TEXT[code], code).toBeTruthy();
     }
+  });
+});
+
+describe("NEGATIVE (r3): a stale read never colors the payout", () => {
+  it("every payout is gray when stale, paid included; a fresh paid stays green", () => {
+    for (const payout of PAYOUTS) expect(payoutBadge(payout, true).color, payout).toBe("gray");
+    expect(payoutBadge("paid", false)).toEqual(PAYOUT_VIEW.paid);
+    expect(payoutBadge("paid", true).label).toMatch(/as of the last read/);
+  });
+});
+
+describe("NEGATIVE (r3): a refusal on the latest read replaces cached data", () => {
+  it("401, 403 and 404 are refusals even when an earlier read is cached", () => {
+    expect(jobPageState(true, 404, true)).toEqual({ show: "refusal", kind: "not_found" });
+    expect(jobPageState(true, 401, true)).toEqual({ show: "refusal", kind: "signed_out" });
+    expect(jobPageState(true, 403, true)).toEqual({ show: "refusal", kind: "unverified" });
+    expect(jobPageState(false, 403, true)).toEqual({ show: "refusal", kind: "unverified" });
+  });
+
+  it("any other failure keeps the last read, marked refresh-failed; with none it is unavailable", () => {
+    expect(jobPageState(true, 503, true)).toEqual({ show: "data", refreshFailed: true });
+    expect(jobPageState(true, null, true)).toEqual({ show: "data", refreshFailed: true });
+    expect(jobPageState(false, 503, true)).toEqual({ show: "unavailable" });
+    expect(jobPageState(false, null, false)).toEqual({ show: "unavailable" });
+    expect(jobPageState(true, null, false)).toEqual({ show: "data", refreshFailed: false });
   });
 });

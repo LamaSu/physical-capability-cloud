@@ -11,6 +11,7 @@
  *   - `settledAt` = the job's completion time
  *   - the escrow read through the first negotiation session only
  */
+import { provenWalletFor } from "../helpers/job-read-party.js";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
@@ -332,6 +333,8 @@ describe("the legacy settlement routes on a real store", () => {
       // Job reads are object-authorized (F3): read as the seeded kernel-nyc operator.
       const p = req.headers["x-test-principal"];
       (req as any).operatorId = typeof p === "string" ? p : "0x1111111111111111111111111111111111111111";
+      // WP-A's gate proves a wallet by SIWE (#353 r3): this caller reads as that proven wallet.
+      (req as any).provenWallet = provenWalletFor(req.headers["x-test-proven-wallet"], (req as any).operatorId);
     });
     await app.register(paidJobFlowRoutes);
     await app.register(negotiationRoutes);
