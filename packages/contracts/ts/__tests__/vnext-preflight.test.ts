@@ -1,8 +1,10 @@
 /**
  * The funding preflight (doc §5.2): each LIVE prerequisite a pure compile cannot see must fail the
  * preflight BY NAME, and a reverting simulation must fail it even when every named check passes.
- * The chain is a scripted stub. The real `fund()` behaviour behind each prerequisite is pinned by the
- * forge suites.
+ * The chain is a scripted stub that RECORDS every request and serves state PER BLOCK, so these tests also
+ * pin what the preflight asks for: one block for everything, and exactly the signed fund() from the sender
+ * (astra review of #367). The real `fund()` behaviour behind each prerequisite is pinned by the forge
+ * suites, and `vnext-preflight.anvil.test.ts` runs this preflight against the real contracts.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -90,8 +92,19 @@ type Chain = {
   throwOn?: string;
 };
 
-function chain(over: Partial<Chain> = {}): PublicClient {
-  const st: Chain = {
+/** The latest block the stub serves when no block is named. */
+const HEAD = 5_000n;
+const hashOf = (n: bigint): Hex => `0x${n.toString(16).padStart(64, "0")}`;
+
+type Call = { kind: "getBlock" | "readContract" | "getCode" | "simulateContract"; params: Record<string, unknown> };
+type Stub = PublicClient & { calls: Call[] };
+
+/**
+ * `over` applies at every block; `atBlock[n]` overrides it at block n only. Every request is recorded, and every
+ * block-scoped request is answered from the state AT the block it names (the head when it names none).
+ */
+function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>> = {}, blockReadFails = false): Stub {
+  const base: Chain = {
     chainId: Number(G.inputs.chainId),
     implementation: IMPLEMENTATION,
     predicted: compiled.escrow,
@@ -110,45 +123,62 @@ function chain(over: Partial<Chain> = {}): PublicClient {
     allowance: compiled.totalGross,
     ...over,
   };
+  const at = (n: unknown): Chain => ({ ...base, ...(atBlock[String((n as bigint | undefined) ?? HEAD)] ?? {}) });
   const id = compiled.identity;
-  const reads: Record<string, (address: Address) => unknown> = {
-    implementation: () => st.implementation,
-    predictEscrow: () => st.predicted,
-    initialized: () => st.initialized,
-    configurationSealed: () => st.sealed,
-    policy: () => [id.operator, st.policyNonce, id.prePolicyRoot, st.jobPolicyHash, id.acceptedPolicyDigest],
+  const reads: Record<string, (st: Chain, address: Address) => unknown> = {
+    implementation: (st) => st.implementation,
+    predictEscrow: (st) => st.predicted,
+    initialized: (st) => st.initialized,
+    configurationSealed: (st) => st.sealed,
+    policy: (st) => [id.operator, st.policyNonce, id.prePolicyRoot, st.jobPolicyHash, id.acceptedPolicyDigest],
     payer: () => id.payer,
     jobIdHash: () => id.jobIdHash,
     termsHash: () => id.termsHash,
-    USDC: () => st.usdc,
+    USDC: (st) => st.usdc,
     authorizedOracle: () => PRIMARY,
     escalationAttester: () => ESCALATION,
-    enabled: (a) => (a === PRIMARY ? st.primaryEnabled : st.escalationEnabled),
-    policyNonceFloor: () => st.floor,
-    fundedEscrowOf: () => st.funded,
-    balanceOf: () => st.balance,
-    allowance: () => st.allowance,
+    enabled: (st, a) => (a === PRIMARY ? st.primaryEnabled : st.escalationEnabled),
+    policyNonceFloor: (st) => st.floor,
+    fundedEscrowOf: (st) => st.funded,
+    balanceOf: (st) => st.balance,
+    allowance: (st) => st.allowance,
   };
+  const calls: Call[] = [];
   return {
-    getChainId: async () => st.chainId,
-    getBlock: async () => ({ timestamp: st.timestamp }),
-    getCode: async () => st.code,
-    readContract: async ({ address, functionName }: { address: Address; functionName: string }) => {
+    calls,
+    getChainId: async () => base.chainId,
+    getBlock: async (params: Record<string, unknown> = {}) => {
+      calls.push({ kind: "getBlock", params });
+      if (blockReadFails) throw new Error("block unavailable");
+      const n = (params.blockNumber as bigint | undefined) ?? HEAD;
+      return { number: n, hash: hashOf(n), timestamp: at(n).timestamp };
+    },
+    getCode: async (params: Record<string, unknown>) => {
+      calls.push({ kind: "getCode", params });
+      return at(params.blockNumber).code;
+    },
+    readContract: async (params: Record<string, unknown>) => {
+      calls.push({ kind: "readContract", params });
+      const st = at(params.blockNumber);
+      const functionName = params.functionName as string;
       if (st.throwOn === functionName) throw new Error(`execution reverted: ${functionName}`);
       const fn = reads[functionName];
       if (!fn) throw new Error(`unscripted read: ${functionName}`);
-      return fn(address);
+      return fn(st, params.address as Address);
     },
-    simulateContract: async () => {
+    simulateContract: async (params: Record<string, unknown>) => {
+      calls.push({ kind: "simulateContract", params });
+      const st = at(params.blockNumber);
       if (st.simulateError) throw st.simulateError;
       return { result: undefined };
     },
-  } as unknown as PublicClient;
+  } as unknown as Stub;
 }
 
 const failed = (r: { checks: { name: string; ok: boolean }[] }) => r.checks.filter((c) => !c.ok).map((c) => c.name);
 
-/** Every revert reachable from `fund()` (escrow + factory acceptPolicy + SafeERC20), so a simulation never prints a raw selector. */
+/** Every custom error the escrow, the factory's acceptPolicy and SafeERC20 declare on the `fund()` path (enumerated from
+ *  the Solidity by hand). A token's own revert data is outside this list and can still surface undecoded. */
 const FUND_PATH_ERRORS = [
   "NotInitialized", "AlreadySealed", "Reentrancy", "ConfigTooLarge", "SignatureTooLarge", "BadUnitCount", "OnlyPayer",
   "InvalidOrDisabledCohort", "TierRequestMismatch", "TierOutOfRange", "ValueOverflow", "DuplicateUnit", "BadLegCount",
@@ -157,7 +187,7 @@ const FUND_PATH_ERRORS = [
   "BadOperatorSignature", "BalanceReadFailed", "FundingDeltaMismatch", "SafeERC20FailedOperation",
 ];
 
-describe("the escrow ABI subset names every fund()-path revert", () => {
+describe("the escrow ABI subset declares every escrow, factory and SafeERC20 error on the fund() path", () => {
   it("declares each one", () => {
     const declared = new Set(VNextSettlementEscrowABI.filter((x) => x.type === "error").map((x) => (x as { name: string }).name));
     expect(FUND_PATH_ERRORS.filter((e) => !declared.has(e))).toEqual([]);
@@ -224,5 +254,77 @@ describe("preflightVNextFunding", () => {
     expect(failed(r)).toEqual([]);
     expect(r.simulation).toEqual({ ok: false, error: "BadSignature" });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("preflightVNextFunding: one block, this policy, this exact call (astra review of #367)", () => {
+  it("pins ONE block: reads it once, and every read, the code lookup and the simulation carry it", async () => {
+    const c = chain();
+    const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER });
+    expect(r.ok).toBe(true);
+    expect(r.blockNumber).toBe(HEAD);
+    expect(r.blockHash).toBe(hashOf(HEAD));
+    expect(c.calls.filter((x) => x.kind === "getBlock")).toHaveLength(1);
+    const scoped = c.calls.filter((x) => x.kind !== "getBlock");
+    expect(scoped.length).toBeGreaterThan(15);
+    expect(scoped.filter((x) => x.params.blockNumber !== HEAD).map((x) => `${x.kind}:${String(x.params.functionName)}`)).toEqual([]);
+    expect(scoped.map((x) => x.kind)).toContain("getCode");
+    expect(scoped.map((x) => x.kind)).toContain("simulateContract");
+  });
+
+  it("reports the state AT the pinned block, not at the head", async () => {
+    const c = () => chain({}, { [String(HEAD)]: { primaryEnabled: false, simulateError: new Error("InvalidOrDisabledCohort") } });
+    const atHead = await preflightVNextFunding(c(), { compiled, acceptance: signed, sender: RELAYER });
+    expect(failed(atHead)).toEqual(["primary cohort enabled"]);
+    expect(atHead.simulation.ok).toBe(false);
+    const earlier = await preflightVNextFunding(c(), { compiled, acceptance: signed, sender: RELAYER, blockNumber: HEAD - 1n });
+    expect(earlier.blockNumber).toBe(HEAD - 1n);
+    expect(failed(earlier)).toEqual([]);
+    expect(earlier.simulation).toEqual({ ok: true });
+    expect(earlier.ok).toBe(true);
+  });
+
+  it("checks the expiry and every reclaim window against the PINNED block's timestamp", async () => {
+    const c = () => chain({}, { [String(HEAD - 1n)]: { timestamp: compiled.expiry }, [String(HEAD)]: { timestamp: compiled.expiry + 1n } });
+    const atExpiry = await preflightVNextFunding(c(), { compiled, acceptance: signed, sender: RELAYER, blockNumber: HEAD - 1n });
+    expect(atExpiry.blockTimestamp).toBe(compiled.expiry);
+    expect(failed(atExpiry)).not.toContain("acceptance not expired"); // inclusive, as the factory's `block.timestamp > expiry`
+    const after = await preflightVNextFunding(c(), { compiled, acceptance: signed, sender: RELAYER });
+    expect(after.blockTimestamp).toBe(compiled.expiry + 1n);
+    expect(failed(after)).toContain("acceptance not expired");
+  });
+
+  it("simulates EXACTLY the signed fund(): the compiled escrow and configs, this acceptance, from this sender, at the pinned block", async () => {
+    const c = chain();
+    await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER, blockNumber: HEAD - 7n });
+    const sims = c.calls.filter((x) => x.kind === "simulateContract");
+    expect(sims).toHaveLength(1);
+    const s = sims[0]!.params;
+    expect(s.address).toBe(compiled.escrow);
+    expect(s.functionName).toBe("fund");
+    expect(s.account).toBe(RELAYER);
+    expect(s.blockNumber).toBe(HEAD - 7n);
+    const [configs, acceptance] = s.args as [unknown, unknown];
+    expect(configs).toEqual(compiled.configs);
+    expect(acceptance).toBe(signed); // the caller's own object, not a rebuilt one
+  });
+
+  it("fails an acceptance whose expiry is not the compiled expiry, even when the chain would accept it", async () => {
+    // astra's case: an acceptance freshly signed for a LATER expiry funds a differently dated policy. The simulation
+    // (stubbed here to pass, as the real one would for a validly signed later expiry) must not carry the result.
+    const later = { ...signed, expiry: compiled.expiry + 99n };
+    const r = await preflightVNextFunding(chain(), { compiled, acceptance: later, sender: RELAYER });
+    expect(r.simulation).toEqual({ ok: true });
+    expect(failed(r)).toEqual(["acceptance expiry matches the compiled policy"]);
+    expect(r.ok).toBe(false);
+  });
+
+  it("a block it cannot read fails by name, and nothing else runs", async () => {
+    const c = chain({}, {}, true);
+    const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER });
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toEqual(["pinned block"]);
+    expect(r.blockNumber).toBeNull();
+    expect(c.calls.map((x) => x.kind)).toEqual(["getBlock"]);
   });
 });
