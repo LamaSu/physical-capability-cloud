@@ -13,6 +13,8 @@
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 
 // In-memory store (backed by audit log for persistence across restarts).
 // For a production system you'd use the DB, but this keeps it simple
@@ -157,17 +159,25 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
    * List recent diagnostic uploads (metadata only, no encrypted payloads).
    * Intended for admin/support use.
    */
-  app.get("/api/operator/diagnostics", async (req, _reply) => {
+  app.get("/api/operator/diagnostics", async (req, reply) => {
     pruneExpired();
 
-    // Scope to caller's kernels — prevent cross-operator log enumeration (R5 NEW-02)
+    // The admin view (every upload, with IPs) needs the admin SECRET. It used to be
+    // granted to any caller whose operatorId was on BROKER_OPERATORS, an identity a
+    // legacy key can carry (N2, WP-A round 6). A wrong secret is refused, never
+    // downgraded. Without it the caller sees only its own uploads, and a request with
+    // no attached identity is 401: the old filter let it see every upload (rule 7).
+    const isAdmin = presentsAdminSecret(req);
+    if (isAdmin && !requireAdminSecret(req, reply)) return reply;
     const callerId = (req as any).operatorId ?? (req as any).userId;
-    const { isBrokerOperator } = await import("../middleware/security-hardening.js");
-    const isAdmin = callerId ? isBrokerOperator(callerId) : false;
+    if (!isAdmin && !callerId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
 
+    // Scope to caller's kernels — prevent cross-operator log enumeration (R5 NEW-02)
     const filtered = isAdmin
       ? uploads
-      : uploads.filter((u) => !callerId || u.kernelId === callerId || (u as any).operatorId === callerId);
+      : uploads.filter((u) => sameIdentity(u.kernelId, callerId) || sameIdentity((u as any).operatorId, callerId));
 
     return {
       uploads: filtered.map((u) => ({

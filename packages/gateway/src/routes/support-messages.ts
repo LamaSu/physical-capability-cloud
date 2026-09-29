@@ -15,6 +15,8 @@
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 
 // Discord webhook for #bug-reports notifications
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
@@ -348,10 +350,17 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "message required" });
     }
 
-    // Derive `from` from caller identity — never trust body.from (admin impersonation fix, R5 NEW-03)
+    // Derive `from` from what the caller HOLDS — never trust body.from (admin
+    // impersonation fix, R5 NEW-03). Replying as "admin" needs the admin SECRET. It
+    // used to be granted to any caller whose operatorId was on BROKER_OPERATORS, an
+    // identity a legacy key can carry (N2, WP-A round 6). A wrong secret is refused,
+    // never downgraded, and a request with no attached identity is 401 (rule 7).
+    const isAdmin = presentsAdminSecret(req);
+    if (isAdmin && !requireAdminSecret(req, reply)) return reply;
     const callerId = (req as any).operatorId ?? (req as any).userId;
-    const { isBrokerOperator } = await import("../middleware/security-hardening.js");
-    const isAdmin = callerId ? isBrokerOperator(callerId) : false;
+    if (!isAdmin && !callerId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
     const from: "admin" | "operator" = isAdmin ? "admin" : "operator";
 
     const thread = findThread(req.params.threadId);
@@ -359,8 +368,10 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "thread not found" });
     }
 
-    // Ownership check: operators can only reply to their own threads
-    if (!isAdmin && callerId && thread.operatorId && thread.operatorId !== callerId) {
+    // Ownership check: operators can only reply to their own threads. A thread with
+    // no recorded operator has no owner to match, so only the admin may reply to it
+    // (the old check skipped whenever either side was missing: rule 7).
+    if (!isAdmin && !sameIdentity(thread.operatorId, callerId)) {
       return reply.code(403).send({ error: "forbidden", message: "You can only reply to your own threads" });
     }
 
