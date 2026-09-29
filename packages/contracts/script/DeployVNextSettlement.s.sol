@@ -1322,31 +1322,36 @@ contract DeployVNextSettlement is Script {
     ///      ({_writeArtifact}): the record root, every directory above it, and the whole tree below it must be
     ///      reachable without a symlink, or the run stops (sol and astra reviews of #339).
     ///
-    ///      Why a check is needed at all: `fs_permissions` is NOT a containment boundary against symlinks. Forge
-    ///      1.7.1 resolves the links in a path that EXISTS, but authorizes a path that does not exist yet by its
-    ///      lexical form. So a symlink on the way to a NEW file or directory can put it outside the grant: forge
-    ///      was observed writing through a symlinked directory and through a dangling link under the root, and
-    ///      creating `deployments/vnext/<network>` inside a link's target when `deployments` was a symlink to a
-    ///      directory without `vnext`. `vm.exists`, `vm.isDir`, `vm.fsMetadata` and `vm.readLink` all resolve
-    ///      the link before they look, so none of them can see one.
+    ///      Why a check is needed at all: `fs_permissions` is NOT a containment boundary against symlinks, and how
+    ///      far it leaks depends on the forge version. Both versions probed follow links on the way to a path that
+    ///      exists. Forge 1.7.1 checks a path that does not exist yet by its lexical form, so it wrote through a
+    ///      symlinked directory and a dangling link under the root, and created `deployments/vnext/<network>` inside
+    ///      a link's target when `deployments` was a symlink to a directory without `vnext`. Forge 1.8.0 (the
+    ///      version CI pins) resolves the links in every path, so a symlinked root or ancestor redirects every
+    ///      record write, with no error at all. `vm.exists`, `vm.isDir`, `vm.fsMetadata` and `vm.readLink` all
+    ///      resolve the link before they look, so none of them can see one.
     ///
-    ///      Two limits remain; no cheatcode closes either. A link swapped in between these checks and the write
-    ///      (a TOCTOU window). And a filesystem mounted inside the tree, which `vm.readDir` does not enter.
+    ///      Three limits remain; no cheatcode closes any of them. A link swapped in between these checks and the
+    ///      write (a TOCTOU window). A filesystem mounted inside the tree, which `vm.readDir` does not enter. And a
+    ///      HARD link from a record file to a file elsewhere: it is a plain file to every cheatcode (none reports a
+    ///      link count). Git cannot commit one, so placing it needs local write access to the checkout.
     function _assertRecordRootContained(string memory root) internal view {
         _assertRecordRootIsReal(root);
         _assertNoSymlinksBelow(root);
     }
 
     /// @dev The root itself, and every directory above it.
-    ///      1. The root must EXIST as a directory. It is committed, so a missing root means the checkout is not
-    ///         the reviewed one, and creating it here would follow a symlinked ancestor (the observed escape
-    ///         above). A dangling root fails here too, since `isDir` follows it to nothing.
-    ///      2. No symlink AT or ABOVE it. Forge resolves the links in the granted path, but checks a child that
-    ///         does not exist yet by its lexical form. Below a real root the two agree, and forge answers
-    ///         `exists` for such a child (false). When the root or any directory above it is a symlink they
-    ///         disagree, and forge refuses to answer. So the refusal IS the no-follow check that no cheatcode
-    ///         offers directly. `VNextDeployRecordTest` pins this against committed fixtures (a symlinked root, a
-    ///         symlinked ancestor), so a forge upgrade that changes the behavior turns the suite red.
+    ///      1. The root must EXIST as a directory. It is committed, so a missing root means the checkout is not the
+    ///         reviewed one, and creating it here would follow a symlinked ancestor (the escape above). A dangling
+    ///         root fails here too, since `isDir` follows it to nothing.
+    ///      2. No symlink AT or ABOVE it. Forge is asked to list a child that must not exist. Where no link is in
+    ///         the way, both versions answer with one error entry at exactly the lexical path
+    ///         `projectRoot/root/<probe>`, and `vm.projectRoot()` is canonical even when forge is started through
+    ///         a symlinked checkout path. With the root or an ancestor a symlink, 1.7.1 refuses to look (its
+    ///         resolved grant no longer prefixes the lexical path), and 1.8.0 answers at the RESOLVED path. Both
+    ///         are refused. An entry that exists at the probe path is refused too. `VNextDeployRecordTest` pins
+    ///         this against committed fixtures, and CI runs it on the pinned forge, so a forge change that alters
+    ///         any of it turns the suite red.
     function _assertRecordRootIsReal(string memory root) internal view {
         require(
             vm.isDir(root),
@@ -1355,8 +1360,21 @@ contract DeployVNextSettlement is Script {
                 root
             )
         );
-        try vm.exists(string.concat(root, ROOT_PROBE)) returns (bool present) {
-            require(!present, string.concat("an entry exists at the deployment record root's probe path, refusing: ", root));
+        string memory probe = string.concat(root, ROOT_PROBE);
+        try vm.readDir(probe, 1) returns (VmSafe.DirEntry[] memory found) {
+            require(
+                found.length == 1 && bytes(found[0].errorMessage).length != 0,
+                string.concat("an entry exists at the deployment record root's probe path, refusing: ", root)
+            );
+            require(
+                keccak256(bytes(found[0].path)) == keccak256(bytes(string.concat(vm.projectRoot(), "/", probe))),
+                string.concat(
+                    "the deployment record root, or a directory above it, is a symlink: forge resolved ",
+                    probe,
+                    " to ",
+                    found[0].path
+                )
+            );
         } catch {
             revert(
                 string.concat(
@@ -1368,8 +1386,10 @@ contract DeployVNextSettlement is Script {
     }
 
     /// @dev The whole tree below the root, at every depth, without following links. Any symlink refuses. So does
-    ///      ANY entry forge reports it could not inspect: an error is never taken to mean the entry vanished.
+    ///      ANY entry forge reports it could not inspect (an error is never taken to mean the entry vanished), and
+    ///      any entry forge lists somewhere other than under the root's lexical path.
     function _assertNoSymlinksBelow(string memory root) internal view {
+        bytes memory prefix = bytes(string.concat(vm.projectRoot(), "/", root, "/"));
         VmSafe.DirEntry[] memory entries = vm.readDir(root, type(uint64).max);
         for (uint256 k; k < entries.length; ++k) {
             require(
@@ -1382,7 +1402,19 @@ contract DeployVNextSettlement is Script {
                 !entries[k].isSymlink,
                 string.concat("symlink under the deployment record root, refusing to read or write through it: ", entries[k].path)
             );
+            require(
+                _hasPrefix(bytes(entries[k].path), prefix),
+                string.concat("forge listed an entry outside the deployment record root's path, refusing: ", entries[k].path)
+            );
         }
+    }
+
+    function _hasPrefix(bytes memory s, bytes memory prefix) private pure returns (bool) {
+        if (s.length < prefix.length) return false;
+        for (uint256 i; i < prefix.length; ++i) {
+            if (s[i] != prefix[i]) return false;
+        }
+        return true;
     }
 
     function _readInputs(string memory mode, string memory label) internal view returns (Inputs memory i) {

@@ -14,3 +14,5 @@ here and nowhere else in `deployments/`. The script refuses to read or write a r
 no symlink sits at or above it, and no symlink sits anywhere below it. The grant alone does not contain a write
 that goes through a symlink, and creating this directory at run time would follow a symlinked `deployments/`.
 CI also fails on any committed symlink under `deployments/` (`ts/__tests__/deployments-no-symlinks.test.ts`).
+Not covered: a link swapped in between the check and the write, a filesystem mounted inside this tree, and a hard
+link from a record to a file elsewhere (git cannot commit one; placing one needs local write access).

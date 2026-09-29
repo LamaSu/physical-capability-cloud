@@ -176,6 +176,19 @@ contract VNextDeployRecordTest is Test {
 
     // ── 7. the record root is contained ──────────────────────────────────────────────────────────
 
+    /// @notice No grant reaches ABOVE the record root, not even to read. On forge 1.7.1 the at-or-above check detects a
+    ///         symlinked root by forge REFUSING to look below it, which only happens while no grant covers the
+    ///         probe path's lexical form. A read grant on `./deployments` or on the project root would silently
+    ///         disarm that on 1.7.1 (1.8.0 compares the resolved path instead), so it must turn this test red.
+    function test_Root_NoGrantReachesAboveTheRecordRoot() public {
+        try harness.readDirOnce("deployments") {
+            fail("a grant reaches deployments/ itself");
+        } catch {}
+        try harness.readDirOnce(".") {
+            fail("a grant reaches the project root");
+        } catch {}
+    }
+
     /// @notice The real, committed record root passes, with a record in it.
     function test_Root_RealRecordTreePasses() public {
         string memory path = _writeRecord(VNextDeploySpec.MODE_PROVISIONAL, "symlink-clean", FACTORY_A);
@@ -238,6 +251,14 @@ contract VNextDeployRecordTest is Test {
     function test_Walk_DeepLinkIsRefused() public {
         _requireLinks();
         _assertWalkRefused(string.concat(WALK, "/deep"), BELOW, "walk/deep/a/b/c/d/deep-link");
+    }
+
+    /// @notice The walk on its own also refuses a root that resolves elsewhere: forge lists the link target's entries
+    ///         under the RESOLVED path, which is not under the root's lexical path. (The full check stops this case
+    ///         earlier; this pins the walk's own defense.)
+    function test_Walk_EntriesListedOutsideTheRootAreRefused() public {
+        _requireLinks();
+        _assertWalkRefused(string.concat(ROOTS, "/link"), "forge listed an entry outside the deployment record root's path", "roots/real/README.md");
     }
 
     /// @notice An entry forge reports it could not inspect is refused, never taken to have vanished. `readDir` on a
@@ -448,6 +469,10 @@ contract DeployRecordHarness is DeployVNextSettlement {
 
     function assertNoSymlinksBelow(string calldata root) external view {
         _assertNoSymlinksBelow(root);
+    }
+
+    function readDirOnce(string calldata path) external view returns (uint256) {
+        return vm.readDir(path, 1).length;
     }
 
     /// @dev The real writer, with an empty tuple. Its containment check is its first statement, so the tuple's

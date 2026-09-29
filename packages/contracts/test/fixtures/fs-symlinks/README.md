@@ -2,8 +2,9 @@
 
 `VNextDeployRecordTest` points `DeployVNextSettlement`'s record-root checks at these committed trees, so the
 checks are tested without any test creating a link. `foundry.toml` grants READ on each fixture root separately
-and on nothing wider. A grant on a directory above `roots/link` would authorize the probe path under it by its
-lexical form, and the symlinked-root case would pass unseen.
+and on nothing wider. On forge 1.7.1 the symlinked-root cases are caught because forge refuses to look below them;
+a grant on a directory above `roots/link` would let forge look, and those cases would pass unseen there. On forge
+1.8.0 (pinned in CI) they are caught by the resolved path forge reports. The suite runs on both.
 
 | Path | What it holds | Expected |
 |---|---|---|
