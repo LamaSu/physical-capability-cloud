@@ -3825,53 +3825,168 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     // ── R33, continued: replay while claims are OUTSTANDING, and across the other authorities ───────
-    // (astra review of #340.) The four tests above replay after every leg was paid. The window that matters most
+    // (astra reviews of #340.) The four tests above replay after every leg was paid. The window that matters most
     // for an executor is BEFORE that: the outcome is chosen (state 6 or 7) but a failed push left a claim open.
-    // A replay then must be refused without touching the open claims, the liability or any balance, and each
-    // claim must still discharge exactly once. The authorities other than evidence-release and deadline-reclaim
-    // (an appeal overturn, and Tier-0 buyer approval) get the same cross-outcome matrix.
+    // `_assertEveryExitRefused` is the check for every such unit. It tries EVERY exit and every state-advancing
+    // call, expects each one's exact state-gate error, and then checks that NOTHING moved:
+    //   - the unit's state, open-claim count and liability;
+    //   - all four liability buckets;
+    //   - the full record of every listed claim;
+    //   - the escrow's and every party's balance.
+    // Each open claim must then discharge exactly once. The authorities other than evidence-release and
+    // deadline-reclaim (appeal overturn, Tier-0 approval, and in VNextWave3StateMachine.t.sol the emergency and
+    // backup lanes) get the same check.
+
+    struct FenceSnapshot {
+        uint256 state;
+        uint256 claimCount;
+        uint256 liability;
+        uint256 totalLiability;
+        uint256 bondLiability;
+        uint256 compLiability;
+        uint256 burnLiability;
+        bytes32 claimRecords;
+        uint256 escrowBalance;
+        uint256 payerBalance;
+        uint256 operatorBalance;
+        uint256 payeeAndFeeBalances;
+    }
+
+    function _fenceSnapshot(VNextSettlementEscrow e, bytes32 id, bytes32[] memory claims)
+        internal
+        view
+        returns (FenceSnapshot memory s)
+    {
+        s.state = uint256(e.unitState(id));
+        s.claimCount = e.remainingClaimCountOf(id);
+        s.liability = e.liabilityOf(id);
+        s.totalLiability = e.totalLiability();
+        s.bondLiability = e.bondLiability();
+        s.compLiability = e.compLiability();
+        s.burnLiability = e.burnLiability();
+        bytes memory records;
+        for (uint256 k; k < claims.length; ++k) {
+            records = bytes.concat(records, abi.encode(e.claimOf(claims[k]))); // reverts ClaimNotFound if gone
+        }
+        s.claimRecords = keccak256(records);
+        s.escrowBalance = usdc.balanceOf(address(e));
+        s.payerBalance = usdc.balanceOf(payer);
+        s.operatorBalance = usdc.balanceOf(operator);
+        // Packed, so one field catches a wei moving to or between the two payees and the fee recipient.
+        s.payeeAndFeeBalances = uint256(keccak256(abi.encode(usdc.balanceOf(recip1), usdc.balanceOf(recip2), usdc.balanceOf(feeDest))));
+    }
+
+    function _assertSameSnapshot(FenceSnapshot memory x, FenceSnapshot memory y) internal pure {
+        assertEq(y.state, x.state, "a refused exit moved the state");
+        assertEq(y.claimCount, x.claimCount, "a refused exit touched the open claims");
+        assertEq(y.liability, x.liability, "a refused exit touched the unit's liability");
+        assertEq(y.totalLiability, x.totalLiability, "a refused exit touched totalLiability");
+        assertEq(y.bondLiability, x.bondLiability, "a refused exit touched bondLiability");
+        assertEq(y.compLiability, x.compLiability, "a refused exit touched compLiability");
+        assertEq(y.burnLiability, x.burnLiability, "a refused exit touched burnLiability");
+        assertEq(y.claimRecords, x.claimRecords, "a refused exit changed a claim record");
+        assertEq(y.escrowBalance, x.escrowBalance, "a refused exit moved escrow funds");
+        assertEq(y.payerBalance, x.payerBalance, "a refused exit paid the payer");
+        assertEq(y.operatorBalance, x.operatorBalance, "a refused exit paid the operator");
+        assertEq(y.payeeAndFeeBalances, x.payeeAndFeeBalances, "a refused exit paid a payee or the fee recipient");
+    }
+
+    /// @dev Every exit and every state-advancing call, on a unit whose outcome is already allocated (states 6-9).
+    ///      The emergency role's replay answers `NoEmergency` unless the unit has an emergency deadline, in which
+    ///      case the state gate answers `NotActive`, so the caller names the error it expects.
+    function _assertEveryExitRefused(VNextSettlementEscrow e, bytes32 id, bytes32[] memory claims, bytes4 emergencyReplay)
+        internal
+    {
+        assertGe(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED), "the outcome is not yet allocated");
+        FenceSnapshot memory before = _fenceSnapshot(e, id, claims);
+
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.finalize(id);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.reclaimAfterDeadline(id);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        vm.expectRevert(emergencyReplay);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.acceptAssertion(id);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.challenge(id);
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.invokeBackup(id);
+        VNextSettlementEscrow.BuyerApproval memory approval = _buyerApproval(e, id);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector); // the state gate fires before any other check
+        e.approveByBuyer(id, approval, "");
+
+        _assertSameSnapshot(before, _fenceSnapshot(e, id, claims));
+    }
+
+    /// @dev Each claim discharges once, and EACH is then refused a second time.
+    function _dischargeEachOnce(VNextSettlementEscrow e, bytes32[] memory claims) internal {
+        for (uint256 k; k < claims.length; ++k) {
+            e.dischargeClaim(claims[k]);
+        }
+        for (uint256 k; k < claims.length; ++k) {
+            vm.expectRevert(VNextSettlementEscrow.ClaimNotFound.selector);
+            e.dischargeClaim(claims[k]);
+        }
+    }
+
+    function _claimIds(VNextSettlementEscrow e, bytes32 id, uint256[] memory legs, ClaimClass[] memory classes)
+        internal
+        view
+        returns (bytes32[] memory out)
+    {
+        out = new bytes32[](legs.length);
+        for (uint256 k; k < legs.length; ++k) {
+            out[k] = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, legs[k], classes[k]);
+        }
+    }
+
+    /// @dev The two principal legs and the fee leg of `_oneUnitConfig(.., f > 0, ..)`.
+    function _releaseClaims(VNextSettlementEscrow e, bytes32 id) internal view returns (bytes32[] memory) {
+        uint256[] memory legs = new uint256[](3);
+        ClaimClass[] memory classes = new ClaimClass[](3);
+        (legs[0], classes[0]) = (0, ClaimClass.PRINCIPAL);
+        (legs[1], classes[1]) = (1, ClaimClass.PRINCIPAL);
+        (legs[2], classes[2]) = (VNextSettlementLib.FEE_LEG_INDEX, ClaimClass.FEE);
+        return _claimIds(e, id, legs, classes);
+    }
+
+    function _refundClaims(VNextSettlementEscrow e, bytes32 id, bool withBond) internal view returns (bytes32[] memory) {
+        uint256[] memory legs = new uint256[](withBond ? 2 : 1);
+        ClaimClass[] memory classes = new ClaimClass[](withBond ? 2 : 1);
+        (legs[0], classes[0]) = (VNextSettlementLib.REFUND_LEG_INDEX, ClaimClass.REFUND);
+        if (withBond) (legs[1], classes[1]) = (VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND);
+        return _claimIds(e, id, legs, classes);
+    }
 
     function test_Fence_ReleaseWithClaimsOutstanding_ReplaysRefused_ClaimsIntact() public {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
         VNextSettlementEscrow e = _fundedEscrow(JOB, c);
         bytes32 id = _unitId(e);
+        uint256 payerAfterFunding = usdc.balanceOf(payer);
         usdc.setTransferMode(MockToken.Mode.REVERT); // every push fails -> every job leg becomes a claim
         _releaseNow(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
         assertEq(e.remainingClaimCountOf(id), 3, "2 principal legs + the fee leg are outstanding");
         assertEq(e.liabilityOf(id), c[0].g, "an outstanding claim is still owed");
-        bytes32[3] memory claims = [
-            VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL),
-            VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 1, ClaimClass.PRINCIPAL),
-            VNextSettlementLib.computeClaimId(block.chainid, address(e), id, VNextSettlementLib.FEE_LEG_INDEX, ClaimClass.FEE)
-        ];
-        uint256 held = usdc.balanceOf(address(e));
-        uint256 payerBal = usdc.balanceOf(payer);
+        bytes32[] memory claims = _releaseClaims(e, id);
 
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.finalize(id); // the same outcome again
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector); // before the deadline
         vm.warp(c[0].reclaimAt);
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.reclaimAfterDeadline(id); // the opposite outcome
-
-        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED), "a refused replay moved the state");
-        assertEq(e.remainingClaimCountOf(id), 3, "a refused replay touched the open claims");
-        assertEq(e.liabilityOf(id), c[0].g, "a refused replay touched the liability");
-        assertEq(usdc.balanceOf(address(e)), held, "a refused replay moved escrow funds");
-        assertEq(usdc.balanceOf(payer), payerBal, "a refused replay refunded the payer");
-        for (uint256 k; k < 3; ++k) {
-            e.claimOf(claims[k]); // reverts ClaimNotFound if a replay deleted it
-        }
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector); // and at it
 
         usdc.setTransferMode(MockToken.Mode.NORMAL);
-        for (uint256 k; k < 3; ++k) {
-            e.dischargeClaim(claims[k]);
-        }
+        _dischargeEachOnce(e, claims);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
-        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), c[0].n, "recipients paid exactly n, once");
+        assertEq(usdc.balanceOf(recip1), c[0].payouts[0].amount, "recipient 1 paid exactly its leg, once");
+        assertEq(usdc.balanceOf(recip2), c[0].payouts[1].amount, "recipient 2 paid exactly its leg, once");
         assertEq(usdc.balanceOf(feeDest), c[0].f, "fee paid exactly f, once");
-        vm.expectRevert(VNextSettlementEscrow.ClaimNotFound.selector);
-        e.dischargeClaim(claims[0]); // a claim discharges exactly once
+        assertEq(usdc.balanceOf(payer), payerAfterFunding, "a released unit refunded the payer");
     }
 
     function test_Fence_RefundWithClaimOutstanding_ReplaysRefused_ClaimIntact() public {
@@ -3884,29 +3999,51 @@ contract VNextSettlementEscrowTest is Test {
         e.reclaimAfterDeadline(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED));
         assertEq(e.remainingClaimCountOf(id), 1, "the single refund leg is outstanding");
-        bytes32 refundClaim = VNextSettlementLib.computeClaimId(
-            block.chainid, address(e), id, VNextSettlementLib.REFUND_LEG_INDEX, ClaimClass.REFUND
-        );
-        uint256 held = usdc.balanceOf(address(e));
+        bytes32[] memory claims = _refundClaims(e, id, false);
 
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.reclaimAfterDeadline(id); // the same outcome again
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.finalize(id); // the opposite outcome
-
-        assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED));
-        assertEq(e.remainingClaimCountOf(id), 1);
-        assertEq(e.liabilityOf(id), c[0].g);
-        assertEq(usdc.balanceOf(address(e)), held);
-        e.claimOf(refundClaim);
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
 
         usdc.setTransferMode(MockToken.Mode.NORMAL);
-        e.dischargeClaim(refundClaim);
+        _dischargeEachOnce(e, claims);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
         assertEq(usdc.balanceOf(payer), payerAfterFunding + c[0].g, "the payer is refunded exactly G, once");
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "a refund paid a payee");
-        vm.expectRevert(VNextSettlementEscrow.ClaimNotFound.selector);
-        e.dischargeClaim(refundClaim);
+    }
+
+    /// @notice astra's round-2 gap on #340: the one combination the suite lacked. An appeal OVERTURN whose pushes FAIL
+    ///         leaves the unit in state 7, with the refund claim (and the returned bond) outstanding, WHILE the accepted
+    ///         assertion is still recorded. Past `reclaimAt`, every exit must be refused and nothing may move. In
+    ///         particular the evidence-release path must not use the retained assertion. Then each claim discharges
+    ///         exactly once.
+    function test_Fence_AppealOverturn_RefundOutstanding_AssertionRetained_PastDeadline() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
+        bytes32 id = _unitId(e);
+        uint256 payerAfterFunding = usdc.balanceOf(payer);
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        usdc.setTransferMode(MockToken.Mode.REVERT); // the refund push and the bond return both fail
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED), "the refund is decided, not paid");
+        assertEq(e.remainingClaimCountOf(id), 1, "the refund leg is the one open JOB claim");
+        assertEq(e.liabilityOf(id), c[0].g, "the refund is still owed");
+        (,, bytes32 accepted,,,,) = e.settlement(id);
+        assertTrue(accepted != bytes32(0), "the accepted assertion is still recorded");
+        bytes32[] memory claims = _refundClaims(e, id, true);
+        assertEq(e.claimOf(claims[1]).amount, bond, "the whole bond is owed back to the challenger");
+        assertEq(e.bondLiability(), bond, "the returned bond stays collateralized");
+
+        vm.warp(c[0].reclaimAt + VNextSettlementLib.APPEAL_WINDOW); // past the deadline and past every window
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+        assertEq(usdc.balanceOf(payer), payerAfterFunding + c[0].g, "refund and bond returned exactly once");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "an overturned unit paid a payee");
+        assertEq(e.bondLiability(), 0, "the bond left the bucket exactly once");
     }
 
     /// @dev An appeal OVERTURN refunds while the accepted assertion is still recorded on the unit. A later
@@ -3927,10 +4064,7 @@ contract VNextSettlementEscrowTest is Test {
         assertTrue(accepted != bytes32(0), "the accepted assertion is still recorded");
 
         vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW + VNextSettlementLib.CHALLENGE_WINDOW);
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.finalize(id);
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        _assertEveryExitRefused(e, id, new bytes32[](0), VNextSettlementEscrow.NoEmergency.selector);
 
         assertEq(usdc.balanceOf(payer), payerBefore + c[0].g + bond, "refund and bond returned exactly once");
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "an overturned unit paid a payee");
@@ -3947,8 +4081,7 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
 
         vm.warp(c[0].reclaimAt);
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.reclaimAfterDeadline(id);
+        _assertEveryExitRefused(e, id, new bytes32[](0), VNextSettlementEscrow.NoEmergency.selector);
 
         assertEq(usdc.balanceOf(payer), payerAfterFunding, "an approved unit was also refunded");
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), c[0].n, "approval did not pay exactly n");
@@ -3959,14 +4092,11 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(JOB, c);
         bytes32 id = _unitId(e);
         uint256 payerAfterFunding = usdc.balanceOf(payer);
-        VNextSettlementEscrow.BuyerApproval memory a = _buyerApproval(e, id);
         vm.warp(c[0].reclaimAt);
         e.reclaimAfterDeadline(id);
         assertEq(usdc.balanceOf(payer), payerAfterFunding + c[0].g, "the reclaim did not return exactly G");
 
-        vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector); // the state gate fires before any other check
-        e.approveByBuyer(id, a, "");
+        _assertEveryExitRefused(e, id, new bytes32[](0), VNextSettlementEscrow.NoEmergency.selector);
 
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), 0, "a refunded unit was also released");
     }

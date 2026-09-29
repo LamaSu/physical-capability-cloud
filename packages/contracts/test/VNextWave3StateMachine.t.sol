@@ -1530,4 +1530,129 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         );
         _assertBucketsCovered(e);
     }
+
+    // ══ R33 round 2 (astra confirm pass on #340): the fence on the EMERGENCY and BACKUP lanes ═══════════════
+    // The same check as the fence tests in VNextSettlementEscrow.t.sol (`_assertEveryExitRefused`), on each
+    // remaining way an outcome gets allocated: emergency UPHOLD and OVERTURN, emergency SILENCE, backup-lane
+    // release and backup timeout. Every push fails, so each lands in state 6 or 7 with claims open. Past
+    // `reclaimAt`, every exit and every state-advancing call must be refused with its exact error, and nothing
+    // may move. Then each claim discharges exactly once. The emergency role's replay reaches the state gate
+    // (`NotActive`) on a unit with an emergency deadline, and answers `NoEmergency` on the backup lane.
+
+    function test_Fence_EmergencyUphold_ReleaseOutstanding_EveryExitRefused() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        attester.disableAtNow();
+        _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        bytes32[] memory claims = _releaseClaims(e, id);
+
+        vm.warp(e.reclaimAtOf(id));
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NotActive.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), G - F, "the payees were paid exactly n, once");
+        assertEq(usdc.balanceOf(feeDest), F, "the fee was paid exactly f, once");
+        _assertBucketsCovered(e);
+    }
+
+    function test_Fence_EmergencyOverturn_RefundOutstanding_EveryExitRefused() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        attester.disableAtNow();
+        uint256 payerBefore = usdc.balanceOf(payer);
+        _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED));
+        bytes32[] memory claims = _refundClaims(e, id, false);
+
+        vm.warp(e.reclaimAtOf(id));
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NotActive.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+        assertEq(usdc.balanceOf(payer), payerBefore + G, "the payer was refunded exactly G, once");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "a refund paid a payee");
+        _assertBucketsCovered(e);
+    }
+
+    function test_Fence_EmergencySilence_RefundOutstanding_EveryExitRefused() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 disabledAt = block.timestamp;
+        attester.disableAtNow();
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.finalize(id); // the emergency-silence refund (reason 3)
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED));
+        bytes32[] memory claims = _refundClaims(e, id, false);
+
+        vm.warp(e.reclaimAtOf(id));
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NotActive.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+        assertEq(usdc.balanceOf(payer), payerBefore + G, "the payer was refunded exactly G, once");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "a refund paid a payee");
+        _assertBucketsCovered(e);
+    }
+
+    function test_Fence_BackupRelease_ClaimsOutstanding_EveryExitRefused() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _commit(e, id, PKG);
+        uint256 cutoff = e.reclaimAtOf(id) - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW;
+        vm.warp(cutoff - VNextSettlementLib.BACKUP_WINDOW);
+        vm.prank(operator);
+        e.invokeBackup(id);
+        _assertOnEscalation(e, id);
+        e.acceptAssertion(id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.finalize(id); // the backup lane's unchallenged release
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        bytes32[] memory claims = _releaseClaims(e, id);
+
+        vm.warp(e.reclaimAtOf(id));
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), G - F, "the payees were paid exactly n, once");
+        assertEq(usdc.balanceOf(feeDest), F, "the fee was paid exactly f, once");
+        _assertBucketsCovered(e);
+    }
+
+    function test_Fence_BackupTimeout_RefundOutstanding_EveryExitRefused() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _commit(e, id, PKG);
+        uint256 cutoff = e.reclaimAtOf(id) - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW;
+        vm.warp(cutoff - VNextSettlementLib.BACKUP_WINDOW);
+        vm.prank(operator);
+        e.invokeBackup(id);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.warp(cutoff);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.finalize(id); // the backup lane produced no verdict: refund (reason 2)
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED));
+        bytes32[] memory claims = _refundClaims(e, id, false);
+
+        vm.warp(e.reclaimAtOf(id));
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+        assertEq(usdc.balanceOf(payer), payerBefore + G, "the payer was refunded exactly G, once");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "a refund paid a payee");
+        _assertBucketsCovered(e);
+    }
 }
