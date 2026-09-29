@@ -263,7 +263,13 @@ export class CdpSpendPermissionService {
     // createSpendPermission only SUBMITS a user operation. Wait for it: a failed or dropped
     // one created nothing. Then read the on-chain permission hash back by salt.
     const done = await this.confirm(params.account, userOp);
-    if (!done.ok && done.failed) throw new CdpUserOperationFailedError("issue", done.userOpHash ?? "unknown");
+    if (!done.ok) {
+      if (done.failed) throw new CdpUserOperationFailedError("issue", done.userOpHash ?? "unknown");
+      // Unknown (a timeout, or no user operation hash to wait for). The listing is NOT
+      // confirmation: it can show a permission whose user operation never completed.
+      // So issue succeeds only on a COMPLETED user operation (astra, pack 58).
+      throw new CdpSpendPermissionUnconfirmedError(params.account, salt.toString());
+    }
     const permissionId = await this.readBackPermissionHash(params.account, salt);
     if (!permissionId) {
       throw new CdpSpendPermissionUnconfirmedError(params.account, salt.toString());

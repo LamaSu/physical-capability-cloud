@@ -143,13 +143,22 @@ interface PaymentStats {
   }>;
 }
 
-const stats: PaymentStats = {
-  totalRequests: 0,
-  paidRequests: 0,
-  gatedRequests: 0,
-  totalRevenue: "0",
-  recentPayments: [],
-};
+/**
+ * Fresh counters for ONE app's payment gate. They are created in paymentGate(app),
+ * so every hook and the stats route of that app close over its own counters. A
+ * module-global object used to let one app's traffic appear in every other app's
+ * /api/x402/stats, even after the gate's descriptor became per app (round 8,
+ * FC-3; astra, pack 58, residual).
+ */
+function newPaymentStats(): PaymentStats {
+  return {
+    totalRequests: 0,
+    paidRequests: 0,
+    gatedRequests: 0,
+    totalRevenue: "0",
+    recentPayments: [],
+  };
+}
 
 /**
  * What the payment gate actually runs, FROZEN when it initializes (WP-A round 5,
@@ -185,6 +194,7 @@ export function getPaymentGateState(instance: { server: object }): PaymentGateSt
 
 export async function paymentGate(app: FastifyInstance) {
   let gateState: PaymentGateState = DISABLED_STATE; // each initialization decides afresh
+  const stats = newPaymentStats(); // this app's counters only
   // Payment gate is controlled by env var — disabled by default for dev
   // Support both old (PCC_X402_ENABLED) and new (PCC_PAYMENT_ENABLED) names
   const enabled =

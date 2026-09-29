@@ -1,4 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
+import { decodedRequestPath } from "./middleware/route-path.js";
 import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
@@ -987,7 +988,11 @@ export async function createGateway(port = 3200) {
     const resolvedDashboardRoot = resolvePath(dashboardPath);
 
     app.setNotFoundHandler(async (req, reply) => {
-      if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
+      // Classified by the SAME decoded path apiGate authorized (route-path.ts), so an
+      // encoded /api/ or /sse/ prefix (/%61pi/...) is a bare 404 too, never the SPA
+      // (astra, pack 59, AZ-6).
+      const classifiedPath = decodedRequestPath(req.url);
+      if (classifiedPath.startsWith("/api/") || classifiedPath.startsWith("/sse/")) {
         return reply.status(404).send({ error: "not_found" });
       }
       // Check if a real static file exists (strip query string)

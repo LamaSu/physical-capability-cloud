@@ -146,12 +146,14 @@ describe("GET /api/admin/keys/wildcard-audit — gated by the admin secret (A8)"
     expect(res.statusCode).toBe(503);
   });
 
+  // N2 has no environment exception (astra, pack 53 verdict): these used to assert
+  // that an unset key left the endpoint OPEN in test and development.
   it.each([["test"], ["development"]])(
-    "unset PCC_ADMIN_KEY is open only in NODE_ENV=%s",
+    "[neg] unset PCC_ADMIN_KEY fails CLOSED in NODE_ENV=%s too (503)",
     async (nodeEnv) => {
       delete process.env.PCC_ADMIN_KEY;
       process.env.NODE_ENV = nodeEnv;
-      expect((await audit()).statusCode).toBe(200);
+      expect((await audit()).statusCode).toBe(503);
     },
   );
 
