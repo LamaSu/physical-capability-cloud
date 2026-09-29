@@ -10,16 +10,20 @@ board row N4a; the real authorization fix is N4b). The fixture tests start
 local HTTP servers that stand in for the gateway, the robot, a "public" host
 and a proxy, run the real scripts as subprocesses, and assert which of them
 were contacted: nothing may reach the public host or the proxy, and the robot
-may receive no command.
+may receive no command. The boundary tests call the scripts' own http(), tool
+dispatchers and uploads directly, because the guard has to hold at the lowest
+HTTP boundary, not only in the loops.
 """
 
 import http.server
 import importlib
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -58,6 +62,9 @@ BYPASS_BASES = [
     "http://ot2.local",
     "http://gateway.localhost:8080",
     "http://localhost.:8080",
+    "http://[fe80::1%25eth0]:8080",
+    "http://[fe80::1%eth0]:8080",
+    "http://127.0.0.%31:3000",
     "http://user@127.0.0.1:3000",
     "http://127.0.0.1:3000/?next=https://capability.network",
     "ftp://127.0.0.1",
@@ -176,10 +183,13 @@ class TransportTests(unittest.TestCase):
 
 
 def run_script(args, env_overrides, timeout=30):
+    # stdin is closed, so an interactive mode that should have been refused cannot
+    # read a prompt and call out.
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONDONTWRITEBYTECODE": "1"}
     env.update(env_overrides)
     return subprocess.run(
-        [sys.executable, *args], cwd=HERE, env=env, capture_output=True, text=True, timeout=timeout
+        [sys.executable, *args], cwd=HERE, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=timeout,
     )
 
 
@@ -240,15 +250,15 @@ class AgentDaemonEntryPointTests(unittest.TestCase):
 class Fixture:
     """A local HTTP server that records every request and answers from `respond`."""
 
-    def __init__(self, respond):
+    def __init__(self, respond, tls=None):
         self.requests = []
+        self.bodies = []
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def _serve(self):
                 length = int(self.headers.get("Content-Length") or 0)
-                if length:
-                    self.rfile.read(length)
+                fixture.bodies.append(self.rfile.read(length) if length else b"")
                 fixture.requests.append((self.command, self.path, dict(self.headers)))
                 status, headers, payload = respond(self.command, self.path)
                 data = json.dumps(payload).encode("utf-8")
@@ -271,7 +281,11 @@ class Fixture:
                 pass
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        scheme = "http"
+        if tls is not None:
+            self.server.socket = tls.wrap_socket(self.server.socket, server_side=True)
+            scheme = "https"
+        self.url = f"{scheme}://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def paths(self):
@@ -323,6 +337,7 @@ def start_script(args, env_overrides):
         [sys.executable, *args],
         cwd=HERE,
         env=env,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -350,7 +365,9 @@ def stop(proc):
 PROXY_ENV_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 
 
-class FixtureTests(unittest.TestCase):
+class FixtureCase(unittest.TestCase):
+    """Base for tests that run fixture servers. It holds no tests of its own."""
+
     def setUp(self):
         self.fixtures = []
 
@@ -358,8 +375,8 @@ class FixtureTests(unittest.TestCase):
         for fixture in self.fixtures:
             fixture.close()
 
-    def fixture(self, respond):
-        f = Fixture(respond)
+    def fixture(self, respond, tls=None):
+        f = Fixture(respond, tls=tls)
         self.fixtures.append(f)
         return f
 
@@ -373,6 +390,8 @@ class FixtureTests(unittest.TestCase):
         self.assertTrue(polled, f"never polled {marker}: {err[-2000:]}")
         return out, err
 
+
+class FixtureTests(FixtureCase):
     def test_executor_does_not_follow_a_redirect_off_the_local_gateway(self):
         public = self.fixture(hostile_executor_gateway)
         gateway = self.fixture(redirect_to(public))
@@ -401,6 +420,7 @@ class FixtureTests(unittest.TestCase):
         env = {"PCC_API_KEY": "k", "ANTHROPIC_API_KEY": "k", "PCC_BASE": gateway.url, "OT2_BASE": robot.url}
         self.run_until_polled(["ot2-agent.py", "daemon", "--unsafe-local"], env, gateway, "/approvals")
         self.assertEqual(public.requests, [], "a redirect was followed to another host")
+        self.assertEqual([r[:2] for r in robot.requests if r[0] != "GET"], [], "the robot got a command")
 
     def test_agent_daemon_ignores_proxy_environment_variables(self):
         proxy = self.fixture(silent_host)
@@ -411,6 +431,7 @@ class FixtureTests(unittest.TestCase):
         env.update({name: proxy.url for name in PROXY_ENV_NAMES})
         self.run_until_polled(["ot2-agent.py", "daemon", "--unsafe-local"], env, gateway, "/approvals")
         self.assertEqual(proxy.requests, [], "a request went through the proxy")
+        self.assertEqual([r[:2] for r in robot.requests if r[0] != "GET"], [], "the robot got a command")
 
     def test_bypass_spellings_are_refused_before_the_robot_is_touched(self):
         robot = self.fixture(robot_responder)
@@ -426,13 +447,21 @@ class FixtureTests(unittest.TestCase):
         gateway = self.fixture(idle_gateway)
         robot = self.fixture(robot_responder)
         env = {"PCC_API_KEY": "k", "ANTHROPIC_API_KEY": "k", "PCC_BASE": gateway.url, "OT2_BASE": robot.url}
+        marker = os.path.join(tempfile.mkdtemp(), "shell-ran")
+        shell = f"execute_tool('ot2_shell', {{'command': 'touch {marker}'}})"
+        upload = "execute_tool('ot2_protocol_upload', {'filename': 'p.py', 'content': 'x'})"
+        common = (f"http('GET', {gateway.url + '/x'!r})", f"http('GET', {robot.url + '/health'!r})", shell, upload)
         calls = {
-            "ot2-executor": ("run()", "pcc('GET', '/api/health')", "ot2('GET', '/health')"),
-            "ot2-agent": ("daemon_mode()", "pcc('GET', '/api/health')", "ot2('GET', '/health')"),
+            "ot2-executor": ("run()", "pcc('GET', '/api/health')", "ot2('GET', '/health')") + common,
+            "ot2-agent": ("daemon_mode()", "interactive_mode()", "pcc('GET', '/api/health')",
+                          "ot2('GET', '/health')", "claude([], [], 'x')") + common,
         }
         for module, snippets in calls.items():
             for snippet in snippets:
-                code = f"import importlib; m = importlib.import_module({module!r}); m.{snippet}"
+                # A dead local port stands in for the Claude API, so a broken guard fails
+                # here without calling out.
+                code = (f"import importlib; m = importlib.import_module({module!r}); "
+                        f"m.ANTHROPIC_API = 'http://127.0.0.1:9'; m.{snippet}")
                 try:
                     r = run_script(["-c", code], env, timeout=10)
                 except subprocess.TimeoutExpired:
@@ -441,13 +470,178 @@ class FixtureTests(unittest.TestCase):
                 self.assertIn("REFUSED", r.stderr)
         self.assertEqual(gateway.requests, [])
         self.assertEqual(robot.requests, [])
+        self.assertFalse(os.path.exists(marker), "the shell tool ran without a start")
 
     def test_agent_self_update_is_disabled(self):
         source = self.fixture(silent_host)
-        result = json.loads(agent.execute_tool("ot2_self_update", {"url": source.url + "/agent.py"}))
+        robot = self.fixture(robot_responder)
+        code = (
+            "import importlib, json; m = importlib.import_module('ot2-agent'); "
+            f"assert m.start_interactive(['--unsafe-local'], {robot.url!r}, 't') is None; "
+            f"print(m.execute_tool('ot2_self_update', {{'url': {source.url + '/agent.py'!r}}}))"
+        )
+        r = run_script(["-c", code], {})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        result = json.loads(r.stdout)
         self.assertFalse(result["updated"])
         self.assertIn("disabled", result["error"])
         self.assertEqual(source.requests, [])
+
+
+def started(module, gateway, robot, snippet):
+    """Python for a subprocess: import `module`, accept a relay start, then run `snippet`."""
+    return (
+        f"import importlib, json; m = importlib.import_module({module!r}); "
+        f"assert m.start_guard(['--unsafe-local'], {gateway.url!r}, 't', ot2_base={robot.url!r}) is None; "
+        + snippet
+    )
+
+
+class BoundaryTests(FixtureCase):
+    """Round 2 (astra): the checks must sit at the lowest HTTP boundary and at tool execution."""
+
+    def test_an_accepted_start_still_refuses_every_destination_outside_its_bases(self):
+        gateway = self.fixture(idle_gateway)
+        robot = self.fixture(robot_responder)
+        other = self.fixture(silent_host)
+        port = gateway.url.rsplit(":", 1)[1]
+        for module in ("ot2-executor", "ot2-agent"):
+            ok = run_script(["-c", started(module, gateway, robot, f"print(m.http('GET', {gateway.url + '/ok'!r})[0])")], {})
+            self.assertEqual((ok.returncode, ok.stdout.strip()), (0, "200"), ok.stderr)
+            for url in (
+                other.url + "/x",
+                gateway.url + "/api/../x",
+                gateway.url + "/api/%2e%2e/x",
+                f"http://127.0.0.1:{port}.evil/x",
+                f"http://user@127.0.0.1:{port}/x",
+                f"http://localhost:{port}/x",
+                "https://api.anthropic.com/v1/messages",
+            ):
+                r = run_script(["-c", started(module, gateway, robot, f"m.http('GET', {url!r})")], {})
+                self.assertEqual(r.returncode, 2, f"{module} {url}: {r.stderr[-300:]}")
+                self.assertIn("REFUSED", r.stderr)
+        self.assertEqual(other.requests, [])
+        self.assertEqual(gateway.paths(), ["/ok", "/ok"])
+
+    def test_every_agent_mode_needs_the_flag(self):
+        robot = self.fixture(robot_responder)
+        for mode in ("interactive", "health"):
+            r = run_script(["ot2-agent.py", mode], {"OT2_BASE": robot.url})
+            self.assertEqual(r.returncode, 2, f"{mode}: {r.stderr}")
+            self.assertIn("REFUSED", r.stderr)
+        self.assertEqual(robot.requests, [])
+        r = run_script(["ot2-agent.py", "health", "--unsafe-local"], {"OT2_BASE": robot.url})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["name"], "fixture-ot2")
+        self.assertEqual([r[:2] for r in robot.requests], [("GET", "/health")])
+        self.assertEqual(run_script(["ot2-agent.py", "bogus"], {}).returncode, 1)
+
+    def test_no_script_keeps_a_second_transport(self):
+        for name in ("ot2-executor.py", "ot2-agent.py", "ot2_local_guard.py"):
+            with open(os.path.join(HERE, name), encoding="utf-8") as f:
+                source = f.read()
+            for word in ("curl", "wget", "urlopen", "http.client", "import socket", "import requests"):
+                self.assertFalse(word in source, f"{name} still has a second transport: {word!r}")
+
+
+class UploadTests(FixtureCase):
+    """Protocol uploads go through the guard's transport as multipart, never a subprocess."""
+
+    def upload(self, module, gateway, robot, filename="dye.py", content="print('dye')", env=None):
+        snippet = f"print(m.execute_tool('ot2_protocol_upload', {{'filename': {filename!r}, 'content': {content!r}}}))"
+        return run_script(["-c", started(module, gateway, robot, snippet)], env or {})
+
+    def test_upload_is_multipart_to_the_robot_only(self):
+        gateway = self.fixture(idle_gateway)
+        robot = self.fixture(robot_responder)
+        for module in ("ot2-executor", "ot2-agent"):
+            r = self.upload(module, gateway, robot)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        posts = [(i, req) for i, req in enumerate(robot.requests) if req[0] == "POST"]
+        self.assertEqual([req[1] for _, req in posts], ["/protocols", "/protocols"])
+        for i, req in posts:
+            headers = {k.lower(): v for k, v in req[2].items()}
+            self.assertTrue(headers["content-type"].startswith("multipart/form-data; boundary="))
+            self.assertEqual(headers["opentrons-version"], "2")
+            self.assertIn(b'name="files"; filename="dye.py"', robot.bodies[i])
+            self.assertIn(b"print('dye')", robot.bodies[i])
+        self.assertEqual(gateway.requests, [])
+
+    def test_unsafe_filenames_are_refused_before_anything_is_sent(self):
+        gateway = self.fixture(idle_gateway)
+        robot = self.fixture(robot_responder)
+        for name in ("../../etc/x.py", "a b.py", "", ".hidden.py", "x\ny.py"):
+            r = self.upload("ot2-executor", gateway, robot, filename=name)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("refused filename", r.stdout)
+        self.assertEqual(robot.requests, [])
+
+    def test_an_upload_ignores_redirects_proxies_and_curl_config(self):
+        public = self.fixture(silent_host)
+        proxy = self.fixture(silent_host)
+        gateway = self.fixture(idle_gateway)
+        robot = self.fixture(redirect_to(public))
+        env = {name: proxy.url for name in PROXY_ENV_NAMES}
+        env.update({"NO_PROXY": "", "no_proxy": ""})
+        # A hostile curl config (round 2 uploaded with curl): follow redirects, no TLS checks.
+        home = tempfile.mkdtemp()
+        with open(os.path.join(home, ".curlrc"), "w") as f:
+            f.write("location\ninsecure\n")
+        env.update({"HOME": home, "CURL_HOME": home, "XDG_CONFIG_HOME": home})
+        for module in ("ot2-executor", "ot2-agent"):
+            r = self.upload(module, gateway, robot, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([req[1] for req in robot.requests], ["/protocols", "/protocols"])
+        self.assertEqual(public.requests, [], "an upload redirect was followed")
+        self.assertEqual(proxy.requests, [], "an upload went through the proxy")
+
+    def test_the_executor_does_not_follow_a_robot_redirect(self):
+        public = self.fixture(robot_responder)
+        gateway = self.fixture(idle_gateway)
+        robot = self.fixture(redirect_to(public))
+        r = run_script(["ot2-executor.py", "--unsafe-local"], {"PCC_API_KEY": "k", "PCC_BASE": gateway.url, "OT2_BASE": robot.url})
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("Cannot reach OT-2", r.stdout)
+        self.assertEqual(public.requests, [])
+        self.assertEqual(gateway.requests, [])
+
+
+@unittest.skipUnless(shutil.which("openssl"), "needs the openssl CLI to make a test certificate")
+class TlsTests(FixtureCase):
+    """A real handshake: an untrusted certificate fails before any HTTP request; PCC_CA_FILE trusts it."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp()
+        self.cert = os.path.join(self.tmp, "cert.pem")
+        key = os.path.join(self.tmp, "key.pem")
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1",
+             "-addext", "subjectAltName=IP:127.0.0.1", "-keyout", key, "-out", self.cert],
+            check=True, capture_output=True,
+        )
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.cert, key)
+        self.gateway = self.fixture(idle_gateway, tls=context)
+        self.robot = self.fixture(robot_responder)
+
+    def fetch(self, env):
+        snippet = f"print(json.dumps(m.http('GET', {self.gateway.url + '/x'!r})))"
+        return run_script(["-c", started("ot2-executor", self.gateway, self.robot, snippet)], env)
+
+    def test_an_untrusted_certificate_fails_the_handshake(self):
+        r = self.fetch({})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        status, body = json.loads(r.stdout)
+        self.assertEqual(status, 0)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", json.dumps(body))
+        self.assertEqual(self.gateway.requests, [], "an HTTP request crossed a failed handshake")
+
+    def test_pcc_ca_file_trusts_a_local_gateway_certificate(self):
+        r = self.fetch({"PCC_CA_FILE": self.cert})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)[0], 200)
+        self.assertEqual(self.gateway.paths(), ["/x"])
 
 
 if __name__ == "__main__":
