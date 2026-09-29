@@ -7,13 +7,14 @@ import { useJobExecution } from "../api/hooks/use-pcc-data.js";
 import { ApiError } from "../api/gateway.js";
 import {
   PHASE_VIEW,
-  PAYOUT_VIEW,
   SOURCE_LABEL,
   NOTICE_TEXT,
   settlementLinkText,
   payoutBasisText,
+  payoutBadge,
   recordStatusBadge,
   freshness,
+  jobPageState,
   evidenceSummaryText,
   jobTitle,
 } from "../lib/job-execution-view.js";
@@ -23,9 +24,11 @@ import {
  *
  * Every value on this page comes from that read model. There are no fixtures and no
  * fallbacks. A job that cannot be read says so, and a read that is too old, or whose
- * refresh failed, is visibly marked stale. The four panels are independent: work
- * reported complete is not payment, and evidence received is not verification. Only the
- * payout badge can be green; the recorded escrow and milestone statuses are neutral text.
+ * refresh failed, is visibly marked stale, and a stale payout is never colored. A 401, 403
+ * or 404 on the latest read replaces the page, cached data included (jobPageState). The
+ * four panels are independent: work reported complete is not payment, and evidence received
+ * is not verification. Only the payout badge can be green; the recorded escrow and milestone
+ * statuses are neutral text.
  */
 export function JobDetailPage() {
   const { jobId } = useParams();
@@ -46,27 +49,42 @@ export function JobDetailPage() {
     </button>
   );
 
+  // Re-evaluate the read's age every few seconds, so a read that stops refreshing goes stale
+  // on screen even when nothing else re-renders the page.
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+
   if (isLoading) return <LoadingShell rows={6} />;
 
-  if (!data) {
-    const status = error instanceof ApiError ? error.status : null;
-    const notFound = status === 404;
-    const signedOut = status === 401;
+  const state = jobPageState(!!data, error instanceof ApiError ? error.status : null, !!error);
+  if (state.show !== "data" || !data) {
+    const refusal = state.show === "refusal" ? state.kind : null;
     return (
       <GlassPanel padding="lg">
         {back}
         <div role="alert" className="text-center py-8">
           <div className="text-white/70">
-            {notFound ? "Job not found" : signedOut ? "Sign in to see this job" : "Job details are unavailable right now"}
+            {refusal === "not_found"
+              ? "Job not found"
+              : refusal === "signed_out"
+                ? "Sign in to see this job"
+                : refusal === "unverified"
+                  ? "Sign in with a wallet to see this job"
+                  : "Job details are unavailable right now"}
           </div>
           <p className="text-xs text-white/40 mt-2">
-            {notFound
+            {refusal === "not_found"
               ? `No job with id ${jobId} exists, or it is not visible to you.`
-              : signedOut
+              : refusal === "signed_out"
                 ? "Only the job's buyer, its operator, or an admin can read it."
-                : "The gateway could not be read. Nothing is shown until it can be."}
+                : refusal === "unverified"
+                  ? "A job's records are shown only to a proven identity: sign in with a wallet, or use an API key made from a wallet sign-in."
+                  : "The gateway could not be read. Nothing is shown until it can be."}
           </p>
-          {!notFound && !signedOut && (
+          {refusal === null && (
             <button onClick={() => refetch()} className="mt-3 text-xs text-teal-300/80 hover:text-teal-300">
               Try again
             </button>
@@ -76,6 +94,7 @@ export function JobDetailPage() {
     );
   }
 
+  const fresh = freshness(data.asOf, now, data.execution.terminal, state.refreshFailed);
   const phase = PHASE_VIEW[data.execution.phase];
 
   return (
@@ -95,7 +114,7 @@ export function JobDetailPage() {
         <StatusChip status={phase.pulse} label={phase.label} />
       </div>
 
-      <Freshness asOf={data.asOf} terminal={data.execution.terminal} refreshFailed={!!error} refreshing={isFetching} />
+      <Freshness asOf={data.asOf} reason={fresh.reason} refreshing={isFetching} />
 
       {data.notices.length > 0 && (
         <GlassPanel padding="md">
@@ -109,7 +128,7 @@ export function JobDetailPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <ExecutionPanel data={data} />
-        <SettlementPanel data={data} />
+        <SettlementPanel data={data} stale={fresh.stale} />
         <EvidencePanel data={data} />
         <VerificationPanel data={data} />
       </div>
@@ -125,29 +144,19 @@ function when(iso: string | null): string {
 
 function Freshness({
   asOf,
-  terminal,
-  refreshFailed,
+  reason,
   refreshing,
 }: {
   asOf: string;
-  terminal: boolean;
-  refreshFailed: boolean;
+  reason: "refresh_failed" | "too_old" | null;
   refreshing: boolean;
 }) {
-  // Re-evaluate the age every few seconds, so a read that stops refreshing goes stale on
-  // screen even when nothing else re-renders the page.
-  const [now, setNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 5_000);
-    return () => clearInterval(t);
-  }, []);
-  const f = freshness(asOf, now, terminal, refreshFailed);
   return (
     <div className="text-[11px] text-white/35">
       Read {new Date(asOf).toLocaleString()}
-      {f.reason === "refresh_failed" ? (
+      {reason === "refresh_failed" ? (
         <span className="text-gold-300"> · The latest refresh failed; this is the last successful read.</span>
-      ) : f.reason === "too_old" ? (
+      ) : reason === "too_old" ? (
         <span className="text-gold-300"> · This read is out of date; it has not been refreshed recently.</span>
       ) : refreshing ? (
         <span> · Refreshing…</span>
@@ -185,9 +194,9 @@ function ExecutionPanel({ data }: { data: JobExecutionDTO }) {
   );
 }
 
-function SettlementPanel({ data }: { data: JobExecutionDTO }) {
+function SettlementPanel({ data, stale }: { data: JobExecutionDTO; stale: boolean }) {
   const s = data.settlement;
-  const payout = PAYOUT_VIEW[s.payout];
+  const payout = payoutBadge(s.payout, stale);
   const linkText = settlementLinkText(s);
   const basis = payoutBasisText(s);
   const r = s.record;
