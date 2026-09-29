@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { apiGate } from "../middleware/api-gate.js";
 import { batchRoutes, _clearSharedBatchesForTests } from "../routes/batches.js";
 import { batchTracker } from "../services.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
-import { closeStore, initStore } from "../db.js";
+import { closeStore, getRepos, getStore, initStore } from "../db.js";
+import { schema } from "@pcc/store";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Board row N49: a shared-batch slot claim belongs to the authenticated caller.
@@ -18,9 +19,34 @@ const PREV_DB = process.env.PCC_DB_PATH;
 let app: FastifyInstance;
 let alice: string;
 let bob: string;
+let carol: string;
 
-const ALICE = "alice@example.com";
-const BOB = "bob@example.com";
+const ALICE = "alice@example.com"; // operates kernel-lab
+const BOB = "bob@example.com"; // operates kernel-other
+const CAROL = "carol@example.com"; // operates nothing
+
+/** Kernels, capabilities and jobs the legacy batch routes check against (round 3). */
+function seedLab() {
+  const { db } = getStore();
+  const now = new Date().toISOString();
+  for (const [id, operator] of [["kernel-lab", ALICE], ["kernel-other", BOB]] as const) {
+    db.insert(schema.shopKernels).values({
+      id, name: id, operatorAddress: operator, location: { lat: 0, lng: 0 }, physicalAddress: "1 Lab St",
+      maxAssuranceTier: 2, publicKey: "pk", reputation: 0, totalJobsCompleted: 0, status: "online",
+      registeredAt: now, lastHeartbeat: now, version: "1",
+    } as any).run();
+    getRepos().capabilities.insert({
+      id: `cap-${id}`, kernelId: id, type: "liquid-handling", name: id, description: "", location: { lat: 0, lng: 0 },
+      pricing: { currency: "USDC", baseCost: "1", minimum: "1" }, materials: [], assuranceTiers: [0], availability: {},
+    } as any);
+  }
+  for (const [jobId, kernelId] of [["job-a", "kernel-lab"], ["job-b", "kernel-lab"], ["job-x", "kernel-other"]]) {
+    db.insert(schema.jobs).values({
+      id: jobId, stepId: "step-1", cwmId: `cwm-${jobId}`, capabilityId: `cap-${kernelId}`, kernelId,
+      status: "queued", assignedDevices: [], progress: 0,
+    } as any).run();
+  }
+}
 
 beforeAll(async () => {
   process.env.PCC_DB_PATH = ":memory:";
@@ -32,6 +58,8 @@ beforeAll(async () => {
   await app.ready();
   alice = provisionApiKey({ operatorId: ALICE }).rawKey;
   bob = provisionApiKey({ operatorId: BOB }).rawKey;
+  carol = provisionApiKey({ operatorId: CAROL }).rawKey;
+  seedLab();
 });
 
 afterAll(async () => {
@@ -131,13 +159,14 @@ describe("N49: the claimant is the authenticated caller", () => {
 });
 
 describe("N49: only the claimant can release a claim", () => {
-  it("returns 403 to another caller and 200 to the claimant", async () => {
+  it("answers another caller exactly as for a missing claim (404), and 200 to the claimant", async () => {
     const id = await createBatch();
     const claimId = (await claim(id, alice, { slotCount: 1 })).json().claim.id;
 
     const byBob = await app.inject({ method: "DELETE", url: `/api/batches/shared/${id}/claim/${claimId}`, headers: auth(bob) });
-    expect(byBob.statusCode).toBe(403);
-    expect(byBob.json().error).toBe("not_claimant");
+    const missing = await app.inject({ method: "DELETE", url: `/api/batches/shared/${id}/claim/claim-none`, headers: auth(bob) });
+    expect(byBob.statusCode).toBe(404);
+    expect(byBob.json()).toEqual(missing.json()); // no existence oracle
     expect(await claimCount(id)).toBe(1);
 
     const anon = await app.inject({ method: "DELETE", url: `/api/batches/shared/${id}/claim/${claimId}` });
@@ -249,6 +278,47 @@ describe("N49 round 2: creating a shared batch", () => {
     expect(asNumber.json().batch.pricePerSlot).toBe("1.5");
   });
 
+  it("round 3: refuses explicit nulls, whitespace-only text, and a number price that would need rounding", async () => {
+    for (const bad of [
+      { minSlotsToRun: null }, { currency: null }, { kernelId: "   " }, { capabilityType: " \t" },
+      { pricePerSlot: 1.1234567 }, { pricePerSlot: 0.0000001 }, { pricePerSlot: 0.1 + 0.2 },
+    ]) {
+      expect((await createWith({ ...GOOD, ...bad })).statusCode, JSON.stringify(bad)).toBe(400);
+    }
+    expect((await createWith({ ...GOOD, pricePerSlot: "0010.500000" })).json().batch.pricePerSlot).toBe("10.5");
+    expect((await createWith({ ...GOOD, pricePerSlot: 2.675 })).json().batch.pricePerSlot).toBe("2.675");
+  });
+
+  it("round 3: closesAt is a real UTC calendar time, in the future and at most 30 days away", async () => {
+    const soon = new Date(Date.now() + 5 * 86_400_000);
+    const day = soon.toISOString().slice(0, 10);
+    for (const closesAt of [
+      "0", "Oct 1 2026", day, `${day}T24:30:00Z`, `${day}T12:60:00Z`, `${day}T12:00:00+02:00`,
+      new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() + 31 * 86_400_000).toISOString(), 1234, null,
+    ]) {
+      expect((await createWith({ ...GOOD, closesAt })).statusCode, String(closesAt)).toBe(400);
+    }
+    expect((await createWith({ ...GOOD, closesAt: `${day}T12:00:00Z` })).statusCode).toBe(200);
+  });
+
+  it("round 3: a batch past its closesAt takes no claims and leaves the open list", async () => {
+    const id = (await createWith({ ...GOOD, closesAt: new Date(Date.now() + 1200).toISOString() })).json().batch.id;
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+    const late = await claim(id, bob, { slotCount: 1 });
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toBe("batch_closed");
+    const open = (await app.inject({ method: "GET", url: "/api/batches/shared/open", headers: auth(bob) })).json();
+    expect(open.batches.map((b: { id: string }) => b.id)).not.toContain(id);
+  });
+
+  it("round 3: one creator holds at most 20 open batches", async () => {
+    for (let i = 0; i < 20; i++) expect((await createWith(GOOD, bob)).statusCode).toBe(200);
+    const over = await createWith(GOOD, bob);
+    expect(over.statusCode).toBe(409);
+    expect(over.json().error).toBe("too_many_open_batches");
+    expect((await createWith(GOOD, alice)).statusCode).toBe(200);
+  });
+
   it("refuses a bad currency, closesAt, or over-long text field", async () => {
     expect((await createWith({ ...GOOD, currency: "usdc" })).statusCode).toBe(400);
     expect((await createWith({ ...GOOD, closesAt: "tomorrow" })).statusCode).toBe(400);
@@ -317,34 +387,81 @@ describe("N49 round 2: the legacy batch-manifest routes", () => {
 
   it("refuses malformed sample fields", async () => {
     const batchId = assembling();
-    for (const bad of [{ position: "" }, { jobId: 7 }, { sampleLabel: "x".repeat(201) }, { sampleType: "plasma" }]) {
+    for (const bad of [{ position: "" }, { jobId: 7 }, { sampleLabel: "x".repeat(201) }, { sampleType: "plasma" }, { sampleLabel: "   " }]) {
       const res = await addSample(batchId, alice, { ...SAMPLE, ...bad });
       expect(res.statusCode, JSON.stringify(bad)).toBe(400);
     }
     expect(batchTracker.getBatch(batchId)!.slots).toHaveLength(0);
   });
 
-  it("shows each viewer only their own samples' owner, label, job and results on list, detail, events and by-job", async () => {
+  it("shows a non-owner positions and status only, and none of their sample events, on list, detail and by-job", async () => {
     const batchId = assembling();
-    await addSample(batchId, alice, SAMPLE);
-    await addSample(batchId, bob, { ...SAMPLE, position: "A2", jobId: "job-b", sampleLabel: "bob-sample" });
+    await addSample(batchId, alice, SAMPLE); // alice operates kernel-lab
+    // A buyer's own sample, attached kernel-side: the tracker records its owner.
+    batchTracker.addSample(batchId, { position: "A2", jobId: "job-b", stepId: "step-1", sampleLabel: "bob-sample", userId: BOB as any });
+    const aliceSlotId = batchTracker.getBatch(batchId)!.slots[0].id;
 
     const detail = (await app.inject({ method: "GET", url: `/api/batches/${batchId}`, headers: auth(bob) })).json();
     const [aliceSlot, bobSlot] = detail.batch.slots;
-    expect(aliceSlot).toMatchObject({ position: "A1", own: false });
-    expect(aliceSlot).not.toHaveProperty("userId");
-    expect(aliceSlot).not.toHaveProperty("sampleLabel");
-    expect(aliceSlot).not.toHaveProperty("jobId");
+    expect(aliceSlot).toEqual({ position: "A1", status: "pending", own: false }); // no id, type or timing
     expect(bobSlot).toMatchObject({ userId: BOB, sampleLabel: "bob-sample", own: true });
-    const aliceEvents = detail.events.filter((e: { slotId?: string }) => e.slotId === aliceSlot.id);
-    expect(aliceEvents.length).toBeGreaterThan(0);
-    for (const e of aliceEvents) expect(e.payload).toEqual({});
+    expect(detail.events.every((e: { slotId?: string }) => e.slotId === undefined || e.slotId === bobSlot.id)).toBe(true);
+    expect(detail.events.some((e: { slotId?: string }) => e.slotId === bobSlot.id)).toBe(true);
+    expect(detail.events.find((e: { type: string }) => e.type === "batch_created")).toMatchObject({ payload: {} });
 
-    for (const url of ["/api/batches", `/api/batches/by-job/job-a`, `/api/batches/${batchId}`]) {
+    for (const url of ["/api/batches", "/api/batches/by-job/job-a", `/api/batches/${batchId}`]) {
       const body = JSON.stringify((await app.inject({ method: "GET", url, headers: auth(bob) })).json());
       expect(body, url).not.toContain(ALICE);
       expect(body, url).not.toContain("patient-7731");
+      expect(body, url).not.toContain(aliceSlotId);
     }
+  });
+
+  it("round 3: lets only the batch kernel's operator add samples, for a job step on that kernel", async () => {
+    const batchId = assembling();
+    const byBob = await addSample(batchId, bob, SAMPLE);
+    expect(byBob.statusCode).toBe(403);
+    expect(byBob.json().error).toBe("not_kernel_operator");
+    for (const bad of [{ jobId: "job-none" }, { jobId: "job-x" }, { stepId: "step-2" }]) {
+      const res = await addSample(batchId, alice, { ...SAMPLE, ...bad });
+      expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+    }
+    expect(batchTracker.getBatch(batchId)!.slots).toHaveLength(0);
+    expect((await addSample("batch-none", alice, SAMPLE)).statusCode).toBe(404);
+
+    expect((await addSample(batchId, alice, SAMPLE)).statusCode).toBe(200);
+    batchTracker.seal(batchId);
+    const sealed = await addSample(batchId, alice, { ...SAMPLE, position: "A3" });
+    expect(sealed.statusCode).toBe(409);
+    expect(sealed.json()).toEqual({ error: "batch_not_assembling", status: "sealed" });
+  });
+
+  it("round 3: never forwards the tracker's own error message", async () => {
+    const batchId = assembling();
+    const spy = vi.spyOn(batchTracker, "addSample").mockImplementationOnce(() => {
+      throw new Error("internal detail: /srv/pcc/secret-path");
+    });
+    try {
+      const res = await addSample(batchId, alice, SAMPLE);
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "sample_not_added" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("round 3: by-job is no membership oracle", async () => {
+    const batchId = assembling();
+    await addSample(batchId, alice, SAMPLE);
+    batchTracker.addSample(batchId, { position: "A2", jobId: "job-b", stepId: "step-1", sampleLabel: "bob-sample", userId: BOB as any });
+    const byJob = async (jobId: string, key: string) =>
+      (await app.inject({ method: "GET", url: `/api/batches/by-job/${jobId}`, headers: auth(key) })).json().batches.map((b: { id: string }) => b.id);
+    expect(await byJob("job-a", alice)).toContain(batchId); // the operator of job-a's kernel
+    expect(await byJob("job-b", bob)).toContain(batchId); // bob's own sample
+    expect(await byJob("job-a", bob)).toEqual([]); // the same answer as a job with no batches
+    expect(await byJob("job-a", carol)).toEqual([]);
+    expect(await byJob("job-none", carol)).toEqual([]);
+    expect((await app.inject({ method: "GET", url: "/api/batches/by-job/job-a" })).statusCode).toBe(401);
   });
 
   it("answers 404 for an unknown batch", async () => {

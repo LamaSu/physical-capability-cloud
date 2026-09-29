@@ -19,6 +19,8 @@ interface BatchSlotClaim {
 }
 import { batchTracker } from "../services.js";
 import { requireAuth } from "../auth/require-auth.js";
+import { getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
 
 // ── In-memory shared batch storage ────────────────────────────────
 // Module-local and in memory: a restart loses every batch and claim, and two
@@ -33,9 +35,69 @@ const MAX_TEXT = 200;
 /** A non-negative decimal amount with at most 6 decimals (USDC precision). */
 const AMOUNT_RE = /^\d{1,9}(\.\d{1,6})?$/;
 const SAMPLE_TYPES = new Set(["unknown", "standard", "blank", "system_suitability", "sample", "spike", "duplicate"]);
+/** closesAt: an ISO 8601 UTC time, "2026-10-01T12:00:00Z" (seconds and milliseconds optional). */
+const ISO_UTC_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?Z$/;
+/** A shared batch may stay open for at most 30 days. */
+const MAX_OPEN_MS = 30 * 24 * 60 * 60_000;
+/** The in-memory store is bounded: per creator, and in total (N49 round 3). */
+const MAX_OPEN_BATCHES_PER_CREATOR = 20;
+const MAX_SHARED_BATCHES = 10_000;
+/** Placeholder operator addresses that make a kernel nobody's. */
+const UNOWNED_OPERATOR_ADDRESSES = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
 function isText(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_TEXT;
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_TEXT && value.trim().length > 0;
+}
+
+/**
+ * A price as a canonical decimal string ("1.5", "10", "0.25"), or null. A number
+ * is accepted only when it has at most 6 decimals as given: 1.1234567 is refused,
+ * never rounded to 1.123457. A string must already match AMOUNT_RE.
+ */
+function canonicalPrice(raw: unknown): string | null {
+  let text: unknown = raw;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw) || raw < 0 || raw >= 1e9) return null;
+    const micros = Math.round(raw * 1e6);
+    if (micros / 1e6 !== raw) return null;
+    text = (micros / 1e6).toFixed(6);
+  }
+  if (typeof text !== "string" || !AMOUNT_RE.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  const intPart = whole.replace(/^0+(?=\d)/, "");
+  const fracPart = fraction.replace(/0+$/, "");
+  return fracPart ? `${intPart}.${fracPart}` : intPart;
+}
+
+/** A closesAt value as epoch ms, or null unless it is a real calendar time in ISO_UTC_RE form. */
+function parseClosesAt(raw: unknown): number | null {
+  if (typeof raw !== "string") return null;
+  const m = ISO_UTC_RE.exec(raw);
+  if (!m) return null;
+  const [y, mo, d, h, mi] = m.slice(1, 6).map(Number);
+  const sec = Number(m[6] ?? "0");
+  const ms = Number((m[7] ?? "0").padEnd(3, "0"));
+  const t = Date.UTC(y, mo - 1, d, h, mi, sec, ms);
+  const back = new Date(t);
+  const same =
+    back.getUTCFullYear() === y && back.getUTCMonth() === mo - 1 && back.getUTCDate() === d &&
+    back.getUTCHours() === h && back.getUTCMinutes() === mi && back.getUTCSeconds() === sec;
+  return same ? t : null;
+}
+
+function isOpenForClaims(batch: SharedBatch, now = Date.now()): boolean {
+  return (batch.status === "open" || batch.status === "filling") && now < Date.parse(batch.closesAt);
+}
+
+/** True only when `principal` is the recorded operator of `kernelId` (N55 swaps in requireKernelOperator). */
+function isKernelOperator(kernelId: string, principal: string | null): boolean {
+  if (!principal) return false;
+  const kernel = getStore().db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, kernelId)).get();
+  return !!kernel && !UNOWNED_OPERATOR_ADDRESSES.has(kernel.operatorAddress) && kernel.operatorAddress === principal;
+}
+
+function findJob(jobId: string) {
+  return getStore().db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
 }
 
 // Board row N49: a claim belongs to the authenticated caller (req.userId, which
@@ -43,7 +105,9 @@ function isText(value: unknown): value is string {
 // body can never name a different claimant. Only the claimant sees the claim
 // itself. Everyone else sees which slots are taken and their status: no
 // claimant, sample labels, claim id (so a future claimId-keyed route cannot
-// become an IDOR), amount, escrow or time.
+// become an IDOR), amount, escrow or time. These fields are omitted, not made
+// unknowable: the public price times the visible slot count gives a claim's
+// display amount, and polling occupancy shows roughly when slots were taken.
 function viewClaim(claim: BatchSlotClaim, viewer: string | null) {
   if (viewer !== null && claim.agentId === viewer) return { ...claim, own: true };
   return { slotIndices: claim.slotIndices, status: claim.status, agentId: null, sampleLabels: [], own: false };
@@ -58,28 +122,44 @@ function viewBatch(batch: SharedBatch, viewer: string | null) {
 }
 
 // The legacy batch manifests (batchTracker) hold every sample's owner, label,
-// job and result reference. A viewer sees those only for their own samples.
+// job, type, timing and result reference. A viewer sees those only for their own
+// samples. Anyone else sees which positions are taken and their status: an
+// explicit projection, so a field added to SampleSlot later stays private.
 function viewSlot(slot: SampleSlot, viewer: string | null) {
   if (viewer !== null && slot.userId === viewer) return { ...slot, own: true };
-  return {
-    id: slot.id,
-    position: slot.position,
-    sampleType: slot.sampleType,
-    status: slot.status,
-    acquisitionStart: slot.acquisitionStart,
-    acquisitionEnd: slot.acquisitionEnd,
-    own: false,
-  };
+  return { position: slot.position, status: slot.status, own: false };
 }
 
 function viewManifest(batch: BatchManifest, viewer: string | null) {
   return { ...batch, slots: batch.slots.map((s) => viewSlot(s, viewer)) };
 }
 
-/** Events about another viewer's sample keep their type and time, not their payload. */
+/** The payload fields a batch-level event may show anyone: aggregate counts only. */
+const BATCH_EVENT_FIELDS: Partial<Record<BatchEvent["type"], readonly string[]>> = {
+  batch_sealed: ["slotCount"],
+  batch_completed: ["completed", "failed"],
+};
+
+/**
+ * A viewer sees events about their own samples in full. Events about anyone
+ * else's sample are left out entirely (no time, no slot link). Batch-level
+ * events keep their type and time and only the allowlisted aggregate fields.
+ */
 function viewEvents(batch: BatchManifest, events: BatchEvent[], viewer: string | null) {
   const mine = new Set(batch.slots.filter((s) => viewer !== null && s.userId === viewer).map((s) => s.id));
-  return events.map((e) => (e.slotId && !mine.has(e.slotId) ? { ...e, payload: {} } : e));
+  const visible: Array<Partial<BatchEvent>> = [];
+  for (const e of events) {
+    if (e.slotId) {
+      if (mine.has(e.slotId)) visible.push(e);
+      continue;
+    }
+    const payload: Record<string, unknown> = {};
+    for (const field of BATCH_EVENT_FIELDS[e.type] ?? []) {
+      if (field in e.payload) payload[field] = e.payload[field];
+    }
+    visible.push({ id: e.id, batchId: e.batchId, timestamp: e.timestamp, type: e.type, payload });
+  }
+  return visible;
 }
 
 /** Test-only: reset the in-memory shared-batch store. */
@@ -108,14 +188,31 @@ export async function batchRoutes(app: FastifyInstance) {
     return { batch: viewManifest(batch, viewer), events: viewEvents(batch, batchTracker.getEvents(req.params.batchId), viewer) };
   });
 
-  // Batches containing a specific job's samples
-  app.get<{ Params: { jobId: string } }>("/api/batches/by-job/:jobId", async (req) => {
-    const batches = batchTracker.getBatchesForJob(req.params.jobId);
-    return { batches: batches.map((b) => viewManifest(b, req.userId ?? null)) };
-  });
+  // Batches containing a specific job's samples. Not a membership oracle: the
+  // operator of the job's kernel sees that kernel's batches holding the job, and
+  // anyone else only the batches holding a sample of theirs from that job. An
+  // unauthorised caller gets the same empty list as a job with no batches.
+  app.get<{ Params: { jobId: string } }>(
+    "/api/batches/by-job/:jobId",
+    { preHandler: [requireAuth] },
+    async (req) => {
+      const viewer = req.userId ?? null;
+      const { jobId } = req.params;
+      const job = findJob(jobId);
+      const all = batchTracker.getBatchesForJob(jobId);
+      const visible =
+        job && isKernelOperator(job.kernelId, viewer)
+          ? all.filter((b) => b.kernelId === job.kernelId)
+          : all.filter((b) => b.slots.some((s) => s.jobId === jobId && viewer !== null && s.userId === viewer));
+      return { batches: visible.map((b) => viewManifest(b, viewer)) };
+    },
+  );
 
-  // Add sample slot to assembling batch. The sample belongs to the caller: a
-  // body userId may only name the caller (N49, same rule as a shared claim).
+  // Add a sample slot to an assembling batch (N49 round 3). Jobs record no
+  // buyer, so the relationship that can be checked is the kernel's: only the
+  // operator of the batch's kernel adds samples, only for a job (and its step)
+  // on that same kernel. The sample is recorded as the caller's: a body userId
+  // may only name the caller.
   app.post<{ Params: { batchId: string } }>(
     "/api/batches/:batchId/slots",
     { preHandler: [requireAuth] },
@@ -137,6 +234,21 @@ export async function batchRoutes(app: FastifyInstance) {
       if (body.sampleType !== undefined && !SAMPLE_TYPES.has(body.sampleType as string)) {
         return reply.status(400).send({ error: "sampleType is not a known sample type" });
       }
+      const batch = batchTracker.getBatch(req.params.batchId);
+      if (!batch) return reply.status(404).send({ error: "not_found" });
+      if (!isKernelOperator(batch.kernelId, owner)) {
+        return reply.status(403).send({
+          error: "not_kernel_operator",
+          message: "Only the operator of this batch's kernel adds samples to it",
+        });
+      }
+      const job = findJob(body.jobId);
+      if (!job || job.kernelId !== batch.kernelId || job.stepId !== body.stepId) {
+        return reply.status(400).send({ error: "jobId and stepId must name a job step on this batch's kernel" });
+      }
+      if (batch.status !== "assembling") {
+        return reply.status(409).send({ error: "batch_not_assembling", status: batch.status });
+      }
       try {
         const slot = batchTracker.addSample(req.params.batchId, {
           position: body.position,
@@ -147,8 +259,9 @@ export async function batchRoutes(app: FastifyInstance) {
           userId: owner,
         });
         return { slot: viewSlot(slot, owner) };
-      } catch (err: any) {
-        return reply.code(400).send({ error: err.message });
+      } catch {
+        // The tracker's own message is not forwarded: only this fixed error is.
+        return reply.code(400).send({ error: "sample_not_added" });
       }
     },
   );
@@ -178,28 +291,39 @@ export async function batchRoutes(app: FastifyInstance) {
     if (!Number.isInteger(totalSlots) || (totalSlots as number) < 1 || (totalSlots as number) > MAX_TOTAL_SLOTS) {
       return reply.status(400).send({ error: `totalSlots must be an integer from 1 to ${MAX_TOTAL_SLOTS}` });
     }
-    const minSlotsToRun = body.minSlotsToRun ?? 1;
+    // An explicit null is refused, not defaulted: only an absent field takes the default.
+    const minSlotsToRun = body.minSlotsToRun === undefined ? 1 : body.minSlotsToRun;
     if (!Number.isInteger(minSlotsToRun) || (minSlotsToRun as number) < 1 || (minSlotsToRun as number) > (totalSlots as number)) {
       return reply.status(400).send({ error: "minSlotsToRun must be an integer from 1 to totalSlots" });
     }
-    // The dashboard sends a number; other clients send a decimal string.
-    const rawPrice = body.pricePerSlot;
-    const pricePerSlot =
-      typeof rawPrice === "number" && Number.isFinite(rawPrice) && rawPrice >= 0 && rawPrice < 1e9
-        ? rawPrice.toFixed(6).replace(/\.?0+$/, "")
-        : rawPrice;
-    if (typeof pricePerSlot !== "string" || !AMOUNT_RE.test(pricePerSlot)) {
+    // The dashboard sends a number; other clients send a decimal string. A value
+    // that would need rounding is refused, and the stored price is canonical.
+    const pricePerSlot = canonicalPrice(body.pricePerSlot);
+    if (pricePerSlot === null) {
       return reply.status(400).send({ error: "pricePerSlot must be a non-negative amount with at most 6 decimals" });
     }
-    const currency = body.currency ?? "USDC";
+    const currency = body.currency === undefined ? "USDC" : body.currency;
     if (typeof currency !== "string" || !/^[A-Z]{3,5}$/.test(currency)) {
       return reply.status(400).send({ error: "currency must be 3 to 5 capital letters" });
     }
-    let closesAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    const now = Date.now();
+    let closesAt = new Date(now + 24 * 60 * 60_000).toISOString();
     if (body.closesAt !== undefined) {
-      const t = typeof body.closesAt === "string" ? Date.parse(body.closesAt) : Number.NaN;
-      if (!Number.isFinite(t)) return reply.status(400).send({ error: "closesAt must be an ISO date" });
+      const t = parseClosesAt(body.closesAt);
+      if (t === null) {
+        return reply.status(400).send({ error: "closesAt must be an ISO 8601 UTC time such as 2026-10-01T12:00:00Z" });
+      }
+      if (t <= now || t > now + MAX_OPEN_MS) {
+        return reply.status(400).send({ error: "closesAt must be in the future and at most 30 days away" });
+      }
       closesAt = new Date(t).toISOString();
+    }
+    const creatorsOpen = [...sharedBatches.values()].filter((b) => b.createdBy === creator && isOpenForClaims(b, now));
+    if (creatorsOpen.length >= MAX_OPEN_BATCHES_PER_CREATOR) {
+      return reply.status(409).send({ error: "too_many_open_batches", limit: MAX_OPEN_BATCHES_PER_CREATOR });
+    }
+    if (sharedBatches.size >= MAX_SHARED_BATCHES) {
+      return reply.status(503).send({ error: "batch_store_full" });
     }
 
     const batch: SharedBatch = {
@@ -225,9 +349,8 @@ export async function batchRoutes(app: FastifyInstance) {
   /** GET /api/batches/shared/open — List open batches available to join */
   app.get("/api/batches/shared/open", async (req) => {
     const { kernelId, capabilityType } = req.query as { kernelId?: string; capabilityType?: string };
-    let batches = [...sharedBatches.values()].filter(
-      (b) => b.status === "open" || b.status === "filling",
-    );
+    const now = Date.now();
+    let batches = [...sharedBatches.values()].filter((b) => isOpenForClaims(b, now));
     if (kernelId) batches = batches.filter((b) => b.kernelId === kernelId);
     if (capabilityType) batches = batches.filter((b) => b.capabilityType === capabilityType);
     return { batches: batches.map((b) => viewBatch(b, req.userId ?? null)) };
@@ -263,6 +386,9 @@ export async function batchRoutes(app: FastifyInstance) {
       if (!batch) return reply.status(404).send({ error: "Batch not found" });
       if (batch.status !== "open" && batch.status !== "filling") {
         return reply.status(409).send({ error: `Batch is ${batch.status}, cannot claim slots` });
+      }
+      if (!isOpenForClaims(batch)) {
+        return reply.status(409).send({ error: "batch_closed", closesAt: batch.closesAt });
       }
 
       const body = (req.body ?? {}) as {
@@ -375,10 +501,10 @@ export async function batchRoutes(app: FastifyInstance) {
       const batch = sharedBatches.get(req.params.batchId);
       if (!batch) return reply.status(404).send({ error: "Batch not found" });
 
+      // Someone else's claim answers exactly like a missing one: no existence oracle.
       const claimIdx = batch.claimedSlots.findIndex((c) => c.id === req.params.claimId);
-      if (claimIdx === -1) return reply.status(404).send({ error: "Claim not found" });
-      if (batch.claimedSlots[claimIdx].agentId !== caller) {
-        return reply.status(403).send({ error: "not_claimant", message: "Only the claimant can release a claim" });
+      if (claimIdx === -1 || batch.claimedSlots[claimIdx].agentId !== caller) {
+        return reply.status(404).send({ error: "Claim not found" });
       }
 
       if (batch.status === "running" || batch.status === "completed") {
