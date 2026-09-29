@@ -3,13 +3,17 @@
 Source: /mnt/sparkbulk/pcc-reconciliation/review-router/r31-pccnode-r2-astra/verdict.md
 
 One test per attack / edge-matrix row, named after the finding it targets:
-  f1 = generic HTTP completion (nested-queue bypass, contract validation)
+  f1 = generic HTTP completion (nested-queue bypass; the completion
+        contract this originally covered was removed in r31 round-3 --
+        generic HTTP now never completes, see test_r31_round3.py)
   f2 = IPP job-id binding + job-state-reasons strictness
-  f3 = OctoPrint private-copy + print-history correlation
+  f3 = OctoPrint private-copy + print-history correlation (REMOVED in
+        r31 round-3: OctoPrint completion tracking was withdrawn
+        entirely, see test_r31_round3.py)
   f4 = http_util strict parsing (duplicate keys / NaN) + device-body bound
   f5 = poll deadlines (Opentrons run poll, IPP/OctoPrint completion poll)
 
-Only pcc_node.http_util's urlopen / http / http_bytes / http_form are faked
+Only pcc_node.http_util's urlopen / http / http_bytes are faked
 (directly, as attributes on the http_util module).  The adapters, the
 classifier and the evidence builder all run for real underneath, per the
 sidecar brief: build a JobExecutor with a fake gateway that records
@@ -30,7 +34,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from pcc_node.http_util import http, http_bytes, http_form, parse_json_strict
+from pcc_node.http_util import http, http_bytes, parse_json_strict
 from pcc_node import job_executor as je
 from pcc_node.job_executor import (
     JobExecutor,
@@ -48,7 +52,6 @@ from pcc_node.job_executor import (
     DEVICE_BODY_MAX_NODES,
     DEVICE_BODY_MAX_DEPTH,
     _extract_device_error,
-    GENERIC_ACCEPTANCE_STATUS_VALUES,
     FAILURE_STATUS_VALUES,
     encode_ipp_get_job_attributes,
     decode_ipp_response,
@@ -211,52 +214,6 @@ def _poll(ex, fake):
         ex.poll_awaiting()
 
 
-OP_KEY = "SECRET-OCTOPRINT-KEY"
-OP_DEVICE = {"id": "op1", "protocol": "octoprint", "url": "http://10.0.0.20:5000", "api_key": OP_KEY}
-
-
-def _accept_octoprint_job(job_id="job-op", filename="benchy.gcode", device=None,
-                           gateway=None, clock=None,
-                           create_status=201, copy_status=201,
-                           get_status=200, get_body=None,
-                           select_status=200, select_body=None):
-    """Drives execute() through the real 4-step OctoPrint adapter, faking
-    only http_form/http.  Returns (ex, gateway, clock, calls, print_path)."""
-    gateway = gateway or _gateway()
-    clock = clock or FakeClock()
-    device = dict(device or OP_DEVICE)
-    ex = JobExecutor(devices=[device], gateway_client=gateway, clock=clock)
-    base_url = device["url"]
-    folder = je.octoprint_job_folder(job_id)
-    name = filename.rsplit("/", 1)[-1]
-    print_path = f"{folder}/{name}"
-    calls = []
-
-    def fake_http_form(method, url, fields, **kwargs):
-        calls.append(("form", method, url, dict(fields), kwargs.get("headers")))
-        return create_status, {}
-
-    def fake_http(method, url, **kwargs):
-        calls.append(("http", method, url, kwargs.get("body"), kwargs.get("headers")))
-        copy_url = f"{base_url}/api/files/local/{filename}"
-        copy_get_select_url = f"{base_url}/api/files/local/{print_path}"
-        if method == "POST" and url == copy_url:
-            return copy_status, {}
-        if method == "GET" and url == copy_get_select_url:
-            body = get_body if get_body is not None else {}
-            return get_status, body
-        if method == "POST" and url == copy_get_select_url:
-            body = select_body if select_body is not None else {}
-            return select_status, body
-        raise AssertionError(f"unexpected http call: {method} {url}")
-
-    with mock.patch("pcc_node.http_util.http_form", side_effect=fake_http_form), \
-         mock.patch("pcc_node.http_util.http", side_effect=fake_http):
-        ex.execute({"id": job_id, "capabilityType": "3d-print",
-                    "parameters": {"filename": filename}})
-    return ex, gateway, clock, calls, print_path, folder
-
-
 # ---------------------------------------------------------------------------
 # Finding 4 (part a): http_util strict answer parsing
 # ---------------------------------------------------------------------------
@@ -398,34 +355,6 @@ class TestF4HttpUtilBoundedReads:
             status, body = http_bytes("POST", "http://dev", data=b"x", max_bytes=100)
         assert (status, body) == (200, raw)
 
-    def test_f4_http_form_sends_multipart_text_fields(self):
-        with mock.patch("pcc_node.http_util.urlopen",
-                        return_value=_Resp(201, b"")) as mock_open:
-            status, data = http_form("POST", "http://dev/api/files/local",
-                                     {"foldername": "pcc-job1"})
-        assert status == 201
-        req = mock_open.call_args[0][0]
-        assert req.get_method() == "POST"
-        content_type = req.get_header("Content-type")
-        assert content_type.startswith("multipart/form-data; boundary=")
-        body_text = req.data.decode("utf-8")
-        assert 'name="foldername"' in body_text
-        assert "pcc-job1" in body_text
-
-    def test_f4_http_form_answer_handling_matches_http(self):
-        """The answer is read exactly like http(): duplicate keys refused."""
-        raw = b'{"status":"failed","status":"completed"}'
-        with mock.patch("pcc_node.http_util.urlopen", return_value=_Resp(200, raw)):
-            status, data = http_form("POST", "http://dev/api/files/local", {"a": "b"})
-        assert isinstance(data, str)
-
-    def test_f4_http_form_oversized_answer_is_status_zero(self):
-        raw = b"x" * 50
-        with mock.patch("pcc_node.http_util.urlopen", return_value=_Resp(201, raw)):
-            status, data = http_form("POST", "http://dev", {"a": "b"}, max_bytes=10)
-        assert status == 0
-        assert "larger than" in data["error"]
-
 
 # ---------------------------------------------------------------------------
 # Finding 4 (part b): device-body size/depth bound (5,000 nodes, depth 8)
@@ -523,11 +452,15 @@ class TestF1GenericHttpWithoutContract:
         assert "execution_completed" not in _text(bundle)
 
     def test_f1_bare_top_level_completed_status_never_completes_without_contract(self):
-        """{"status":"completed"} alone: without a contract, generic HTTP
-        completes a job only under a reviewed per-device contract."""
+        """{"status":"completed"} alone: no field of a generic device's body
+        can be read as "the physical work finished" (r31 round-2 finding 1 --
+        the completion contract this test's name refers to was removed in
+        round-3).  A clean 2xx with no failure stated is acceptance now,
+        never completion. CHANGED (r31 round-3): used to be UNCLASSIFIABLE."""
         result = _gh_execute(GH_DEVICE, (200, {"status": "completed"}))
         assert result.get("executed") is not True
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+        assert result.get("submitted") is True
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     @pytest.mark.parametrize("body", [
         pytest.param({"state": "done"}, id="state-done"),
@@ -562,12 +495,14 @@ class TestF1GenericHttpWithoutContract:
         assert classify_execution_result(result) == RESULT_ACCEPTED
 
     def test_f1_204_never_completes_even_with_a_completion_claiming_body(self):
-        """204 has no content by definition (RFC 9110 sec 15.3.5): it states
-        no outcome, whatever a parsed body next to it might claim."""
+        """204 is now just another clean 2xx (r31 round-3 removed the special
+        HTTP_NO_CONTENT case along with the completion contract): acceptance,
+        never completion, whatever a parsed body next to it might claim.
+        CHANGED (r31 round-3): submitted used to be False; now True."""
         result = _gh_execute(GH_DEVICE, (204, {"status": "completed"}))
         assert result.get("executed") is not True
-        assert result.get("submitted") is not True
-        assert classify_execution_result(result) != RESULT_SUCCESS
+        assert result.get("submitted") is True
+        assert classify_execution_result(result) == RESULT_ACCEPTED
 
     def test_f1_204_end_to_end_never_reports_completed(self):
         gateway = _gateway()
@@ -583,283 +518,6 @@ class TestF1GenericHttpWithoutContract:
         result = _gh_execute(GH_DEVICE, (200, body))
         assert result.get("executed") is not True
         assert classify_execution_result(result) != RESULT_SUCCESS
-
-
-class TestF1ContractValidation:
-    """validate_completion_contract is strict: an unreviewed or self-defeating
-    contract runs nothing."""
-
-    VALID = {
-        "version": 1, "method": "POST", "path": "/run",
-        "completionField": "result.phase", "completionValues": ["finished"],
-        "correlationField": "result.jobId",
-    }
-
-    def test_f1_a_well_formed_contract_is_valid(self):
-        assert je.validate_completion_contract(self.VALID) is None
-
-    def test_f1_contract_naming_an_acceptance_value_as_completion_is_invalid(self):
-        """device={"completionContract":{...,"completionField":"state",
-        "completionValues":["queued"],...}} from the brief."""
-        contract = {**self.VALID, "completionField": "state", "completionValues": ["queued"]}
-        problem = je.validate_completion_contract(contract)
-        assert problem is not None and "queued" in problem
-
-    @pytest.mark.parametrize("word", sorted(GENERIC_ACCEPTANCE_STATUS_VALUES))
-    def test_f1_contract_naming_any_acceptance_word_is_invalid(self, word):
-        contract = {**self.VALID, "completionValues": [word]}
-        assert je.validate_completion_contract(contract) is not None
-
-    @pytest.mark.parametrize("word", sorted(FAILURE_STATUS_VALUES))
-    def test_f1_contract_naming_any_failure_word_is_invalid(self, word):
-        contract = {**self.VALID, "completionValues": [word]}
-        assert je.validate_completion_contract(contract) is not None
-
-    @pytest.mark.parametrize("value", [False, 1.5, None, {}, []])
-    def test_f1_completion_values_with_unusable_entries_are_invalid(self, value):
-        contract = {**self.VALID, "completionValues": [value]}
-        assert je.validate_completion_contract(contract) is not None
-
-    def test_f1_completion_values_must_be_a_non_empty_list(self):
-        assert je.validate_completion_contract({**self.VALID, "completionValues": []}) is not None
-
-    def test_f1_true_is_a_valid_completion_value(self):
-        contract = {**self.VALID, "completionValues": [True]}
-        assert je.validate_completion_contract(contract) is None
-
-    def test_f1_non_bool_int_is_a_valid_completion_value(self):
-        contract = {**self.VALID, "completionValues": [3]}
-        assert je.validate_completion_contract(contract) is None
-
-    @pytest.mark.parametrize("version", [2, 0, -1, "1", 1.0, None])
-    def test_f1_only_version_1_int_is_valid(self, version):
-        assert je.validate_completion_contract({**self.VALID, "version": version}) is not None
-
-    @pytest.mark.parametrize("method", ["GET", "DELETE", "HEAD", "patch-typo", 7])
-    def test_f1_method_must_be_post_put_or_patch(self, method):
-        assert je.validate_completion_contract({**self.VALID, "method": method}) is not None
-
-    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "post", "put", "patch"])
-    def test_f1_method_is_case_insensitive(self, method):
-        assert je.validate_completion_contract({**self.VALID, "method": method}) is None
-
-    @pytest.mark.parametrize("path", [
-        "relative/path", "http://dev/run", "/a/../b", "/has space", "", None, 7,
-    ])
-    def test_f1_path_must_be_a_clean_absolute_path(self, path):
-        assert je.validate_completion_contract({**self.VALID, "path": path}) is not None
-
-    def test_f1_completion_field_and_correlation_field_must_differ(self):
-        contract = {**self.VALID, "correlationField": self.VALID["completionField"]}
-        problem = je.validate_completion_contract(contract)
-        assert problem is not None and "differ" in problem
-
-    @pytest.mark.parametrize("field", ["", None, "  ", "a..b", 7])
-    def test_f1_completion_field_must_be_a_usable_dot_path(self, field):
-        assert je.validate_completion_contract({**self.VALID, "completionField": field}) is not None
-
-    def test_f1_unknown_contract_key_is_invalid(self):
-        contract = {**self.VALID, "extraField": "nope"}
-        problem = je.validate_completion_contract(contract)
-        assert problem is not None and "unknown" in problem.lower()
-
-    def test_f1_missing_required_key_is_invalid(self):
-        contract = dict(self.VALID)
-        del contract["completionField"]
-        problem = je.validate_completion_contract(contract)
-        assert problem is not None and "missing" in problem.lower()
-
-    def test_f1_correlation_request_field_with_a_dot_is_invalid(self):
-        contract = {**self.VALID, "correlationRequestField": "a.b"}
-        assert je.validate_completion_contract(contract) is not None
-
-    def test_f1_non_dict_contract_is_invalid(self):
-        assert je.validate_completion_contract("not a contract") is not None
-        assert je.validate_completion_contract(None) is not None
-
-    def test_f1_invalid_contract_refuses_the_job_with_no_http_request(self):
-        device = {
-            "id": "g1", "protocol": "http", "url": "http://dev",
-            "completionContract": {
-                "version": 1, "method": "POST", "path": "/run",
-                "completionField": "state", "completionValues": ["queued"],
-                "correlationField": "jobId",
-            },
-        }
-        with mock.patch("pcc_node.http_util.http") as fake_http:
-            result = JobExecutor(devices=[])._execute_generic_http(
-                device, {"id": "job-inv", "parameters": {}})
-        fake_http.assert_not_called()
-        assert result.get("executed") is not True
-        assert "contract" in result.get("error", "").lower()
-        assert classify_execution_result(result) == RESULT_FAILURE
-
-
-class TestF1ContractOutcome:
-    """A validated contract: correlated completion field match required;
-    method/path locked to the contract; conflicting statements refuse."""
-
-    CONTRACT_DEVICE = {
-        "id": "g1", "protocol": "http", "url": "http://dev",
-        "completionContract": {
-            "version": 1, "method": "POST", "path": "/run",
-            "completionField": "state", "completionValues": ["done"],
-            "correlationField": "jobId",
-        },
-    }
-
-    def _run(self, status_and_data, job=None, device=None, job_id="job-c1"):
-        status, data = status_and_data
-        calls = []
-
-        def fake_http(method, url, **kwargs):
-            calls.append((method, url, kwargs.get("body"), kwargs.get("headers")))
-            return status, data
-
-        job = job or {"id": job_id, "parameters": {}}
-        with mock.patch("pcc_node.http_util.http", side_effect=fake_http):
-            result = JobExecutor(devices=[])._execute_generic_http(device or self.CONTRACT_DEVICE, job)
-        return result, calls
-
-    def test_f1_state_done_with_matching_job_id_completes(self):
-        """{"state":"done","jobId":"<this job id>"} with completionField
-        "state", completionValues ["done"], correlationField "jobId" DOES
-        complete -- the brief's positive control."""
-        result, calls = self._run((200, {"state": "done", "jobId": "job-c1"}))
-        assert result.get("executed") is True, result
-        assert classify_execution_result(result) == RESULT_SUCCESS
-        assert result["contract"] == {
-            "version": 1, "completionField": "state", "correlationField": "jobId",
-        }
-        bundle = build_evidence_bundle("job-c1", self.CONTRACT_DEVICE, result)
-        assert EVENT_EXECUTION_COMPLETED in _types(bundle)
-
-    def test_f1_state_done_without_the_correlation_echo_never_completes(self):
-        result, calls = self._run((200, {"state": "done"}))
-        assert result.get("executed") is not True, result
-        assert classify_execution_result(result) != RESULT_SUCCESS
-
-    def test_f1_state_done_echoing_another_jobs_id_never_completes(self):
-        result, calls = self._run((200, {"state": "done", "jobId": "someone-elses-job"}))
-        assert result.get("executed") is not True, result
-        assert classify_execution_result(result) != RESULT_SUCCESS
-
-    def test_f1_completion_field_matching_but_acceptance_stated_elsewhere_is_a_conflict(self):
-        body = {"state": "done", "jobId": "job-c1", "data": {"status": "queued"}}
-        result, _ = self._run((200, body))
-        assert result.get("executed") is not True, result
-        assert classify_execution_result(result) != RESULT_SUCCESS
-
-    def test_f1_completion_field_holding_an_acceptance_word_is_accepted(self):
-        result, _ = self._run((200, {"state": "queued", "jobId": "job-c1"}))
-        assert result.get("submitted") is True
-        assert "executed" not in result
-        assert classify_execution_result(result) == RESULT_ACCEPTED
-
-    def test_f1_completion_field_holding_neither_is_unclassifiable(self):
-        result, _ = self._run((200, {"state": "homing", "jobId": "job-c1"}))
-        assert result.get("executed") is not True
-        assert result.get("submitted") is not True
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
-
-    def test_f1_nested_queued_two_levels_deep_never_completes_with_contract(self):
-        """The brief's second required attack, with a contract present."""
-        body = {"state": "done", "jobId": "job-c1", "data": {"result": {"status": "queued"}}}
-        result, _ = self._run((200, body))
-        assert result.get("executed") is not True, result
-        assert classify_execution_result(result) != RESULT_SUCCESS
-
-    def test_f1_a_failure_stated_anywhere_outranks_the_contract(self):
-        body = {"state": "done", "jobId": "job-c1", "error": "actuator jammed"}
-        result, _ = self._run((200, body))
-        assert result.get("executed") is not True
-        assert classify_execution_result(result) == RESULT_FAILURE
-
-    def test_f1_202_is_accepted_regardless_of_the_contract(self):
-        result, _ = self._run((202, {"state": "done", "jobId": "job-c1"}))
-        assert result.get("submitted") is True
-        assert "executed" not in result
-        assert classify_execution_result(result) == RESULT_ACCEPTED
-
-    def test_f1_204_never_completes_regardless_of_the_contract(self):
-        result, _ = self._run((204, {"state": "done", "jobId": "job-c1"}))
-        assert result.get("executed") is not True
-        assert classify_execution_result(result) != RESULT_SUCCESS
-
-    def test_f1_transport_failure_is_a_failure_regardless_of_the_contract(self):
-        result, _ = self._run((0, {"error": "conn refused"}))
-        assert result.get("executed") is not True
-        assert classify_execution_result(result) == RESULT_FAILURE
-
-    def test_f1_request_uses_the_contracts_method_and_path(self):
-        job = {"id": "job-c1", "parameters": {}}
-        result, calls = self._run((200, {"state": "done", "jobId": "job-c1"}), job=job)
-        assert calls, "no HTTP request was made"
-        [(method, url, body, headers)] = calls
-        assert method == "POST"
-        assert url == "http://dev/run"
-
-    def test_f1_request_carries_the_correlation_header(self):
-        result, calls = self._run((200, {"state": "done", "jobId": "job-c1"}))
-        [(method, url, body, headers)] = calls
-        assert headers is not None
-        assert headers.get(je.CORRELATION_HEADER) == "job-c1" or (
-            "X-PCC-Job-Id" in {k for k in headers} and headers.get("X-PCC-Job-Id") == "job-c1"
-        )
-
-    def test_f1_job_naming_a_different_method_is_refused_with_no_request(self):
-        job = {"id": "job-c1", "parameters": {"method": "PATCH"}}
-        with mock.patch("pcc_node.http_util.http") as fake_http:
-            result = JobExecutor(devices=[])._execute_generic_http(self.CONTRACT_DEVICE, job)
-        fake_http.assert_not_called()
-        assert result.get("executed") is not True
-        assert classify_execution_result(result) == RESULT_FAILURE
-
-    def test_f1_job_naming_a_different_path_is_refused_with_no_request(self):
-        job = {"id": "job-c1", "parameters": {"path": "/other"}}
-        with mock.patch("pcc_node.http_util.http") as fake_http:
-            result = JobExecutor(devices=[])._execute_generic_http(self.CONTRACT_DEVICE, job)
-        fake_http.assert_not_called()
-        assert result.get("executed") is not True
-
-    def test_f1_job_naming_the_contracts_own_method_and_path_is_allowed(self):
-        job = {"id": "job-c1", "parameters": {"method": "POST", "path": "/run"}}
-        result, calls = self._run((200, {"state": "done", "jobId": "job-c1"}), job=job)
-        assert calls
-        assert classify_execution_result(result) == RESULT_SUCCESS
-
-    def test_f1_correlation_request_field_is_set_in_the_body(self):
-        device = {
-            "id": "g1", "protocol": "http", "url": "http://dev",
-            "completionContract": {
-                "version": 1, "method": "POST", "path": "/run",
-                "completionField": "state", "completionValues": ["done"],
-                "correlationField": "jobId", "correlationRequestField": "jobId",
-            },
-        }
-        job = {"id": "job-echo", "parameters": {"body": {"payload": "x"}}}
-        result, calls = self._run(
-            (200, {"state": "done", "jobId": "job-echo"}), job=job, device=device,
-            job_id="job-echo",
-        )
-        [(method, url, body, headers)] = calls
-        assert body["jobId"] == "job-echo"
-        assert body["payload"] == "x"
-
-    def test_f1_correlation_request_field_already_holding_a_different_id_is_refused(self):
-        device = {
-            "id": "g1", "protocol": "http", "url": "http://dev",
-            "completionContract": {
-                "version": 1, "method": "POST", "path": "/run",
-                "completionField": "state", "completionValues": ["done"],
-                "correlationField": "jobId", "correlationRequestField": "jobId",
-            },
-        }
-        job = {"id": "job-echo", "parameters": {"body": {"jobId": "not-this-job"}}}
-        with mock.patch("pcc_node.http_util.http") as fake_http:
-            result = JobExecutor(devices=[])._execute_generic_http(device, job)
-        fake_http.assert_not_called()
-        assert result.get("executed") is not True
 
 
 # ---------------------------------------------------------------------------
@@ -974,7 +632,7 @@ class TestF2IppReasonsStrictness:
     @pytest.mark.parametrize("reasons,expected", [
         pytest.param(("none",), POLL_COMPLETED, id="none"),
         pytest.param(("job-completed-successfully",), POLL_COMPLETED, id="successfully"),
-        pytest.param(("job-completed-with-warnings",), POLL_COMPLETED, id="with-warnings"),
+        pytest.param(("job-completed-with-warnings",), POLL_UNOBSERVABLE, id="with-warnings"),
         pytest.param(("job-completed-with-errors",), POLL_FAILED, id="with-errors"),
         pytest.param(("completed-with-errors",), POLL_FAILED, id="with-errors-table-15"),
         pytest.param(("queued-in-device",), POLL_UNOBSERVABLE, id="queued-in-device"),
@@ -988,223 +646,6 @@ class TestF2IppReasonsStrictness:
         body = _ipp_ok_response(7, job_id=42, state=9, reasons=reasons)
         verdict, observation = ipp_completion_verdict(200, body, 7, 42)
         assert verdict == expected, observation
-
-
-# ---------------------------------------------------------------------------
-# Finding 3: OctoPrint private copy + print-history correlation
-# ---------------------------------------------------------------------------
-
-
-class TestF3OctoPrintJobFolder:
-    def test_f3_folder_name_is_pcc_prefixed_and_sanitized(self):
-        assert je.octoprint_job_folder("job-abc123") == "pcc-job-abc123"
-
-    def test_f3_unsafe_characters_are_replaced_with_underscore(self):
-        folder = je.octoprint_job_folder("job with spaces/slash!")
-        assert folder == "pcc-job_with_spaces_slash_"
-        assert " " not in folder and "/" not in folder and "!" not in folder
-
-    def test_f3_two_different_job_ids_never_share_a_folder(self):
-        assert je.octoprint_job_folder("job-a") != je.octoprint_job_folder("job-b")
-
-
-class TestF3OctoPrintPrivateCopyExecute:
-    """The adapter never prints the requested file directly: it creates a
-    per-job folder, copies the file into it, reads a baseline, then selects
-    and prints the copy -- stopping at the first failed step."""
-
-    def test_f3_happy_path_makes_all_four_calls_in_order(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            job_id="job-op1", filename="benchy.gcode",
-            get_body={"prints": {"success": 2, "failure": 0}},
-        )
-        assert folder == "pcc-job-op1"
-        assert print_path == "pcc-job-op1/benchy.gcode"
-        kinds = [(c[0], c[1], c[2]) for c in calls]
-        assert kinds == [
-            ("form", "POST", "http://10.0.0.20:5000/api/files/local"),
-            ("http", "POST", "http://10.0.0.20:5000/api/files/local/benchy.gcode"),
-            ("http", "GET", f"http://10.0.0.20:5000/api/files/local/{print_path}"),
-            ("http", "POST", f"http://10.0.0.20:5000/api/files/local/{print_path}"),
-        ]
-        assert calls[0][3] == {"foldername": folder}
-        assert calls[1][3] == {"command": "copy", "destination": folder}
-        assert calls[3][3] == {"command": "select", "print": True}
-
-    def test_f3_result_carries_print_path_and_baseline(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            get_body={"prints": {"success": 3, "failure": 1}},
-        )
-        entry = ex.awaiting_completion()["job-op"]
-        assert entry["handle"] == {
-            "base_url": "http://10.0.0.20:5000",
-            "path": print_path,
-            "baseline": {"success": 3, "failure": 1},
-        }
-
-    def test_f3_missing_prints_key_is_a_zero_zero_baseline(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(get_body={})
-        entry = ex.awaiting_completion()["job-op"]
-        assert entry["handle"]["baseline"] == {"success": 0, "failure": 0}
-
-    def test_f3_folder_creation_failure_stops_with_no_later_request(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(create_status=500)
-        assert len(calls) == 1 and calls[0][0] == "form"
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_f3_copy_failure_stops_with_no_get_or_select(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(copy_status=500)
-        # Exactly the form call plus the failed copy call -- no GET, no select.
-        assert len(calls) == 2
-        assert calls[1][1] == "POST"
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_f3_copy_answering_200_instead_of_201_is_refused(self):
-        """SPEC: the copy step must answer 201 exactly (200 is not enough)."""
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(copy_status=200)
-        assert len(calls) == 2
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_f3_unreadable_baseline_stops_before_select(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            get_body={"prints": {"success": "not-a-number", "failure": 0}},
-        )
-        assert len(calls) == 3, calls
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_f3_negative_baseline_counts_are_refused(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            get_body={"prints": {"success": -1, "failure": 0}},
-        )
-        assert len(calls) == 3
-        assert ex.awaiting_completion() == {}
-
-    @pytest.mark.parametrize("select_status", [200, 201, 204])
-    def test_f3_select_accepts_200_201_or_204(self, select_status):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            select_status=select_status, get_body={"prints": {"success": 0, "failure": 0}},
-        )
-        assert "job-op" in ex.awaiting_completion()
-        assert _statuses(gateway) == ["running"]
-
-    def test_f3_select_failure_still_leaves_the_copy_made(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            select_status=500, get_body={"prints": {"success": 0, "failure": 0}},
-        )
-        assert len(calls) == 4
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running", "failed"]
-
-    def test_f3_poll_reads_the_private_copy_not_api_job(self):
-        """Each poll is one GET .../api/files/local/<path>; /api/job is never read."""
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            get_body={"prints": {"success": 0, "failure": 0}},
-        )
-        seen = []
-
-        def fake_get(req, *a, **k):
-            seen.append(req.full_url)
-            return _Resp(200, _json_bytes({"path": print_path, "origin": "local",
-                                           "prints": {"success": 1, "failure": 0,
-                                                      "last": {"success": True}}}))
-
-        with mock.patch("pcc_node.http_util.urlopen", side_effect=fake_get):
-            ex.poll_awaiting()
-
-        assert len(seen) == 1
-        assert seen[0] == f"http://10.0.0.20:5000/api/files/local/{print_path}"
-        assert "/api/job" not in seen[0]
-        assert _statuses(gateway) == ["running", "completed"]
-
-
-class TestF3OctoPrintHistoryVerdict:
-    """octoprint_history_verdict reads durable print-history counts, not a
-    transient current-job snapshot -- so a print instance is never confused
-    with a file."""
-
-    PATH = "pcc-job1/benchy.gcode"
-    BASELINE = {"success": 0, "failure": 0}
-
-    def _verdict(self, body, baseline=None, status=200, path=None):
-        return je.octoprint_history_verdict(status, body, path or self.PATH, baseline or self.BASELINE)
-
-    def test_f3_cancelled_then_reprinted_between_polls_is_failed(self):
-        """Required attack: a cancelled print followed by a successful
-        re-print between two polls (success +1 and failure +1) -> FAILED."""
-        body = {"path": self.PATH, "origin": "local",
-                "prints": {"success": 1, "failure": 1, "last": {"success": True}}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_FAILED, reason
-
-    def test_f3_history_unchanged_never_completes(self):
-        """Required attack: history unchanged while /api/job would say
-        Operational 100% -> never completed."""
-        body = {"path": self.PATH, "origin": "local", "prints": {"success": 0, "failure": 0}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_disconnect_then_later_success_completes_only_then(self):
-        """Required attack: a disconnect (status 0) then a later answer with
-        success +1 -> COMPLETED only then."""
-        verdict1, reason1 = self._verdict({}, status=0)
-        assert verdict1 == POLL_WAITING, reason1
-        body = {"path": self.PATH, "origin": "local",
-                "prints": {"success": 1, "failure": 0, "last": {"success": True}}}
-        verdict2, reason2 = self._verdict(body)
-        assert verdict2 == POLL_COMPLETED, reason2
-
-    def test_f3_success_increment_without_last_success_true_is_waiting(self):
-        body = {"path": self.PATH, "origin": "local",
-                "prints": {"success": 1, "failure": 0, "last": {"success": False}}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_success_increment_with_no_last_field_is_waiting(self):
-        body = {"path": self.PATH, "origin": "local", "prints": {"success": 1, "failure": 0}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_a_count_below_baseline_is_unobservable(self):
-        """The file was replaced/reset: history went backwards."""
-        body = {"path": self.PATH, "origin": "local", "prints": {"success": 0, "failure": 0}}
-        verdict, reason = self._verdict(body, baseline={"success": 2, "failure": 0})
-        assert verdict == POLL_UNOBSERVABLE, reason
-
-    def test_f3_failure_above_baseline_wins_over_a_simultaneous_success_rise(self):
-        body = {"path": self.PATH, "origin": "local",
-                "prints": {"success": 5, "failure": 2, "last": {"success": True}}}
-        verdict, reason = self._verdict(body, baseline={"success": 4, "failure": 1})
-        assert verdict == POLL_FAILED, reason
-
-    def test_f3_answer_about_a_different_path_is_waiting(self):
-        body = {"path": "other-job/file.gcode", "origin": "local",
-                "prints": {"success": 1, "failure": 0, "last": {"success": True}}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_answer_about_a_non_local_origin_is_waiting(self):
-        body = {"path": self.PATH, "origin": "sdcard",
-                "prints": {"success": 1, "failure": 0, "last": {"success": True}}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_non_200_is_waiting(self):
-        verdict, reason = self._verdict({"prints": {"success": 1, "failure": 0}}, status=500)
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_non_dict_body_is_waiting(self):
-        verdict, reason = self._verdict("not json")
-        assert verdict == POLL_WAITING, reason
-
-    def test_f3_malformed_prints_counts_are_waiting(self):
-        body = {"prints": {"success": "one", "failure": 0}}
-        verdict, reason = self._verdict(body)
-        assert verdict == POLL_WAITING, reason
-
 
 # ---------------------------------------------------------------------------
 # Finding 5: poll deadlines (Opentrons run poll; IPP/OctoPrint completion poll)
@@ -1378,22 +819,6 @@ class TestF5CompletionPollDeadlines:
 
         assert captured.get("timeout") == pytest.approx(min(COMPLETION_POLL_REQUEST_TIMEOUT_S, 3))
 
-    def test_f5_octoprint_poll_request_timeout_is_min_10_and_remaining(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            device={**OP_DEVICE, "completionPollTimeout": 4},
-            get_body={"prints": {"success": 0, "failure": 0}},
-        )
-        captured = {}
-
-        def fake_http(method, url, **kwargs):
-            captured["timeout"] = kwargs.get("timeout")
-            return 200, {"path": print_path, "origin": "local", "prints": {"success": 0, "failure": 0}}
-
-        with mock.patch("pcc_node.http_util.http", side_effect=fake_http):
-            ex.poll_awaiting()
-
-        assert captured.get("timeout") == pytest.approx(min(COMPLETION_POLL_REQUEST_TIMEOUT_S, 4))
-
     def test_f5_ipp_answer_after_deadline_is_dropped_without_status_even_if_completed(self):
         ex, gateway, clock = _accept_ipp_job(timeout_override=100)
 
@@ -1405,24 +830,6 @@ class TestF5CompletionPollDeadlines:
             ))
 
         with mock.patch("pcc_node.http_util.urlopen", side_effect=_late_answer):
-            ex.poll_awaiting()
-
-        assert ex.awaiting_completion() == {}
-        assert _statuses(gateway) == ["running"]
-        assert len(_bundles(gateway)) == 1
-
-    def test_f5_octoprint_answer_after_deadline_is_dropped_without_status_even_if_completed(self):
-        ex, gateway, clock, calls, print_path, folder = _accept_octoprint_job(
-            device={**OP_DEVICE, "completionPollTimeout": 100},
-            get_body={"prints": {"success": 0, "failure": 0}},
-        )
-
-        def fake_http(method, url, **kwargs):
-            clock.advance(1000)  # far past the 100s budget by the time it answers
-            return 200, {"path": print_path, "origin": "local",
-                        "prints": {"success": 1, "failure": 0, "last": {"success": True}}}
-
-        with mock.patch("pcc_node.http_util.http", side_effect=fake_http):
             ex.poll_awaiting()
 
         assert ex.awaiting_completion() == {}
