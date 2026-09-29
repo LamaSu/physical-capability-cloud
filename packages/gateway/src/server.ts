@@ -37,6 +37,7 @@ import { operatorRoutes } from "./routes/operator.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { operatorChannelsRoutes } from "./routes/operator-channels.js";
 import { operatorStatusRoutes } from "./routes/operator-status.js";
+import { capabilityAvailabilityRoutes } from "./routes/capability-availability.js";
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { composeRoutes } from "./routes/compose.js";
@@ -693,6 +694,8 @@ export async function createGateway(port = 3200) {
   await app.register(operatorsPublicRoutes);
   await app.register(operatorChannelsRoutes);
   await app.register(operatorStatusRoutes);
+  // N83 (rehearsal R0 G11): the owner sets a capability's availability.
+  await app.register(capabilityAvailabilityRoutes);
   await app.register(captureRoutes);
   await app.register(skillsRoutes);
   // On-Ramp UI artifact registry — POST/GET/PUT/DELETE /api/artifacts + the
