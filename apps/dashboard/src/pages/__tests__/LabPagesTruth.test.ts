@@ -16,7 +16,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { stepSegmentNote, workflowStepSegments } from "../orchestrator-logic.js";
+import { readOrchestratorResponse, stepSegmentNote, workflowStepSegments } from "../orchestrator-logic.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (name: string) => readFileSync(resolve(here, "..", name), "utf-8");
@@ -49,6 +49,109 @@ describe("workflowStepSegments", () => {
   });
 });
 
+describe("readOrchestratorResponse", () => {
+  // N34: outside demo mode the gateway now answers orchestrator routes with
+  // HTTP 501 { error: "not_available", message, see } once it stops
+  // recording this data. Treating that body as data (the old behaviour)
+  // showed "0 Transfer Graphs" — fabricated authoritative state (PX-3).
+
+  it("classifies a 501 not_available, keeping its message and see routes", async () => {
+    const res = new Response(
+      JSON.stringify({
+        error: "not_available",
+        message: "orchestrator graphs are not recorded by this gateway",
+        see: ["GET /api/kernels", "GET /api/kernels/:kernelId/devices"],
+      }),
+      { status: 501 },
+    );
+
+    const result = await readOrchestratorResponse(res);
+
+    expect(result).toEqual({
+      state: "not_available",
+      message: "orchestrator graphs are not recorded by this gateway",
+      see: ["GET /api/kernels", "GET /api/kernels/:kernelId/devices"],
+    });
+  });
+
+  it("treats a 501 whose body is not not_available as a plain error", async () => {
+    const res = new Response(JSON.stringify({ error: "some_other_error" }), {
+      status: 501,
+      statusText: "Not Implemented",
+    });
+
+    const result = await readOrchestratorResponse(res);
+
+    expect(result.state).toBe("error");
+    if (result.state === "error") {
+      expect(result.status).toBe(501);
+    }
+  });
+
+  it("never throws on a non-JSON error body", async () => {
+    const res = new Response("<html>gateway error</html>", { status: 500 });
+
+    const result = await readOrchestratorResponse(res);
+
+    expect(result.state).toBe("error");
+    if (result.state === "error") {
+      expect(result.status).toBe(500);
+      expect(typeof result.message).toBe("string");
+      expect(result.message.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("flags demo data from the x-pcc-demo response header", async () => {
+    const res = new Response(JSON.stringify({ graphs: [] }), {
+      status: 200,
+      headers: { "x-pcc-demo": "true" },
+    });
+
+    const result = await readOrchestratorResponse(res);
+
+    expect(result.state).toBe("ok");
+    if (result.state === "ok") {
+      expect(result.demo).toBe(true);
+    }
+  });
+
+  it("flags demo data from a demo: true body field", async () => {
+    const res = new Response(JSON.stringify({ graphs: [], demo: true }), { status: 200 });
+
+    const result = await readOrchestratorResponse(res);
+
+    expect(result.state).toBe("ok");
+    if (result.state === "ok") {
+      expect(result.demo).toBe(true);
+    }
+  });
+
+  it("is not demo data for a plain 200, and keeps the data intact", async () => {
+    const res = new Response(JSON.stringify({ graphs: [{ id: "g1" }] }), { status: 200 });
+
+    const result = await readOrchestratorResponse<{ graphs: Array<{ id: string }> }>(res);
+
+    expect(result.state).toBe("ok");
+    if (result.state === "ok") {
+      expect(result.demo).toBe(false);
+      expect(result.data.graphs).toEqual([{ id: "g1" }]);
+    }
+  });
+
+  it("reports an error instead of throwing on invalid JSON in an ok response", async () => {
+    const res = new Response("not json", { status: 200 });
+
+    const result = await readOrchestratorResponse(res);
+
+    expect(result.state).toBe("error");
+    if (result.state === "error") {
+      expect(result.status).toBe(200);
+      expect(typeof result.message).toBe("string");
+      expect(result.message.length).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("OrchestratorPage source", () => {
   const source = read("OrchestratorPage.tsx");
 
@@ -56,6 +159,20 @@ describe("OrchestratorPage source", () => {
     expect(source).not.toContain('"60%"');
     expect(source).not.toMatch(/i === 1 \? "bg-amber-400/);
     expect(source).toContain("workflowStepSegments(wf.status, wf.steps.length)");
+  });
+
+  it("classifies every orchestrator fetch instead of trusting the raw body", () => {
+    const calls = source.match(/readOrchestratorResponse/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(4);
+    expect(source).not.toContain(".then((r) => r.json())");
+  });
+
+  it("says when the gateway doesn't have the data, instead of showing an empty lab", () => {
+    expect(source).toContain("not available on this gateway");
+  });
+
+  it("falls KPI tiles back to an em dash instead of a fabricated zero", () => {
+    expect(source).toContain("—");
   });
 });
 
