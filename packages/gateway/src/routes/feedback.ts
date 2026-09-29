@@ -71,12 +71,20 @@ const MAX_FEEDBACK_FILE_BYTES = (() => {
   const n = Number.parseInt(process.env.PCC_FEEDBACK_MAX_BYTES ?? "", 10);
   return Number.isFinite(n) && n > 0 ? n : 50 * 1024 * 1024;
 })();
-function storeFull(file: string, maxBytes: number): boolean {
+/**
+ * True when appending `line` would take `file` past `maxBytes` (the hard cap). The
+ * check used to look at the CURRENT size only, so a report appended just under the
+ * cap crossed it (astra, pack 53, new defect 2). A missing file is empty; any other
+ * stat failure refuses rather than appending blind.
+ */
+function wouldExceedCap(file: string, line: string, maxBytes: number): boolean {
+  let current = 0;
   try {
-    return statSync(file).size >= maxBytes;
-  } catch {
-    return false; // no file yet
+    current = statSync(file).size;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") return true;
   }
+  return current + Buffer.byteLength(line, "utf8") > maxBytes;
 }
 
 // Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
@@ -110,9 +118,9 @@ export function __resetFeedbackDedup(): void {
 const MAX_LOG_ENTRIES = 20;
 const LOG_NOTE_MAX = 500;
 
-function append(file: string, rec: unknown): void {
+function append(file: string, recLine: string): void {
   mkdirSync(DATA_DIR, { recursive: true });
-  appendFileSync(file, JSON.stringify(rec) + "\n", "utf8");
+  appendFileSync(file, recLine, "utf8");
 }
 function readAll(file: string): unknown[] {
   if (!existsSync(file)) return [];
@@ -400,10 +408,11 @@ export async function feedbackRoutes(app: FastifyInstance) {
       });
     }
 
-    if (storeFull(FEEDBACK_FILE, MAX_FEEDBACK_FILE_BYTES)) {
+    const recLine = JSON.stringify(rec) + "\n"; // exactly what append() writes
+    if (wouldExceedCap(FEEDBACK_FILE, recLine, MAX_FEEDBACK_FILE_BYTES)) {
       return reply.code(503).send({ error: "feedback_store_full", message: "Feedback storage is full; the operators have been told. Try again later." });
     }
-    append(FEEDBACK_FILE, rec);
+    append(FEEDBACK_FILE, recLine);
     // Mark the key only AFTER a successful append — a failed write must not
     // permanently dedup a report that never persisted (#3).
     markSeen(dedupKey);

@@ -478,4 +478,51 @@ describe("aggregator x402 gating (e2e)", () => {
       await app.close();
     }, 10_000);
   });
+
+  // ── N67 (operator item 80; astra pack 58 verdict, weakest link) ─────────────
+  // With x402 ON and an invalid or missing treasury, the gate used to switch itself
+  // OFF, so priced calls were served FREE. It now fails closed: 503
+  // payment_not_configured, the upstream never called, and an alert is raised.
+  describe("N67: x402 ON with an invalid treasury fails CLOSED, never free", () => {
+    it.each([
+      ["a placeholder treasury", "0x1111111111111111111111111111111111111111"],
+      ["a malformed treasury", "not-an-address"],
+      ["no treasury at all", undefined],
+    ])("[neg] %s: a paid tool answers 503 payment_not_configured, the upstream is never called", async (_name, treasury) => {
+      const reg = getAggregatorRegistry();
+      reg.upsert(makePaidTool("0.01"));
+      setGateEnv({ facilitatorUrl: "https://fac.test" });
+      if (treasury === undefined) delete process.env.PCC_AGGREGATOR_TREASURY;
+      else process.env.PCC_AGGREGATOR_TREASURY = treasury;
+      const fetchMock = installFetchMock({});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const app = Fastify();
+      await app.register(aggregatorRoutes);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/aggregator/invoke/paid-tool-1",
+        payload: { args: {} },
+      });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toBe("payment_not_configured");
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes("api.example.com"))).toBe(false);
+      expect(errorSpy.mock.calls.some((c) => String(c[0]).includes("PCC_AGGREGATOR_TREASURY"))).toBe(true);
+      await app.close();
+    });
+
+    it("control: a FREE tool still answers 200 (it needs no treasury)", async () => {
+      const reg = getAggregatorRegistry();
+      reg.upsert(makeFreeTool());
+      setGateEnv({ facilitatorUrl: "https://fac.test" });
+      process.env.PCC_AGGREGATOR_TREASURY = "not-an-address";
+      installFetchMock({});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const app = Fastify();
+      await app.register(aggregatorRoutes);
+      const res = await app.inject({ method: "POST", url: "/api/aggregator/invoke/free-tool-1", payload: { args: {} } });
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+  });
 });
+
