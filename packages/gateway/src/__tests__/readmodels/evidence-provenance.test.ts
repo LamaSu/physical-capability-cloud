@@ -4,6 +4,7 @@
  * wrong or could never know: "verified" from a row existing, an eventCount of 0 for bundles
  * that have events, and integrity nobody recomputed.
  */
+import { provenWalletFor } from "../helpers/job-read-party.js";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
@@ -155,6 +156,8 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
       const p = req.headers["x-test-principal"];
       if (typeof p === "string" && p !== "none") (req as any).operatorId = p;
       else if (p === undefined) (req as any).operatorId = OPERATOR_NYC;
+      // WP-A's gate proves a wallet by SIWE (#353 r3): a wallet principal reads as proven.
+      (req as any).provenWallet = provenWalletFor(req.headers["x-test-proven-wallet"], (req as any).operatorId);
     });
     await app.register(paidJobFlowRoutes);
     await app.register(negotiationRoutes);
@@ -227,5 +230,13 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     expect(other.statusCode).toBe(404);
     expect(missing.statusCode).toBe(404);
     expect(other.body.replace(jobId, "X")).toBe(missing.body.replace("job-does-not-exist", "X"));
+    // A key that only CLAIMS the operator's id, without a proven wallet, is 403 (#353 r3).
+    const claimed = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}/evidence/provenance`,
+      headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": "none" },
+    });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().error).toBe("identity_unverified");
   });
 });
