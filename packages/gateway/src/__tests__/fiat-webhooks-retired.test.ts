@@ -12,7 +12,8 @@ import { initStore, closeStore } from "../db.js";
  * credits — being behind an API key is NOT provider authentication. Nothing consumes the
  * credits (deductCredits is never called in real code; the rail is x402 / on-chain USDC),
  * so the path is removed rather than hardened; funding moves to direct USDC.
- * PCC_LEGACY_FIAT_WEBHOOKS=true is a dev-only escape hatch (still unsigned — never prod).
+ * PCC_LEGACY_FIAT_WEBHOOKS used to re-enable it outside production; it re-enables nothing
+ * now, in any environment (board N48, cross-family review of #373 at d5be8805, finding D).
  */
 describe("legacy fiat webhooks + credits are RETIRED (audit PR2)", () => {
   let app: FastifyInstance;
@@ -88,23 +89,32 @@ describe("legacy fiat webhooks + credits are RETIRED (audit PR2)", () => {
     ).toBe(410);
   });
 
-  // ── the retire is a reversible flag, not a hardcoded break ──
-  it("escape hatch: PCC_LEGACY_FIAT_WEBHOOKS=true makes the credits route live again (404, not 410)", async () => {
+  // ── the legacy flag re-enables nothing, in any environment ──
+  it("PCC_LEGACY_FIAT_WEBHOOKS=true re-enables nothing: the credits and webhooks stay 410", async () => {
     process.env.PCC_LEGACY_FIAT_WEBHOOKS = "true";
-    const r = await app.inject({ method: "GET", url: "/api/fiat-ramp/stripe/credits/nobody", headers: bearer() });
-    expect(r.statusCode).toBe(404); // live handler → "no balance", not the 410-retired guard
+    for (const [method, url, payload] of [
+      ["GET", "/api/fiat-ramp/stripe/credits/nobody", undefined],
+      ["POST", "/api/fiat-ramp/stripe/credits/deposit", { amountUsd: 50 }],
+      ["POST", "/api/fiat-ramp/webhook/stripe", forgedCredit],
+      ["POST", "/api/fiat-ramp/webhook/yellowcard", { event: "COLLECTION.COMPLETE", data: { id: "x" } }],
+    ] as const) {
+      const r = await app.inject({ method, url, headers: bearer(), payload: payload as any });
+      expect(r.statusCode, url).toBe(410);
+    }
     delete process.env.PCC_LEGACY_FIAT_WEBHOOKS;
   });
 
-  // ── the escape hatch is enforced, not just documented: prod boot fails if it's set ──
-  it("FAILS STARTUP under NODE_ENV=production when the legacy flag is set", async () => {
+  it("production boots with the legacy flag set (it is ignored) and still answers 410", async () => {
     const prevEnv = process.env.NODE_ENV;
     process.env.NODE_ENV = "production";
     process.env.PCC_LEGACY_FIAT_WEBHOOKS = "true";
-    const bad = Fastify();
-    bad.register(fiatRampRoutes);
-    await expect(bad.ready()).rejects.toThrow(/forbidden in production/);
-    await bad.close().catch(() => {});
+    const prod = Fastify();
+    await prod.register(apiGate);
+    await prod.register(fiatRampRoutes);
+    await expect(prod.ready()).resolves.toBeDefined();
+    const r = await prod.inject({ method: "POST", url: "/api/fiat-ramp/webhook/stripe", headers: bearer(), payload: forgedCredit });
+    expect(r.statusCode).toBe(410);
+    await prod.close();
     if (prevEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = prevEnv;
     delete process.env.PCC_LEGACY_FIAT_WEBHOOKS;
