@@ -159,7 +159,7 @@ export async function sendMessage(
       doneReason: "error",
       turns: 0,
       error:
-        "@anthropic-ai/sdk failed to load. Reinstall the CLI (`npm i -g @pcc/onboard` or `npx -y @pcc/onboard`).",
+        "@anthropic-ai/sdk failed to load. Run `pnpm install` at the repository root, then rebuild the CLI (`pnpm --filter '@pcc/onboard...' build`).",
     };
   }
 

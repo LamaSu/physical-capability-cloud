@@ -107,6 +107,11 @@ const CAPABILITY_TYPES = {
 
 // ── Code snippet ────────────────────────────────────────────────
 
+// N26: no @pcc package is published to npm yet, so the page gives the
+// from-source install that works, and links the real repository.
+const REPO_URL = "https://github.com/LamaSu/physical-capability-cloud";
+const INSTALL_FROM_SOURCE = `git clone ${REPO_URL} && cd physical-capability-cloud && pnpm install`;
+
 const QUICK_START_CODE = `import { quickStart } from "@pcc/onboard-kit";
 
 const { kernelAgent, stop } = await quickStart({
@@ -203,13 +208,16 @@ export function OnboardKitPage() {
 
       {/* ── Install ──────────────────────────────────────────── */}
       <GlassPanel padding="md" className="space-y-3">
-        <h3 className="text-sm font-semibold text-white/70">Install</h3>
+        <h3 className="text-sm font-semibold text-white/70">Install from source</h3>
+        <p className="text-xs text-white/40">
+          The @pcc packages are not on npm yet, so the kit runs from the repository.
+        </p>
         <div className="flex items-center gap-2">
           <code className="flex-1 bg-black/40 border border-white/[0.06] rounded px-3 py-2 text-xs text-cyan-300/70 font-mono">
-            pnpm add @pcc/spec @pcc/kernel @pcc/a2a @pcc/agent-runtime @pcc/agent-kernel @pcc/onboard-kit
+            {INSTALL_FROM_SOURCE}
           </code>
           <button
-            onClick={() => copyToClipboard("pnpm add @pcc/spec @pcc/kernel @pcc/a2a @pcc/agent-runtime @pcc/agent-kernel @pcc/onboard-kit", "install")}
+            onClick={() => copyToClipboard(INSTALL_FROM_SOURCE, "install")}
             className="shrink-0 px-2 py-2 text-[10px] rounded bg-white/[0.06] border border-white/[0.08] text-white/40 hover:text-white/70 transition-colors"
           >
             {copiedSnippet === "install" ? "Copied" : "Copy"}
@@ -411,7 +419,7 @@ export function OnboardKitPage() {
         </p>
         <div className="flex items-center justify-center gap-3">
           <a
-            href="https://capability.network/tree/main/packages/onboard-kit"
+            href={`${REPO_URL}/tree/master/packages/onboard-kit`}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-cyan-500/15 border border-cyan-500/25 text-cyan-400 hover:bg-cyan-500/25 transition-colors"
