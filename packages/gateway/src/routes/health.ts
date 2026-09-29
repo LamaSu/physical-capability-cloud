@@ -15,18 +15,20 @@ export interface HealthRoutesOptions {
  *   status          "ok"
  *   timestamp       ISO-8601, per request
  *   version         "0.1.0" (static; release-please owns versions)
- *   commit          full git SHA baked into the image at build time, or null
- *   commitSource    "image_build" | "unknown"
- *   buildArg        the build argument that supplied the SHA, or null
- *   deployMetadata  { railwayGitCommitSha }: host metadata, not proof of the code served
+ *   commit            the git SHA a build argument named, recorded in the image, or null
+ *   commitSource      "build_argument" | "unknown"
+ *   buildArg          the build argument that supplied the SHA, or null
+ *   sourceDigest      digest of the source the image was built from, or null
+ *   sourceDigestSpec  "pcc.source-digest/v1" | null
+ *   deployMetadata    { railwayGitCommitSha }: host metadata, not proof of the code served
  *
- * commit/commitSource say WHICH COMMIT is being served (STATUS-BOARD N5, deploy
- * observability). They come only from the image file, never from a runtime variable;
- * see build-info.ts. They are read once, at registration: the build a process serves
- * cannot change while it runs.
+ * These say WHICH SOURCE is being served (STATUS-BOARD N5, deploy observability). They come
+ * only from the image file, never from a runtime variable; see build-info.ts. commit is a
+ * claim; sourceDigest is what CI and scripts/verify-build-source.sh check against a commit.
+ * They are read once, at registration: the build a process serves cannot change while it runs.
  */
 export async function healthRoutes(app: FastifyInstance, opts: HealthRoutesOptions = {}): Promise<void> {
-  const { commit, commitSource, buildArg, deployMetadata } = (opts.buildInfo ?? readBuildInfo)();
+  const { commit, commitSource, buildArg, sourceDigest, sourceDigestSpec, deployMetadata } = (opts.buildInfo ?? readBuildInfo)();
 
   const healthPayload = () => ({
     status: "ok",
@@ -35,6 +37,8 @@ export async function healthRoutes(app: FastifyInstance, opts: HealthRoutesOptio
     commit,
     commitSource,
     buildArg,
+    sourceDigest,
+    sourceDigestSpec,
     deployMetadata,
   });
 

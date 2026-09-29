@@ -11,7 +11,7 @@ import { readBuildInfo, type BuildInfo } from "../build-info.js";
 const SHA40 = "0123456789abcdef0123456789abcdef01234567";
 const OTHER40 = "fedcba9876543210fedcba9876543210fedcba98";
 const PATHS = ["/api/health", "/health"] as const;
-const PAYLOAD_KEYS = ["buildArg", "commit", "commitSource", "deployMetadata", "status", "timestamp", "version"];
+const PAYLOAD_KEYS = ["buildArg", "commit", "commitSource", "deployMetadata", "sourceDigest", "sourceDigestSpec", "status", "timestamp", "version"];
 
 const ENV_KEYS = ["PCC_BUILD_SHA", "RAILWAY_GIT_COMMIT_SHA"] as const;
 let savedEnv: Record<string, string | undefined> = {};
@@ -37,7 +37,9 @@ afterEach(async () => {
 
 /** The build info a given image file (or none) yields, with the current env. */
 const fromFile = (content: string | null) => () => readBuildInfo({ readFile: () => content });
-const baked = (commit: string, buildArg = "PCC_BUILD_SHA") => JSON.stringify({ commit, buildArg });
+const DIGEST = `sha256:${"ef".repeat(32)}`;
+const baked = (commit: string, buildArg = "PCC_BUILD_SHA") =>
+  JSON.stringify({ commit, buildArg, sourceDigest: DIGEST, sourceDigestSpec: "pcc.source-digest/v1" });
 
 /** Build a fresh app AFTER the test has set its env (build info is read at registration). */
 async function buildApp(buildInfo: () => BuildInfo = fromFile(null)): Promise<FastifyInstance> {
@@ -101,11 +103,13 @@ describe("GET /api/health + /health: commit / commitSource", () => {
     }
   });
 
-  it("the image file's commit -> image_build, with the build argument that supplied it", async () => {
+  it("the image file's commit -> build_argument, with the argument that supplied it and the source digest", async () => {
     const both = await getBoth(await buildApp(fromFile(baked(SHA40, "RAILWAY_GIT_COMMIT_SHA"))));
     for (const url of PATHS) {
       expect(both[url]!.body.commit, url).toBe(SHA40);
-      expect(both[url]!.body.commitSource, url).toBe("image_build");
+      expect(both[url]!.body.commitSource, url).toBe("build_argument");
+      expect(both[url]!.body.sourceDigest, url).toBe(DIGEST);
+      expect(both[url]!.body.sourceDigestSpec, url).toBe("pcc.source-digest/v1");
       expect(both[url]!.body.buildArg, url).toBe("RAILWAY_GIT_COMMIT_SHA");
     }
   });
