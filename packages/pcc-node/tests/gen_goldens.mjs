@@ -369,6 +369,13 @@ const goldens = {
 // vector states its intended outcome, and generation fails if the mirror
 // disagrees. Session keys travel as publicKeyHex.
 const REVOCATION_TEXT = (revokedAt) => '{"sessionId":"sess-001","revokedAt":' + revokedAt + ',"reason":"rotated"}';
+// R20 round 3: the JSON boundary itself. A field the preimage ignores still
+// has to be RFC 8259 JSON, and a container nest at most 64 deep, so json.loads'
+// NaN/Infinity tokens, CPython's 4300-digit and recursion limits and V8's
+// unlimited depth cannot make the two languages disagree.
+const REVOCATION_WITH = (unused) => '{"sessionId":"sess-001","revokedAt":1727201000,"reason":"rotated","unused":' + unused + '}';
+const NEST = (levels) => "[".repeat(levels) + "]".repeat(levels);
+const SIGNING_JSON_MAX_DEPTH = 64;
 const SESSION_TEXT = JSON.stringify(SESSION_BASE);
 const sessionWith = (patch) => JSON.stringify({ ...SESSION_BASE, ...patch });
 const swap = (from, to) => {
@@ -403,7 +410,31 @@ const PARITY_VECTORS = [
   { name: "delegation_missing_scope", kind: "delegation", accept: false, json: sessionWith({ scope: undefined }) },
   { name: "delegation_short_public_key", kind: "delegation", accept: false, json: sessionWith({ publicKeyHex: SESSION_BASE.publicKeyHex.slice(2) }) },
   { name: "delegation_public_key_0x_uppercase", kind: "delegation", accept: true, json: sessionWith({ publicKeyHex: "0X" + SESSION_BASE.publicKeyHex.toUpperCase() }) },
+  { name: "revocation_ignored_nan", kind: "revocation", accept: false, json: REVOCATION_WITH("NaN") },
+  { name: "revocation_ignored_infinity", kind: "revocation", accept: false, json: REVOCATION_WITH("Infinity") },
+  { name: "revocation_ignored_negative_infinity_nested", kind: "revocation", accept: false, json: REVOCATION_WITH('{"a":[-Infinity]}') },
+  { name: "delegation_ignored_nan", kind: "delegation", accept: false, json: SESSION_TEXT.slice(0, -1) + ',"extra":NaN}' },
+  { name: "revocation_leading_bom", kind: "revocation", accept: false, json: "\ufeff" + REVOCATION_TEXT("1727201000") },
+  { name: "revocation_ignored_depth_64", kind: "revocation", accept: true, json: REVOCATION_WITH(NEST(63)) },
+  { name: "revocation_ignored_depth_65", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(64)) },
+  { name: "revocation_ignored_depth_1200", kind: "revocation", accept: false, json: REVOCATION_WITH(NEST(1199)) },
+  { name: "revocation_ignored_long_integer", kind: "revocation", accept: true, json: REVOCATION_WITH("1" + "0".repeat(5000)) },
+  { name: "revocation_long_integer", kind: "revocation", accept: false, json: REVOCATION_TEXT("1" + "0".repeat(5000)) },
 ];
+
+/** parseSigningInputJson's depth rule (signing-preimage.ts): any container deeper than 64 refuses. */
+function nestingExceeds(value, limit) {
+  const stack = [[value, 1]];
+  while (stack.length > 0) {
+    const [v, depth] = stack.pop();
+    if (typeof v !== "object" || v === null) continue;
+    if (depth > limit) return true;
+    for (const child of Array.isArray(v) ? v : Object.values(v)) {
+      if (typeof child === "object" && child !== null) stack.push([child, depth + 1]);
+    }
+  }
+  return false;
+}
 
 function evaluateParityVector(v) {
   let parsed;
@@ -412,6 +443,7 @@ function evaluateParityVector(v) {
   } catch {
     return { reject: true };
   }
+  if (nestingExceeds(parsed, SIGNING_JSON_MAX_DEPTH)) return { reject: true };
   try {
     const bytes = v.kind === "revocation" ? sessionRevocationPreimage(parsed) : sessionKeyDelegationPreimage(parsed);
     return { preimage_utf8: bytes.toString("utf8") };

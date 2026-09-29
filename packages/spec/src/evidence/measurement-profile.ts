@@ -41,6 +41,7 @@ import { createHash } from "node:crypto";
 
 import { canonicalize } from "../util/canonical.js";
 import { EVIDENCE_LEVELS, type EvidenceLevel } from "./evidence-level.js";
+import { plainDataCopy } from "../util/plain-data.js";
 
 /** Domain separator — a profile digest can never collide with another digest. */
 export const MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1";
@@ -417,19 +418,8 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-/**
- * A plain-data copy of `value`: its canonical JSON text, parsed back. Getters
- * run exactly once and the copy has none, so nothing can answer one way to a
- * check and another way afterwards. A value JSON cannot carry (a cycle, NaN,
- * Infinity, a function) is refused, never coerced.
- */
-export function plainDataCopy(value: unknown): { ok: true; value: unknown } | { ok: false; reason: string } {
-  try {
-    return { ok: true, value: JSON.parse(canonicalize(value)) };
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : "not serializable" };
-  }
-}
+/** Re-exported: the one-pass copy every check here runs on (util/plain-data.ts). */
+export { plainDataCopy };
 
 /** A diagnostic for any value that cannot throw (JSON.stringify can, on a bigint or a cycle). */
 function describeValue(v: unknown): string {

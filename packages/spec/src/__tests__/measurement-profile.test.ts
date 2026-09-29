@@ -67,6 +67,25 @@ function expectedDigest(domain: string, profile: unknown): string {
   return "0x" + createHash("sha256").update(canonicalize({ domain, profile })).digest("hex");
 }
 
+/**
+ * Rebuilds every plain object in `value`, recursively, with its keys
+ * inserted in REVERSE order — a genuine key-order permutation. Unlike
+ * `JSON.parse(JSON.stringify({...obj}))` (which preserves insertion order,
+ * per the astra pack 40 finding at measurement-profile.test.ts:138-142 of
+ * the prior revision), this actually changes `Object.keys()` order. Arrays
+ * keep their element order; only object keys are reversed.
+ */
+function reversed<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((x) => reversed(x)) as unknown as T;
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).reverse();
+    const out: Record<string, unknown> = {};
+    for (const k of keys) out[k] = reversed((value as Record<string, unknown>)[k]);
+    return out as T;
+  }
+  return value;
+}
+
 describe("measurement profile — validation fails closed", () => {
   it("the print pilot profile validates", () => {
     expect(validateMeasurementProfile(printPilotProfile())).toEqual([]);
@@ -138,9 +157,11 @@ describe("measurement profile — digest is the commitment family over the produ
     expect(computeMeasurementProfileDigest(printPilotProfile())).toBe(PINNED_PRINT_PILOT_DIGEST);
   });
 
-  it("is stable across key order (canonicalizer sorts)", () => {
+  it("is stable across key order: a genuinely reversed-key profile digests the same (canonicalizer sorts)", () => {
     const a = printPilotProfile();
-    const reordered = JSON.parse(JSON.stringify({ ...a })) as MeasurementProfileV1;
+    const reordered = reversed(a);
+    // Prove this is a REAL permutation, unlike a JSON round-trip of a spread.
+    expect(Object.keys(reordered)).toEqual([...Object.keys(a)].reverse());
     expect(computeMeasurementProfileDigest(reordered)).toBe(computeMeasurementProfileDigest(a));
   });
 
@@ -312,4 +333,190 @@ describe("measurement profile — validation fails closed on unknown terms and n
       expect(violations.some((v) => v.path === path)).toBe(true);
     });
   }
+});
+
+describe("round 2 (astra pack 40)", () => {
+  describe("calibration: optional fields validate even when calibration is not required", () => {
+    const cases: [string, (p: Record<string, unknown>) => void, string[]][] = [
+      [
+        "procedureId alone, calibration not required",
+        (p) => { p.calibration = { required: false, procedureId: "cal-1" }; },
+        ["calibration.procedureId"],
+      ],
+      [
+        "validityWindowSeconds alone, calibration not required",
+        (p) => { p.calibration = { required: false, validityWindowSeconds: 3600 }; },
+        ["calibration.validityWindowSeconds"],
+      ],
+      [
+        "both fields, both malformed, calibration not required",
+        (p) => { p.calibration = { required: false, procedureId: 42, validityWindowSeconds: -1 }; },
+        ["calibration.procedureId", "calibration.validityWindowSeconds"],
+      ],
+      [
+        "calibration required, but procedureId is not a string",
+        (p) => { p.calibration = { required: true, procedureId: 42, validityWindowSeconds: 3600 }; },
+        ["calibration.procedureId"],
+      ],
+    ];
+    for (const [name, mutate, paths] of cases) {
+      it(`${name} -> violation at ${paths.join(" and ")}`, () => {
+        const p = printPilotProfile() as unknown as Record<string, unknown>;
+        mutate(p);
+        const violations = validateMeasurementProfile(p);
+        for (const path of paths) {
+          expect(violations.some((v) => v.path === path)).toBe(true);
+        }
+      });
+    }
+  });
+
+  describe("sparse arrays are rejected (index-based check catches holes .every() would skip)", () => {
+    it("device.permittedAdapterVersions = new Array(1) is a violation", () => {
+      const p = printPilotProfile() as unknown as Record<string, unknown>;
+      (p.device as Record<string, unknown>).permittedAdapterVersions = new Array(1);
+      expect(validateMeasurementProfile(p).some((v) => v.path === "device.permittedAdapterVersions")).toBe(true);
+    });
+
+    it("interpretation.evidenceTypeIds with a hole (a.length = 2 after one push) is a violation", () => {
+      const p = printPilotProfile() as unknown as Record<string, unknown>;
+      const a = ["capture.photo_nonced"];
+      a.length = 2;
+      (p.interpretation as Record<string, unknown>).evidenceTypeIds = a;
+      expect(validateMeasurementProfile(p).some((v) => v.path === "interpretation.evidenceTypeIds")).toBe(true);
+    });
+
+    it("witnesses.requiredRoles = new Array(2) is a violation", () => {
+      const p = printPilotProfile() as unknown as Record<string, unknown>;
+      (p.witnesses as Record<string, unknown>).requiredRoles = new Array(2);
+      expect(validateMeasurementProfile(p).some((v) => v.path === "witnesses.requiredRoles")).toBe(true);
+    });
+  });
+
+  describe("profileGoverns never throws, even on inputs JSON.stringify itself would choke on", () => {
+    const FAKE_COMMITTED = `0x${"a".repeat(64)}`;
+
+    it("a bigint committed digest: digest-wrong-family, reason names the type, never throws", () => {
+      let res: ReturnType<typeof profileGoverns> | undefined;
+      expect(() => {
+        res = profileGoverns(10n as unknown as string, printPilotProfile());
+      }).not.toThrow();
+      expect(res!.governs).toBe(false);
+      expect(res!.code).toBe("digest-wrong-family");
+      expect(res!.reasons.join(" ")).toContain("type bigint");
+    });
+
+    it("a cyclic presented profile: profile-invalid, never throws", () => {
+      const p = printPilotProfile() as unknown as Record<string, unknown>;
+      p.selfCycle = p;
+      let res: ReturnType<typeof profileGoverns> | undefined;
+      expect(() => {
+        res = profileGoverns(FAKE_COMMITTED, p as unknown as MeasurementProfileV1);
+      }).not.toThrow();
+      expect(res!.governs).toBe(false);
+      expect(res!.code).toBe("profile-invalid");
+    });
+
+    it("a NaN measurement.sampling.minSamples: profile-invalid, never throws", () => {
+      const p = printPilotProfile();
+      (p.measurement.sampling as { minSamples: number }).minSamples = NaN;
+      let res: ReturnType<typeof profileGoverns> | undefined;
+      expect(() => {
+        res = profileGoverns(FAKE_COMMITTED, p);
+      }).not.toThrow();
+      expect(res!.governs).toBe(false);
+      expect(res!.code).toBe("profile-invalid");
+    });
+  });
+
+  describe("the governing snapshot is an independent, deep-frozen copy", () => {
+    it("deep-equals the input profile but is not the same object", () => {
+      const p = printPilotProfile();
+      const committed = computeMeasurementProfileDigest(p);
+      const res = profileGoverns(committed, p);
+      expect(res.governs).toBe(true);
+      expect(res.profile).toEqual(p);
+      expect(res.profile).not.toBe(p);
+    });
+
+    it("the snapshot and its nested measurement object are both frozen", () => {
+      const p = printPilotProfile();
+      const committed = computeMeasurementProfileDigest(p);
+      const res = profileGoverns(committed, p);
+      expect(Object.isFrozen(res.profile)).toBe(true);
+      expect(Object.isFrozen(res.profile!.measurement)).toBe(true);
+    });
+
+    it("mutating the caller's profile after the call does not change the returned snapshot", () => {
+      const p = printPilotProfile();
+      const committed = computeMeasurementProfileDigest(p);
+      const res = profileGoverns(committed, p);
+      p.measurement.method = "MUTATED-AFTER-CALL";
+      p.device.deviceId = "MUTATED-AFTER-CALL";
+      expect(res.profile!.measurement.method).not.toBe("MUTATED-AFTER-CALL");
+      expect(res.profile!.device.deviceId).not.toBe("MUTATED-AFTER-CALL");
+    });
+  });
+
+  it("a lying measurement.sampling getter: first read wins, in both the digest and the returned snapshot", () => {
+    const p = printPilotProfile();
+    let reads = 0;
+    Object.defineProperty(p.measurement, "sampling", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads++;
+        return reads === 1 ? { minSamples: 2 } : { minSamples: 1 };
+      },
+    });
+
+    const firstReadProfile = printPilotProfile();
+    firstReadProfile.measurement.sampling = { minSamples: 2 };
+    const expectedDigestValue = computeMeasurementProfileDigest(firstReadProfile);
+
+    const res = profileGoverns(expectedDigestValue, p);
+    expect(res.presentedDigest).toBe(expectedDigestValue);
+    expect(res.profile!.measurement.sampling.minSamples).toBe(2);
+  });
+
+  it("computeMeasurementProfileDigest reads a lying getter once: the first read is what is validated and digested (lane mutation check)", () => {
+    const p = printPilotProfile();
+    let reads = 0;
+    Object.defineProperty(p.measurement, "sampling", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads++;
+        return reads === 1 ? { minSamples: 2 } : { minSamples: 1 };
+      },
+    });
+    const firstRead = printPilotProfile();
+    firstRead.measurement.sampling = { minSamples: 2 };
+    const secondRead = printPilotProfile();
+    secondRead.measurement.sampling = { minSamples: 1 };
+    const digest = computeMeasurementProfileDigest(p);
+    expect(digest).toBe(computeMeasurementProfileDigest(firstRead));
+    expect(digest).not.toBe(computeMeasurementProfileDigest(secondRead));
+    expect(reads).toBe(1);
+  });
+
+  describe("key order: a real reversal (not a JSON round-trip of a spread), via reversed()", () => {
+    it("reversed() really reverses keys at the top level and one nested level", () => {
+      const p = printPilotProfile();
+      const r = reversed(p);
+      expect(Object.keys(r)).toEqual([...Object.keys(p)].reverse());
+      expect(Object.keys(r.device)).toEqual([...Object.keys(p.device)].reverse());
+    });
+
+    it("computeMeasurementProfileDigest(reversed(p)) equals the digest of p", () => {
+      const p = printPilotProfile();
+      expect(computeMeasurementProfileDigest(reversed(p))).toBe(computeMeasurementProfileDigest(p));
+    });
+  });
+
+  it("computeMeasurementProfileDigest throws InvalidMeasurementProfileError on a profile JSON cannot carry (NaN)", () => {
+    const p = printPilotProfile();
+    (p.measurement.sampling as { minSamples: number }).minSamples = NaN;
+    expect(() => computeMeasurementProfileDigest(p)).toThrow(InvalidMeasurementProfileError);
+  });
 });

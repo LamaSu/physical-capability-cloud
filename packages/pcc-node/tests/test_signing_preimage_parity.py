@@ -16,9 +16,11 @@ from pathlib import Path
 import pytest
 
 from pcc_node.signing_preimage import (
+    SIGNING_JSON_MAX_DEPTH,
     SIGNING_PREIMAGE_CONTRACT,
     SigningPreimageError,
     is_tagged_digest,
+    loads_strict,
     parse_ed25519_public_key_hex,
     parse_ed25519_signature_hex,
     parse_tagged_digest,
@@ -43,8 +45,8 @@ def _code(fn, *args):
     return exc.value.code
 
 
-# The signature-parity CI job sets PCC_REQUIRE_PYNACL=1 (and installs the
-# declared `crypto` extra), so a missing PyNaCl FAILS there instead of skipping
+# The evidence-signature-parity CI job sets PCC_REQUIRE_PYNACL=1 (and installs
+# pinned PyNaCl), so a missing PyNaCl FAILS there instead of skipping
 # with a green exit. Elsewhere it skips only the signature half, visibly.
 REQUIRE_PYNACL = os.environ.get("PCC_REQUIRE_PYNACL") == "1"
 
@@ -282,14 +284,15 @@ class TestMalformedSessionKeys:
 
 
 def _parity_outcome(v):
-    """Decode the vector's JSON TEXT with json.loads, then build the preimage.
+    """Decode the vector's JSON TEXT at the contract's boundary, then build the preimage.
 
-    json.loads yields floats for 1.0 and 1e2 and accepts the NaN token, and the
-    contract takes numbers by value as JSON.parse does, so both languages must
-    land on the same bytes or the same refusal.
+    loads_strict is the mirror of the TypeScript parseSigningInputJson: bare
+    json.loads would accept NaN in a field the preimage ignores, refuse a
+    4300-digit literal JSON.parse reads, and recurse where V8 does not. A decode
+    failure is a rejection, exactly as a JSON.parse throw is in TypeScript.
     """
-    parsed = json.loads(v["json"])
     try:
+        parsed = loads_strict(v["json"])
         if v["kind"] == "revocation":
             return session_revocation_preimage(parsed).decode("utf-8", "surrogatepass")
         session = dict(parsed) if isinstance(parsed, dict) else parsed
@@ -314,5 +317,47 @@ def test_parity_vectors_cover_the_numeric_domain_and_empty_path():
         "revocation_above_max_safe",
         "delegation_integral_float_issued_at",
         "delegation_derivation_path_empty",
+        "revocation_ignored_nan",
+        "revocation_ignored_infinity",
+        "revocation_ignored_negative_infinity_nested",
+        "delegation_ignored_nan",
+        "revocation_ignored_depth_64",
+        "revocation_ignored_depth_65",
+        "revocation_ignored_depth_1200",
+        "revocation_ignored_long_integer",
     ):
         assert required in names
+
+
+class TestLoadsStrict:
+    """The JSON boundary: mirror of parseSigningInputJson (R20 round 3)."""
+
+    BASE = '{"sessionId":"sess-001","revokedAt":1727201000,"reason":"rotated","unused":%s}'
+
+    def _code(self, text):
+        try:
+            loads_strict(text)
+            return "ACCEPT"
+        except SigningPreimageError as err:
+            return err.code
+
+    def test_non_standard_tokens_refused_anywhere(self):
+        for token in ("NaN", "Infinity", "-Infinity", '{"a":[NaN]}', "undefined", "0x10", "'x'"):
+            assert self._code(self.BASE % token) == "malformed-json", token
+
+    def test_depth_bound_matches_typescript(self):
+        nest = lambda n: "[" * n + "]" * n
+        assert SIGNING_JSON_MAX_DEPTH == 64
+        assert self._code(self.BASE % nest(63)) == "ACCEPT"
+        assert self._code(self.BASE % nest(64)) == "malformed-json"
+        assert self._code(self.BASE % nest(5000)) == "malformed-json"
+        # CPython's json raises RecursionError between 5000 and 20000 levels; V8 parses on.
+        assert self._code(self.BASE % nest(20000)) == "malformed-json"
+        assert self._code(nest(64)) == "ACCEPT"
+        assert self._code(nest(65)) == "malformed-json"
+
+    def test_numbers_decode_as_doubles_and_non_json_refused(self):
+        assert loads_strict(self.BASE % ("1" + "0" * 5000))["unused"] == float("inf")
+        assert loads_strict("1") == 1.0 and isinstance(loads_strict("1"), float)
+        for bad in (None, 7, b"{}", "", "\ufeff{}", "{} x", "{'a':1}"):
+            assert self._code(bad) == "malformed-json", repr(bad)
