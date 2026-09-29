@@ -52,7 +52,18 @@ const EVIDENCE: Record<string, EvidenceRequirement[]> = {
   ],
   "courier-route|tier0": [{ requirementId: "drop.declared", evidenceTypeId: "decl.self_attested", tier: 0 }],
 };
-/** print's expected assurance, exactly as the compiler must produce it from the fixtures above. */
+/**
+ * print's expected assurance from the fixtures above. The ORDER of its evidence is the compiler's (the
+ * structural test below pins presentation order == canonicalPlan order). `sameAssurance` compares these
+ * pinned constants order-insensitively, because #351's 9d7686af sorts evidence and this branch predates it.
+ */
+const sameAssurance = (x: unknown, y: { tier: number; program: string | null; evidence: Array<{ evidenceTypeId: string; tier: number }> }) => {
+  const norm = (a: { tier: number; program: string | null; evidence: Array<{ evidenceTypeId: string; tier: number }> }) => ({
+    ...a,
+    evidence: [...a.evidence].sort((m, n) => (m.evidenceTypeId < n.evidenceTypeId ? -1 : m.evidenceTypeId > n.evidenceTypeId ? 1 : m.tier - n.tier)),
+  });
+  expect(norm(x as typeof y)).toEqual(norm(y));
+};
 const PRINT_ASSURANCE = {
   tier: 2,
   program: PROGRAM,
@@ -135,7 +146,7 @@ describe("PlanPresentation.assurance (item 6): evidence strength, from the canon
       evidence: printBinding.canonicalPlan.assurance.evidence.map((e) => ({ evidenceTypeId: e.evidenceTypeId, tier: e.tier })),
     });
     // Pinned to the concrete fixture values too, so a regression that changes the fixture's meaning is caught.
-    expect(print.assurance).toEqual(PRINT_ASSURANCE);
+    sameAssurance(print.assurance, PRINT_ASSURANCE);
 
     const mail = p.nodes.find((n) => n.nodeId === "mail")!;
     expect(mail.assurance).toEqual(MAIL_ASSURANCE);
@@ -145,7 +156,7 @@ describe("PlanPresentation.assurance (item 6): evidence strength, from the canon
     const outcome = accept();
     const p = presentPlan({ submission: agentDag(), outcome, sealed: sealedRecordFor(outcome), asOf: ASOF });
     expect(p.state).toBe("sealed");
-    expect(p.nodes.find((n) => n.nodeId === "print")!.assurance).toEqual(PRINT_ASSURANCE);
+    sameAssurance(p.nodes.find((n) => n.nodeId === "print")!.assurance, PRINT_ASSURANCE);
     expect(p.nodes.find((n) => n.nodeId === "mail")!.assurance).toEqual(MAIL_ASSURANCE);
   });
 
@@ -179,7 +190,7 @@ describe("PlanPresentation.assurance (item 6): evidence strength, from the canon
 
     const outcome = accept(); // the real, UNforged dag's accepted deal
     const compiled = presentPlan({ submission: forged, outcome, asOf: ASOF });
-    expect(compiled.nodes.find((n) => n.nodeId === "print")!.assurance).toEqual(PRINT_ASSURANCE); // from canonicalPlan, not the forgery
+    sameAssurance(compiled.nodes.find((n) => n.nodeId === "print")!.assurance, PRINT_ASSURANCE); // from canonicalPlan, not the forgery
   });
 });
 
@@ -216,7 +227,7 @@ describe("PlanPresentation.expiry (item 6): the reservation's own expiry, shown 
     expect(p.expiry).toBeUndefined();
   });
 
-  it.each([-1, 1.5, "x"])("a malformed expiresAt (%p) is invalid / plan-binding, and shows no nodes", (bad) => {
+  it.each([-1, 1.5, "x", 8_640_000_000_001, Number.MAX_SAFE_INTEGER])("a malformed or unrenderable expiresAt (%p) is invalid / plan-binding, and shows no nodes", (bad) => {
     const p = presentPlan({
       submission: agentDag(),
       reservation: { reservationId: RESERVATION_ID, expiresAt: bad as unknown as number },

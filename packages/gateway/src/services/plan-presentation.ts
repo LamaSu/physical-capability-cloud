@@ -249,13 +249,17 @@ function listOf<T>(x: unknown, max: number, item: (v: unknown) => T): T[] {
  * against another already-trusted input (the submission's own reservationId), exactly like the plan's
  * own binding check.
  */
+/** The largest unix time (seconds) an ECMAScript Date can hold: 8.64e15 ms. */
+const MAX_RENDERABLE_UNIX_SECONDS = 8_640_000_000_000;
+
 function readReservationWindow(x: unknown): ReservationWindow | null {
   if (typeof x !== "object" || x === null) return null;
   const o = x as Record<string, unknown>;
   const reservationId = o.reservationId;
   const expiresAt = o.expiresAt;
   if (typeof reservationId !== "string" || reservationId.length === 0) return null;
-  if (!isInt(expiresAt, 0, Number.MAX_SAFE_INTEGER)) return null;
+  // Bounded by what a Date can render (8.64e15 ms), so a window that validates here can always be shown.
+  if (!isInt(expiresAt, 0, MAX_RENDERABLE_UNIX_SECONDS)) return null;
   return { reservationId, expiresAt };
 }
 
