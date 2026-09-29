@@ -370,3 +370,24 @@ describe("v0 amendment 1 (2026-09-29): A1, capability types are CSD urls", () =>
     expect(res.success).toBe(false);
   });
 });
+
+describe("v0 amendment 1 (2026-09-29): A7, onboarding artifact roles", () => {
+  it("a device kit can carry its intake schema and safety envelope as artifacts", async () => {
+    const kit = liquidHandlingKit({
+      artifacts: [
+        ...liquidHandlingKit().artifacts,
+        { role: "intake-schema", name: "intake/device-intake.schema.json", mediaType: "application/schema+json", digest: H("7") },
+        { role: "safety-envelope", name: "safety-envelope.json", mediaType: "application/json", digest: H("8") },
+      ],
+    });
+    expect(CapabilityKitManifestV1Schema.safeParse(kit).success).toBe(true);
+    await expect(computeKitDigest(kit)).resolves.toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("an unknown role is still refused", () => {
+    const kit = liquidHandlingKit({
+      artifacts: [...liquidHandlingKit().artifacts, { role: "wishlist" as never, name: "x.json", mediaType: "application/json", digest: H("7") }],
+    });
+    expect(CapabilityKitManifestV1Schema.safeParse(kit).success).toBe(false);
+  });
+});

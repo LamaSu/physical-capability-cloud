@@ -39,8 +39,9 @@
  * operator-ux and refvertical build against this shape. Any change needs
  * their ack on the bus first; a breaking change is a new version. Amendment 1
  * (2026-09-29) was acked on the bus before it landed. It adds A4 (the
- * conventions above) and A6 (artifact names are safe relative paths), and
- * shares the CSD url pattern with the binding and opportunity contracts.
+ * conventions above), A6 (artifact names are safe relative paths) and A7
+ * (artifact roles intake-schema and safety-envelope), and shares the CSD url
+ * pattern with the binding and opportunity contracts.
  */
 
 import { z } from "zod";
@@ -80,6 +81,9 @@ export const KIT_ARTIFACT_ROLES = [
   "deck-layout",
   "economics-terms",
   "docs",
+  // Amendment A7 (adk #4099): the onboarding artifacts a device kit ships with.
+  "intake-schema", // the filled human-intake record schema (packages/spec/src/onboarding/intake)
+  "safety-envelope", // the operational/safety envelope (sensors' R8, packages/spec/src/onboarding)
 ] as const;
 export type KitArtifactRole = (typeof KIT_ARTIFACT_ROLES)[number];
 
