@@ -213,7 +213,7 @@ export const CWMSchema = z.object({
 
 export const EscrowStatusSchema = z.enum([
   "unfunded", "funded", "locked", "releasing",
-  "released", "disputed", "refunded", "slashed",
+  "released", "disputed", "refunded", "refund_pending", "slashed",
 ]);
 
 export const EscrowMilestoneSchema = z.object({
@@ -235,7 +235,7 @@ export const EscrowSchema = z.object({
   totalAmount: AmountSchema,
   currency: CurrencySchema,
   milestones: z.array(EscrowMilestoneSchema),
-  status: z.enum(["created", "funded", "active", "completing", "completed", "disputed", "refunded"]),
+  status: z.enum(["created", "funded", "active", "completing", "completed", "disputed", "refunded", "refund_pending"]),
   createdAt: TimestampSchema,
   deadline: TimestampSchema,
 });
