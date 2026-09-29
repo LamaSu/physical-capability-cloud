@@ -12,6 +12,8 @@ import { hashBundle, hashEvent, type EvidenceEvent } from "@pcc/spec";
 import { buildCanonicalEvidenceEnvelope } from "../../services/evidence-envelope.js";
 import { buildEvidenceProvenanceDTO, type ProvenanceBundleRow, type ProvenanceEventRow } from "../../readmodels/evidence-provenance.js";
 
+import { PLACEHOLDER_SIGNATURE_VALUES } from "../../services/device-evidence-settlement.js";
+
 const AS_OF = "2026-09-28T12:00:00.000Z";
 const ZERO = "0x0000000000000000000000000000000000000000";
 
@@ -190,6 +192,29 @@ describe("the DTO never claims what the gateway does not record", () => {
     expect(sig["s-zero"]).toEqual({ signer: null, algorithm: null, checked: false });
     expect(sig["s-value"]).toEqual({ signer: null, algorithm: null, checked: false });
     expect(sig["s-real"]).toEqual({ signer: "0xabc", algorithm: "secp256k1", checked: false });
+  });
+
+  it("NEGATIVE (evidence #4088): the relay's placeholder, every gateway placeholder value and the emitter's test marker are no signature; a secp256k1 kernel signature is still shown", async () => {
+    const withSig = async (id: string, kernelSignature: unknown) => {
+      const b = await loEvBundle(id, [ev("e1", "execution_completed")]);
+      return { ...b, kernelSignature };
+    };
+    const secp = "0x1111111111111111111111111111111111111111";
+    const dto = await build([
+      // POST /api/operator/evidence stores a bundle without a device signature like this (their probe).
+      await withSig("s-relay", { signer: "kernel-1", algorithm: "sha256", value: "operator-relay-auto" }),
+      ...(await Promise.all(
+        [...PLACEHOLDER_SIGNATURE_VALUES].map((value, i) => withSig(`s-set-${i}`, { signer: "kernel-1", algorithm: "ed25519", value })),
+      )),
+      await withSig("s-test", { signer: "0xabc", algorithm: "ed25519", value: "test_sig_run-1" }),
+      await withSig("s-secp", { signer: secp, algorithm: "secp256k1", value: "0xdead" }),
+    ]);
+    const sig = Object.fromEntries(dto.bundles.map((b) => [b.bundleId, b.signature]));
+    const none = { signer: null, algorithm: null, checked: false };
+    expect(sig["s-relay"]).toEqual(none);
+    for (let i = 0; i < PLACEHOLDER_SIGNATURE_VALUES.size; i += 1) expect(sig[`s-set-${i}`]).toEqual(none);
+    expect(sig["s-test"]).toEqual(none);
+    expect(sig["s-secp"]).toEqual({ signer: secp, algorithm: "secp256k1", checked: false });
   });
 
   it("NEGATIVE (evidence #3680 nit): first and last are ordered by time, not by string, and shown as recorded", async () => {

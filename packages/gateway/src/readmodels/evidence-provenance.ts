@@ -20,6 +20,7 @@ import {
   type ProvenanceBundle,
 } from "@pcc/spec";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { PLACEHOLDER_SIGNATURE_VALUES, ZERO_ADDRESS } from "../services/device-evidence-settlement.js";
 import type { SourceRead } from "./job-execution.js";
 
 export interface ProvenanceEventRow {
@@ -69,9 +70,8 @@ export function loadEvidenceProvenance(jobId: string, repos: EvidenceProvenanceR
  * #345 names this GATEWAY_STAMPED_DEVICE_ID; the literal stands in until it lands.
  */
 const GATEWAY_DEVICE = "gateway";
-/** The signer PUT /complete writes for events it synthesized: a placeholder, not a signature. */
-const PLACEHOLDER_SIGNER = "0x0000000000000000000000000000000000000000";
-const PLACEHOLDER_SIGNATURE_VALUE = "gateway-auto-sign";
+/** The kernel emitter's marker for a test signature: not a signature. */
+const TEST_SIGNATURE_PREFIX = "test_sig_";
 
 const gatewayStamped = (e: ProvenanceEventRow) => e.source?.deviceId === GATEWAY_DEVICE;
 
@@ -146,9 +146,14 @@ function tierCoverageOf(tier: 0 | 1 | 2 | 3 | null, events: ProvenanceEventRow[]
 
 function signatureOf(sig: unknown): ProvenanceBundle["signature"] {
   const o = sig !== null && typeof sig === "object" ? (sig as Record<string, unknown>) : {};
-  // The gateway's placeholder for events it synthesized is no signature (evidence #3680 F2).
+  // A placeholder is no signature: the gateway's zero-address signer (evidence #3680 F2), any
+  // value the gateway writes when it has no device signature (PUT /complete's "gateway-auto-sign",
+  // the operator relay's "operator-relay-auto": evidence #4088), or the emitter's test marker.
+  // These are the non-signature checks isDeviceSignedSignature applies; the algorithm is not
+  // required to be ed25519, since a secp256k1 kernel signature is still a signature to show.
   const placeholder =
-    (typeof o.signer === "string" && o.signer.toLowerCase() === PLACEHOLDER_SIGNER) || o.value === PLACEHOLDER_SIGNATURE_VALUE;
+    (typeof o.signer === "string" && o.signer.toLowerCase() === ZERO_ADDRESS) ||
+    (typeof o.value === "string" && (PLACEHOLDER_SIGNATURE_VALUES.has(o.value) || o.value.startsWith(TEST_SIGNATURE_PREFIX)));
   if (placeholder) return { signer: null, algorithm: null, checked: false };
   return {
     signer: typeof o.signer === "string" && o.signer !== "" ? o.signer : null,
