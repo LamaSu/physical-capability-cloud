@@ -14,25 +14,37 @@ into evidence that both checks downstream accept:
   (and ``settlementUnitId`` / ``challengeNonce`` when the gateway assigned them), its
   ``source.kernelId`` is the kernel that accepted the job, and it carries its own
   ``hash`` (``hashEvent``: sha256 over the canonical ``{type, timestamp, source,
-  payload}``), so a bundle of these events binds to exactly one job.
+  payload}``), so a bundle of these events binds to exactly one job;
+* the public ``EvidenceEvent`` contract (``EvidenceEventSchema`` in @pcc/spec): every
+  event has an ``id`` (``<opentronsRunId>:<commandId>``, unique per run) and a
+  ``source.deviceType``, the one the kernel's Opentrons adapter reports.
 
 ``payload.jobId`` is always the PCC job id (evidence's reserved-field rule, bus #3219).
 The robot's own run id travels as ``payload.opentronsRunId``.
 
 This is a pure producer. Fetching is injected, and nothing here signs a bundle or talks
 to the gateway. Input that is incomplete fails closed with :class:`CommandTraceError`:
-a page that stops before the robot's own ``totalLength``, a command without an id, a
-type or a time, or a duplicate id. A trace that silently drops commands would prove a
-run the robot did not perform.
+a page that stops before the robot's own ``totalLength``, a command without an id or
+a type, or a duplicate id. A trace that silently drops commands would prove a run the
+robot did not perform.
+
+Each entry is timed by the command's ``completedAt``. A command that never completed
+(the run stopped first) is timed by the run's own end, which the caller passes as
+``run_ended_at`` and which may not be earlier than any completion, so the chain's
+``capturedAt`` never runs backwards for it. Its ``createdAt`` stays in ``rawContent``.
 """
 
 import re
+from datetime import datetime
 from urllib.parse import quote
 
 from .log_capture import canonicalize, sha256_hex
 
 LOG_KIND = "command_trace"
 EVENT_TYPE = "log_hash_chain_entry"
+# The deviceType the kernel's Opentrons adapter reports (packages/kernel/src/opentrons/
+# adapter.ts), so both runtimes name the robot the same way in EvidenceSource.
+DEVICE_TYPE = "instrument"
 OT2_API_VERSION = "2"
 DEFAULT_PAGE_LENGTH = 200
 MAX_COMMANDS = 100_000
@@ -115,6 +127,20 @@ def command_log_line(command):
     return canonicalize({k: command[k] for k in RECORDED_FIELDS if k in command})
 
 
+def _instant(value, what):
+    """An aware datetime from an ISO-8601 time as the robot reports it ("Z" allowed)."""
+    if not isinstance(value, str) or not value:
+        raise CommandTraceError(f"{what} is not a timestamp")
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        instant = datetime.fromisoformat(text)
+    except ValueError:
+        raise CommandTraceError(f"{what} is not an ISO-8601 time: {value!r}") from None
+    if instant.tzinfo is None:
+        raise CommandTraceError(f"{what} has no time zone: {value!r}")
+    return instant
+
+
 def hash_event(event):
     """``hashEvent`` from packages/spec/src/util/canonical.ts."""
     return sha256_hex(
@@ -145,6 +171,7 @@ def build_command_trace_events(
     run_id,
     settlement_unit_id=None,
     challenge_nonce=None,
+    run_ended_at=None,
 ):
     """One chained, kernel-signed ``log_hash_chain_entry`` event per command.
 
@@ -153,6 +180,8 @@ def build_command_trace_events(
     content hash of the protocol the job committed to. ``run_id`` is the robot's run id.
     ``settlement_unit_id`` and ``challenge_nonce``, when the gateway issued them for the
     unit being settled, are stamped on every event, as LO-EV-9 requires.
+    ``run_ended_at`` is the run's own ``completedAt`` (``GET /runs/{runId}``). It is
+    required when a command never completed, and times that command's entry.
     """
     for name, value in (
         ("job_id", job_id),
@@ -168,6 +197,15 @@ def build_command_trace_events(
             raise CommandTraceError(f"{name} must be 0x + 64 lowercase hex")
     if not commands:
         raise CommandTraceError("a run with no commands has no trace")
+    completions = [
+        _instant(c["completedAt"], f"command {c.get('id')!r} completedAt")
+        for c in commands
+        if isinstance(c, dict) and c.get("completedAt") is not None
+    ]
+    if run_ended_at is not None:
+        ended = _instant(run_ended_at, "run_ended_at")
+        if completions and ended < max(completions):
+            raise CommandTraceError("run_ended_at is earlier than a command's completedAt")
     binding = {
         "jobId": job_id,
         "kernelId": kernel_id,
@@ -184,9 +222,13 @@ def build_command_trace_events(
     events = []
     for command in commands:
         raw = command_log_line(command)
-        captured_at = command.get("completedAt") or command.get("createdAt")
-        if not isinstance(captured_at, str) or not captured_at:
-            raise CommandTraceError(f"command {command['id']} has no completedAt or createdAt")
+        captured_at = command.get("completedAt")
+        if captured_at is None:
+            if run_ended_at is None:
+                raise CommandTraceError(
+                    f"command {command['id']} never completed; pass run_ended_at, the run's own completedAt"
+                )
+            captured_at = run_ended_at
         entry = capture.capture(
             raw_content=raw,
             source=source,
@@ -197,9 +239,10 @@ def build_command_trace_events(
         payload = dict(entry["payload"])
         payload.update(binding)
         event = {
+            "id": f"{run_id}:{command['id']}",
             "type": EVENT_TYPE,
             "timestamp": entry["timestamp"],
-            "source": {"kernelId": kernel_id, "deviceId": device_id},
+            "source": {"kernelId": kernel_id, "deviceId": device_id, "deviceType": DEVICE_TYPE},
             "payload": payload,
         }
         event["hash"] = hash_event(event)

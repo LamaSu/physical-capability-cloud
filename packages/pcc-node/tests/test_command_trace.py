@@ -7,10 +7,13 @@ drift fails here.
 """
 
 import json
+import os
+import re
 
 import pytest
 
 from pcc_node.command_trace import (
+    DEVICE_TYPE,
     CommandTraceError,
     build_command_trace_events,
     command_log_line,
@@ -28,6 +31,8 @@ KERNEL = "kernel_mqse6f60_wshx"
 DEVICE = "ot2-falling-bush"
 PROTOCOL = "sha256:" + "ab" * 32
 RUN = "run-1c2d"
+RUN_ENDED = "2026-09-24T20:00:03.400Z"  # the run's own completedAt
+EVIDENCE_TS = os.path.join(os.path.dirname(__file__), "..", "..", "spec", "src", "types", "evidence.ts")
 
 
 def _commands():
@@ -74,7 +79,7 @@ def _capture():
 
 
 def _build(commands=None, **overrides):
-    kwargs = dict(job_id=JOB, kernel_id=KERNEL, device_id=DEVICE, protocol_hash=PROTOCOL, run_id=RUN)
+    kwargs = dict(job_id=JOB, kernel_id=KERNEL, device_id=DEVICE, protocol_hash=PROTOCOL, run_id=RUN, run_ended_at=RUN_ENDED)
     kwargs.update(overrides)
     return build_command_trace_events(commands if commands is not None else _commands(), _capture(), **kwargs)
 
@@ -176,13 +181,37 @@ def test_events_form_one_signed_chain_in_the_robots_order():
         vk.verify(p["entryHash"].encode("utf-8"), bytes.fromhex(p["kernelSignature"]["value"]))
         assert p["kernelSignature"]["algorithm"] == "ed25519"
         previous = p["entryHash"]
-    # A command that never completed is timed by its creation.
-    assert events[2]["payload"]["capturedAt"] == "2026-09-24T20:00:03.000Z"
+    # A command that never completed is timed by the run's end, never by its creation,
+    # so capturedAt does not run backwards.
+    assert [e["payload"]["capturedAt"] for e in events] == [
+        "2026-09-24T20:00:00.200Z", "2026-09-24T20:00:02.500Z", RUN_ENDED,
+    ]
+
+
+def test_a_run_whose_commands_all_completed_needs_no_run_end():
+    events = _build(_commands()[:2], run_ended_at=None)
+    assert [e["payload"]["capturedAt"] for e in events] == ["2026-09-24T20:00:00.200Z", "2026-09-24T20:00:02.500Z"]
+
+
+def test_events_are_evidence_events_with_a_unique_id_and_the_kernels_device_type():
+    events = _build()
+    for e in events:
+        assert set(e) == {"id", "type", "timestamp", "source", "payload", "hash"}
+        assert e["source"] == {"kernelId": KERNEL, "deviceId": DEVICE, "deviceType": "instrument"}
+    assert [e["id"] for e in events] == [f"{RUN}:cmd-1", f"{RUN}:cmd-2", f"{RUN}:cmd-3"]
+
+
+@pytest.mark.skipif(not os.path.exists(EVIDENCE_TS), reason="needs the monorepo's packages/spec")
+def test_device_type_is_one_the_spec_accepts():
+    with open(EVIDENCE_TS, encoding="utf-8") as f:
+        block = re.search(r"EVIDENCE_DEVICE_TYPES = \[(.*?)\] as const", f.read(), re.S)
+    assert block, "EVIDENCE_DEVICE_TYPES not found in packages/spec/src/types/evidence.ts"
+    assert DEVICE_TYPE in re.findall(r'"([^"]+)"', block.group(1))
 
 
 def test_every_event_commits_the_job_kernel_and_protocol_and_hashes_itself():
     for e in _build():
-        assert e["source"] == {"kernelId": KERNEL, "deviceId": DEVICE}
+        assert e["source"] == {"kernelId": KERNEL, "deviceId": DEVICE, "deviceType": DEVICE_TYPE}
         assert (e["payload"]["jobId"], e["payload"]["kernelId"], e["payload"]["protocolHash"]) == (JOB, KERNEL, PROTOCOL)
         assert e["payload"]["logKind"] == "command_trace"
         assert e["payload"]["opentronsRunId"] == RUN  # the robot's id never rides as jobId
@@ -207,7 +236,12 @@ def test_malformed_unit_fields_are_refused(bad):
 
 def test_changing_any_committed_field_changes_the_event_hash():
     e = _build()[1]
-    for path, value in [(("payload", "jobId"), "job-other"), (("source", "kernelId"), "k2"), (("payload", "protocolHash"), "sha256:" + "cd" * 32)]:
+    for path, value in [
+        (("payload", "jobId"), "job-other"),
+        (("source", "kernelId"), "k2"),
+        (("source", "deviceType"), "camera"),
+        (("payload", "protocolHash"), "sha256:" + "cd" * 32),
+    ]:
         forged = json.loads(json.dumps(e))
         forged[path[0]][path[1]] = value
         assert hash_event(forged) != e["hash"], path
@@ -217,7 +251,11 @@ def test_changing_any_committed_field_changes_the_event_hash():
     "commands, overrides, match",
     [
         ([], {}, "no commands"),
-        ([{"id": "c", "commandType": "home"}], {}, "no completedAt or createdAt"),
+        (None, {"run_ended_at": None}, "never completed"),
+        (None, {"run_ended_at": "2026-09-24T20:00:02.000Z"}, "earlier than"),
+        (None, {"run_ended_at": "yesterday"}, "ISO-8601"),
+        (None, {"run_ended_at": "2026-09-24T20:00:04"}, "no time zone"),
+        ([{"id": "c", "commandType": "home", "completedAt": "soon"}], {}, "ISO-8601"),
         (None, {"job_id": ""}, "job_id"),
         (None, {"protocol_hash": None}, "protocol_hash"),
     ],
@@ -232,9 +270,10 @@ def test_build_fails_closed(commands, overrides, match):
 # fixture below; regenerate if canonical.ts changes.
 
 GOLDEN_EVENT = {
+    "id": f"{RUN}:cmd-2",  # not hashed, as in hashEvent
     "type": "log_hash_chain_entry",
     "timestamp": "2026-09-24T20:00:02.500Z",
-    "source": {"kernelId": KERNEL, "deviceId": DEVICE},
+    "source": {"kernelId": KERNEL, "deviceId": DEVICE, "deviceType": "instrument"},
     "payload": {
         "jobId": JOB,
         "kernelId": KERNEL,
@@ -246,8 +285,8 @@ GOLDEN_EVENT = {
         "note": "µL \"quoted\"",
     },
 }
-GOLDEN_EVENT_HASH = "sha256:e148d47997822096a97b75399354b19a7048f85ae4f16de2a762dab068745418"
-GOLDEN_BUNDLE_HASH = "sha256:a48620267c3ba64bc97fee9b47fe51c0b6f4e546b8dd23722f094c95bc9e64cf"
+GOLDEN_EVENT_HASH = "sha256:dee82ff2f10d9e17d2767b08719da89b3285892804c134b6dbf70b6accc40b62"
+GOLDEN_BUNDLE_HASH = "sha256:35b8f832fd5eb591b6150e3c406a915b0bf0bad2fe81a2a98bcef254269f9b3f"
 
 
 def test_hash_event_matches_the_typescript_golden():
