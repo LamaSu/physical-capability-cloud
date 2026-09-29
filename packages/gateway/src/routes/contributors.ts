@@ -573,6 +573,15 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    // 1b. A fresh claim is decided AGAIN here, and nothing is awaited from here to
+    // the insert below. The wallet call above yields, and a concurrent request can
+    // claim this email meanwhile (another quickstart, or POST /api/auth/provision).
+    // If both passed the first decision, two parties would hold one identity (F3).
+    // The loser gets the same 409 as any claimed identity (R5), and no wallet or key.
+    if (decision.kind === "fresh" && decideUnverifiedIdentity(req, body.email).kind !== "fresh") {
+      return reply.code(409).send(IDENTITY_CLAIMED_RESPONSE);
+    }
+
     // 2. Provision an API key bound to this email.
     let apiKey: string;
     let keyId: string;
