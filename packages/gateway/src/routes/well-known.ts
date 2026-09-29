@@ -3,6 +3,7 @@ import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { signAgentCard, type AgentCard } from "@pcc/a2a-signing";
 import { getActiveSigningKey } from "../signing-key.js";
+import { getPaymentGateState } from "../middleware/x402-gate.js";
 
 /**
  * /.well-known/ routes for discovery:
@@ -34,7 +35,7 @@ const CHAIN_ID = process.env.PCC_CHAIN_ID ? parseInt(process.env.PCC_CHAIN_ID, 1
 const REGISTRY_ADDRESS = (process.env.PCC_REGISTRY_ADDRESS ?? "0x8004A818BFB912233c491871b3d84c89A494BD9e") as `0x${string}`;
 
 export async function wellKnownRoutes(app: FastifyInstance) {
-  app.get("/.well-known/agent-registration.json", async (_request, reply) => {
+  app.get("/.well-known/agent-registration.json", async (request, reply) => {
     const registrations: Array<{ agentId: number; agentRegistry: string }> = [];
 
     if (AGENT_ID !== undefined) {
@@ -68,7 +69,16 @@ export async function wellKnownRoutes(app: FastifyInstance) {
           endpoint: `${GATEWAY_URL}/api/identity`,
         },
       ],
-      x402Support: true,
+      // Only when a real payment recipient is configured (WP-A fold F1): with
+      // none, the gateway refuses priced routes, so it must not claim support.
+      // Only when the gate is ACTIVE with a configured recipient (WP-A round 5): read
+      // from the gate's frozen state, so discovery can never promise what the gate is
+      // not doing (disabled, unconfigured, or a config change since startup).
+      // x402 specifically (round 8, astra FC-4): an ACTIVE MPP gate does not speak x402.
+      x402Support: (() => {
+        const running = getPaymentGateState(request.server);
+        return running.status === "active" && running.protocol === "x402";
+      })(),
       active: true,
       registrations,
       supportedTrust: ["reputation", "crypto-economic"],
@@ -84,8 +94,6 @@ export async function wellKnownRoutes(app: FastifyInstance) {
   // A2A Agent Card — Google A2A protocol discovery
   // -----------------------------------------------------------------------
 
-  // MPP is the default; x402 is legacy opt-in via PCC_X402_LEGACY=true
-  const mppEnabled = process.env.PCC_X402_LEGACY !== "true";
 
   app.get(
     "/.well-known/agent-card.json",
@@ -121,6 +129,27 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       },
     },
     async (_request, reply) => {
+    // The payment scheme is advertised ONLY with a configured recipient (WP-A
+    // fold F1). It used to fall back to 0x…0001 — an address nobody controls —
+    // and tell every discovering agent to pay it. With no recipient, the scheme
+    // and its `x-recipient` are omitted entirely (the gate 503s priced routes).
+    // Protocol and recipient come from the gate as it RUNS (WP-A round 5, #2963).
+    const running = getPaymentGateState(_request.server);
+    const recipient = running.status === "active" ? running.recipient : null;
+    const mppEnabled = running.protocol === "mpp";
+    const paymentScheme = recipient
+      ? {
+          x402: {
+            type: "http",
+            scheme: "bearer",
+            "x-payment-protocol": mppEnabled ? "mpp" : "x402",
+            "x-network": "eip155:84532",
+            "x-currency": "USDC",
+            "x-recipient": recipient,
+            description: `Micropayment via ${mppEnabled ? "MPP/Tempo" : "x402 (Coinbase)"} on Base Sepolia. Price declared in WWW-Authenticate header on 402 response.`,
+          },
+        }
+      : {};
     const agentCard = {
       protocolVersion: "1.0",
       name: KERNEL_NAME,
@@ -174,15 +203,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
             },
           },
         },
-        x402: {
-          type: "http",
-          scheme: "bearer",
-          "x-payment-protocol": mppEnabled ? "mpp" : "x402",
-          "x-network": "eip155:84532",
-          "x-currency": "USDC",
-          "x-recipient": process.env.TEMPO_RECIPIENT ?? process.env.PCC_TREASURY_ADDRESS ?? "0x0000000000000000000000000000000000000001",
-          description: `Micropayment via ${mppEnabled ? "MPP/Tempo" : "x402 (Coinbase)"} on Base Sepolia. Price declared in WWW-Authenticate header on 402 response.`,
-        },
+        ...paymentScheme,
       },
 
       security: [

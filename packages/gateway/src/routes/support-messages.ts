@@ -6,15 +6,24 @@
  * Operators poll for replies.
  *
  *   POST /api/operator/support              — send a support message
- *   GET  /api/operator/support              — list all threads (admin)
+ *   GET  /api/operator/support              — list threads (own; every thread with the admin secret)
  *   GET  /api/operator/support/mine         — operator checks their thread
  *   GET  /api/operator/support/:threadId    — get a specific thread
  *   POST /api/operator/support/:threadId/reply — reply to a thread
- *   PATCH /api/operator/support/:threadId   — update thread status (admin)
+ *   PATCH /api/operator/support/:threadId   — update thread status (admin secret)
+ *
+ * Ownership (WP-A; astra, pack 47): a thread belongs to the identity that opened it
+ * (apiGate's attached identity), never to whoever names its kernelId. Only that
+ * identity, or the admin secret, lists, reads, polls or answers it; anyone else gets
+ * the same 404 as for an unknown id. A new message joins the caller's OWN open thread
+ * for the kernel, so a thread someone else opened for the same kernelId (or for
+ * "unknown", which pcc-node sends without a kernel) never captures it.
  */
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { adminOrCaller, callerIdentity, mayAccess, presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 
 // Discord webhook for #bug-reports notifications
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
@@ -71,7 +80,7 @@ interface SupportThread {
   kernelId: string;
   kernelName: string;
   operatorIp: string;
-  operatorId?: string;     // Authenticated caller's operator ID (for ownership checks)
+  operatorId: string;      // The identity that opened the thread: its owner (see the header)
   subject: string;
   status: "open" | "in-progress" | "resolved" | "closed";
   priority: "low" | "normal" | "high" | "urgent";
@@ -94,11 +103,11 @@ function findThread(threadId: string): SupportThread | undefined {
   return threads.find((t) => t.id === threadId);
 }
 
-function findThreadByKernel(kernelId: string): SupportThread | undefined {
-  // Find most recent open thread for this kernel
+/** The caller's own most recent open thread for this kernel; never another identity's. */
+function findOpenThreadOf(kernelId: string, owner: string): SupportThread | undefined {
   return [...threads]
     .reverse()
-    .find((t) => t.kernelId === kernelId && t.status !== "closed");
+    .find((t) => t.kernelId === kernelId && t.status !== "closed" && sameIdentity(t.operatorId, owner));
 }
 
 function inferPriority(text: string): SupportThread["priority"] {
@@ -151,10 +160,14 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       systemInfo?: Record<string, unknown>;
     };
   }>("/api/operator/support", async (req, reply) => {
+    // The thread belongs to the caller's identity; with none attached there is no owner (rule 7).
+    const owner = callerIdentity(req);
+    if (owner === null) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
     // Rate limit: 5 support messages per operator per 10 minutes (Discord webhook flood prevention, R5 NEW-04)
-    const callerId = (req as any).operatorId ?? (req as any).userId ?? req.ip;
     const { checkCallerRate } = await import("../middleware/security-hardening.js");
-    if (!checkCallerRate(callerId, "support_create", 5, 600_000)) {
+    if (!checkCallerRate(owner, "support_create", 5, 600_000)) {
       return reply.code(429).send({
         error: "rate_limited",
         message: "Too many support messages. Try again in 10 minutes.",
@@ -180,8 +193,8 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       ...(retrievalCode ? { retrievalCode } : {}),
     };
 
-    // Try to append to existing open thread
-    let thread = findThreadByKernel(kernelId);
+    // Try to append to the caller's own open thread for this kernel
+    let thread = findOpenThreadOf(kernelId, owner);
 
     if (thread) {
       thread.messages.push(msg);
@@ -211,14 +224,12 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       }
     }
 
-    const creatorOperatorId = (req as any).operatorId ?? (req as any).userId;
-
     thread = {
       id: `thread-${uuidv4().slice(0, 8)}`,
       kernelId,
       kernelName: kernelName ?? kernelId,
       operatorIp: req.ip,
-      operatorId: creatorOperatorId,
+      operatorId: owner,
       subject: subject ?? message.slice(0, 80),
       status: "open",
       priority: inferPriority(message),
@@ -244,16 +255,18 @@ export async function supportMessageRoutes(app: FastifyInstance) {
   /**
    * GET /api/operator/support
    *
-   * List all support threads (admin view). Sorted newest first.
-   * Query: ?status=open&limit=50
+   * List support threads, newest first: the caller's own, or every thread with the
+   * admin secret. Query: ?status=open&limit=50
    */
   app.get<{
     Querystring: { status?: string; limit?: string };
-  }>("/api/operator/support", async (req) => {
+  }>("/api/operator/support", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     const { status, limit: limitStr } = req.query;
     const limit = Math.min(parseInt(limitStr ?? "50", 10) || 50, 200);
 
-    let filtered = [...threads].reverse();
+    let filtered = [...threads].reverse().filter((t) => mayAccess(who, t.operatorId));
     if (status) {
       filtered = filtered.filter((t) => t.status === status);
     }
@@ -273,6 +286,7 @@ export async function supportMessageRoutes(app: FastifyInstance) {
         updatedAt: t.updatedAt,
       })),
       total: filtered.length,
+      scoped: !who.admin,
     };
   });
 
@@ -285,14 +299,17 @@ export async function supportMessageRoutes(app: FastifyInstance) {
   app.get<{
     Querystring: { kernelId?: string };
   }>("/api/operator/support/mine", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     const { kernelId } = req.query;
 
     if (!kernelId) {
       return reply.code(400).send({ error: "kernelId query param required" });
     }
 
+    // Naming a kernel proves nothing: only the caller's own threads for it.
     const myThreads = threads
-      .filter((t) => t.kernelId === kernelId)
+      .filter((t) => t.kernelId === kernelId && mayAccess(who, t.operatorId))
       .reverse();
 
     return {
@@ -320,8 +337,11 @@ export async function supportMessageRoutes(app: FastifyInstance) {
   app.get<{
     Params: { threadId: string };
   }>("/api/operator/support/:threadId", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
     const thread = findThread(req.params.threadId);
-    if (!thread) {
+    // Another identity's thread answers exactly like an unknown id.
+    if (!thread || !mayAccess(who, thread.operatorId)) {
       return reply.code(404).send({ error: "thread not found" });
     }
     return { thread };
@@ -348,10 +368,17 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "message required" });
     }
 
-    // Derive `from` from caller identity — never trust body.from (admin impersonation fix, R5 NEW-03)
+    // Derive `from` from what the caller HOLDS — never trust body.from (admin
+    // impersonation fix, R5 NEW-03). Replying as "admin" needs the admin SECRET. It
+    // used to be granted to any caller whose operatorId was on BROKER_OPERATORS, an
+    // identity a legacy key can carry (N2, WP-A round 6). A wrong secret is refused,
+    // never downgraded, and a request with no attached identity is 401 (rule 7).
+    const isAdmin = presentsAdminSecret(req);
+    if (isAdmin && !requireAdminSecret(req, reply)) return reply;
     const callerId = (req as any).operatorId ?? (req as any).userId;
-    const { isBrokerOperator } = await import("../middleware/security-hardening.js");
-    const isAdmin = callerId ? isBrokerOperator(callerId) : false;
+    if (!isAdmin && !callerId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
     const from: "admin" | "operator" = isAdmin ? "admin" : "operator";
 
     const thread = findThread(req.params.threadId);
@@ -359,8 +386,10 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "thread not found" });
     }
 
-    // Ownership check: operators can only reply to their own threads
-    if (!isAdmin && callerId && thread.operatorId && thread.operatorId !== callerId) {
+    // Ownership check: operators can only reply to their own threads. A thread with
+    // no recorded operator has no owner to match, so only the admin may reply to it
+    // (the old check skipped whenever either side was missing: rule 7).
+    if (!isAdmin && !sameIdentity(thread.operatorId, callerId)) {
       return reply.code(403).send({ error: "forbidden", message: "You can only reply to your own threads" });
     }
 
@@ -391,12 +420,14 @@ export async function supportMessageRoutes(app: FastifyInstance) {
   /**
    * PATCH /api/operator/support/:threadId
    *
-   * Update thread status (admin). Body: { status: "resolved" | "closed" | ... }
+   * Update thread status (admin secret). Body: { status: "resolved" | "closed" | ... }
+   * Status and priority are support's to set; they used to be open to any key.
    */
   app.patch<{
     Params: { threadId: string };
     Body: { status?: string; priority?: string };
   }>("/api/operator/support/:threadId", async (req, reply) => {
+    if (!requireAdminSecret(req, reply)) return reply;
     const { status, priority } = req.body ?? {};
     const thread = findThread(req.params.threadId);
     if (!thread) {

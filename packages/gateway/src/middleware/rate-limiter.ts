@@ -10,6 +10,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { authPath } from "./route-path.js";
 
 const WINDOW_MS = 60_000; // 1 minute
 const MAX_REQUESTS = 200; // per IP per window
@@ -26,14 +27,20 @@ setInterval(() => {
 
 async function rateLimiterImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // Skip rules decide on the route Fastify MATCHED (authPath), never the raw
+    // request line: `/%61pi/...` is not "/api/"-prefixed as raw text, yet
+    // find-my-way decodes it and runs the /api handler — so it used to skip the
+    // limiter entirely (MUST-CLOSE 10).
+    const path = authPath(req);
+
     // Static assets and non-API discovery routes are outside this policy.
-    if (!req.url.startsWith("/api/")) return;
+    if (!path.startsWith("/api/")) return;
 
     const now = Date.now();
     // Health checks stay exempt from accounting, but still advertise the API
     // policy so automated clients see consistent headers on every /api/*
     // response.
-    if (req.url.split("?")[0] === "/api/health") {
+    if (path === "/api/health") {
       reply.header("RateLimit-Limit", String(MAX_REQUESTS));
       reply.header("RateLimit-Remaining", String(MAX_REQUESTS));
       reply.header("RateLimit-Reset", String(Math.ceil(WINDOW_MS / 1_000)));

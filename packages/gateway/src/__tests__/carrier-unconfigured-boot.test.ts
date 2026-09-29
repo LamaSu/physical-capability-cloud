@@ -118,11 +118,21 @@ describe("carrier config gate — production, nothing configured", () => {
   });
 
   it("keeps /api/carrier/healthz serving, so ops can see WHAT is unconfigured", async () => {
-    // AUTHENTICATED: the detailed posture is for operators. Anonymous production callers
-    // get the redacted summary (asserted in the next test — sol #316 re-review, H1).
+    // The detailed posture is for the OPERATOR of the deployment: in production it needs
+    // the admin secret (WP-A round 5, #2883); an ordinary authenticated key gets the
+    // redacted summary, like an anonymous caller (next test, sol #316 re-review, H1).
+    const savedAdminKey = process.env.PCC_ADMIN_KEY;
+    process.env.PCC_ADMIN_KEY = "carrier-healthz-test-admin-secret";
     const app = await buildAuthedApp("production");
     try {
-      const res = await app.inject({ method: "GET", url: "/api/carrier/healthz", headers: { "x-test-operator": "0xops" } });
+      const plainKey = await app.inject({ method: "GET", url: "/api/carrier/healthz", headers: { "x-test-operator": "0xops" } });
+      expect(plainKey.json().redacted).toBe(true);
+      expect(plainKey.json()).not.toHaveProperty("shipments");
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/carrier/healthz",
+        headers: { "x-test-operator": "0xops", "x-admin-key": "carrier-healthz-test-admin-secret" },
+      });
       // NOT 500. getEasyPostClient() throws mock_forbidden_in_production here
       // (easypost-client.ts:385, requireProductionMode derived from NODE_ENV at :850), so an
       // eager call made healthz die in exactly the case an operator is trying to diagnose.
@@ -142,6 +152,8 @@ describe("carrier config gate — production, nothing configured", () => {
       expect(body).toHaveProperty("durable");
     } finally {
       await app.close();
+      if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+      else process.env.PCC_ADMIN_KEY = savedAdminKey;
     }
   });
 

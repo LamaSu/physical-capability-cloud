@@ -18,5 +18,6 @@ export interface IAuditLogRepository {
     since?: string;
     limit?: number;
   }): AuditLogRow[];
-  stats(): { eventType: string; count: number }[];
+  /** Counts by eventType over the last 24 hours; with `actor`, only that actor's entries. */
+  stats(actor?: string): { eventType: string; count: number }[];
 }

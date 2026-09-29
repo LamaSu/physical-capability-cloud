@@ -128,10 +128,22 @@ a{color:var(--grn);text-decoration:none}
     var p=$("pitch").value.trim(); if(p)data.useCase=p;
     var inv=$("invite").value.trim(); if(inv)data.inviteCode=inv;
   }
-  // Fire-and-forget progressive save — always sends the full accumulated record.
+  // Progressive save: always sends the full accumulated record. The server issues this
+  // lead's token in its FIRST reply. Until then, saves are serialized: a second save
+  // sent without the token would start a second record (WP-A round 7, astra r2 new
+  // defect 3). Saves asked for meanwhile collapse into ONE follow-up, which carries
+  // the token. After the first reply, every save carries it and is sent at once.
+  var firstSave=null,saveAgain=false;
+  function post(){
+    return fetch("/api/waitlist",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data),keepalive:true}).then(function(r){return r.json();}).then(function(d){if(d&&typeof d.leadToken==="string")data.leadToken=d.leadToken;});
+  }
   function save(){
     if(!data.email)return;
-    try{fetch("/api/waitlist",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data),keepalive:true}).catch(function(){});}catch(e){}
+    if(firstSave){saveAgain=true;return;}
+    if(data.leadToken){try{post().catch(function(){});}catch(e){}return;}
+    try{
+      firstSave=post().catch(function(){}).then(function(){firstSave=null;if(saveAgain){saveAgain=false;save();}});
+    }catch(e){firstSave=null;}
   }
   // Capture even if they navigate away or background the tab mid-flow.
   window.addEventListener("pagehide",function(){collect();save();});

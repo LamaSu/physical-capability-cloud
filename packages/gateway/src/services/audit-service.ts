@@ -88,12 +88,13 @@ class AuditService {
   }
 
   /**
-   * Aggregate counts by eventType for the last 24 hours.
+   * Aggregate counts by eventType for the last 24 hours. With `actor`, only that
+   * actor's entries, counted in full (no row limit).
    */
-  stats(): { eventType: string; count: number }[] {
+  stats(actor?: string): { eventType: string; count: number }[] {
     try {
       const repos = getRepos();
-      return repos.auditLog.stats();
+      return repos.auditLog.stats(actor);
     } catch {
       return [];
     }

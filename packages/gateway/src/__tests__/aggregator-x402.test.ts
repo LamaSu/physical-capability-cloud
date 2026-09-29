@@ -40,7 +40,7 @@ import {
 
 const SHA = "sha256:" + "a".repeat(64);
 const HMAC = "deadbeef".repeat(8); // 64 hex chars
-const TREASURY = "0x1111111111111111111111111111111111111111";
+const TREASURY = "0x9f8e7d6c5b4a39281706f5e4d3c2b1a098765432"; // a repeated-digit payee is now refused as a placeholder (WP-A round 8)
 const PAYER = "0x2222222222222222222222222222222222222222";
 
 function makePaidTool(perCallUsdc = "0.01"): IndexedTool {

@@ -31,6 +31,7 @@ import { invokeRoutes } from "./invoke.js";
 import { receiptsRoutes } from "./receipts.js";
 import { randomBytes } from "node:crypto";
 import { agntcyAdminRoutes } from "./agntcy.js";
+import { configuredAddress } from "../../config/payment-recipient.js";
 
 /** Process-singleton registry used by every aggregator route. */
 let _registry: IndexedToolRegistry | undefined;
@@ -72,8 +73,12 @@ export function getX402GateConfig(): X402GateConfig | undefined {
     resolveChainConfig(chain);
   const facilitatorUrl =
     process.env.PCC_X402_FACILITATOR_URL ?? defaultFacilitatorUrl;
-  const payTo = (process.env.PCC_AGGREGATOR_TREASURY ?? "") as Address;
-  if (!payTo || !/^0x[a-fA-F0-9]{40}$/.test(payTo)) {
+  // The SAME recipient policy as the main payment gate (WP-A round 8, astra failclosed
+  // r2 FC-10): EIP-55 checksum for mixed case, and no zero/sentinel, repeated-digit or
+  // known-placeholder address, in any casing. A shape check alone let a placeholder
+  // payee be advertised in every priceTag.
+  const payTo = configuredAddress(process.env.PCC_AGGREGATOR_TREASURY) as Address | null;
+  if (!payTo) {
     // Misconfigured: log + treat as disabled so we don't gate calls with no payee.
     // eslint-disable-next-line no-console
     console.warn(
