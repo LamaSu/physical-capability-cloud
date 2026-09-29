@@ -12,7 +12,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { getLicensingEngine, getStoryIPService, resetLicensingEngine, resetStoryIPService, type LicenseEvaluation } from "@pcc/contracts";
-import { ipRoutes } from "../routes/ip.js";
+import { ipRoutes, recordedIpOwner } from "../routes/ip.js";
+import { capabilityRoutes } from "../routes/capabilities.js";
+import { kernelRoutes } from "../routes/kernels.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, initStore } from "../db.js";
@@ -287,12 +289,52 @@ describe("N10a: /api/ip/* authorization", () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
-    it("a settlement that paid nothing can be tried again; one that paid anything cannot", async () => {
+    /** The settlement journal, oldest first: claim, then per row an intent and its outcome, and any release. */
+    const journal = () =>
+      getRepos()
+        .auditLog.query({ eventType: "ip.royalties.settlement", limit: 1000 })
+        .sort((a, b) => a.id - b.id)
+        .map((r) => r.action);
+
+    it("a failure that may have executed is held for reconciliation and never retried automatically (astra #385 r2)", async () => {
       const { child, jobId } = await settled();
-      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(new Error("rpc down"));
-      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(502); // nothing paid: claim released
-      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200); // retried, paid
-      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(409); // never twice
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(new Error("receipt lookup failed after submission"));
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(502);
+      const again = await settle(BUYER, { jobId, childIpId: child });
+      expect(again.statusCode).toBe(409);
+      expect(again.json<{ error: string }>().error).toBe("already_settled");
+      expect(journal()).toEqual(["claim", "intent", "failed"]);
+    });
+
+    it("only Story's explicit nonexecution releases the claim; then a retry pays once, and never twice", async () => {
+      const { child, jobId } = await settled();
+      const notExecuted = Object.assign(new Error("Story real mode is not executed"), { code: "STORY_NOT_EXECUTED" });
+      vi.spyOn(getStoryIPService(), "payJobRoyalty").mockRejectedValueOnce(notExecuted);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(501);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(409);
+      expect(journal()).toEqual(["claim", "intent", "failed", "release", "claim", "intent", "paid"]);
+    });
+
+    it("a released milestone is settled once, whichever of the job's child IPs names it (astra #385 r2)", async () => {
+      const { parent, child, jobId } = await settled();
+      // Nothing stops one job having two derivative links, so the obligation is the milestone, not the child.
+      const second = `0x${"c2".repeat(20)}`;
+      getRepos().story.insertDerivativeLink({ id: "dl-second", parentIpId: parent, childIpId: second, licenseTokenId: "lt-2", jobId, evidenceBundleHash: "sha256:second", txHash: `0x${"cd".repeat(32)}`, linkedAt: new Date().toISOString() });
+      owe10Percent(parent, second);
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
+      const res = await settle(BUYER, { jobId, childIpId: second });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("already_settled");
+    });
+
+    it("two escrows for one workflow are ambiguous, and nothing is settled (astra #385 r2)", async () => {
+      const { child, jobId } = await settled();
+      const job = getRepos().jobs.findById(jobId)!;
+      getRepos().escrows.insert({ id: "esc-twin", cwmId: job.cwmId, contractAddress: "mock-escrow-twin", payer: OTHER, totalAmount: "25.00", currency: "USDC", status: "completed", createdAt: "2026-09-24T00:00:00Z", deadline: "2026-09-30T00:00:00Z" });
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(409);
+      expect(res.json<{ error: string }>().error).toBe("settlement_ambiguous");
     });
 
     it("another workflow's released milestone never settles this job (no fallback across workflows)", async () => {
@@ -377,6 +419,71 @@ describe("N10a: /api/ip/* authorization", () => {
       expect([pay.statusCode, settle.statusCode]).toEqual([501, 501]);
       expect(pay.json<{ error: string }>().error).toBe("not_executed");
       expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a derivative's parent is the registrant's own IP (astra #385 r2)", () => {
+    it("a job whose capability is another kernel's cannot derive from that capability's IP", async () => {
+      // OTHER operates kernel-sf and registers its capability cap-sf-cnc as IP.
+      const reg = await app.inject({
+        method: "POST",
+        url: "/api/ip/register-capability",
+        headers: as(OTHER),
+        payload: { capability: { id: "cap-sf-cnc", name: "CNC", type: "cnc", kernelId: "kernel-sf" }, designerAddress: OTHER, designerName: "SF Precision Workshop" },
+      });
+      expect(reg.statusCode).toBe(200);
+      const sfIp = reg.json<{ registration: { ipId: string } }>().registration.ipId;
+      // A job on OWNER's kernel-nyc that names kernel-sf's capability: job submission does not check the pair.
+      getRepos().jobs.insert({ id: "job-cross", stepId: "step-cross", cwmId: "cwm-cross", capabilityId: "cap-sf-cnc", kernelId: "kernel-nyc", status: "completed", assignedDevices: [], progress: 100 });
+      const derive = await app.inject({
+        method: "POST",
+        url: "/api/ip/register-job-evidence",
+        headers: as(OWNER),
+        payload: { parentIpId: sfIp, jobId: "job-cross", evidenceBundleHash: "sha256:cross", operatorAddress: OWNER, operatorName: "NYC MakerSpace" },
+      });
+      expect(derive.statusCode).toBe(409);
+      expect(derive.json<{ error: string }>().error).toBe("job_capability_not_on_kernel");
+    });
+  });
+
+  describe("root of trust at this head: re-registration cannot move a registered IP (astra #385 r2)", () => {
+    it("a capability cannot be repointed and an owned kernel cannot be re-registered, so the IP's owner stays", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      // What apiGate does for an API key: sets the key's (self-asserted) operatorId.
+      app.addHook("onRequest", async (req) => {
+        const op = req.headers["x-test-operator"];
+        if (typeof op === "string") (req as { operatorId?: string }).operatorId = op;
+      });
+      await app.register(ipRoutes);
+      await app.register(capabilityRoutes);
+      await app.register(kernelRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app); // cap-nyc-fdm, owned by OWNER through kernel-nyc
+
+      // Re-posting the capability with another kernel returns the existing row unchanged.
+      const repost = await app.inject({ method: "POST", url: "/api/capabilities", headers: { "x-test-operator": OTHER }, payload: { id: "cap-nyc-fdm", kernelId: "kernel-sf", type: "fdm" } });
+      expect(repost.json<{ created: boolean }>().created).toBe(false);
+      expect(getRepos().capabilities.findById("cap-nyc-fdm")!.kernelId).toBe("kernel-nyc");
+
+      // Re-registering the owned kernel as another actor is refused, and its operator is unchanged.
+      const rekernel = await app.inject({
+        method: "POST",
+        url: "/api/kernels",
+        headers: { "x-test-operator": OTHER },
+        payload: { id: "kernel-nyc", name: "taken", operatorAddress: OTHER, location: { lat: 0, lng: 0 }, physicalAddress: "elsewhere", maxAssuranceTier: 0 },
+      });
+      expect(rekernel.statusCode).toBe(403);
+      expect(getRepos().kernels.findById("kernel-nyc")!.operatorAddress.toLowerCase()).toBe(OWNER);
+
+      // So the IP still belongs to OWNER: OTHER is refused on it, OWNER is not.
+      expect(recordedIpOwner(ipId)).toBe(OWNER);
+      const splits = (to: string) => ({ ipId, splits: [{ address: to, role: "integrator", percentage: 100, label: "all" }] });
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OTHER), payload: splits(OTHER) })).statusCode).toBe(403);
+      expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OWNER), payload: splits(OWNER) })).statusCode).toBe(200);
     });
   });
 

@@ -370,6 +370,34 @@ describe("processEvidence → Auto Story Derivative IP", () => {
     expect(result.error).toBeUndefined();
   });
 
+  it("a derivative Story minted but the store failed to record is reported unrecorded, never completed (astra #385 r2)", async () => {
+    const { getRepos } = await import("../db.js");
+    const { pipelineTelemetry } = await import("../telemetry.js");
+    const repos = getRepos();
+    repos.story.insertIpRegistration({
+      ipId: "0xmock_parent_ip",
+      nftTokenId: "1",
+      licenseTermsId: "1",
+      txHash: "0xtx_parent",
+      capabilityId: "cap-nyc-fdm",
+      csdUrl: "pcc://capabilities/fdm/v2",
+      chain: "story-aeneid",
+      registeredAt: new Date().toISOString(),
+    });
+    vi.spyOn(repos.story, "insertDerivativeLink").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    const emit = vi.spyOn(pipelineTelemetry, "emit");
+
+    await getSettlementService().processEvidence(makeBundle(), "job-004");
+
+    const claim = emit.mock.calls.filter((c) => c[1] === "settlement_claim");
+    expect(claim.map((c) => c[2])).toEqual(["started", "failed"]);
+    expect(claim[1]![3]).toMatchObject({ metadata: { outcome: "unrecorded", repairRequired: true, derivativeIpId: "0xmock_child_ip_001" } });
+    expect(repos.auditLog.query({ eventType: "settlement.story_registered", limit: 10 })).toEqual([]);
+    expect(repos.auditLog.query({ eventType: "ip.derivative_unrecorded", limit: 10 })).toHaveLength(1);
+  });
+
   it("persists derivative link to DB after successful registration", async () => {
     const { getRepos } = await import("../db.js");
     const repos = getRepos();

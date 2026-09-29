@@ -244,9 +244,14 @@ function hasRecordedOwner(ipId: string): boolean {
   return recordedIpOwner(ipId) !== null;
 }
 
-/** Story real mode (STORY_MOCK=false), where the service would sign with the GATEWAY's key. */
-function storyRealMode(): boolean {
-  return process.env.STORY_MOCK === "false";
+/**
+ * Story real mode, where the service would sign with the GATEWAY's key. Real if EITHER the environment
+ * or the service instance says so: the instance fixes its mode when it is built (StoryIPService's
+ * `mock`), so a later change to STORY_MOCK can never make this check say "mock" while a real signer runs
+ * (astra, #385 r2). Unset means mock on both sides, and real mode needs STORY_PRIVATE_KEY before signing.
+ */
+function storyRealMode(svc: object): boolean {
+  return process.env.STORY_MOCK === "false" || (svc as { mock?: unknown }).mock === false;
 }
 
 const GATEWAY_NEVER_PAYS = {
@@ -314,46 +319,63 @@ const ESCROW_CURRENCY_DECIMALS: Readonly<Record<string, number>> = { USDC: 6 };
  * settle this job (coord-watch #2974). A job whose workflow id matches no escrow is not settleable.
  */
 function findJobMilestone(job: { cwmId: string; stepId: string }):
-  | { escrow: { id: string; payer: string; currency: string }; milestone: { stepId: string; amount: string; status: string } }
+  | { escrow: { id: string; payer: string; currency: string }; milestone: { id: string; stepId: string; amount: string; status: string } }
   | "none"
   | "ambiguous" {
   const repos = getRepos();
-  const escrow = repos.escrows.findByCwm(job.cwmId);
-  if (!escrow) return "none";
+  // escrows.cwm_id is not unique, and findByCwm returns whichever row comes first: several escrows for one
+  // workflow are ambiguous and settle nothing (astra, #385 r2).
+  const escrows = repos.escrows.findAll().filter((e) => e.cwmId === job.cwmId);
+  if (escrows.length === 0) return "none";
+  if (escrows.length > 1) return "ambiguous";
+  const escrow = escrows[0]!;
   const ms = repos.escrows.findMilestonesByEscrow(escrow.id).filter((m) => m.stepId === job.stepId);
   if (ms.length === 0) return "none";
   if (ms.length > 1) return "ambiguous";
   return { escrow, milestone: ms[0]! };
 }
 
-// ── Once-only settlement (a durable claim in the append-only audit log) ─────
+// ── Once-only settlement, and its journal (the append-only audit log) ────────
 //
-// A settlement of (jobId, childIpId) is claimed by an audit event written synchronously, before the
-// first payment call, so no other request in this process can interleave between the check and the
-// claim. A claim is permanent once anything was paid. A partial failure needs operator repair; it is
-// never retried automatically, because that would pay the paid rows twice. If nothing was paid, a
-// release event lets the settlement be tried again.
+// What is owed royalties is a RELEASED ESCROW MILESTONE: its revenue is paid out once, whichever job or
+// child IP a caller names. So the claim is keyed by the milestone (escrow_milestones.id), not by
+// (jobId, childIpId) (astra, #385 r2). The claim is written synchronously before the first payment
+// call: no other request in this process interleaves between the check and the claim.
+//
+// The journal records, per royalty row, an "intent" before the payment call and its outcome after it
+// ("paid" with the transaction, or "failed"). An intent with no outcome is an uncertain payment. A claim
+// is released ONLY when Story reported that it executed none of the rows (STORY_NOT_EXECUTED); any
+// other failure may have executed after submission, so the claim stands and the milestone waits for
+// operator reconciliation, never an automatic retry.
+//
+// Across processes this is not atomic: two gateway processes on one database could both pass the check.
+// The durable, transactional table for this (royalty_settlement_events, keyed by the obligation, written
+// under BEGIN IMMEDIATE) is in the economics DDL, operator queue item 27. Until it lands, the gateway
+// runs one process per database, and Story real mode never pays (501).
 
 const SETTLEMENT_EVENT = "ip.royalties.settlement";
+const SETTLEMENT_RESOURCE = "escrow_milestone";
 
-function activeSettlementClaims(jobId: string, childIpId: string): number {
+type SettlementAction = "claim" | "release" | "intent" | "paid" | "failed";
+
+function activeSettlementClaims(milestoneId: string): number {
   const rows = getRepos()
-    .auditLog.query({ eventType: SETTLEMENT_EVENT, resourceType: "job", limit: Number.MAX_SAFE_INTEGER })
-    .filter((r) => r.resourceId === jobId && (r.metadata as { childIpId?: unknown } | null)?.childIpId === childIpId);
+    .auditLog.query({ eventType: SETTLEMENT_EVENT, resourceType: SETTLEMENT_RESOURCE, limit: Number.MAX_SAFE_INTEGER })
+    .filter((r) => r.resourceId === milestoneId);
   const claims = rows.filter((r) => r.action === "claim").length;
   const releases = rows.filter((r) => r.action === "release").length;
   return claims - releases;
 }
 
-function recordSettlement(action: "claim" | "release", jobId: string, childIpId: string, actor: string, metadata: Record<string, unknown>): void {
+function recordSettlement(action: SettlementAction, milestoneId: string, actor: string, metadata: Record<string, unknown>): void {
   getRepos().auditLog.insert({
     timestamp: new Date().toISOString(),
     eventType: SETTLEMENT_EVENT,
     actor,
-    resourceType: "job",
-    resourceId: jobId,
+    resourceType: SETTLEMENT_RESOURCE,
+    resourceId: milestoneId,
     action,
-    metadata: { childIpId, ...metadata },
+    metadata,
     ip: null,
     userAgent: null,
   });
@@ -477,6 +499,22 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(409).send({
           error: "parent_not_job_capability",
           message: `Job ${job.id}'s evidence derives from the IP of its own capability ${job.capabilityId}, not from ${parentIpId}.`,
+        });
+      }
+      // A job/capability association is not permission to derive from someone's IP (astra, #385 r2). A
+      // capability lives on one kernel, so a job that really ran it ran on that kernel; then the caller, as
+      // the job's kernel operator, IS the parent's recorded owner. Anything else is refused.
+      const capability = repos.capabilities.findById(job.capabilityId);
+      if (!capability || capability.kernelId !== job.kernelId) {
+        return reply.code(409).send({
+          error: "job_capability_not_on_kernel",
+          message: `Job ${job.id} ran on kernel ${job.kernelId}, but its capability ${job.capabilityId} is not that kernel's; no derivative is registered.`,
+        });
+      }
+      if (recordedIpOwner(parentIpId) !== wallet) {
+        return reply.code(403).send({
+          error: "not_parent_owner",
+          message: `Only the recorded owner of ${parentIpId} may register derivatives of it.`,
         });
       }
 
@@ -628,7 +666,7 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: "no_settlement_record", message: `Job ${jobId} has no escrow milestone.` });
       }
       if (found === "ambiguous") {
-        return reply.code(409).send({ error: "settlement_ambiguous", message: `More than one escrow milestone matches job ${jobId}; nothing is settled.` });
+        return reply.code(409).send({ error: "settlement_ambiguous", message: `More than one escrow, or more than one milestone, matches job ${jobId}; nothing is settled.` });
       }
       const { escrow, milestone } = found;
 
@@ -666,7 +704,7 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: "ip_not_linked_to_job", message: `IP ${childIpId} is not the registered evidence of job ${jobId}.` });
       }
 
-      if (storyRealMode()) return reply.code(501).send(GATEWAY_NEVER_PAYS);
+      if (storyRealMode(svc)) return reply.code(501).send(GATEWAY_NEVER_PAYS);
 
       let distributions: ReturnType<typeof engine.getRoyaltyDistribution>;
       try {
@@ -675,44 +713,59 @@ export async function ipRoutes(app: FastifyInstance) {
         return storyFailure(reply, err, "settle_royalties_failed");
       }
       const payable = distributions.filter((d) => d.amount !== "0");
+      const obligation = { escrowId: escrow.id, milestoneId: milestone.id, jobId: job.id, childIpId };
       if (payable.length > 0) {
-        // Check and claim with no await in between: once-only within this process.
+        // Check and claim the milestone with no await in between: once-only within this process.
         try {
-          if (activeSettlementClaims(job.id, childIpId) > 0) {
+          if (activeSettlementClaims(milestone.id) > 0) {
             return reply.code(409).send({
               error: "already_settled",
-              message: `Royalties for job ${jobId} and IP ${childIpId} were already settled, or a settlement is being repaired. They are never paid twice.`,
+              message: `Royalties on job ${jobId}'s released milestone were already settled, or its settlement awaits reconciliation. They are never paid twice.`,
             });
           }
-          recordSettlement("claim", job.id, childIpId, wallet, { revenue, payer: escrow.payer, rows: payable.length });
+          recordSettlement("claim", milestone.id, wallet, { ...obligation, revenue, payer: escrow.payer, rows: payable.length });
         } catch {
           return reply.code(503).send({ error: "store_unavailable", message: "A settlement cannot be recorded, so nothing is paid." });
         }
       }
 
-      // Every row reports its own outcome. A failed row fails the request: nothing is swallowed.
+      // Every row reports its own outcome, and the journal keeps it. A failed row fails the request.
       type Row =
         | { ipId: string; recipientAddress: string; amount: string; outcome: "paid"; txHash: string }
         | { ipId: string; recipientAddress: string; amount: string; outcome: "failed"; error: string };
       const rows: Row[] = [];
       let totalDistributed = 0n;
       let notExecuted = 0;
-      for (const dist of distributions) {
-        if (dist.amount === "0") continue;
+      const journal = (action: SettlementAction, row: Record<string, unknown>) => {
+        try {
+          recordSettlement(action, milestone.id, wallet, { ...obligation, ...row });
+        } catch {
+          /* the claim already blocks a repeat; a missing journal row leaves the payment for reconciliation */
+        }
+      };
+      for (const dist of payable) {
+        const row = { ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount };
+        journal("intent", row);
         try {
           const { txHash } = await svc.payJobRoyalty(dist.ipId, dist.amount, escrow.payer);
-          rows.push({ ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount, outcome: "paid", txHash });
+          journal("paid", { ...row, txHash });
+          rows.push({ ...row, outcome: "paid", txHash });
           totalDistributed += BigInt(dist.amount);
         } catch (err) {
-          if (isStoryNotExecuted(err)) notExecuted++;
-          rows.push({ ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount, outcome: "failed", error: err instanceof Error ? err.message : String(err) });
+          const nonexecution = isStoryNotExecuted(err);
+          if (nonexecution) notExecuted++;
+          const error = err instanceof Error ? err.message : String(err);
+          journal("failed", { ...row, error, notExecuted: nonexecution });
+          rows.push({ ...row, outcome: "failed", error });
         }
       }
       const failed = rows.filter((r) => r.outcome === "failed").length;
-      if (payable.length > 0 && rows.every((r) => r.outcome === "failed")) {
-        // Nothing was paid: release the claim so the settlement can be tried again.
+      if (payable.length > 0 && notExecuted === payable.length) {
+        // Story reported that it executed NONE of the rows: nonexecution is established, so the claim is
+        // released and the settlement may be tried again. Any other failure may have executed after
+        // submission, so the claim stands for reconciliation.
         try {
-          recordSettlement("release", job.id, childIpId, wallet, { reason: "nothing paid" });
+          recordSettlement("release", milestone.id, wallet, { ...obligation, reason: "story executed none of the rows" });
         } catch {
           /* the claim stands: a later attempt is refused, which is the safe side */
         }
@@ -725,7 +778,7 @@ export async function ipRoutes(app: FastifyInstance) {
       if (failed > 0) {
         return reply.code(502).send({
           error: "settlement_incomplete",
-          message: `${failed} of ${rows.length} royalty payments failed; the rows say which were paid.`,
+          message: `${failed} of ${rows.length} royalty payments failed; the rows say which were paid. The milestone's settlement is held for reconciliation and is never retried automatically.`,
           ...result,
         });
       }
@@ -809,7 +862,7 @@ export async function ipRoutes(app: FastifyInstance) {
       } catch {
         return reply.code(503).send({ error: "store_unavailable", message: "The IP cannot be looked up without the store." });
       }
-      if (storyRealMode()) return reply.code(501).send(GATEWAY_NEVER_PAYS);
+      if (storyRealMode(svc)) return reply.code(501).send(GATEWAY_NEVER_PAYS);
 
       try {
         const result = await svc.payJobRoyalty(ipId, amount, wallet);

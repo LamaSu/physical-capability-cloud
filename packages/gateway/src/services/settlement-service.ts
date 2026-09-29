@@ -293,10 +293,18 @@ export class SettlementService {
             });
             if (job?.capabilityId) {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
-              // The derivative is the job's kernel operator's work (N10a: never the zero address).
+              // The derivative is the job's kernel operator's work (N10a: never the zero address), and only
+              // when the job ran on its capability's own kernel, so the registrant is the parent IP's
+              // recorded owner (the same rule as POST /api/ip/register-job-evidence).
               const kernel = repos.kernels.findById(job.kernelId);
               const operatorOk = kernel !== undefined && /^0x[0-9a-fA-F]{40}$/.test(kernel.operatorAddress) && !/^0x0{40}$/i.test(kernel.operatorAddress);
-              if (ipReg && kernel && operatorOk) {
+              const capabilityOnKernel = repos.capabilities.findById(job.capabilityId)?.kernelId === job.kernelId;
+              if (ipReg && kernel && operatorOk && !capabilityOnKernel) {
+                pipelineTelemetry.emit(jobId, "settlement_claim", "skipped", {
+                  metadata: { reason: "job_capability_not_on_kernel", capabilityId: job.capabilityId },
+                });
+              }
+              if (ipReg && kernel && operatorOk && capabilityOnKernel) {
                 const { getStoryIPService } = await import("@pcc/contracts");
                 const storyIPService = getStoryIPService();
                 const link = await storyIPService.registerJobAsDerivative(ipReg.ipId, {
@@ -306,7 +314,9 @@ export class SettlementService {
                   operatorName: kernel.name,
                   ipfsCid: result.cid,
                 });
-                // Persist derivative link to DB
+                // Persist derivative link to DB. Only a recorded link is a completed registration: the link
+                // row is the child IP's ownership record (astra, #385 r2).
+                let recorded = false;
                 try {
                   repos.story.insertDerivativeLink({
                     id: `dl_${jobId}_${Date.now()}`,
@@ -318,21 +328,28 @@ export class SettlementService {
                     txHash: link.txHash,
                     linkedAt: link.linkedAt,
                   });
+                  recorded = true;
                 } catch (dbErr) {
                   // The derivative exists on Story but has no owner record: flag it for operator repair.
                   console.error("[settlement] Story derivative minted but NOT recorded:", dbErr instanceof Error ? dbErr.message : dbErr);
                   auditService.log({ eventType: "ip.derivative_unrecorded", actor: "settlement-service", resourceType: "ip", resourceId: link.childIpId, action: "repair-needed", metadata: { jobId, parentIpId: link.parentIpId } });
                 }
-                pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
-                });
-                auditService.log({
-                  eventType: "settlement.story_registered",
-                  resourceType: "job",
-                  resourceId: jobId,
-                  action: "register_derivative",
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
-                });
+                if (recorded) {
+                  pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+                    metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  });
+                  auditService.log({
+                    eventType: "settlement.story_registered",
+                    resourceType: "job",
+                    resourceId: jobId,
+                    action: "register_derivative",
+                    metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  });
+                } else {
+                  pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
+                    metadata: { outcome: "unrecorded", repairRequired: true, derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  });
+                }
               }
             }
           } catch (storyErr) {
