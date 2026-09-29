@@ -5,13 +5,16 @@
 --
 -- This is BUDGET_RESERVATIONS_DDL in packages/db/src/repositories/budget-reservations.ts, statement for
 -- statement (budget-reservations.test.ts holds the two equal). The gateway's runtime migration
--- (packages/db/src/migrate.ts) runs it through ensureBudgetReservationsSchema, which also refuses a
--- table of another shape. Amounts are exact base units stored as canonical decimal TEXT (SQLite has no
+-- (packages/db/src/migrate.ts) runs it through ensureBudgetReservationsSchema, which trusts the RECORDED
+-- schema version (pcc_schema_versions, written by this DDL) and never the table's SQL text: a table
+-- without the current version is rebuilt when empty and stops the boot when it holds rows.
+-- Amounts are exact base units stored as canonical decimal TEXT (SQLite has no
 -- numeric(78,0)) and compared as BigInt in application code. Issue and consume run in BEGIN IMMEDIATE
 -- transactions. The guard triggers hold no data, so they are dropped and recreated on every run.
 
+CREATE TABLE IF NOT EXISTS pcc_schema_versions (object TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS budget_reservations (
-  id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+  id TEXT NOT NULL PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
   principal TEXT NOT NULL CHECK (length(principal) BETWEEN 1 AND 128),
   payer_address TEXT NOT NULL CHECK (length(payer_address) BETWEEN 1 AND 128),
   currency TEXT NOT NULL CHECK (length(currency) BETWEEN 1 AND 128),
@@ -44,10 +47,11 @@ CREATE INDEX IF NOT EXISTS budget_reservations_parent_idx ON budget_reservations
 DROP TRIGGER IF EXISTS budget_reservations_insert_guard;
 CREATE TRIGGER budget_reservations_insert_guard BEFORE INSERT ON budget_reservations
 WHEN NEW.state <> 'issued'
+  OR EXISTS (SELECT 1 FROM budget_reservations e WHERE e.id = NEW.id)
   OR (NEW.parent_reservation_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM budget_reservations p WHERE p.id = NEW.parent_reservation_id AND p.state = 'consumed'))
 BEGIN
-  SELECT RAISE(ABORT, 'budget_reservations: a reservation is inserted issued, and a child only under a consumed parent');
+  SELECT RAISE(ABORT, 'budget_reservations: a reservation is inserted issued, under an id never used before, and a child only under a consumed parent');
 END;
 DROP TRIGGER IF EXISTS budget_reservations_update_guard;
 CREATE TRIGGER budget_reservations_update_guard BEFORE UPDATE ON budget_reservations
@@ -65,3 +69,4 @@ CREATE TRIGGER budget_reservations_delete_guard BEFORE DELETE ON budget_reservat
 BEGIN
   SELECT RAISE(ABORT, 'budget_reservations: a reservation is never deleted');
 END;
+INSERT OR REPLACE INTO pcc_schema_versions (object, version) VALUES ('budget_reservations', 2);
