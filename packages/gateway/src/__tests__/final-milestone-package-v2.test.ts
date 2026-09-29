@@ -289,6 +289,30 @@ describe("validatePackageBody — pinned forms", () => {
       expect(() => validatePackageBody(b)).toThrow(/must not be empty/);
     }
   });
+
+  it("time bounds are decimal Unix-second strings, start <= end, kept byte-for-byte (bus #3567)", () => {
+    for (const [start, end] of [
+      ["2026-08-20T00:00:00Z", "2026-08-20T00:05:00Z"],
+      ["01700000000", "1700000100"],
+      ["-1", "1700000100"],
+      ["1700000000.5", "1700000100"],
+      ["1e9", "1700000100"],
+      ["1700000000", "9007199254740992"],
+    ]) {
+      const b = clone(BODY);
+      b.evidenceTimeBounds = { start, end };
+      expect(() => validatePackageBody(b), `${start}..${end}`).toThrow(/decimal string of Unix seconds/);
+    }
+    const numeric: any = clone(BODY);
+    numeric.evidenceTimeBounds = { start: 1700000000, end: 1700000100 };
+    expect(() => validatePackageBody(numeric)).toThrow();
+    const inverted = clone(BODY);
+    inverted.evidenceTimeBounds = { start: "1700000100", end: "1700000000" };
+    expect(() => validatePackageBody(inverted)).toThrow(/start is after end/);
+    const equal = clone(BODY);
+    equal.evidenceTimeBounds = { start: "1700000000", end: "1700000000" };
+    expect(validatePackageBody(equal).evidenceTimeBounds).toEqual({ start: "1700000000", end: "1700000000" });
+  });
 });
 
 describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted", () => {

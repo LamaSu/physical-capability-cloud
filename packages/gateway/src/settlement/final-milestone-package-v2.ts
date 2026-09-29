@@ -125,6 +125,18 @@ function nonEmpty(v: unknown, path: string): string {
   if (s.length === 0) throw new PackageBodyValidationError(path, "must not be empty");
   return s;
 }
+/**
+ * An evidenceTimeBounds end: a decimal string of Unix seconds, kept exactly as
+ * given (the canonical settlement-vector golden: "1699999500" / "1700000000").
+ * The same grammar as spec `parseEvidenceTimeBound` (#438; bus #3567).
+ */
+function unixSeconds(v: unknown, path: string): string {
+  const s = nonEmpty(v, path);
+  if (!/^(0|[1-9][0-9]*)$/.test(s) || !Number.isSafeInteger(Number(s))) {
+    throw new PackageBodyValidationError(path, "must be a decimal string of Unix seconds (no sign, no leading zeros)");
+  }
+  return s;
+}
 function hex32(v: unknown, path: string): Hex {
   const s = str(v, path);
   if (!HEX32.test(s)) throw new PackageBodyValidationError(path, `expected 0x+64 lowercase hex, got "${s}"`);
@@ -205,6 +217,11 @@ export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body
   const cb = obj(b.challengeBinding, "$.challengeBinding", ["nonce", "tChallengeRef"]);
   const ev = obj(b.evidence, "$.evidence", ["evidenceBlockHash"]);
   const tb = obj(b.evidenceTimeBounds, "$.evidenceTimeBounds", ["start", "end"]);
+  const boundStart = unixSeconds(tb.start, "$.evidenceTimeBounds.start");
+  const boundEnd = unixSeconds(tb.end, "$.evidenceTimeBounds.end");
+  if (Number(boundStart) > Number(boundEnd)) {
+    throw new PackageBodyValidationError("$.evidenceTimeBounds", "start is after end");
+  }
 
   return {
     packageSchemaVersion: PACKAGE_SCHEMA_VERSION,
@@ -232,10 +249,7 @@ export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body
     evidence: {
       evidenceBlockHash: hex32(ev.evidenceBlockHash, "$.evidence.evidenceBlockHash"),
     },
-    evidenceTimeBounds: {
-      start: nonEmpty(tb.start, "$.evidenceTimeBounds.start"),
-      end: nonEmpty(tb.end, "$.evidenceTimeBounds.end"),
-    },
+    evidenceTimeBounds: { start: boundStart, end: boundEnd },
   };
 }
 
