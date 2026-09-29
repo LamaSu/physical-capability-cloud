@@ -91,7 +91,7 @@ Every field except `deployMetadata` comes **only** from `/app/BUILD_INFO.json`, 
 |---|---|
 | `commit`, `commitSource: "build_argument"` | The full 40-hex SHA a **build argument** named: `PCC_BUILD_SHA` (CI's `build-image` job passes `github.sha`; `:staging` and `:prod` are retags of that image) or `RAILWAY_GIT_COMMIT_SHA` (Railway passes it when it builds the Dockerfile). `buildArg` says which. Whoever runs a build chooses its arguments, so on its own this is a **claim**. |
 | `commitSource: "unknown"` | No build argument named a commit (for example a local build without one). `commit` and `buildArg` are `null`; the gateway never guesses. |
-| `sourceDigest` | `sha256:` digest of the source the image was built from, computed inside the build right after `COPY . .` and before anything is built (`scripts/source-digest.sh`, spec `pcc.source-digest/v1`: `packages/`, `apps/`, `docs/` and the root build files, without `node_modules`, `dist`, `.git` or the contract build directories). This is what binds `commit` to the code. |
+| `sourceDigest` | `sha256:` digest of the source the image was built from, computed inside the build right after `COPY . .` and before anything is built (`scripts/source-digest.sh`, spec `pcc.source-digest/v1`: `packages/`, `apps/`, `docs/` and the root build files including `Dockerfile` and `.dockerignore`, without `node_modules`, `dist`, `.git` or the contract build directories). This is what binds `commit` to the code. |
 | `deployMetadata.railwayGitCommitSha` | Railway's **runtime** `RAILWAY_GIT_COMMIT_SHA`, if set. Deploy metadata, not proof of the code served; never reported as `commit`. |
 
 **How `commit` is bound to the code:**
@@ -99,7 +99,10 @@ Every field except `deployMetadata` comes **only** from `/app/BUILD_INFO.json`, 
 - **Any served gateway, any time:** from a clone that has the commit, run `sh scripts/verify-build-source.sh <commit> https://capability.network`. It rebuilds the digested tree with `git archive <commit>` and compares both the digest and the recorded commit. `source MATCHES` means the image was built from exactly that commit's source, in the digest's scope. A Railway Dockerfile build of a commit verifies the same way.
 - A build from a working tree with local or ignored files in scope (for example `.turbo` logs) gets a different digest. That is intended: its source is not exactly the commit's.
 
-**What this cannot prove.** Whoever controls the deployment (the container's files, mounts or image) can serve different code and a different `BUILD_INFO.json`, including a copied digest. `/api/health` reports what the image's build recorded; it is not proof against the deployment operator. Trust in it rests on the pipeline above and on who can deploy.
+**What this cannot prove.**
+- Whoever controls the deployment (the container's files, mounts or image) can serve different code and a different `BUILD_INFO.json`, including a copied digest. `/api/health` reports what the image's build recorded; it is not proof against the deployment operator.
+- `sourceDigest` says which source files entered the build, not what the build then did with them. CI builds with the commit's own `Dockerfile` (which is inside the digest), but a build run with a different recipe (for example `docker build -f other.Dockerfile`) could record a matching digest and still change the code it builds.
+- Trust therefore rests on the CI pipeline above and on who can build and deploy.
 
 Build rules (Dockerfile, tested by `dockerfile-build-info.test.ts`):
 - A **non-empty** build argument that is not a full 40-hex SHA **fails the build**, whether or not the other argument is valid. A 7-character prefix could be ambiguous, and anything else is not a commit.

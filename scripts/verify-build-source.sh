@@ -19,7 +19,7 @@ full="$(git rev-parse --verify --quiet "${commit}^{commit}")" || { echo "verify:
 tmp="${TMPDIR:-/tmp}/pcc-verify-source.$$"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 mkdir -p "$tmp"
-git archive "$full" -- packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json \
+git archive "$full" -- packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json Dockerfile .dockerignore \
   | tar -x -C "$tmp"
 expected="$(sh "$here/source-digest.sh" "$tmp")"
 

@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
 const DIGEST_SH = join(REPO, "scripts/source-digest.sh");
 const VERIFY_SH = join(REPO, "scripts/verify-build-source.sh");
-const SCOPE = ["packages", "apps", "docs", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "tsconfig.base.json"];
+const SCOPE = ["packages", "apps", "docs", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "tsconfig.base.json", "Dockerfile", ".dockerignore"];
 
 function tree(extra: Record<string, string> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "pcc-src-digest-"));
@@ -26,6 +26,8 @@ function tree(extra: Record<string, string> = {}): string {
     "pnpm-workspace.yaml": "packages: ['packages/*']\n",
     "turbo.json": "{}\n",
     "tsconfig.base.json": "{}\n",
+    Dockerfile: "FROM node:22-slim\nCOPY . .\n",
+    ".dockerignore": "**/node_modules\n**/dist\n",
     "packages/gateway/src/server.ts": "export const a = 1;\n",
     "packages/gateway/package.json": '{"name":"@pcc/gateway"}\n',
     "apps/dashboard/index.html": "<html></html>\n",
@@ -74,6 +76,8 @@ describe("scripts/source-digest.sh (pcc.source-digest/v1)", () => {
     expect(digestOf(tree({ "packages/gateway/src/extra.ts": "" }))).not.toBe(base);
     expect(digestOf(tree({ "docs/other.md": "x" }))).not.toBe(base);
     expect(digestOf(tree({ "pnpm-lock.yaml": "lockfileVersion: 10\n" }))).not.toBe(base);
+    // The build recipe copied into the context is covered too.
+    expect(digestOf(tree({ Dockerfile: "FROM node:22-slim\nCOPY . .\nRUN sed -i s/1/2/ packages/gateway/src/server.ts\n" }))).not.toBe(base);
     const renamed = tree();
     renameSync(join(renamed, "packages/gateway/src/server.ts"), join(renamed, "packages/gateway/src/server2.ts"));
     expect(digestOf(renamed)).not.toBe(base);

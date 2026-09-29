@@ -11,7 +11,7 @@
 #
 # pcc.source-digest/v1:
 #   scope     packages/ apps/ docs/ and the root build files package.json pnpm-lock.yaml
-#             pnpm-workspace.yaml turbo.json tsconfig.base.json
+#             pnpm-workspace.yaml turbo.json tsconfig.base.json Dockerfile .dockerignore
 #   excluded  any node_modules, dist or .git entry, and packages/contracts/{out,cache,lib}
 #             (the same exclusions .dockerignore applies inside that scope)
 #   files     regular files only (symlinks are not followed); content only (no modes, times)
@@ -20,11 +20,11 @@
 set -eu
 root="${1:?usage: source-digest.sh <tree-root>}"
 cd "$root"
-for p in packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json; do
+for p in packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json Dockerfile .dockerignore; do
   [ -e "$p" ] || { echo "source-digest: $root has no $p" >&2; exit 1; }
 done
 digest="$(
-  find packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json \
+  find packages apps docs package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json Dockerfile .dockerignore \
     \( -name node_modules -o -name dist -o -name .git \
        -o -path packages/contracts/out -o -path packages/contracts/cache -o -path packages/contracts/lib \) -prune \
     -o -type f -print0 \
