@@ -34,18 +34,26 @@ import { normalizeIdentity, sameIdentity } from "./identity-normalize.js";
 import { resolveApiKey } from "./api-key-auth.js";
 import { SCOPES_NOT_CARRIED_BY_WILDCARD, parseScopeColumn } from "../middleware/scope-checker.js";
 
-/** Every env var that grants elevated access by operatorId allowlist. */
+/**
+ * Every env var that names identities by operatorId allowlist. They are RESERVED
+ * from self-service claims. Only the last two still grant anything, and neither
+ * grants an admin view (the admin views take the admin secret, N2):
+ * - PCC_SETTLEMENT_OPERATORS: settlement-scope approval, and only for a SIWE-PROVEN
+ *   address (routes/provision.ts);
+ * - BROKER_OPERATORS: assigning request work to other operators
+ *   (middleware/security-hardening.ts isBrokerOperator, routes/requests.ts).
+ * The rest are retired gates, kept reserved so nobody can claim those identities.
+ */
 export const ADMIN_IDENTITY_ALLOWLIST_ENV_VARS = [
-  "PCC_KEY_ADMINS",            // routes/admin-key-audit.ts (historical gate; still reserved)
-  "AUDIT_ADMINS",              // routes/audit.ts — unscoped audit-log access
-  "PCC_DEMAND_ADMINS",         // routes/admin-demand.ts
-  "PCC_AGGREGATOR_ADMINS",     // routes/aggregator/agntcy.ts, routes/aggregator/ingest.ts
-  "PCC_TOOL_INDEX_ADMINS",     // routes/tool-search.ts — POST /api/tools/reload
-  "PCC_OBSERVABILITY_ADMINS",  // routes/admin-observability.ts
-  "PCC_SETTLEMENT_OPERATORS",  // routes/provision.ts — settlement-scope approval
-  "BROKER_OPERATORS",          // middleware/security-hardening.ts isBrokerOperator —
-                               // assigns work to other operators; admin view of
-                               // diagnostic logs + support messages
+  "PCC_KEY_ADMINS",            // routes/admin-key-audit.ts: retired gate (the secret now)
+  "AUDIT_ADMINS",              // routes/audit.ts: retired gate (the secret now)
+  "PCC_DEMAND_ADMINS",         // routes/admin-demand.ts: retired gate (the secret now)
+  "PCC_AGGREGATOR_ADMINS",     // routes/aggregator/{agntcy,ingest}.ts: retired gate (the secret now)
+  "PCC_TOOL_INDEX_ADMINS",     // routes/tool-search.ts POST /api/tools/reload: retired gate (the secret now)
+  "PCC_OBSERVABILITY_ADMINS",  // routes/admin-observability.ts: retired gate (the secret now)
+  "PCC_SETTLEMENT_OPERATORS",  // routes/provision.ts: settlement-scope approval (SIWE-proven only)
+  "BROKER_OPERATORS",          // isBrokerOperator: assigns request work to other operators. It no
+                               // longer opens the diagnostics or support admin views (b2218637).
 ] as const;
 
 export type AdminIdentityAllowlist = (typeof ADMIN_IDENTITY_ALLOWLIST_ENV_VARS)[number];
