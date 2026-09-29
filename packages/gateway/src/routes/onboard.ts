@@ -35,6 +35,7 @@ import {
   coalesceSourceDocumentId,
 } from "./onboard-analysis.js";
 import { bindRegistrationOwner } from "./onboard-owner.js";
+import { adminOrCaller, mayAccess } from "../auth/admin-secret-gate.js";
 // Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
 // route filters registrations by req.tenantId (from T1.9 tenantContext
 // middleware). The /register handler always backfills tenant_id at insert
@@ -521,14 +522,25 @@ export async function onboardRoutes(app: FastifyInstance) {
     } catch { return { registrations: [] }; }
   });
 
-  // Get registration detail
-  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req) => {
+  // Get registration detail (N62). The FULL record (the operator block with the
+  // owner's identity and contact, the serial number, space and power requirements,
+  // and pricing) is its owner's (registrationOwner: the authenticated caller bound at
+  // write, M3), or the admin secret's (adminOrCaller: a wrong secret is refused,
+  // never downgraded). Anyone else, like an unknown id, gets 404. The list above is
+  // the sanitised public view. This route used to return every record to any key.
+  app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
+    const who = adminOrCaller(req, reply);
+    if (!who) return reply;
+    let reg: ReturnType<ReturnType<typeof getRepos>["registrations"]["findById"]>;
     try {
-      const repos = getRepos();
-      const reg = repos.registrations.findById(req.params.id);
-      if (!reg) return { error: "not_found" };
-      return { registration: reg };
-    } catch { return { error: "not_found" }; }
+      reg = getRepos().registrations.findById(req.params.id);
+    } catch {
+      reg = undefined;
+    }
+    if (!reg || !mayAccess(who, registrationOwner(reg))) {
+      return reply.status(404).send({ error: "not_found" });
+    }
+    return { registration: reg };
   });
 
   // ── Approve a registration (admin key required) ──

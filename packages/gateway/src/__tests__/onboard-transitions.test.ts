@@ -290,9 +290,13 @@ describe("onboarding review transitions are atomic and audited", () => {
 
   // ── M2: an approval is bound to the evidence the admin reviewed ─────────
 
-  /** What an admin UI reads before approving: the evidenceDigest of the review record GET serves. */
+  /** What an admin UI reads before approving: the evidenceDigest of the review record GET serves. The full record needs the admin secret (N62). */
   async function reviewedDigest(regId: string): Promise<string> {
-    const res = await app.inject({ method: "GET", url: `/api/onboard/registrations/${regId}`, headers: { "x-test-operator": "reviewer@example.com" } });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/onboard/registrations/${regId}`,
+      headers: { "x-admin-key": ADMIN_KEY, "x-test-operator": "reviewer@example.com" },
+    });
     const description: string = res.json().registration.description;
     return JSON.parse(description.replace(/^PROOF SUBMITTED: /, "")).evidenceDigest;
   }
