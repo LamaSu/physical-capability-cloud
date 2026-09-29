@@ -21,6 +21,8 @@ import {
   signingPreimage,
 } from "../evidence/signing-preimage.js";
 import { makeExecutionLogVerifier } from "../evidence/verifiers/oracle-binding.js";
+import { verifyEvidenceSubjectBinding } from "../evidence/subject-binding.js";
+import { buildLose3Envelope } from "../../scripts/emit-execution-log-bundle.mjs";
 import type { LogChainEntryView } from "../evidence/verifiers/log-chain.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
@@ -34,7 +36,8 @@ interface FixtureEvent {
 }
 
 const fixturePath = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
-const vector = JSON.parse(readFileSync(fixturePath("./fixtures/lose3-execution-log-bundle.json"), "utf8"));
+const fixtureText = readFileSync(fixturePath("./fixtures/lose3-execution-log-bundle.json"), "utf8");
+const vector = JSON.parse(fixtureText);
 interface SignatureObject {
   signer: string;
   algorithm: string;
@@ -66,7 +69,15 @@ const verifyKernel = (message: Uint8Array, signature: unknown) => {
 const logEvent = bundle.events.find((e) => e.type === "printer_job_verified")!;
 const logEntries = logEvent.payload.entries as LogChainEntryView[];
 const logParams = logEvent.payload.params;
-const CTX = { vocabVersion: 2 };
+const CTX = {
+  vocabVersion: 2,
+  subject: { jobId: vector.bundle.jobId as string, kernelId: vector.bundle.kernelId as string },
+};
+
+/** #52's expectedSigner: the same "0x" + first-40-hex convention every producer uses. */
+const EXPECTED_SIGNER = `0x${String(vector.kernelPublicKeyHex).slice(0, 40)}`;
+/** deps.verifyBundleSignature / deps.verifyKernelSignature: real crypto over the fixture key. */
+const verifyBundleSignature = (digest: string, signature: unknown) => verifyKernel(signingPreimage(digest), signature);
 
 describe("LO-SE-3 vector — hashes recompute from the production canonicalizer", () => {
   it("every event hash recomputes", async () => {
@@ -160,35 +171,87 @@ describe("LO-SE-3 vector — negative controls", () => {
     expect(() => signingPreimage(raw32)).toThrow(SigningPreimageError);
   });
 
-  it("execution_failed is absent from the bundle", () => {
-    expect(bundle.events.some((e) => e.type === "execution_failed")).toBe(false);
-  });
+  // The old "execution_failed is absent" assertion here proved nothing about
+  // rejection behavior (astra pack 40): it is superseded below by "LO-SE-3
+  // vector — the failure-bearing negative is authentic, not a broken hash",
+  // which checks both bundles' execution_failed counts AND that #52 still
+  // accepts the failure-bearing bundle (integrity != outcome policy).
 });
 
-describe("LO-SE-3 vector — the #52 verifier over the carried chain", () => {
+describe("LO-SE-3 vector — the #52 verifier over the consumer-run BUNDLE (new contract)", () => {
   const verifier = makeExecutionLogVerifier({
+    expectedSigner: EXPECTED_SIGNER,
+    verifyBundleSignature,
     verifyKernelSignature: (entryHash, signature) => verifyKernel(signingPreimage(entryHash), signature),
   });
 
-  it("accepts the kernel-signed chain", async () => {
-    const res = await verifier.verify(logEntries, logParams, CTX);
+  it("accepts the kernel-signed bundle", async () => {
+    const res = await verifier.verify(bundle, logParams, CTX);
     expect(res.met).toBe(true);
   });
 
-  it("rejects a forged log line", async () => {
-    const forged = structuredClone(logEntries);
-    forged[1]!.rawContent = "FORGED";
+  it("rejects a forged log line — the untouched event.hash no longer matches the tampered payload, so this now fails at binding, one layer above the old entries-only check", async () => {
+    const forged = structuredClone(vector.bundle);
+    const idx = forged.events.findIndex((e: { type: string }) => e.type === "printer_job_verified");
+    (forged.events[idx].payload.entries[1] as Record<string, unknown>).rawContent = "FORGED";
     const res = await verifier.verify(forged, logParams, CTX);
     expect(res.met).toBe(false);
-    expect(res.detail.join(" ")).toContain("entryHash mismatch");
+    expect(res.detail.join(" ")).toMatch(/bundle does not bind to the job|event-hash-mismatch/);
   });
 
-  it("rejects a signature moved from one entry to another", async () => {
-    const moved = structuredClone(logEntries);
-    moved[1]!.kernelSignature = moved[0]!.kernelSignature;
+  it("rejects a signature moved from one entry to another — same reason: the payload changed but its recorded event.hash did not", async () => {
+    const moved = structuredClone(vector.bundle);
+    const idx = moved.events.findIndex((e: { type: string }) => e.type === "printer_job_verified");
+    const entries = moved.events[idx].payload.entries as Record<string, unknown>[];
+    entries[1]!.kernelSignature = entries[0]!.kernelSignature;
     const res = await verifier.verify(moved, logParams, CTX);
     expect(res.met).toBe(false);
-    expect(res.detail.join(" ")).toContain("kernel signature invalid");
+    expect(res.detail.join(" ")).toMatch(/bundle does not bind to the job|event-hash-mismatch/);
+  });
+});
+
+describe("LO-SE-3 vector — buildLose3Envelope() is reproducible", () => {
+  it("regenerating the vector reproduces the committed fixture file byte-for-byte", async () => {
+    const { text } = await buildLose3Envelope();
+    expect(text).toBe(fixtureText);
+  });
+});
+
+describe("LO-SE-3 vector — the failure-bearing negative is authentic, not a broken hash", () => {
+  const fb = vector.negatives.failureBearingBundle as {
+    bundleHash: string;
+    kernelSignature: SignatureObject;
+    jobId: string;
+    kernelId: string;
+    events: FixtureEvent[];
+  };
+  const verifier = makeExecutionLogVerifier({
+    expectedSigner: EXPECTED_SIGNER,
+    verifyBundleSignature,
+    verifyKernelSignature: (entryHash, signature) => verifyKernel(signingPreimage(entryHash), signature),
+  });
+
+  it("its bundle signature verifies under the fixture key", () => {
+    expect(verifyKernel(signingPreimage(fb.bundleHash), fb.kernelSignature)).toBe(true);
+  });
+
+  it("verifyEvidenceSubjectBinding accepts it for the job/kernel subject", async () => {
+    const binding = await verifyEvidenceSubjectBinding({
+      bundleHash: fb.bundleHash,
+      events: fb.events,
+      subject: { jobId: fb.jobId, kernelId: fb.kernelId },
+    });
+    expect(binding.ok).toBe(true);
+  });
+
+  it("carries exactly one execution_failed event, while the positive bundle carries none", () => {
+    expect(bundle.events.filter((e) => e.type === "execution_failed").length).toBe(0);
+    expect(fb.events.filter((e) => e.type === "execution_failed").length).toBe(1);
+  });
+
+  it("the #52 verifier still returns met:true on it — the log is authentic; refusing a completed+failed contradiction is outcome policy for the evaluator (proven in #363), not integrity for #52", async () => {
+    const res = await verifier.verify(fb, logParams, CTX);
+    expect(res.met).toBe(true);
   });
 });
 
