@@ -56,8 +56,8 @@ async function settle() {
 
 async function renderAt(path: string, { signedIn }: { signedIn: boolean }) {
   window.history.replaceState(null, "", path);
-  const { useAuthStore } = await import("../stores/auth-store.js");
-  useAuthStore.setState({ isAuthenticated: signedIn, apiKey: signedIn ? "pcc_test_key" : null });
+  const { adoptApiKey } = await import("../stores/auth-store.js");
+  adoptApiKey(signedIn ? "pcc_test_key" : null);
   const { App } = await import("../App.js");
   await act(async () => {
     root.render(<App />);

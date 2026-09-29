@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
 import { GATEWAY_BASE } from "../lib/gateway-base.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import {
   runPasskeyRegistration,
   detectPasskeySupport,
@@ -44,9 +45,11 @@ export type PasskeyStatus =
   | "error";
 
 export interface UsePasskeyOptions {
-  /** Bind the credential to an operator (requires apiKey). Omit for anonymous. */
+  /**
+   * Bind the credential to this operator. The binding challenge is sent
+   * through authorizedFetch with the signed-in key. Omit for anonymous.
+   */
   operatorId?: string;
-  apiKey?: string;
   /** Override the gateway base URL (defaults to VITE_PCC_URL / same-origin). */
   apiBase?: string;
 }
@@ -64,7 +67,7 @@ export interface UsePasskeyReturn {
 }
 
 export function usePasskey(options: UsePasskeyOptions = {}): UsePasskeyReturn {
-  const { operatorId, apiKey, apiBase = API } = options;
+  const { operatorId, apiBase = API } = options;
   const [status, setStatus] = useState<PasskeyStatus>("checking-support");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PasskeyRegistrationResult | null>(null);
@@ -102,7 +105,7 @@ export function usePasskey(options: UsePasskeyOptions = {}): UsePasskeyReturn {
         {
           apiBase,
           operatorId,
-          apiKey,
+          authorizedFetchFn: authorizedFetch,
           fetchFn: window.fetch.bind(window),
           startRegistration: startRegistrationAdapter,
         },
@@ -124,7 +127,7 @@ export function usePasskey(options: UsePasskeyOptions = {}): UsePasskeyReturn {
       );
       setStatus("error");
     }
-  }, [apiBase, operatorId, apiKey]);
+  }, [apiBase, operatorId]);
 
   const reset = useCallback(() => {
     setError(null);

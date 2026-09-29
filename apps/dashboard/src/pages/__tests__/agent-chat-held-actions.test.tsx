@@ -15,7 +15,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useAuthStore } from "../../stores/auth-store.js";
+import { adoptApiKey } from "../../stores/auth-store.js";
 import { OnboardChatPage } from "../OnboardChatPage.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -53,7 +53,7 @@ function reply(body: Record<string, unknown>, status = 200) {
 beforeEach(() => {
   sent = [];
   replies = [];
-  useAuthStore.setState({ apiKey: KEY, isAuthenticated: true });
+  adoptApiKey(KEY);
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -80,7 +80,7 @@ afterEach(async () => {
   container.remove();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  useAuthStore.setState({ apiKey: null, isAuthenticated: false });
+  adoptApiKey(null);
 });
 
 async function flush() {
