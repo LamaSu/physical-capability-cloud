@@ -1,9 +1,11 @@
 /**
  * EvidenceProvenanceDTO (@pcc/spec readmodels/evidence-provenance.ts): the loader and the builder.
- * Vocabulary per the evidence lane (#3346): evidence integrity has ONE model, event_bundle_hash
- * (hashEvent + hashBundle, what /settle recomputes). The /complete envelope hash is reported as
- * gateway_envelope, the gateway's storage integrity, never as evidence integrity. Fabricated
- * events never count toward tier coverage. Nothing here reads "verified".
+ * Vocabulary per the evidence lane (#3346, #3680): evidence integrity has ONE model,
+ * event_bundle_hash (hashEvent + hashBundle, what /settle recomputes), and only it is
+ * `recomputed_match`. The /complete envelope hash is `storage_envelope_match` (model
+ * gateway_envelope): the gateway's storage integrity, never evidence integrity. Neither
+ * fabricated nor gateway-stamped events count toward tier coverage, and the gateway's
+ * zero-address placeholder signature is no signature. Nothing here reads "verified".
  */
 import { createHash } from "node:crypto";
 import {
@@ -13,8 +15,7 @@ import {
   hashEvent,
   isFabricated,
   type EvidenceEvent,
-  type EvidenceIntegrityModel,
-  type EvidenceIntegrityState,
+  type EvidenceIntegrity,
   type EvidenceProvenanceDTO,
   type ProvenanceBundle,
 } from "@pcc/spec";
@@ -62,19 +63,31 @@ export function loadEvidenceProvenance(jobId: string, repos: EvidenceProvenanceR
   }
 }
 
+/**
+ * The deviceId the gateway stamps on events it writes itself (PUT /complete: its own
+ * execution_completed and the caller's body events). No device reported such an event.
+ * #345 names this GATEWAY_STAMPED_DEVICE_ID; the literal stands in until it lands.
+ */
 const GATEWAY_DEVICE = "gateway";
+/** The signer PUT /complete writes for events it synthesized: a placeholder, not a signature. */
+const PLACEHOLDER_SIGNER = "0x0000000000000000000000000000000000000000";
+const PLACEHOLDER_SIGNATURE_VALUE = "gateway-auto-sign";
+
+const gatewayStamped = (e: ProvenanceEventRow) => e.source?.deviceId === GATEWAY_DEVICE;
 
 function claimedTier(t: unknown): 0 | 1 | 2 | 3 | null {
   return t === 0 || t === 1 || t === 2 || t === 3 ? t : null;
 }
 
-async function integrityOf(b: ProvenanceBundleRow): Promise<{ state: EvidenceIntegrityState; model: EvidenceIntegrityModel | null }> {
-  if (b.events.length === 0) return { state: "not_recomputable", model: null };
+/** Evidence integrity (LO-EV): every event hash, then the bundle hash over them. */
+async function eventBundleHashMatches(b: ProvenanceBundleRow): Promise<boolean> {
   const events = b.events as unknown as EvidenceEvent[];
-  // Evidence integrity (LO-EV): every event hash, then the bundle hash over them.
   const eventHashesOk = (await Promise.all(events.map(async (e) => (await hashEvent(e)) === e.hash))).every(Boolean);
-  if (eventHashesOk && (await hashBundle(events)) === b.bundleHash) return { state: "recomputed_match", model: "event_bundle_hash" };
-  // Gateway storage integrity: the envelope /complete hashes.
+  return eventHashesOk && (await hashBundle(events)) === b.bundleHash;
+}
+
+/** Gateway storage integrity: the envelope /complete hashes. */
+function storageEnvelopeMatches(b: ProvenanceBundleRow): boolean {
   const envelope = buildCanonicalEvidenceEnvelope(
     {
       id: b.id,
@@ -87,14 +100,32 @@ async function integrityOf(b: ProvenanceBundleRow): Promise<{ state: EvidenceInt
     },
     b.events,
   );
-  if (`sha256:${createHash("sha256").update(envelope).digest("hex")}` === b.bundleHash) {
-    return { state: "recomputed_match", model: "gateway_envelope" };
-  }
+  return `sha256:${createHash("sha256").update(envelope).digest("hex")}` === b.bundleHash;
+}
+
+/**
+ * Recomputed integrity. A model that cannot even run on a stored bundle (a value the canonical
+ * form refuses, e.g. an integer beyond 2^53-1 once #359 lands) does not reproduce: it is caught
+ * for that bundle, so one old row never fails the whole read.
+ */
+async function integrityOf(b: ProvenanceBundleRow): Promise<EvidenceIntegrity> {
+  if (b.events.length === 0) return { state: "not_recomputable", model: null };
+  const safely = async (check: () => boolean | Promise<boolean>) => {
+    try {
+      return await check();
+    } catch {
+      return false;
+    }
+  };
+  if (await safely(() => eventBundleHashMatches(b))) return { state: "recomputed_match", model: "event_bundle_hash" };
+  if (await safely(() => storageEnvelopeMatches(b))) return { state: "storage_envelope_match", model: "gateway_envelope" };
   return { state: "no_model_reproduces", model: null };
 }
 
 function tierCoverageOf(tier: 0 | 1 | 2 | 3 | null, events: ProvenanceEventRow[]): ProvenanceBundle["tierCoverage"] {
-  const counted = events.filter((e) => !isFabricated(e as unknown as EvidenceEvent));
+  // Only what a device reported counts: not fabricated events, and not events the gateway
+  // stamped itself (evidence #3680 F1: /complete stamps the caller's body events "gateway").
+  const counted = events.filter((e) => !isFabricated(e as unknown as EvidenceEvent) && !gatewayStamped(e));
   const req = tier === null ? undefined : DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === tier);
   if (!req) {
     return { state: "unknown_tier", required: [], missing: [], minimumEvents: null, countedEvents: counted.length, basis: "recorded_event_types" };
@@ -115,6 +146,10 @@ function tierCoverageOf(tier: 0 | 1 | 2 | 3 | null, events: ProvenanceEventRow[]
 
 function signatureOf(sig: unknown): ProvenanceBundle["signature"] {
   const o = sig !== null && typeof sig === "object" ? (sig as Record<string, unknown>) : {};
+  // The gateway's placeholder for events it synthesized is no signature (evidence #3680 F2).
+  const placeholder =
+    (typeof o.signer === "string" && o.signer.toLowerCase() === PLACEHOLDER_SIGNER) || o.value === PLACEHOLDER_SIGNATURE_VALUE;
+  if (placeholder) return { signer: null, algorithm: null, checked: false };
   return {
     signer: typeof o.signer === "string" && o.signer !== "" ? o.signer : null,
     algorithm: typeof o.algorithm === "string" && o.algorithm !== "" ? o.algorithm : null,
@@ -122,9 +157,26 @@ function signatureOf(sig: unknown): ProvenanceBundle["signature"] {
   };
 }
 
+/**
+ * The earliest and latest recorded timestamps, ordered by the time they parse to (a raw string
+ * sort puts "...00.500Z" before "...00Z") and shown as recorded. Unparseable ones are skipped.
+ */
+function timeRange(events: ProvenanceEventRow[]): { firstAt: string | null; lastAt: string | null } {
+  let first: { at: string; ms: number } | null = null;
+  let last: { at: string; ms: number } | null = null;
+  for (const e of events) {
+    if (typeof e.timestamp !== "string" || e.timestamp === "") continue;
+    const ms = Date.parse(e.timestamp);
+    if (!Number.isFinite(ms)) continue;
+    if (!first || ms < first.ms) first = { at: e.timestamp, ms };
+    if (!last || ms > last.ms) last = { at: e.timestamp, ms };
+  }
+  return { firstAt: first?.at ?? null, lastAt: last?.at ?? null };
+}
+
 async function bundleOf(jobId: string, b: ProvenanceBundleRow): Promise<ProvenanceBundle> {
   const events = Array.isArray(b.events) ? b.events : [];
-  const times = events.map((e) => e.timestamp).filter((t): t is string => typeof t === "string" && t !== "").sort();
+  const { firstAt, lastAt } = timeRange(events);
   const tier = claimedTier(b.assuranceTier);
   return {
     bundleId: b.id,
@@ -137,9 +189,9 @@ async function bundleOf(jobId: string, b: ProvenanceBundleRow): Promise<Provenan
       count: events.length,
       types: [...new Set(events.map((e) => e.type))].sort(),
       fabricated: events.filter((e) => isFabricated(e as unknown as EvidenceEvent)).length,
-      gatewayAuthored: events.filter((e) => e.source?.deviceId === GATEWAY_DEVICE).length,
-      firstAt: times[0] ?? null,
-      lastAt: times[times.length - 1] ?? null,
+      gatewayAuthored: events.filter(gatewayStamped).length,
+      firstAt,
+      lastAt,
     },
     signature: signatureOf(b.kernelSignature),
     integrity: await integrityOf({ ...b, events }),

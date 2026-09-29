@@ -53,15 +53,32 @@ function envelopeBundle(id: string, events: Array<Omit<ProvenanceEventRow, "hash
 
 const build = (rows: ProvenanceBundleRow[]) => buildEvidenceProvenanceDTO("job-1", { ok: true, value: rows }, AS_OF);
 
-describe("integrity is recomputed, and only event_bundle_hash is evidence integrity", () => {
+describe("integrity is recomputed, and only event_bundle_hash is evidence integrity (recomputed_match)", () => {
   it("an LO-EV bundle reproduces under event_bundle_hash", async () => {
     const dto = await build([await loEvBundle("b-a", [ev("e1", "gcode_hash_verified"), ev("e2", "execution_completed")])]);
     expect(dto.bundles[0]!.integrity).toEqual({ state: "recomputed_match", model: "event_bundle_hash" });
   });
 
-  it("a /complete bundle reproduces only as gateway_envelope (storage integrity), never as event_bundle_hash", async () => {
+  it("NEGATIVE (evidence #3680 F3): a /complete bundle is storage_envelope_match, never recomputed_match", async () => {
     const dto = await build([envelopeBundle("b-b", [ev("e1", "execution_completed")])]);
-    expect(dto.bundles[0]!.integrity).toEqual({ state: "recomputed_match", model: "gateway_envelope" });
+    expect(dto.bundles[0]!.integrity).toEqual({ state: "storage_envelope_match", model: "gateway_envelope" });
+    // A surface reading only `state` never sees "recomputed" for a bundle /settle would refuse.
+    expect(dto.bundles[0]!.integrity.state).not.toBe("recomputed_match");
+  });
+
+  it("NEGATIVE (evidence #3680): a value no model can canonicalize is no_model_reproduces for that bundle, never a failed read", async () => {
+    // Canonicalizing this payload throws in both models. Today a circular value does; after #359,
+    // an integer beyond 2^53-1 will too.
+    const bad = await loEvBundle("b-big", [ev("e1", "execution_completed")]);
+    const circular: Record<string, unknown> = { n: 1 };
+    circular.self = circular;
+    bad.events[0] = { ...bad.events[0]!, payload: circular };
+    const good = await loEvBundle("b-ok", [ev("e1", "execution_completed")]);
+    const dto = await build([bad, good]);
+    expect(dto.state).toBe("received");
+    const byId = Object.fromEntries(dto.bundles.map((b) => [b.bundleId, b.integrity]));
+    expect(byId["b-big"]).toEqual({ state: "no_model_reproduces", model: null });
+    expect(byId["b-ok"]).toEqual({ state: "recomputed_match", model: "event_bundle_hash" });
   });
 
   it("NEGATIVE: a payload changed after hashing reproduces under no model", async () => {
@@ -81,7 +98,7 @@ describe("integrity is recomputed, and only event_bundle_hash is evidence integr
   });
 });
 
-describe("tier coverage counts recorded, non-fabricated event types (self-reported)", () => {
+describe("tier coverage counts the event types a DEVICE recorded: not fabricated, not gateway-stamped (self-reported)", () => {
   it("covers when every required group has a counted event and the minimum is met", async () => {
     const dto = await build([await loEvBundle("b-f", [ev("e1", "gcode_hash_verified"), ev("e2", "execution_completed"), ev("e3", "power_profile_summary")], 1)]);
     expect(dto.bundles[0]!.tierCoverage).toMatchObject({ state: "covers", missing: [], minimumEvents: 3, countedEvents: 3, basis: "recorded_event_types" });
@@ -102,6 +119,43 @@ describe("tier coverage counts recorded, non-fabricated event types (self-report
     expect(b.tierCoverage.countedEvents).toBe(2);
   });
 
+  it("NEGATIVE (evidence #3680 F1, their probe): a bundle as /complete writes it, claimed tier 2, never covers", async () => {
+    // /complete stamps its own execution_completed and the caller's body events, of ANY type,
+    // with source.deviceId "gateway". No device reported them.
+    const gw = { source: { deviceId: "gateway", deviceType: "machine", kernelId: "kernel-nyc" } };
+    const dto = await build([
+      envelopeBundle(
+        "b-probe",
+        [
+          ev("e1", "execution_completed", gw),
+          ev("e2", "gcode_hash_verified", gw),
+          ev("e3", "power_profile_summary", gw),
+          ev("e4", "cv_inspection_result", gw),
+        ],
+        2,
+      ),
+    ]);
+    const b = dto.bundles[0]!;
+    expect(b.events).toMatchObject({ count: 4, gatewayAuthored: 4, fabricated: 0 });
+    expect(b.tierCoverage).toMatchObject({ state: "missing", countedEvents: 0, minimumEvents: 4 });
+    expect(b.tierCoverage.missing).toHaveLength(4);
+    expect(b.integrity.state).toBe("storage_envelope_match");
+    expect(b.signature).toEqual({ signer: null, algorithm: null, checked: false });
+  });
+
+  it("NEGATIVE (evidence #3680 F1): device events count; a gateway-stamped one among them does not", async () => {
+    const dto = await build([
+      await loEvBundle("b-mixed", [
+        ev("e1", "gcode_hash_verified"),
+        ev("e2", "execution_completed", { source: { deviceId: "gateway", deviceType: "machine", kernelId: "kernel-nyc" } }),
+        ev("e3", "power_profile_summary"),
+      ], 1),
+    ]);
+    const b = dto.bundles[0]!;
+    expect(b.tierCoverage).toMatchObject({ state: "missing", countedEvents: 2 });
+    expect(b.tierCoverage.missing).toEqual([["execution_completed"]]);
+  });
+
   it("NEGATIVE: a claimed tier outside 0-3 is null and its coverage unknown", async () => {
     const dto = await build([await loEvBundle("b-h", [ev("e1", "execution_completed")], 7)]);
     expect(dto.bundles[0]!.claimedTier).toBeNull();
@@ -114,11 +168,41 @@ describe("the DTO never claims what the gateway does not record", () => {
     const dto = await build([envelopeBundle("b-i", [ev("e1", "execution_completed", { source: { deviceId: "gateway", deviceType: "machine", kernelId: "kernel-nyc" } })])]);
     expect(dto.verification.state).toBe("no_verdict_recorded");
     const b = dto.bundles[0]!;
-    expect(b.signature).toEqual({ signer: ZERO, algorithm: "ed25519", checked: false });
+    // evidence #3680 F2: the gateway's zero-address placeholder is no signature.
+    expect(b.signature).toEqual({ signer: null, algorithm: null, checked: false });
     expect(b.archive).toEqual({ state: "not_recorded" });
     expect(b.events.gatewayAuthored).toBe(1);
     expect(JSON.stringify(dto)).not.toMatch(/"state":"verified"|"verified":true|"checked":true|"archived"/);
     expect(b.inspect).toEqual({ envelope: `GET /api/evidence/${encodeURIComponent(b.bundleHash)}`, events: "GET /api/evidence/job-1" });
+  });
+
+  it("NEGATIVE (evidence #3680 F2): a placeholder is no signature, by its signer or its value; a real signer is shown as stored", async () => {
+    const withSig = async (id: string, kernelSignature: unknown) => {
+      const b = await loEvBundle(id, [ev("e1", "execution_completed")]);
+      return { ...b, kernelSignature };
+    };
+    const dto = await build([
+      await withSig("s-zero", { signer: ZERO.toUpperCase().replace("0X", "0x"), algorithm: "ed25519", value: "x" }),
+      await withSig("s-value", { signer: "0xabc", algorithm: "ed25519", value: "gateway-auto-sign" }),
+      await withSig("s-real", { signer: "0xabc", algorithm: "secp256k1", value: "sig" }),
+    ]);
+    const sig = Object.fromEntries(dto.bundles.map((b) => [b.bundleId, b.signature]));
+    expect(sig["s-zero"]).toEqual({ signer: null, algorithm: null, checked: false });
+    expect(sig["s-value"]).toEqual({ signer: null, algorithm: null, checked: false });
+    expect(sig["s-real"]).toEqual({ signer: "0xabc", algorithm: "secp256k1", checked: false });
+  });
+
+  it("NEGATIVE (evidence #3680 nit): first and last are ordered by time, not by string, and shown as recorded", async () => {
+    const dto = await build([
+      await loEvBundle("b-times", [
+        ev("e1", "gcode_hash_verified", { timestamp: "2026-09-28T10:00:00.500Z" }),
+        ev("e2", "execution_completed", { timestamp: "2026-09-28T10:00:00Z" }),
+        ev("e3", "power_profile_summary", { timestamp: "2026-09-28T12:00:00+02:00" }),
+        ev("e4", "photo_captured", { timestamp: "not a time" }),
+      ]),
+    ]);
+    // As strings, "...00.500Z" sorts before "...00Z" and "+02:00" (10:00Z) after both.
+    expect(dto.bundles[0]!.events).toMatchObject({ firstAt: "2026-09-28T10:00:00Z", lastAt: "2026-09-28T10:00:00.500Z" });
   });
 
   it("counts and order: newest first; counts are sums of the bundles", async () => {
@@ -174,7 +258,7 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     delete process.env.MOCK_SETTLEMENT;
   });
 
-  it("a real PUT /complete bundle: gateway_envelope storage integrity, gateway-written events, no verdict", async () => {
+  it("a real PUT /complete bundle: storage_envelope_match, gateway-stamped events that cover nothing, no signature, no verdict", async () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
@@ -190,10 +274,13 @@ describe("GET /api/jobs/:jobId/evidence/provenance on a real store", () => {
     const dto = res.json();
     expect(dto.state).toBe("received");
     const b = dto.bundles[0];
-    expect(b.integrity).toEqual({ state: "recomputed_match", model: "gateway_envelope" });
-    expect(b.signature).toEqual({ signer: ZERO, algorithm: "ed25519", checked: false });
+    expect(b.integrity).toEqual({ state: "storage_envelope_match", model: "gateway_envelope" });
+    expect(b.signature).toEqual({ signer: null, algorithm: null, checked: false });
     expect(b.events.count).toBeGreaterThan(0);
     expect(b.events.gatewayAuthored).toBe(b.events.count);
+    // Every event is gateway-stamped, so nothing counts toward the claimed tier.
+    expect(b.tierCoverage.countedEvents).toBe(0);
+    expect(b.tierCoverage.state).not.toBe("covers");
     expect(dto.verification.state).toBe("no_verdict_recorded");
   });
 

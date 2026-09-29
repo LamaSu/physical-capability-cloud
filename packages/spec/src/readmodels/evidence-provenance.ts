@@ -10,28 +10,39 @@
  *     `no_verdict_recorded` until one is stored. It is never read from a row existing, a count,
  *     or a status such as evidence_submitted.
  *   - "signed" or "authentic". No stored bundle's signature has ever been checked, so
- *     `signature.checked` is false. The signer is shown as stored.
+ *     `signature.checked` is false. The signer is shown as stored, except the gateway's own
+ *     placeholder (the zero-address signer that PUT /complete writes for events it synthesized),
+ *     which is no signature at all: signer and algorithm null.
  *   - "archived". No archive CID is stored for any bundle.
- *   - anything about fabricated events except that they exist. They never count toward tier
- *     coverage.
+ *   - anything about fabricated or gateway-stamped events except that they exist. Neither
+ *     counts toward tier coverage: no device reported a gateway-stamped event (source.deviceId
+ *     "gateway"; PUT /complete stamps its own events and the caller's body events so).
  *
- * integrity: recomputed on read.
- *   - event_bundle_hash is EVIDENCE integrity, the one LO-EV model (what /settle recomputes):
- *     every event hash reproduces from {type, timestamp, source, payload}, and the bundle hash
- *     reproduces from the sorted event hashes.
- *   - gateway_envelope is only the gateway's STORAGE integrity (the envelope its /complete
- *     route hashes): the stored bundle and events are the bytes that were hashed. It is never
- *     evidence integrity.
- *   - no_model_reproduces is not proof of tampering (a device or relay hash has no model here),
- *     and not_recomputable means there are no events to recompute from.
+ * integrity: recomputed on read. Each state names exactly one model, so a surface that reads
+ * only `state` cannot mistake storage integrity for evidence integrity (evidence #3680 F3).
+ *   - recomputed_match (model event_bundle_hash) is EVIDENCE integrity, the one LO-EV model
+ *     (what /settle recomputes): every event hash reproduces from {type, timestamp, source,
+ *     payload}, and the bundle hash reproduces from the sorted event hashes.
+ *   - storage_envelope_match (model gateway_envelope) is only the gateway's STORAGE integrity
+ *     (the envelope its /complete route hashes): the stored bundle and events are the bytes that
+ *     were hashed. It is never evidence integrity, and /settle would refuse such a bundle.
+ *   - no_model_reproduces is not proof of tampering (a device or relay hash has no model here,
+ *     or a stored value cannot be canonicalized), and not_recomputable means there are no events
+ *     to recompute from.
  */
 
 export const EVIDENCE_PROVENANCE_SCHEMA_ID = "pcc.evidence-provenance/v1" as const;
 
-export type EvidenceIntegrityState = "recomputed_match" | "no_model_reproduces" | "not_recomputable";
+export type EvidenceIntegrityState = "recomputed_match" | "storage_envelope_match" | "no_model_reproduces" | "not_recomputable";
 
 /** event_bundle_hash: evidence integrity (LO-EV). gateway_envelope: gateway storage integrity only. */
 export type EvidenceIntegrityModel = "event_bundle_hash" | "gateway_envelope";
+
+/** Recomputed integrity: each state pairs with exactly one model (or none). */
+export type EvidenceIntegrity =
+  | { state: "recomputed_match"; model: "event_bundle_hash" }
+  | { state: "storage_envelope_match"; model: "gateway_envelope" }
+  | { state: "no_model_reproduces" | "not_recomputable"; model: null };
 
 export type TierCoverageState = "covers" | "missing" | "unknown_tier";
 
@@ -53,15 +64,20 @@ export interface ProvenanceBundle {
     fabricated: number;
     /** Written by the gateway itself (source.deviceId "gateway"), not by a device. */
     gatewayAuthored: number;
-    /** Earliest and latest event timestamps, as recorded; null without events. */
+    /**
+     * Earliest and latest event timestamps, ordered by the time they parse to and shown as
+     * recorded; null without a parseable timestamp.
+     */
     firstAt: string | null;
     lastAt: string | null;
   };
+  /** As stored; the gateway's zero-address placeholder is no signature (signer and algorithm null). */
   signature: { signer: string | null; algorithm: string | null; checked: false };
-  integrity: { state: EvidenceIntegrityState; model: EvidenceIntegrityModel | null };
+  integrity: EvidenceIntegrity;
   /**
-   * Do the recorded NON-fabricated event types include what the claimed tier requires
-   * (DEFAULT_TIER_REQUIREMENTS)? Self-reported events, not a verification.
+   * Do the recorded event types that a DEVICE reported (neither fabricated nor gateway-stamped)
+   * include what the claimed tier requires (DEFAULT_TIER_REQUIREMENTS)? Self-reported events,
+   * not a verification.
    */
   tierCoverage: {
     state: TierCoverageState;
@@ -70,7 +86,7 @@ export interface ProvenanceBundle {
     /** Required groups that no counted event satisfies. */
     missing: string[][];
     minimumEvents: number | null;
-    /** Events counted: all except fabricated ones. */
+    /** Events counted: all except fabricated and gateway-stamped ones. */
     countedEvents: number;
     basis: "recorded_event_types";
   };
