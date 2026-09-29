@@ -2,8 +2,10 @@
  * R13 over HTTP: issuing and reading one-use budget reservations (operator decision #2240, amended by
  * #2301/#2302). The accept route (#391) consumes them.
  *
- *   POST /api/settlement/reservations       issue a reservation for the authenticated principal
- *   GET  /api/settlement/reservations/:id   read one of the principal's own reservations
+ *   POST /api/settlement/reservations                  issue a reservation for the authenticated principal
+ *   POST /api/settlement/reservations/:id/children     MC 9: a composite operator issues a CHILD reservation
+ *                                                      carved from one unit of a sealed parent deal
+ *   GET  /api/settlement/reservations/:id              read one of the principal's own reservations
  *
  * Authority. Every term that grants money authority is the server's; the body names only what the
  * principal asks for.
@@ -68,6 +70,9 @@ export function productionReservationWiring(): { missing: string[] } {
   };
 }
 
+/** The unit reference a child names: `${jobId}#${milestoneIndex}` of the parent's sealed deal. */
+const UNIT_REF = /^[\x21-\x7e]{1,296}#(0|[1-9][0-9]?)$/;
+
 /** A reservation as JSON: exact amounts as decimal strings. */
 function view(r: BudgetReservation) {
   return {
@@ -78,6 +83,8 @@ function view(r: BudgetReservation) {
     purpose: r.purpose,
     minTier: r.minTier,
     payerAddress: r.payerAddress,
+    parentReservationId: r.parentReservationId,
+    parentUnit: r.parentUnit,
     expiresAt: r.expiresAt,
     state: r.state,
     consumedDealDigest: r.consumedDealDigest,
@@ -160,6 +167,86 @@ export async function reservationRoutes(app: FastifyInstance, opts: ReservationR
       return reply.status(201).send({ reservation: view(result.reservation) });
     } catch (err) {
       req.log.error({ err }, "reservations issue: server fault");
+      return reply.status(500).send({ error: "internal-error" });
+    }
+  });
+
+  /**
+   * MC 9 (#2301): a composite operator subcontracts part of a unit it was paid for. The child is funded
+   * by its OWN wallet (never the parent payer's), is held by the parent unit's operator only, and all
+   * children of one unit fit that unit's net n and expire by its reclaimAt.
+   *
+   * The route names only the parent id and the unit reference. The STORE derives every term of the
+   * unit (operator, n, reclaimAt) from the parent's sealed deal inside its immediate transaction, after
+   * checking the stored bytes against the sealed digest (R13 round 2, H1). The child's own request must
+   * be the operator's own, in the same currency; its ceiling and floor apply to the child too.
+   *
+   * No oracle: every answer of the not-found family (no parent, parent not sealed, no such unit, not the
+   * unit's operator, and a corrupt stored deal) is the SAME 404, and the store decides it before any
+   * answer that could reveal the parent's terms.
+   */
+  app.post("/api/settlement/reservations/:id/children", async (req: FastifyRequest, reply: FastifyReply) => {
+    const principal = authenticatedPrincipal(req);
+    if (principal === null) return reply.status(401).send({ error: "authentication-required" });
+    try {
+      const wiring = wiringOf();
+      if ("missing" in wiring) return reply.status(503).send({ error: "issue-not-wired", missing: [...wiring.missing] });
+      const parentId = (req.params as { id?: unknown }).id;
+      const raw: unknown = req.body;
+      const unit = typeof raw === "object" && raw !== null ? (raw as { unit?: unknown }).unit : undefined;
+      const body = readIssueBody(raw);
+      if (body === null || typeof parentId !== "string" || typeof unit !== "string" || !UNIT_REF.test(unit)) {
+        return reply.status(400).send({ error: "malformed-body" });
+      }
+      // The child's own request: the principal's own, in the same currency. It says nothing about the parent.
+      const terms = wiring.requestTerms(body.requestId, principal);
+      if (terms === null) return reply.status(404).send({ error: "request-not-found" });
+      if (terms.currency !== body.currency) return reply.status(422).send({ error: "currency-mismatch" });
+      const minTier = effectiveFloor(terms.minTier, body.minTier);
+      const payer = wiring.payerFor(principal);
+      if (payer === null) return reply.status(409).send({ error: "no-payer-wallet" });
+      const result = wiring.store.issue({
+        reservationId: wiring.newId(),
+        principal,
+        payerAddress: payer,
+        currency: body.currency,
+        maxAmountBaseUnits: body.maxAmountBaseUnits,
+        purpose: body.purpose,
+        requestId: body.requestId,
+        minTier,
+        expiresInSec: body.expiresInSec,
+        requestCeilingBaseUnits: terms.ceilingBaseUnits,
+        parent: { reservationId: parentId, unit },
+      });
+      if (!result.ok) {
+        switch (result.reason) {
+          case "parent-deal-corrupt":
+            req.log.error({ parentId }, "reservations child issue: a stored sealed deal failed its integrity check");
+            return reply.status(404).send({ error: "parent-unit-not-found" }); // the same answer as the rest of the family
+          case "parent-not-found":
+          case "parent-not-consumed":
+          case "parent-unit-not-found":
+          case "child-principal-not-parent-operator":
+            return reply.status(404).send({ error: "parent-unit-not-found" });
+          case "over-request-ceiling":
+            return reply.status(409).send({ error: "over-request-ceiling" });
+          case "parent-currency-mismatch":
+            return reply.status(422).send({ error: "currency-mismatch" });
+          case "child-payer-is-parent-payer":
+            return reply.status(409).send({ error: "child-payer-is-parent-payer" });
+          case "over-parent-unit":
+            return reply.status(409).send({ error: "over-parent-unit" });
+          case "child-outlives-parent-unit":
+            return reply.status(422).send({ error: "child-outlives-parent-unit" });
+          case "invalid-input":
+            return reply.status(400).send({ error: "malformed-body" });
+          default:
+            throw new Error(`child reservation refused: ${result.reason}`);
+        }
+      }
+      return reply.status(201).send({ reservation: view(result.reservation) });
+    } catch (err) {
+      req.log.error({ err }, "reservations child issue: server fault");
       return reply.status(500).send({ error: "internal-error" });
     }
   });
