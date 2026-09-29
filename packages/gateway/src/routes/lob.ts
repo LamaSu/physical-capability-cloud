@@ -34,6 +34,7 @@ import {
   type LobLetterStatus,
 } from "../services/lob-letter-store.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import { checkAdminKey } from "../auth/admin-key.js";
 
 // NOTE: must agree with routes/carrier.ts's identical augmentation — TS merges
 // these declarations and rejects conflicting types (that exact conflict broke
@@ -300,7 +301,11 @@ export async function lobRoutes(app: FastifyInstance) {
     const store = getLobLetterStore();
     const missingConfig = computeMissingLobConfig();
     const configured = missingConfig.length === 0;
-    if (isCarrierProductionEnv() && !callerId(req)) {
+    // Production: the detailed posture (missing config, client state, shipment /
+    // letter / ledger COUNTS) is cross-tenant operational data, so it needs the
+    // admin secret, not just any authenticated key (WP-A round 5, #2883). Everyone
+    // else gets the redacted summary.
+    if (isCarrierProductionEnv() && !checkAdminKey(req).ok) {
       return {
         ok: configured,
         service: "lob (print-and-mail)",

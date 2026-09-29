@@ -1,14 +1,18 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { CdpConfig, CdpNetwork, CdpWallet } from "./types.js";
+import { cdpCredentialsComplete } from "./mode.js";
 
 /**
  * CdpWalletClient — creates/reads CDP smart wallets (self-custodial, server-managed).
  * Smart accounts on Base get gasless USDC via the CDP paymaster.
  *
- * Mock/real switch is presence-of-creds: `mock = cfg.mock ?? !cfg.apiKeyId`. With no
- * apiKeyId it returns deterministic fakes (gateway/tests/settlement work offline); with
- * creds it calls the real @coinbase/cdp-sdk. The SDK is imported lazily so mock-only
- * consumers don't need it loaded.
+ * Mock/real switch: real mode needs the COMPLETE credential tuple (apiKeyId,
+ * apiKeySecret, walletSecret). It used to go real on apiKeyId alone, so a
+ * half-configured deployment called the SDK with missing secrets. With any of the
+ * three missing it returns simulated results, and every one of them carries
+ * `mock: true` (a zero balance or a faucet "hash" must never read as real; WP-A
+ * round 5, sol #2963). The SDK is imported lazily so mock-only consumers don't need
+ * it loaded.
  */
 export class CdpWalletClient {
   private readonly network: CdpNetwork;
@@ -19,7 +23,9 @@ export class CdpWalletClient {
   constructor(cfg: CdpConfig = {}) {
     this.cfg = cfg;
     this.network = cfg.network ?? "base-sepolia";
-    this.mock = cfg.mock ?? !cfg.apiKeyId;
+    // cfg.mock can force MOCK, never REAL: without the full tuple the client is mock
+    // whatever cfg.mock says (round 8, astra failclosed r2 FC-6).
+    this.mock = cfg.mock === true || !cdpCredentialsComplete(cfg);
   }
 
   get isMock(): boolean {
@@ -46,6 +52,7 @@ export class CdpWalletClient {
         network: this.network,
         smartAccount: true,
         createdAt: new Date().toISOString(),
+        mock: true,
       };
     }
     const cdp = await this.cdp();
@@ -64,9 +71,10 @@ export class CdpWalletClient {
   /** USDC balance for an address on the configured network. */
   async getBalance(
     address: `0x${string}`,
-  ): Promise<{ address: `0x${string}`; usdc: number; network: CdpNetwork }> {
+  ): Promise<{ address: `0x${string}`; usdc: number; network: CdpNetwork; mock?: true }> {
     if (this.mock) {
-      return { address, usdc: 0, network: this.network };
+      // A simulated zero, marked: it must not read as "this wallet is empty".
+      return { address, usdc: 0, network: this.network, mock: true };
     }
     const cdp = await this.cdp();
     // Result-shape parsing is defensive (validated by the live smoke); the CALL is typed.
@@ -96,9 +104,10 @@ export class CdpWalletClient {
   async requestFaucet(
     address: `0x${string}`,
     token: "usdc" | "eth" = "usdc",
-  ): Promise<{ transactionHash: string }> {
+  ): Promise<{ transactionHash: string | null; mock?: true }> {
     if (this.mock) {
-      return { transactionHash: "0x" + "f".repeat(64) };
+      // Nothing was sent, so there is no transaction hash (it used to be a fabricated 0xfff…).
+      return { transactionHash: null, mock: true };
     }
     const cdp = await this.cdp();
     const res = (await cdp.evm.requestFaucet({
@@ -110,8 +119,24 @@ export class CdpWalletClient {
   }
 }
 
-/** Deterministic-shape mock EVM address (20 bytes). */
+/**
+ * Every address the client mints in MOCK mode starts with this prefix: twelve
+ * zero bytes, then eight random bytes. A mock wallet is an address NO key
+ * controls, so money sent to it is unrecoverable — it must be recognizable by
+ * construction, forever, without a lookup table. (The previous mock address was
+ * random hex with only a UUID version/variant nibble as a weak tell, so a
+ * gateway could not tell a mock wallet from a real one.) A real CDP smart
+ * account landing in this range is a 2^-96 event; a false positive only ever
+ * REFUSES an onramp, which is the safe direction.
+ */
+export const CDP_MOCK_ADDRESS_PREFIX = "0x000000000000000000000000";
+
+/** True when `address` was minted by a mock-mode CdpWalletClient (see prefix). */
+export function isCdpMockAddress(address: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(address) && address.toLowerCase().startsWith(CDP_MOCK_ADDRESS_PREFIX);
+}
+
+/** Mock EVM address (20 bytes), recognizable via isCdpMockAddress. */
 function mockAddress(): `0x${string}` {
-  const hex = (randomUUID() + randomUUID()).replace(/-/g, "");
-  return ("0x" + hex.slice(0, 40)) as `0x${string}`;
+  return (CDP_MOCK_ADDRESS_PREFIX + randomBytes(8).toString("hex")) as `0x${string}`;
 }
