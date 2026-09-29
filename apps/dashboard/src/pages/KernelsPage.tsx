@@ -34,6 +34,10 @@ export function KernelsPage() {
   }
 
   const onlineCount = kernels.filter(isKernelOnline).length;
+  // A kernel without a capability count makes the total unknown, not smaller.
+  const capabilityTotal = kernels.every((k) => typeof k.capabilityCount === "number")
+    ? kernels.reduce((s, k) => s + k.capabilityCount, 0)
+    : undefined;
 
   return (
     <div className="space-y-6">
@@ -46,7 +50,12 @@ export function KernelsPage() {
           <DataCell label="Online" value={onlineCount} sub="fresh heartbeat" mono />
         </GlassPanel>
         <GlassPanel padding="md">
-          <DataCell label="Capabilities" value={kernels.reduce((s, k) => s + (k.capabilityCount ?? 0), 0)} mono />
+          <DataCell
+            label="Capabilities"
+            value={capabilityTotal ?? "—"}
+            sub={capabilityTotal === undefined ? "unavailable: a kernel didn't report its count" : undefined}
+            mono
+          />
         </GlassPanel>
       </div>
 
