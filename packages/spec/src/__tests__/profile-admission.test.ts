@@ -10,7 +10,9 @@
  * field (F4). Evidence's rulings (bus #3419): value is a decimal string, and
  * the set digest binds the settlement unit.
  */
-import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { describe, it, expect } from "vitest";
 
@@ -1081,5 +1083,54 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
     const r = await admit(p, [await toBundle(drafts, p)], { verifyPrimitiveInstance: capturesMatch });
     expect(r.decision).toBe("reject");
     expect(r.reasons[0]!.detail).toContain("not verified as capture.photo_nonced");
+  });
+});
+
+describe("profile admission — the LO-SE-3 failure-bearing negative is refused by outcome policy (astra pack 40, finding 40-9)", () => {
+  const FIXTURE = JSON.parse(
+    readFileSync(fileURLToPath(new URL("./fixtures/lose3-execution-log-bundle.json", import.meta.url)), "utf8"),
+  ) as {
+    kernelPublicKeyHex: string;
+    bundle: AdmissionBundle;
+    negatives: { failureBearingBundle: AdmissionBundle };
+  };
+  const fixtureKey = createPublicKey({
+    key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(FIXTURE.kernelPublicKeyHex, "hex")]),
+    format: "der",
+    type: "spki",
+  });
+  const verifyFixture = (b: AdmissionBundle) =>
+    verify(null, signingPreimage(b.bundleHash), fixtureKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+  const lose3Subject = { jobId: "job-lose3-consumer-run-001", kernelId: "kernel-hp-3301-golden" };
+
+  async function run(bundle: AdmissionBundle) {
+    const p = deviceReportedProfile();
+    p.device = { ...p.device, deviceId: "dev-hp-3301-0D253A" };
+    return profileAdmitsBundle({
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: lose3Subject,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(lose3Subject, [bundle.bundleHash]),
+      verifyBundleSignature: verifyFixture,
+      verifyPrimitiveInstance: () => true,
+    });
+  }
+
+  it("the failure-bearing bundle authenticates and binds, then is rejected as a completion-and-failure contradiction", async () => {
+    const r = await run(FIXTURE.negatives.failureBearingBundle);
+    expect(codes(r)).not.toContain("unauthenticated-bundle");
+    expect(codes(r)).not.toContain("unbound-bundle");
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toContain("contradictory-evidence");
+    expect(r.reasons.find((x) => x.code === "contradictory-evidence")!.detail).toContain("completion-and-failure");
+  });
+
+  it("the positive bundle raises no contradiction; it is refused only because it carries no profile observation", async () => {
+    const r = await run(FIXTURE.bundle);
+    expect(codes(r)).not.toContain("unauthenticated-bundle");
+    expect(codes(r)).not.toContain("unbound-bundle");
+    expect(codes(r)).not.toContain("contradictory-evidence");
+    expect(r.decision).not.toBe("admit");
   });
 });
