@@ -11,7 +11,7 @@ import { mkdtempSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MIN_BODY_HEX, redact, scanRepo, scanText } from "./secret-scan.mjs";
+import { MIN_BODY_HEX, parseCatFileBatch, redact, scanBytes, scanRepo, scanText } from "./secret-scan.mjs";
 
 const SCANNER = join(dirname(fileURLToPath(import.meta.url)), "secret-scan.mjs");
 const HEX64 = "0123456789abcdef".repeat(4);
@@ -32,8 +32,14 @@ function track(dir, ...rels) {
   execFileSync("git", ["-C", dir, "add", "--", ...rels]);
 }
 
-function runCli(dir) {
-  return spawnSync(process.execPath, [SCANNER, "--root", dir], { encoding: "utf8" });
+function runCli(dir, ...args) {
+  return spawnSync(process.execPath, [SCANNER, "--root", dir, ...args], { encoding: "utf8" });
+}
+
+function commitAll(dir, message) {
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", message]);
+  return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 }
 
 function withRepo(files, tracked, fn) {
@@ -155,7 +161,7 @@ test("submodule entries are listed, not silently skipped", () => {
     ]);
     const run = runCli(dir);
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /1 submodule entry has no content in this repository and were not scanned:\n {2}vendor\/sub/);
+    assert.match(run.stdout, /1 submodule entry points into another repository and were not scanned:\n {2}vendor\/sub/);
   });
 });
 
@@ -184,7 +190,7 @@ test("CLI exits 0 on a clean repository", () => {
   withRepo({ "README.md": "Use PCC_API_KEY from the environment.\n" }, ["README.md"], (dir) => {
     const run = runCli(dir);
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /secret-scan: OK\. 1 tracked files \(binaries included\), no PCC key literals\./);
+    assert.match(run.stdout, /secret-scan: OK\. 1 tracked files \(the index\): no PCC key literals\./);
   });
 });
 
@@ -197,4 +203,112 @@ test("CLI exits 2, not 0, when the repository cannot be read", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Round 3 (astra r2 on #371) ────────────────────────────────────────────────
+
+const OID_A = "a".repeat(40);
+const OID_B = "b".repeat(40);
+const frame = (oid, type, body) => Buffer.concat([Buffer.from(`${oid} ${type} ${body.length}\n`), body, Buffer.from("\n")]);
+
+test("cat-file framing: a well-formed reply parses, in the requested order", () => {
+  const out = Buffer.concat([frame(OID_A, "blob", Buffer.from("one")), frame(OID_B, "commit", Buffer.from("two"))]);
+  const objects = parseCatFileBatch(out, [OID_A, OID_B]);
+  assert.equal(objects.get(OID_A).data.toString(), "one");
+  assert.equal(objects.get(OID_B).type, "commit");
+});
+
+test("cat-file framing: every malformed or short reply is an error, never a shorter scan", () => {
+  const good = frame(OID_A, "blob", Buffer.from("payload"));
+  const cases = {
+    missing: Buffer.from(`${OID_A} missing\n`),
+    "different object": frame(OID_B, "blob", Buffer.from("payload")),
+    "bad type": frame(OID_A, "blobby", Buffer.from("payload")),
+    "negative size": Buffer.from(`${OID_A} blob -1\npayload\n`),
+    "exponent size": Buffer.from(`${OID_A} blob 1e3\npayload\n`),
+    "extra header field": Buffer.from(`${OID_A} blob 7 x\npayload\n`),
+    "truncated payload": good.subarray(0, good.length - 4),
+    "missing delimiter": Buffer.concat([good.subarray(0, good.length - 1), Buffer.from("X")]),
+    "trailing bytes": Buffer.concat([good, Buffer.from("junk")]),
+    "no header": Buffer.from("no newline at all"),
+    empty: Buffer.alloc(0),
+  };
+  for (const [name, out] of Object.entries(cases)) {
+    assert.throws(() => parseCatFileBatch(out, [OID_A]), Error, name);
+  }
+  assert.throws(() => parseCatFileBatch(good, [OID_A, OID_B]), /truncated/);
+});
+
+test("a key saved as UTF-16 or UTF-32 text is found, in either byte order", () => {
+  const text = `token = "${key("live")}"\n`;
+  const utf16le = Buffer.from(text, "utf16le");
+  const utf16be = Buffer.from(utf16le).swap16();
+  const utf32le = Buffer.alloc(text.length * 4);
+  for (let i = 0; i < text.length; i += 1) utf32le.writeUInt32LE(text.charCodeAt(i), i * 4);
+  const utf32be = Buffer.from(utf32le).swap32();
+  for (const [name, buf] of Object.entries({ utf16le, utf16be, utf32le, utf32be })) {
+    const found = scanBytes(buf);
+    assert.ok(found.some((f) => f.prefix === "pcc_live_" && f.length === 64), name);
+  }
+  withRepo({ "notes.txt": Buffer.concat([Buffer.from([0xff, 0xfe]), utf16le]) }, ["notes.txt"], (dir) => {
+    const run = runCli(dir);
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stderr, /notes\.txt:1 \[utf-16\] {2}pcc_live_<64 hex chars, value not printed>/);
+    assert.ok(!run.stderr.includes(HEX64));
+  });
+});
+
+test("--tree scans the commit, so removing a file from the index hides nothing", () => {
+  withRepo({ "leak.sh": `K="${key("oracle")}"\n`, "README.md": "ok\n" }, [], (dir) => {
+    commitAll(dir, "add files");
+    // The round-2 bypass: PR code rewrites the index before the scanner reads it.
+    execFileSync("git", ["-C", dir, "update-index", "--force-remove", "leak.sh"]);
+    assert.equal(runCli(dir).status, 0); // the index no longer lists it
+    const run = runCli(dir, "--tree", "HEAD");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stderr, /leak\.sh:1 {2}pcc_oracle_<64 hex chars, value not printed>/);
+  });
+});
+
+test("--range finds a key a later commit removed, and a key in a commit message", () => {
+  withRepo({ "README.md": "ok\n" }, [], (dir) => {
+    const base = commitAll(dir, "base");
+    writeFileSync(join(dir, "tmp.env"), `KEY=${key("test")}\n`);
+    commitAll(dir, "add a key");
+    unlinkSync(join(dir, "tmp.env"));
+    commitAll(dir, "remove it again");
+    assert.equal(runCli(dir, "--tree", "HEAD").status, 0); // the final tree is clean
+    const history = runCli(dir, "--range", `${base}..HEAD`);
+    assert.equal(history.status, 1, history.stdout);
+    assert.match(history.stderr, /tmp\.env \(object [0-9a-f]{12}\):1 {2}pcc_test_<64 hex chars, value not printed>/);
+    assert.ok(!history.stderr.includes(HEX64));
+
+    commitAll(dir, `deploy with ${key("live")}`);
+    const message = runCli(dir, "--range", `${base}..HEAD`);
+    assert.match(message.stderr, /commit [0-9a-f]{12}:\d+ {2}pcc_live_<64 hex chars, value not printed>/);
+  });
+});
+
+test("git's own errors are captured and redacted, never passed through", () => {
+  const parent = mkdtempSync(join(tmpdir(), "secret-scan-leak-"));
+  // Not created: git's own message then quotes this key-bearing path.
+  const dir = join(parent, `repo-${key("live")}`);
+  try {
+    const run = runCli(dir);
+    assert.equal(run.status, 2, run.stdout);
+    assert.match(run.stderr, /secret-scan: error:/);
+    assert.ok(!run.stderr.includes(HEX64) && !run.stdout.includes(HEX64), "a key-bearing path leaked");
+    assert.ok(run.stderr.includes("pcc_live_<redacted>"));
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("bad revisions and missing option values are errors (exit 2)", () => {
+  withRepo({ "README.md": "ok\n" }, [], (dir) => {
+    commitAll(dir, "base");
+    for (const args of [["--tree", "no-such-rev"], ["--tree"], ["--range", "HEAD"], ["--range", "HEAD..nope"], ["--tree", "--range"]]) {
+      assert.equal(runCli(dir, ...args).status, 2, args.join(" "));
+    }
+  });
 });

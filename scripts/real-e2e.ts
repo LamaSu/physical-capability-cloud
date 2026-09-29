@@ -267,7 +267,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 5000));
     const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
     status = s.status;
-    process.stdout.write(`    ${i + 1}/40: ${status}   \r`);
+    process.stdout.write(`    ${i + 1}/40: ${redactKeys(String(status))}   \r`); // the gateway's text, redacted
     if (status === "completed" || status === "failed") break;
   }
   console.log();

@@ -36,23 +36,31 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# N44: every line the script prints goes through say(). The message is redacted
+# and printed literally (%s, never echo -e), so neither key material nor an
+# escape sequence from a response reaches the terminal. Only the colour
+# constants are interpreted.
+say() {
+  printf '  %b%s%b %s\n' "$1" "$2" "$NC" "$(redact "$3")"
+}
+
 pass() {
-  echo -e "  ${GREEN}PASS${NC} $1"
+  say "$GREEN" PASS "$1"
   PASS_COUNT=$((PASS_COUNT + 1))
 }
 
 fail() {
-  echo -e "  ${RED}FAIL${NC} $1"
+  say "$RED" FAIL "$1"
   FAIL_COUNT=$((FAIL_COUNT + 1))
 }
 
 skip() {
-  echo -e "  ${YELLOW}SKIP${NC} $1"
+  say "$YELLOW" SKIP "$1"
   SKIP_COUNT=$((SKIP_COUNT + 1))
 }
 
 info() {
-  echo -e "  ${CYAN}INFO${NC} $1"
+  say "$CYAN" INFO "$1"
 }
 
 # N44: strip PCC key material from anything printed or written to the report.
@@ -65,7 +73,7 @@ add_check() {
   CHECKS_JSON=$(echo "$CHECKS_JSON" | jq \
     --arg name "$1" \
     --arg status "$2" \
-    --arg details "$3" \
+    --arg details "$(redact "$3")" \
     --argjson duration "$4" \
     '. + [{"name": $name, "status": $status, "details": $details, "durationMs": $duration}]')
 }
@@ -283,7 +291,11 @@ else
       VERIFY_RESP=""
     else
       info "Sending smoke verify request..."
-      VERIFY_RESP=$(curl -sS --max-time 15 -X POST "$ORACLE_URL_USED/verify" \
+      # The check passes only when the oracle PROCESSED an authenticated request:
+      # transport ok, HTTP 200, and a boolean result.verified. The smoke evidence is
+      # not expected to verify; a rejected key, a timeout or a malformed answer FAILs.
+      VERIFY_BODY_FILE=$(mktemp)
+      VERIFY_HTTP=$(curl -sS --max-time 15 -o "$VERIFY_BODY_FILE" -w '%{http_code}' -X POST "$ORACLE_URL_USED/verify" \
         -H "Content-Type: application/json" \
         -H "x-oracle-key: $ORACLE_KEY" \
         -d '{
@@ -293,14 +305,34 @@ else
           "evidenceHash": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
           "assuranceTier": 0,
           "chainId": 84532
-        }' 2>/dev/null || echo "")
-    fi
-    if [ -n "$VERIFY_RESP" ]; then
-      VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
-      REASON=$(echo "$VERIFY_RESP" | jq -r .result.reason 2>/dev/null || echo "")
-      info "Verify response: verified=$VERIFIED reason=$(redact "$REASON")"
-    elif [ -n "$ORACLE_KEY" ]; then
-      info "Verify request returned empty (oracle may be processing)"
+        }' 2>/dev/null) || VERIFY_HTTP="transport-error"
+      VERIFY_RESP=$(cat "$VERIFY_BODY_FILE" 2>/dev/null || true)
+      rm -f "$VERIFY_BODY_FILE"
+      VERIFIED=$(printf '%s' "$VERIFY_RESP" | jq -r 'if (.result.verified | type) == "boolean" then (.result.verified | tostring) else "invalid" end' 2>/dev/null || echo "invalid")
+      case "$VERIFY_HTTP" in
+        200)
+          if [ "$VERIFIED" = "invalid" ]; then
+            fail "Oracle verify answered 200 without a boolean result.verified"
+            add_check "oracle-verify" "FAIL" "200 without a boolean result.verified" "0"
+          else
+            REASON=$(printf '%s' "$VERIFY_RESP" | jq -r '.result.reason // ""' 2>/dev/null || echo "")
+            pass "Oracle processed the authenticated verify request (verified=$VERIFIED, reason: $REASON)"
+            add_check "oracle-verify" "PASS" "authenticated verify processed; verified=$VERIFIED" "0"
+          fi
+          ;;
+        401|403)
+          fail "Oracle rejected PCC_ORACLE_KEY (HTTP $VERIFY_HTTP)"
+          add_check "oracle-verify" "FAIL" "authentication rejected (HTTP $VERIFY_HTTP)" "0"
+          ;;
+        transport-error|000)
+          fail "Oracle verify request failed in transport (timeout or connection)"
+          add_check "oracle-verify" "FAIL" "transport failure" "0"
+          ;;
+        *)
+          fail "Oracle verify answered HTTP $VERIFY_HTTP"
+          add_check "oracle-verify" "FAIL" "HTTP $VERIFY_HTTP" "0"
+          ;;
+      esac
     fi
   else
     fail "Oracle returned unexpected status: $(redact "$ORACLE_HEALTH")"
@@ -379,7 +411,9 @@ if $E2E_OK; then
   if [ "$IS_VALID" = "true" ]; then
     info "API key validated successfully"
   else
-    info "API key validation returned: $(redact "$VALIDATE_RESP")"
+    # A provisioned key that does not validate is a failed flow, not a note.
+    fail "API key validation failed: $VALIDATE_RESP"
+    E2E_OK=false
   fi
 fi
 
@@ -391,7 +425,7 @@ if $E2E_OK; then
   add_check "e2e-flow" "PASS" "All E2E steps succeeded. Types=$TYPE_COUNT Kernels=$KERNEL_COUNT" "$DURATION"
 else
   fail "E2E flow failed"
-  add_check "e2e-flow" "FAIL" "E2E flow failed at API key provisioning" "$DURATION"
+  add_check "e2e-flow" "FAIL" "E2E flow failed (see the step that failed above)" "$DURATION"
 fi
 echo ""
 

@@ -8,10 +8,19 @@ on:
 
 jobs:
   # Board row N44: PCC key material (pcc_live_/pcc_test_/pcc_oracle_ in any case,
-  # then 20 or more hex chars) in any tracked file or file name fails CI. Every
-  # blob is read from git, binaries included, with no size cap. The scan prints
-  # file:line only, never a value. Node built-ins only: no install step, no
-  # third-party action beyond checkout.
+  # then 20 or more hex chars) in any tracked file, file name, commit message or
+  # intermediate commit fails the scan. The scanner reads the commit's tree and
+  # every object the change introduces from git's object store (not the index,
+  # which a process can rewrite), with no size cap, and prints file:line only,
+  # never a value. Node built-ins only: no install step, no third-party action
+  # beyond checkout.
+  #
+  # On a push to master this job runs master's own scanner and is the gate
+  # build-image waits for. On a pull request it is advisory, because it runs the
+  # pull request's own code. The enforcing scan for pull requests is
+  # .github/workflows/secret-scan.yml: it runs on pull_request_target, so both
+  # its definition and its scanner come from the base branch, and it never checks
+  # out or runs the pull request's code.
   secret-scan:
     runs-on: ubuntu-latest
 
@@ -28,21 +37,19 @@ jobs:
       - name: Secret-scan self-test
         run: node --test scripts/ci/secret-scan.test.mjs
 
-      - name: Scan tracked files for PCC key literals
-        run: node scripts/ci/secret-scan.mjs
-
-      # A PR could weaken the scanner in the same change that adds a key, so the
-      # scanner as it is on the base branch also scans this PR's files.
-      - name: Scan again with the base branch's scanner
-        if: github.event_name == 'pull_request'
+      - name: Scan the commit tree and every object this change adds
         env:
-          BASE_REF: ${{ github.base_ref }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git cat-file -e "origin/${BASE_REF}:scripts/ci/secret-scan.mjs" 2>/dev/null; then
-            git show "origin/${BASE_REF}:scripts/ci/secret-scan.mjs" > "$RUNNER_TEMP/secret-scan-base.mjs"
-            node "$RUNNER_TEMP/secret-scan-base.mjs" --root "$GITHUB_WORKSPACE"
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            node scripts/ci/secret-scan.mjs --tree HEAD --range "${BASE_SHA}..HEAD"
+          elif [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            node scripts/ci/secret-scan.mjs --tree HEAD
           else
-            echo "The base branch has no scanner yet: this change introduces it."
+            node scripts/ci/secret-scan.mjs --tree HEAD --range "${BEFORE}..HEAD"
           fi
 
   build-and-test:
