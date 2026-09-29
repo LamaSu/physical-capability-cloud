@@ -61,18 +61,31 @@ const MAX_WAITLIST_FILE_BYTES = (() => {
   const n = Number.parseInt(process.env.PCC_WAITLIST_MAX_BYTES ?? "", 10);
   return Number.isFinite(n) && n > 0 ? n : 50 * 1024 * 1024;
 })();
-function storeFull(file: string): boolean {
+/**
+ * True when appending `line` would take `file` past `maxBytes` (the hard cap). The
+ * check used to look at the CURRENT size only, so a record appended just under the
+ * cap crossed it (astra, pack 53, new defect 2). A missing file is empty; any other
+ * stat failure refuses rather than appending blind.
+ */
+function wouldExceedCap(file: string, line: string): boolean {
+  let current = 0;
   try {
-    return statSync(file).size >= MAX_WAITLIST_FILE_BYTES;
-  } catch {
-    return false; // no file yet
+    current = statSync(file).size;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") return true;
   }
+  return current + Buffer.byteLength(line, "utf8") > MAX_WAITLIST_FILE_BYTES;
 }
 const STORE_FULL = { error: "waitlist_store_full", message: "Signups are paused while storage is full; the operators have been told." };
 
-function append(file: string, rec: unknown): void {
+/** The exact line append() writes for `rec`, so the cap check measures what is written. */
+function line(rec: unknown): string {
+  return JSON.stringify(rec) + "\n";
+}
+
+function append(file: string, recLine: string): void {
   mkdirSync(DATA_DIR, { recursive: true });
-  appendFileSync(file, JSON.stringify(rec) + "\n", "utf8");
+  appendFileSync(file, recLine, "utf8");
 }
 function readAll(file: string): unknown[] {
   if (!existsSync(file)) return [];
@@ -186,8 +199,9 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       createdAt: new Date().toISOString(),
       ip: req.ip,
     };
-    if (storeFull(WAITLIST_FILE)) return reply.code(503).send(STORE_FULL);
-    append(WAITLIST_FILE, rec);
+    const recLine = line(rec);
+    if (wouldExceedCap(WAITLIST_FILE, recLine)) return reply.code(503).send(STORE_FULL);
+    append(WAITLIST_FILE, recLine);
     if (leadKey && !presented) trackIssuedLead(leadKey);
     return { status: "ok", id: rec.id, leadId, leadToken, message: "You're on the waitlist — we'll be in touch." };
   });
@@ -241,8 +255,9 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       createdAt: new Date().toISOString(),
       ip: req.ip,
     };
-    if (storeFull(BETA_FILE)) return reply.code(503).send(STORE_FULL);
-    append(BETA_FILE, rec);
+    const recLine = line(rec);
+    if (wouldExceedCap(BETA_FILE, recLine)) return reply.code(503).send(STORE_FULL);
+    append(BETA_FILE, recLine);
     return {
       status: "ok",
       id: rec.id,
