@@ -103,6 +103,28 @@ describe("a hosted session", () => {
     expect(s.pending()).toEqual([]);
   });
 
+  it("the outcome note is told once: a later turn does not repeat it", async () => {
+    const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("Done."), text("Next.")] });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
+    const turn = await s.send("register");
+    await s.confirm(turn.pending[0]!.token);
+    await s.send("thanks");
+    await s.send("what next?");
+    expect(String(h.requests[3]!.messages.at(-1)!.content)).toBe("what next?");
+  });
+
+  it("the outcome note is scrubbed even when the transport returns a secret", async () => {
+    const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("Done.")] });
+    h.transport.callTool = async () => ({ registered: true, apiKey: "pcc_live_LeakedByATransport99" });
+    const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: null });
+    const turn = await s.send("register");
+    await s.confirm(turn.pending[0]!.token);
+    await s.send("thanks");
+    const told = String(h.requests[2]!.messages.at(-1)!.content);
+    expect(told).toContain('"registered":true');
+    expect(told).not.toContain("pcc_live_");
+  });
+
   it("a declined write never runs, and the model is told", async () => {
     const h = harness({ replies: [toolUse("onboard_machine", {}), text("Confirm?"), text("OK, not registering.")] });
     const s = await HostedSession.open(h.deps, { userKey: "user:alice", credential: CREDENTIAL });
