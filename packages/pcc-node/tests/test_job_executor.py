@@ -531,9 +531,14 @@ OT_FAIL_TRANSPORT = {
 # A 2xx to `select + print` means OctoPrint ACCEPTED the job and started it,
 # not that anything was printed, so the adapter's flag is `submitted`.  This
 # used to be OP_SUCCESS with `printed: True` (must-close item 5).
+# CHANGED (r31 round-1 finding 3): what is printed is the job's private copy
+# (folder pcc-<job id>, copy, baseline read, then select + print), so the
+# accepted result names that copy and its print-history baseline.
 OP_ACCEPTED = {
     "submitted": True,
     "filename": "benchy.gcode",
+    "printPath": "pcc-job-op/benchy.gcode",
+    "baseline": {"success": 0, "failure": 0},
     "status_code": 200,
     "device": "http://10.0.0.20:5000",
 }
@@ -567,9 +572,10 @@ OP_FAIL_ERROR_IN_2XX_BODY = {
 }
 
 # JobExecutor._execute_generic_http
-# CHANGED (r31 astra verdict item 1): the response was {"ok": True}.  The live
-# adapter now claims `executed` only when the body states completion, so the
-# fixture mirrors a completion statement.
+# CHANGED (r31 astra verdict item 1): the response was {"ok": True}.  A
+# classifier-level success shape: the live adapter sets `executed` only under
+# a device's completion contract (r31 round-1 finding 1; see
+# TestR31GenericHttpCompletionContract for the live path).
 GH_SUCCESS = {
     "executed": True,
     "status_code": 200,
@@ -1559,8 +1565,9 @@ class _FakeResponse:
         self.status = status
         self._raw = json.dumps(payload).encode("utf-8")
 
-    def read(self):
-        return self._raw
+    def read(self, amt=-1):
+        # Like http.client.HTTPResponse.read(amt): the node reads a bounded size.
+        return self._raw if amt is None or amt < 0 else self._raw[:amt]
 
     def __enter__(self):
         return self
@@ -1883,8 +1890,9 @@ class _RawResponse:
         self.status = status
         self._raw = raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
 
-    def read(self):
-        return self._raw
+    def read(self, amt=-1):
+        # Like http.client.HTTPResponse.read(amt): the node reads a bounded size.
+        return self._raw if amt is None or amt < 0 else self._raw[:amt]
 
     def __enter__(self):
         return self
@@ -1903,6 +1911,12 @@ SOAP_FAULT_BODY = (
     "<faultstring>carriage jam; job aborted</faultstring>"
     "</soap:Fault></soap:Body></soap:Envelope>"
 )
+
+
+def _contract(field, values, correlation, path="/execute", method="POST"):
+    """A version-1 generic HTTP completion contract (r31 round-1 finding 1)."""
+    return {"version": 1, "method": method, "path": path, "completionField": field,
+            "completionValues": values, "correlationField": correlation}
 
 
 class TestDeviceReportedFailureInABody:
@@ -1941,12 +1955,26 @@ class TestDeviceReportedFailureInABody:
         pytest.param(304, "", id="redirect-304"),
     ]
 
-    # Bodies in which the DEVICE states that the work finished.
-    DEVICE_SUCCESSES = [
+    # Bodies in which a device states, in the generic vocabulary, that the work
+    # finished.  CHANGED (r31 round-1 finding 1): these used to release on
+    # their own.  Without a completion contract they now never complete.
+    DEVICE_COMPLETION_STATEMENTS = [
         pytest.param(200, _json_body({"status": "completed"}), id="completed-status-200"),
         pytest.param(200, _json_body({"data": {"state": "done"}}), id="nested-done-200"),
         pytest.param(201, _json_body({"done": True, "jobId": "abc"}), id="done-true-201"),
         pytest.param(200, _json_body({"result": {"status": "SUCCEEDED"}}), id="result-succeeded-200"),
+    ]
+    # The same statements from a device whose contract names the field, and
+    # correlated to this job ("job-body"): these release.
+    DEVICE_CONTRACT_SUCCESSES = [
+        pytest.param(200, _json_body({"status": "completed", "jobId": "job-body"}),
+                     _contract("status", ["completed"], "jobId"), id="completed-status-200"),
+        pytest.param(200, _json_body({"data": {"state": "done", "jobId": "job-body"}}),
+                     _contract("data.state", ["done"], "data.jobId"), id="nested-done-200"),
+        pytest.param(201, _json_body({"done": True, "jobId": "job-body"}),
+                     _contract("done", [True], "jobId"), id="done-true-201"),
+        pytest.param(200, _json_body({"result": {"status": "SUCCEEDED", "id": "job-body"}}),
+                     _contract("result.status", ["succeeded"], "result.id"), id="result-succeeded-200"),
     ]
     # CHANGED (r31 astra verdict item 1): these five bodies used to be
     # DEVICE_SUCCESSES and were asserted to release.  None of them states that
@@ -2012,17 +2040,27 @@ class TestDeviceReportedFailureInABody:
         assert result["error"]
         assert classify_execution_result(result) == RESULT_FAILURE
 
-    @pytest.mark.parametrize("status,raw", DEVICE_SUCCESSES)
-    def test_a_genuine_success_still_succeeds(self, status, raw):
+    @pytest.mark.parametrize("status,raw,contract", DEVICE_CONTRACT_SUCCESSES)
+    def test_a_genuine_success_still_succeeds(self, status, raw, contract):
         """Negative control: reading the body must not dispute healthy runs
-        whose device says the work finished."""
+        whose device says, under its contract, that THIS job finished."""
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
-            result = ex._execute_generic_http(self.GH_DEVICE, self._job())
+            result = ex._execute_generic_http({**self.GH_DEVICE, "completionContract": contract}, self._job())
 
         assert result["executed"] is True, f"healthy device disputed: {result!r}"
         assert "error" not in result
         assert classify_execution_result(result) == RESULT_SUCCESS
+
+    @pytest.mark.parametrize("status,raw", DEVICE_COMPLETION_STATEMENTS)
+    def test_a_completion_statement_without_a_contract_is_not_a_success(self, status, raw):
+        """r31 round-1 finding 1: no device-agnostic completion vocabulary."""
+        ex = JobExecutor(devices=[])
+        with self._socket(status, raw):
+            result = ex._execute_generic_http(self.GH_DEVICE, self._job())
+
+        assert "executed" not in result, result
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
 
     @pytest.mark.parametrize("status,raw", DEVICE_OPAQUE_2XX)
     def test_a_2xx_without_a_completion_statement_is_not_a_success(self, status, raw):
@@ -2076,11 +2114,14 @@ class TestDeviceReportedFailureInABody:
 
     def test_healthy_device_still_releases_end_to_end(self):
         """CHANGED (r31 item 1): the body was {"ok": true}, which no longer
-        states completion; a device that says so still releases."""
+        states completion.  CHANGED again (r31 round-1 finding 1): completion
+        needs the device's contract and this job's id echoed back; a device
+        that says so still releases."""
         gateway = self._gateway()
-        ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
+        device = {**self.GH_DEVICE, "completionContract": _contract("status", ["completed"], "jobId")}
+        ex = JobExecutor(devices=[device], gateway_client=gateway)
 
-        with self._socket(200, _json_body({"status": "completed"})):
+        with self._socket(200, _json_body({"status": "completed", "jobId": "job-body"})):
             bundle = ex.execute(self._job())
 
         types = _event_types(bundle)
@@ -2298,6 +2339,25 @@ class TestAcceptanceIsNotCompletion:
 
     # --- OctoPrint ------------------------------------------------------------
 
+    def _octoprint_sequence(self, job_id, select_status, select_raw):
+        """Answer the adapter's four requests in order -- create the job
+        folder, copy the file into it, read the copy (no print history yet),
+        select + print the copy -- and record each (method, url)."""
+        copy = f"pcc-{job_id}/benchy.gcode"
+        answers = iter([
+            _RawResponse(201, _json_body({"done": True, "folder": {"name": f"pcc-{job_id}"}})),
+            _RawResponse(201, _json_body({"name": "benchy.gcode", "path": copy, "origin": "local"})),
+            _RawResponse(200, _json_body({"name": "benchy.gcode", "path": copy, "origin": "local"})),
+            _RawResponse(select_status, select_raw),
+        ])
+        seen = []
+
+        def respond(req, *args, **kwargs):
+            seen.append((req.get_method(), req.full_url))
+            return next(answers)
+
+        return mock.patch("pcc_node.http_util.urlopen", side_effect=respond), seen
+
     @pytest.mark.parametrize("status,raw", [
         # 204 No Content is OctoPrint's documented answer to select + print.
         pytest.param(204, "", id="204-no-content"),
@@ -2306,9 +2366,10 @@ class TestAcceptanceIsNotCompletion:
     ])
     def test_octoprint_2xx_is_accepted_not_printed(self, status, raw):
         ex = JobExecutor(devices=[])
-        with self._socket(status, raw):
+        socket, seen = self._octoprint_sequence("job-op", status, raw)
+        with socket:
             result = ex._execute_octoprint(
-                self.OP_DEVICE, {"parameters": {"filename": "benchy.gcode"}}
+                self.OP_DEVICE, {"id": "job-op", "parameters": {"filename": "benchy.gcode"}}
             )
 
         assert result["submitted"] is True
@@ -2316,6 +2377,15 @@ class TestAcceptanceIsNotCompletion:
         assert "error" not in result
         assert result == {**OP_ACCEPTED, "status_code": status}
         assert classify_execution_result(result) == RESULT_ACCEPTED
+        # r31 round-1 finding 3: the job's private copy is printed, never the
+        # requested file itself.
+        base = "http://10.0.0.20:5000/api/files/local"
+        assert seen == [
+            ("POST", base),
+            ("POST", f"{base}/benchy.gcode"),
+            ("GET", f"{base}/pcc-job-op/benchy.gcode"),
+            ("POST", f"{base}/pcc-job-op/benchy.gcode"),
+        ]
 
     def test_octoprint_2xx_never_releases_end_to_end(self):
         gateway = self._gateway()
@@ -2325,7 +2395,8 @@ class TestAcceptanceIsNotCompletion:
             "capabilityType": "3d-print",
             "parameters": {"filename": "benchy.gcode"},
         }
-        with self._socket(204, ""):
+        socket, _ = self._octoprint_sequence("job-op-e2e", 204, "")
+        with socket:
             bundle = ex.execute(job)
 
         assert _event_types(bundle) == [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS]
@@ -2379,31 +2450,47 @@ class TestAcceptanceIsNotCompletion:
         assert "submitted" not in result
         assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
 
-    def test_generic_http_2xx_stating_completion_is_executed(self):
-        """Positive control for the test above."""
+    def test_generic_http_2xx_stating_completion_needs_a_contract(self):
+        """Positive control for the test above.  CHANGED (r31 round-1 finding
+        1): a completion word alone no longer completes; under the device's
+        contract, with this job's id echoed back, it does."""
         ex = JobExecutor(devices=[])
-        with self._socket(200, _json_body({"status": "completed"})):
-            result = ex._execute_generic_http(self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+        body = _json_body({"status": "completed", "jobId": "job-gh"})
+        job = {"id": "job-gh", "parameters": {"path": "/execute"}}
+        with self._socket(200, body):
+            bare = ex._execute_generic_http(self.GH_DEVICE, job)
+        assert "executed" not in bare
+        assert classify_execution_result(bare) == RESULT_UNCLASSIFIABLE
 
+        device = {**self.GH_DEVICE, "completionContract": _contract("status", ["completed"], "jobId")}
+        with self._socket(200, body):
+            result = ex._execute_generic_http(device, job)
         assert result["executed"] is True
         assert classify_execution_result(result) == RESULT_SUCCESS
 
-    @pytest.mark.parametrize("status,raw,expected_statuses,expected_types", [
-        pytest.param(200, _json_body({"jobId": "abc", "status": "completed"}), ["running", "completed"],
-                     [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_COMPLETED], id="200-stating-completion-completes"),
-        pytest.param(200, _json_body({"jobId": "abc"}), ["running", "failed"],
+    CONTRACT_GH_DEVICE = {**GH_DEVICE, "completionContract": _contract("status", ["completed"], "jobId")}
+
+    @pytest.mark.parametrize("device,status,raw,expected_statuses,expected_types", [
+        pytest.param(CONTRACT_GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e", "status": "completed"}),
+                     ["running", "completed"], [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_COMPLETED],
+                     id="200-completion-under-the-contract-completes"),
+        pytest.param(GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e", "status": "completed"}),
+                     ["running", "failed"], [EVENT_EXECUTION_STARTED],
+                     id="200-completion-without-a-contract-fails-closed"),
+        pytest.param(CONTRACT_GH_DEVICE, 200, _json_body({"jobId": "job-gh-e2e"}), ["running", "failed"],
                      [EVENT_EXECUTION_STARTED], id="200-without-completion-fails-closed"),
-        pytest.param(202, _json_body({"jobId": "abc"}), ["running"],
+        pytest.param(CONTRACT_GH_DEVICE, 202, _json_body({"jobId": "job-gh-e2e"}), ["running"],
                      [EVENT_EXECUTION_STARTED, EVENT_EXECUTION_PROGRESS], id="202-stays-running"),
     ])
     def test_generic_http_200_completes_but_202_stays_running_end_to_end(
-        self, status, raw, expected_statuses, expected_types
+        self, device, status, raw, expected_statuses, expected_types
     ):
         """CHANGED (r31 item 1): the 200 case used {"jobId": "abc"} and was
         asserted to complete.  It now needs the device's completion statement;
-        without one the job fails closed."""
+        without one the job fails closed.  CHANGED again (r31 round-1 finding
+        1): the statement counts only under the device's contract."""
         gateway = self._gateway()
-        ex = JobExecutor(devices=[self.GH_DEVICE], gateway_client=gateway)
+        ex = JobExecutor(devices=[device], gateway_client=gateway)
         job = {"id": "job-gh-e2e", "capabilityType": "generic", "parameters": {"path": "/execute"}}
         with self._socket(status, raw):
             bundle = ex.execute(job)
@@ -2622,13 +2709,19 @@ class TestR31GenericHttpCompletionContract:
             side_effect=lambda req, *a, **k: _RawResponse(status, raw),
         )
 
+    JOB_ID = "job-contract"
+
     def _run(self, status, raw, device=None):
         ex = JobExecutor(devices=[])
         with self._socket(status, raw):
-            return ex._execute_generic_http(device or self.GH_DEVICE, {"parameters": {"path": "/execute"}})
+            return ex._execute_generic_http(
+                device or self.GH_DEVICE, {"id": self.JOB_ID, "parameters": {"path": "/execute"}}
+            )
 
     @pytest.mark.parametrize("raw,expected", [
         pytest.param(_json_body({"status": "queued"}), RESULT_ACCEPTED, id="queued-is-acceptance"),
+        pytest.param(_json_body({"job": {"stage": "running"}}), RESULT_ACCEPTED,
+                     id="running-under-any-key-is-acceptance"),
         pytest.param(_json_body({"submitted": True}), RESULT_ACCEPTED, id="submitted-is-acceptance"),
         pytest.param(_json_body({"data": {"error": "jam"}}), RESULT_FAILURE, id="nested-failure"),
         pytest.param(_json_body({"result": {"success": False}}), RESULT_FAILURE, id="nested-failed-result"),
@@ -2655,11 +2748,17 @@ class TestR31GenericHttpCompletionContract:
         pytest.param(_json_body({"status": "completed"}), id="completed"),
         pytest.param(_json_body({"state": "FINISHED"}), id="finished-state"),
         pytest.param(_json_body({"payload": {"completed": True}}), id="completed-flag-in-envelope"),
+        # The round-1 reviewer's exact wrapper: the REQUEST completed, the
+        # device operation inside is still queued.
+        pytest.param(_json_body({"status": "completed", "data": {"result": {"status": "queued"}}}),
+                     id="wrapper-completed-work-queued"),
     ])
-    def test_a_completion_statement_is_executed(self, raw):
+    def test_a_completion_statement_without_a_contract_is_never_executed(self, raw):
+        """CHANGED (r31 round-1 finding 1): these used to be executed.  With no
+        device-agnostic completion vocabulary they are unclassifiable."""
         result = self._run(200, raw)
-        assert result["executed"] is True
-        assert classify_execution_result(result) == RESULT_SUCCESS
+        assert "executed" not in result, result
+        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
 
     def test_a_202_stating_completion_is_still_only_accepted(self):
         result = self._run(202, _json_body({"status": "completed"}))
@@ -2669,19 +2768,47 @@ class TestR31GenericHttpCompletionContract:
 
     # --- per-device contract ----------------------------------------------------
 
-    CONTRACT_DEVICE = {**GH_DEVICE, "completionField": "result.phase", "completionValues": ["FINISHED"]}
+    CONTRACT = _contract("result.phase", ["FINISHED"], "result.jobId")
+    CONTRACT_DEVICE = {**GH_DEVICE, "completionContract": CONTRACT}
 
     def test_a_contract_value_is_completion(self):
-        result = self._run(200, _json_body({"result": {"phase": "finished"}}), self.CONTRACT_DEVICE)
+        result = self._run(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}}),
+                           self.CONTRACT_DEVICE)
         assert result["executed"] is True
+        assert result["contract"] == {"version": 1, "completionField": "result.phase",
+                                      "correlationField": "result.jobId"}
         assert classify_execution_result(result) == RESULT_SUCCESS
 
     @pytest.mark.parametrize("raw,expected", [
-        pytest.param(_json_body({"result": {"phase": "QUEUED"}}), RESULT_ACCEPTED, id="queued-by-contract"),
-        pytest.param(_json_body({"result": {"phase": "HOMING"}}), RESULT_UNCLASSIFIABLE, id="other-value"),
-        pytest.param(_json_body({"status": "completed"}), RESULT_UNCLASSIFIABLE,
+        pytest.param(_json_body({"result": {"phase": "QUEUED", "jobId": "job-contract"}}), RESULT_ACCEPTED,
+                     id="queued-by-contract"),
+        pytest.param(_json_body({"result": {"phase": "HOMING", "jobId": "job-contract"}}), RESULT_UNCLASSIFIABLE,
+                     id="other-value"),
+        pytest.param(_json_body({"status": "completed", "jobId": "job-contract"}), RESULT_UNCLASSIFIABLE,
                      id="default-vocabulary-ignored-under-a-contract"),
         pytest.param(_json_body({"result": "FINISHED"}), RESULT_UNCLASSIFIABLE, id="path-not-traversable"),
+        # r31 round-1 finding 1: the answer must be bound to THIS job ...
+        pytest.param(_json_body({"result": {"phase": "finished"}}), RESULT_UNCLASSIFIABLE,
+                     id="no-correlation-echo"),
+        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-other"}}), RESULT_UNCLASSIFIABLE,
+                     id="another-jobs-id"),
+        pytest.param(_json_body({"result": {"phase": "finished", "jobId": 7}}), RESULT_UNCLASSIFIABLE,
+                     id="non-string-correlation"),
+        # ... and no acceptance/running statement may appear anywhere.
+        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract",
+                                            "step": {"status": "queued"}}}),
+                     RESULT_UNCLASSIFIABLE, id="nested-queued-conflict"),
+        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract"},
+                                 "queue": [{"submitted": True}]}),
+                     RESULT_UNCLASSIFIABLE, id="acceptance-flag-in-a-list-conflict"),
+        # The scan is key-agnostic: "queued" under any key, or in a list, is a
+        # statement too (a key allowlist would miss another device's name for it).
+        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract"},
+                                 "job": {"stage": "queued"}}),
+                     RESULT_UNCLASSIFIABLE, id="queued-under-another-key-conflict"),
+        pytest.param(_json_body({"result": {"phase": "finished", "jobId": "job-contract"},
+                                 "steps": ["homing", "Running"]}),
+                     RESULT_UNCLASSIFIABLE, id="running-in-a-list-conflict"),
     ])
     def test_under_a_contract_nothing_else_is_completion(self, raw, expected):
         result = self._run(200, raw, self.CONTRACT_DEVICE)
@@ -2689,17 +2816,84 @@ class TestR31GenericHttpCompletionContract:
         assert classify_execution_result(result) == expected
 
     def test_a_contract_never_overrides_a_failure(self):
-        result = self._run(200, _json_body({"result": {"phase": "FINISHED", "error": "tip crash"}}),
+        result = self._run(200, _json_body({"result": {"phase": "FINISHED", "jobId": "job-contract",
+                                                       "error": "tip crash"}}),
                            self.CONTRACT_DEVICE)
         assert result["executed"] is False
         assert classify_execution_result(result) == RESULT_FAILURE
 
-    @pytest.mark.parametrize("field", [None, "", 7])
-    def test_an_unusable_contract_is_never_completion(self, field):
-        device = {**self.GH_DEVICE, "completionField": field}
-        result = self._run(200, _json_body({"status": "completed"}), device)
-        assert "executed" not in result
-        assert classify_execution_result(result) == RESULT_UNCLASSIFIABLE
+    @pytest.mark.parametrize("contract", [
+        pytest.param({**CONTRACT, "completionField": None}, id="no-field"),
+        pytest.param({**CONTRACT, "completionField": ""}, id="empty-field"),
+        pytest.param({**CONTRACT, "completionField": 7}, id="numeric-field"),
+        pytest.param({**CONTRACT, "completionValues": ["queued"]}, id="acceptance-value"),
+        pytest.param({**CONTRACT, "completionValues": ["Running"]}, id="running-value"),
+        pytest.param({**CONTRACT, "completionValues": ["failed"]}, id="failure-value"),
+        pytest.param({**CONTRACT, "completionValues": [False]}, id="false-value"),
+        pytest.param({**CONTRACT, "completionValues": []}, id="no-values"),
+        pytest.param({**CONTRACT, "version": 2}, id="unknown-version"),
+        pytest.param({**CONTRACT, "version": True}, id="bool-version"),
+        pytest.param({**CONTRACT, "method": "GET"}, id="get-method"),
+        pytest.param({**CONTRACT, "path": "http://elsewhere/x"}, id="absolute-url"),
+        pytest.param({**CONTRACT, "path": "/a/../b"}, id="dot-dot-path"),
+        pytest.param({**CONTRACT, "correlationField": "result.phase"}, id="correlation-is-completion"),
+        pytest.param({**CONTRACT, "extra": 1}, id="unknown-key"),
+        pytest.param({k: v for k, v in CONTRACT.items() if k != "correlationField"}, id="no-correlation"),
+        pytest.param("result.phase", id="not-an-object"),
+    ])
+    def test_an_unusable_contract_runs_nothing(self, contract):
+        """r31 round-1 finding 1: a refused contract (a queued-means-finished
+        one included) sends no request at all and fails the job."""
+        ex = JobExecutor(devices=[])
+        with self._socket(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}})) as sock:
+            result = ex._execute_generic_http({**self.GH_DEVICE, "completionContract": contract},
+                                              {"id": self.JOB_ID, "parameters": {"path": "/execute"}})
+        assert sock.call_count == 0, "a refused contract must send nothing"
+        assert result["executed"] is False
+        assert "contract" in result["error"]
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    @pytest.mark.parametrize("params", [
+        pytest.param({"path": "/other"}, id="other-path"),
+        pytest.param({"path": "/execute", "method": "DELETE"}, id="other-method"),
+    ])
+    def test_a_job_cannot_pick_another_operation_on_a_contract_device(self, params):
+        ex = JobExecutor(devices=[])
+        with self._socket(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}})) as sock:
+            result = ex._execute_generic_http(self.CONTRACT_DEVICE, {"id": self.JOB_ID, "parameters": params})
+        assert sock.call_count == 0
+        assert result["executed"] is False
+        assert classify_execution_result(result) == RESULT_FAILURE
+
+    def test_the_node_sends_the_job_id_for_the_device_to_echo(self):
+        contract = {**self.CONTRACT, "correlationRequestField": "pccJobId"}
+        ex = JobExecutor(devices=[])
+        sent = {}
+
+        def respond(req, *args, **kwargs):
+            sent["headers"] = {k.lower(): v for k, v in req.header_items()}
+            sent["body"] = json.loads(req.data.decode("utf-8"))
+            return _RawResponse(200, _json_body({"result": {"phase": "finished", "jobId": "job-contract"}}))
+
+        with mock.patch("pcc_node.http_util.urlopen", side_effect=respond):
+            result = ex._execute_generic_http(
+                {**self.GH_DEVICE, "completionContract": contract},
+                {"id": self.JOB_ID, "parameters": {"path": "/execute", "body": {"volume": 5}}},
+            )
+        assert sent["headers"]["x-pcc-job-id"] == "job-contract"
+        assert sent["body"] == {"volume": 5, "pccJobId": "job-contract"}
+        assert result["executed"] is True
+
+    def test_a_body_already_naming_another_job_is_refused(self):
+        contract = {**self.CONTRACT, "correlationRequestField": "pccJobId"}
+        ex = JobExecutor(devices=[])
+        with self._socket(200, _json_body({})) as sock:
+            result = ex._execute_generic_http(
+                {**self.GH_DEVICE, "completionContract": contract},
+                {"id": self.JOB_ID, "parameters": {"path": "/execute", "body": {"pccJobId": "job-other"}}},
+            )
+        assert sock.call_count == 0
+        assert result["executed"] is False
 
 
 # ---------------------------------------------------------------------------
