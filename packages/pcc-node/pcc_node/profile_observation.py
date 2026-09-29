@@ -14,8 +14,13 @@ and verification. The admission check in ``@pcc/spec``
   ``"none"``, and a ``sampleId`` (the sha256 of the raw capture).
 
 This module builds those parts. It never decides admission. It refuses to
-build a record the check would reject, so a producer fails loud at capture time
-rather than silently at settlement.
+build a record under a profile whose own terms admission would fail closed on
+(``profile_admission_blockers``, mirroring the vocabulary-free part of TS
+``unverifiableProfileTerms``), or a record whose fields admission would reject,
+so a producer fails loud at capture time rather than silently at settlement.
+Two TS terms need the evidence vocabulary and are not mirrored here: capture
+window tokens that are not event types, and primitive ids that are not active.
+Registration (#384) refuses those before a digest can be committed.
 
 The profile digest is recomputed here exactly as TS
 ``computeMeasurementProfileDigest`` does:
@@ -51,6 +56,53 @@ class ProfileObservationError(ValueError):
     """A profile observation this module refuses to build."""
 
 
+# TS EVIDENCE_DEVICE_TYPES (packages/spec/src/types/evidence.ts), kept equal by
+# tests/test_profile_observation.py, which reads the TS source.
+EVIDENCE_DEVICE_TYPES = (
+    "controller", "camera", "photo-camera", "power_monitor", "vibration_sensor",
+    "acoustic_sensor", "temperature_sensor", "tee", "courier_api", "human",
+    "instrument", "chromatograph", "bioreactor", "autosampler",
+    "spectrometer", "thermal_camera", "force_sensor", "flow_sensor",
+    "ph_sensor", "gas_analyzer", "plc", "robot_arm",
+    "pcb_placer", "gateway_bridge",
+    "digital_agent", "workflow_engine",
+)
+
+
+def profile_admission_blockers(profile):
+    """Profile terms TS admission fails closed on, whatever the evidence says.
+
+    Mirrors ``unverifiableProfileTerms`` in packages/spec/src/evidence/
+    profile-admission.ts for every term that needs no vocabulary: a numeric
+    tolerance, ``maxIntervalMs``, required calibration or witnesses, coverage
+    other than one-shot with minFraction 1, a device kind that is not an
+    evidence device type, and a version pin written as a pattern.
+    """
+    blockers = []
+    measurement = profile["measurement"]
+    if "tolerance" in measurement:
+        blockers.append("measurement.tolerance: comparing the observed value with a tolerance is not evaluated yet")
+    if "maxIntervalMs" in measurement["sampling"]:
+        blockers.append("measurement.sampling.maxIntervalMs: a continuous-capture term; only one-shot capture is evaluated")
+    if profile["calibration"].get("required") is True:
+        blockers.append("calibration.required: no evidence event carries a calibration record yet")
+    if profile["witnesses"]["requiredRoles"]:
+        blockers.append("witnesses.requiredRoles: independent witness attestation is not evaluated")
+    coverage = profile["capture"]["coverage"]
+    if coverage["policy"] != "one-shot":
+        blockers.append(f"capture.coverage.policy {coverage['policy']!r}: only 'one-shot' is evaluated")
+    elif coverage["minFraction"] != 1:
+        blockers.append(f"capture.coverage.minFraction {coverage['minFraction']!r}: one-shot evaluates only 1")
+    device = profile["device"]
+    if device["kind"] not in EVIDENCE_DEVICE_TYPES:
+        blockers.append(f"device.kind {device['kind']!r} is not an evidence device type, so no source can match it")
+    for field in ("permittedAdapterVersions", "permittedFirmwareVersions"):
+        for pin in device[field]:
+            if "*" in pin:
+                blockers.append(f"device.{field} {pin!r}: version pins are exact strings, not patterns")
+    return blockers
+
+
 def compute_measurement_profile_digest(profile):
     """``"0x" + sha256(canonicalize({"domain": ..., "profile": profile}))``.
 
@@ -82,6 +134,11 @@ def committed_profile(profile, committed_digest):
         raise ProfileObservationError(
             f"the job's profile digests to {actual}, not the committed {committed_digest}: "
             "refusing to collect under terms the agreement did not commit"
+        )
+    blockers = profile_admission_blockers(profile)
+    if blockers:
+        raise ProfileObservationError(
+            "admission cannot admit any observation under this profile: " + "; ".join(blockers)
         )
     return profile
 
@@ -160,10 +217,12 @@ def source_mismatches(profile, source):
     """Why observations from ``source`` would not qualify under ``profile``.
 
     An empty list means the device, kind, adapter and versions all match.
-    Pre-flight only: evidence is still recorded faithfully either way.
+    Pre-flight only: evidence is still recorded faithfully either way. A term
+    of the PROFILE that admission fails closed on is reported first, as the
+    profile's problem, since no device could satisfy it.
     """
     device = profile["device"]
-    problems = []
+    problems = [f"profile: {b}" for b in profile_admission_blockers(profile)]
     if source.get("deviceId") != device["deviceId"]:
         problems.append(f"deviceId {source.get('deviceId')!r} is not the profiled {device['deviceId']!r}")
     if source.get("deviceType") != device["kind"]:
