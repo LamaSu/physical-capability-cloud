@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { CsdSchema, type CSD } from "../csd/schema.js";
 import { CsdRegistry, loadBuiltinCsds } from "../csd/registry.js";
+import { buildContractRegistrySnapshot, computeRegistrySnapshotDigest } from "../csd/registry-contract-adapter.js";
 
 // ── Import JSON files directly ──────────────────────────────────────
 import fdmRaw from "../csds/fdm.csd.json" with { type: "json" };
@@ -585,14 +586,37 @@ describe("CsdRegistry.resolve — baseDefinition inheritance", () => {
 
 // ── loadBuiltinCsds ───────────────────────────────────────────────────
 
+const PRINT_AND_MAIL_URL = "pcc://capabilities/document-print-and-mail/v1";
+
 describe("loadBuiltinCsds", () => {
   it("loads without errors", () => {
     expect(() => loadBuiltinCsds()).not.toThrow();
   });
 
-  it("loads exactly 8 built-in CSDs", () => {
+  it("loads exactly 9 built-in CSDs (8 base + the reference vertical's workflow CSD)", () => {
     const registry = loadBuiltinCsds();
-    expect(registry.size).toBe(8);
+    expect(registry.size).toBe(9);
+  });
+
+  // Board N64: the reference vertical's capability type must resolve on the builtin registry, the one the
+  // gateway's getCsdRegistry() serves. Before this, csdForType("document-print-and-mail") was null in
+  // production, so R10 could not resolve the print leg (the real-state trace, #433).
+  it("resolves the reference vertical's capability type (board N64)", () => {
+    const registry = loadBuiltinCsds();
+    expect(registry.findUrlByType("document-print-and-mail")).toBe(PRINT_AND_MAIL_URL);
+    expect(registry.get(PRINT_AND_MAIL_URL)?.kind).toBe("workflow");
+  });
+
+  // Registering it must not move the D2 compiler ABI: the snapshot takes only active CSDs with a composition
+  // block, and this one is a draft with no composition block. So the digest is byte-identical with and without it.
+  it("leaves the D2 registry snapshot digest unchanged (draft, no composition block)", async () => {
+    const withIt = loadBuiltinCsds();
+    const without = new CsdRegistry();
+    for (const csd of withIt.list()) if (csd.url !== PRINT_AND_MAIL_URL) without.register(csd);
+    expect(without.size).toBe(withIt.size - 1);
+    expect(await computeRegistrySnapshotDigest(await buildContractRegistrySnapshot(withIt))).toBe(
+      await computeRegistrySnapshotDigest(await buildContractRegistrySnapshot(without)),
+    );
   });
 
   it("all built-in CSDs are retrievable by URL", () => {
@@ -605,12 +629,14 @@ describe("loadBuiltinCsds", () => {
     expect(registry.get("pcc://capabilities/make-pizza/v1")).toBeDefined();
     expect(registry.get("pcc://capabilities/courier-route/v1")).toBeDefined();
     expect(registry.get("pcc://capabilities/hot-food-prep/v1")).toBeDefined();
+    expect(registry.get(PRINT_AND_MAIL_URL)).toBeDefined();
   });
 
-  it("all built-in CSDs have kind = 'base'", () => {
+  it("the 8 capability built-ins have kind = 'base'; the reference vertical is the one 'workflow'", () => {
     const registry = loadBuiltinCsds();
     const bases = registry.findByKind("base");
     expect(bases).toHaveLength(8);
+    expect(registry.findByKind("workflow").map((c) => c.url)).toEqual([PRINT_AND_MAIL_URL]);
   });
 
   it("all built-in CSDs resolve without inheritance errors", () => {
@@ -624,6 +650,7 @@ describe("loadBuiltinCsds", () => {
       "pcc://capabilities/make-pizza/v1",
       "pcc://capabilities/courier-route/v1",
       "pcc://capabilities/hot-food-prep/v1",
+      PRINT_AND_MAIL_URL,
     ];
     for (const url of urls) {
       expect(() => registry.resolve(url)).not.toThrow();
