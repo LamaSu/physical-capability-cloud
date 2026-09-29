@@ -4,10 +4,12 @@
  * /api/ot2/{tool-call,tool-result,scope,chat,camera}/... were a second, weaker
  * copy of the device relay. Claims, results, chat and camera reads were not
  * bound to a kernel operator, and POST /api/ot2/scope took createdBy and
- * allowedTools from the body. Those routes are unmounted. Every /api/ot2/*
- * request now answers 410 Gone and names the /api/relay/:kernelId/... route
- * that replaces it (routes/device-relay.ts). apiGate still runs first, so an
- * unauthenticated caller gets its 401 before reaching this.
+ * allowedTools from the body. Those routes are unmounted, and no other handler
+ * serves /api/ot2. A request that reaches this plugin answers 410 Gone and names
+ * the /api/relay/:kernelId/... route that replaces it (routes/device-relay.ts).
+ * apiGate still runs first (an unauthenticated caller gets its 401), and CORS
+ * preflights or unmatched paths may answer too; none of them runs a legacy
+ * operation.
  */
 
 import type { FastifyInstance } from "fastify";

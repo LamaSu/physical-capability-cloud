@@ -18,8 +18,10 @@ When a user's agent talks to a machine's agent, we need to:
 
 ### Class 1: READ (always allowed)
 No scope needed for the kernel's operator. Any other agent reads robot state
-only while it holds an active scope on that kernel, and names that scope on
-every call (see "Who may call the relay" below).
+only while it holds an active scope on that kernel. A tool call must name that
+scope (`scopeId`); camera and chat reads check only that the caller holds an
+active scope on the kernel, without naming one (see "Who may call the relay"
+below).
 
 | Tool | What |
 |------|------|
@@ -152,8 +154,22 @@ with no API key or SIWE session gets 401.
 | Anyone else | Nothing |
 
 A scope holder commands. It never acts as the device: claiming calls,
-reporting results and pushing frames are the operator's alone. The legacy
-`/api/ot2/*` routes are retired and answer 410 Gone with the replacement path.
+reporting results and pushing frames are the operator's alone. A scope is used
+only on its own kernel: a call recorded on one kernel under another kernel's
+scope (rows the retired writer could leave) grants that scope's holder nothing,
+and a revoke or audit of the scope never reaches it.
+
+The legacy `/api/ot2/*` routes are retired: no handler for them remains. A request
+that reaches the retirement plugin gets 410 Gone with the replacement path; the
+auth gate's 401, CORS preflight handling or an unmatched path may answer first,
+and none of them runs a legacy operation.
+
+**Funding (parity, not a funding gate).** A scoped, non-safe tool call bound to a
+job is refused while that job's escrow exists in a state other than `funded`,
+`active` or `completed`, and a lookup error refuses it (503). A job with no
+session, CWM or escrow record, or a `completed` escrow, does not stop the call.
+Binding every actuation to an accepted, funded job and its committed protocol is
+item 5 of board row N4b-gw (R30), not this table.
 
 ## Validation Flow
 

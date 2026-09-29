@@ -12,6 +12,7 @@ from pcc_node.executor import (
     create_adapter,
     poll_pending_jobs,
     execute_and_report,
+    run_pending_once,
 )
 
 
@@ -153,7 +154,7 @@ class TestExecuteAndReport:
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
             mock_pcc.return_value = (200, {})
-            execute_and_report(call, [adapter], "http://pcc", "key")
+            assert execute_and_report(call, [adapter], "http://pcc", "key", "k1") is True
 
         adapter.execute.assert_called_once_with("test_tool", {"x": 1})
         mock_pcc.assert_called_once()
@@ -161,13 +162,18 @@ class TestExecuteAndReport:
         assert post_body["callId"] == "c1"
         assert mock_pcc.call_args[0][:2] == ("POST", "/api/relay/k1/tool-result")
 
-    def test_does_not_execute_without_a_kernel_id(self):
+    def test_the_polled_kernel_is_required(self):
         adapter = mock.Mock()
         adapter.device_type = "test"
         adapter.execute.return_value = json.dumps({"ok": True})
+        call = {"id": "c9", "kernelId": "k1", "toolName": "t", "args": {}}
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
-            execute_and_report({"id": "c9", "toolName": "t", "args": {}}, [adapter], "http://pcc", "key")
+            with pytest.raises(TypeError):
+                execute_and_report(call, [adapter], "http://pcc", "key")  # no kernel id at all
+            for missing in (None, "", 7):
+                with pytest.raises(ValueError):
+                    execute_and_report(call, [adapter], "http://pcc", "key", missing)
 
         adapter.execute.assert_not_called()
         mock_pcc.assert_not_called()
@@ -178,7 +184,7 @@ class TestExecuteAndReport:
         call = {"id": "c8", "kernelId": "someone-elses", "toolName": "t", "args": {}}
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
-            execute_and_report(call, [adapter], "http://pcc", "key", kernel_id="k1")
+            assert execute_and_report(call, [adapter], "http://pcc", "key", kernel_id="k1") is False
 
         adapter.execute.assert_not_called()
         mock_pcc.assert_not_called()
@@ -215,7 +221,50 @@ class TestExecuteAndReport:
 
         with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
             mock_pcc.return_value = (200, {})
-            execute_and_report(call, [adapter1, adapter2], "http://pcc", "key")
+            execute_and_report(call, [adapter1, adapter2], "http://pcc", "key", "k1")
 
         adapter1.execute.assert_called_once()
         adapter2.execute.assert_called_once()
+
+
+class TestRunPendingOnce:
+    """The path from polling to execution binds every call to the polled kernel."""
+
+    def _gateway(self, calls):
+        """A fake PCC: GET pending answers `calls`; POST tool-result is recorded."""
+        posted = []
+
+        def pcc_request(method, path, body=None, base_url=None, api_key=None):
+            if method == "GET":
+                return 200, {"calls": calls}
+            posted.append((path, body))
+            return 200, {}
+
+        return pcc_request, posted
+
+    def test_a_foreign_call_in_the_polled_list_never_touches_the_device(self):
+        adapter = mock.Mock()
+        adapter.device_type = "test"
+        adapter.execute.return_value = json.dumps({"ok": True})
+        calls = [
+            {"id": "mine", "kernelId": "k1", "toolName": "t", "args": {"n": 1}},
+            {"id": "foreign", "kernelId": "k2", "toolName": "t", "args": {"n": 2}},
+            {"id": "unstated", "toolName": "t", "args": {"n": 3}},
+            "not-a-call",
+        ]
+        fake, posted = self._gateway(calls)
+        with mock.patch("pcc_node.executor.pcc_request", side_effect=fake) as mock_pcc:
+            assert run_pending_once([adapter], "http://pcc", "key", "k1") == (2, 2)
+
+        assert mock_pcc.call_args_list[0][0][:2] == ("GET", "/api/relay/k1/tool-call/pending")
+        assert [c.args for c in adapter.execute.call_args_list] == [("t", {"n": 1}), ("t", {"n": 3})]
+        assert [(path, body["callId"]) for path, body in posted] == [
+            ("/api/relay/k1/tool-result", "mine"),
+            ("/api/relay/k1/tool-result", "unstated"),
+        ]
+
+    def test_it_needs_the_kernel_it_polls(self):
+        with mock.patch("pcc_node.executor.pcc_request") as mock_pcc:
+            with pytest.raises(ValueError):
+                run_pending_once([], "http://pcc", "key", "")
+        mock_pcc.assert_not_called()

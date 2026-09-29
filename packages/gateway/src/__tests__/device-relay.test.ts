@@ -1327,3 +1327,64 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// astra r1 on #400, item 3: rows the retired /api/ot2 writer left behind can link
+// a call on one kernel to a scope held on another. Such a link grants nothing.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("N4b-gw: a call linked to another kernel's scope stays on its own kernel", () => {
+  async function crossLinkedCall(status: string) {
+    const foreignScope = await mintScope("holder-2", ["run_create"], "kernel-test-2");
+    const id = `legacy-${status}-${Date.now().toString(36)}`;
+    getStore().db.insert(toolCallRelay).values({
+      id,
+      scopeId: foreignScope,
+      kernelId: "kernel-test-1",
+      toolName: "run_create",
+      toolArgs: {},
+      status,
+      result: JSON.stringify({ secret: "kernel-test-1 data" }),
+      createdAt: new Date().toISOString(),
+    }).run();
+    return { id, foreignScope };
+  }
+
+  it("the other kernel's scope holder can't read the call's result; the operator can", async () => {
+    const { id } = await crossLinkedCall("completed");
+    const holder = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${id}`, headers: asKey("holder-2") });
+    expect(holder.statusCode).toBe(403);
+    const operator = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${id}`, headers: op });
+    expect(operator.statusCode).toBe(200);
+  });
+
+  it("the scope's audit on its own kernel does not list the other kernel's call", async () => {
+    const { id, foreignScope } = await crossLinkedCall("completed");
+    const res = await app.inject({ method: "GET", url: `/api/relay/kernel-test-2/scope/${foreignScope}/audit`, headers: asKey("holder-2") });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.stringify(res.json())).not.toContain(id);
+    expect(JSON.stringify(res.json())).not.toContain("kernel-test-1 data");
+  });
+
+  it("revoking the scope leaves the other kernel's pending call alone", async () => {
+    const { id, foreignScope } = await crossLinkedCall("pending");
+    const res = await app.inject({ method: "POST", url: `/api/relay/kernel-test-2/scope/${foreignScope}/revoke`, headers: asKey(OPERATOR_2) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().rejectedPendingCalls).toBe(0);
+    const row = getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get();
+    expect(row!.status).toBe("pending");
+  });
+
+  it("a failed result on one kernel does not spend another kernel's scope retries", async () => {
+    const { id, foreignScope } = await crossLinkedCall("claimed");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      headers: op,
+      payload: { callId: id, error: "boom" },
+    });
+    expect(res.statusCode).toBe(200);
+    const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, foreignScope)).get();
+    expect(scope!.retryCount).toBe(0);
+  });
+});

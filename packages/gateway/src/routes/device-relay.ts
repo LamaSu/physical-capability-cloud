@@ -262,8 +262,10 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
  * Parity with the retired /api/ot2/tool-call: a scoped write under a scope
  * bound to a job is refused while that job's escrow exists and is not funded.
  * Unlike the legacy route, a lookup error refuses the call instead of
- * letting it through. N4b-gw item 5 (gateway, R30) replaces this with the
- * accepted, funded job and committed-protocol check.
+ * letting it through. This is parity, not a funding gate: a job with no
+ * session, CWM or escrow record, or a completed escrow, does not stop the
+ * call. N4b-gw item 5 (gateway, R30) replaces this with the accepted, funded
+ * job and committed-protocol check.
  */
 function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | null {
   if (!scope.jobId) return null;
@@ -728,12 +730,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       }
     }
 
-    // If failed and scope has retries left, update retry count
+    // If failed and scope has retries left, update retry count. Only a scope on
+    // this call's own kernel counts: an old row can link a call to another kernel's scope.
     if (error && call.scopeId) {
       const scope = db
         .select()
         .from(executionScopes)
-        .where(eq(executionScopes.id, call.scopeId))
+        .where(and(eq(executionScopes.id, call.scopeId), eq(executionScopes.kernelId, call.kernelId)))
         .get();
 
       if (scope && scope.retryCount < scope.maxRetries) {
@@ -778,10 +781,16 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Tool call not found", id });
     }
 
-    // Object owner: the kernel operator, or the creator of the call's scope.
+    // Object owner: the kernel operator, or the creator of the call's scope. The
+    // scope must be on this kernel too: the retired /api/ot2 writer could link a
+    // call to another kernel's scope, and that link grants nothing.
     const principal = relayPrincipal(req)!;
     const scope = call.scopeId
-      ? db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get()
+      ? db
+          .select()
+          .from(executionScopes)
+          .where(and(eq(executionScopes.id, call.scopeId), eq(executionScopes.kernelId, kernelId)))
+          .get()
       : undefined;
     const allowed = scope
       ? ownsScope(scope, kernelId, principal)
@@ -945,7 +954,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.post<{
     Params: { kernelId: string; scopeId: string };
   }>("/api/relay/:kernelId/scope/:scopeId/revoke", async (req, reply) => {
-    const { scopeId } = req.params;
+    const { kernelId, scopeId } = req.params;
 
     const { db } = getStore();
     const scope = ownedScopeOrReply(req, reply);
@@ -960,11 +969,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       .where(eq(executionScopes.id, scopeId))
       .run();
 
-    // Reject any pending tool calls under this scope
+    // Reject any pending tool calls under this scope, on this kernel only.
     const pendingCalls = db
       .select()
       .from(toolCallRelay)
-      .where(eq(toolCallRelay.scopeId, scopeId))
+      .where(and(eq(toolCallRelay.scopeId, scopeId), eq(toolCallRelay.kernelId, kernelId)))
       .all();
 
     const now = new Date().toISOString();
@@ -995,7 +1004,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     Params: { kernelId: string; scopeId: string };
     Querystring: { limit?: string };
   }>("/api/relay/:kernelId/scope/:scopeId/audit", async (req, reply) => {
-    const { scopeId } = req.params;
+    const { kernelId, scopeId } = req.params;
     const limit = Math.min(parseInt(req.query.limit ?? "100", 10), 500);
 
     const { db } = getStore();
@@ -1003,10 +1012,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const scope = ownedScopeOrReply(req, reply);
     if (!scope) return reply;
 
+    // This kernel's calls only, whatever other rows name the scope.
     const calls = db
       .select()
       .from(toolCallRelay)
-      .where(eq(toolCallRelay.scopeId, scopeId))
+      .where(and(eq(toolCallRelay.scopeId, scopeId), eq(toolCallRelay.kernelId, kernelId)))
       .orderBy(toolCallRelay.createdAt)
       .limit(limit)
       .all();

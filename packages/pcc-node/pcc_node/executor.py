@@ -244,7 +244,13 @@ def poll_pending_jobs(pcc_base, api_key, kernel_id):
     return calls if isinstance(calls, list) else []
 
 
-def execute_and_report(call, adapters, pcc_base, api_key, kernel_id=None):
+def _require_kernel_id(kernel_id):
+    if not isinstance(kernel_id, str) or not kernel_id:
+        raise ValueError("the kernel id this node polled is required: a call runs only for that kernel")
+    return kernel_id
+
+
+def execute_and_report(call, adapters, pcc_base, api_key, kernel_id):
     """Execute a tool call using the appropriate adapter, report result to PCC.
 
     Parameters
@@ -258,25 +264,24 @@ def execute_and_report(call, adapters, pcc_base, api_key, kernel_id=None):
         PCC gateway base URL.
     api_key : str
         Bearer token (the kernel operator's).
-    kernel_id : str, optional
-        The kernel this node polled. It wins over ``call["kernelId"]``, and a
-        call that names a different kernel is refused.
+    kernel_id : str
+        The kernel this node polled (required). A call runs only for it: one that
+        names a different kernel is refused before any adapter is touched, and
+        the result is reported to this kernel's relay path.
+
+    Returns True when the call ran, False when it was refused.
     """
+    kernel = _require_kernel_id(kernel_id)
     call_id = call.get("id", "unknown")
     tool_name = call.get("toolName", "")
     # The relay names the arguments "args"; older payloads used "toolArgs".
     tool_args = call.get("args", call.get("toolArgs", {}))
 
-    # Decide where the result goes BEFORE touching the device: a call whose
-    # result cannot be reported must not run.
+    # Decide BEFORE touching the device: a call for another kernel never runs here.
     stated = call.get("kernelId")
-    if kernel_id and stated and stated != kernel_id:
-        log.error(f"Call {call_id} names kernel {stated!r}, not the polled {kernel_id!r}; refusing it")
-        return
-    kernel = kernel_id or stated
-    if not kernel:
-        log.error(f"No kernel id for call {call_id}; refusing to execute what cannot be reported")
-        return
+    if stated is not None and stated != kernel:
+        log.error(f"Call {call_id} names kernel {stated!r}, not the polled {kernel!r}; refusing it")
+        return False
 
     log.info(f"Executing {tool_name}({json.dumps(tool_args)[:100]}) [call={call_id}]")
 
@@ -304,3 +309,21 @@ def execute_and_report(call, adapters, pcc_base, api_key, kernel_id=None):
     )
     if status != 200:
         log.error(f"Failed to post result for {call_id}: HTTP {status}")
+    return True
+
+
+def run_pending_once(adapters, pcc_base, api_key, kernel_id):
+    """Poll this kernel's pending calls and execute each one, bound to the same kernel.
+
+    This is the path from polling to execution: the kernel that was polled is the
+    only kernel a call may run for, whatever the response says. Returns
+    ``(executed, refused)``.
+    """
+    kernel = _require_kernel_id(kernel_id)
+    executed = refused = 0
+    for call in poll_pending_jobs(pcc_base, api_key, kernel):
+        if isinstance(call, dict) and execute_and_report(call, adapters, pcc_base, api_key, kernel):
+            executed += 1
+        else:
+            refused += 1
+    return executed, refused
