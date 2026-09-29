@@ -4202,6 +4202,34 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "an overturned unit paid a payee");
     }
 
+    /// @dev Tier-0 buyer approval (`approveByBuyer`'s own `_allocateRelease` call site) with every push failing:
+    ///      state 6 with both principal legs open.
+    function test_Fence_Tier0Approve_ReleaseOutstanding_EveryExitRefused() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 0);
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
+        bytes32 id = _unitId(e);
+        uint256 payerAfterFunding = usdc.balanceOf(payer);
+        VNextSettlementEscrow.BuyerApproval memory a = _buyerApproval(e, id);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        vm.prank(payer);
+        e.approveByBuyer(id, a, "");
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        uint256[] memory legs = new uint256[](2);
+        ClaimClass[] memory classes = new ClaimClass[](2);
+        (legs[0], classes[0]) = (0, ClaimClass.PRINCIPAL);
+        (legs[1], classes[1]) = (1, ClaimClass.PRINCIPAL);
+        bytes32[] memory claims = _claimIds(e, id, legs, classes);
+
+        vm.warp(c[0].reclaimAt);
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NoEmergency.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), c[0].n, "approval paid exactly n, once");
+        assertEq(usdc.balanceOf(payer), payerAfterFunding, "an approved unit also refunded the payer");
+    }
+
     function test_Fence_Tier0_ApproveThenReclaim_RefundIsRefused() public {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 0);
         VNextSettlementEscrow e = _fundedEscrow(JOB, c);

@@ -1605,6 +1605,33 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         _assertBucketsCovered(e);
     }
 
+    /// @dev Emergency silence on a CHALLENGED unit: the refund AND the whole bond (returned: the challenge was
+    ///      vindicated) both left open by failing pushes.
+    function test_Fence_EmergencySilenceWhileChallenged_RefundAndBondOutstanding_EveryExitRefused() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        uint256 bond = _challenge(e, id);
+        uint256 disabledAt = block.timestamp;
+        attester.disableAtNow();
+        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        e.finalize(id); // the emergency-silence refund (reason 3), bond disposed RETURN_ALL
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.REFUND_ALLOCATED));
+        bytes32[] memory claims = _refundClaims(e, id, true);
+        assertEq(e.claimOf(claims[1]).amount, bond, "the whole bond is owed back to the challenger");
+
+        vm.warp(e.reclaimAtOf(id));
+        _assertEveryExitRefused(e, id, claims, VNextSettlementEscrow.NotActive.selector);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        _dischargeEachOnce(e, claims);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+        assertEq(usdc.balanceOf(payer), payerBefore + G, "refund and bond returned exactly once");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2) + usdc.balanceOf(feeDest), 0, "a refund paid a payee");
+        _assertBucketsCovered(e);
+    }
+
     function test_Fence_BackupRelease_ClaimsOutstanding_EveryExitRefused() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _commit(e, id, PKG);
