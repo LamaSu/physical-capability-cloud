@@ -635,7 +635,8 @@ describe("F. the leaderboard reads every page of /api/capabilities", () => {
 
     expect(calls).toEqual(["offset=0&limit=200", "offset=200&limit=200"]);
     expect(t).toContain("Ranked over the first 200 of the 300 capabilities");
-    expect(t).toMatch(/\d\+/);
+    // One kernel read so far: the KPI is a lower bound, not the network's kernel count.
+    expect(t).toMatch(/Kernels\s*1\+/);
   });
 });
 
