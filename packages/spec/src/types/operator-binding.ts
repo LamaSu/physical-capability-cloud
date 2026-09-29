@@ -15,14 +15,22 @@
  * resolves from its own payout-destination store (N21). A binding never sets,
  * changes or authorizes a payout, and grants no spend authority (R41).
  *
+ * Capability types are CSD urls (amendment A1). A binding, a kit and an
+ * opportunity compare capability types directly, so a legacy type string such
+ * as "3d-printing" can never silently fail to match. Capacity whose legacy type
+ * resolves to no CSD is listed in `unmappedCapacity`, never claimable, so an
+ * operator can see why it matches nothing.
+ *
  * v0, FROZEN FOR CONSUMERS (steward ruling #3058): adk, readmodels,
  * operator-ux and refvertical build against this shape. Any change needs
- * their ack on the bus first; a breaking change is a new version.
+ * their ack on the bus first; a breaking change is a new version. adk (#3785)
+ * and operator-ux (#3997) acked amendment A1.
  */
 
 import { z } from "zod";
 
 import type { SHA256, Timestamp } from "./common.js";
+import { CSD_CAPABILITY_URL_PATTERN } from "./capability-kit.js";
 
 export const OPERATOR_BINDING_SCHEMA = "pcc.operator-binding.v0" as const;
 
@@ -32,6 +40,7 @@ export type ExecutorKind = "machine" | "human" | "digital" | "workcell" | "fleet
 export interface OperatorBindingEntry {
   kind: "kernel" | "skill" | "digital-kernel";
   id: string;
+  /** CSD url of the capability this binding serves, e.g. pcc://capabilities/liquid-handling/v1. */
   capabilityType: string;
   /** The Capability Kit version this binding hosts, if any. */
   kitDigest: SHA256 | null;
@@ -40,6 +49,14 @@ export interface OperatorBindingEntry {
   /** Capped by the server from proven evidence; never the self-declared tier. */
   assuranceTierCap: 0 | 1 | 2 | 3;
   lastSeenAt: Timestamp | null;
+}
+
+/** Capacity the server knows about whose legacy type resolves to no CSD. Never claimable. */
+export interface OperatorUnmappedCapacity {
+  kind: "kernel" | "skill" | "digital-kernel";
+  id: string;
+  /** The legacy type string as recorded, e.g. "3d-printing". */
+  legacyType: string;
 }
 
 export interface OperatorPayeeView {
@@ -60,11 +77,13 @@ export interface OperatorBindingDTO {
   };
   executorKinds: ExecutorKind[];
   bindings: OperatorBindingEntry[];
+  /** Capacity that matches no CSD, and so no work; shown so the operator sees why. */
+  unmappedCapacity: OperatorUnmappedCapacity[];
   /** From the server's payout-destination store only; null when none is set. */
   payee: OperatorPayeeView | null;
   moneyAuthority: "none";
   executionAuthority: {
-    /** Capability types the principal may claim work for, derived from bindings. */
+    /** CSD urls the principal may claim work for, derived from bindings. */
     canClaimCapabilityTypes: string[];
   };
   /** READ time of this projection. */
@@ -104,12 +123,20 @@ export const OperatorBindingEntrySchema = z
   .object({
     kind: z.enum(["kernel", "skill", "digital-kernel"]),
     id: z.string().min(1),
-    capabilityType: z.string().min(1),
+    capabilityType: z.string().regex(CSD_CAPABILITY_URL_PATTERN, "Must be a CSD url"),
     kitDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable(),
     presence: z.enum(["online", "offline", "unknown"]),
     availability: z.record(z.unknown()).nullable(),
     assuranceTierCap: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
     lastSeenAt: z.string().nullable(),
+  })
+  .strict();
+
+export const OperatorUnmappedCapacitySchema = z
+  .object({
+    kind: z.enum(["kernel", "skill", "digital-kernel"]),
+    id: z.string().min(1),
+    legacyType: z.string().min(1).max(120),
   })
   .strict();
 
@@ -124,10 +151,11 @@ export const OperatorBindingDTOSchema = z
       .strict(),
     executorKinds: z.array(z.enum(["machine", "human", "digital", "workcell", "fleet"])),
     bindings: z.array(OperatorBindingEntrySchema),
+    unmappedCapacity: z.array(OperatorUnmappedCapacitySchema).max(500),
     payee: OperatorPayeeViewSchema.nullable(),
     moneyAuthority: z.literal("none"),
     executionAuthority: z
-      .object({ canClaimCapabilityTypes: z.array(z.string().min(1)) })
+      .object({ canClaimCapabilityTypes: z.array(z.string().regex(CSD_CAPABILITY_URL_PATTERN, "Must be a CSD url")) })
       .strict(),
     asOf: z.string().min(1),
   })

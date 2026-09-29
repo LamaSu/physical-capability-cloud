@@ -179,6 +179,7 @@ function binding(overrides: Partial<OperatorBindingDTO> = {}): OperatorBindingDT
       source: "payout-wallet-store (N21)",
       verified: false,
     },
+    unmappedCapacity: [],
     moneyAuthority: "none",
     executionAuthority: { canClaimCapabilityTypes: ["pcc://capabilities/liquid-handling/v1"] },
     asOf: "2026-09-24T12:00:01Z",
@@ -334,5 +335,38 @@ describe("v0 amendment 1 (2026-09-29): A2, A3, A5, A6", () => {
       expect(CapabilityKitManifestV1Schema.safeParse(withName(bad)).success, bad).toBe(false);
       await expect(computeKitDigest(withName(bad)), bad).rejects.toThrow();
     }
+  });
+});
+
+describe("v0 amendment 1 (2026-09-29): A1, capability types are CSD urls", () => {
+  it("a binding's capabilityType must be a CSD url, not a legacy type string", () => {
+    const legacy = binding();
+    legacy.bindings = [{ ...legacy.bindings[0]!, capabilityType: "3d-printing" }];
+    legacy.executionAuthority = { canClaimCapabilityTypes: [] };
+    expect(OperatorBindingDTOSchema.safeParse(legacy).success).toBe(false);
+  });
+
+  it("claim rights must be CSD urls as well", () => {
+    const res = OperatorBindingDTOSchema.safeParse(binding({ executionAuthority: { canClaimCapabilityTypes: ["liquid-handling"] } }));
+    expect(res.success).toBe(false);
+  });
+
+  it("unmappedCapacity lists legacy capacity honestly and is required", () => {
+    const withUnmapped = binding({ unmappedCapacity: [{ kind: "kernel", id: "kernel-fdm-b", legacyType: "3d-printing" }] });
+    expect(OperatorBindingDTOSchema.safeParse(withUnmapped).success).toBe(true);
+    const { unmappedCapacity: _drop, ...missing } = binding();
+    expect(OperatorBindingDTOSchema.safeParse(missing).success).toBe(false);
+    const smuggled = binding({ unmappedCapacity: [{ kind: "kernel", id: "k", legacyType: "x", ...({ claimable: true } as object) }] });
+    expect(OperatorBindingDTOSchema.safeParse(smuggled).success).toBe(false);
+  });
+
+  it("unmapped capacity can never become claimable", () => {
+    const res = OperatorBindingDTOSchema.safeParse(
+      binding({
+        unmappedCapacity: [{ kind: "kernel", id: "kernel-fdm-b", legacyType: "3d-printing" }],
+        executionAuthority: { canClaimCapabilityTypes: ["pcc://capabilities/liquid-handling/v1", "3d-printing"] },
+      }),
+    );
+    expect(res.success).toBe(false);
   });
 });
