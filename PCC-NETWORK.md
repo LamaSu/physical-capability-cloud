@@ -68,7 +68,8 @@ Pick whichever fits you:
   poll → evaluate → claim → execute → heartbeat → evidence loop around one `executeJob`
   handler you supply, so a coding agent becomes a *persistent* PCC operator rather than a
   one-shot tool call. Until it exists, an agent can run that loop against the API itself:
-  `GET /api/job-offers/open?capabilityType=<type>`, then `POST /api/job-offers/:id/claim`.
+  `GET /api/job-offers/open?capabilityType=<type>`, then `POST /api/job-offers/:id/claim`
+  with an API key and a JSON body naming the claiming kernel (`{"kernelId": "..."}`).
 
 ---
 

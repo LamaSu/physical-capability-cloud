@@ -78,12 +78,14 @@ different need:
 
 There is no packaged runtime for this yet: no `@pcc/operator-agent-runtime`
 package exists. Until there is, poll the open job-offers feed (public, no key
-needed) and claim a match with your API key:
+needed), then claim a match for your kernel with your API key:
 
 ```bash
 curl "https://capability.network/api/job-offers/open?capabilityType=manufacturing.fdm"
 curl -X POST "https://capability.network/api/job-offers/<id>/claim" \
-  -H "Authorization: Bearer pcc_live_..."
+  -H "Authorization: Bearer pcc_live_..." \
+  -H "Content-Type: application/json" \
+  -d '{"kernelId": "<your kernel id>"}'
 ```
 
 ## Troubleshoot
