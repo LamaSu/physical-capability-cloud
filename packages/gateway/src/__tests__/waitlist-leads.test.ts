@@ -115,3 +115,34 @@ describe("waitlist leads", () => {
     }
   });
 });
+
+describe("a lead's budget starts at its first recorded save, whoever made its token (astra, pack 53: NEW-3 / new defect 1)", () => {
+  it("[neg] a page-made token: after its first save, the lead's updates draw on the LEAD's budget, not the exhausted per-IP window", async () => {
+    const ip = "198.51.100.177";
+    // 79 other signups from the same (NAT'd) address: the per-IP window (80) is one short of full.
+    for (let i = 0; i < 79; i += 1) {
+      const r = await app.inject({ method: "POST", url: "/api/waitlist", payload: { email: `crowd${i}@x.test`, leadId: `lead-crowd-${i}` }, remoteAddress: ip });
+      expect(r.statusCode).toBe(200);
+    }
+    const token = "a1b2c3d4e5f60718293a4b5c6d7e8f901234"; // made by the page (36 hex characters)
+    const first = await app.inject({ method: "POST", url: "/api/waitlist", payload: { email: "dee@x.test", leadId: "lead-dee", leadToken: token }, remoteAddress: ip });
+    expect(first.statusCode).toBe(200); // the 80th request: the window is now full
+    const next = await app.inject({
+      method: "POST",
+      url: "/api/waitlist",
+      payload: { email: "dee@x.test", leadId: "lead-dee", leadToken: token, name: "Dee" },
+      remoteAddress: ip,
+    });
+    expect(next.statusCode).toBe(200);
+  });
+
+  it("control: a stranger's NEW lead from the same address is still limited by the full per-IP window", async () => {
+    const ip = "198.51.100.178";
+    for (let i = 0; i < 80; i += 1) {
+      await app.inject({ method: "POST", url: "/api/waitlist", payload: { email: `busy${i}@x.test`, leadId: `lead-busy-${i}` }, remoteAddress: ip });
+    }
+    const fresh = await app.inject({ method: "POST", url: "/api/waitlist", payload: { email: "new@x.test", leadId: "lead-new", leadToken: "ffffeeeeddddccccbbbbaaaa999988887777" }, remoteAddress: ip });
+    expect(fresh.statusCode).toBe(429);
+  });
+});
+

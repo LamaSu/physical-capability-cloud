@@ -28,7 +28,7 @@ import type { FastifyRequest } from "fastify";
 export const ADMIN_KEY_HEADER = "x-admin-key";
 
 export type AdminKeyCheck =
-  | { ok: true; mode: "key" | "dev-open" }
+  | { ok: true; mode: "key" }
   | { ok: false; status: 401 | 403 | 503; error: string; message: string };
 
 function digest(value: string): Buffer {
@@ -43,16 +43,17 @@ export function adminKeyMatches(provided: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/** Only these exact NODE_ENV values may run without a configured admin key. */
-function devOpenAllowed(): boolean {
-  const env = process.env.NODE_ENV;
-  return env === "test" || env === "development";
-}
-
+/**
+ * The admin secret gate. There is NO environment exception (N2; astra, pack 53
+ * verdict, weakest link). An unset or blank PCC_ADMIN_KEY refuses in every
+ * environment. It used to succeed (mode "dev-open") when NODE_ENV was "test" or
+ * "development", so a deployment running that way without a key served every
+ * privileged view, for example the cross-tenant audit log, to any caller
+ * presenting any X-Admin-Key.
+ */
 export function checkAdminKey(req: FastifyRequest): AdminKeyCheck {
   const expected = process.env.PCC_ADMIN_KEY;
   if (typeof expected !== "string" || expected.trim().length === 0) {
-    if (devOpenAllowed()) return { ok: true, mode: "dev-open" };
     return {
       ok: false,
       status: 503,

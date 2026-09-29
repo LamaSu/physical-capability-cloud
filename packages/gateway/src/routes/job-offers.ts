@@ -47,6 +47,9 @@ import {
   type GeoFence,
   type PricingSpec,
 } from "../services/job-offers-store.js";
+import { callerIdentity } from "../auth/admin-secret-gate.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
+import { getRepos } from "../db.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -304,14 +307,38 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         message: "event (or kind) is required. Common values: acknowledged, in_progress, progress_update, delivered, error, cancelled, note.",
       });
     }
+    // The offer's PARTIES only (the AG-25 inspection that astra's pack 54 asked
+    // for). This route let ANY key record an event on ANY offer, with its author
+    // ("by") taken from the body. Events drive status, so "cancelled" bypassed the
+    // owner-only DELETE, and "delivered" could be forged. Now:
+    //   - the caller is the attached identity (never the X-Posted-By header), and is
+    //     the event's author;
+    //   - "cancelled" is the poster's, as DELETE;
+    //   - "delivered", "in_progress" and "pickup" are the claimant's: the owner of
+    //     the kernel that claimed the offer;
+    //   - anything else (notes, progress) is either party's.
+    const caller = callerIdentity(req);
+    if (caller === null) return reply.code(401).send({ error: "authentication_required" });
     const store = getJobOffersStore();
-    const result = store.recordEvent(
-      req.params.id,
-      eventKind,
-      b.by ?? null,
-      b.payload ?? null,
-      b.note ?? null,
-    );
+    const offer = store.get(req.params.id);
+    if (!offer) return reply.code(404).send({ error: "not_found" });
+    const isPoster = typeof offer.posterDid === "string" && sameIdentity(offer.posterDid, caller);
+    const claimKernel = offer.claimedByKernelId ? getRepos().kernels.findById(offer.claimedByKernelId) : undefined;
+    const isClaimant =
+      !!claimKernel && typeof claimKernel.operatorAddress === "string" && sameIdentity(claimKernel.operatorAddress, caller);
+    const allowed =
+      eventKind === "cancelled"
+        ? isPoster
+        : eventKind === "delivered" || eventKind === "in_progress" || eventKind === "pickup"
+          ? isClaimant
+          : isPoster || isClaimant;
+    if (!allowed) {
+      return reply.code(403).send({
+        error: "forbidden",
+        message: "Only the offer's poster or claimant records its events; cancelling is the poster's and delivery is the claimant's.",
+      });
+    }
+    const result = store.recordEvent(req.params.id, eventKind, caller, b.payload ?? null, b.note ?? null);
     if (!result.ok) return reply.code(404).send({ error: "not_found" });
     return { ok: true, status: result.status, event: result.event };
   });

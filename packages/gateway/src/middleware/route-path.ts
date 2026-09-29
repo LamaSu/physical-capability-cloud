@@ -47,7 +47,19 @@ export function authPath(req: FastifyRequest): string {
   // /api/* — verified true today (no wildcard/`*` route is registered under
   // /api/*; see apigate-registered-public-surface.test.ts's wildcard-routes
   // test) — and would need re-checking the day one is added.
-  const raw = req.url.split("?")[0];
+  return decodedRequestPath(req.url);
+}
+
+/**
+ * The request path with its query string stripped and %-decoded: authPath's
+ * fallback, exported so the not-found handler (server.ts, SERVE_DASHBOARD)
+ * classifies an unmatched request by the SAME path apiGate authorized. It used to
+ * test the raw url, so an unmatched /%61pi/... was authorized as /api/... and then
+ * answered with the SPA (astra, pack 59, AZ-6). Malformed %-encoding keeps the raw
+ * path.
+ */
+export function decodedRequestPath(url: string): string {
+  const raw = url.split("?")[0];
   try {
     return decodeURIComponent(raw);
   } catch {

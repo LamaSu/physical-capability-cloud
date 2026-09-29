@@ -15,9 +15,9 @@
  * Gating (HALT-safe + least-privilege):
  *   • Inert unless PCC_FUNNEL_ENABLED==="true"  → 404 not_enabled.
  *   • Registered AFTER apiGate, so the caller is authenticated.
- *   • Admin-only: operatorId must be in PCC_OBSERVABILITY_ADMINS (comma-sep).
- *     When that var is unset, access is allowed ONLY in non-production
- *     (NODE_ENV !== "production") to keep local dev frictionless.
+ *   • Admin-only: the admin SECRET (X-Admin-Key = PCC_ADMIN_KEY, via
+ *     requireAdminSecret). There is no allowlist and no environment exception: an
+ *     unset key refuses (503) in every environment (N2).
  *
  * NOTE: for interactive, span-level trace replay use Sentry's Trace Explorer
  * (already wired) — paste the trace_id. These endpoints give the aggregate /
@@ -45,9 +45,9 @@ const TRACE_ID_RE = /^tr_[0-9a-f]{16,32}$/;
  * ERRORS views read the `agent.report` audit event that POST /api/feedback emits
  * regardless of that flag, so they are enabled by DEFAULT (requireFunnel=false) and
  * protected by the admin gate alone — no need to turn on journey recording just to
- * read agent feedback. SECURITY: the admin gate fails closed in production (no
- * PCC_OBSERVABILITY_ADMINS ⇒ 403); ensure NODE_ENV=production in prod so the
- * no-allowlist path denies. Set PCC_OBSERVABILITY_ADMINS to grant specific operators.
+ * read agent feedback. SECURITY: the admin gate is the admin secret, in every
+ * environment (N2). PCC_OBSERVABILITY_ADMINS grants nothing; it stays reserved from
+ * self-service claims (auth/reserved-identities.ts).
  */
 function guard(
   req: FastifyRequest,
@@ -62,7 +62,7 @@ function guard(
     return false;
   }
   // WP-A round 5 (coord-watch #2883): the admin SECRET, not an asserted operatorId on
-  // PCC_OBSERVABILITY_ADMINS. checkAdminKey fails closed outside test/development; the
+  // PCC_OBSERVABILITY_ADMINS. checkAdminKey fails closed in every environment (N2); the
   // old PCC_OBSERVABILITY_DEV_OPEN opt-in is gone with the allowlist.
   return requireAdminSecret(req, reply);
 }

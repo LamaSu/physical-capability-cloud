@@ -66,11 +66,13 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     });
     expect(post.statusCode).toBe(201);
 
-    // 1) the feedback stream view (reads agent.report audit events) shows it
+    // 1) the feedback stream view (reads agent.report audit events) shows it. It is
+    // an admin view, so it needs the admin secret in every environment (N2).
+    process.env.PCC_ADMIN_KEY = "observability-view-test-admin-key";
     const stream = await app.inject({
       method: "GET",
       url: "/api/admin/observability/feedback",
-      headers: { "x-admin-token": "t" },
+      headers: { "x-admin-key": "observability-view-test-admin-key" },
     });
     expect(stream.statusCode).toBe(200);
     const reports = stream.json().reports as Array<Record<string, unknown>>;
@@ -83,12 +85,13 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
       last_error_code: "TIER_MISMATCH",
     });
 
-    // 2) the error histogram view counts its errorCode
+    // 2) the error histogram view counts its errorCode (also an admin view: the secret)
     const errors = await app.inject({
       method: "GET",
       url: "/api/admin/observability/errors",
-      headers: { "x-admin-token": "t" },
+      headers: { "x-admin-key": "observability-view-test-admin-key" },
     });
+    delete process.env.PCC_ADMIN_KEY;
     expect(errors.statusCode).toBe(200);
     const hist = errors.json().by_error_code as Array<{ error_code: string; count: number }>;
     expect(hist.find((h) => h.error_code === "TIER_MISMATCH")?.count).toBeGreaterThanOrEqual(1);

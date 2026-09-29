@@ -45,14 +45,13 @@ describe("checkAdminKey", () => {
     expect(checkAdminKey(req({ "x-admin-key": "k-124" }))).toMatchObject({ ok: false, status: 403 });
   });
 
-  it("fails closed (503) when unset, unless NODE_ENV is exactly test/development", () => {
+  it("[neg] fails closed (503) when unset, in EVERY environment (N2 has no environment exception)", () => {
     delete process.env.PCC_ADMIN_KEY;
-    process.env.NODE_ENV = "production";
-    expect(checkAdminKey(req({ "x-admin-key": "x" }))).toMatchObject({ ok: false, status: 503 });
-    process.env.NODE_ENV = "development";
-    expect(checkAdminKey(req({}))).toEqual({ ok: true, mode: "dev-open" });
-    process.env.NODE_ENV = "test";
-    expect(checkAdminKey(req({}))).toEqual({ ok: true, mode: "dev-open" });
+    for (const env of ["production", "development", "test", ""]) {
+      process.env.NODE_ENV = env;
+      expect(checkAdminKey(req({ "x-admin-key": "x" })), env).toMatchObject({ ok: false, status: 503 });
+      expect(checkAdminKey(req({})), env).toMatchObject({ ok: false, status: 503 });
+    }
   });
 
   it("never echoes the secret in a refusal", () => {
