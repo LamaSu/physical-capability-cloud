@@ -14,6 +14,10 @@
  *  - The faucet never reports a mint that did not happen, and never calls a submitted
  *    transaction a mint.
  *
+ * The fixes for the review of this PR at d5be8805 (CDP snapshot, exact principals, operation
+ * readiness, the legacy routes retired, session modes, provision, spend authority) are in
+ * fiat-ramp-readiness-ownership.test.ts.
+ *
  * The routes' configuration is read once per module instance, so each case builds a fresh
  * app (vi.resetModules) with the environment it needs.
  */
@@ -57,6 +61,7 @@ const ENV = [
   "PCC_DEMO_ROUTES",
   "PCC_ADMIN_KEY",
   "PCC_LEGACY_FIAT_WEBHOOKS",
+  "CDP_ONRAMP_APP_ID",
 ];
 const saved: Record<string, string | undefined> = {};
 const savedNodeEnv = process.env.NODE_ENV;
@@ -158,7 +163,7 @@ describe("NEGATIVE: an unconfigured provider fails closed (no provider-shaped da
     const body = (await call("GET", "/api/fiat-ramp/status")).json();
     expect(body.demoRoutes).toBe(false);
     for (const p of ["coinbase", "stripe", "yellowcard", "wise", "cdp"]) {
-      expect(body.providers[p], p).toMatchObject({ mock: true, environment: null, available: false });
+      expect(body.providers[p], p).toMatchObject({ configured: false, mock: true, environment: null, available: false });
     }
   });
 });
@@ -239,7 +244,8 @@ describe("NEGATIVE (coord-watch #2934): the gate and the client read the same sn
 // ── Demo ─────────────────────────────────────────────────────────────────────
 
 describe("PCC_DEMO_ROUTES=true: simulated responses, each marked mock/demo", () => {
-  for (const [, method, url, body] of OTHER_ROUTES) {
+  // A spend permission needs a wallet the caller created (fiat-ramp-readiness-ownership G).
+  for (const [, method, url, body] of OTHER_ROUTES.filter(([, , u]) => !u.includes("spend-permission"))) {
     it(`${method} ${url.split("?")[0]} -> 200 with mock:true, demo:true`, async () => {
       await buildApp({ PCC_DEMO_ROUTES: "true" });
       const res = await call(method, url, body);
@@ -380,18 +386,5 @@ describe("NEGATIVE: the faucet never reports a mint that did not happen", () => 
     const res = await call("GET", `/api/faucet/usdc?wallet=${WALLET_A}&amount=100`);
     expect(res.statusCode).toBe(405);
     expect(res.json()).toMatchObject({ success: false, error: "use_post" });
-  });
-});
-
-// ── Legacy (dev-only) credits ────────────────────────────────────────────────
-
-describe("NEGATIVE (coord-watch #2934): the dev-only legacy credit read is owner-scoped", () => {
-  it("a caller reads only its own credit balance; an admin reads any", async () => {
-    await buildApp({ PCC_LEGACY_FIAT_WEBHOOKS: "true", PCC_ADMIN_KEY: ADMIN });
-    // Mock credits: the legacy deposit credits the caller directly.
-    expect((await call("POST", "/api/fiat-ramp/stripe/credits/deposit", { amountUsd: 5 }, "user-1")).statusCode).toBe(200);
-    expect((await call("GET", "/api/fiat-ramp/stripe/credits/user-1", undefined, "user-1")).statusCode).toBe(200);
-    expect((await call("GET", "/api/fiat-ramp/stripe/credits/user-1", undefined, "user-2")).statusCode).toBe(404);
-    expect((await call("GET", "/api/fiat-ramp/stripe/credits/user-1", undefined, "user-2", { "x-admin-key": ADMIN })).statusCode).toBe(200);
   });
 });

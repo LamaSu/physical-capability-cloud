@@ -48,8 +48,18 @@ export class CdpOnrampClient {
         createdAt: new Date().toISOString(),
       };
     }
-    // Real hosted Coinbase Onramp URL. Funds settle on Base mainnet (onramp is real money).
-    const appId = this.cfg.onrampAppId ?? "";
+    // Real hosted Coinbase Onramp URL. Funds settle on Base mainnet (onramp is real money), so
+    // it is never built for a testnet client, nor without the project's app id (it used to
+    // fall back to an empty one).
+    if (this.network !== "base") {
+      throw new Error(
+        `Coinbase Onramp sells USDC on Base mainnet; this client is configured for ${this.network}, so no checkout was built.`,
+      );
+    }
+    const appId = this.cfg.onrampAppId?.trim();
+    if (!appId) {
+      throw new Error("No Coinbase Onramp app id (CDP_ONRAMP_APP_ID) is configured, so no checkout was built.");
+    }
     const addresses = encodeURIComponent(JSON.stringify({ [params.destinationAddress]: ["base"] }));
     const assets = encodeURIComponent(JSON.stringify(["USDC"]));
     const amt = params.presetAmountUSD

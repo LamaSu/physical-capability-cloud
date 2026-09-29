@@ -8,7 +8,7 @@
  * Mock: returns simulated sessions for testing without Stripe keys.
  */
 import type { Address, Id } from "@pcc/spec";
-import type { FiatRampSession } from "@pcc/spec";
+import type { FiatRampSession, RampSessionMode } from "@pcc/spec";
 
 export interface StripeOnrampConfig {
   secretKey: string;
@@ -58,6 +58,12 @@ export class StripeOnrampClient {
     return this.config.publishableKey;
   }
 
+  /** What this client's sessions are: simulated in mock mode, else the key's environment. */
+  get sessionMode(): RampSessionMode {
+    if (this.config.mock) return "simulated";
+    return this.config.secretKey.startsWith("sk_live_") ? "production" : "sandbox";
+  }
+
   /** Create an onramp session for a user to buy crypto */
   async createSession(params: CreateOnrampSessionParams): Promise<StripeOnrampSession> {
     if (this.config.mock) {
@@ -98,6 +104,7 @@ export class StripeOnrampClient {
       provider: "stripe",
       direction: "onramp",
       status: "created",
+      mode: this.sessionMode,
       fiatCurrency: "USD",
       fiatAmount: params.sourceAmount ?? "0",
       cryptoCurrency: params.destinationCurrency ?? "usdc",
@@ -126,6 +133,7 @@ export class StripeOnrampClient {
       provider: "stripe",
       direction: "onramp",
       status: "created",
+      mode: this.sessionMode,
       fiatCurrency: "USD",
       fiatAmount: params.sourceAmount ?? "0",
       cryptoCurrency: params.destinationCurrency ?? "usdc",
