@@ -92,6 +92,44 @@ describe("Job Submission API", () => {
 
   // ── POST /api/jobs/submit ────────────────────────────────────────────────
 
+  // ── N69: a job's capability must be on the job's kernel ──────────────────
+  // Submission stored a caller-named capabilityId as given, so a job could name a
+  // capability on ANOTHER kernel (or none at all). IP derivation (N10a), settlement
+  // and the catalog read the (kernel, capability) pair as given.
+  describe("N69: POST /api/jobs/submit refuses a capability that is not on the job's kernel", () => {
+    it("[neg] a capability on ANOTHER kernel is refused (400 capability_not_on_kernel), nothing written", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit",
+        payload: { stepId: "step-n69-cross", jobId: "job-n69-cross", kernelId: "kernel-nyc", capabilityId: "cap-sf-cnc" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("capability_not_on_kernel");
+      expect(getRepos().jobs.findById("job-n69-cross")).toBeFalsy();
+    });
+
+    it("[neg] an unknown capability is refused (400 capability_not_found), nothing written", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit",
+        payload: { stepId: "step-n69-unknown", jobId: "job-n69-unknown", kernelId: "kernel-nyc", capabilityId: "cap-does-not-exist" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("capability_not_found");
+      expect(getRepos().jobs.findById("job-n69-unknown")).toBeFalsy();
+    });
+
+    it("control: a capability ON the kernel is accepted and stored as given", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit",
+        payload: { stepId: "step-n69-ok", jobId: "job-n69-ok", kernelId: "kernel-nyc", capabilityId: "cap-nyc-fdm" },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(getRepos().jobs.findById("job-n69-ok")?.capabilityId).toBe("cap-nyc-fdm");
+    });
+  });
+
   describe("POST /api/jobs/submit", () => {
     it("accepts a valid job and returns immediately", async () => {
       const res = await app.inject({

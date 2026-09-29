@@ -268,6 +268,22 @@ export class JobFacade extends BaseFacade {
 
       // Resolve capability ID (fuzzy match if not provided)
       let resolvedCapabilityId = body.capabilityId;
+      // N69: a job's (kernel, capability) pair is always consistent. A capability the
+      // caller names must exist and be on THIS kernel, because IP derivation (N10a),
+      // settlement and the catalog read the pair as given. Submission used to store
+      // any named capabilityId as is. Checked before anything is written.
+      if (resolvedCapabilityId) {
+        const cap = this.repos.capabilities.findById(resolvedCapabilityId);
+        if (!cap) {
+          return this.badRequest("capability_not_found", `Capability '${resolvedCapabilityId}' not found`);
+        }
+        if (cap.kernelId !== kernelId) {
+          return this.badRequest(
+            "capability_not_on_kernel",
+            `Capability '${resolvedCapabilityId}' is not on kernel '${kernelId}'`,
+          );
+        }
+      }
       if (!resolvedCapabilityId) {
         const caps = this.repos.capabilities.findByKernel(kernelId);
         if (caps.length === 0) {

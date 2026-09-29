@@ -40,10 +40,25 @@ const BUYER = "r7-buyer";
 let seq = 0;
 const uid = (p: string) => `${p}-${Date.now().toString(36)}-${++seq}`;
 
-/** A kernel row with a known served tier. */
+/**
+ * A kernel row with a known served tier, and the capability `cap-<id>-r7` ON it, so
+ * a job's (kernel, capability) pair is consistent (N69) and these tests exercise the
+ * tier alone.
+ */
 function kernel(prefix: string, fields: Record<string, unknown>): string {
   const id = uid(prefix);
   ensureKernelRow(id, { operatorAddress: "r7-operator@example.com", ...fields });
+  getRepos().capabilities.insert({
+    id: `cap-${id}-r7`,
+    kernelId: id,
+    type: "r7-test",
+    name: "R7 test capability",
+    materials: [],
+    assuranceTiers: [0, 1, 2, 3],
+    pricing: { baseCost: "0", minimum: "0", currency: "USDC" },
+    availability: {},
+    location: { lat: 0, lng: 0 },
+  } as never);
   return id;
 }
 
@@ -65,7 +80,7 @@ async function submit(kernelId: string, assuranceTier: unknown) {
 
 function expectRefused(
   out: Awaited<ReturnType<typeof submit>>,
-  code: "assurance_tier_not_authorized" | "invalid_assurance_tier",
+  code: "assurance_tier_not_authorized" | "invalid_assurance_tier" | "capability_not_found",
 ) {
   expect(out.res.success).toBe(false);
   if (out.res.success) return;
@@ -114,10 +129,13 @@ describe("WP-C R7: a job's tier must be within the kernel's served tier", () => 
     expectAccepted(await submit(k, 2), 2);
   });
 
-  it("[neg] a kernel with NO row is served at 0: tier 1 is refused, tier 0 still accepted (external kernels)", async () => {
+  it("[neg] a kernel with NO row is served at 0: tier 1 is refused; tier 0 is now refused too, because no capability can be on it (N69)", async () => {
     const ghost = uid("r7-no-row");
     expectRefused(await submit(ghost, 1), "assurance_tier_not_authorized");
-    expectAccepted(await submit(ghost, 0), 0);
+    // N69: the named capability does not exist, so the (kernel, capability) pair cannot
+    // be consistent. Without a named capability, submission to a kernel with no
+    // capabilities already failed (no_capability_found_for_kernel).
+    expectRefused(await submit(ghost, 0), "capability_not_found");
   });
 
   it.each([
