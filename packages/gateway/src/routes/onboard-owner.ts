@@ -13,6 +13,7 @@
  */
 
 import { isPlainObject } from "./onboard-evidence.js";
+import { normalizeIdentity } from "../auth/identity-normalize.js";
 
 /** Stored when a registration has no authenticated owner; it matches nobody. */
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -22,12 +23,14 @@ const ZERO_ADDRESS_RE = /^0x0{40}$/i;
 const OWNER_IDENTITY_FIELDS = ["walletAddress", "email"] as const;
 
 /**
- * The identity fold for comparing identities: trimmed and lower-cased. It
- * must stay identical to normalizeIdentity in #326's
- * auth/reserved-identities.ts; unify the two at integration.
+ * The identity fold for comparing identities. It IS #326's normalizeIdentity
+ * (auth/identity-normalize.ts: NFKC, trim, full Unicode case folding, NFKC), so
+ * this file and identity binding can never fold differently. It used to be
+ * trim + lower-case, with a note to unify the two at integration: that is done here,
+ * now that WP-B stacks on #326.
  */
 export function foldIdentity(id: unknown): string {
-  return String(id ?? "").trim().toLowerCase();
+  return normalizeIdentity(id);
 }
 
 /** An empty value or the zero-address placeholder names nobody. */
