@@ -13,6 +13,7 @@ import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
 
 /** A real device-signed (#236) evidence bundle over `bundleHash`, in the wire
  *  form the node produces (hex Ed25519 sig, truncated EVM-looking signer). */
@@ -260,6 +261,70 @@ describe("Operator Relay Routes", () => {
       const stored = getRepos().evidence.findById(body.bundleId);
       expect(stored!.kernelSignature.value).toBe("operator-relay-auto");
       expect(stored!.assuranceTier).toBe(0);
+    });
+  });
+
+  // ── N80 (rehearsal R0 G3): stored evidence tells the truth ──────
+  describe("POST /api/operator/evidence stores a true hash (N80)", () => {
+    /** A seeded job with a kernel. The test fails, never skips, when the seed has none. */
+    function seededJob() {
+      const job = getRepos().jobs.findAll().find((j) => j.kernelId);
+      expect(job, "the seed must hold a job with a kernel").toBeTruthy();
+      return job!;
+    }
+    const bundlesFor = (jobId: string) => getRepos().evidence.findByJob(jobId).length;
+
+    it("a device document is stored under the sha256 of what was received, never sha256-<bundleId>", async () => {
+      const job = seededJob();
+      const evidence = { deviceId: "SIM-0001", run: { runId: "run-1", result: { readings: { A1: 0.412 } } } };
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      const expected = await sha256(canonicalize(evidence));
+      expect(body).toMatchObject({ stored: true, contentHash: expected, hashModel: "document_sha256", eventsStored: 0, deviceSigned: false, signatureVerified: false });
+      const stored = getRepos().evidence.findById(body.bundleId)!;
+      expect(stored.bundleHash).toBe(expected);
+      expect(stored.bundleHash).not.toMatch(/^sha256-/);
+      expect(stored.kernelSignature.value).toBe("operator-relay-auto");
+    });
+
+    it("LO-EV events are stored with recomputed hashes, and the stored bundle hash reproduces from them", async () => {
+      const job = seededJob();
+      const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
+      const events = [
+        { type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true } },
+        { type: "cv_inspection_result", timestamp: "2026-09-29T22:35:02.000Z", source: src, payload: { passed: true } },
+      ];
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body).toMatchObject({ stored: true, hashModel: "event_bundle_hash", eventsStored: 2, signatureVerified: false });
+      const rows = getRepos().evidence.findEventsByBundle(body.bundleId);
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(row.hash).toBe(await hashEvent({ type: row.type, timestamp: row.timestamp, source: row.source, payload: row.payload } as Omit<EvidenceEvent, "hash" | "id">));
+      }
+      expect(getRepos().evidence.findById(body.bundleId)!.bundleHash).toBe(await hashBundle(rows as unknown as EvidenceEvent[]));
+    });
+
+    it("NEGATIVE: an event hash that does not reproduce is refused with 422, and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
+      const events = [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: {}, hash: `sha256:${"ab".repeat(32)}` }];
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: "event_hash_mismatch", eventIndex: 0, stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("NEGATIVE: evidence naming another kernel than the job's is refused with 409, and nothing is stored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: `${job.kernelId}-not-this-job`, evidence: { ok: true } } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("kernel_mismatch");
+      expect(bundlesFor(job.id)).toBe(before);
     });
   });
 
