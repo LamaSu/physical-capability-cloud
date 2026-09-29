@@ -149,6 +149,30 @@ def _format_device(dev):
         return f"{dtype}: {json.dumps(dev)}"
 
 
+
+#: The public PCC gateway, the default target of `pcc-node start`.
+PUBLIC_GATEWAY = "https://capability.network"
+
+
+def _target_banner(pcc_base):
+    """The first lines `pcc-node start` prints (N57): the gateway this node will
+    register with and take jobs from, and what starting creates there."""
+    base = (pcc_base or "").rstrip("/")
+    if base == PUBLIC_GATEWAY:
+        where = "public PCC network, test-net payments"
+    else:
+        source = None
+        try:
+            source = click.get_current_context().get_parameter_source("pcc_base")
+        except RuntimeError:
+            pass
+        where = "set by --pcc-base" if source == click.core.ParameterSource.COMMANDLINE else "set by PCC_BASE"
+    return [
+        f"Target gateway: {base} ({where})",
+        "  Starting registers this machine there: a kernel record under your API key "
+        "(updated if it already exists).",
+    ]
+
 @click.group()
 @click.version_option(version=__version__, prog_name="pcc-node")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging")
@@ -198,6 +222,10 @@ def main(ctx, verbose):
 def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     """Detect hardware, register on PCC, and start the node daemon."""
     log = logging.getLogger("pcc-node")
+
+    # N57: say which gateway this node will talk to before doing anything.
+    for line in _target_banner(pcc_base):
+        click.echo(line)
 
     # Check if already running
     running, pid = is_running()
