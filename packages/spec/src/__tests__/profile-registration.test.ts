@@ -141,3 +141,37 @@ describe("profile registration — refuses what could never govern the device's 
     expect(codes(r)).toEqual(["device-mismatch", "capability-type-mismatch", "unverifiable-term", "digest-mismatch"]);
   });
 });
+
+describe("profile registration — checks, digest and stored row are one copy (astra pack 39 discipline)", () => {
+  it("the profile returned for storage is a copy, not the caller's object, and later mutation cannot reach it", () => {
+    const p = cameraProfile();
+    const r = checkProfileRegistration(request(p));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile).not.toBe(p);
+    p.device.deviceId = "dev-mutated-after-check";
+    expect(r.profile.device.deviceId).toBe(CAMERA);
+    expect(r.profileDigest).toBe(computeMeasurementProfileDigest(cameraProfile()));
+  });
+
+  it("a getter that lies after the first read cannot split what is checked from what is stored", () => {
+    const p = cameraProfile();
+    let reads = 0;
+    Object.defineProperty(p.device, "deviceId", {
+      enumerable: true,
+      configurable: true,
+      get: () => (reads++ === 0 ? CAMERA : "dev-other"),
+    });
+    const r = checkProfileRegistration(request(p));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.profile.device.deviceId).toBe(CAMERA);
+    expect(reads).toBe(1);
+  });
+
+  it("a request JSON cannot carry is refused as profile-invalid, never coerced", () => {
+    const p = cameraProfile() as unknown as Record<string, unknown>;
+    (p.measurement as Record<string, unknown>).sampling = { minSamples: Number.NaN };
+    expect(codes(checkProfileRegistration(request(p)))).toEqual(["profile-invalid"]);
+  });
+});

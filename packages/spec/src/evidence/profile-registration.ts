@@ -20,14 +20,18 @@
  *   - `digest-mismatch`: the client sent a digest that is not the digest of
  *     the profile it sent.
  *
- * The digest is always computed here, from the submitted profile. A
- * client-supplied digest is only ever compared, never stored or trusted.
+ * Every check runs on one plain-data copy of the request (`plainDataCopy`:
+ * each field read exactly once), and the profile returned for storage is that
+ * copy, so what is checked, digested and stored is one thing. The digest is
+ * always computed here, from that copy. A client-supplied digest is only ever
+ * compared, never stored or trusted.
  * Every problem is reported, not just the first, so an operator can fix a
  * profile in one pass.
  */
 
 import {
   computeMeasurementProfileDigest,
+  plainDataCopy,
   validateMeasurementProfile,
   type MeasurementProfileDigest,
   type MeasurementProfileV1,
@@ -62,7 +66,15 @@ export type ProfileRegistrationResult =
   | { ok: false; problems: ProfileRegistrationProblem[] };
 
 /** Never throws. */
-export function checkProfileRegistration(request: ProfileRegistrationRequest): ProfileRegistrationResult {
+export function checkProfileRegistration(input: ProfileRegistrationRequest): ProfileRegistrationResult {
+  const copy = plainDataCopy(input);
+  if (!copy.ok || typeof copy.value !== "object" || copy.value === null) {
+    return {
+      ok: false,
+      problems: [{ code: "profile-invalid", detail: `<root>: the request is not plain JSON data (${copy.ok ? "not an object" : copy.reason})` }],
+    };
+  }
+  const request = copy.value as ProfileRegistrationRequest;
   const violations = validateMeasurementProfile(request.profile);
   if (violations.length > 0) {
     return {
