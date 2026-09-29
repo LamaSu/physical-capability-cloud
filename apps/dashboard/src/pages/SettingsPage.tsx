@@ -2,7 +2,7 @@ import React from "react";
 import { useAccount } from "wagmi";
 import { GlassPanel, AddressDisplay, LoadingShell } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { useAgentMe } from "../api/hooks/use-pcc-data.js";
+import { keyCounts, useAgentMe } from "../api/hooks/use-pcc-data.js";
 import { UnavailableState } from "../components/LiveState.js";
 
 /**
@@ -33,8 +33,12 @@ function AccountPanel() {
     return <UnavailableState what="your account" error={me.error} onRetry={() => void me.refetch()} />;
   }
 
+  // useAgentMe rejects an answer without a complete identity; the key section
+  // may still be unavailable on its own.
   const { identity, keys } = me.data;
   const fullAccess = identity.scopes.includes("*");
+  const counts = keyCounts(keys);
+  const keysReason = typeof keys?.unavailable === "string" ? keys.unavailable.slice(0, 80) : null;
 
   return (
     <div className="space-y-3">
@@ -44,11 +48,11 @@ function AccountPanel() {
       </Row>
       <Row label="Access">{fullAccess ? "All scopes (*)" : identity.scopes.join(", ") || "none"}</Row>
       <Row label="Active keys">
-        {keys.active ?? <span className="text-white/40">unavailable</span>}
+        {counts ? counts.active : <span className="text-white/40">unavailable{keysReason ? ` (${keysReason})` : ""}</span>}
       </Row>
-      {keys.wildcard_keys > 0 && (
+      {counts && counts.wildcardKeys > 0 && (
         <p className="text-xs text-amber-200/70">
-          {keys.wildcard_keys} of your keys can use every scope (*). Revoke the ones you no longer need.
+          {counts.wildcardKeys} of your keys can use every scope (*). Revoke the ones you no longer need.
         </p>
       )}
       {me.isError && (

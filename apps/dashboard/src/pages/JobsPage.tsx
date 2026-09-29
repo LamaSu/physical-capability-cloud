@@ -74,8 +74,14 @@ export function JobsPage() {
         )}
         {filtered.length === 0 ? (
           <EmptyState
-            title={jobs.length === 0 ? "No jobs yet" : `No ${filter} jobs`}
-            description={jobs.length === 0 ? "Jobs will appear here when you submit a workflow or capability request." : undefined}
+            title={jobs.length === 0 ? "No jobs yet" : truncated ? `No ${filter} jobs in the first ${JOBS_PAGE_SIZE}` : `No ${filter} jobs`}
+            description={
+              jobs.length === 0
+                ? "Jobs will appear here when you submit a workflow or capability request."
+                : truncated
+                  ? `Only the first ${JOBS_PAGE_SIZE} jobs were read; there may be ${filter} jobs beyond them.`
+                  : undefined
+            }
             action={jobs.length === 0 ? { label: "Discover Capabilities", onClick: () => navigate("/discover") } : undefined}
           />
         ) : (

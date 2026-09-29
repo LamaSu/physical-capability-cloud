@@ -10,19 +10,29 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { deriveLiveStatus, type QueryView } from "../live-status.js";
+import { COUNT_MAX_AGE_MS, deriveLiveStatus, isKernelOnline, type QueryView } from "../live-status.js";
 import type { JobDTO, KernelDTO } from "../../types/dto.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-function ok<T>(data: T): QueryView<T> {
-  return { data, isSuccess: true, isError: false };
+/** A successful read, `ageMs` old; `lastErrorAgoMs` places an earlier failed read. */
+function ok<T>(data: T, ageMs = 1_000, lastErrorAgoMs?: number): QueryView<T> {
+  const now = Date.now();
+  return {
+    data,
+    isSuccess: true,
+    isError: false,
+    dataUpdatedAt: now - ageMs,
+    errorUpdatedAt: lastErrorAgoMs === undefined ? 0 : now - lastErrorAgoMs,
+  };
 }
+/** The latest read failed just now; `staleData` is what an earlier read left in the cache. */
 function failed<T>(staleData?: T): QueryView<T> {
-  return { data: staleData, isSuccess: false, isError: true };
+  const now = Date.now();
+  return { data: staleData, isSuccess: false, isError: true, dataUpdatedAt: staleData ? now - 60_000 : 0, errorUpdatedAt: now - 500 };
 }
 function loading<T>(): QueryView<T> {
-  return { data: undefined, isSuccess: false, isError: false };
+  return { data: undefined, isSuccess: false, isError: false, dataUpdatedAt: 0, errorUpdatedAt: 0 };
 }
 
 function kernel(status: KernelDTO["status"], isStale = false): KernelDTO {
@@ -109,6 +119,34 @@ describe("deriveLiveStatus", () => {
     });
     expect(props.activeJobs).toBe(4);
     expect(props.kernelsOnline).toBe(0);
+  });
+});
+
+describe("counts are current, not just cached (astra round 2, #352 finding 1)", () => {
+  it("a count read before an outage stays hidden when the gateway answers again, until it is re-read", () => {
+    // The health check failed 5 s ago and has since answered ok again.
+    const recovered = ok({ status: "ok" }, 500, 5_000);
+    const before = deriveLiveStatus({ health: recovered, kernels: ok([kernel("online")], 10_000), jobs: ok([job("queued")], 10_000) });
+    expect(before.networkStatus).toBe("connected");
+    expect(before.kernelsOnline).toBeUndefined();
+    expect(before.activeJobs).toBeUndefined();
+
+    const reread = deriveLiveStatus({ health: recovered, kernels: ok([kernel("online")], 1_000), jobs: ok([job("queued")], 1_000) });
+    expect(reread.kernelsOnline).toBe(1);
+    expect(reread.activeJobs).toBe(1);
+  });
+
+  it("a count older than COUNT_MAX_AGE_MS is not shown as current", () => {
+    const old = COUNT_MAX_AGE_MS + 1_000;
+    const props = deriveLiveStatus({ health: ok({ status: "ok" }), kernels: ok([kernel("online")], old), jobs: ok([job("queued")], old) });
+    expect(props.kernelsOnline).toBeUndefined();
+    expect(props.activeJobs).toBeUndefined();
+  });
+
+  it("a kernel that doesn't say whether its heartbeat is fresh is not counted online", () => {
+    const unsaid = { id: "k-unsaid", status: "online" } as KernelDTO;
+    expect(isKernelOnline(unsaid)).toBe(false);
+    expect(deriveLiveStatus({ health: ok({ status: "ok" }), kernels: ok([unsaid]), jobs: ok([]) }).kernelsOnline).toBe(0);
   });
 });
 

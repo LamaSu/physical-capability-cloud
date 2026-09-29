@@ -142,6 +142,7 @@ describe("sortLeaderboard", () => {
       kernelId: name,
       kernelName: name,
       kernelStatus: "online" as const,
+      online: true,
       avgScore: score,
       scoredCount: score == null ? 0 : 1,
       capabilityCount: 1,
