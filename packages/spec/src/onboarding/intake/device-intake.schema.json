@@ -1,0 +1,2445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pcc://onboarding/device-intake.schema.json",
+  "title": "PCC Device Intake",
+  "description": "One entry per permanent intake field id. Each answer records a value, its provenance, and (for research/confirmed provenance) a source. x-pcc-* annotations carry the R2 policy: class, fills, requiredFor, neverDefault, sensitive, why, and evidence-primitive status.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "pcc.device-intake.v1"
+    },
+    "answers": {
+      "type": "object",
+      "properties": {
+        "operator.displayName": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What name should buyers and the network see for you or your shop?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "kernel:name",
+            "operatorProfile:displayName"
+          ],
+          "x-pcc-requiredFor": "register",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This is the name that appears on every listing and job you accept."
+        },
+        "operator.contactEmail": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "format": "email"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What email should we use for job notifications and key provisioning?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "operatorProfile:contactEmail",
+            "notificationChannel:email"
+          ],
+          "x-pcc-requiredFor": "register",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "We need a channel to reach you about jobs, approvals, and account security."
+        },
+        "operator.authority": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Do you have the authority to offer this machine's time on PCC?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "registration:attestation.authority"
+          ],
+          "x-pcc-requiredFor": "register",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Only someone authorized to commit the machine's time may register it — this is never assumed."
+        },
+        "device.description": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "In your own words, what is this device and what should buyers expect to get from it?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "identifyDeviceInput:description",
+            "csdSearch:query"
+          ],
+          "x-pcc-requiredFor": "identify",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This seeds device identification and the search for a matching capability contract."
+        },
+        "device.vendor": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the device's manufacturer/vendor.",
+          "x-pcc-class": "A",
+          "x-pcc-fills": [
+            "adapterConfig:vendor",
+            "kit:compatibility.models[].vendor"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "The vendor name drives the adapter config and which kits can match this device."
+        },
+        "device.model": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the device's exact model.",
+          "x-pcc-class": "A",
+          "x-pcc-fills": [
+            "adapterConfig:model",
+            "kit:compatibility.models[].model"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "The exact model is how we find the right manual, safety limits, and remote-control protocol."
+        },
+        "device.serialNumber": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What is the device's serial number (from its label)?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "deviceRecord:serialNumber"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "The serial number ties this specific unit to its device record."
+        },
+        "device.firmware": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the device's firmware version.",
+          "x-pcc-class": "A",
+          "x-pcc-fills": [
+            "deviceRecord:firmware"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Firmware version affects which commands and safety behaviors are available (N83 G8)."
+        },
+        "device.adapterType": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "octoprint",
+                "modbus",
+                "opcua",
+                "sila",
+                "generic-http",
+                "opentrons"
+              ]
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the adapter type PCC should use to talk to this device.",
+          "x-pcc-class": "A",
+          "x-pcc-fills": [
+            "registerDevice:adapterType"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This selects the real adapter that will run jobs — it is never \"mock\" for a live device."
+        },
+        "location.cityCountry": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "country": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "city",
+                "country"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What city and country is this device located in?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:location"
+          ],
+          "x-pcc-requiredFor": "publish",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Buyers need a coarse location to judge shipping time and jurisdiction."
+        },
+        "location.streetAddress": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "set": {
+                  "const": true
+                }
+              },
+              "required": [
+                "set"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What is the device's street address? (Private — never shown publicly; used for logistics only.)",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "kernel:physicalAddress"
+          ],
+          "x-pcc-requiredFor": "optional",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": true,
+          "x-pcc-why": "We need this for couriers and installers, but it is never published — public listings only ever show city and country."
+        },
+        "network.reachability": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "sameLan": {
+                  "type": "boolean"
+                },
+                "staticIp": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sameLan",
+                "staticIp"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is this device on the same local network as the agent host, and does it have a static IP?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "adapterConfig:baseUrl",
+            "deploymentChoice:topology"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This decides whether we can reach it directly or need pcc-node as a relay."
+        },
+        "network.outboundHttps": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Can this device (or its host) make outbound HTTPS calls?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "deploymentChoice:outboundHttps"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Outbound-only connectivity lets us use pcc-node without opening any inbound ports."
+        },
+        "network.inboundBlocked": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is inbound access to this device blocked by a firewall or NAT?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "deploymentChoice:inboundBlocked"
+          ],
+          "x-pcc-requiredFor": "register-device",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This confirms whether pcc-node's outbound-only design is required."
+        },
+        "safety.supervision": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "attended",
+                "unattended",
+                "remote-supervised"
+              ]
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Will this device run attended, unattended, or remote-supervised?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "safetyEnvelope:supervision"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Supervision level is never assumed — it directly bounds which jobs are safe to accept."
+        },
+        "safety.estop": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "present": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "whoCanPress": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "present"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is there a physical e-stop? What type, and who can reach it?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "safetyEnvelope:estop"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "An e-stop's presence and reachability is safety-critical and is never defaulted."
+        },
+        "safety.hazards": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "chemical",
+                  "laser",
+                  "heat",
+                  "mechanical",
+                  "biological"
+                ]
+              }
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What hazards does this device present (chemical, laser, heat, mechanical, biological)?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "safetyEnvelope:hazards"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Hazard classes shape the safety envelope — an empty answer blocks job acceptance rather than assuming \"none\"."
+        },
+        "safety.limits": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "parameter": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "min": {
+                    "type": "number"
+                  },
+                  "max": {
+                    "type": "number"
+                  },
+                  "unit": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "parameter"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the safety limits we found for this device (e.g. max temperature, max volume, allowed materials) — or tell us if any are wrong.",
+          "x-pcc-class": "B",
+          "x-pcc-fills": [
+            "safetyEnvelope:limits",
+            "csd:typedIO.bounds"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Safety limits come from the manual, but only a human confirmation makes them binding — never a guess."
+        },
+        "consumables.items": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What consumables does this device use (materials, tips, filters, etc.)?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capabilityAvailability:consumables.items"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This lets buyers and the scheduler know what's needed to run a job."
+        },
+        "consumables.restockedBy": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Who restocks these consumables, and how often?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capabilityAvailability:consumables.restockedBy"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This sets expectations for availability and avoids mid-job surprises."
+        },
+        "consumables.loadedMaterial": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What material or consumable is currently loaded?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "safetyEnvelope:loadedMaterial"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "The loaded material determines which operating bands from the manual actually apply right now."
+        },
+        "calibration.lastDate": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "When did you last calibrate this device? (self-declared)",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:calibration.lastDate"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This is self-declared only — we never infer or default a calibration date.",
+          "x-pcc-selfDeclaredOnly": true,
+          "x-pcc-evidencePrimitive": {
+            "id": "decl.self_attested",
+            "status": "live"
+          }
+        },
+        "calibration.procedureRef": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Which calibration procedure did you follow? (self-declared)",
+          "x-pcc-class": "B",
+          "x-pcc-fills": [
+            "evidencePlan:calibration.procedureRef"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Research can suggest a procedure, but only your confirmation makes it the record — self-declared only.",
+          "x-pcc-selfDeclaredOnly": true,
+          "x-pcc-evidencePrimitive": {
+            "id": "decl.self_attested",
+            "status": "live"
+          }
+        },
+        "evidence.executorDeviceId": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Which device id actually executes the job?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "provenanceRecipe:executorDeviceId"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This is the raw fact the evidence plan is built from — independence is derived from it, never asked directly."
+        },
+        "evidence.observerDeviceIds": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Which device ids (if any) only observe the job, without executing it?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "provenanceRecipe:observerDeviceIds"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "An observer that isn't also the executor is what makes an inspection independent — we derive that, we don't ask you to assert it."
+        },
+        "evidence.executionMode": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "real",
+                "mock",
+                "dry_run"
+              ]
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is this run against the real device, or a mock/dry-run adapter?",
+          "x-pcc-class": "A",
+          "x-pcc-fills": [
+            "evidencePlan:confirm.execution_mode"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "A mock or dry-run answer caps the job's evidence at tier 0 — it can lower the tier, never raise it.",
+          "x-pcc-evidencePrimitive": {
+            "id": "confirm.execution_mode",
+            "status": "live"
+          }
+        },
+        "evidence.camera": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "seesWorkArea": {
+                  "type": "boolean"
+                },
+                "seesOutput": {
+                  "type": "boolean"
+                },
+                "mount": {
+                  "type": "string",
+                  "enum": [
+                    "fixed",
+                    "mounted"
+                  ]
+                },
+                "captureDeviceId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "seesWorkArea",
+                "seesOutput",
+                "mount",
+                "captureDeviceId"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is there a camera? Does it see the work area, does it see the output, is it fixed or handheld, and which device id captures it?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:capture.photo_nonced.placement"
+          ],
+          "x-pcc-requiredFor": "tier2",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "The camera must be a separate device from the machine — this is what lets us capture believable photo evidence.",
+          "x-pcc-evidencePrimitive": {
+            "id": "capture.photo_nonced",
+            "status": "stub",
+            "note": "stub = proves nothing yet"
+          }
+        },
+        "evidence.operatorPresence": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "always",
+                "sometimes",
+                "never"
+              ]
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is an operator present always, sometimes, or never during a job?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:operatorPresence"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Operator presence shapes what kind of evidence and approval is realistic to collect."
+        },
+        "evidence.approver": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contact": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Who is the person who will approve evidence for this device? (identity only — their signing key is registered separately later.)",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:approval.expert.approver"
+          ],
+          "x-pcc-requiredFor": "tier2",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "We need to know who will attest to job quality before we register how they sign.",
+          "x-pcc-evidencePrimitive": {
+            "id": "approval.expert",
+            "status": "stub",
+            "note": "stub = proves nothing yet"
+          }
+        },
+        "evidence.controllerRunLog": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "exportsOwnLogPerJob": {
+                  "type": "boolean"
+                },
+                "access": {
+                  "type": "string",
+                  "enum": [
+                    "api",
+                    "file"
+                  ]
+                }
+              },
+              "required": [
+                "exportsOwnLogPerJob",
+                "access"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Can the controller export its own execution log per job? If so, via API or file?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:machine.execution_log"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "A per-job exportable log is what lets us build a trustworthy machine execution record.",
+          "x-pcc-evidencePrimitive": {
+            "id": "machine.execution_log",
+            "status": "stub",
+            "note": "stub = proves nothing yet"
+          }
+        },
+        "evidence.instrumentSignsOutput": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Does the instrument cryptographically sign its own output?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:receipt.kernel_signed",
+            "evidencePlan:ident.registered_key"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (companion primitive: receipt.kernel_signed).",
+          "x-pcc-evidencePrimitive": {
+            "id": "ident.registered_key",
+            "status": "stub",
+            "note": "stub = proves nothing yet"
+          }
+        },
+        "evidence.referenceSample": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "available": {
+                  "type": "boolean"
+                },
+                "expectedResultRef": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "available"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Do you have a reference sample with a known expected result?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "evidencePlan:measure.io_test_pair"
+          ],
+          "x-pcc-requiredFor": "tier1",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "A known-good test pair is the strongest cheap proof that the capability actually works.",
+          "x-pcc-evidencePrimitive": {
+            "id": "measure.io_test_pair",
+            "status": "stub",
+            "note": "stub = proves nothing yet"
+          }
+        },
+        "capability.type": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the capability contract (CSD) this device implements.",
+          "x-pcc-class": "A",
+          "x-pcc-fills": [
+            "capability:type",
+            "kit:capabilities[]"
+          ],
+          "x-pcc-requiredFor": "publish",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "We search the registry before authoring anything new — reuse comes first."
+        },
+        "capability.parameters": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "min": {
+                    "type": "number"
+                  },
+                  "max": {
+                    "type": "number"
+                  },
+                  "unit": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Confirm the typed parameters and ranges we found for this capability.",
+          "x-pcc-class": "B",
+          "x-pcc-fills": [
+            "csd:typedIO"
+          ],
+          "x-pcc-requiredFor": "publish",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Buyers configure jobs against these typed ranges — they must be confirmed, not guessed."
+        },
+        "pricing.unitPrice": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "pattern": "^\\d+(\\.\\d+)?$"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What is your price per unit for this capability?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:pricing.basePrice"
+          ],
+          "x-pcc-requiredFor": "publish",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "Price is never defaulted or guessed — only you set it."
+        },
+        "pricing.minimum": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "pattern": "^\\d+(\\.\\d+)?$"
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Is there a minimum charge per job?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:pricing.minimumCharge"
+          ],
+          "x-pcc-requiredFor": "publish",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "A minimum protects you from unprofitable small jobs — never assumed."
+        },
+        "pricing.currency": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "What currency is your price in?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:pricing.currency"
+          ],
+          "x-pcc-requiredFor": "publish",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This is never assumed — it changes what buyers actually pay."
+        },
+        "payout.destination": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "set": {
+                  "const": true
+                }
+              },
+              "required": [
+                "set"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "Where should payouts be sent? (Stored securely in the payout system — never written into this record.)",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "gatewayPayoutStore:destination"
+          ],
+          "x-pcc-requiredFor": "get-paid",
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": true,
+          "x-pcc-why": "Payout details are sensitive: they go straight to the payout store (N21), and this record only ever keeps a \"set\" flag."
+        },
+        "availability.schedule": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "always",
+                    "windows",
+                    "cron",
+                    "manual-claim"
+                  ]
+                },
+                "timezone": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "windows": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "start": {
+                        "type": "string"
+                      },
+                      "end": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "cron": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "timezone"
+              ],
+              "additionalProperties": false
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "When can this device take jobs — always, specific windows, a cron schedule, or manual claim? What timezone?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:availability"
+          ],
+          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This is what the scheduler uses to decide when to offer you jobs."
+        },
+        "sla.acceptanceWindowSec": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "How many seconds do you have to accept an offered job before it expires?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:sla.acceptanceWindowSec"
+          ],
+          "x-pcc-requiredFor": "optional",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This sets buyer expectations for how quickly you respond."
+        },
+        "sla.completionDeadlineSec": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "How many seconds should a job take at most before it's considered late?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "capability:sla.completionDeadlineSec"
+          ],
+          "x-pcc-requiredFor": "optional",
+          "x-pcc-neverDefault": false,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "This sets the SLA buyers see and what counts as a late job."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "answers"
+  ],
+  "additionalProperties": false
+}
