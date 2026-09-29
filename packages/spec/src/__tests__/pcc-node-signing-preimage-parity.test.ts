@@ -1,9 +1,11 @@
 /**
- * LO-EV-1 Python byte parity, proven where CI runs it. CI has python3 but runs
- * no Python suite yet (N52), so this vitest test loads pcc-node's
+ * LO-EV-1 Python byte parity, proven where CI runs it. The Python signature half
+ * runs in the evidence-signature-parity workflow; this vitest test loads pcc-node's
  * signing_preimage.py by path (it imports only the standard library) and checks
  * every golden and every accept/reject parity vector in goldens.json, byte for
- * byte, decoding the vectors' JSON text with json.loads. Signature parity needs
+ * byte, decoding the vectors' JSON text at the contract's boundary (loads_strict,
+ * the mirror of parseSigningInputJson; a decode failure is a rejection, as a
+ * JSON.parse throw is in TypeScript). Signature parity needs
  * PyNaCl and stays in test_signing_preimage_parity.py, which fails instead of
  * skipping when PCC_REQUIRE_PYNACL=1. A missing python3 fails this test; it
  * never skips.
@@ -36,8 +38,8 @@ for v in g["session_revocation"]:
     if text(m.session_revocation_preimage(v["revocation"])) != v["preimage_utf8"]:
         bad.append(v["name"])
 for v in g["parity_vectors"]:
-    parsed = json.loads(v["json"])
     try:
+        parsed = m.loads_strict(v["json"])
         if v["kind"] == "revocation":
             got = text(m.session_revocation_preimage(parsed))
         else:

@@ -1,0 +1,71 @@
+# LO-EV-1 signature parity (board row R20; cross-family review A01). The Python
+# mirror's signature half must never pass by skipping. This job runs the parity
+# suite with PyNaCl installed and PCC_REQUIRE_PYNACL=1, so nothing may skip.
+# First, a negative control proves the same run FAILS, on the PyNaCl
+# requirement itself, when PyNaCl is missing.
+name: evidence-signature-parity
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Installs pinned PyPI packages, so the token gets read-only access.
+permissions:
+  contents: read
+
+jobs:
+  pcc-node-signature-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/pcc-node
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Negative control - without PyNaCl the required run must fail on the PyNaCl check
+        run: |
+          python -m venv "$RUNNER_TEMP/no-nacl"
+          "$RUNNER_TEMP/no-nacl/bin/python" -m pip install --quiet "pytest==8.3.5"
+          if "$RUNNER_TEMP/no-nacl/bin/python" -c "import nacl" 2>/dev/null; then
+            echo "invalid control: PyNaCl is importable in the venv without it"
+            exit 1
+          fi
+          set +e
+          out=$(PCC_REQUIRE_PYNACL=1 PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider tests/test_signing_preimage_parity.py 2>&1)
+          rc=$?
+          set -e
+          echo "$out" | tail -5
+          if [ "$rc" -eq 0 ]; then
+            echo "PCC_REQUIRE_PYNACL=1 passed without PyNaCl: the signature half can hide behind a skip"
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable"; then
+            echo "the run failed, but not on the PyNaCl requirement"
+            exit 1
+          fi
+          echo "ok: without PyNaCl the required run fails on the PyNaCl check"
+
+      - name: Signature parity (PyNaCl required, nothing may skip)
+        env:
+          PCC_REQUIRE_PYNACL: "1"
+        run: |
+          python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
+          set +e
+          out=$(PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_signing_preimage_parity.py 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          if echo "$out" | grep -q "skipped"; then
+            echo "a test skipped in the required run"
+            exit 1
+          fi
