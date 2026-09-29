@@ -102,8 +102,16 @@ export class ComplianceFacade extends BaseFacade {
   async getEvidenceForJob(jobId: string): Promise<Result<EvidenceSummaryDTO[]>> {
     return this.execute("getEvidenceForJob", async () => {
       const rawBundles = this.repos.evidence.findByJob(jobId) as RawEvidenceBundle[];
-      return populateEvidenceList(rawBundles);
+      return populateEvidenceList(rawBundles.map((b) => this.withEvents(b)));
     });
+  }
+
+  /**
+   * Bundle rows carry no events, so without this every eventCount read 0 (readmodels'
+   * evidence facts map, item B). Attach the bundle's stored events.
+   */
+  private withEvents(raw: RawEvidenceBundle): RawEvidenceBundle {
+    return { ...raw, events: this.repos.evidence.findEventsByBundle(raw.id) as RawEvidenceBundle["events"] };
   }
 
   /**
@@ -113,7 +121,7 @@ export class ComplianceFacade extends BaseFacade {
     return this.execute("getBundle", async () => {
       const raw = this.repos.evidence.findById(bundleId) as RawEvidenceBundle | undefined;
       if (!raw) throw new NotFoundError("evidence bundle", bundleId);
-      return populateEvidenceSummaryDTO(raw);
+      return populateEvidenceSummaryDTO(this.withEvents(raw));
     });
   }
 

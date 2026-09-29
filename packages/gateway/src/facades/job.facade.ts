@@ -172,7 +172,10 @@ export class JobFacade extends BaseFacade {
 
       const kernelMap = this.loadKernelMap([job.kernelId]);
       const capabilityMap = this.loadCapabilityMap([job.capabilityId]);
-      const evidenceBundles = this.repos.evidence.findByJob(jobId);
+      // Bundle rows carry no events; attach them so evidenceBundles[].eventCount is real.
+      const evidenceBundles = this.repos.evidence
+        .findByJob(jobId)
+        .map((b) => ({ ...b, events: this.repos.evidence.findEventsByBundle(b.id) }));
 
       return populateJobDetailDTO(job, kernelMap, capabilityMap, evidenceBundles, context);
     });
