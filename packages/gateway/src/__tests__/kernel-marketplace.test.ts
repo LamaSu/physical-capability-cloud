@@ -112,11 +112,20 @@ function mockFetch(
 // Tests
 // ---------------------------------------------------------------------------
 
+const TEST_ADMIN_KEY = "kernel-marketplace-test-admin-key";
+const ADMIN_HEADERS = { "x-admin-key": TEST_ADMIN_KEY };
+
 describe("Kernel Marketplace", () => {
   let app: FastifyInstance;
 
+  // The admin routes (verify, suspend) need a configured admin secret in
+  // every environment (WP-A e666b159: no test/development exception), so the
+  // suite sets one and presents it on its admin calls.
+  const savedAdminKey = process.env.PCC_ADMIN_KEY;
+
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
+    process.env.PCC_ADMIN_KEY = TEST_ADMIN_KEY;
     initStore({ seed: false });
     app = await buildApp();
   });
@@ -124,6 +133,8 @@ describe("Kernel Marketplace", () => {
   afterAll(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   beforeEach(() => {
@@ -290,10 +301,12 @@ describe("Kernel Marketplace", () => {
       await app.inject({
         method: "POST",
         url: "/api/kernels/k-temp/verify",
+        headers: ADMIN_HEADERS,
       });
       await app.inject({
         method: "POST",
         url: "/api/kernels/k-currency/verify",
+        headers: ADMIN_HEADERS,
       });
 
       const res = await app.inject({
@@ -331,7 +344,7 @@ describe("Kernel Marketplace", () => {
       }
       mockFetch(async () => new Response("{}", { status: 200 }));
       for (const kernelId of ["k-t1", "k-t3", "k-t3-unbacked"]) {
-        const v = await app.inject({ method: "POST", url: `/api/kernels/${kernelId}/verify` });
+        const v = await app.inject({ method: "POST", url: `/api/kernels/${kernelId}/verify`, headers: ADMIN_HEADERS });
         expect(v.statusCode).toBe(200);
       }
 
@@ -378,10 +391,12 @@ describe("Kernel Marketplace", () => {
       await app.inject({
         method: "POST",
         url: "/api/kernels/k-expensive/verify",
+        headers: ADMIN_HEADERS,
       });
       await app.inject({
         method: "POST",
         url: "/api/kernels/k-cheap/verify",
+        headers: ADMIN_HEADERS,
       });
 
       const res = await app.inject({
@@ -409,10 +424,12 @@ describe("Kernel Marketplace", () => {
       await app.inject({
         method: "POST",
         url: "/api/kernels/k-a/verify",
+        headers: ADMIN_HEADERS,
       });
       await app.inject({
         method: "POST",
         url: "/api/kernels/k-b/verify",
+        headers: ADMIN_HEADERS,
       });
       const res = await app.inject({
         method: "GET",
@@ -467,6 +484,7 @@ describe("Kernel Marketplace", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/kernels/k-verify-pass/verify",
+        headers: ADMIN_HEADERS,
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
@@ -484,6 +502,7 @@ describe("Kernel Marketplace", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/kernels/k-verify-fail/verify",
+        headers: ADMIN_HEADERS,
       });
       expect(res.statusCode).toBe(502);
       expect(res.json().error).toBe("smoke_test_failed");
@@ -500,6 +519,7 @@ describe("Kernel Marketplace", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/kernels/k-nope/verify",
+        headers: ADMIN_HEADERS,
       });
       expect(res.statusCode).toBe(404);
     });

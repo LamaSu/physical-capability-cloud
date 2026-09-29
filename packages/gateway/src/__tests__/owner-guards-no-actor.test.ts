@@ -484,8 +484,21 @@ describe("steward rule 7: the marketplace ceiling check fails closed without a r
           payload: { manifest },
         });
         expect(reg.statusCode).toBe(201);
-        // NODE_ENV is "test" and no PCC_ADMIN_KEY is set: the admin gate is open.
-        expect((await bare.inject({ method: "POST", url: `/api/kernels/${s.kernelId}/verify` })).statusCode).toBe(200);
+        // The admin gate needs a configured secret in every environment (WP-A
+        // e666b159), so the verify call presents one.
+        const savedAdminKey = process.env.PCC_ADMIN_KEY;
+        process.env.PCC_ADMIN_KEY = "owner-guards-test-admin-key";
+        try {
+          const verify = await bare.inject({
+            method: "POST",
+            url: `/api/kernels/${s.kernelId}/verify`,
+            headers: { "x-admin-key": "owner-guards-test-admin-key" },
+          });
+          expect(verify.statusCode).toBe(200);
+        } finally {
+          if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+          else process.env.PCC_ADMIN_KEY = savedAdminKey;
+        }
         const served = (await bare.inject({ method: "GET", url: `/api/kernels/marketplace/${s.kernelId}` })).json();
         expect(served.kernel.maxAssuranceTier).toBe(expected);
       }
