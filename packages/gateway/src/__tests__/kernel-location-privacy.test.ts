@@ -35,6 +35,7 @@ import { a2aTasksRoutes } from "../routes/a2a-tasks.js";
 import { statusRoutes } from "../routes/status.js";
 import { operatorStatusRoutes } from "../routes/operator-status.js";
 import { kernelAgentPackageRoutes } from "../routes/kernel-agent-package.js";
+import { nlQueryRoutes } from "../routes/nl-query.js";
 import { planComposition } from "../routes/compose.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
@@ -85,6 +86,7 @@ beforeAll(async () => {
   await app.register(statusRoutes);
   await app.register(operatorStatusRoutes);
   await app.register(kernelAgentPackageRoutes);
+  await app.register(nlQueryRoutes);
   await app.ready();
 
   ({ key: ownerKey, operatorId: ownerId } = await provision("n68-owner@example.invalid"));
@@ -190,6 +192,22 @@ describe("coarse by default: nobody reads the exact site or the street address",
     expect(a2a.body).toContain(`"locationCell":"${CELL}"`);
     for (const s of EXACT_STRINGS) expect(a2a.body).not.toContain(s);
   });
+});
+
+describe("POST /api/query (astra N68 r1, CRITICAL): its kernel and capability answers are the projected reads", () => {
+  // Each query picks one intent: kernel_health by id; network_status and operator_stats list every
+  // kernel; find_capability lists a type's capabilities. They used to return the stored rows.
+  for (const query of ["is kernel kernel-n68-a healthy", "how many kernels are online", "what are my stats", "find a 3d-printing for my part"]) {
+    it(`a stranger's key asking "${query}" learns neither the exact site nor the street address`, async () => {
+      const res = await app.inject({ method: "POST", url: "/api/query", headers: bearer(strangerKey), payload: { query } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { intent: string; data: Array<Record<string, unknown>> };
+      for (const s of EXACT_STRINGS) expect(res.body, `${body.intent}: ${s}`).not.toContain(s);
+      const row = body.data.find((r) => r.id === "kernel-n68-a" || r.kernelId === "kernel-n68-a");
+      expect(row, body.intent).toBeDefined();
+      expect(row).toMatchObject({ location: CENTRE, locationPrecision: "approximate", locationCell: CELL });
+    });
+  }
 });
 
 describe("{0,0} is no location", () => {
