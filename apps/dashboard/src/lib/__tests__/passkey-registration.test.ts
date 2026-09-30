@@ -57,6 +57,20 @@ describe("assembleCreationOptions", () => {
 });
 
 describe("runPasskeyRegistration", () => {
+  it("an operator binding without the authorized fetch fails closed, before any request (astra A03c F2)", async () => {
+    const fetchFn = vi.fn();
+    const startRegistration = vi.fn();
+    await expect(
+      runPasskeyRegistration(
+        { apiBase: "", operatorId: "op@example.com", fetchFn: fetchFn as any, startRegistration },
+        "rand1234",
+      ),
+    ).rejects.toThrow(/authorized fetch/i);
+    // Silently falling back to an anonymous challenge would register an unbound passkey.
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(startRegistration).not.toHaveBeenCalled();
+  });
+
   it("runs challenge -> ceremony -> verify and returns the credential", async () => {
     const fetchFn = vi
       .fn()
