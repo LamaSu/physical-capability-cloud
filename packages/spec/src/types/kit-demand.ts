@@ -317,6 +317,18 @@ export interface PublicOpportunityAggregate {
 }
 
 /**
+ * The approved identifiers as ONE snapshot: iterated once, only strings that pass
+ * `isPublishableCapabilityId`, deduplicated and sorted, held in a fresh native Set.
+ * Membership and `approvedSetDigest` both come from this snapshot, so a caller's
+ * Set whose `has()` or iterator disagrees with itself can't authorise an ID the
+ * digest never commits (PX-13 round-2 F3).
+ */
+function approvedSnapshot(approved: Iterable<unknown>): { ids: string[]; members: Set<string> } {
+  const ids = [...new Set(Array.from(approved).filter((v): v is string => typeof v === "string" && isPublishableCapabilityId(v)))].sort(byString);
+  return { ids, members: new Set(ids) };
+}
+
+/**
  * Project one private signal into the public aggregate for a closed release
  * period, or return `null` when it must stay private: a key that is not in
  * the publisher's approved set or fails `isPublishableCapabilityId` (so never
@@ -330,6 +342,14 @@ export function toPublicOpportunityAggregate(
   signal: KitDemandSignal,
   period: ReleasePeriod,
   approvedCapabilityTypes: ReadonlySet<string>,
+): PublicOpportunityAggregate | null {
+  return projectSignal(signal, period, approvedSnapshot(approvedCapabilityTypes).members);
+}
+
+function projectSignal(
+  signal: KitDemandSignal,
+  period: ReleasePeriod,
+  approved: ReadonlySet<string>,
 ): PublicOpportunityAggregate | null {
   const bounds = assertReleasable(period);
   const s = KitDemandSignalSchema.parse(signal);
@@ -346,7 +366,7 @@ export function toPublicOpportunityAggregate(
     );
   }
   if (!isPublishableCapabilityId(s.capabilityKey)) return null;
-  if (!approvedCapabilityTypes.has(s.capabilityKey)) return null;
+  if (!approved.has(s.capabilityKey)) return null;
   if (s.internal === undefined) return null;
   const n = s.internal.distinctVerifiedRequestersAtOrAbove[PUBLIC_RELEASE_POLICY.evidenceFloor];
   if (n < PUBLIC_RELEASE_POLICY.k) return null;
@@ -366,7 +386,7 @@ export interface PublicOpportunityRelease {
   schema: "pcc.public-opportunity-release.v1";
   period: ReleasePeriod;
   policy: { k: number; evidenceFloor: DemandEvidenceClass };
-  /** `sha256:<hex>` over the sorted approved set the publisher supplied, so the release records its input */
+  /** `sha256:<hex>` over the approved-set snapshot the release used (publishable IDs only, sorted) */
   approvedSetDigest: SHA256;
   /** Qualifying aggregates only, sorted by capabilityType */
   aggregates: PublicOpportunityAggregate[];
@@ -386,6 +406,7 @@ export function buildPublicRelease(
   approvedCapabilityTypes: ReadonlySet<string>,
 ): PublicOpportunityRelease {
   assertReleasable(period);
+  const approved = approvedSnapshot(approvedCapabilityTypes);
   const seen = new Set<string>();
   const aggregates: PublicOpportunityAggregate[] = [];
   for (const signal of signals) {
@@ -393,7 +414,7 @@ export function buildPublicRelease(
       throw new Error(`public release: more than one signal for ${signal.capabilityKey}`);
     }
     seen.add(signal.capabilityKey);
-    const aggregate = toPublicOpportunityAggregate(signal, period, approvedCapabilityTypes);
+    const aggregate = projectSignal(signal, period, approved.members);
     if (aggregate !== null) aggregates.push(aggregate);
   }
   aggregates.sort((a, b) => byString(a.capabilityType, b.capabilityType));
@@ -401,7 +422,7 @@ export function buildPublicRelease(
     schema: "pcc.public-opportunity-release.v1" as const,
     period,
     policy: { k: PUBLIC_RELEASE_POLICY.k, evidenceFloor: PUBLIC_RELEASE_POLICY.evidenceFloor },
-    approvedSetDigest: canonicalDigest([...approvedCapabilityTypes].sort(byString)),
+    approvedSetDigest: canonicalDigest(approved.ids),
     aggregates,
   };
   return { ...body, digest: canonicalDigest(body) };
