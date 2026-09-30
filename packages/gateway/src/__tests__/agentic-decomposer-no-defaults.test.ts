@@ -143,6 +143,74 @@ describe("matchableTerms", () => {
       matchableTerms({ ...BASE, pricing: { currency: "USDC", minimum: "5" } }),
     ).toEqual({ ok: true, price: 5, currency: "USDC", assuranceTiers: [0, 1] });
   });
+
+  // ---------------------------------------------------------------------
+  // Board N23 follow-up (#439): astra SHIP-WITH-NITS findings.
+  // ---------------------------------------------------------------------
+
+  it("subcent_declared_prices_do_not_become_zero_or_share_a_commitment", () => {
+    // "0.001" and "0.004" used to both digest as "0.00" (matched-capability-
+    // digest.ts's v1 preimage uses toFixed(2)) and both estimate to 0 --
+    // two different declared prices sharing one commitment. Reject instead
+    // of rounding; this is local to the legacy 2-decimal representation.
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: "USDC", baseCost: "0.001" } }),
+    ).toEqual({ ok: false, reason: "invalid-pricing" });
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: "USDC", baseCost: "0.004" } }),
+    ).toEqual({ ok: false, reason: "invalid-pricing" });
+    // A price that IS exactly representable at 2 decimal places still matches.
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: "USDC", baseCost: "0.50" } }),
+    ).toEqual({ ok: true, price: 0.5, currency: "USDC", assuranceTiers: [0, 1] });
+  });
+
+  it("unsafe_headline_is_not_returned_as_a_different_declared_price", () => {
+    // "9007199254740993" used to become 9007199254740992 via parseFloat.
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: "USDC", baseCost: "9007199254740993" } }),
+    ).toEqual({ ok: false, reason: "invalid-pricing" });
+    // Thirty nines used to become 1e+30 (and toFixed(2) on that is exponential).
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: "USDC", baseCost: "9".repeat(30) } }),
+    ).toEqual({ ok: false, reason: "invalid-pricing" });
+    // The largest safe integer itself is still fine -- only values that
+    // actually lose precision are rejected.
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: "USDC", baseCost: String(Number.MAX_SAFE_INTEGER) } }),
+    ).toEqual({
+      ok: true,
+      price: Number.MAX_SAFE_INTEGER,
+      currency: "USDC",
+      assuranceTiers: [0, 1],
+    });
+  });
+
+  it("matcher_rejects_blank_currency", () => {
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: " ", baseCost: "12" } }),
+    ).toEqual({ ok: false, reason: "invalid-pricing" });
+    expect(
+      matchableTerms({ ...BASE, pricing: { currency: " USDC ", baseCost: "12" } }),
+    ).toEqual({ ok: false, reason: "invalid-pricing" });
+  });
+
+  it("matchableTerms_rejects_sparse_tiers", () => {
+    const sparse: number[] = [0, , 1];
+    expect(matchableTerms({ ...BASE, assuranceTiers: sparse })).toEqual({
+      ok: false,
+      reason: "invalid-tiers",
+    });
+  });
+
+  it("not reproduced: non-object pricing shapes (array, string, number, boolean) already fail via the currency-type guard -- no separate shape check is needed", () => {
+    const shapes: unknown[] = [["USDC", "12"], "USDC:12", 12, true];
+    for (const pricing of shapes) {
+      expect(
+        matchableTerms({ ...BASE, pricing: pricing as CapabilityLite["pricing"] }),
+      ).toEqual({ ok: false, reason: "invalid-pricing" });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -284,6 +352,31 @@ describe("createMatcher — declared terms flow through unchanged into the diges
       assuranceTiers: [0, 1],
     });
     expect(result!.matchedCapabilityDigest).toBe(expected);
+  });
+
+  it("preserves_declared_non_default_currency", async () => {
+    // Guards against unconditional replacement with "USDC": the prior
+    // coverage only ever declared "USDC", so it could not catch that
+    // mutant (board N23 follow-up #439-E).
+    const eur: CapabilityLite = {
+      ...DECLARED,
+      id: "cap-eur-declared",
+      pricing: { currency: "EUR", baseCost: "12" },
+    };
+    const matcher = createMatcher(() => [eur]);
+    const result = await matcher.match(QUERY);
+    expect(result).not.toBeNull();
+    expect(result!.currency).toBe("EUR");
+  });
+
+  it("createMatcher never matches a sub-cent declared price rather than inventing a 2-decimal representation of it", async () => {
+    const subcent: CapabilityLite = {
+      ...DECLARED,
+      id: "cap-subcent-declared",
+      pricing: { currency: "USDC", baseCost: "0.001" },
+    };
+    const matcher = createMatcher(() => [subcent]);
+    expect(await matcher.match(QUERY)).toBeNull();
   });
 });
 
