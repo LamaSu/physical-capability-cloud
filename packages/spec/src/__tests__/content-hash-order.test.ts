@@ -2,7 +2,9 @@
  * Content hashes sort by UTF-16 code unit, never by locale collation
  * (oracle #3348 / #3350). The vectors in util/code-unit-order.vectors.json
  * are what a non-JS mirror reproduces. Code-unit order is byte order for
- * their ASCII strings, and a Python recomputation matched every value.
+ * ASCII strings only; the codeUnitOrder vector covers non-ASCII and lone
+ * surrogates. A Python recomputation (key=s.encode("utf-16-be",
+ * "surrogatepass")) matched every value.
  */
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
@@ -20,8 +22,14 @@ import { assertJobSpecIsWellFormed, computeJobSpecHash, type JobSpec } from "../
 import vectors from "../util/code-unit-order.vectors.json" with { type: "json" };
 
 const sha = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
-/** An independent reference order: the UTF-8 bytes of each string. */
-const byBytes = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+/** An independent reference order: element-wise over UTF-16 code units (charCodeAt). */
+const byCharCodes = (a: string, b: string): number => {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const d = a.charCodeAt(i) - b.charCodeAt(i);
+    if (d !== 0) return d;
+  }
+  return a.length - b.length;
+};
 const rotations = <T>(xs: readonly T[]): T[][] =>
   xs.map((_, i) => [...xs.slice(i), ...xs.slice(0, i)]).concat([[...xs].reverse()]);
 
@@ -29,18 +37,53 @@ describe("compareCodeUnits", () => {
   it("orders by code unit: punctuation and digits as bytes do, uppercase before lowercase", () => {
     const keys = vectors.mapSnapshot.entries.map((e) => e.key);
     expect([...keys].sort(compareCodeUnits)).toEqual(vectors.mapSnapshot.sortedKeys);
-    expect([...keys].sort(byBytes)).toEqual(vectors.mapSnapshot.sortedKeys);
+    expect([...keys].sort(byCharCodes)).toEqual(vectors.mapSnapshot.sortedKeys);
     expect(["cmm_2", "cmm2", "cmm-1"].sort(compareCodeUnits)).toEqual(["cmm-1", "cmm2", "cmm_2"]);
     expect(["0xab", "0xAB", "0xAb"].sort(compareCodeUnits)).toEqual(["0xAB", "0xAb", "0xab"]);
     expect(compareCodeUnits("a", "a")).toBe(0);
   });
 });
 
+// E1 finding 6: non-ASCII and lone-surrogate vectors, checked against an
+// independent comparison, so the contract holds beyond ASCII.
+describe("code-unit order beyond ASCII", () => {
+  const { strings, sorted, utf16be } = vectors.codeUnitOrder;
+  const utf16beHex = (s: string) =>
+    Array.from({ length: s.length }, (_, i) => s.charCodeAt(i).toString(16).padStart(4, "0")).join("");
+
+  it("compareCodeUnits and the independent reference both give the vector's order", () => {
+    for (const input of rotations(strings)) {
+      expect([...input].sort(compareCodeUnits)).toEqual(sorted);
+      expect([...input].sort(byCharCodes)).toEqual(sorted);
+    }
+  });
+
+  it("canonicalize orders object keys the same way", () => {
+    const obj = Object.fromEntries(strings.map((s, i) => [s, i]));
+    expect(Object.keys(JSON.parse(canonicalize(obj)))).toEqual(sorted);
+  });
+
+  it("the vector's UTF-16BE bytes are in byte order, so a mirror can sort by them", () => {
+    expect(sorted.map(utf16beHex)).toEqual(utf16be);
+    expect([...utf16be].sort()).toEqual(utf16be);
+  });
+
+  it("is neither UTF-8 byte order nor code-point order", () => {
+    const utf8 = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+    expect(compareCodeUnits("\u{10000}", "\uE000")).toBeLessThan(0);
+    expect(utf8("\u{10000}", "\uE000")).toBeGreaterThan(0);
+    expect("\u{10000}".codePointAt(0)!).toBeGreaterThan("\uE000".codePointAt(0)!);
+    // UTF-8 encoding replaces every lone surrogate with U+FFFD.
+    expect(utf8("\ud800", "\udc00")).toBe(0);
+    expect(compareCodeUnits("\ud800", "\udc00")).toBeLessThan(0);
+  });
+});
+
 describe("computeMapSnapshotHash sorts keys by code unit", () => {
   const entries = vectors.mapSnapshot.entries as MapEntry[];
 
-  it("reproduces the vector, whatever the input order, and equals the byte-order reference", () => {
-    const reference = sha(canonicalize({ entries: [...entries].sort((a, b) => byBytes(a.key, b.key)) }));
+  it("reproduces the vector, whatever the input order, and equals the independent code-unit reference", () => {
+    const reference = sha(canonicalize({ entries: [...entries].sort((a, b) => byCharCodes(a.key, b.key)) }));
     expect(reference).toBe(vectors.mapSnapshot.snapshotHash);
     for (const r of rotations(entries)) expect(computeMapSnapshotHash(r)).toBe(vectors.mapSnapshot.snapshotHash);
   });

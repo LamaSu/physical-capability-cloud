@@ -1,6 +1,49 @@
 {
   "contract": "pcc.spec.content-hash-order.v1",
-  "rule": "Every content hash sorts strings by UTF-16 code unit (the order canonicalize gives object keys), never by locale collation. For these ASCII inputs that is byte order.",
+  "rule": "Every content hash sorts strings by UTF-16 code unit (the order canonicalize gives object keys), never by locale collation. For ASCII strings that is byte order; beyond ASCII it is neither UTF-8 byte order nor code-point order (see codeUnitOrder).",
+  "codeUnitOrder": {
+    "function": "compareCodeUnits",
+    "rule": "UTF-16 code-unit order. U+10000 (d800 dc00) sorts before U+E000, unlike UTF-8 byte order or code-point order; lone surrogates are ordinary code units and a lone d800 sorts before the pair d800 dc00.",
+    "strings": [
+      "\u00e9",
+      "\uffff",
+      "\ud800\udc00",
+      "z",
+      "\udfff",
+      "\ue000",
+      "\ud800",
+      "Z",
+      "\udbff\udfff",
+      "\ufffd",
+      "\udc00"
+    ],
+    "sorted": [
+      "Z",
+      "z",
+      "\u00e9",
+      "\ud800",
+      "\ud800\udc00",
+      "\udbff\udfff",
+      "\udc00",
+      "\udfff",
+      "\ue000",
+      "\ufffd",
+      "\uffff"
+    ],
+    "utf16be": [
+      "005a",
+      "007a",
+      "00e9",
+      "d800",
+      "d800dc00",
+      "dbffdfff",
+      "dc00",
+      "dfff",
+      "e000",
+      "fffd",
+      "ffff"
+    ]
+  },
   "mapSnapshot": {
     "function": "computeMapSnapshotHash",
     "entries": [
