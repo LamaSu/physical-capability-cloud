@@ -276,3 +276,16 @@ describe("ident.registered_key checks the pinned params before the pending rule 
     }
   });
 });
+
+describe("the ident.registered_key verifier never throws, even on a hostile thrown value (E2 finding 2, found in the fix round)", () => {
+  const v = makeRegisteredKeyVerifier();
+  const ctx = { vocabVersion: 1 };
+
+  it("a getter that throws a value whose toString also throws still gives met:false", async () => {
+    const hostile = { toString(): string { throw new Error("toString ran"); } };
+    const params = { registryId: KERNEL_SIGNING_KEY_REGISTRY_ID, snapshotHash: `0x${"ab".repeat(32)}` };
+    const instance = { get snapshot(): never { throw hostile; }, kernelId: "kernel-1", signer: "x" };
+    const r = await v.verify(instance, params, ctx);
+    expect(r.met).toBe(false);
+  });
+});

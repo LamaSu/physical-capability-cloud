@@ -207,7 +207,7 @@ export function makeRegisteredKeyVerifier(): PrimitiveVerifier {
           ? { met: true, detail: [`signer resolves for ${inst.kernelId} in the pinned registry`] }
           : { met: false, detail: [r.reason] };
       } catch (err) {
-        return { met: false, detail: [`malformed instance: ${err instanceof Error ? err.message : String(err)}`] };
+        return { met: false, detail: [`malformed instance: ${errorText(err)}`] };
       }
     },
   };
