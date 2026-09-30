@@ -17,6 +17,7 @@ import { resetSettlementService, getSettlementService } from "../services/settle
 import { closeWorkflowStore } from "../workflow-store.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any imports that use them
@@ -170,6 +171,8 @@ async function buildApp(): Promise<FastifyInstance> {
   resetSettlementService();
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app); // job reads are object-authorized (F3)
   await app.register(settlementRoutes);
   await app.ready();
   return app;
