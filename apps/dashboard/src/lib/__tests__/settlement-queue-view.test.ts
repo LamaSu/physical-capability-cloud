@@ -12,6 +12,7 @@ import {
   flushOutcome,
   formatUsdcBaseUnits,
   statusFromResponse,
+  triggerBadge,
   type EpochSummary,
 } from "../settlement-queue-view.js";
 
@@ -79,6 +80,19 @@ describe("epochDetailNote: the detail panel's placeholder when nothing is select
   it("'no epoch' only for a real, empty answer; otherwise a prompt to pick one", () => {
     expect(epochDetailNote({ state: "read", value: [] })).toBe("No epoch to show");
     expect(epochDetailNote({ state: "read", value: [EPOCH] })).toBe("Click an epoch to see breakdown");
+  });
+});
+
+describe("triggerBadge: the epoch-list badge (M3)", () => {
+  it("colors size teal, value gold, manual/age gray", () => {
+    expect(triggerBadge({ batches: [{ ...EPOCH.batches[0], trigger: "size" }] })).toEqual({ label: "size", color: "teal" });
+    expect(triggerBadge({ batches: [{ ...EPOCH.batches[0], trigger: "value" }] })).toEqual({ label: "value", color: "gold" });
+    expect(triggerBadge({ batches: [{ ...EPOCH.batches[0], trigger: "manual" }] })).toEqual({ label: "manual", color: "gray" });
+    expect(triggerBadge({ batches: [{ ...EPOCH.batches[0], trigger: "age" }] })).toEqual({ label: "age", color: "gray" });
+  });
+
+  it("NEGATIVE: an empty batch list is 'no batches', never an invented trigger", () => {
+    expect(triggerBadge({ batches: [] })).toEqual({ label: "no batches", color: "gray" });
   });
 });
 

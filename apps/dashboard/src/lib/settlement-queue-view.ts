@@ -147,6 +147,21 @@ export function flushConfirmation(q: QueueStatus): string {
   );
 }
 
+export type BadgeColor = "teal" | "gold" | "gray";
+
+/**
+ * The epoch-list trigger badge: the first batch's trigger, colored — never an invented trigger
+ * for an epoch with no batches (M3). A manual flush of an empty queue is a valid epoch (the
+ * gateway can produce `batches: []`); it is shown as "no batches" with no trigger, not "manual".
+ */
+export function triggerBadge(epoch: Pick<EpochSummary, "batches">): { label: string; color: BadgeColor } {
+  const trigger = epoch.batches[0]?.trigger;
+  if (trigger === undefined) return { label: "no batches", color: "gray" };
+  if (trigger === "size") return { label: trigger, color: "teal" };
+  if (trigger === "value") return { label: trigger, color: "gold" };
+  return { label: trigger, color: "gray" };
+}
+
 /**
  * What the epoch-detail panel says when nothing is selected: the read's own reason when the
  * epoch history is not a real answer yet (loading or unavailable — M2), "no epoch" only for a

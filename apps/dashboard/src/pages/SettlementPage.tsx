@@ -17,6 +17,7 @@ import {
   flushOutcome,
   formatUsdcBaseUnits,
   statusFromResponse,
+  triggerBadge,
   type EpochSummary,
   type QueueStatus,
   type Read,
@@ -236,50 +237,43 @@ export function SettlementPage() {
               <p className="text-sm text-white/40 text-center py-4">{epochsNote}</p>
             </GlassPanel>
           )}
-          {list?.map((epoch) => (
-            <GlassPanel
-              key={epoch.epochId}
-              hover
-              glow={selectedEpoch === epoch.epochId ? "green" : "none"}
-              onClick={() =>
-                setSelectedEpoch(
-                  selectedEpoch === epoch.epochId ? null : epoch.epochId,
-                )
-              }
-              className="cursor-pointer"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="text-sm font-mono text-emerald-400">
-                    #{epoch.epochId}
-                  </span>
-                  <span className="text-sm text-white/80">
-                    {epoch.totalIntents} ops in{" "}
-                    {epoch.batches.length} batch{epoch.batches.length !== 1 ? "es" : ""}
-                  </span>
-                  <GlowBadge
-                    color={
-                      epoch.batches[0]?.trigger === "size"
-                        ? "teal"
-                        : epoch.batches[0]?.trigger === "value"
-                          ? "gold"
-                          : "gray"
-                    }
-                  >
-                    {epoch.batches[0]?.trigger ?? "manual"}
-                  </GlowBadge>
+          {list?.map((epoch) => {
+            const badge = triggerBadge(epoch);
+            return (
+              <GlassPanel
+                key={epoch.epochId}
+                hover
+                glow={selectedEpoch === epoch.epochId ? "green" : "none"}
+                onClick={() =>
+                  setSelectedEpoch(
+                    selectedEpoch === epoch.epochId ? null : epoch.epochId,
+                  )
+                }
+                className="cursor-pointer"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-mono text-emerald-400">
+                      #{epoch.epochId}
+                    </span>
+                    <span className="text-sm text-white/80">
+                      {epoch.totalIntents} ops in{" "}
+                      {epoch.batches.length} batch{epoch.batches.length !== 1 ? "es" : ""}
+                    </span>
+                    <GlowBadge color={badge.color}>{badge.label}</GlowBadge>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-white/40">
+                    <span>
+                      {(epoch.completedAt - epoch.startedAt).toFixed(0)}ms
+                    </span>
+                    <span>
+                      {new Date(epoch.startedAt).toLocaleTimeString()}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-4 text-xs text-white/40">
-                  <span>
-                    {(epoch.completedAt - epoch.startedAt).toFixed(0)}ms
-                  </span>
-                  <span>
-                    {new Date(epoch.startedAt).toLocaleTimeString()}
-                  </span>
-                </div>
-              </div>
-            </GlassPanel>
-          ))}
+              </GlassPanel>
+            );
+          })}
           {list !== null && list.length === 0 && (
             <GlassPanel>
               <p className="text-sm text-white/40 text-center py-4">
