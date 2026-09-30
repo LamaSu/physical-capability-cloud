@@ -97,6 +97,17 @@ describe("LicensingEngine.setRateSchedule immutability guard", () => {
   });
 });
 
+describe("LicensingEngine.setRateSchedule checks rule 5 on the raw object", () => {
+  it("refuses a correctly hashed schedule whose startTime is -1 (astra EC1 M3: the range is 0..2^53-1)", () => {
+    const engine = new LicensingEngine();
+    const segments = [{ kind: "constant" as const, startTime: -1, endTime: null, bps: 150 }];
+    const body = { version: 1, segments, publishedAt: "2026-01-01T00:00:00Z" };
+    const s: RateSchedule = { ...body, scheduleHash: computeScheduleHash(body) };
+    expect(() => engine.setRateSchedule(IP_A, s)).toThrow(/startTime -1 is not an integer in 0\.\.2\^53-1/);
+    expect(engine.getRateSchedule(IP_A)).toBeUndefined();
+  });
+});
+
 describe("LicensingEngine.unsafeReplaceRateSchedule escape hatch", () => {
   it("replaces the cached schedule with a different-hash schedule", () => {
     const engine = new LicensingEngine();

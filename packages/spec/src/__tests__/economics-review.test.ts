@@ -812,6 +812,17 @@ describe("clean-room round 3b: every number in a schedule body means one value t
     expect(() => assertScheduleIsWellFormed({ segments: [{ ...segment, startTime: 2 ** 53 } as unknown as RateSchedule["segments"][number]] })).toThrow(/startTime/);
   });
 
+  it("astra EC1 M3: rule 5's range starts at 0, so the shared helper refuses a negative integer, as the parsers do", () => {
+    // The licensing engine hands raw objects to this check, without the zod parse that refuses them.
+    const at = (field: string) => ({ kind: "constant", startTime: 0, endTime: null, bps: 40, [field]: -1 });
+    for (const field of ["startTime", "bps"]) {
+      expect(() => assertScheduleIsWellFormed({ version: 1, segments: [at(field) as unknown as RateSchedule["segments"][number]] })).toThrow(
+        new RegExp(`${field} -1 is not an integer in 0\\.\\.2\\^53-1`),
+      );
+      expect(optionsRefusal(sealed(at(field)))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+    }
+  });
+
   it("a real number in a schedule body is written as ECMAScript Number.prototype.toString writes it", () => {
     expect(canonicalize({ a: 1e-9, b: 0.000001, c: 1.5e-7, d: 100.5, e: 1e16, f: 1e21 })).toBe('{"a":1e-9,"b":0.000001,"c":1.5e-7,"d":100.5,"e":10000000000000000,"f":1e+21}');
     const tiny = sealed({ kind: "exponential-decay", startTime: 0, endTime: null, startBps: 40, endBps: 40, decayPerSecond: 1e-9 });

@@ -284,6 +284,57 @@ describe("netSplitterFor", () => {
     });
   });
 
+  describe("astra EC1 (round 2 at 8dc089e5): each plan unit and the input are read once, and nothing thrown escapes", () => {
+    const ag = examplePrintAndMail();
+    const printshop = ag.parties.find((p) => p.partyId === "printshop")!.payTo!;
+    const courier = ag.parties.find((p) => p.partyId === "courier")!.payTo!;
+    // The $12.30 print quote of the add-ons test above: its real value is refused OPERATOR_BELOW_QUOTE.
+    const honest = () => planUnits(ag, undefined, { "a-print": { quote: 12_300_000n, payoutAddress: printshop }, "b-mail": { quote: 5_000_000n, payoutAddress: courier } });
+    const split = (units: unknown) => refusal(netSplitterFor({ agreement: ag, accepted: null, server: server(ag) })(units as PlanSplitUnit[]));
+    /** The reviewer's quote: the real $12.30 for its first two reads (all that validation read), then 0. */
+    const shifting = () => {
+      let reads = 0;
+      return () => (++reads <= 2 ? 12_300_000n : 0n);
+    };
+    const trap = () => {
+      throw new Error("trap");
+    };
+
+    it("H1: a quote that changes between reads is never enforced as another value", () => {
+      expect(split(honest())).toBe("economics:OPERATOR_BELOW_QUOTE:a-print");
+      const [print, mail] = honest();
+      // An accessor is refused outright, as snapshotJson refuses one anywhere in the agreement.
+      const withGetter = Object.defineProperty({ ...print! }, "quote", { get: shifting(), enumerable: true });
+      expect(split([withGetter, mail])).toBe("economics:PLAN_UNITS_INVALID");
+      // A Proxy's get trap is never consulted: the unit is judged on its one data read, the real quote.
+      const next = shifting();
+      const lying = new Proxy({ ...print! }, { get: (t, k, r) => (k === "quote" ? next() : Reflect.get(t, k, r)) });
+      expect(split([lying, mail])).toBe("economics:OPERATOR_BELOW_QUOTE:a-print");
+    });
+
+    it("H2: no unit, unit list or input can throw out of the seam; each is refused instead", () => {
+      const [print, mail] = honest();
+      const hostile = new Proxy({}, { get: trap }); // the reviewer's counterexample
+      expect(() => split([hostile])).not.toThrow();
+      expect(split([hostile])).toBe("economics:PLAN_UNITS_INVALID");
+      expect(split([new Proxy({ ...print! }, { getOwnPropertyDescriptor: trap }), mail])).toBe("economics:PLAN_UNITS_INVALID");
+      const revokedUnits = Proxy.revocable([print, mail], {});
+      revokedUnits.revoke();
+      expect(split(revokedUnits.proxy)).toBe("economics:PLAN_UNITS_INVALID");
+      // The input object itself: its three fields are read once, and a read that throws refuses every split.
+      const input = { agreement: ag, accepted: null, server: server(ag) };
+      const revokedInput = Proxy.revocable(input, {});
+      revokedInput.revoke();
+      for (const bad of [new Proxy(input, { get: trap, getOwnPropertyDescriptor: trap }), revokedInput.proxy]) {
+        let splitter: ReturnType<typeof netSplitterFor> | undefined;
+        expect(() => {
+          splitter = netSplitterFor(bad as never);
+        }).not.toThrow();
+        expect(refusal(splitter!(honest()))).toBe("economics:SERVER_FACTS_INVALID:unreadable");
+      }
+    });
+  });
+
   it("the protocol fee recipient stays the fee recipient: FEE is not in the payouts", () => {
     const ag = examplePrintAndMail();
     const r = netSplitterFor({ agreement: ag, accepted: null, server: server(ag) })(planUnits(ag));

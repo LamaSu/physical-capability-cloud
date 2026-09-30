@@ -372,10 +372,12 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
     // A schedule is sealed under a hash of its numbers, so each must mean one value to every reader. An
     // integer above 2^53 - 1 is rounded by a JavaScript reader but not by an exact one, and JSON 1e400
     // reads as Infinity, which no rate can be computed from (pcc-economics clean-room round 3b, P100c).
+    // The range starts at 0, as in the parsers: callers such as the licensing engine hand this check raw
+    // objects that no parser has seen (astra EC1 M3).
     const fields = seg as unknown as Readonly<Record<string, unknown>>;
     for (const field of INTEGER_SEGMENT_FIELDS) {
       const v = fields[field];
-      if (typeof v === "number" && !Number.isSafeInteger(v)) {
+      if (typeof v === "number" && !(Number.isSafeInteger(v) && v >= 0)) {
         throw new Error(`RateSchedule segments[${i}].${field} ${v} is not an integer in 0..2^53-1`);
       }
     }

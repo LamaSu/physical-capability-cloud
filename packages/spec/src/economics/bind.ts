@@ -28,7 +28,7 @@ import { canonicalize } from "../util/canonical.js";
 import type { RateSchedule } from "../types/rate-schedule.js";
 import { compileEconomics } from "./compile.js";
 import { cmpStr } from "./hash.js";
-import { snapshotJson } from "./input.js";
+import { MAX_INPUT_ARRAY_LENGTH, snapshotJson } from "./input.js";
 import type { CaptureClassId } from "./rates.js";
 import { z } from "zod";
 import { RateScheduleSchema } from "../types/rate-schedule.js";
@@ -196,17 +196,51 @@ export const ServerEconomicsFactsSchema = z
   })
   .strict();
 
-function validPlanUnits(units: unknown): units is readonly PlanSplitUnit[] {
-  if (!Array.isArray(units)) return false;
-  return units.every(
-    (u: unknown) =>
-      typeof u === "object" &&
-      u !== null &&
-      typeof (u as PlanSplitUnit).nodeId === "string" &&
-      typeof (u as PlanSplitUnit).payoutAddress === "string" &&
-      /^0x[0-9a-fA-F]{40}$/.test((u as PlanSplitUnit).payoutAddress) &&
-      (["quote", "g", "f", "n"] as const).every((k) => typeof (u as PlanSplitUnit)[k] === "bigint" && (u as PlanSplitUnit)[k] >= 0n),
-  );
+/** One own data property, read once. An accessor, a missing key or a Proxy trap that throws reads as not ok. */
+function ownData(from: unknown, key: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    if (typeof from !== "object" || from === null) return { ok: false };
+    const d = Object.getOwnPropertyDescriptor(from, key);
+    return d !== undefined && "value" in d ? { ok: true, value: d.value } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** The fields of a plan unit the splitter decides on (`operator` is not one), read once and frozen. */
+type PlanUnitRead = Readonly<Pick<PlanSplitUnit, "nodeId" | "payoutAddress" | "quote" | "g" | "f" | "n">>;
+
+const isAmount = (x: unknown): x is bigint => typeof x === "bigint" && x >= 0n;
+
+/**
+ * The plan's units, read exactly once into frozen plain data before any decision (astra EC1 H1, H2). Every
+ * later check reads this copy only: reading the caller's objects again let a getter pass validation with
+ * one quote and be enforced against another, and let a Proxy trap throw out of the seam. As in
+ * snapshotJson, only own data properties are read, so an accessor is refused and a Proxy's get trap is
+ * never consulted. Anything unreadable returns null (PLAN_UNITS_INVALID); nothing throws.
+ */
+function readPlanUnits(units: unknown): readonly PlanUnitRead[] | null {
+  try {
+    if (!Array.isArray(units)) return null;
+    const length = ownData(units, "length");
+    if (!length.ok || typeof length.value !== "number" || !Number.isSafeInteger(length.value) || length.value < 0 || length.value > MAX_INPUT_ARRAY_LENGTH) return null;
+    const out: PlanUnitRead[] = [];
+    for (let i = 0; i < length.value; i++) {
+      const unit = ownData(units, String(i));
+      if (!unit.ok) return null;
+      const read = (key: keyof PlanUnitRead): unknown => {
+        const r = ownData(unit.value, key);
+        return r.ok ? r.value : undefined;
+      };
+      const [nodeId, payoutAddress, quote, g, f, n] = [read("nodeId"), read("payoutAddress"), read("quote"), read("g"), read("f"), read("n")];
+      if (typeof nodeId !== "string" || typeof payoutAddress !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(payoutAddress)) return null;
+      if (!isAmount(quote) || !isAmount(g) || !isAmount(f) || !isAmount(n)) return null;
+      out.push(Object.freeze({ nodeId, payoutAddress, quote, g, f, n }));
+    }
+    return Object.freeze(out);
+  } catch {
+    return null; // a revoked Proxy throws even from Array.isArray
+  }
 }
 
 /** Refusal codes read `economics:<CODE>[:<detail>]`, bounded, so the seam can record them verbatim. */
@@ -242,13 +276,19 @@ export function agreementUnitGross(agreement: unknown): { ok: true; gross: Recor
 }
 
 export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
-  // Snapshot everything now, so a caller mutating its objects later cannot change a decision. Reading
-  // never throws; malformed facts refuse every call below.
-  const serverCopy = snapshotJson((input as { server?: unknown } | null)?.server);
+  // Snapshot everything now, so a caller mutating its objects later cannot change a decision. Each input
+  // field is read once, as an own data property: a getter or a Proxy trap on the input itself used to throw
+  // from here (astra EC1 H2). Reading never throws; malformed facts refuse every call below.
+  const field = (key: keyof NetSplitterInput): unknown => {
+    const r = ownData(input, key);
+    return r.ok ? r.value : undefined;
+  };
+  const serverCopy = snapshotJson(field("server"));
   const serverParsed = serverCopy.ok ? ServerEconomicsFactsSchema.safeParse(serverCopy.value) : null;
-  const acceptedRaw = (input as { accepted?: unknown } | null)?.accepted;
-  const acceptedCopy = acceptedRaw === null ? null : snapshotJson(acceptedRaw);
-  const agreementCopy = snapshotJson((input as { agreement?: unknown } | null)?.agreement);
+  // Only an `accepted` that reads as null means acceptance happens now; an unreadable one is checked, and refused.
+  const acceptedRaw = ownData(input, "accepted");
+  const acceptedCopy = acceptedRaw.ok && acceptedRaw.value === null ? null : snapshotJson(acceptedRaw.ok ? acceptedRaw.value : undefined);
+  const agreementCopy = snapshotJson(field("agreement"));
 
   return (units) => {
     if (serverParsed === null || !serverParsed.success) {
@@ -256,7 +296,8 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
       return refuse("SERVER_FACTS_INVALID", why || "(root)");
     }
     const server = serverParsed.data;
-    if (!validPlanUnits(units)) return refuse("PLAN_UNITS_INVALID");
+    const plan = readPlanUnits(units);
+    if (plan === null) return refuse("PLAN_UNITS_INVALID");
     const accepted = acceptedCopy === null ? null : acceptedCopy.ok ? (acceptedCopy.value as AcceptedAgreementHashes) : ({} as AcceptedAgreementHashes);
     const parsed = agreementCopy.ok ? EconomicAgreementSchema.safeParse(agreementCopy.value) : null;
     if (parsed === null || !parsed.success) return refuse("SCHEMA_INVALID");
@@ -310,12 +351,12 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
 
     // Units: exactly the plan's nodes, each at the server-quoted gross, running what the server says.
     const byRef = new Map(ag.units.map((u) => [u.unitRef, u] as const));
-    const nodeIds = new Set(units.map((u) => u.nodeId));
-    if (nodeIds.size !== units.length || byRef.size !== units.length || units.some((u) => !byRef.has(u.nodeId))) {
+    const nodeIds = new Set(plan.map((u) => u.nodeId));
+    if (nodeIds.size !== plan.length || byRef.size !== plan.length || plan.some((u) => !byRef.has(u.nodeId))) {
       return refuse("UNIT_SET_MISMATCH");
     }
     const facts = new Map(Object.entries(server.unitFacts));
-    for (const u of units) {
+    for (const u of plan) {
       const unit = byRef.get(u.nodeId)!;
       if (BigInt(unit.gross) !== u.g) return refuse("GROSS_MISMATCH", u.nodeId);
       if (u.g < u.quote) return refuse("QUOTE_NOT_COVERED", u.nodeId);
@@ -353,7 +394,7 @@ export function netSplitterFor(input: NetSplitterInput): PlanSplitter {
 
     const compiledByRef = new Map(compiled.units.map((u) => [u.unitRef, u] as const));
     const out: Extract<PlanSplitResult, { ok: true }>["units"] = [];
-    for (const u of units) {
+    for (const u of plan) {
       const c = compiledByRef.get(u.nodeId)!;
       // One fee rule, the escrow's. Both sides compute it; if they ever disagree, nothing is funded.
       if (BigInt(c.fee) !== u.f || BigInt(c.net) !== u.n) return refuse("FEE_RULE_DIVERGED", u.nodeId);
