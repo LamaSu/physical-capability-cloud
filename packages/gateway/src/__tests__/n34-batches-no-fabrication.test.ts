@@ -57,4 +57,59 @@ describe("N34: the demo HPLC batch", () => {
     expect(list[0]!.runConfig).toMatchObject({ method: "HPLC_RP_C18_gradient_30min", demo: true });
     expect(byJob).toHaveLength(1);
   });
+
+  it("NEGATIVE (F-D, reviewer r1b): a batch seeded while demo was ON stays hidden once demo is toggled OFF in the SAME process", async () => {
+    // services.ts seeds the demo batch once, at import, when demo is on. A long-running
+    // gateway process does not re-import when an operator flips PCC_DEMO_ROUTES off — so
+    // the seeded singleton must recheck demo mode on every READ, not trust the state it
+    // was created under.
+    for (const k of ENV) delete process.env[k];
+    process.env.PCC_DEMO_ROUTES = "true";
+    process.env.NODE_ENV = "test";
+    vi.resetModules();
+    const { batchRoutes } = await import("../routes/batches.js");
+    const app = Fastify({ logger: false });
+    await app.register(batchRoutes);
+    await app.ready();
+    try {
+      // Confirm it really was seeded (demo on) before flipping anything.
+      const seeded = await app.inject({ method: "GET", url: "/api/batches" });
+      expect(seeded.json().batches).toHaveLength(1);
+
+      // Flip demo off in this SAME process — no re-import, no fresh module, exactly
+      // what an operator toggling the env var (or a per-request demo check) looks like.
+      delete process.env.PCC_DEMO_ROUTES;
+
+      const list = await app.inject({ method: "GET", url: "/api/batches" });
+      const byJob = await app.inject({ method: "GET", url: "/api/batches/by-job/job-010" });
+      expect(list.json().batches, JSON.stringify(list.json())).toEqual([]);
+      expect(byJob.json().batches).toEqual([]);
+      expect(JSON.stringify(list.json())).not.toMatch(FIXTURE);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a batch a caller actually created (no demo flag) stays visible regardless of demo mode", async () => {
+    for (const k of ENV) delete process.env[k];
+    process.env.PCC_DEMO_ROUTES = "true";
+    process.env.NODE_ENV = "test";
+    vi.resetModules();
+    const { batchRoutes } = await import("../routes/batches.js");
+    const { batchTracker } = await import("../services.js");
+    const app = Fastify({ logger: false });
+    await app.register(batchRoutes);
+    await app.ready();
+    try {
+      const real = batchTracker.createBatch("kernel-real", "dev-real-01", "cap-real", {
+        method: "REAL_METHOD",
+      });
+      delete process.env.PCC_DEMO_ROUTES;
+      const list = await app.inject({ method: "GET", url: "/api/batches" });
+      const ids = (list.json().batches as Array<{ id: string }>).map((b) => b.id);
+      expect(ids).toEqual([real.id]);
+    } finally {
+      await app.close();
+    }
+  });
 });
