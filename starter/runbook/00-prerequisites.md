@@ -24,7 +24,7 @@ python3 -m pip install 'pcc-node[crypto]>=0.1.1'
 ```
 Until 0.1.1 is on PyPI (0.1.0 was withdrawn for security fixes), install the release commit instead:
 ```bash
-python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@81a0994af1409fa1a87c9d5ec00d784923b6a16c#subdirectory=packages/pcc-node'
+python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@1e9308a81f21fd25c38eba976b9b58797c67c5ed#subdirectory=packages/pcc-node'
 ```
 **Check:**
 ```bash
