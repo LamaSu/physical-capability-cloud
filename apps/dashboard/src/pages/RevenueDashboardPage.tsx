@@ -1,13 +1,14 @@
 import React from "react";
 import {
-  GlassPanel, GlowBadge, DataCell, AmountDisplay,
+  GlassPanel, GlowBadge, DataCell,
   AnimatedNumber, EmptyState, LoadingShell,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useJobs, useEscrows } from "../api/hooks/use-pcc-data.js";
 import { useNavigate } from "react-router-dom";
-import { formatCount, isActiveJob, mayBeTruncated } from "../lib/live-status.js";
+import { JOBS_PAGE_SIZE, formatCount, isActiveJob, mayBeTruncated } from "../lib/live-status.js";
 import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+import { EscrowAmount } from "../components/EscrowAmount.js";
 
 const FINISHED = new Set(["completed", "failed", "cancelled"]);
 
@@ -110,7 +111,7 @@ export function RevenueDashboardPage() {
                       <span className="text-xs font-mono text-white/60">{esc.id}</span>
                       <GlowBadge color="gold" className="ml-2">{esc.status}</GlowBadge>
                     </div>
-                    {esc.totalAmount != null ? <AmountDisplay amount={esc.totalAmount} size="sm" /> : <span className="text-white/40">—</span>}
+                    <EscrowAmount amount={esc.totalAmount} currency={esc.currency} size="sm" />
                   </div>
                 ))}
               </div>
@@ -121,7 +122,15 @@ export function RevenueDashboardPage() {
           <GlassPanel padding="lg">
             <h2 className="text-sm font-medium text-white/60 mb-4">Completed Jobs</h2>
             {completedJobs.length === 0 ? (
-              <EmptyState title="No completed jobs yet" />
+              truncated ? (
+                // One page was read: none completed in it is not none completed at all (astra 18b F5).
+                <EmptyState
+                  title={`No completed jobs in the first ${JOBS_PAGE_SIZE}`}
+                  description={`The gateway returned its first ${JOBS_PAGE_SIZE} jobs and none of them is completed; there may be completed jobs beyond them.`}
+                />
+              ) : (
+                <EmptyState title="No completed jobs yet" />
+              )
             ) : (
               <div className="space-y-2">
                 {completedJobs.slice(0, 10).map((job) => (

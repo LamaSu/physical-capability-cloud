@@ -1,13 +1,14 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  GlassPanel, DataCell, AmountDisplay, StatusChip, ProgressArc,
+  GlassPanel, DataCell, StatusChip, ProgressArc,
   EmptyState, LoadingShell,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useJobs, useKernels, useEscrows, useGatewayHealth } from "../api/hooks/use-pcc-data.js";
 import { formatCount, isActiveJob, isKernelOnline, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
 import { UnavailableState } from "../components/LiveState.js";
+import { EscrowAmount } from "../components/EscrowAmount.js";
 
 /** Canonical job statuses (types/dto.ts StepStatus) to a pulse; the label always carries the status text. */
 const jobStatusToPulse: Record<string, "online" | "executing" | "completed" | "failed" | "offline"> = {
@@ -195,7 +196,7 @@ export function DashboardPage() {
                   <div key={esc.id} className="flex items-center justify-between py-1.5 text-xs gap-4">
                     <span className="text-white/40 font-mono truncate">{esc.id}</span>
                     <span className="text-white/50">{esc.status}</span>
-                    {esc.totalAmount != null ? <AmountDisplay amount={esc.totalAmount} size="sm" /> : <Unavailable />}
+                    <EscrowAmount amount={esc.totalAmount} currency={esc.currency} size="sm" />
                   </div>
                 ))}
               </div>

@@ -31,6 +31,15 @@ import type {
   PaginatedResult,
   AgentMeDTO,
 } from "../../types/dto.js";
+import {
+  ESCROW_CURRENCIES,
+  KNOWN_ESCROW_STATUSES,
+  KNOWN_JOB_STATUSES,
+  KNOWN_KERNEL_STATUSES,
+  isCanonicalAmount,
+  isCount,
+  isInRange,
+} from "../wire-vocabulary.js";
 
 // ---------------------------------------------------------------------------
 // Wire guards
@@ -54,12 +63,50 @@ function rowsOrThrow<T>(list: unknown, route: string, rowOk: (row: Record<string
   return list as T[];
 }
 
-/** Every job is classified by its status, so a row without one is malformed. */
-const jobRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status);
-/** "Online" needs both the status and the staleness flag the gateway always sets. */
-const kernelRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status) && typeof r.isStale === "boolean";
-const escrowRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status);
-const capabilityRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.kernelId);
+/** Absent, or present and valid: for fields a page shows when they're there and marks unavailable when not. */
+const optional = (v: unknown, ok: (v: unknown) => boolean) => v === undefined || v === null || ok(v);
+
+/**
+ * Every job is counted and classified by its status, so a row without a
+ * status the gateway defines is malformed (wire-vocabulary.ts).
+ */
+const jobRowOk = (r: Record<string, unknown>) => isText(r.id) && isText(r.status) && KNOWN_JOB_STATUSES.has(r.status);
+/** "Online" needs a known status and the staleness flag the gateway always sets. */
+const kernelRowOk = (r: Record<string, unknown>) =>
+  isText(r.id) && isText(r.status) && KNOWN_KERNEL_STATUSES.has(r.status) && typeof r.isStale === "boolean";
+/**
+ * An escrow is shown with its amount in its own currency, so both must be
+ * readable: a canonical decimal amount, and a currency the escrows table
+ * allows (astra 18b F1). Milestone counts may be absent (the pages mark them
+ * unavailable); when present they are counts, and the released and disputed
+ * milestones are among the escrow's milestones.
+ */
+const escrowRowOk = (r: Record<string, unknown>) =>
+  isText(r.id) &&
+  isText(r.status) &&
+  KNOWN_ESCROW_STATUSES.has(r.status) &&
+  isCanonicalAmount(r.totalAmount) &&
+  typeof r.currency === "string" &&
+  ESCROW_CURRENCIES.has(r.currency) &&
+  optional(r.jobId, (v) => typeof v === "string") &&
+  optional(r.milestoneCount, isCount) &&
+  optional(r.releasedCount, isCount) &&
+  optional(r.disputedCount, isCount) &&
+  (!isCount(r.milestoneCount) || !isCount(r.releasedCount) || !isCount(r.disputedCount) || r.releasedCount + r.disputedCount <= r.milestoneCount);
+/**
+ * A capability is grouped by kernel and type, and its queue depth, assurance
+ * score and reputation are summed, averaged and ranked, so each must be valid
+ * when present (astra 18b F3). A missing queue depth or score is shown as
+ * unknown by the pages.
+ */
+const capabilityRowOk = (r: Record<string, unknown>) =>
+  isText(r.id) &&
+  isText(r.kernelId) &&
+  isText(r.type) &&
+  optional(r.name, (v) => typeof v === "string") &&
+  optional(r.queueDepth, isCount) &&
+  optional(r.assuranceScore, (v) => isInRange(v, 0, 1)) &&
+  optional(r.reputation, (v) => isInRange(v, 0, 1000));
 
 // ---------------------------------------------------------------------------
 // Capabilities
@@ -124,25 +171,55 @@ export interface AllCapabilities {
 }
 
 /**
- * All capability instances, for views that rank or total across the whole
- * network (the kernel leaderboard). Pages through GET /api/capabilities, since
- * one request returns at most CAPABILITIES_PAGE_LIMIT rows.
+ * All capability instances, for views that rank, total or search across the
+ * whole network (the kernel leaderboard, Discover). Pages through
+ * GET /api/capabilities, since one request returns at most
+ * CAPABILITIES_PAGE_LIMIT rows.
+ *
+ * The pages must describe one list (astra 18b F4). The read fails, and the
+ * query's retry starts it over, when:
+ * - the total changes between pages (the list changed mid-read);
+ * - a page answers for an offset other than the one asked;
+ * - its hasMore disagrees with its own offset, limit and total;
+ * - an id repeats;
+ * - more rows arrive than the total.
+ * A page that comes back empty before the total is reached ends the read,
+ * which is then marked incomplete, as is one that stops at
+ * CAPABILITIES_MAX_PAGES.
  */
 export function useAllCapabilities() {
   return useQuery<AllCapabilities>({
     queryKey: ["capabilities", "all"],
     queryFn: async () => {
+      const route = "/api/capabilities";
       const items: CapabilityDTO[] = [];
-      let total = 0;
+      const seen = new Set<string>();
+      let total: number | null = null;
       for (let page = 0; page < CAPABILITIES_MAX_PAGES; page++) {
-        const res = await api.getCapabilities({ offset: items.length, limit: CAPABILITIES_PAGE_LIMIT });
-        if (!isRecord(res) || typeof res.total !== "number") throw new Error("unexpected response shape from /api/capabilities");
-        const rows = rowsOrThrow<CapabilityDTO>(res.items, "/api/capabilities", capabilityRowOk);
-        items.push(...rows);
+        const offset = items.length;
+        const res = await api.getCapabilities({ offset, limit: CAPABILITIES_PAGE_LIMIT });
+        if (!isRecord(res) || !isCount(res.total)) throw new Error(`unexpected response shape from ${route}`);
+        const rows = rowsOrThrow<CapabilityDTO>(res.items, route, capabilityRowOk);
+        if (total !== null && res.total !== total) {
+          throw new Error(`the capability list changed while it was read (${route} total ${total}, then ${res.total})`);
+        }
         total = res.total;
-        if (items.length >= total || rows.length === 0) break;
+        if (typeof res.offset === "number" && res.offset !== offset) {
+          throw new Error(`${route} answered for offset ${res.offset} when offset ${offset} was asked`);
+        }
+        if (typeof res.hasMore === "boolean" && typeof res.limit === "number" && res.hasMore !== offset + res.limit < total) {
+          throw new Error(`${route} hasMore disagrees with its offset, limit and total`);
+        }
+        for (const row of rows) {
+          if (seen.has(row.id)) throw new Error(`${route} listed capability ${row.id} twice`);
+          seen.add(row.id);
+        }
+        items.push(...rows);
+        if (items.length > total) throw new Error(`${route} returned more rows than its total of ${total}`);
+        if (items.length === total || rows.length === 0) break;
       }
-      return { items, total, complete: items.length >= total };
+      const read = total ?? 0;
+      return { items, total: read, complete: items.length === read };
     },
     retry: 1,
     staleTime: 30_000,
@@ -410,10 +487,12 @@ export function useAgentMe() {
  * The key counts of GET /api/agent/me, or null when that section is
  * unavailable. The gateway reports an unreadable key list as
  * { active: null, wildcard_keys: 0, unavailable }, so wildcard_keys is only
- * a count when active is one too.
+ * a count when active is one too. Both must be counts, and the wildcard keys
+ * are among the active ones (routes/agent-introspection.ts counts them from
+ * the same list): anything else is unavailable, never shown (astra 18b F3).
  */
 export function keyCounts(keys: unknown): { active: number; wildcardKeys: number } | null {
-  if (!isRecord(keys) || keys.unavailable || typeof keys.active !== "number" || typeof keys.wildcard_keys !== "number") {
+  if (!isRecord(keys) || keys.unavailable || !isCount(keys.active) || !isCount(keys.wildcard_keys) || keys.wildcard_keys > keys.active) {
     return null;
   }
   return { active: keys.active, wildcardKeys: keys.wildcard_keys };
