@@ -622,4 +622,39 @@ describe("public release (PX-13 round-1 findings)", () => {
       expect(() => buildPublicRelease([frozen], PERIOD, APPROVED)).not.toThrow();
     });
   });
+
+  describe("approved-set snapshot (PX-13 round-2 F3)", () => {
+    const SECRET = "pcc://capabilities/secret-us-ca-sf/v1";
+
+    it("a Set whose has() disagrees with its contents can't authorise an ID", async () => {
+      const approved = new Set([TYPE]);
+      approved.has = () => true;
+      const release = buildPublicRelease([signal({}, { capabilityKey: SECRET })], PERIOD, approved);
+      expect(release.aggregates).toEqual([]);
+      expect(release.approvedSetDigest).toBe(await sha256(canonicalize([TYPE])));
+      expect(project(signal({}, { capabilityKey: SECRET }), approved)).toBeNull();
+    });
+
+    it("an iterator that changes between passes is read once, for membership and digest alike", async () => {
+      let pass = 0;
+      const shifty = {
+        has: () => true,
+        *[Symbol.iterator]() {
+          pass++;
+          yield pass === 1 ? TYPE : SECRET;
+        },
+      } as unknown as ReadonlySet<string>;
+      const release = buildPublicRelease([signal(), signal({}, { capabilityKey: SECRET })], PERIOD, shifty);
+      expect(release.aggregates.map((a) => a.capabilityType)).toEqual([TYPE]);
+      expect(release.approvedSetDigest).toBe(await sha256(canonicalize([TYPE])));
+      expect(pass).toBe(1);
+    });
+
+    it("commits only publishable string IDs, deduplicated and sorted", async () => {
+      const mixed = new Set<unknown>([TYPE, OTHER, TYPE, "proposed:x", 42, "pcc://capabilities/a-b-c-d-e/v1"]) as unknown as ReadonlySet<string>;
+      const release = buildPublicRelease([signal()], PERIOD, mixed);
+      expect(release.approvedSetDigest).toBe(await sha256(canonicalize([OTHER, TYPE])));
+    });
+  });
 });
+
