@@ -365,6 +365,9 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
   if (schedule.version !== undefined && !(Number.isSafeInteger(schedule.version) && schedule.version >= 1 && schedule.version <= MAX_SCHEDULE_VERSION)) {
     throw new Error(`RateSchedule version ${schedule.version} is not an integer in 1..${MAX_SCHEDULE_VERSION}`);
   }
+  if (!Array.isArray(schedule.segments) || schedule.segments.length === 0) {
+    throw new Error("RateSchedule has no segments: a schedule needs at least one segment");
+  }
   let prevEnd: number | null = null;
   for (let i = 0; i < schedule.segments.length; i++) {
     const seg = schedule.segments[i];
@@ -372,10 +375,12 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
     // A schedule is sealed under a hash of its numbers, so each must mean one value to every reader. An
     // integer above 2^53 - 1 is rounded by a JavaScript reader but not by an exact one, and JSON 1e400
     // reads as Infinity, which no rate can be computed from (pcc-economics clean-room round 3b, P100c).
+    // The range starts at 0, as in the parsers: callers such as the licensing engine hand this check raw
+    // objects that no parser has seen (astra EC1 M3).
     const fields = seg as unknown as Readonly<Record<string, unknown>>;
     for (const field of INTEGER_SEGMENT_FIELDS) {
       const v = fields[field];
-      if (typeof v === "number" && !Number.isSafeInteger(v)) {
+      if (typeof v === "number" && !(Number.isSafeInteger(v) && v >= 0)) {
         throw new Error(`RateSchedule segments[${i}].${field} ${v} is not an integer in 0..2^53-1`);
       }
     }
@@ -384,6 +389,15 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
       if (typeof v === "number" && !Number.isFinite(v)) {
         throw new Error(`RateSchedule segments[${i}].${field} ${v} is not a finite number`);
       }
+    }
+    // And the segment schema's own kinds, types and ranges: bps at most 10000, a positive scale or decay, the
+    // six capture classes and their rates. The licensing engine hands this check raw objects that no parser
+    // has seen, so without this it stored segments every parser refuses (astra EC1b M3). Unknown keys stay
+    // ignored, as the schema ignores them.
+    const parsed = RateSegmentSchema.safeParse(seg);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new Error(`RateSchedule segments[${i}] is not a valid segment: ${issue?.path.join(".") || "kind"}: ${issue?.message ?? "invalid"}`);
     }
 
     // An open-ended segment (endTime null) covers every later moment, and evaluation returns the FIRST

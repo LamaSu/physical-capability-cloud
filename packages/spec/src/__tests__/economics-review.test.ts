@@ -22,7 +22,7 @@ import { simulateEconomics } from "../economics/simulate.js";
 import type { Clause, EconomicAgreement } from "../economics/types.js";
 import { verifyAcceptedAgreement } from "../economics/verify.js";
 import { computeManifestHash, type CompositionManifest } from "../types/composition-manifest.js";
-import { assertScheduleIsWellFormed, computeScheduleHash, evaluateRateSchedule, type RateSchedule } from "../types/rate-schedule.js";
+import { assertScheduleIsWellFormed, computeScheduleHash, evaluateRateSchedule, RateSegmentSchema, type RateSchedule } from "../types/rate-schedule.js";
 import { computeTrainingManifestHash } from "../types/training-manifest.js";
 import { canonicalize } from "../util/canonical.js";
 import { a, baseAgreement, clone } from "./economics-helpers.js";
@@ -810,6 +810,41 @@ describe("clean-room round 3b: every number in a schedule body means one value t
     const segment = { kind: "constant", startTime: 0, endTime: null, bps: 40, note: 1.5, huge: JSON.parse("1e400") };
     expect(() => assertScheduleIsWellFormed({ version: 1, segments: [segment as unknown as RateSchedule["segments"][number]] })).not.toThrow();
     expect(() => assertScheduleIsWellFormed({ segments: [{ ...segment, startTime: 2 ** 53 } as unknown as RateSchedule["segments"][number]] })).toThrow(/startTime/);
+  });
+
+  it("astra EC1 M3: rule 5's range starts at 0, so the shared helper refuses a negative integer, as the parsers do", () => {
+    // The licensing engine hands raw objects to this check, without the zod parse that refuses them.
+    const at = (field: string) => ({ kind: "constant", startTime: 0, endTime: null, bps: 40, [field]: -1 });
+    for (const field of ["startTime", "bps"]) {
+      expect(() => assertScheduleIsWellFormed({ version: 1, segments: [at(field) as unknown as RateSchedule["segments"][number]] })).toThrow(
+        new RegExp(`${field} -1 is not an integer in 0\\.\\.2\\^53-1`),
+      );
+      expect(optionsRefusal(sealed(at(field)))).toEqual([["SCHEMA_INVALID", ["options"]]]);
+    }
+  });
+
+  it("astra EC1b M3: the shared helper admits exactly the segments the schema admits, for raw callers too", () => {
+    const base = { startTime: 0, endTime: null };
+    const refusedBySchema: Array<[string, Record<string, unknown>]> = [
+      ["adoption-indexed scale 0", { ...base, kind: "adoption-indexed", scale: 0, floorBps: 0, capBps: 500 }],
+      ["exponential-decay decayPerSecond 0", { ...base, kind: "exponential-decay", startBps: 500, endBps: 40, decayPerSecond: 0 }],
+      ["exponential-decay decayPerSecond -1", { ...base, kind: "exponential-decay", startBps: 500, endBps: 40, decayPerSecond: -1 }],
+      ["constant bps 10001", { ...base, kind: "constant", bps: 10_001 }],
+      ["constant bps as a string", { ...base, kind: "constant", bps: "40" }],
+      ["capture-class-indexed CC0 10001", { ...base, kind: "capture-class-indexed", byClass: { CC0: 10_001 }, default: 40 }],
+      ["capture-class-indexed CC1 -1", { ...base, kind: "capture-class-indexed", byClass: { CC1: -1 }, default: 40 }],
+      ["capture-class-indexed an unknown class", { ...base, kind: "capture-class-indexed", byClass: { CC9: 40 }, default: 40 }],
+      ["an unknown kind", { ...base, kind: "bonus", bps: 40 }],
+    ];
+    for (const [what, segment] of refusedBySchema) {
+      expect(RateSegmentSchema.safeParse(segment).success, what).toBe(false);
+      expect(() => assertScheduleIsWellFormed({ version: 1, segments: [segment as unknown as RateSchedule["segments"][number]] }), what).toThrow(/segments\[0\]/);
+    }
+    expect(() => assertScheduleIsWellFormed({ version: 1, segments: [] })).toThrow(/at least one segment/);
+    // Parity the other way: what the schema admits, the helper admits (unknown keys are ignored by both).
+    const admitted = { ...base, kind: "capture-class-indexed", byClass: { CC0: 0, CC5: 10_000 }, default: 40, note: 1.5 };
+    expect(RateSegmentSchema.safeParse(admitted).success).toBe(true);
+    expect(() => assertScheduleIsWellFormed({ version: 1, segments: [admitted as unknown as RateSchedule["segments"][number]] })).not.toThrow();
   });
 
   it("a real number in a schedule body is written as ECMAScript Number.prototype.toString writes it", () => {
