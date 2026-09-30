@@ -7,7 +7,7 @@ Combines all node subsystems into a single long-running process:
   4. Announce capabilities (signed)
   5. Start HTTP polling loop:
      - Poll /api/operator/jobs every N seconds
-     - Execute each job via JobExecutor
+     - Hand each job to JobExecutor, which refuses it (typed operations only)
      - Push evidence bundle back to gateway
      - Re-announce capabilities every 60s (heartbeat)
   6. Handle graceful shutdown on SIGINT/SIGTERM
@@ -302,8 +302,11 @@ def run_daemon(config: NodeConfig):
                 gateway_client.mark_job_seen(job_id)
 
                 try:
-                    job_executor.execute(job)
-                    jobs_completed += 1
+                    # Refused and left queued: a polled job's fields never become
+                    # device commands (verdict 68b); typed operations run devices.
+                    result = job_executor.execute(job)
+                    if result.get("status") == "completed":
+                        jobs_completed += 1
                 except Exception as e:
                     log.error(f"Job {job_id} execution error: {e}")
 
