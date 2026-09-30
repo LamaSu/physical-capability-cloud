@@ -106,5 +106,47 @@
       ]
     },
     "jobSpecHash": "0x6afbc39c8010b5bcc27b9ef0a69a0b7d1edf5001fb30e47035f3e5386b501355"
+  },
+  "jobSpecDuplicateBuyers": {
+    "function": "computeJobSpecHash",
+    "rule": "Buyers may repeat. cofundedBy sorts by buyer, then by the canonical JSON of the whole entry, both in UTF-16 code-unit order (so amountCents 10 sorts before 2).",
+    "job": "jobSpec.job with cofundedBy replaced by the list below",
+    "cofundedBy": [
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 2
+      },
+      {
+        "buyer": "0xAB00000000000000000000000000000000000002",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 1
+      }
+    ],
+    "sortedCofundedBy": [
+      {
+        "buyer": "0xAB00000000000000000000000000000000000002",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 1
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 10
+      },
+      {
+        "buyer": "0xab00000000000000000000000000000000000001",
+        "amountCents": 2
+      }
+    ],
+    "jobSpecHash": "0xe8424ee827157ba1d6fdc5a202480a22089e9d3b210e19e806c4e7baa45d6867"
   }
 }

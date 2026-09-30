@@ -10,7 +10,7 @@ import { canonicalize } from "../util/canonical.js";
 import { compareCodeUnits } from "../util/code-unit-order.js";
 import { computeMapSnapshotHash, type MapEntry } from "../types/registry.js";
 import { computeWorkSchemaHash } from "../types/work-schema.js";
-import { computeJobSpecHash } from "../types/job-spec.js";
+import { assertJobSpecIsWellFormed, computeJobSpecHash, type JobSpec } from "../types/job-spec.js";
 import vectors from "../util/code-unit-order.vectors.json" with { type: "json" };
 
 const sha = (s: string) => `0x${createHash("sha256").update(s).digest("hex")}`;
@@ -62,5 +62,41 @@ describe("computeJobSpecHash sorts co-funders by code unit (case-sensitive)", ()
     for (const cofundedBy of rotations(j.cofundedBy)) {
       expect(computeJobSpecHash({ ...j, cofundedBy } as never)).toBe(vectors.jobSpec.jobSpecHash);
     }
+  });
+});
+
+// E1 finding 3: duplicate buyers stay valid, so the co-funder order must be
+// total over the hashed content, not just over `buyer`.
+describe("computeJobSpecHash orders duplicate co-funders totally", () => {
+  const X = "0xab00000000000000000000000000000000000001";
+  const sealed = (cofundedBy: Array<{ buyer: string; amountCents: number }>): JobSpec => {
+    const job = {
+      ...vectors.jobSpec.job,
+      constraints: { deadlineSeconds: 3600, maxBudgetCents: 3, requiredAssuranceTier: 0 as const },
+      cofundedBy,
+      buyerSignature: "0x01",
+      sellerSignature: null,
+      createdAt: "2026-09-29T00:00:00.000Z",
+    };
+    return { ...job, jobSpecHash: computeJobSpecHash(job) };
+  };
+
+  it("reproduces the duplicate-buyer vector, whatever the input order", () => {
+    const d = vectors.jobSpecDuplicateBuyers;
+    for (const cofundedBy of rotations(d.cofundedBy)) {
+      expect(computeJobSpecHash({ ...vectors.jobSpec.job, cofundedBy } as never)).toBe(d.jobSpecHash);
+    }
+  });
+
+  it("the same buyer twice with amounts [1,2] or [2,1] hashes the same", () => {
+    const a = sealed([{ buyer: X, amountCents: 1 }, { buyer: X, amountCents: 2 }]);
+    const b = sealed([{ buyer: X, amountCents: 2 }, { buyer: X, amountCents: 1 }]);
+    expect(a.jobSpecHash).toBe(b.jobSpecHash);
+  });
+
+  it("a sealed job still verifies after its co-funder list is reordered; duplicates stay valid", () => {
+    const job = sealed([{ buyer: X, amountCents: 1 }, { buyer: X, amountCents: 2 }]);
+    expect(() => assertJobSpecIsWellFormed(job)).not.toThrow();
+    expect(() => assertJobSpecIsWellFormed({ ...job, cofundedBy: [...job.cofundedBy!].reverse() })).not.toThrow();
   });
 });
