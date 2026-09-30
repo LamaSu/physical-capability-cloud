@@ -576,3 +576,34 @@ describe("industrial verifier maps (adapted to the new deps contract)", () => {
     }
   });
 });
+
+// ── astra r2 (pack 73, gpt-5.6-sol): carrier B must visit every signed entry exactly once ──
+// An entry hash covers {capturedAt, rawContent, source}, not previousHash, so two identical
+// entries share a hash, and the second can link to the first as its own predecessor.
+describe("#52 binding — carrier B visits every signed entry exactly once (astra r2, pack 73)", () => {
+  async function identicalPairAndHidden(): Promise<LogChainEntryView[]> {
+    const t = iso(0);
+    const h = await computeLogEntryHash("ok", DEVICE, t);
+    const e0: LogChainEntryView = { entryId: "e0", entryHash: h, previousHash: GENESIS_HASH, rawContent: "ok", source: DEVICE, capturedAt: t, kernelSignature: sign(h) };
+    const e1: LogChainEntryView = { ...e0, entryId: "e1", previousHash: h };
+    const t2 = iso(1000);
+    const h2 = await computeLogEntryHash("job FAILED", DEVICE, t2);
+    const unrelated = `sha256:${"ab".repeat(32)}`;
+    const e2: LogChainEntryView = { entryId: "e2", entryHash: h2, previousHash: unrelated as LogChainEntryView["previousHash"], rawContent: "job FAILED", source: DEVICE, capturedAt: t2, kernelSignature: sign(h2) };
+    return [e0, e1, e2];
+  }
+
+  it("a repeated entry cannot pad the walk and hide a third signed entry (met:false, minEntries 3)", async () => {
+    const bundle = await bundleOf(await carrierBEvents(await identicalPairAndHidden()));
+    const res = await v({ minEntries: 3 }).verify(bundle, PARAMS, CTX);
+    expect(res.met).toBe(false);
+    expect(res.detail.join(" ")).toMatch(/revisit|twice|cycle/);
+  });
+
+  it("a self-linked duplicate alone is refused as a revisit, never counted twice", async () => {
+    const [e0, e1] = await identicalPairAndHidden();
+    const bundle = await bundleOf(await carrierBEvents([e0!, e1!]));
+    const res = await v({ minEntries: 2 }).verify(bundle, PARAMS, CTX);
+    expect(res.met).toBe(false);
+  });
+});
