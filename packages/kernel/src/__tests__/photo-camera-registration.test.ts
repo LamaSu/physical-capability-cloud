@@ -281,3 +281,39 @@ describe("photo camera gemini configuration", () => {
     ).toThrow(/config\.geminiApiKey must be a string/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// astra pack 41 (gpt-5.6-sol), HIGH 2: the inspection names the model that actually ran
+// ---------------------------------------------------------------------------
+
+describe("photo camera inspection labels the model that actually ran", () => {
+  const stubCapture = {
+    async capture(bytes: Uint8Array) {
+      return { imageHash: sha256Of(bytes), rawSizeBytes: bytes.length, antiSpoofScore: 0.9, antiSpoofChecks: [], exif: {}, storageCid: undefined };
+    },
+  } as unknown as ConstructorParameters<typeof PhotoCameraAdapter>[2];
+  const gemini = (compare: () => Promise<unknown>) => ({ compare } as unknown as ConstructorParameters<typeof PhotoCameraAdapter>[3]);
+
+  async function inspect(service: ConstructorParameters<typeof PhotoCameraAdapter>[3], withReference: boolean) {
+    const adapter = new PhotoCameraAdapter("cam-label", "kernel-label", stubCapture, service);
+    const events = collect(adapter);
+    const ref = "sha256:" + "d".repeat(64);
+    if (withReference) adapter.setReferenceBytes(ref, imageBytes(3));
+    adapter.setNextCapture(imageBytes(5));
+    await adapter.runInspection(withReference ? ref : undefined);
+    return events.find((e) => e.type === "cv_inspection_result")!.payload.model;
+  }
+
+  it("a Gemini service with no reference runs the heuristic, and says so", async () => {
+    expect(await inspect(gemini(async () => { throw new Error("must not be called"); }), false)).toBe("anti-spoof-heuristic");
+  });
+
+  it("a Gemini comparison that is unavailable, or throws, falls back and says heuristic", async () => {
+    expect(await inspect(gemini(async () => ({ matchScore: -1, verdict: "unavailable", discrepancies: [] })), true)).toBe("anti-spoof-heuristic");
+    expect(await inspect(gemini(async () => { throw new Error("timeout"); }), true)).toBe("anti-spoof-heuristic");
+  });
+
+  it("only a Gemini comparison that ran is labeled gemini", async () => {
+    expect(await inspect(gemini(async () => ({ matchScore: 0.95, verdict: "match", discrepancies: [] })), true)).toBe("gemini-2.0-flash");
+  });
+});
