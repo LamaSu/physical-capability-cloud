@@ -14,9 +14,11 @@
  *     placeholder (the zero-address signer that PUT /complete writes for events it synthesized),
  *     which is no signature at all: signer and algorithm null.
  *   - "archived". No archive CID is stored for any bundle.
- *   - anything about fabricated or gateway-stamped events except that they exist. Neither
- *     counts toward tier coverage: no device reported a gateway-stamped event (source.deviceId
- *     "gateway"; PUT /complete stamps its own events and the caller's body events so).
+ *   - anything about fabricated or gateway-stamped events except that they exist. Neither counts
+ *     toward tier coverage, nor does an event that names no device at all (a missing `source`, or
+ *     `source.deviceId` absent/empty): no device reported a gateway-stamped event (source.deviceId
+ *     "gateway"; PUT /complete stamps its own events and the caller's body events so), and no
+ *     device reported an event that names none.
  *
  * integrity: recomputed on read. Each state names exactly one model, so a surface that reads
  * only `state` cannot mistake storage integrity for evidence integrity (evidence #3680 F3).
@@ -75,9 +77,9 @@ export interface ProvenanceBundle {
   signature: { signer: string | null; algorithm: string | null; checked: false };
   integrity: EvidenceIntegrity;
   /**
-   * Do the recorded event types that a DEVICE reported (neither fabricated nor gateway-stamped)
-   * include what the claimed tier requires (DEFAULT_TIER_REQUIREMENTS)? Self-reported events,
-   * not a verification.
+   * Do the recorded event types that a DEVICE reported (neither fabricated, gateway-stamped, nor
+   * without a device identity) include what the claimed tier requires
+   * (DEFAULT_TIER_REQUIREMENTS)? Self-reported events, not a verification.
    */
   tierCoverage: {
     state: TierCoverageState;
@@ -86,7 +88,12 @@ export interface ProvenanceBundle {
     /** Required groups that no counted event satisfies. */
     missing: string[][];
     minimumEvents: number | null;
-    /** Events counted: all except fabricated and gateway-stamped ones. */
+    /**
+     * Events counted: all except fabricated ones, gateway-stamped ones, and events that name no
+     * device at all (a missing `source`, or `source.deviceId` absent/empty) — an event with no
+     * device identity is not evidence a device reported it, so it never counts toward coverage,
+     * the same as an explicitly gateway-stamped one.
+     */
     countedEvents: number;
     basis: "recorded_event_types";
   };

@@ -163,6 +163,25 @@ describe("tier coverage counts the event types a DEVICE recorded: not fabricated
     expect(dto.bundles[0]!.claimedTier).toBeNull();
     expect(dto.bundles[0]!.tierCoverage.state).toBe("unknown_tier");
   });
+
+  it("NEGATIVE (M3): events with no device source (source: null) never satisfy tier coverage", async () => {
+    const dto = await build([
+      await loEvBundle(
+        "b-nosource",
+        [
+          ev("e1", "gcode_hash_verified", { source: null }),
+          ev("e2", "execution_completed", { source: null }),
+          ev("e3", "power_profile_summary", { source: null }),
+        ],
+        1,
+      ),
+    ]);
+    const b = dto.bundles[0]!;
+    expect(b.events).toMatchObject({ count: 3, fabricated: 0, gatewayAuthored: 0 });
+    expect(b.tierCoverage.state).not.toBe("covers");
+    expect(b.tierCoverage.countedEvents).toBe(0);
+    expect(b.tierCoverage.missing).toHaveLength(3);
+  });
 });
 
 describe("the DTO never claims what the gateway does not record", () => {

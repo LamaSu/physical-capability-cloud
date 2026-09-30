@@ -4,8 +4,9 @@
  * event_bundle_hash (hashEvent + hashBundle, what /settle recomputes), and only it is
  * `recomputed_match`. The /complete envelope hash is `storage_envelope_match` (model
  * gateway_envelope): the gateway's storage integrity, never evidence integrity. Neither
- * fabricated nor gateway-stamped events count toward tier coverage, and the gateway's
- * zero-address placeholder signature is no signature. Nothing here reads "verified".
+ * fabricated events, gateway-stamped events, nor events naming no device at all count toward
+ * tier coverage, and the gateway's zero-address placeholder signature is no signature. Nothing
+ * here reads "verified".
  */
 import { createHash } from "node:crypto";
 import {
@@ -75,6 +76,17 @@ const TEST_SIGNATURE_PREFIX = "test_sig_";
 
 const gatewayStamped = (e: ProvenanceEventRow) => e.source?.deviceId === GATEWAY_DEVICE;
 
+/**
+ * True iff a device reported this event: it names a non-empty deviceId that is not the
+ * gateway's own stamp. A missing source (source: null, or no deviceId at all) reports
+ * nothing and does not count (evidence M3) — absence of the gateway's stamp is not
+ * presence of a device.
+ */
+const deviceReported = (e: ProvenanceEventRow) => {
+  const deviceId = e.source?.deviceId;
+  return typeof deviceId === "string" && deviceId !== "" && deviceId !== GATEWAY_DEVICE;
+};
+
 function claimedTier(t: unknown): 0 | 1 | 2 | 3 | null {
   return t === 0 || t === 1 || t === 2 || t === 3 ? t : null;
 }
@@ -123,9 +135,11 @@ async function integrityOf(b: ProvenanceBundleRow): Promise<EvidenceIntegrity> {
 }
 
 function tierCoverageOf(tier: 0 | 1 | 2 | 3 | null, events: ProvenanceEventRow[]): ProvenanceBundle["tierCoverage"] {
-  // Only what a device reported counts: not fabricated events, and not events the gateway
-  // stamped itself (evidence #3680 F1: /complete stamps the caller's body events "gateway").
-  const counted = events.filter((e) => !isFabricated(e as unknown as EvidenceEvent) && !gatewayStamped(e));
+  // Only what a device reported counts: not fabricated events, and only events that name a
+  // non-empty deviceId other than the gateway's own stamp (evidence #3680 F1: /complete stamps
+  // the caller's body events "gateway"; evidence M3: a source-less event names no device at all,
+  // so it is excluded the same way, not counted by default).
+  const counted = events.filter((e) => !isFabricated(e as unknown as EvidenceEvent) && deviceReported(e));
   const req = tier === null ? undefined : DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === tier);
   if (!req) {
     return { state: "unknown_tier", required: [], missing: [], minimumEvents: null, countedEvents: counted.length, basis: "recorded_event_types" };
