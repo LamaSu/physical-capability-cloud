@@ -106,6 +106,16 @@ describe("LicensingEngine.setRateSchedule checks rule 5 on the raw object", () =
     expect(() => engine.setRateSchedule(IP_A, s)).toThrow(/startTime -1 is not an integer in 0\.\.2\^53-1/);
     expect(engine.getRateSchedule(IP_A)).toBeUndefined();
   });
+
+  it("refuses a correctly hashed schedule the segment schema refuses: an adoption scale of 0 (astra EC1b M3)", () => {
+    const engine = new LicensingEngine();
+    const segments = [{ kind: "adoption-indexed" as const, startTime: 0, endTime: null, scale: 0, floorBps: 0, capBps: 500 }];
+    const body = { version: 1, segments, publishedAt: "2026-01-01T00:00:00Z" };
+    const s: RateSchedule = { ...body, scheduleHash: computeScheduleHash(body) };
+    expect(() => engine.setRateSchedule(IP_A, s)).toThrow(/segments\[0\]/);
+    expect(() => engine.unsafeReplaceRateSchedule(IP_A, s)).toThrow(/segments\[0\]/);
+    expect(engine.getRateSchedule(IP_A)).toBeUndefined();
+  });
 });
 
 describe("LicensingEngine.unsafeReplaceRateSchedule escape hatch", () => {

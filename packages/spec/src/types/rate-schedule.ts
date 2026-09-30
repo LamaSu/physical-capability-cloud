@@ -365,6 +365,9 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
   if (schedule.version !== undefined && !(Number.isSafeInteger(schedule.version) && schedule.version >= 1 && schedule.version <= MAX_SCHEDULE_VERSION)) {
     throw new Error(`RateSchedule version ${schedule.version} is not an integer in 1..${MAX_SCHEDULE_VERSION}`);
   }
+  if (!Array.isArray(schedule.segments) || schedule.segments.length === 0) {
+    throw new Error("RateSchedule has no segments: a schedule needs at least one segment");
+  }
   let prevEnd: number | null = null;
   for (let i = 0; i < schedule.segments.length; i++) {
     const seg = schedule.segments[i];
@@ -386,6 +389,15 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
       if (typeof v === "number" && !Number.isFinite(v)) {
         throw new Error(`RateSchedule segments[${i}].${field} ${v} is not a finite number`);
       }
+    }
+    // And the segment schema's own kinds, types and ranges: bps at most 10000, a positive scale or decay, the
+    // six capture classes and their rates. The licensing engine hands this check raw objects that no parser
+    // has seen, so without this it stored segments every parser refuses (astra EC1b M3). Unknown keys stay
+    // ignored, as the schema ignores them.
+    const parsed = RateSegmentSchema.safeParse(seg);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new Error(`RateSchedule segments[${i}] is not a valid segment: ${issue?.path.join(".") || "kind"}: ${issue?.message ?? "invalid"}`);
     }
 
     // An open-ended segment (endTime null) covers every later moment, and evaluation returns the FIRST
