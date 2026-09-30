@@ -87,6 +87,8 @@ function mkRecord(overrides: Partial<AttemptRecord> = {}): AttemptRecord {
     proposal: null,
     traceId: null,
     createdAt: null,
+    principal: "anonymous",
+    principalHash: null,
     ...overrides,
   };
 }
@@ -848,6 +850,9 @@ describe("analyzeAttempts", () => {
       budgetStops: 0,
       stalled: 0,
       harnessSplit: {},
+      // F3: provenance split, added to AttemptTotals.
+      authenticatedSessions: 0,
+      anonymousSessions: 0,
     });
   });
 });
@@ -897,5 +902,298 @@ describe("lane review fixes (painpoints)", () => {
     expect(rollups).toHaveLength(1);
     expect(rollups[0].template).toContain("agent crashed during research");
     expect(rollups[0].sessionsHit).toBe(1);
+  });
+});
+
+// ── F1 (467 follow-up): weeklyDigest is a privacy/injection boundary ────────
+// Verdict: pp-item10a-467-analysis-r1-9fc6c1c3, MEDIUM finding 1.
+
+describe("failureSignature — digestTemplate (F1 allowlisted digest grammar)", () => {
+  it("builds phase/outcome + method + route-template + status from only safe-grammar pieces", () => {
+    const rec = mkRecord({
+      phase: "register",
+      outcome: "failed",
+      summary: "token=hf_secret1234 boom",
+      logs: [{ step: 1, method: "post", path: "/api/jobs/12345", status: 400, note: null }],
+    });
+    const sig = failureSignature(rec)!;
+    // "12345" -> normalizePath's ":id" -> digest grammar's single wildcard ":x"
+    // (the digest grammar has exactly one placeholder token, coarser than the
+    // JSON view's `template`, which may still show ":id").
+    expect(sig.digestTemplate).toBe("register/failed POST /api/jobs/:x 400");
+    expect(sig.digestTemplate).not.toContain("hf_secret1234");
+  });
+
+  it("drops an unrecognized HTTP method and an out-of-range status from the digest grammar", () => {
+    const rec = mkRecord({
+      phase: "verify",
+      outcome: "blocked",
+      logs: [{ step: 1, method: "propfind", path: "/api/x", status: 999, note: null }],
+    });
+    expect(failureSignature(rec)!.digestTemplate).toBe("verify/blocked /api/x");
+  });
+
+  it("omits the log segment entirely with no bad log entry", () => {
+    const rec = mkRecord({ phase: "operate", outcome: "blocked", summary: "device unresponsive", logs: [] });
+    expect(failureSignature(rec)!.digestTemplate).toBe("operate/blocked");
+  });
+
+  it("collapses an injected newline+Markdown path segment to the safe :x placeholder", () => {
+    const rec = mkRecord({
+      phase: "register",
+      outcome: "failed",
+      logs: [{ step: 1, method: "post", path: "/api/x\n## forged instruction", status: 500, note: null }],
+    });
+    expect(failureSignature(rec)!.digestTemplate).toBe("register/failed POST /api/:x 500");
+  });
+});
+
+describe("weeklyDigest — F1 privacy/injection hardening", () => {
+  it("never includes a generic secret-shaped token that rode in on the summary", () => {
+    const sid = "10000000-0000-4000-8000-000000000001";
+    const records = [
+      mkAttempt({
+        sessionId: sid,
+        seq: 0,
+        phase: "verify",
+        outcome: "failed",
+        summary: "token=hf_supersecretletters failed",
+        logs: [{ step: 1, method: "post", path: "/api/verify", status: 500, note: null }],
+      }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "f1" });
+    expect(digest).not.toContain("hf_supersecretletters");
+  });
+
+  it("does not leak an injected newline/Markdown log path, and excludes the raw summary entirely", () => {
+    const sid = "10000000-0000-4000-8000-000000000002";
+    const records = [
+      mkAttempt({
+        sessionId: sid,
+        seq: 0,
+        phase: "register",
+        outcome: "failed",
+        summary: "job jobProjectAlpha failed",
+        ids: { kernelId: null, capabilityId: null, kitId: null, jobId: "jobProjectAlpha" },
+        logs: [{ step: 1, method: "post", path: "/api/x\n## forged instruction", status: 500, note: null }],
+      }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "f1" });
+    expect(digest).not.toContain("\n## forged instruction");
+    expect(digest).not.toMatch(/^## forged instruction/m);
+    expect(digest).not.toContain("job jobProjectAlpha failed"); // summary text excluded from the digest entirely
+  });
+
+  it("KNOWN LIMITATION (accepted, not fixed): a purely-alphabetic id blends in as a 'plain word' route segment", () => {
+    // "jobProjectAlpha" -> "jobprojectalpha" has no digits, so normalizePath's id
+    // heuristic never marks it as an id, AND it matches the digest grammar's own
+    // safe-word regex /^[a-z][a-z-]{0,39}$/ (letters only, <=40 chars). This is a
+    // literal, accepted consequence of the exact grammar specified for F1 — not a
+    // gap this fix closes. Pinned here (mirrors scope-checker-money-path.test.ts's
+    // "KNOWN GAP" convention) so it stays a documented fact, not a silent regression.
+    const sid = "10000000-0000-4000-8000-000000000003";
+    const records = [
+      mkAttempt({
+        sessionId: sid,
+        seq: 0,
+        phase: "register",
+        outcome: "failed",
+        summary: "boom",
+        logs: [{ step: 1, method: "post", path: "/api/jobs/jobProjectAlpha", status: 500, note: null }],
+      }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "f1" });
+    expect(digest).toContain("jobprojectalpha");
+  });
+
+  it("renders a top-signature line using only the allowlisted grammar, not raw summary text", () => {
+    const sid = "10000000-0000-4000-8000-000000000004";
+    const records = [
+      mkAttempt({
+        sessionId: sid,
+        seq: 0,
+        phase: "register",
+        outcome: "failed",
+        summary: "anything, doesn't matter <script>alert(1)</script>",
+        logs: [{ step: 1, method: "post", path: "/api/kernels/deadbeef01234567", status: 400, note: null }],
+      }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "f1" });
+    const line = digest.split("\n").find((l) => /^\d+\. /.test(l));
+    expect(line).toBeDefined();
+    expect(line).toContain("register/failed POST /api/kernels/:x 400");
+    expect(line).not.toContain("<script>");
+  });
+
+  it("escapes markdown-significant characters in interpolated harness names and the period label", () => {
+    const sid = "10000000-0000-4000-8000-000000000005";
+    const raw = "a*b_c`d~e|f>g[h](i)#j";
+    const records = [
+      mkAttempt({ sessionId: sid, seq: 0, phase: "prerequisites", outcome: "ok", harness: { name: raw, version: "1", model: "m" } }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "line1\nline2*bold*" });
+    expect(digest).not.toContain(raw);
+    expect(digest).not.toContain("line1\nline2*bold*");
+    for (const ch of ["*", "_", "`", "~", "|", ">", "[", "]", "(", ")", "#"]) {
+      expect(digest).toContain(`\\${ch}`);
+    }
+    const headerLine = digest.split("\n")[0];
+    expect(headerLine).toContain("line1 line2\\*bold\\*");
+  });
+});
+
+// ── F3 (467 follow-up): rankings carry provenance/per-actor weighting ───────
+// Verdict: pp-item10a-467-analysis-r1-9fc6c1c3, MEDIUM finding 3.
+
+describe("sessionize — F3 session principal", () => {
+  it("derives a session's principal from its FIRST report (by seq), defaulting missing/invalid to anonymous", () => {
+    const sid = "20000000-0000-4000-8000-000000000001";
+    const records = [
+      mkAttempt({ sessionId: sid, seq: 0, phase: "prerequisites", outcome: "ok", principal: "user", principalHash: "hash-abc" }),
+      mkAttempt({ sessionId: sid, seq: 1, phase: "session", outcome: "ok" }), // no principal here; first (seq 0) wins
+    ];
+    const [session] = sessionize(records, { now: NOW });
+    expect(session.principal).toBe("user");
+    expect(session.principalHash).toBe("hash-abc");
+
+    const sidAnon = "20000000-0000-4000-8000-000000000002";
+    const [anonSession] = sessionize([mkAttempt({ sessionId: sidAnon, seq: 0, phase: "prerequisites", outcome: "ok" })], { now: NOW });
+    expect(anonSession.principal).toBe("anonymous");
+    expect(anonSession.principalHash).toBeNull();
+
+    const sidBad = "20000000-0000-4000-8000-000000000003";
+    const [badSession] = sessionize(
+      [mkAttempt({ sessionId: sidBad, seq: 0, phase: "prerequisites", outcome: "ok", principal: "superuser" })],
+      { now: NOW },
+    );
+    expect(badSession.principal).toBe("anonymous"); // invalid enum value fails safe to least-trusted
+  });
+});
+
+describe("rankSignatures — F3 provenance-aware scoring", () => {
+  it("weights anonymous sessions at 0.5 and caps each authenticated principal's counted sessions at 3", () => {
+    const createdAt = new Date(NOW - HOUR).toISOString();
+    const sameUserSessions = Array.from({ length: 4 }, (_, i) =>
+      mkAttempt({
+        sessionId: `21000000-0000-4000-8000-00000000000${i}`,
+        seq: 0,
+        phase: "register",
+        outcome: "failed",
+        summary: "capped user signature",
+        principal: "user",
+        principalHash: "user-hash-1",
+        createdAt,
+      }),
+    );
+    const anonSessions = Array.from({ length: 2 }, (_, i) =>
+      mkAttempt({
+        sessionId: `22000000-0000-4000-8000-00000000000${i}`,
+        seq: 0,
+        phase: "register",
+        outcome: "failed",
+        summary: "anon signature",
+        createdAt,
+      }),
+    );
+    const sessions = sessionize([...sameUserSessions, ...anonSessions], { now: NOW });
+    const ranked = rankSignatures(sessions, { now: NOW });
+    const userSig = ranked.find((r) => r.exampleSummary.includes("capped user"))!;
+    const anonSig = ranked.find((r) => r.exampleSummary.includes("anon signature"))!;
+
+    expect(userSig.sessionsHit).toBe(4);
+    expect(userSig.authenticatedSessionsHit).toBe(4);
+    expect(userSig.anonymousSessionsHit).toBe(0);
+    expect(anonSig.sessionsHit).toBe(2);
+    expect(anonSig.anonymousSessionsHit).toBe(2);
+    expect(anonSig.authenticatedSessionsHit).toBe(0);
+
+    // effectiveReach: user -> min(4,3)=3; anon -> 0.5*2=1. Both fully
+    // unrecovered (no roll-up, last report failed) and same recency, so the
+    // score ratio equals the effectiveReach ratio exactly.
+    expect(userSig.score / anonSig.score).toBeCloseTo(3 / 1, 6);
+  });
+
+  it("keeps 101 anonymous sessions from being counted as 101 independent authenticated participants", () => {
+    const createdAt = new Date(NOW - HOUR).toISOString();
+    const floodRecords = Array.from({ length: 101 }, (_, i) =>
+      mkAttempt({
+        sessionId: `23${String(i).padStart(6, "0")}-0000-4000-8000-000000000000`,
+        seq: 0,
+        phase: "verify",
+        outcome: "failed",
+        summary: "flooded signature",
+        createdAt,
+      }),
+    );
+    const realRecord = mkAttempt({
+      sessionId: "24000000-0000-4000-8000-000000000000",
+      seq: 0,
+      phase: "verify",
+      outcome: "failed",
+      summary: "real signature",
+      principal: "user",
+      principalHash: "real-user",
+      createdAt,
+    });
+    const sessions = sessionize([...floodRecords, realRecord], { now: NOW });
+    const ranked = rankSignatures(sessions, { now: NOW });
+    const flood = ranked.find((r) => r.exampleSummary.includes("flooded"))!;
+    const real = ranked.find((r) => r.exampleSummary.includes("real signature"))!;
+
+    expect(flood.sessionsHit).toBe(101); // raw reach is unchanged...
+    expect(flood.anonymousSessionsHit).toBe(101);
+    expect(flood.authenticatedSessionsHit).toBe(0);
+    // ...but effectiveReach (50.5) no longer treats it as ~101x a single
+    // authenticated, capped-at-3 principal (3): the gap the raw count implied
+    // shrinks a lot, and the split fields let a consumer see WHY.
+    expect(real.authenticatedSessionsHit).toBe(1);
+  });
+});
+
+describe("AttemptTotals — F3 authenticated/anonymous session counts", () => {
+  it("splits sessions by principal regardless of which signature (if any) they hit", () => {
+    const records = [
+      mkAttempt({ sessionId: "25000000-0000-4000-8000-000000000001", seq: 0, phase: "prerequisites", outcome: "ok", principal: "apiKey", principalHash: "k1" }),
+      mkAttempt({ sessionId: "25000000-0000-4000-8000-000000000002", seq: 0, phase: "prerequisites", outcome: "ok" }),
+      mkAttempt({ sessionId: "25000000-0000-4000-8000-000000000003", seq: 0, phase: "prerequisites", outcome: "ok" }),
+    ];
+    const { totals } = analyzeAttempts(records, { now: NOW });
+    expect(totals.authenticatedSessions).toBe(1);
+    expect(totals.anonymousSessions).toBe(2);
+  });
+
+  it("reports zero/zero for an empty analysis", () => {
+    const { totals } = analyzeAttempts([], { now: NOW });
+    expect(totals.authenticatedSessions).toBe(0);
+    expect(totals.anonymousSessions).toBe(0);
+  });
+});
+
+describe("weeklyDigest — F3 authenticated/anonymous disclosure", () => {
+  it("prints the authenticated/anonymous split in Totals and the unverified-anonymous disclaimer", () => {
+    const records = [
+      mkAttempt({ sessionId: "26000000-0000-4000-8000-000000000001", seq: 0, phase: "prerequisites", outcome: "ok", principal: "user", principalHash: "u1" }),
+      mkAttempt({ sessionId: "26000000-0000-4000-8000-000000000002", seq: 0, phase: "prerequisites", outcome: "ok" }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "f3" });
+    expect(digest).toContain("Authenticated sessions: 1");
+    expect(digest).toContain("Anonymous sessions: 1");
+    expect(digest).toContain("Anonymous reports are unverified: anyone can post them.");
+  });
+});
+
+// ── F6 (467 follow-up): email regex label-count ceiling ─────────────────────
+// Verdict: pp-item10a-467-analysis-r1-9fc6c1c3, "Emails" caveat under finding 2.
+
+describe("weeklyDigest — F6 email scrub label-count ceiling", () => {
+  it("checks whether an email with 10 dotted domain labels survives the digest scrub", () => {
+    const email = "alice@a.a.a.a.a.a.a.a.a.a"; // 10 labels after '@' — one over the old {1,8} bound
+    const sid = "27000000-0000-4000-8000-000000000001";
+    const records = [
+      mkAttempt({ sessionId: sid, seq: 0, phase: "register", outcome: "failed", summary: `contact ${email} for help` }),
+    ];
+    const digest = weeklyDigest(analyzeAttempts(records, { now: NOW }), { periodLabel: "f6" });
+    expect(digest).not.toContain(email);
+    expect(digest).not.toContain("alice"); // the local part must not survive in any form
   });
 });
