@@ -139,7 +139,6 @@ describe("matched-capability digest v2 (board N20)", () => {
       ["an undefined profile (must be explicit null)", { measurementProfile: undefined }],
       ["a profile with an empty id", { measurementProfile: { id: "", version: "1" } }],
       ["a profile with an empty version", { measurementProfile: { id: "p", version: "" } }],
-      ["no kernel location", { kernelLocation: null }],
       ["latitude 91", { kernelLocation: { lat: 91, lng: 0 } }],
       ["longitude 181", { kernelLocation: { lat: 0, lng: 181 } }],
       ["NaN latitude", { kernelLocation: { lat: Number.NaN, lng: 0 } }],
@@ -232,5 +231,45 @@ describe("matched-capability digest v2 (board N20)", () => {
     expect(matchedCapabilityDigestPreImage(fixture)).toBe(expectedPreImage);
     expect(Buffer.byteLength(expectedPreImage, "utf8")).toBe(157);
     expect(matchedCapabilityDigest(fixture)).toBe(expectedDigest);
+  });
+});
+
+describe("matched-capability digest v2 — kernel location (board N20 round 2, #3603)", () => {
+  const NULL_LOCATION_PRE =
+    '{"assuranceTiers":[0,1,2],"capabilityId":"cap-k-print-1-document-print-and-mail","capabilityType":"document-print-and-mail",' +
+    '"csd":{"contractDigest":"sha256:abababababababababababababababababababababababababababababababab","url":"pcc://capabilities/document-print-and-mail/v1"},' +
+    '"currency":"USDC","currencyDecimals":"6","domain":"PCC:matched-capability:v2","kernelId":"k-print-1","kernelLocationGeohash6":null,' +
+    '"measurementProfile":null,"operatorSettlementAddress":"0xabcdef0123456789abcdef0123456789abcdef01","priceMinorUnits":"25000000"}';
+  const NULL_LOCATION_DIGEST = "0xfacd369395f056b2ca426c49fff8706146d0ff4bac212bd5c4990e5b72c71925";
+
+  it("an exact {lat:0,lng:0} counts as NO location, and encodes identically to null/absent", () => {
+    expect(matchedCapabilityDigestV2PreImage({ ...GOLDEN, kernelLocation: null })).toBe(NULL_LOCATION_PRE);
+    expect(Buffer.byteLength(NULL_LOCATION_PRE, "utf8")).toBe(536);
+
+    const nullDigest = v2({ kernelLocation: null });
+    const originDigest = v2({ kernelLocation: { lat: 0, lng: 0 } });
+    const absent: MatchedCapabilitySnapshotV2 = { ...GOLDEN };
+    delete absent.kernelLocation;
+    const absentDigest = matchedCapabilityDigestV2(absent);
+
+    expect(nullDigest).toBe(NULL_LOCATION_DIGEST);
+    expect(originDigest).toBe(NULL_LOCATION_DIGEST);
+    expect(absentDigest).toBe(NULL_LOCATION_DIGEST);
+  });
+
+  it("the existing 540-byte real-location golden is unchanged", () => {
+    expect(matchedCapabilityDigestV2PreImage(GOLDEN)).toBe(GOLDEN_BYTES);
+    expect(Buffer.byteLength(GOLDEN_BYTES, "utf8")).toBe(540);
+    expect(matchedCapabilityDigestV2(GOLDEN)).toBe(GOLDEN_DIGEST);
+  });
+
+  it("a real on-equator location ({lat:0,lng:45}) is NOT treated as 'no location'", () => {
+    const preimage = matchedCapabilityDigestV2PreImage({ ...GOLDEN, kernelLocation: { lat: 0, lng: 45 } });
+    const parsed = JSON.parse(preimage) as { kernelLocationGeohash6: string | null };
+    expect(parsed.kernelLocationGeohash6).not.toBeNull();
+    expect(parsed.kernelLocationGeohash6).toBe(geohash(0, 45, 6));
+    expect(matchedCapabilityDigestV2({ ...GOLDEN, kernelLocation: { lat: 0, lng: 45 } })).not.toBe(
+      NULL_LOCATION_DIGEST,
+    );
   });
 });

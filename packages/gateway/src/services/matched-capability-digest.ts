@@ -126,8 +126,13 @@ export interface MatchedCapabilitySnapshotV2 {
   csd: { url: string; contractDigest: string };
   /** R21's measurement profile, or null until R21 exists. */
   measurementProfile: { id: string; version: string } | null;
-  /** The KERNEL's registered location, never the capability row's. */
-  kernelLocation: { lat: number; lng: number };
+  /**
+   * The KERNEL's registered location, never the capability row's. `null`,
+   * absent, or the exact {lat:0,lng:0} origin all mean "no location" (board
+   * N20 round 2, agreed with gateway #3603) and encode identically as
+   * `kernelLocationGeohash6: null` — never a geohash, never omitted.
+   */
+  kernelLocation?: { lat: number; lng: number } | null;
 }
 
 // ── Acceptance limits NOT stated in the quoted N20 spec text (board N20
@@ -277,13 +282,31 @@ export function matchedCapabilityDigestV2PreImage(snap: MatchedCapabilitySnapsho
     profile = { id: idOf("measurementProfile.id", profileId), version: idOf("measurementProfile.version", version) };
   }
 
-  if (typeof kernelLocation !== "object" || kernelLocation === null) refuse("kernelLocation", "is required");
-  const { lat, lng } = kernelLocation;
-  let kernelLocationGeohash6: string;
-  try {
-    kernelLocationGeohash6 = geohash(lat, lng, 6);
-  } catch {
-    refuse("kernelLocation", "must be a finite latitude in [-90, 90] and longitude in [-180, 180]");
+  // `null`/absent, or the exact {lat:0,lng:0} origin, both mean "no
+  // location" (board N20 round 2, agreed with gateway #3603): {0,0} is not
+  // a real place any kernel is actually registered at, so it is treated
+  // the same as "we don't know" — and BOTH encode as an explicit `null`,
+  // never a geohash string and never an omitted key, so "no location" can
+  // never be misread as a real cell.
+  const isOrigin =
+    typeof kernelLocation === "object" &&
+    kernelLocation !== null &&
+    (kernelLocation as { lat?: unknown }).lat === 0 &&
+    (kernelLocation as { lng?: unknown }).lng === 0;
+  let kernelLocationGeohash6: string | null;
+  if (kernelLocation === null || kernelLocation === undefined || isOrigin) {
+    kernelLocationGeohash6 = null;
+  } else {
+    if (typeof kernelLocation !== "object") refuse("kernelLocation", "is required");
+    const { lat, lng } = kernelLocation;
+    try {
+      kernelLocationGeohash6 = geohash(lat, lng, 6);
+    } catch {
+      refuse(
+        "kernelLocation",
+        "must be null/absent, exactly {lat:0,lng:0}, or a finite latitude in [-90, 90] and longitude in [-180, 180]",
+      );
+    }
   }
 
   return canonicalize({
