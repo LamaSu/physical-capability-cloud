@@ -489,3 +489,26 @@ describe("preflightVNextFunding: one block IDENTITY, one frozen input (astra rou
     expect(r.ok).toBe(true);
   });
 });
+
+describe("preflightVNextFunding: every caller input is read at the call (sol, pack 26d follow-up)", () => {
+  it("a caller that changes blockNumber after the call does not move the pinned block", async () => {
+    const c = chain();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const realChainId = c.getChainId.bind(c);
+    let first = true;
+    (c as unknown as { getChainId: () => Promise<number> }).getChainId = async () => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return realChainId();
+    };
+    const params = { compiled, acceptance: signed, sender: RELAYER, blockNumber: HEAD - 3n };
+    const running = preflightVNextFunding(c, params);
+    params.blockNumber = HEAD - 9n; // mutated after the call, while the preflight awaits
+    release();
+    const r = await running;
+    expect(r.blockNumber).toBe(HEAD - 3n);
+  });
+});

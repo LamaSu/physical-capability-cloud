@@ -125,6 +125,7 @@ export async function preflightVNextFunding(
   const c: CompiledVNextPolicy = structuredClone(p.compiled);
   const acceptance: PolicyAcceptance = structuredClone(p.acceptance);
   const sender = p.sender;
+  const requestedBlockNumber = p.blockNumber; // read at the call, like every other input (sol, 26d follow-up)
   const fundArgs = [c.configs, acceptance] as const;
   const checks: PreflightCheck[] = [];
   const diagnostics: PreflightCheck[] = [];
@@ -163,7 +164,8 @@ export async function preflightVNextFunding(
   let blockHash: Hex;
   let blockTimestamp: bigint;
   try {
-    const b = p.blockNumber === undefined ? await client.getBlock() : await client.getBlock({ blockNumber: p.blockNumber });
+    const b =
+      requestedBlockNumber === undefined ? await client.getBlock() : await client.getBlock({ blockNumber: requestedBlockNumber });
     if (b.number === null || b.hash === null) throw new Error("the node returned a pending block, which has no number or hash to pin");
     blockNumber = b.number;
     blockHash = b.hash;
