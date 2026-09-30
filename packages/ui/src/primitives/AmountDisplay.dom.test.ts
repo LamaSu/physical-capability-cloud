@@ -55,4 +55,15 @@ describe("AmountDisplay in a real DOM", () => {
       expect(el!.className).not.toMatch(/green|glow|text-(red|gold|teal|cyan)-/);
     });
   });
+
+  it("ignores a className, so a caller cannot restore payment-state colour or glow", () => {
+    for (const amount of ["12.5", undefined]) {
+      const props = { amount, className: "text-green-400 glow-text-green" } as unknown as AmountDisplayProps;
+      withRender(props, (host) => {
+        const el = host.querySelector("[data-amount]");
+        expect(el, String(amount)).not.toBeNull();
+        expect(el!.className, String(amount)).not.toMatch(/green|glow/);
+      });
+    }
+  });
 });

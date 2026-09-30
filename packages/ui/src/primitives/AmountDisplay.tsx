@@ -3,9 +3,10 @@ import { cn, formatAmountExact, parseAmountExact } from "../utils.js";
 
 export interface AmountDisplayProps {
   /**
-   * A decimal string ("1234.5", "1,234.56"), a finite number, or, with `decimals`,
-   * an integer count of base units. Missing or unreadable input renders as
-   * unavailable (an em dash), never as $0.00.
+   * A decimal string ("1234.5", "1,234.56"), a bigint, or a number that still holds
+   * its digits (see parseAmountExact); with `decimals`, an integer count of base
+   * units. Missing or unreadable input renders as unavailable (an em dash), never
+   * as $0.00.
    */
   amount?: string | number | bigint | null;
   /** When set, `amount` is an integer in base units with this many decimals (USDC: 6). */
@@ -17,7 +18,8 @@ export interface AmountDisplayProps {
    * money badge (MONEY_STATUS_MAP in @pcc/spec) shows whether it was paid.
    */
   glow?: boolean;
-  className?: string;
+  // No className: the look of an amount is fixed, so no caller can give it a
+  // payment-state colour or glow. Wrap it to lay it out.
 }
 
 const sizeMap = {
@@ -49,12 +51,14 @@ const SECONDARY: React.CSSProperties = { opacity: 0.7 };
 /** Currencies a "$" may stand for. Any other currency shows no "$": "1.50 ETH", not "$1.50 ETH". */
 const DOLLAR_CURRENCIES: ReadonlySet<string> = new Set(["USD", "USDC", "USDT", "USDBC"]);
 
+/** Only an ASCII code is upper-cased and matched: toUpperCase folds "UſDC" (long s) to "USDC". */
+const ASCII_CODE = /^[A-Za-z]+$/;
+
 export function AmountDisplay({
   amount,
   decimals,
   currency = "USDC",
   size = "md",
-  className,
 }: AmountDisplayProps) {
   const exact = parseAmountExact(amount, decimals);
 
@@ -63,7 +67,7 @@ export function AmountDisplay({
   if (exact === null) {
     return (
       <span
-        className={cn("font-mono", sizeMap[size], className)}
+        className={cn("font-mono", sizeMap[size])}
         title="Amount unavailable"
         data-amount="unavailable"
       >
@@ -76,10 +80,10 @@ export function AmountDisplay({
   const formatted = formatAmountExact(exact);
   // A dynamic currency can arrive as null at runtime; it then shows no "$" and no unit.
   const unit = typeof currency === "string" ? currency.trim() : "";
-  const dollar = DOLLAR_CURRENCIES.has(unit.toUpperCase());
+  const dollar = ASCII_CODE.test(unit) && DOLLAR_CURRENCIES.has(unit.toUpperCase());
   return (
     <span
-      className={cn("font-mono font-semibold", sizeMap[size], className)}
+      className={cn("font-mono font-semibold", sizeMap[size])}
       style={TABULAR}
       data-amount="value"
     >

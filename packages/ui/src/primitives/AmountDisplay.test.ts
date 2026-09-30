@@ -133,3 +133,69 @@ describe("AmountDisplay (server render)", () => {
     }
   });
 });
+
+/**
+ * astra's pack-30 review of 050455a3 (SHIP-WITH-FIXES). Each finding is pinned
+ * here; the first three failed on 050455a3 before the fix.
+ */
+describe("astra pack 30 findings", () => {
+  // Finding 1 (HIGH): className reopened the colour channel the primitive closes.
+  it("ignores a className, so a caller cannot restore payment-state colour or glow", () => {
+    for (const amount of ["12.5", undefined]) {
+      const props = { amount, className: "text-green-400 glow-text-green" } as unknown as AmountDisplayProps;
+      expect(markup(props), String(amount)).not.toMatch(/green|glow/);
+    }
+  });
+
+  // Finding 2 (HIGH): a JSON number past 2^53 has already lost digits before it arrives.
+  it("refuses a number it cannot hold exactly, with or without decimals", () => {
+    const n = (JSON.parse('{"n":9007199254740993}') as { n: number }).n;
+    for (const d of [0, 6, undefined]) {
+      expect(fmt(n, d), String(d)).toBeNull();
+      expect(fmt(-n, d), String(d)).toBeNull();
+    }
+    expect(fmt(Number.MAX_SAFE_INTEGER, 0)).toBe("9,007,199,254,740,991.00");
+    expect(fmt(Number.MAX_SAFE_INTEGER)).toBe("9,007,199,254,740,991.00");
+    expect(fmt(1.5, 6)).toBeNull();
+    // The same count as a string or bigint stays exact.
+    expect(fmt("9007199254740993", 0)).toBe("9,007,199,254,740,993.00");
+    expect(fmt(BigInt("9007199254740993"), 6)).toBe("9,007,199,254.740993");
+  });
+
+  // Finding 3 (HIGH): Unicode case folding let look-alikes ("UſDC") earn a "$".
+  it("shows a $ only for an ASCII dollar code, never a Unicode look-alike", () => {
+    expect(text({ amount: "1.5", currency: "UſDC" })).toBe("1.50 UſDC");
+    expect(text({ amount: "1.5", currency: "UſD" })).toBe("1.50 UſD");
+    expect(text({ amount: "1.5", currency: "ＵＳＤＣ" })).toBe("1.50 ＵＳＤＣ");
+    expect(text({ amount: "1.5", currency: "USDC.e" })).toBe("1.50 USDC.e");
+    expect(text({ amount: "1.5", currency: "usdc" })).toBe("$ 1.50 usdc");
+    expect(text({ amount: "1.5", currency: " USDC " })).toBe("$ 1.50 USDC");
+    expect(text({ amount: "1.5", currency: "USDbC" })).toBe("$ 1.50 USDbC");
+  });
+
+  // Finding 4 (MEDIUM): resolved by narrowing the contract. A number that prints in
+  // exponent form is refused, not guessed; such amounts must arrive as strings.
+  it("refuses a number that prints in exponent form", () => {
+    expect(fmt(1e-7)).toBeNull();
+    expect(fmt(1e21)).toBeNull();
+    expect(fmt(0.000001)).toBe("0.000001");
+    expect(fmt("0.0000001")).toBe("0.0000001");
+    expect(fmt("1000000000000000000000")).toBe("1,000,000,000,000,000,000,000.00");
+  });
+
+  // Coverage astra listed as missing; these already held on 050455a3.
+  it("pins the remaining edge cases", () => {
+    expect(fmt("1", 1)).toBe("0.10");
+    expect(fmt("1", 18)).toBe("0.000000000000000001");
+    expect(fmt("1" + "0".repeat(36), 36)).toBe("1.00");
+    expect(fmt(BigInt(-2500000), 6)).toBe("-2.50");
+    expect(fmt(-0)).toBe("0.00");
+    expect(fmt(-0, 6)).toBe("0.00");
+    for (const bad of ["1,2345", ",123", "123,", "1,,234", "1,234,56", "１２"]) {
+      expect(fmt(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(fmt("\u00a012.5\u00a0")).toBe("12.50");
+    const hostile = { toString: () => "1.5", valueOf: () => 1.5 };
+    expect(fmt(hostile)).toBeNull();
+  });
+});
