@@ -1,8 +1,18 @@
 # Asking your agent to research your device
 
-Your agent can look things up for you — the manual, the safety limits, the
-calibration procedure, whether someone already built a driver for your
-machine. This page is a short guide to asking it well. No jargon required.
+Your agent looks things up for you: the manual, the device's limits, how it
+connects, what a typical job takes in and produces, whether someone already
+built a driver for your machine. This page is a short guide to asking it
+well. No jargon required.
+
+## Give it these first (fastest first)
+
+1. **The make and model, exactly as printed on the label.** A photo of the
+   label works.
+2. **The manual,** if you have it. Put the PDF in this folder.
+3. **The firmware or software version,** if the device shows one.
+4. **Whatever you use to run it today:** a protocol file, a script, or the
+   name of the vendor's app.
 
 ## How to ask a good research question
 
@@ -21,7 +31,9 @@ machine. This page is a short guide to asking it well. No jargon required.
    money-related, a paraphrase isn't good enough. Ask your agent to copy the
    exact sentence from the manual, not summarize it.
 
-A few sentences you can reuse directly:
+## Things worth asking your agent
+
+You can say these in your own words:
 
 - "Find the programming manual for **\<model\>** and list how it is
   remote-controlled."
@@ -30,7 +42,23 @@ A few sentences you can reuse directly:
 - "Find the safety limits and e-stop requirements for the **\<model\>** in
   its manual, quoted word for word."
 - "Find the calibration procedure and interval for the **\<model\>**."
+- "What does a typical job put in and get out? Use published protocols or
+  papers, and cite them."
+- "What can go wrong if it runs unattended, and how do people usually guard
+  against that?"
 - "Check whether a kit already exists for this device before we build one."
+- "What do comparable services charge? Show your sources — I'll set my own
+  price."
+
+## How to check what it found
+
+- **Ask where every number came from.** A limit without a source doesn't go
+  into the safety limits.
+- **Check that the source is for your model and version,** not a similar one.
+- **If two sources disagree,** the manual for your exact model wins. If
+  you're still unsure, ask the manufacturer.
+- **Find the emergency stop on the device itself.** Don't take the manual's
+  word for it — confirm it's there and that it works before anything runs.
 
 ## Never accept an unsourced number for a safety limit or a price
 
@@ -68,6 +96,12 @@ in order:
    give you clear, safe, step-by-step instructions rather than asking you to
    guess.
 
+Your agent will say what it tried and what it will try next: the maker's
+support site, similar models, and papers that used the device. Meanwhile,
+these help most: photos of the label, the ports and the connectors; how you
+control it today (buttons, a USB cable, a web page on your network); and one
+job you've run, described step by step.
+
 ### Template email to a vendor
 
 > Subject: Documentation request — \<model\> (safety limits / calibration
@@ -99,5 +133,6 @@ date, and safety, I/O, and money findings always require your confirmation
 before they become part of your device's record (see
 `packages/spec/src/onboarding/research/library.ts` for the entries this
 guide corresponds to, and `packages/spec/src/onboarding/intake/fields.ts` for
-where each finding ends up). This isn't bureaucracy for its own sake — it's
-the difference between a safety limit you can trust and one somebody made up.
+where each finding ends up, including what happens when you say "I don't
+know"). This isn't bureaucracy for its own sake — it's the difference between
+a safety limit you can trust and one somebody made up.

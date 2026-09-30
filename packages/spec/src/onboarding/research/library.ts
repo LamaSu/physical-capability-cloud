@@ -111,7 +111,7 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     humanConfirmRequired: false,
     coaching: {
       ask: "Ask me: find the programming manual for {model} and list how it is remote-controlled.",
-      why: "The right protocol means the agent can actually drive the device instead of guessing at commands.",
+      why: "Knowing how it connects — USB, network, or serial — narrows the search, and the right protocol means the agent can actually drive the device instead of guessing at commands.",
     },
   },
   {
@@ -132,7 +132,7 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     humanConfirmRequired: true,
     coaching: {
       ask: "Ask me: find the parameter ranges for {capability} in the {model} manual, and quote the numbers.",
-      why: "Wrong ranges can damage the device or the job — always get them from the manual, quoted exactly.",
+      why: "This reads the manual and published protocols to see what a typical job puts in and gets out — wrong ranges can damage the device or the job, so we always get them quoted exactly.",
     },
   },
   {
@@ -153,7 +153,7 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     humanConfirmRequired: true,
     coaching: {
       ask: "Ask me: find the safety limits and e-stop requirements for the {model} in its manual, quoted word for word.",
-      why: "Safety limits are never guessed or defaulted — a sourced quote protects you and anyone near the machine.",
+      why: "Each limit comes with the page it's from, and the e-stop location still gets checked on the device itself — safety limits are never guessed or defaulted, since they protect you and anyone near the machine.",
     },
   },
   {
@@ -194,7 +194,7 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     humanConfirmRequired: false,
     coaching: {
       ask: "Ask me: find the consumable parts list and restock cadence for the {model}.",
-      why: "Knowing restock cadence up front avoids surprise downtime mid-job.",
+      why: "This checks what a job usually uses up and how often it needs restocking — you'll confirm which of these apply to you, so downtime never catches you mid-job.",
     },
   },
   {
