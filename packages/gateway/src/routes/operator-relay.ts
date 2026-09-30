@@ -13,7 +13,7 @@
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
@@ -142,9 +142,10 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       //
       // The stored bundleHash is never made up (N80, rehearsal R0 G3). It used to be
       // `sha256-<bundleId>` for any unsigned body, with no events stored, so it committed
-      // to nothing that was received. commitRelayEvidence recomputes LO-EV event hashes,
-      // keeps a device-signed digest as signed, or hashes the canonical body received,
-      // and it refuses a supplied hash its content does not reproduce.
+      // to nothing that was received. commitRelayEvidence recomputes LO-EV event hashes or
+      // keeps a device-signed digest as signed, and refuses everything else: a supplied
+      // hash its content does not reproduce, an ambiguous envelope, malformed events, and
+      // a document the gateway could not keep (cross-family review E4).
       //
       // assuranceTier stays 0 ON PURPOSE (fails closed): an UNVERIFIED bundle
       // "actually supports" only the tier-0 permissionless floor (eligibility.ts).
@@ -167,30 +168,35 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           };
 
       try {
-        repos.evidence.insert({
-          id: bundleId,
-          jobId,
-          stepId: job.stepId ?? "operator-relay",
-          kernelId: job.kernelId ?? kernelId,
-          assuranceTier: 0,
-          bundleHash,
-          kernelSignature,
-          sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
-          createdAt: now,
+        // One transaction (cross-family review E4, finding 2): the bundle and its events
+        // commit together or not at all, so a failed event insert never leaves a stored
+        // bundle whose hash its missing events cannot reproduce.
+        getStore().db.transaction(() => {
+          repos.evidence.insert({
+            id: bundleId,
+            jobId,
+            stepId: job.stepId ?? "operator-relay",
+            kernelId: job.kernelId ?? kernelId,
+            assuranceTier: 0,
+            bundleHash,
+            kernelSignature,
+            sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
+            createdAt: now,
+          });
+          if (events.length > 0) {
+            repos.evidence.insertEvents(
+              events.map((ev, i) => ({
+                id: `${bundleId}:${i}`,
+                bundleId,
+                type: ev.type,
+                timestamp: ev.timestamp,
+                source: ev.source as { deviceId: string; deviceType: string; kernelId: string },
+                payload: ev.payload,
+                hash: ev.hash,
+              })),
+            );
+          }
         });
-        if (events.length > 0) {
-          repos.evidence.insertEvents(
-            events.map((ev, i) => ({
-              id: `${bundleId}:${i}`,
-              bundleId,
-              type: ev.type,
-              timestamp: ev.timestamp,
-              source: ev.source as { deviceId: string; deviceType: string; kernelId: string },
-              payload: ev.payload,
-              hash: ev.hash,
-            })),
-          );
-        }
       } catch (insertErr) {
         // Evidence insert failed — still acknowledge receipt
         app.log.error(`operator-relay: evidence insert failed: ${insertErr}`);

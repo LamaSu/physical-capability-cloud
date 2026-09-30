@@ -1,9 +1,10 @@
 /**
  * N80 (rehearsal R0 G3): what the operator relay commits for a pushed evidence body. The stored
- * hash is a hash the stored content reproduces, or a digest a device signed; never `sha256-<id>`.
+ * hash is a hash the stored content reproduces, or a digest a device signed; never `sha256-<id>`,
+ * and never a hash of content the gateway does not keep (cross-family review E4, round 2).
  */
 import { describe, it, expect } from "vitest";
-import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
+import { hashBundle, hashEvent, type EvidenceEvent } from "@pcc/spec";
 import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import type { CapturedDeviceBundle } from "../services/device-evidence-settlement.js";
 
@@ -33,20 +34,6 @@ function captured(bundleHash: string): CapturedDeviceBundle {
 }
 
 describe("commitRelayEvidence (N80: never a made-up hash)", () => {
-  it("a device document is committed by the sha256 of its canonical JSON, with no events", async () => {
-    const r = await commitRelayEvidence(rehearsalBody, null);
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.commitment).toEqual({ bundleHash: await sha256(canonicalize(rehearsalBody)), hashModel: "document_sha256", events: [] });
-    expect(r.commitment.bundleHash).toMatch(TAGGED);
-  });
-
-  it("pcc-node's events without a source are not LO-EV events: the document model, nothing stored as events", async () => {
-    const r = await commitRelayEvidence(pccNodeBody, null);
-    expect(r.ok && r.commitment.hashModel).toBe("document_sha256");
-    expect(r.ok && r.commitment.events).toEqual([]);
-  });
-
   it("LO-EV events: every hash is recomputed, the bundle hash is hashBundle over them, and the events are kept", async () => {
     const events = [loEv("execution_completed", 1), loEv("cv_inspection_result", 2)];
     const r = await commitRelayEvidence({ events }, null);
@@ -76,7 +63,7 @@ describe("commitRelayEvidence (N80: never a made-up hash)", () => {
     expect(r).toEqual({ ok: false, refusal: { error: "bundle_hash_mismatch" } });
   });
 
-  it("a device-signed bundle without LO-EV events keeps the digest the device signed", async () => {
+  it("a device-signed bundle without events keeps the digest the device signed", async () => {
     const digest = `sha256:${"ef".repeat(32)}`;
     const r = await commitRelayEvidence({ bundleHash: digest }, captured(digest));
     expect(r).toEqual({ ok: true, commitment: { bundleHash: digest, hashModel: "device_signed_digest", events: [] } });
@@ -94,10 +81,45 @@ describe("commitRelayEvidence (N80: never a made-up hash)", () => {
     expect(r).toEqual({ ok: false, refusal: { error: "bundle_hash_mismatch" } });
   });
 
-  it("no accepted body is ever committed by a hash made from an id", async () => {
-    for (const body of [rehearsalBody, pccNodeBody, { printed: true, returncode: 0 }, { events: [loEv("execution_completed", 1)] }]) {
-      const r = await commitRelayEvidence(body, null);
-      expect(r.ok && r.commitment.bundleHash).toMatch(TAGGED);
+  it("every accepted body is committed by a canonical tagged digest", async () => {
+    const digest = `sha256:${"ef".repeat(32)}`;
+    const accepted = [await commitRelayEvidence({ events: [loEv("execution_completed", 1)] }, null), await commitRelayEvidence({ bundleHash: digest }, captured(digest))];
+    for (const r of accepted) expect(r.ok && r.commitment.bundleHash).toMatch(TAGGED);
+  });
+});
+
+describe("commitRelayEvidence refuses what it cannot store reproducibly (cross-family review E4, round 2)", () => {
+  it("NEGATIVE (E4 finding 1): a document with no LO-EV events and no device signature is refused, never hashed and dropped", async () => {
+    for (const body of [rehearsalBody, { printed: true, returncode: 0 }]) {
+      expect(await commitRelayEvidence(body, null)).toEqual({ ok: false, refusal: { error: "evidence_not_lo_ev" } });
+    }
+  });
+
+  it("NEGATIVE (E4 finding 3): events that are present but not all LO-EV are malformed, never a quieter model", async () => {
+    expect(await commitRelayEvidence(pccNodeBody, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 0 } });
+    const mixed = { events: [loEv("execution_completed", 1), { type: "execution_completed", timestamp: "2026-09-29T22:35:02Z" }] };
+    expect(await commitRelayEvidence(mixed, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 1 } });
+    expect(await commitRelayEvidence({ events: [] }, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: null } });
+    expect(await commitRelayEvidence({ events: "not-a-list" }, null)).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: null } });
+  });
+
+  it("NEGATIVE (E4 finding 3): a device signature over events without a source is malformed, not a device-signed digest", async () => {
+    const digest = `sha256:${"ef".repeat(32)}`;
+    const body = { events: [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01Z" }], bundleHash: digest };
+    expect(await commitRelayEvidence(body, captured(digest))).toEqual({ ok: false, refusal: { error: "events_malformed", eventIndex: 0 } });
+  });
+
+  it("NEGATIVE (E4 finding 3): commitment fields both at the root and under `bundle` are ambiguous", async () => {
+    for (const field of ["events", "bundleHash", "kernelSignature", "signature"]) {
+      const body = { bundle: { events: [loEv("execution_completed", 1)] }, [field]: field === "events" ? [] : `sha256:${"ab".repeat(32)}` };
+      expect(await commitRelayEvidence(body, null), field).toEqual({ ok: false, refusal: { error: "ambiguous_envelope" } });
+    }
+  });
+
+  it("NEGATIVE (E4 finding 3): a `bundle` that is present but not an object is malformed", async () => {
+    for (const bundle of ["x", 1, null, [loEv("execution_completed", 1)]]) {
+      const r = await commitRelayEvidence({ bundle, events: [loEv("execution_completed", 1)] }, null);
+      expect(r, JSON.stringify(bundle)).toEqual({ ok: false, refusal: { error: "malformed_envelope" } });
     }
   });
 });

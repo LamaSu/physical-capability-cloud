@@ -6,21 +6,27 @@
  *   POST /api/operator/job-status
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import nacl from "tweetnacl";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore, getRepos } from "../db.js";
-import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
+import { hashBundle, hashEvent, type EvidenceEvent } from "@pcc/spec";
 
-/** A real device-signed (#236) evidence bundle over `bundleHash`, in the wire
- *  form the node produces (hex Ed25519 sig, truncated EVM-looking signer). */
-function realDeviceBundle(jobId: string, bundleHash = `sha256:${"ab".repeat(32)}`) {
+/** A real device-signed (#236) evidence bundle in the wire form the node produces (hex Ed25519
+ *  sig, truncated EVM-looking signer): LO-EV events, and the bundle hash computed from them and
+ *  signed, as kernel-sdk's job-handler does. */
+async function realDeviceBundle(jobId: string, kernelId: string) {
   const kp = nacl.sign.keyPair();
-  const sig = nacl.sign.detached(new TextEncoder().encode(bundleHash), kp.secretKey);
   const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+  const raw = [
+    { type: "execution_completed", timestamp: new Date().toISOString(), source: { deviceId: "printer-1", deviceType: "fdm", kernelId }, payload: { ok: true } },
+  ];
+  const events = await Promise.all(raw.map(async (e) => ({ ...e, hash: await hashEvent(e as Omit<EvidenceEvent, "hash" | "id">) })));
+  const bundleHash = await hashBundle(events as unknown as EvidenceEvent[]);
+  const sig = nacl.sign.detached(new TextEncoder().encode(bundleHash), kp.secretKey);
   return {
     jobId,
     assuranceTier: 2, // node's DECLARED tier — path 1 must NOT trust it (stays 0)
@@ -30,9 +36,17 @@ function realDeviceBundle(jobId: string, bundleHash = `sha256:${"ab".repeat(32)}
       algorithm: "ed25519",
       value: hex(sig),
     },
-    events: [{ type: "execution_completed", timestamp: new Date().toISOString() }],
+    events,
   };
 }
+
+/** A seeded job with a kernel. A test using it fails, never skips, when the seed has none. */
+function seededJob() {
+  const job = getRepos().jobs.findAll().find((j) => j.kernelId);
+  expect(job, "the seed must hold a job with a kernel").toBeTruthy();
+  return job!;
+}
+const bundlesFor = (jobId: string) => getRepos().evidence.findByJob(jobId).length;
 
 // ---------------------------------------------------------------------------
 // Test app builder
@@ -181,11 +195,9 @@ describe("Operator Relay Routes", () => {
       expect(body.warning).toBe("job_not_found");
     });
 
-    it("stores evidence for known job", async () => {
-      const kernelId = await getSeededKernelId(app);
-      if (!kernelId) return;
-      const jobId = await getQueuedJobId(app, kernelId);
-      if (!jobId) return;
+    it("NEGATIVE (N80, review E4): pcc-node's current events, which carry no source, are refused (422) and not stored", async () => {
+      const { id: jobId, kernelId } = seededJob();
+      const before = bundlesFor(jobId);
 
       const res = await app.inject({
         method: "POST",
@@ -205,21 +217,16 @@ describe("Operator Relay Routes", () => {
           timestamp: Date.now() / 1000,
         },
       });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.stored).toBe(true);
-      expect(body.jobId).toBe(jobId);
-      expect(body.bundleId).toBeTruthy();
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: "events_malformed", eventIndex: 0, stored: false, jobId });
+      expect(bundlesFor(jobId)).toBe(before);
     });
 
     // ── SEAM-2 path 1: capture the node's REAL device signature ──────────
     it("captures the node's real device-signed (#236) Ed25519 signature", async () => {
-      const kernelId = await getSeededKernelId(app);
-      if (!kernelId) return;
-      const jobId = await getQueuedJobId(app, kernelId);
-      if (!jobId) return;
+      const { id: jobId, kernelId } = seededJob();
 
-      const bundle = realDeviceBundle(jobId);
+      const bundle = await realDeviceBundle(jobId, kernelId);
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
@@ -242,50 +249,63 @@ describe("Operator Relay Routes", () => {
       expect(stored!.assuranceTier).toBe(0);
     });
 
-    it("falls back to the placeholder for non-bundle evidence (backward compatible)", async () => {
-      const kernelId = await getSeededKernelId(app);
-      if (!kernelId) return;
-      const jobId = await getQueuedJobId(app, kernelId);
-      if (!jobId) return;
+    it("NEGATIVE (N80, review E4): non-bundle evidence is refused (422), never stored under a hash of content the gateway drops", async () => {
+      const { id: jobId, kernelId } = seededJob();
+      const before = bundlesFor(jobId);
 
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
         payload: { jobId, kernelId, evidence: { printed: true, returncode: 0 } },
       });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.stored).toBe(true);
-      expect(body.deviceSigned).toBe(false);
-
-      const stored = getRepos().evidence.findById(body.bundleId);
-      expect(stored!.kernelSignature.value).toBe("operator-relay-auto");
-      expect(stored!.assuranceTier).toBe(0);
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: "evidence_not_lo_ev", stored: false, jobId });
+      expect(bundlesFor(jobId)).toBe(before);
     });
   });
 
   // ── N80 (rehearsal R0 G3): stored evidence tells the truth ──────
   describe("POST /api/operator/evidence stores a true hash (N80)", () => {
-    /** A seeded job with a kernel. The test fails, never skips, when the seed has none. */
-    function seededJob() {
-      const job = getRepos().jobs.findAll().find((j) => j.kernelId);
-      expect(job, "the seed must hold a job with a kernel").toBeTruthy();
-      return job!;
-    }
-    const bundlesFor = (jobId: string) => getRepos().evidence.findByJob(jobId).length;
-
-    it("a device document is stored under the sha256 of what was received, never sha256-<bundleId>", async () => {
+    it("NEGATIVE (review E4 finding 1): the rehearsal's device document is refused (422), not stored under a hash nobody can reproduce", async () => {
       const job = seededJob();
+      const before = bundlesFor(job.id);
       const evidence = { deviceId: "SIM-0001", run: { runId: "run-1", result: { readings: { A1: 0.412 } } } };
       const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      const expected = await sha256(canonicalize(evidence));
-      expect(body).toMatchObject({ stored: true, contentHash: expected, hashModel: "document_sha256", eventsStored: 0, deviceSigned: false, signatureVerified: false });
-      const stored = getRepos().evidence.findById(body.bundleId)!;
-      expect(stored.bundleHash).toBe(expected);
-      expect(stored.bundleHash).not.toMatch(/^sha256-/);
-      expect(stored.kernelSignature.value).toBe("operator-relay-auto");
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: "evidence_not_lo_ev", stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("NEGATIVE (review E4 finding 2): when storing the events fails, the bundle is rolled back, never left without them", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
+      const events = [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true } }];
+      const spy = vi.spyOn(getRepos().evidence, "insertEvents").mockImplementationOnce(() => {
+        throw new Error("injected insertEvents failure");
+      });
+      try {
+        const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
+        expect(res.json()).toMatchObject({ stored: false, error: "storage_failed" });
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(bundlesFor(job.id)).toBe(before);
+    });
+
+    it("NEGATIVE (review E4 finding 3): a root bundleHash beside a bundle wrapper is ambiguous (422), never ignored", async () => {
+      const job = seededJob();
+      const before = bundlesFor(job.id);
+      const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
+      const evidence = {
+        bundle: { events: [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: {} }] },
+        bundleHash: `sha256:${"ab".repeat(32)}`,
+      };
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: "ambiguous_envelope", stored: false });
+      expect(bundlesFor(job.id)).toBe(before);
     });
 
     it("LO-EV events are stored with recomputed hashes, and the stored bundle hash reproduces from them", async () => {
