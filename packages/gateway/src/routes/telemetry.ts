@@ -7,6 +7,12 @@
  * GET  /api/telemetry/logs             — query structured logs (with filters)
  * GET  /api/telemetry/logs/stream      — SSE stream of live log + telemetry events
  * POST /api/telemetry/emit             — manually emit a telemetry event
+ *
+ * A job's timeline, the job-id enumerations and log lines that name a job are that job's
+ * records: they take the job read gate (F3 round 2, cross-family review r1 of #403). No
+ * credential is 401, an unproven one 403; a proven wallet sees only the jobs it may read
+ * (jobReadScopeOf) and a job it may not read looks like a job with no telemetry. Log lines
+ * that name no job are not job records and stay readable (jobRecordFilterOf).
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -16,9 +22,10 @@ import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { gateJobRead, jobReadScopeOf, jobRecordFilterOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 
-// Active SSE clients for the live log stream
-const logStreamClients = new Set<FastifyReply>();
+// Active SSE clients for the live log stream, each with the records it may see
+const logStreamClients = new Map<FastifyReply, (record: unknown) => boolean>();
 
 // Subscribe to StreamHub global topic once and fan-out to SSE clients
 streamHub.subscribe(
@@ -26,7 +33,8 @@ streamHub.subscribe(
   (event) => {
     if (event.type !== "telemetry_event" && event.type !== "log_entry") return;
     const payload = `event: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
-    for (const client of logStreamClients) {
+    for (const [client, keep] of logStreamClients) {
+      if (!keep(event.payload)) continue;
       try {
         client.raw.write(payload);
       } catch {
@@ -63,17 +71,22 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>(
     "/api/telemetry/pipeline/:jobId",
-    async (req) => {
+    async (req, reply) => {
       const { jobId } = req.params;
-      const timeline = pipelineTelemetry.getTimeline(jobId);
+      const gate = gateJobRead(req, jobId);
+      if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
+      // A job the caller may not read gets what a job with no telemetry gets.
+      const timeline = gate.ok ? pipelineTelemetry.getTimeline(jobId) : [];
       return { jobId, timeline, phases: PIPELINE_PHASES };
     },
   );
 
   // ── GET /api/telemetry/active ──────────────────────────────────────────
 
-  app.get("/api/telemetry/active", async () => {
-    const active = pipelineTelemetry.getActiveJobs();
+  app.get("/api/telemetry/active", async (req, reply) => {
+    const scope = jobReadScopeOf(req);
+    if (!scope.ok) return refuseJobRead(reply, scope);
+    const active = pipelineTelemetry.getActiveJobs().filter((summary) => scopeAllows(scope, summary.jobId));
     return { active, count: active.length };
   });
 
@@ -86,8 +99,10 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
   // ── GET /api/telemetry/jobs ────────────────────────────────────────────
 
-  app.get("/api/telemetry/jobs", async () => {
-    const jobIds = pipelineTelemetry.getAllJobIds();
+  app.get("/api/telemetry/jobs", async (req, reply) => {
+    const scope = jobReadScopeOf(req);
+    if (!scope.ok) return refuseJobRead(reply, scope);
+    const jobIds = pipelineTelemetry.getAllJobIds().filter((jobId) => scopeAllows(scope, jobId));
     return { jobIds };
   });
 
@@ -104,18 +119,34 @@ export async function telemetryRoutes(app: FastifyInstance) {
       before?: string;
       limit?: string;
     };
-  }>("/api/telemetry/logs", async (req) => {
+  }>("/api/telemetry/logs", async (req, reply) => {
     const q = req.query;
-    const entries = logger.query({
-      level: q.level as LogLevel | undefined,
-      source: q.source,
-      jobId: q.jobId,
-      kernelId: q.kernelId,
-      search: q.search,
-      after: q.after,
-      before: q.before,
-      limit: q.limit ? parseInt(q.limit, 10) : 200,
-    });
+    // Asking for one job's lines is reading that job: the gate runs, and a job the caller may
+    // not read has no lines. Without a job, the lines naming a job the caller may not read are
+    // left out, before the limit is applied.
+    let keep: (entry: unknown) => boolean;
+    if (q.jobId) {
+      const gate = gateJobRead(req, q.jobId);
+      if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
+      keep = () => gate.ok;
+    } else {
+      const filter = jobRecordFilterOf(req);
+      if (!filter.ok) return refuseJobRead(reply, filter);
+      keep = filter.keep;
+    }
+    const entries = logger
+      .query({
+        level: q.level as LogLevel | undefined,
+        source: q.source,
+        jobId: q.jobId,
+        kernelId: q.kernelId,
+        search: q.search,
+        after: q.after,
+        before: q.before,
+        limit: Number.POSITIVE_INFINITY,
+      })
+      .filter(keep)
+      .slice(-(q.limit ? parseInt(q.limit, 10) : 200));
     return {
       entries,
       total: entries.length,
@@ -130,6 +161,10 @@ export async function telemetryRoutes(app: FastifyInstance) {
     if (!canOpenSSE(req.ip)) {
       return reply.status(429).send({ error: "too_many_connections", message: "SSE connection limit exceeded" });
     }
+    // Which jobs' lines and events the caller may see is fixed when the stream opens: a job
+    // the caller becomes a party to later streams after a reconnect (it fails closed).
+    const filter = jobRecordFilterOf(req);
+    if (!filter.ok) return refuseJobRead(reply, filter);
     trackSSEOpen(req.ip);
 
     reply.raw.writeHead(200, {
@@ -139,13 +174,13 @@ export async function telemetryRoutes(app: FastifyInstance) {
     });
 
     // Send recent history on connect
-    const recent = logger.getRecent(50);
+    const recent = logger.getRecent(50).filter((entry) => filter.keep(entry));
     for (const entry of recent) {
       reply.raw.write(`event: log_entry\ndata: ${JSON.stringify(entry)}\n\n`);
     }
 
     // Also send recent telemetry events from active jobs
-    for (const summary of pipelineTelemetry.getActiveJobs().slice(0, 5)) {
+    for (const summary of pipelineTelemetry.getActiveJobs().filter((active) => filter.keep(active)).slice(0, 5)) {
       const timeline = pipelineTelemetry.getTimeline(summary.jobId).slice(-10);
       for (const evt of timeline) {
         reply.raw.write(`event: telemetry_event\ndata: ${JSON.stringify(evt)}\n\n`);
@@ -154,7 +189,7 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
     reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected" })}\n\n`);
 
-    logStreamClients.add(reply);
+    logStreamClients.set(reply, filter.keep);
 
     // Heartbeat
     const heartbeat = setInterval(() => {
