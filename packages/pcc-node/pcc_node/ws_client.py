@@ -28,10 +28,11 @@ log = logging.getLogger("pcc-node.ws")
 
 USER_AGENT = "PCC-Node/0.1.1 (https://capability.network)"
 
-# Relaxed SSL context for self-signed certs on local networks
-_relaxed_ctx = ssl.create_default_context()
-_relaxed_ctx.check_hostname = False
-_relaxed_ctx.verify_mode = ssl.CERT_NONE
+# Gateway traffic carries the operator's bearer key and the jobs the node acts
+# on, so the gateway's certificate is always verified (verdict 68b, finding 2).
+# Never relax this for the gateway: LAN devices have their own transport
+# (http_util), and a self-signed gateway is not a gateway this client talks to.
+_gateway_ctx = ssl.create_default_context()
 
 
 def _http(
@@ -51,7 +52,7 @@ def _http(
         headers["Content-Type"] = "application/json"
     req = Request(url, data=data, headers=headers, method=method)
     try:
-        with urlopen(req, timeout=timeout, context=_relaxed_ctx) as resp:
+        with urlopen(req, timeout=timeout, context=_gateway_ctx) as resp:
             raw = resp.read().decode("utf-8")
             try:
                 return resp.status, json.loads(raw)
