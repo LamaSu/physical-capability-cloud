@@ -80,8 +80,44 @@ describe("flushOutcome", () => {
 
 describe("NEGATIVE (#313: accepted is not settled): a flush never reads as settled", () => {
   it("the flush answer carries bundler UserOperation hashes, not an on-chain receipt", () => {
-    const body = { epoch: 3, totalIntents: 5, batches: 1, batchDetails: [{ userOpHash: "0xab", operationCount: 5, trigger: "manual" }] };
+    const body = {
+      epoch: 3,
+      totalIntents: 5,
+      batches: 1,
+      batchDetails: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 5, trigger: "manual" }],
+    };
     for (const b of [body, {}, null]) expect(flushOutcome(200, b).message, JSON.stringify(b)).not.toMatch(/settle/i);
+  });
+});
+
+describe("flushOutcome: a malformed 2xx is never assumed accepted (H1)", () => {
+  const SHAPE_MESSAGE = "The gateway's answer did not have the expected shape.";
+
+  it("NEGATIVE: a 2xx body missing the flush contract's fields fails closed, not a bare acceptance", () => {
+    expect(flushOutcome(200, {})).toEqual({ ok: false, message: SHAPE_MESSAGE });
+    expect(flushOutcome(200, null)).toEqual({ ok: false, message: SHAPE_MESSAGE });
+    expect(flushOutcome(200, { epoch: 3, totalIntents: 5 })).toEqual({ ok: false, message: SHAPE_MESSAGE });
+  });
+
+  it("NEGATIVE: batchDetails, when present, must match the flush contract or the whole read fails closed", () => {
+    const hash = "0x" + "ab".repeat(32);
+    // Not a real UserOp hash.
+    expect(
+      flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1, batchDetails: [{ userOpHash: "0xab", operationCount: 5, trigger: "manual" }] })
+        .ok,
+    ).toBe(false);
+    // batches says 2 batches, batchDetails lists only 1 — an inconsistent body.
+    expect(
+      flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 2, batchDetails: [{ userOpHash: hash, operationCount: 5, trigger: "manual" }] })
+        .ok,
+    ).toBe(false);
+  });
+
+  it("a well-formed batchDetails is still a success", () => {
+    const hash = "0x" + "ab".repeat(32);
+    expect(
+      flushOutcome(200, { epoch: 3, totalIntents: 5, batches: 1, batchDetails: [{ userOpHash: hash, operationCount: 5, trigger: "manual" }] }),
+    ).toEqual({ ok: true, message: "The gateway reports epoch 3 flushed: 5 operations in 1 batch(es)." });
   });
 });
 

@@ -18,10 +18,12 @@ export interface QueueStatus {
   smartAccountAddress: string | null;
 }
 
+export type FlushTrigger = "manual" | "size" | "age" | "value";
+
 export interface BatchDetail {
   userOpHash: string;
   operationCount: number;
-  trigger: string;
+  trigger: FlushTrigger;
 }
 
 export interface EpochSummary {
@@ -45,8 +47,15 @@ export const UNREACHABLE: Read<never> = { state: "unavailable", reason: UNREACHA
 const SHAPE = "The gateway's answer did not have the expected shape.";
 
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-const isCount = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0;
+/** A count the page can safely display or sum: a non-negative integer within Number's safe range. */
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const isTime = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+const FLUSH_TRIGGERS: ReadonlySet<string> = new Set(["manual", "size", "age", "value"]);
+const isTrigger = (v: unknown): v is FlushTrigger => typeof v === "string" && FLUSH_TRIGGERS.has(v);
+/** An ERC-4337 UserOperation hash from the bundler: 0x + 32 bytes. */
+const isUserOpHash = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
+const isBatchDetail = (b: unknown): b is BatchDetail =>
+  isObj(b) && isUserOpHash(b.userOpHash) && isCount(b.operationCount) && isTrigger(b.trigger);
 
 /** The refusal's own message when it has one, else the HTTP status. */
 function refusalReason(httpStatus: number, body: unknown): string {
@@ -107,17 +116,26 @@ export function epochsFromResponse(httpStatus: number, body: unknown): Read<Epoc
  * What the page says after a flush: what the gateway reports it flushed, or its refusal (e.g.
  * batch settlement not configured). A flush hands the epoch's operations to the bundler as
  * UserOperations; its answer carries their hashes, not an on-chain receipt, so the page never
- * calls it settled (#313: accepted is not settled).
+ * calls it settled (#313: accepted is not settled). A 2xx body that does not match the flush
+ * contract is never assumed accepted — the page cannot say whether anything was flushed, so it
+ * fails closed with the same shape message a malformed status/epochs read uses (H1).
  */
 export function flushOutcome(httpStatus: number, body: unknown): { ok: boolean; message: string } {
   if (httpStatus < 200 || httpStatus >= 300) return { ok: false, message: refusalReason(httpStatus, body) };
-  if (isObj(body) && isCount(body.epoch) && isCount(body.totalIntents) && isCount(body.batches)) {
+  if (
+    isObj(body) &&
+    isCount(body.epoch) &&
+    isCount(body.totalIntents) &&
+    isCount(body.batches) &&
+    (body.batchDetails === undefined ||
+      (Array.isArray(body.batchDetails) && body.batchDetails.length === body.batches && body.batchDetails.every(isBatchDetail)))
+  ) {
     return {
       ok: true,
       message: `The gateway reports epoch ${body.epoch} flushed: ${body.totalIntents} operations in ${body.batches} batch(es).`,
     };
   }
-  return { ok: true, message: "The gateway accepted the flush." };
+  return { ok: false, message: SHAPE };
 }
 
 /** The confirmation a manual flush asks for: how many operations, what a flush does, and that it is final. */
