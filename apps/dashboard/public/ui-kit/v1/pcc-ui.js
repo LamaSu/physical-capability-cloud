@@ -70,7 +70,6 @@
   // Kit-owned per-action EXECUTION state (ruling 5). It lives in a WeakMap keyed by the action
   // object, never ON the action: an action is untrusted manifest JSON, and a manifest must not be
   // able to pre-seed a key, strip the header, mark itself done, or make an action inert.
-  //   keys    body fingerprint -> Idempotency-Key, only for attempts whose outcome is UNRESOLVED
   //   posting a request (or hosted typed operation) for this action is in flight
   //   done    a MONEY write for this action was accepted (2xx): one-shot for this render
   //   gate    the identity of the ONE open Approval gate for this action (null when none)
@@ -78,10 +77,25 @@
   function actionState(action) {
     var st = ACTION_STATE.get(action);
     if (!st) {
-      st = { keys: Object.create(null), posting: false, done: false, gate: null };
+      st = { posting: false, done: false, gate: null };
       ACTION_STATE.set(action, st);
     }
     return st;
+  }
+  // Kit-owned per-REQUEST-INTENT state (astra r2 on #342, F1). An intent is the exact request the
+  // wire would carry: method, pinned URL (query included) and body. Every action object describing
+  // that request -- a cloned manifest entry, an approval window, a button -- shares ONE open gate, ONE
+  // unresolved Idempotency-Key and ONE money one-shot, so a manifest cannot duplicate a money action
+  // into independent approvals with different keys. The per-object state above still applies; the
+  // stricter of the two wins.
+  //   key     the Idempotency-Key while this intent's outcome is UNRESOLVED (A/B/A reuses A's key)
+  //   posting / done / gate: as above, for the intent
+  var INTENT_STATE = Object.create(null);
+  function intentState(desc) {
+    var k = desc.method + ' ' + desc.url + '\n' + JSON.stringify(desc.body);
+    var it = INTENT_STATE[k];
+    if (!it) { it = { key: null, posting: false, done: false, gate: null }; INTENT_STATE[k] = it; }
+    return it;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1601,6 +1615,8 @@
     // Validate ONCE into the canonical descriptor; every step below uses this same object.
     var desc = opts.desc || requestDescriptor(action, action.body, false, ctx.apiBase, opts.formValues);
     if (!desc.ok) { refuseStatus(status, desc); return null; }
+    var it = intentState(desc); // the same request from ANY action object (clone, window, button)
+    if (it.posting || it.done) { alreadySubmitted(status, it); return null; }
 
     // Every write the kit's allowlist does not know is money: it passes the Approval gate first
     // (unless we ARE that gate -- the approval window, or the gate's own Approve).
@@ -1636,21 +1652,23 @@
     // Belt and braces: the busy guard and the money one-shot hold even for a direct caller.
     if (st.posting || st.done) { alreadySubmitted(status, st); return null; }
     if (!desc || !desc.ok) { refuseStatus(status, desc); return null; }
-    // Idempotency INTENTS (r1 finding 5), kit-owned: one key per body fingerprint while that
-    // attempt's outcome is UNRESOLVED, so A (unknown outcome) -> B -> retry A resends A's key and the
-    // server dedupes instead of double-charging. A 2xx consumes that fingerprint's key (a non-money
-    // write may then re-send under a new key; an accepted MONEY write is one-shot, st.done). A form
-    // reference (idempotencyFrom) DERIVES the key from (method, canonical route, reference, body): the
-    // same logical intent dedupes even across a reload, and never shares a key with another route
-    // or another body.
+    var it = intentState(desc);
+    if (it.posting || it.done) { alreadySubmitted(status, it); return null; }
+    // Idempotency INTENTS (r1 finding 5; astra r2 F1/F3), kit-owned: one key per request intent
+    // (method, exact wire URL, body) while its outcome is UNRESOLVED, so A (unknown outcome) -> B ->
+    // retry A resends A's key and the server dedupes instead of double-charging, and a CLONED action
+    // for the same request reuses it too. A 2xx consumes the key (a non-money write may then re-send
+    // under a new key; an accepted MONEY write is one-shot). A form reference (idempotencyFrom)
+    // DERIVES the key from (method, exact wire URL with its query, reference, body): the same logical
+    // intent dedupes even across a reload, and never shares a key with another target or body.
     var fp = JSON.stringify(desc.body);
-    var key = st.keys[fp];
+    var key = it.key;
     if (!key) {
       var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
       key = (ref != null && ref !== '')
-        ? 'idem-' + hash53(desc.method + ' ' + desc.canonical + '|' + String(ref) + '|' + fp)
+        ? 'idem-' + hash53(desc.method + ' ' + desc.url + '|' + String(ref) + '|' + fp)
         : 'idem-' + uuid();
-      st.keys[fp] = key;
+      it.key = key;
     }
     var sendBody = Object.assign({}, desc.body);
     if (desc.method === 'POST') sendBody.idempotencyKey = key; // legacy body field (kind "post"), preserved
@@ -1660,24 +1678,24 @@
       // line so it never stays at a stale "Working...".
       if (opts.mirror && opts.mirror !== status) { opts.mirror.className = cls; opts.mirror.textContent = text; }
     }
-    st.posting = true;
+    st.posting = true; it.posting = true;
     show('pcc-action-status', 'Working…');
     var sending;
     try { sending = ctx.tx.send(desc, sendBody, key); }
     catch (e) { // the request never started (review charlie F6): release the guard, say so honestly
-      st.posting = false;
+      st.posting = false; it.posting = false;
       show('pcc-action-status st-failed', 'Refused: the request could not be started - nothing was sent.');
       return Promise.resolve({ ok: false, sent: false });
     }
     return sending.then(function (res) {
-      st.posting = false;
+      st.posting = false; it.posting = false;
       if (res.ok) {
-        delete st.keys[fp]; // this intent is resolved
+        it.key = null; // this intent is resolved
         var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
         // An HTTP 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2). A money write reads
         // "submitted" (waiting) and is one-shot for this render; anything else a NEUTRAL "Done".
         // Settled-green comes only from a read model (a receipt window).
-        if (desc.money) { st.done = true; show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace); }
+        if (desc.money) { st.done = true; it.done = true; show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace); }
         else show('pcc-action-status st-ack', 'Done' + trace);
         if (typeof opts.onSuccess === 'function') opts.onSuccess(res, desc);
       } else {
@@ -1685,7 +1703,7 @@
       }
       return { ok: !!res.ok, sent: !res.refused };
     }, function (err) {
-      st.posting = false;
+      st.posting = false; it.posting = false;
       show('pcc-action-status st-failed', String(err && err.message || 'Request failed'));
       return { ok: false, sent: true };
     });
@@ -1799,16 +1817,18 @@
     // Host lockdown: writes are disabled in a hosted view — never open the gate.
     // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
     if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
-    var st = actionState(action);
+    var st = actionState(action), it = intentState(desc);
     // An intent in flight or already accepted: say so, never open a gate whose Approve would be inert.
     if (st.posting || st.done) { alreadySubmitted(opts && opts.status, st); return; }
-    // One approval modal per action: a rapid second click must not stack a second gate (and says so).
-    if (st.gate) {
+    if (it.posting || it.done) { alreadySubmitted(opts && opts.status, it); return; }
+    // One approval modal per action AND per request intent: neither a rapid second click nor a
+    // cloned action for the same request can stack a second gate (astra r2 F1), and it says so.
+    if (st.gate || it.gate) {
       if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; opts.status.textContent = 'An approval window for this is already open.'; }
       return;
     }
-    var gate = {}; // THIS opening's identity: only it may release the one-gate guard
-    st.gate = gate;
+    var gate = {}; // THIS opening's identity: only it may release the one-gate guards
+    st.gate = gate; it.gate = gate;
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
@@ -1831,6 +1851,7 @@
     // overlay and never releases the newer gate's guard.
     function close() {
       if (st.gate === gate) st.gate = null;
+      if (it.gate === gate) it.gate = null;
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
     }
     approve.onclick = function () {

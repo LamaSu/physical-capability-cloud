@@ -1496,3 +1496,41 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     expect(barStatus().textContent).toBe("An approval window for this is already open.");
   });
 });
+
+describe("astra r2 (#342 @60137b16): reproduced findings (verify before fix)", () => {
+  const FUND = "/api/escrow/chain/0xabc/fund";
+  const clone = { id: "fund", label: "Fund", kind: "post", path: FUND, body: { escrowId: "e1", amount: 5 } };
+  const fundBtns = () => buttons().filter((b) => (b.textContent || "").indexOf("Fund") === 0);
+  // The NEWEST gate's Approve (an earlier gate lingers ~1.2 s with a disabled Approve after it sends).
+  const lastApprove = () => (Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")) as HTMLButtonElement[]).filter((b) => b.textContent === "Approve").pop();
+
+  it("F1 (HIGH): two CLONED money actions (same id, method, path, body) can send only ONE request", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "actions", actions: [clone, { ...clone }] }]));
+    const [b1, b2] = fundBtns();
+    b1!.click(); gateApproveBtn()!.click(); await flush();
+    b2!.click(); const g = lastApprove(); if (g && !g.disabled) { g.click(); await flush(); }
+    expect(posts(calls, "/fund").length).toBe(1);
+  });
+
+  it("F1 (HIGH): opening both cloned gates first still lets only ONE request leave", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "actions", actions: [clone, { ...clone }] }]));
+    const [b1, b2] = fundBtns();
+    b1!.click(); b2!.click();
+    for (const g of Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).filter((b) => b.textContent === "Approve") as HTMLButtonElement[]) g.click();
+    await flush();
+    expect(posts(calls, "/fund").length).toBe(1);
+  });
+
+  it("F3 (MEDIUM): an idempotencyFrom key covers the query string (different targets, different keys)", async () => {
+    const calls = installFetch(() => ({ status: 200 }));
+    const form = (q: string) => ({ kind: "form", schema: { properties: { ref: { type: "string", default: "R1" } } },
+      submit: { id: "s" + q, label: "Send " + q, kind: "post", path: "/api/example?mode=" + q, idempotencyFrom: "ref", body: { x: 1 } } });
+    boot(man([form("A"), form("B")]));
+    for (const q of ["A", "B"]) { btn("Send " + q).click(); lastApprove()!.click(); await flush(); }
+    const keys = posts(calls, "/api/example").map((c) => c.headers["Idempotency-Key"]);
+    expect(keys.length).toBe(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+});
