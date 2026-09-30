@@ -200,7 +200,7 @@ export async function settlementRoutes(app: FastifyInstance) {
 
     // No SWF accrual here. The fund's ledger is in memory and the escrow routes no share of a release to it,
     // so any accrual would record money that never moved (this used to accrue a constant 1000 for every
-    // release, whatever was paid). swfAccrue is for a real flow into the fund, once one exists.
+    // release, whatever was paid). The SWF's accrual helper (routes/swf.ts) is for a real flow into the fund, once one exists.
 
     return {
       txHash: result.txHash,
