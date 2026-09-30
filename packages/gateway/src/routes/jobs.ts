@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
 import { getRepos, getStore } from "../db.js";
-import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
+import { gateJobRead, jobReadScopeOf, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import {
@@ -28,19 +28,26 @@ export async function jobRoutes(app: FastifyInstance) {
   /**
    * List jobs with optional kernel/status filtering and DTO enrichment.
    * Supports: ?kernelId=, ?status=, or both.
+   *
+   * Only the jobs the caller may read (jobReadScopeOf, F3 round 2): an admin lists every job
+   * in its tenant; a proven wallet lists the jobs of the kernels it operates and the jobs it
+   * is the recorded buyer of. No credential is 401, an unproven one 403.
    */
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
     async (req, reply) => {
       const asOf = new Date().toISOString();
-      // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true.
-      // Default OFF preserves cross-tenant listing (today's behavior).
+      const scope = jobReadScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
+      // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true. The scope applies
+      // the tenant too, including a tenant-less caller's (the repository cannot take null).
       const tOpts = tenantOpts(req as any);
       const result = await facade.list(
         {
           kernelId: req.query.kernelId,
           status: req.query.status,
           ...(tOpts?.tenantId ? { tenantId: tOpts.tenantId } : {}),
+          ...(scope.jobIds ? { jobIds: scope.jobIds } : {}),
         },
         {},
         { offset: req.query.offset, limit: req.query.limit },
