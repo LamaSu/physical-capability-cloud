@@ -210,12 +210,63 @@ describe("faucet and relay throttles", () => {
   it("[neg] relays: a per-caller hourly count and a global daily breaker that alerts once", () => {
     process.env.PCC_RELAY_MAX_PER_KEY_HOUR = "2";
     process.env.PCC_RELAY_MAX_GLOBAL_DAY = "3";
-    expect(admitRelay({ apiKeyId: "a" }).ok).toBe(true);
-    expect(admitRelay({ apiKeyId: "a" }).ok).toBe(true);
-    expect(admitRelay({ apiKeyId: "a" })).toMatchObject({ status: 429, error: "relay_rate_limited" });
-    expect(admitRelay({ apiKeyId: "b" }).ok).toBe(true);
-    expect(admitRelay({ apiKeyId: "c" })).toMatchObject({ status: 503, error: "relay_daily_breaker" });
-    expect(admitRelay({ apiKeyId: "d" })).toMatchObject({ status: 503 });
+    // Distinct callers each carry their own principal (a real API key always does).
+    expect(admitRelay({ principal: "pa", apiKeyId: "a" }).ok).toBe(true);
+    expect(admitRelay({ principal: "pa", apiKeyId: "a" }).ok).toBe(true);
+    expect(admitRelay({ principal: "pa", apiKeyId: "a" })).toMatchObject({ status: 429, error: "relay_rate_limited" });
+    expect(admitRelay({ principal: "pb", apiKeyId: "b" }).ok).toBe(true);
+    expect(admitRelay({ principal: "pc", apiKeyId: "c" })).toMatchObject({ status: 503, error: "relay_daily_breaker" });
+    expect(admitRelay({ principal: "pd", apiKeyId: "d" })).toMatchObject({ status: 503 });
     expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+/**
+ * astra pack 103: the four fail-open defects. Kill switch/config now gate the
+ * faucet and relay too; a present-but-blank value fails closed; the hourly count
+ * binds the principal as well as the key; a backward clock step is refused.
+ */
+describe("pack 103 fail-closed fixes", () => {
+  it("[neg] F1: the kill switch stops the faucet and the relay", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_GATEWAY_PAYS_ENABLED = "false";
+    expect(admitFaucetDrip({ wallet: "0xw", amount: 1, spender: { apiKeyId: "k" } })).toMatchObject({ status: 503, error: "gateway_pays_disabled" });
+    process.env.PCC_PGTR_FORWARDER_ADDRESS = "0x1"; process.env.PCC_PGTR_RELAYER_KEY = "0x2";
+    expect(admitRelay({ principal: "p", apiKeyId: "k" })).toMatchObject({ status: 503, error: "gateway_pays_disabled" });
+  });
+
+  it("[neg] F2: a present-but-blank config fails closed, it does not restore the default", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = " ";
+    expect(checkGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(1) })).toMatchObject({ status: 503, error: "gateway_pays_misconfigured" });
+    delete process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD;
+    process.env.PCC_GATEWAY_PAYS_ENABLED = " ";
+    expect(checkGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(1) })).toMatchObject({ status: 503, error: "gateway_pays_misconfigured" });
+    delete process.env.PCC_GATEWAY_PAYS_ENABLED;
+    process.env.PCC_RELAY_MAX_PER_KEY_HOUR = " ";
+    process.env.PCC_PGTR_FORWARDER_ADDRESS = "0x1"; process.env.PCC_PGTR_RELAYER_KEY = "0x2";
+    expect(admitRelay({ principal: "p", apiKeyId: "k" })).toMatchObject({ status: 503, error: "relay_misconfigured" });
+  });
+
+  it("[neg] F3: one principal cannot multiply the faucet hourly count by rotating keys", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_FAUCET_MAX_CALLS_PER_KEY_HOUR = "5";
+    for (let i = 0; i < 5; i += 1) {
+      expect(admitFaucetDrip({ wallet: `0xw${i}`, amount: 1, spender: { principal: "victim", apiKeyId: `k${i}` } }).ok, `call ${i}`).toBe(true);
+    }
+    // A sixth call, same principal, a SIXTH key: refused on the principal bucket.
+    expect(admitFaucetDrip({ wallet: "0xw6", amount: 1, spender: { principal: "victim", apiKeyId: "k6" } })).toMatchObject({ status: 429, error: "faucet_rate_limited" });
+  });
+
+  it("[neg] F4: a backward clock step across a UTC day is refused (no allowance replenish)", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+    t = Date.UTC(2026, 8, 30, 12, 0, 0);
+    expect(admitGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(25) }).ok).toBe(true);
+    t = Date.UTC(2026, 8, 31, 12, 0, 0); // forward a day
+    expect(admitGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(25) }).ok).toBe(true);
+    t = Date.UTC(2026, 8, 30, 12, 0, 0); // clock goes BACKWARD
+    expect(admitGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(25) })).toMatchObject({ status: 503, error: "gateway_pays_clock_regressed" });
   });
 });

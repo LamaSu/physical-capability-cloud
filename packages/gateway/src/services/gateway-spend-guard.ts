@@ -138,7 +138,11 @@ function readConfig(): Config {
   const testnet = isTestnetNetwork();
   const flag = process.env.PCC_GATEWAY_PAYS_ENABLED;
   let enabled: boolean;
-  if (flag === undefined || flag.trim() === "") enabled = testnet;
+  // Default ONLY when the variable is absent. A present-but-blank value is a
+  // misconfiguration, not "use the default" — a blank must never silently
+  // restore spending (astra pack 103, HIGH).
+  if (flag === undefined) enabled = testnet;
+  else if (flag.trim() === "") return { ok: false, problem: "PCC_GATEWAY_PAYS_ENABLED is blank" };
   else if (/^(true|1|on)$/i.test(flag.trim())) enabled = true;
   else if (/^(false|0|off)$/i.test(flag.trim())) enabled = false;
   else return { ok: false, problem: "PCC_GATEWAY_PAYS_ENABLED is not true/false" };
@@ -147,10 +151,11 @@ function readConfig(): Config {
   const caps = {} as Record<keyof typeof CAP_ENV, bigint>;
   for (const key of Object.keys(CAP_ENV) as Array<keyof typeof CAP_ENV>) {
     const raw = process.env[CAP_ENV[key]];
-    if (raw === undefined || raw.trim() === "") {
+    if (raw === undefined) {
       caps[key] = BigInt(defaults[key]) * MICRO;
       continue;
     }
+    if (raw.trim() === "") return { ok: false, problem: `${CAP_ENV[key]} is blank` };
     const v = usdToMicro(raw);
     if (v === null) return { ok: false, problem: `${CAP_ENV[key]} is not a non-negative USD amount` };
     caps[key] = v;
@@ -195,6 +200,22 @@ interface SpendEntry {
 
 let now: () => number = () => Date.now();
 let entries: SpendEntry[] = [];
+// F4 (astra pack 103): the process-local ledger is pruned to the current UTC
+// day, so a backward clock step would silently drop a prior day's admissions and
+// replenish the allowance. Refuse any admission once the observed day has gone
+// backwards from the furthest day already seen in this process.
+let maxDaySeen = "";
+function dayRegressed(day: string): boolean {
+  if (day < maxDaySeen) return true;
+  if (day > maxDaySeen) maxDaySeen = day;
+  return false;
+}
+const CLOCK_REGRESSED: GatewaySpendRefusal = {
+  ok: false,
+  status: 503,
+  error: "gateway_pays_clock_regressed",
+  message: "Gateway-paid actions are paused: the server clock moved backward across a UTC day; the daily caps cannot be trusted.",
+};
 
 function utcDay(ms = now()): string {
   return new Date(ms).toISOString().slice(0, 10);
@@ -300,6 +321,7 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
  * write that moved funds; the guard never under-counts.
  */
 export function admitGatewaySpend(input: GatewaySpendInput): GatewaySpendDecision {
+  if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
   const decision = checkGatewaySpend(input);
   if (!decision.ok) return decision;
   const principal = normalizePrincipal(input.spender.principal);
@@ -320,13 +342,14 @@ const RELAY_DEFAULTS = { perKeyHour: 20, globalDay: 200 } as const;
 
 function intEnv(name: string, fallback: number): number | null {
   const raw = process.env[name];
-  if (raw === undefined || raw.trim() === "") return fallback;
+  if (raw === undefined) return fallback;
+  if (raw.trim() === "") return null; // present-but-blank is a misconfiguration, not the default
   return /^\d{1,9}$/.test(raw.trim()) ? Number(raw.trim()) : null;
 }
 
 const HOUR_MS = 3_600_000;
-let faucetDrips: Array<{ at: number; day: string; wallet: string; keyId: string; amount: number }> = [];
-let relays: Array<{ at: number; day: string; keyId: string }> = [];
+let faucetDrips: Array<{ at: number; day: string; wallet: string; keyId: string; principalId: string; amount: number }> = [];
+let relays: Array<{ at: number; day: string; keyId: string; principalId: string }> = [];
 
 function callerKey(spender: { principal?: string; apiKeyId?: string }): string {
   return spender.apiKeyId ? `key:${spender.apiKeyId}` : `principal:${normalizePrincipal(spender.principal)}`;
@@ -350,6 +373,12 @@ export function admitFaucetDrip(input: {
   if (!isTestnetNetwork()) {
     return { ok: false, status: 503, error: "faucet_disabled", message: "The faucet runs only on a testnet deployment." };
   }
+  // F1 (astra pack 103): the faucet signs with the gateway/deployer key, so the
+  // payment kill switch and a malformed config must stop it too.
+  const cfg = readConfig();
+  if (!cfg.ok) { alertOnce(`misconfigured:${cfg.problem}`, `faucet refused: ${cfg.problem}`); return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." }; }
+  if (!cfg.enabled) return { ok: false, status: 503, error: "gateway_pays_disabled", message: "The gateway does not pay on callers' behalf here (PCC_GATEWAY_PAYS_ENABLED is off)." };
+  if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
   const maxPerCall = faucetMaxPerCall();
   const perWalletDay = intEnv("PCC_FAUCET_MAX_PER_WALLET_DAY", FAUCET_DEFAULTS.perWalletDay);
   const perKeyHour = intEnv("PCC_FAUCET_MAX_CALLS_PER_KEY_HOUR", FAUCET_DEFAULTS.perKeyHour);
@@ -368,11 +397,16 @@ export function admitFaucetDrip(input: {
   if (walletToday + input.amount > perWalletDay) {
     return { ok: false, status: 429, error: "faucet_wallet_daily_cap", message: `This wallet's faucet total for today would pass ${perWalletDay} mUSDC.` };
   }
+  // F3 (astra pack 103): enforce the hourly count on BOTH the key and the
+  // principal, so an operator cannot multiply the limit by minting keys.
   const keyId = callerKey(input.spender);
-  if (faucetDrips.filter((d) => d.keyId === keyId && t - d.at < HOUR_MS).length >= perKeyHour) {
+  const principalId = `principal:${normalizePrincipal(input.spender.principal)}`;
+  const withinHour = (pred: (d: { keyId: string; principalId: string; at: number }) => boolean) =>
+    faucetDrips.filter((d) => pred(d) && t - d.at < HOUR_MS).length;
+  if (withinHour((d) => d.keyId === keyId) >= perKeyHour || withinHour((d) => d.principalId === principalId) >= perKeyHour) {
     return { ok: false, status: 429, error: "faucet_rate_limited", message: `At most ${perKeyHour} faucet calls per hour per caller.` };
   }
-  faucetDrips.push({ at: t, day, wallet, keyId, amount: input.amount });
+  faucetDrips.push({ at: t, day, wallet, keyId, principalId, amount: input.amount });
   return { ok: true };
 }
 
@@ -381,6 +415,11 @@ export function admitFaucetDrip(input: {
  * per-caller hourly count and the global daily count. Counted at once.
  */
 export function admitRelay(spender: { principal?: string; apiKeyId?: string }): GatewaySpendDecision {
+  // F1 (astra pack 103): the relayer key signs, so the payment kill switch and a
+  // malformed config must stop it too.
+  const cfg = readConfig();
+  if (!cfg.ok) { alertOnce(`misconfigured:${cfg.problem}`, `relay refused: ${cfg.problem}`); return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." }; }
+  if (!cfg.enabled) return { ok: false, status: 503, error: "gateway_pays_disabled", message: "The gateway does not pay on callers' behalf here (PCC_GATEWAY_PAYS_ENABLED is off)." };
   const perKeyHour = intEnv("PCC_RELAY_MAX_PER_KEY_HOUR", RELAY_DEFAULTS.perKeyHour);
   const globalDay = intEnv("PCC_RELAY_MAX_GLOBAL_DAY", RELAY_DEFAULTS.globalDay);
   if (perKeyHour === null || globalDay === null) {
@@ -389,16 +428,20 @@ export function admitRelay(spender: { principal?: string; apiKeyId?: string }): 
   }
   const t = now();
   const day = utcDay(t);
+  if (dayRegressed(day)) return CLOCK_REGRESSED;
   relays = relays.filter((r) => r.day === day || t - r.at < HOUR_MS);
   if (relays.filter((r) => r.day === day).length >= globalDay) {
     alertOnce("relay-breaker", `the relay's global daily count (${globalDay}) is reached`);
     return { ok: false, status: 503, error: "relay_daily_breaker", message: "Relaying is paused for today: the global daily count is reached." };
   }
   const keyId = callerKey(spender);
-  if (relays.filter((r) => r.keyId === keyId && t - r.at < HOUR_MS).length >= perKeyHour) {
+  const principalId = `principal:${normalizePrincipal(spender.principal)}`;
+  const relaysWithin = (pred: (r: { keyId: string; principalId: string; at: number }) => boolean) =>
+    relays.filter((r) => pred(r) && t - r.at < HOUR_MS).length;
+  if (relaysWithin((r) => r.keyId === keyId) >= perKeyHour || relaysWithin((r) => r.principalId === principalId) >= perKeyHour) {
     return { ok: false, status: 429, error: "relay_rate_limited", message: `At most ${perKeyHour} relays per hour per caller.` };
   }
-  relays.push({ at: t, day, keyId });
+  relays.push({ at: t, day, keyId, principalId });
   return { ok: true };
 }
 
@@ -409,5 +452,6 @@ export function __resetGatewaySpendGuardForTests(clock?: () => number): void {
   faucetDrips = [];
   relays = [];
   alerted.clear();
+  maxDaySeen = "";
   now = clock ?? (() => Date.now());
 }

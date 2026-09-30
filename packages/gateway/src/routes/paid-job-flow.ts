@@ -391,7 +391,11 @@ export async function createJobFromSession(
     const admitted = fundingMicro === null
       ? INVALID_FUNDING_AMOUNT
       : admitGatewaySpend({
-          spender: spender ?? { action: "unattributed", principal: session.userAgentId ?? undefined },
+          // 104/F2 (astra): an unattributed helper call (no authenticated spender) must
+        // NOT trust the body-declared session.userAgentId as its principal — that
+        // would give each userAgentId its own cap bucket. All unattributed calls
+        // share ONE bucket (normalizePrincipal("") => "unknown").
+        spender: spender ?? { action: "unattributed" },
           amountMicro: fundingMicro,
         });
     if (!admitted.ok) throw new GatewaySpendRefusedError(admitted);
