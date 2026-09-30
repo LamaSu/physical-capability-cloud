@@ -8,10 +8,13 @@ Each test failed at 5545fa7a, the reviewed SHA:
 - 102f's finding 1 (HIGH, node side): push_evidence() treated HTTP 200 with
   {"stored": false} as success.
 
-Plain http stays allowed for a loopback gateway (a rehearsal gateway on this
-machine), where the key never leaves the host.
+Plain http stays allowed for a gateway at a literal loopback address (a
+rehearsal gateway on this machine), where the key never leaves the host.
+Verdict 68d narrowed that: "localhost" by name is refused, and an http proxy
+from the environment is never used.
 """
 
+import importlib
 import json
 import socket
 import threading
@@ -87,7 +90,7 @@ class TestPlainHttpToAnotherHost:
                                 base_url="http://gw.example.test")
         assert status == 0 and no_network == []
 
-    @pytest.mark.parametrize("base", ["http://127.0.0.1:9", "http://localhost:9", "http://[::1]:9", "https://gw.example.test"])
+    @pytest.mark.parametrize("base", ["http://127.0.0.1:9", "http://127.8.9.10:9", "http://[::1]:9", "https://gw.example.test"])
     def test_https_and_loopback_http_are_allowed(self, base, no_network):
         pcc_request("GET", "/api/health", base_url=base)
         assert len(no_network) == 1
@@ -137,3 +140,55 @@ class TestEvidenceReceipt:
             assert PCCGatewayClient(gateway.url, api_key=KEY, kernel_id="k1").push_evidence("j1", {"x": 1}) is True
         finally:
             gateway.close()
+
+
+class TestRound4Transport:
+    """Verdict 68d, finding 1: loopback means a literal loopback address, reached
+    directly. Each test here failed at d879e9fa (except the 307/308 regressions)."""
+
+    def test_localhost_by_name_is_refused_whatever_it_resolves_to(self, monkeypatch):
+        attempts = []
+        real = socket.getaddrinfo
+
+        def resolve(host, *args, **kwargs):
+            if host == "localhost":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.255.255.1", 9))]
+            return real(host, *args, **kwargs)
+
+        def connect(sock, address):
+            attempts.append(address)
+            raise OSError("network disabled in this test")
+
+        monkeypatch.setattr(socket, "getaddrinfo", resolve)
+        monkeypatch.setattr(socket.socket, "connect", connect)
+        status, body = pcc_request("GET", "/api/auth/validate", base_url="http://localhost:9", api_key=KEY)
+        assert attempts == []
+        assert status == 0 and body["error"] == "insecure_gateway_url"
+
+    def test_an_http_proxy_never_carries_the_key(self, monkeypatch):
+        proxy, gateway = Recorder(), Recorder(answer=(200, {"valid": True}))
+        try:
+            monkeypatch.setenv("http_proxy", proxy.url)
+            monkeypatch.setenv("HTTP_PROXY", proxy.url)
+            for name in ("no_proxy", "NO_PROXY"):
+                monkeypatch.delenv(name, raising=False)
+            importlib.reload(http_util)  # the opener reads proxy settings when it is built
+            status, _ = http_util.pcc_request("GET", "/api/auth/validate", base_url=gateway.url, api_key=KEY)
+            assert proxy.requests == []
+            assert status == 200 and gateway.requests[0][2] == "Bearer " + KEY
+        finally:
+            monkeypatch.undo()
+            importlib.reload(http_util)
+            proxy.close()
+            gateway.close()
+
+    @pytest.mark.parametrize("code", [307, 308])
+    def test_a_body_preserving_redirect_is_not_followed(self, code):
+        catcher = Recorder()
+        gateway = Recorder(answer=(code, {}), headers=[("Location", catcher.url + "/capture")])
+        try:
+            status, _ = pcc_request("POST", "/api/operator/evidence", body={"x": 1}, base_url=gateway.url, api_key=KEY)
+            assert status == code and catcher.requests == []
+        finally:
+            gateway.close()
+            catcher.close()

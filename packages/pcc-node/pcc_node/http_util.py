@@ -10,7 +10,8 @@ import json
 import logging
 import ssl
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
+from urllib.request import (HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener,
+                            getproxies, urlopen)
 from urllib.error import HTTPError, URLError
 
 log = logging.getLogger("pcc-node.http")
@@ -76,8 +77,10 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
 def gateway_url_allowed(url):
     """True if a PCC gateway URL may carry the operator's key and its answers.
 
-    Only https qualifies, or plain http to this machine (a rehearsal gateway on
-    loopback), where the key never leaves the host (verdict 68c, finding 1).
+    Only https qualifies, or plain http to a literal loopback address
+    (127.0.0.0/8 or [::1]: a rehearsal gateway on this machine), where the key
+    never leaves the host (verdicts 68c and 68d, finding 1). The name
+    "localhost" is refused, since a resolver can map it anywhere.
     """
     try:
         parsed = urlsplit(url)
@@ -90,8 +93,6 @@ def gateway_url_allowed(url):
         return True
     if parsed.scheme != "http":
         return False
-    if host == "localhost":
-        return True
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
@@ -105,8 +106,15 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-# Verified TLS, and no redirects, for everything sent to the PCC gateway.
-_GATEWAY_OPENER = build_opener(_NoRedirect, HTTPSHandler(context=ssl.create_default_context()))
+def _https_proxies_only():
+    """Environment proxies for https only. An http proxy would see the key in clear
+    text, so plain http (loopback only) always goes direct (verdict 68d, finding 1)."""
+    return {scheme: url for scheme, url in getproxies().items() if scheme == "https"}
+
+
+# Verified TLS, no redirects, and no proxy for plain http, for everything sent to the PCC gateway.
+_GATEWAY_OPENER = build_opener(ProxyHandler(_https_proxies_only()), _NoRedirect,
+                               HTTPSHandler(context=ssl.create_default_context()))
 
 
 def gateway_request(method, url, body=None, headers=None, timeout=30):
@@ -117,9 +125,9 @@ def gateway_request(method, url, body=None, headers=None, timeout=30):
     the bearer key and the answers can only come from the configured gateway.
     """
     if not gateway_url_allowed(url):
-        log.warning("Refusing to contact a PCC gateway over plain http on another host: use https")
+        log.warning("Refusing a PCC gateway URL that is not https (plain http only to 127.0.0.1 or [::1])")
         return 0, {"error": "insecure_gateway_url",
-                   "message": "a PCC gateway must be https (plain http only on this machine)"}
+                   "message": "a PCC gateway must be https (plain http only to 127.0.0.1 or [::1])"}
     hdrs = dict(headers or {})
     hdrs.setdefault("User-Agent", USER_AGENT)
     data = None
