@@ -98,6 +98,8 @@ export const GAS_LIMITS = {
   createEscrow: 900000n, addMilestone: 500000n, fund: 500000n, approve: 150000n,
   release: 1200000n, approveAndRelease: 1000000n, submitEvidence: 300000n,
   submitAttestation: 500000n, depositBond: 400000n, fileDispute: 500000n,
+  // MilestoneEscrowV3.reclaimAfterDeadline: one status write and at most two token transfers.
+  reclaim: 300000n,
 } as const;
 
 /**
@@ -1437,6 +1439,103 @@ export async function approveAndReleaseV3(
     gas: GAS_LIMITS.approveAndRelease,
   });
 
+  return { transactionHash: hash, status: "submitted" };
+}
+
+// ── V3 deadline reclaim (N79) ─────────────────────────────────────────────
+//
+// MilestoneEscrowV3.reclaimAfterDeadline(uint256) is the escrow's own refund exit. It is payer-only (forwarder-aware),
+// allowed only from Funded, Locked or Evidenced, and only once block.timestamp >= fundedAt + the reclaim window
+// (reclaimDeadlineSeconds, or DEFAULT_RECLAIM_DEADLINE when that is 0). In the gateway-driven Mode-A flow the gateway
+// signer IS the payer (paid-job-flow createJobFromSession), so the gateway can send it. These helpers are a primitive:
+// nothing in the gateway calls them yet (services/escrow-reclaim.ts).
+
+/** One V3 milestone as the reclaim decision needs it. `status` is MilestoneEscrowV3.MilestoneStatus (0..8). */
+export interface ReclaimMilestoneV3 {
+  index: number;
+  status: number;
+  amount: bigint;
+}
+
+/** A V3 escrow's on-chain state for the deadline reclaim, all read at ONE block. */
+export interface ReclaimStateV3 {
+  address: Address;
+  blockNumber: bigint;
+  blockTimestamp: bigint;
+  payer: Address;
+  funded: boolean;
+  fundedAt: bigint;
+  /** The window in force: reclaimDeadlineSeconds, or DEFAULT_RECLAIM_DEADLINE when that is 0. */
+  windowSeconds: bigint;
+  milestones: ReclaimMilestoneV3[];
+}
+
+/**
+ * Read a V3 escrow's reclaim state, pinned to the latest block so every field describes the same moment.
+ * `blockTimestamp` is that block's time. The reclaim transaction lands in a later block, so a milestone due here is
+ * due there too.
+ */
+export async function getReclaimStateV3(contractAddress: Address): Promise<ReclaimStateV3> {
+  const client = getPublicClient();
+  const block = await client.getBlock();
+  const at = { address: contractAddress, abi: MilestoneEscrowV3ABI, blockNumber: block.number } as const;
+  const [payer, funded, fundedAt, windowSet, windowDefault, count] = await Promise.all([
+    client.readContract({ ...at, functionName: "payer" }),
+    client.readContract({ ...at, functionName: "funded" }),
+    client.readContract({ ...at, functionName: "fundedAt" }),
+    client.readContract({ ...at, functionName: "reclaimDeadlineSeconds" }),
+    client.readContract({ ...at, functionName: "DEFAULT_RECLAIM_DEADLINE" }),
+    client.readContract({ ...at, functionName: "getMilestoneCount" }),
+  ]);
+  const milestones = await Promise.all(
+    Array.from({ length: Number(count) }, async (_, index) => {
+      const m = await client.readContract({ ...at, functionName: "getMilestone", args: [BigInt(index)] });
+      return { index, status: Number(m.status), amount: m.amount };
+    }),
+  );
+  return {
+    address: contractAddress,
+    blockNumber: block.number,
+    blockTimestamp: block.timestamp,
+    payer,
+    funded,
+    fundedAt,
+    windowSeconds: windowSet === 0n ? windowDefault : windowSet,
+    milestones,
+  };
+}
+
+/**
+ * Calldata for MilestoneEscrowV3.reclaimAfterDeadline(uint256), for a payer's OWN wallet to submit (an escrow the
+ * gateway signer is not the payer of). The gateway never sends this for such an escrow.
+ */
+export function encodeReclaimAfterDeadlineV3(milestoneIndex: number): Hex {
+  return encodeFunctionData({
+    abi: MilestoneEscrowV3ABI,
+    functionName: "reclaimAfterDeadline",
+    args: [BigInt(milestoneIndex)],
+  });
+}
+
+/**
+ * Send MilestoneEscrowV3.reclaimAfterDeadline(milestoneIndex) from the gateway signer, which must be the escrow's
+ * payer. Returns on broadcast; callers wait for the receipt. The address is REQUIRED: a refund never falls back to
+ * ESCROW_CONTRACT_ADDRESS.
+ */
+export async function reclaimAfterDeadlineV3(
+  milestoneIndex: number,
+  contractAddress: Address,
+): Promise<WriteResult> {
+  const wallet = getWalletClient();
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address: contractAddress,
+    abi: MilestoneEscrowV3ABI,
+    functionName: "reclaimAfterDeadline",
+    args: [BigInt(milestoneIndex)],
+    gas: GAS_LIMITS.reclaim,
+  });
   return { transactionHash: hash, status: "submitted" };
 }
 
