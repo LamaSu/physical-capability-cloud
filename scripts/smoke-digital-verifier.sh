@@ -322,7 +322,7 @@ if [ -z "$PROVISION_RESP" ]; then
 else
   API_KEY=$(echo "$PROVISION_RESP" | jq -r .api_key 2>/dev/null || echo "")
   if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-    fail "API key provision failed: $PROVISION_RESP"
+    fail "API key provision failed (response withheld: it contains the provisioned api_key)"
     E2E_OK=false
   else
     info "Got an API key (${#API_KEY} chars; not printed)"
