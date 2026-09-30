@@ -1518,6 +1518,8 @@ describe("astra r2 (#342 @60137b16): reproduced findings (verify before fix)", (
     boot(man([{ kind: "actions", actions: [clone, { ...clone }] }]));
     const [b1, b2] = fundBtns();
     b1!.click(); b2!.click();
+    expect(overlays()).toBe(1); // the clone shares the intent's ONE gate
+    expect(barStatus().textContent).toBe("An approval window for this is already open.");
     for (const g of Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).filter((b) => b.textContent === "Approve") as HTMLButtonElement[]) g.click();
     await flush();
     expect(posts(calls, "/fund").length).toBe(1);
