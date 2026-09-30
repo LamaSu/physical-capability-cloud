@@ -183,10 +183,14 @@ describe.skipIf(!RUN)("preflightVNextFunding against the real contracts on anvil
     expect(r.simulation.ok).toBe(false);
     const beforeCreate = r.blockNumber!;
 
-    // 1. created, payer unfunded: exactly the two pull checks fail. Pinned BEFORE the creation, it still sees no escrow.
+    // 1. created, payer unfunded: the two pull DIAGNOSTICS report the shortfall, and the real simulation, which decides,
+    //    reverts. Pinned BEFORE the creation, it still sees no escrow.
     await send(relayer, { address: FACTORY, abi: VNextSettlementEscrowFactoryABI, functionName: "createEscrow", args: [compiled.identity] } as never);
     r = await pf();
-    expect(failed(r)).toEqual(["payer balance", "payer allowance to the escrow"]);
+    expect(failed(r)).toEqual([]);
+    expect(r.diagnostics.filter((d) => !d.ok).map((d) => d.name)).toEqual(["payer balance", "payer allowance to the escrow"]);
+    expect(r.simulation.ok).toBe(false);
+    expect(r.ok).toBe(false);
     r = await pf(acc, beforeCreate);
     expect(r.blockNumber).toBe(beforeCreate);
     expect(failed(r)).toContain("escrow created");

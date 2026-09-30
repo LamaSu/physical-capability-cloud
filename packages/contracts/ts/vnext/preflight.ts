@@ -14,19 +14,31 @@
  * This reads each of those, then SIMULATES the exact signed `fund()` call from the actual sender. The
  * simulation is the authority: the named checks exist so a failure says WHY.
  *
- * ONE BLOCK. Every read, the code lookup, the time checks and the simulation run against a single block, pinned
- * first (the latest block, or the caller's `blockNumber`), and the result names it. So `ok` is a statement about
- * that block, never a blend of several heads (astra review of #367). That removes inconsistency DURING the
- * preflight only: the transaction lands in a later block, the contract re-checks everything at execution, and
- * nothing here replaces an on-chain check.
+ * ONE BLOCK, BY IDENTITY. Every read, the code lookup, the time checks and the simulation run against a single
+ * block, pinned first (the latest block, or the caller's `blockNumber`) and then addressed by its HASH (EIP-1898,
+ * `requireCanonical: true`), so a reorganized block number can never answer for the block that was read (astra
+ * round 2 on #367, F1). A node that cannot serve hash-pinned calls fails the preflight closed. The chain id is read
+ * before and after, and must match the compiled one both times. This removes inconsistency DURING the preflight
+ * only: the transaction lands in a later block, the contract re-checks everything at execution, and nothing here
+ * replaces an on-chain check.
  *
- * THE COMPILED POLICY, NOT ANOTHER ONE. The acceptance's own `expiry` must equal the compiled expiry. Otherwise
- * the simulation could pass for a differently dated policy (signed over a different digest) while the named
- * expiry check judged the compiled one.
+ * FROZEN INPUTS. The compiled policy and the acceptance are deep-copied before the first await, and only that copy
+ * is checked and simulated (astra round 2, F2). The result returns the exact `fund()` arguments it judged, so a
+ * caller submits what was checked, not whatever its own objects hold by then.
+ *
+ * THE COMPILED POLICY, NOT ANOTHER ONE. The acceptance's own `expiry` must equal the compiled expiry (a static
+ * check). Otherwise the simulation could pass for a differently dated policy (signed over a different digest)
+ * while the named expiry check judged the compiled one.
+ *
+ * DIAGNOSTICS. The payer's balance and allowance are read and reported, but they never decide `ok`: only the
+ * simulation shows whether the token actually delivers the pull (astra round 2, F3).
  */
 import {
   BaseError,
   ContractFunctionRevertedError,
+  decodeErrorResult,
+  decodeFunctionResult,
+  encodeFunctionData,
   parseAbi,
   zeroAddress,
   type Abi,
@@ -50,10 +62,14 @@ export interface PreflightCheck {
 }
 
 export interface VNextFundingPreflight {
-  /** Every check passed AND the exact signed `fund()` simulated without reverting, all at `blockNumber`. */
+  /** Every check passed AND the exact signed `fund()` simulated without reverting, all at the block `blockHash`. */
   ok: boolean;
   checks: PreflightCheck[];
+  /** Reported, never deciding `ok`: the payer's balance and allowance. The simulation is the authority on the pull. */
+  diagnostics: PreflightCheck[];
   simulation: { ok: boolean; error?: string };
+  /** The exact `fund(configs, acceptance)` arguments every check and the simulation judged (a deep copy taken at the call). */
+  fundArgs: readonly [CompiledVNextPolicy["configs"], PolicyAcceptance];
   /** The one block every read, the code lookup and the simulation ran against. `null` only if it could not be read. */
   blockNumber: bigint | null;
   blockHash: Hex | null;
@@ -63,8 +79,26 @@ export interface VNextFundingPreflight {
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+/** Revert data carried anywhere in an error's cause chain (a raw JSON-RPC eth_call revert puts it in `data`). */
+function revertDataOf(e: unknown): Hex | undefined {
+  for (let x: unknown = e, i = 0; x && i < 8; x = (x as { cause?: unknown }).cause, i++) {
+    const data = (x as { data?: unknown }).data;
+    if (typeof data === "string" && /^0x[0-9a-fA-F]{8,}$/.test(data)) return data as Hex;
+    if (data && typeof (data as { data?: unknown }).data === "string") return (data as { data: Hex }).data;
+  }
+  return undefined;
+}
+
 /** The revert's error name when the contract gave one, else the first line of the message. */
 export function describeRevert(e: unknown): string {
+  const data = revertDataOf(e);
+  if (data) {
+    try {
+      return decodeErrorResult({ abi: VNextSettlementEscrowABI, data }).errorName;
+    } catch {
+      // not an error this ABI declares; fall through to the message
+    }
+  }
   if (e instanceof BaseError) {
     const reverted = e.walk((x) => x instanceof ContractFunctionRevertedError);
     if (reverted instanceof ContractFunctionRevertedError) {
@@ -87,38 +121,78 @@ export async function preflightVNextFunding(
     blockNumber?: bigint;
   },
 ): Promise<VNextFundingPreflight> {
-  const { compiled: c, acceptance, sender } = p;
+  // Frozen before the first await: nothing the caller does to its own objects from here on is judged (F2).
+  const c: CompiledVNextPolicy = structuredClone(p.compiled);
+  const acceptance: PolicyAcceptance = structuredClone(p.acceptance);
+  const sender = p.sender;
+  const fundArgs = [c.configs, acceptance] as const;
   const checks: PreflightCheck[] = [];
+  const diagnostics: PreflightCheck[] = [];
   const record = (name: string, ok: boolean, detail: string) => {
     checks.push({ name, ok, detail });
     return ok;
   };
+  const failedResult = (error: string, blockNumber: bigint | null, blockHash: Hex | null, blockTimestamp: bigint) => ({
+    ok: false,
+    checks,
+    diagnostics,
+    simulation: { ok: false, error },
+    fundArgs,
+    blockNumber,
+    blockHash,
+    blockTimestamp,
+  });
 
-  // 0. the one block everything below runs against
+  // STATIC, before any read: the acceptance is for THIS compiled policy (§5.1).
+  record(
+    "acceptance expiry matches the compiled policy",
+    acceptance.expiry === c.expiry,
+    `acceptance.expiry ${acceptance.expiry}; compiled expiry ${c.expiry} (the digest the signatures must cover uses the compiled one)`,
+  );
+
+  // The chain id, before anything is pinned (it is read again at the end).
+  let chainIdBefore: bigint | undefined;
+  try {
+    chainIdBefore = BigInt(await client.getChainId());
+  } catch {
+    chainIdBefore = undefined;
+  }
+
+  // 0. the one block everything below runs against, addressed by its hash
   let blockNumber: bigint;
-  let blockHash: Hex | null;
+  let blockHash: Hex;
   let blockTimestamp: bigint;
   try {
     const b = p.blockNumber === undefined ? await client.getBlock() : await client.getBlock({ blockNumber: p.blockNumber });
-    if (b.number === null) throw new Error("the node returned a pending block, which has no number to pin");
+    if (b.number === null || b.hash === null) throw new Error("the node returned a pending block, which has no number or hash to pin");
     blockNumber = b.number;
     blockHash = b.hash;
     blockTimestamp = b.timestamp;
   } catch (e) {
     record("pinned block", false, `could not read the block to pin: ${describeRevert(e)}`);
-    return {
-      ok: false,
-      checks,
-      simulation: { ok: false, error: "not simulated: no block to pin" },
-      blockNumber: null,
-      blockHash: null,
-      blockTimestamp: 0n,
-    };
+    return failedResult("not simulated: no block to pin", null, null, 0n);
   }
-  record("pinned block", true, `every read and the simulation run at block ${blockNumber} (${blockHash})`);
+  const pin = { blockHash, requireCanonical: true } as const;
+  const rpc = (method: "eth_call" | "eth_getCode", params: unknown[]) =>
+    client.request({ method, params: [...params, pin] } as never) as Promise<Hex>;
+  // A node that cannot serve calls pinned by block hash (EIP-1898) fails the preflight closed.
+  try {
+    await rpc("eth_getCode", [c.factory]);
+  } catch (e) {
+    record(
+      "pinned block",
+      false,
+      `block ${blockNumber} (${blockHash}) could not be addressed by hash (EIP-1898, requireCanonical): ${describeRevert(e)}`,
+    );
+    return failedResult("not simulated: the node cannot pin calls to the block hash", blockNumber, blockHash, blockTimestamp);
+  }
+  record("pinned block", true, `every read and the simulation run at block ${blockNumber}, addressed by hash ${blockHash}`);
 
-  const read = async (address: Address, abi: Abi, functionName: string, args: readonly unknown[] = []) =>
-    client.readContract({ address, abi, functionName, args, blockNumber } as never) as Promise<unknown>;
+  const read = async (address: Address, abi: Abi, functionName: string, args: readonly unknown[] = []) => {
+    const data = encodeFunctionData({ abi, functionName, args } as never);
+    const ret = await rpc("eth_call", [{ to: address, data }]);
+    return decodeFunctionResult({ abi, functionName, data: ret } as never) as unknown;
+  };
   /** Run one read-based check. A read that throws is a FAILED check, never a skipped one. */
   const probe = async (name: string, fn: () => Promise<[boolean, string]>) => {
     try {
@@ -130,11 +204,12 @@ export async function preflightVNextFunding(
   };
   const identityArg = { ...c.identity };
 
-  // 1. the deployment the compile assumed
-  await probe("chain id", async () => {
-    const id = BigInt(await client.getChainId());
-    return [id === c.chainId, `connected to ${id}; compiled for ${c.chainId}`];
-  });
+  // 1. the deployment the compile assumed (the chain id is compared again, after every read, at the end)
+  record(
+    "chain id",
+    chainIdBefore === c.chainId,
+    chainIdBefore === undefined ? "could not read the chain id" : `connected to ${chainIdBefore}; compiled for ${c.chainId}`,
+  );
   await probe("implementation", async () => {
     const impl = (await read(c.factory, VNextSettlementEscrowFactoryABI, "implementation")) as Address;
     return [same(impl, c.implementation), `factory.implementation() = ${impl}; compiled with ${c.implementation}`];
@@ -145,7 +220,7 @@ export async function preflightVNextFunding(
   });
 
   // 2. the clone
-  const code = await client.getCode({ address: c.escrow, blockNumber }).catch(() => undefined);
+  const code = await rpc("eth_getCode", [c.escrow]).catch(() => undefined);
   const created = record(
     "escrow created",
     !!code && code !== "0x",
@@ -205,12 +280,7 @@ export async function preflightVNextFunding(
     return [same(funded, zeroAddress), same(funded, zeroAddress) ? "no funded escrow for this job" : `already funded by ${funded}`];
   });
 
-  // 4. the acceptance is for THIS compiled policy, and time at the pinned block
-  record(
-    "acceptance expiry matches the compiled policy",
-    acceptance.expiry === c.expiry,
-    `acceptance.expiry ${acceptance.expiry}; compiled expiry ${c.expiry} (the digest the signatures must cover uses the compiled one)`,
-  );
+  // 4. time at the pinned block
   record("acceptance not expired", blockTimestamp <= c.expiry, `block time ${blockTimestamp}; expiry ${c.expiry}`);
   c.configs.forEach((u, i) => {
     const d = u.reclaimAt - blockTimestamp;
@@ -229,35 +299,59 @@ export async function preflightVNextFunding(
     record("acceptance shape", false, (e as Error).message);
   }
 
-  // 6. the exact pull (diagnostics: only the simulation shows the token actually delivers it)
-  await probe("payer balance", async () => {
+  // 6. the exact pull: DIAGNOSTICS, reported but never deciding `ok` (only the simulation shows the token delivers it)
+  const diagnose = async (name: string, fn: () => Promise<[boolean, string]>) => {
+    try {
+      const [ok, detail] = await fn();
+      diagnostics.push({ name, ok, detail });
+    } catch (e) {
+      diagnostics.push({ name, ok: false, detail: `read failed: ${describeRevert(e)}` });
+    }
+  };
+  await diagnose("payer balance", async () => {
     const bal = (await read(c.token, ERC20_ABI, "balanceOf", [c.identity.payer])) as bigint;
     return [bal >= c.totalGross, `balance ${bal}; needs ${c.totalGross}`];
   });
-  await probe("payer allowance to the escrow", async () => {
+  await diagnose("payer allowance to the escrow", async () => {
     const allowance = (await read(c.token, ERC20_ABI, "allowance", [c.identity.payer, c.escrow])) as bigint;
     return [allowance >= c.totalGross, `allowance ${allowance}; needs ${c.totalGross}`];
   });
 
-  // 7. the authority: simulate the exact signed call from the actual sender, at the pinned block
+  // 7. the authority: simulate the exact signed call from the actual sender, at the pinned block (by hash)
   let simulation: { ok: boolean; error?: string };
   if (!created) {
     simulation = { ok: false, error: "not simulated: the escrow does not exist yet" };
   } else {
     try {
-      await client.simulateContract({
-        address: c.escrow,
-        abi: VNextSettlementEscrowABI,
-        functionName: "fund",
-        args: [c.configs.map((u) => ({ ...u, payouts: u.payouts.map((x) => ({ ...x })) })), acceptance],
-        account: sender,
-        blockNumber,
-      } as never);
+      const data = encodeFunctionData({ abi: VNextSettlementEscrowABI, functionName: "fund", args: fundArgs } as never);
+      await rpc("eth_call", [{ from: sender, to: c.escrow, data }]);
       simulation = { ok: true };
     } catch (e) {
       simulation = { ok: false, error: describeRevert(e) };
     }
   }
 
-  return { ok: checks.every((x) => x.ok) && simulation.ok, checks, simulation, blockNumber, blockHash, blockTimestamp };
+  // The chain id again: the node must still be on the compiled chain after every read.
+  let chainIdAfter: bigint | undefined;
+  try {
+    chainIdAfter = BigInt(await client.getChainId());
+  } catch {
+    chainIdAfter = undefined;
+  }
+  record(
+    "chain id unchanged",
+    chainIdAfter === c.chainId && chainIdAfter === chainIdBefore,
+    `before ${chainIdBefore ?? "unread"}; after ${chainIdAfter ?? "unread"}; compiled for ${c.chainId}`,
+  );
+
+  return {
+    ok: checks.every((x) => x.ok) && simulation.ok,
+    checks,
+    diagnostics,
+    simulation,
+    fundArgs,
+    blockNumber,
+    blockHash,
+    blockTimestamp,
+  };
 }

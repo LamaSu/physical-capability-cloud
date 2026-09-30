@@ -10,12 +10,16 @@ import { describe, expect, it } from "vitest";
 import {
   ContractFunctionExecutionError,
   ContractFunctionRevertedError,
+  decodeFunctionData,
   encodeErrorResult,
+  encodeFunctionResult,
   getContractAddress,
   keccak256,
+  parseAbi,
   stringToHex,
   zeroAddress,
   zeroHash,
+  type Abi,
   type Address,
   type Hex,
   type PublicClient,
@@ -23,6 +27,7 @@ import {
 import {
   VNEXT_GOLDEN,
   VNextSettlementEscrowABI,
+  VNextSettlementEscrowFactoryABI,
   buildUnitConfig,
   compileVNextPolicy,
   jobIdHashOf,
@@ -89,21 +94,52 @@ type Chain = {
   balance: bigint;
   allowance: bigint;
   simulateError?: unknown;
+  /** The fund() simulation reverts with this escrow error (served to both the viem and the raw eth_call paths). */
+  simulateRevert?: string;
   throwOn?: string;
 };
+
+/** Every function the stub can answer, for decoding raw eth_call data by selector. */
+const STUB_ABI = [
+  ...VNextSettlementEscrowFactoryABI,
+  ...VNextSettlementEscrowABI,
+  ...parseAbi([
+    "function enabled() view returns (bool)",
+    "function balanceOf(address account) view returns (uint256)",
+    "function allowance(address owner, address spender) view returns (uint256)",
+  ]),
+] as Abi;
 
 /** The latest block the stub serves when no block is named. */
 const HEAD = 5_000n;
 const hashOf = (n: bigint): Hex => `0x${n.toString(16).padStart(64, "0")}`;
 
-type Call = { kind: "getBlock" | "readContract" | "getCode" | "simulateContract"; params: Record<string, unknown> };
+type Call = {
+  kind: "getBlock" | "readContract" | "getCode" | "simulateContract" | "request";
+  params: Record<string, unknown>;
+};
 type Stub = PublicClient & { calls: Call[] };
+
+/** Knobs for the adversarial cases: what the head block reads as, per-HASH state, and a hook run on each read. */
+type Adversary = {
+  /** What getBlock() returns for the head: a block number and the hash the node reported at that moment. */
+  head?: { number: bigint; hash: Hex };
+  /** State served to calls pinned by block HASH (EIP-1898), overriding the by-number state for that hash. */
+  byHash?: Record<string, Partial<Chain>>;
+  /** Run before answering each contract read (to mutate caller-owned inputs mid-flight). */
+  onRead?: (functionName: string) => void;
+};
 
 /**
  * `over` applies at every block; `atBlock[n]` overrides it at block n only. Every request is recorded, and every
  * block-scoped request is answered from the state AT the block it names (the head when it names none).
  */
-function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>> = {}, blockReadFails = false): Stub {
+function chain(
+  over: Partial<Chain> = {},
+  atBlock: Record<string, Partial<Chain>> = {},
+  blockReadFails = false,
+  adv: Adversary = {},
+): Stub {
   const base: Chain = {
     chainId: Number(G.inputs.chainId),
     implementation: IMPLEMENTATION,
@@ -124,6 +160,19 @@ function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>
     ...over,
   };
   const at = (n: unknown): Chain => ({ ...base, ...(atBlock[String((n as bigint | undefined) ?? HEAD)] ?? {}) });
+  /** State for a call pinned by hash: the per-hash override if any, else the block the hash names in this stub. */
+  const atHash = (h: string): Chain => ({ ...at(BigInt(h)), ...(adv.byHash?.[h.toLowerCase()] ?? {}) });
+  const revertOf = (st: Chain): unknown =>
+    st.simulateRevert
+      ? new ContractFunctionExecutionError(
+          new ContractFunctionRevertedError({
+            abi: VNextSettlementEscrowABI,
+            data: encodeErrorResult({ abi: VNextSettlementEscrowABI, errorName: st.simulateRevert as never }),
+            functionName: "fund",
+          }),
+          { abi: VNextSettlementEscrowABI, functionName: "fund", args: [] },
+        )
+      : st.simulateError;
   const id = compiled.identity;
   const reads: Record<string, (st: Chain, address: Address) => unknown> = {
     implementation: (st) => st.implementation,
@@ -137,7 +186,7 @@ function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>
     USDC: (st) => st.usdc,
     authorizedOracle: () => PRIMARY,
     escalationAttester: () => ESCALATION,
-    enabled: (st, a) => (a === PRIMARY ? st.primaryEnabled : st.escalationEnabled),
+    enabled: (st, a) => (a.toLowerCase() === PRIMARY.toLowerCase() ? st.primaryEnabled : st.escalationEnabled),
     policyNonceFloor: (st) => st.floor,
     fundedEscrowOf: (st) => st.funded,
     balanceOf: (st) => st.balance,
@@ -150,8 +199,36 @@ function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>
     getBlock: async (params: Record<string, unknown> = {}) => {
       calls.push({ kind: "getBlock", params });
       if (blockReadFails) throw new Error("block unavailable");
+      if (adv.head && params.blockNumber === undefined) {
+        return { number: adv.head.number, hash: adv.head.hash, timestamp: atHash(adv.head.hash).timestamp };
+      }
       const n = (params.blockNumber as bigint | undefined) ?? HEAD;
       return { number: n, hash: hashOf(n), timestamp: at(n).timestamp };
+    },
+    // Raw JSON-RPC, as an EIP-1898 (block-hash-pinned) caller uses it: eth_call and eth_getCode only.
+    request: async (args: { method: string; params: unknown[] }) => {
+      calls.push({ kind: "request", params: args as unknown as Record<string, unknown> });
+      const block = args.params[args.params.length - 1] as { blockHash?: Hex; requireCanonical?: boolean };
+      if (!block?.blockHash) throw new Error(`stub: ${args.method} without a block hash`);
+      const st = atHash(block.blockHash);
+      if (args.method === "eth_getCode") return st.code;
+      if (args.method !== "eth_call") throw new Error(`stub: unsupported ${args.method}`);
+      const tx = args.params[0] as { to: Address; data: Hex; from?: Address };
+      const { functionName } = decodeFunctionData({ abi: STUB_ABI, data: tx.data });
+      if (functionName === "fund") {
+        const err = revertOf(st);
+        if (err instanceof ContractFunctionExecutionError) {
+          const data = (err.cause as ContractFunctionRevertedError).raw;
+          throw Object.assign(new Error("execution reverted"), { code: 3, data });
+        }
+        if (err) throw err;
+        return "0x";
+      }
+      adv.onRead?.(functionName);
+      if (st.throwOn === functionName) throw new Error(`execution reverted: ${functionName}`);
+      const fn = reads[functionName];
+      if (!fn) throw new Error(`unscripted read: ${functionName}`);
+      return encodeFunctionResult({ abi: STUB_ABI, functionName, result: fn(st, tx.to) as never });
     },
     getCode: async (params: Record<string, unknown>) => {
       calls.push({ kind: "getCode", params });
@@ -161,6 +238,7 @@ function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>
       calls.push({ kind: "readContract", params });
       const st = at(params.blockNumber);
       const functionName = params.functionName as string;
+      adv.onRead?.(functionName);
       if (st.throwOn === functionName) throw new Error(`execution reverted: ${functionName}`);
       const fn = reads[functionName];
       if (!fn) throw new Error(`unscripted read: ${functionName}`);
@@ -169,7 +247,8 @@ function chain(over: Partial<Chain> = {}, atBlock: Record<string, Partial<Chain>
     simulateContract: async (params: Record<string, unknown>) => {
       calls.push({ kind: "simulateContract", params });
       const st = at(params.blockNumber);
-      if (st.simulateError) throw st.simulateError;
+      const err = revertOf(st);
+      if (err) throw err;
       return { result: undefined };
     },
   } as unknown as Stub;
@@ -214,8 +293,6 @@ describe("preflightVNextFunding", () => {
     ["another chain", { chainId: 1 }, "chain id"],
     ["another settlement token", { usdc: RELAYER }, "settlement token"],
     ["an expired acceptance", { timestamp: G.inputs.expiry + 1n }, "acceptance not expired"],
-    ["a short allowance", { allowance: compiled.totalGross - 1n }, "payer allowance to the escrow"],
-    ["a short balance", { balance: compiled.totalGross - 1n }, "payer balance"],
     ["a read that reverts", { throwOn: "fundedEscrowOf" }, "job not already funded"],
   ];
   for (const [what, over, check] of cases) {
@@ -225,6 +302,19 @@ describe("preflightVNextFunding", () => {
       expect(failed(r)).toContain(check);
     });
   }
+
+  it("reports a short balance or allowance as a DIAGNOSTIC; the simulation of the pull decides", async () => {
+    const short = { balance: compiled.totalGross - 1n, allowance: compiled.totalGross - 1n };
+    const r = await preflightVNextFunding(chain({ ...short, simulateRevert: "FundingDeltaMismatch" }), {
+      compiled,
+      acceptance: signed,
+      sender: RELAYER,
+    });
+    expect(failed(r)).toEqual([]);
+    expect(r.diagnostics.filter((d) => !d.ok).map((d) => d.name)).toEqual(["payer balance", "payer allowance to the escrow"]);
+    expect(r.simulation).toEqual({ ok: false, error: "FundingDeltaMismatch" });
+    expect(r.ok).toBe(false);
+  });
 
   it("fails a relayer that carries no payer signature (OnlyPayer); the payer itself may send without one", async () => {
     const unsignedByPayer = { ...signed, payerSignature: "0x" as Hex };
@@ -242,15 +332,7 @@ describe("preflightVNextFunding", () => {
   });
 
   it("fails on a reverting simulation even when every named check passes, and names the contract error", async () => {
-    const reverted = new ContractFunctionExecutionError(
-      new ContractFunctionRevertedError({
-        abi: VNextSettlementEscrowABI,
-        data: encodeErrorResult({ abi: VNextSettlementEscrowABI, errorName: "BadSignature" }),
-        functionName: "fund",
-      }),
-      { abi: VNextSettlementEscrowABI, functionName: "fund", args: [] },
-    );
-    const r = await preflightVNextFunding(chain({ simulateError: reverted }), { compiled, acceptance: signed, sender: RELAYER });
+    const r = await preflightVNextFunding(chain({ simulateRevert: "BadSignature" }), { compiled, acceptance: signed, sender: RELAYER });
     expect(failed(r)).toEqual([]);
     expect(r.simulation).toEqual({ ok: false, error: "BadSignature" });
     expect(r.ok).toBe(false);
@@ -258,7 +340,7 @@ describe("preflightVNextFunding", () => {
 });
 
 describe("preflightVNextFunding: one block, this policy, this exact call (astra review of #367)", () => {
-  it("pins ONE block: reads it once, and every read, the code lookup and the simulation carry it", async () => {
+  it("pins ONE block by HASH: reads it once, and every read, the code lookup and the simulation address it (EIP-1898)", async () => {
     const c = chain();
     const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER });
     expect(r.ok).toBe(true);
@@ -267,13 +349,39 @@ describe("preflightVNextFunding: one block, this policy, this exact call (astra 
     expect(c.calls.filter((x) => x.kind === "getBlock")).toHaveLength(1);
     const scoped = c.calls.filter((x) => x.kind !== "getBlock");
     expect(scoped.length).toBeGreaterThan(15);
-    expect(scoped.filter((x) => x.params.blockNumber !== HEAD).map((x) => `${x.kind}:${String(x.params.functionName)}`)).toEqual([]);
-    expect(scoped.map((x) => x.kind)).toContain("getCode");
-    expect(scoped.map((x) => x.kind)).toContain("simulateContract");
+    expect(scoped.every((x) => x.kind === "request")).toBe(true);
+    const pins = scoped.map((x) => {
+      const params = (x.params as unknown as { params: unknown[] }).params;
+      return params[params.length - 1];
+    });
+    expect(pins.every((b) => JSON.stringify(b) === JSON.stringify({ blockHash: hashOf(HEAD), requireCanonical: true }))).toBe(true);
+    const methods = scoped.map((x) => (x.params as unknown as { method: string }).method);
+    expect(methods).toContain("eth_getCode");
+    expect(methods).toContain("eth_call");
+  });
+
+  it("fails closed when the node cannot serve calls pinned by block hash", async () => {
+    const c = chain();
+    (c as unknown as { request: unknown }).request = async () => {
+      throw new Error("invalid argument 1: hex string without 0x prefix (EIP-1898 unsupported)");
+    };
+    const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER });
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toEqual(["pinned block"]);
+    expect(r.simulation.ok).toBe(false);
+  });
+
+  it("fails when the chain id changes during the preflight", async () => {
+    const c = chain();
+    let n = 0;
+    (c as unknown as { getChainId: () => Promise<number> }).getChainId = async () => (n++ === 0 ? Number(G.inputs.chainId) : 1);
+    const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER });
+    expect(failed(r)).toEqual(["chain id unchanged"]);
+    expect(r.ok).toBe(false);
   });
 
   it("reports the state AT the pinned block, not at the head", async () => {
-    const c = () => chain({}, { [String(HEAD)]: { primaryEnabled: false, simulateError: new Error("InvalidOrDisabledCohort") } });
+    const c = () => chain({}, { [String(HEAD)]: { primaryEnabled: false, simulateRevert: "InvalidOrDisabledCohort" } });
     const atHead = await preflightVNextFunding(c(), { compiled, acceptance: signed, sender: RELAYER });
     expect(failed(atHead)).toEqual(["primary cohort enabled"]);
     expect(atHead.simulation.ok).toBe(false);
@@ -296,17 +404,24 @@ describe("preflightVNextFunding: one block, this policy, this exact call (astra 
 
   it("simulates EXACTLY the signed fund(): the compiled escrow and configs, this acceptance, from this sender, at the pinned block", async () => {
     const c = chain();
-    await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER, blockNumber: HEAD - 7n });
-    const sims = c.calls.filter((x) => x.kind === "simulateContract");
+    const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER, blockNumber: HEAD - 7n });
+    const sims = c.calls.filter((x) => {
+      const req = x.params as unknown as { method?: string; params?: unknown[] };
+      return x.kind === "request" && req.method === "eth_call" && (req.params?.[0] as { from?: string })?.from !== undefined;
+    });
     expect(sims).toHaveLength(1);
-    const s = sims[0]!.params;
-    expect(s.address).toBe(compiled.escrow);
-    expect(s.functionName).toBe("fund");
-    expect(s.account).toBe(RELAYER);
-    expect(s.blockNumber).toBe(HEAD - 7n);
-    const [configs, acceptance] = s.args as [unknown, unknown];
+    const req = sims[0]!.params as unknown as { params: [{ from: Address; to: Address; data: Hex }, { blockHash: Hex }] };
+    expect(req.params[0].to).toBe(compiled.escrow);
+    expect(req.params[0].from).toBe(RELAYER);
+    expect(req.params[1].blockHash).toBe(hashOf(HEAD - 7n));
+    const { functionName, args } = decodeFunctionData({ abi: VNextSettlementEscrowABI, data: req.params[0].data });
+    expect(functionName).toBe("fund");
+    const [configs, acceptance] = args as unknown as [unknown, PolicyAcceptance];
     expect(configs).toEqual(compiled.configs);
-    expect(acceptance).toBe(signed); // the caller's own object, not a rebuilt one
+    expect(acceptance).toEqual(signed);
+    // ...and the result hands back exactly what it judged, as a copy (not the caller's own object).
+    expect(r.fundArgs[1]).toEqual(signed);
+    expect(r.fundArgs[1]).not.toBe(signed);
   });
 
   it("fails an acceptance whose expiry is not the compiled expiry, even when the chain would accept it", async () => {
@@ -326,5 +441,51 @@ describe("preflightVNextFunding: one block, this policy, this exact call (astra 
     expect(failed(r)).toEqual(["pinned block"]);
     expect(r.blockNumber).toBeNull();
     expect(c.calls.map((x) => x.kind)).toEqual(["getBlock"]);
+  });
+});
+
+describe("preflightVNextFunding: one block IDENTITY, one frozen input (astra round 2 on #367, pack 26b)", () => {
+  it("F1: a reorganized block cannot pass for the one it read: every call is pinned to the block HASH", async () => {
+    // getBlock() reports block N as H1, where the primary cohort is DISABLED and fund() reverts. Block N is then
+    // reorganized: calls pinned only by NUMBER now reach a replacement block where everything passes.
+    const H1 = hashOf(HEAD);
+    const c = chain(
+      {},
+      {},
+      false,
+      { head: { number: HEAD, hash: H1 }, byHash: { [H1]: { primaryEnabled: false, simulateRevert: "InvalidOrDisabledCohort" } } },
+    );
+    const r = await preflightVNextFunding(c, { compiled, acceptance: signed, sender: RELAYER });
+    expect(r.blockHash).toBe(H1);
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toContain("primary cohort enabled");
+    expect(r.simulation).toEqual({ ok: false, error: "InvalidOrDisabledCohort" });
+  });
+
+  it("F2: inputs are frozen at the call: a caller that swaps the acceptance mid-flight changes nothing that is judged", async () => {
+    const acceptance: PolicyAcceptance = { ...signed };
+    const laterSig = `0x${"22".repeat(65)}` as Hex;
+    const c = chain({}, {}, false, {
+      onRead: (fn) => {
+        if (fn === "balanceOf") {
+          acceptance.expiry = compiled.expiry + 99n;
+          acceptance.payerSignature = laterSig;
+          acceptance.operatorSignature = laterSig;
+        }
+      },
+    });
+    const r = await preflightVNextFunding(c, { compiled, acceptance, sender: RELAYER });
+    const sims = c.calls.filter((x) => x.kind === "simulateContract" || (x.kind === "request" && JSON.stringify(x.params).includes('"eth_call"')));
+    const fundCall = sims.find((x) => x.kind === "simulateContract") ?? sims[sims.length - 1];
+    const simulated = JSON.stringify(fundCall?.params, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+    expect(simulated).not.toContain(laterSig.slice(2));
+    expect(r.ok).toBe(true);
+    expect(r.checks.find((x) => x.name === "acceptance expiry matches the compiled policy")?.ok).toBe(true);
+  });
+
+  it("F3: balance and allowance are DIAGNOSTICS: a short reported balance never vetoes a fund() that simulates", async () => {
+    const r = await preflightVNextFunding(chain({ balance: 0n, allowance: 0n }), { compiled, acceptance: signed, sender: RELAYER });
+    expect(r.simulation).toEqual({ ok: true });
+    expect(r.ok).toBe(true);
   });
 });
