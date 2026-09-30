@@ -120,4 +120,16 @@ describe("intentional refusals carry no report_hint (N34 / N48)", () => {
     expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 503, errorCode: "NOT_CONFIGURED" })).not.toBeNull();
     expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 500, errorCode: null })).not.toBeNull();
   });
+
+  it("NEGATIVE (F-C, reviewer r1a): a mismatched status/code pair is a real bug, not the designed refusal — each code is keyed to ONE status", () => {
+    // not_available is designed for 501 (N34). A 500 saying not_available is not that
+    // refusal — it's a real failure, and must still get a report_hint.
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 500, errorCode: "not_available" })).not.toBeNull();
+    // not_configured is designed for 503 (N48). A 599 saying not_configured is not that
+    // refusal either.
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 599, errorCode: "not_configured" })).not.toBeNull();
+    // And swapped: not_configured at 501, not_available at 503 — neither is the designed pair.
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 501, errorCode: "not_configured" })).not.toBeNull();
+    expect(buildReportHint({ url: "/api/x", method: "GET", statusCode: 503, errorCode: "not_available" })).not.toBeNull();
+  });
 });
