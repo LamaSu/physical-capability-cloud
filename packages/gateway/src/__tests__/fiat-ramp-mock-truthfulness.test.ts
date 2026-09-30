@@ -77,8 +77,11 @@ describe("F6 — CDP wallet client in MOCK mode (no CDP credentials)", () => {
     expect(body.note).toMatch(/MOCK/);
     expect(body.note).toMatch(/unrecoverable/);
     expect(body.note).not.toMatch(/Usable on PCC now/);
-    const { isCdpMockAddress } = await import("@pcc/payments");
-    expect(isCdpMockAddress(body.walletAddress)).toBe(true);
+    // No key controls a mock wallet, so the answer names it by a reference, never an address
+    // (cross-family review r3, A06a): nothing address-shaped reaches the caller.
+    expect(body.walletAddress).toBeNull();
+    expect(body.demoWalletRef).toMatch(/^demo-wallet-[0-9a-f]{16}$/);
+    expect(res.body).not.toMatch(/0x[0-9a-fA-F]{40}/);
   });
 
   it("POST /coinbase/onramp REFUSES outright (503) — for any address, including its own mock wallet", async () => {

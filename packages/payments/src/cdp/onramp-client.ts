@@ -39,7 +39,7 @@ export class CdpOnrampClient {
       return {
         sessionId,
         onrampUrl:
-          `https://pay.coinbase.com/buy/mock?sessionId=${sessionId}` +
+          `https://mock-onramp.invalid/pcc?sessionId=${sessionId}` +
           `&address=${params.destinationAddress}&asset=USDC&network=${this.network}${amt}`,
         destinationAddress: params.destinationAddress,
         asset: "USDC",

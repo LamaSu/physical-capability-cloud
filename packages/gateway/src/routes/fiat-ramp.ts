@@ -34,6 +34,7 @@ import {
   CdpWalletClient,
   CdpOnrampClient,
   CdpSpendPermissionService,
+  CDP_MOCK_ADDRESS_PREFIX,
   isCdpMockAddress,
 } from "@pcc/payments";
 
@@ -371,8 +372,35 @@ function providerMode(reply: FastifyReply, p: RampProvider): "live" | "demo" | n
  * Marks a provider response with what produced it: in demo, mock/demo; live, the
  * provider's environment, so a sandbox answer is never mistaken for real money moving.
  */
+/**
+ * A demo answer never carries a wallet address (cross-family review r3, A06a, CRITICAL): a mock
+ * wallet's address is valid EVM hex that NO key controls, so anything sent to it is gone, whatever
+ * flags the answer carries. Demo answers name a mock wallet by a reference that is not an address;
+ * the two map one-to-one through the mock address's random tail (see isCdpMockAddress).
+ */
+const DEMO_WALLET_REF_RE = /^demo-wallet-([0-9a-f]{16})$/;
+
+function demoWalletRefOf(mockAddress: string): string {
+  return `demo-wallet-${mockAddress.slice(-16).toLowerCase()}`;
+}
+
+function mockAddressOfRef(ref: unknown): `0x${string}` | null {
+  const m = typeof ref === "string" ? DEMO_WALLET_REF_RE.exec(ref) : null;
+  return m ? (`${CDP_MOCK_ADDRESS_PREFIX}${m[1]}` as `0x${string}`) : null;
+}
+
+/** Every mock-minted address in a demo answer, at any depth, becomes its demo reference. */
+function scrubMockAddresses(value: unknown): unknown {
+  if (typeof value === "string") return isCdpMockAddress(value) ? demoWalletRefOf(value) : value;
+  if (Array.isArray(value)) return value.map(scrubMockAddresses);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubMockAddresses(v)]));
+  }
+  return value;
+}
+
 function markRamp<T extends object>(mode: "live" | "demo", p: RampProvider, body: T) {
-  if (mode === "demo") return markDemo("demo", body);
+  if (mode === "demo") return markDemo("demo", scrubMockAddresses(body) as T);
   const environment = providerConfig(p).environment;
   return environment === "sandbox" ? { ...body, environment, sandbox: true as const } : { ...body, environment };
 }
@@ -492,9 +520,11 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const w = await wallet.createWallet();
     recordWalletCreator(w.address, principalOf(req));
     if (wallet.isMock) {
-      // Never "usable": no key controls a mock address (F6). Reached only in demo mode.
+      // Never "usable": no key controls a mock address (F6). Reached only in demo mode. The
+      // answer names it by a reference, never by an address (A06a r3).
       return markRamp(mode, "cdp", {
-        walletAddress: w.address,
+        walletAddress: null,
+        demoWalletRef: demoWalletRefOf(w.address),
         network: w.network,
         smartAccount: w.smartAccount,
         mock: true,
@@ -529,7 +559,8 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       // Demo: a mock wallet no key controls, and no checkout at all (the mock client's URL
       // pointed at pay.coinbase.com).
       return markRamp(mode, "cdp", {
-        walletAddress: w.address,
+        walletAddress: null,
+        demoWalletRef: demoWalletRefOf(w.address),
         network: w.network,
         smartAccount: w.smartAccount,
         onrampUrl: null,
@@ -574,19 +605,28 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     const body = req.body as
       | {
           walletAddress?: string;
+          walletRef?: string;
           spender?: string;
           allowanceUSDC?: number;
           periodSec?: number;
           expiresAt?: string;
         }
       | undefined;
-    if (!body?.walletAddress || !body?.spender || body.allowanceUSDC == null) {
+    // A demo wallet has no address a caller could hold (A06a r3): demo mode takes its reference.
+    const demo = mode === "demo";
+    const walletKey = demo ? body?.walletRef : body?.walletAddress;
+    if (!walletKey || !body?.spender || body.allowanceUSDC == null) {
       return reply
         .status(400)
-        .send({ error: "walletAddress, spender, allowanceUSDC required" });
+        .send({ error: demo ? "walletRef, spender, allowanceUSDC required" : "walletAddress, spender, allowanceUSDC required" });
     }
-    if (!isAddress(String(body.walletAddress)) || !isAddress(String(body.spender))) {
-      return reply.status(400).send({ error: "invalid_address", message: "walletAddress and spender must be valid EVM addresses" });
+    const account = demo ? mockAddressOfRef(walletKey) : isAddress(String(walletKey)) ? (String(walletKey) as `0x${string}`) : null;
+    if (!account || !isAddress(String(body.spender))) {
+      return reply.status(400).send(
+        demo
+          ? { error: "invalid_wallet_ref", message: "In demo mode pass walletRef (the demoWalletRef that POST /cdp/wallet or /cdp/provision returned) and a valid EVM spender" }
+          : { error: "invalid_address", message: "walletAddress and spender must be valid EVM addresses" },
+      );
     }
     if (typeof body.allowanceUSDC !== "number" || !Number.isFinite(body.allowanceUSDC) || body.allowanceUSDC <= 0) {
       return reply.status(400).send({ error: "invalid_allowance", message: "allowanceUSDC must be a positive number" });
@@ -596,7 +636,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
     // Spend authority over a wallet: its creator's, or an admin's. Anyone else gets the
     // same answer as for a wallet that does not exist.
-    if (!hasValidAdminKey(req.headers["x-admin-key"]) && !createdWallet(principalOf(req), String(body.walletAddress))) {
+    if (!hasValidAdminKey(req.headers["x-admin-key"]) && !createdWallet(principalOf(req), account)) {
       return reply.status(404).send({
         error: "wallet_not_found",
         message: "No wallet you created on this gateway has that address, so nothing was issued.",
@@ -604,7 +644,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     }
     return markRamp(mode, "cdp",
       await getCdp().spendPerm.issue({
-        account: body.walletAddress as `0x${string}`,
+        account,
         spender: body.spender as `0x${string}`,
         allowanceUSDC: body.allowanceUSDC,
         periodSec: body.periodSec ?? 86_400,

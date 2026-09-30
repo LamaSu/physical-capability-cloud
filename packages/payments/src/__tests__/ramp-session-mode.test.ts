@@ -135,6 +135,15 @@ describe("Wise payout sessions record their mode, from the URL the client calls"
   });
 });
 
+describe("NEGATIVE (astra A06a r3): the mock onramp client builds no payment-shaped provider URL", () => {
+  it("a mock session's URL is on a reserved non-resolving domain, never pay.coinbase.com", async () => {
+    const c = new CdpOnrampClient({ apiKeyId: "", apiKeySecret: "", walletSecret: "", mock: true });
+    const s = await c.createSession({ destinationAddress: WALLET, presetAmountUSD: 5 });
+    expect(s.onrampUrl).not.toMatch(/coinbase\.com/);
+    expect(new URL(s.onrampUrl).hostname.endsWith(".invalid")).toBe(true);
+  });
+});
+
 describe("NEGATIVE: the CDP onramp client never builds a checkout it cannot stand behind", () => {
   const live = { apiKeyId: "id", apiKeySecret: "s", walletSecret: "w", mock: false } as const;
 
