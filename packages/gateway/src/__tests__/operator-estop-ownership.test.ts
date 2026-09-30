@@ -528,6 +528,16 @@ describe("N31 policy READ: owner-or-admin (adk #3972)", () => {
     expect(res.json().error).toBe("not_kernel_owner");
   });
 
+  it("[neg] F2: owner key + WRONG admin secret is 403 (not downgraded), an unknown kernel is 404, and no identity is exactly 401", async () => {
+    const kernelId = await ownedKernel("n31-policy-f2");
+    // A wrong admin secret presented alongside a non-owner key: refused, not downgraded.
+    expect((await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: { ...asAttacker(), "x-admin-key": "wrong" } })).statusCode).toBe(403);
+    // An authenticated non-owner asking for an unknown kernel: 404.
+    expect((await app.inject({ method: "GET", url: "/api/operator/policy/kernel-does-not-exist", headers: asAttacker() })).statusCode).toBe(404);
+    // No identity at all (bare app, no apiGate): exactly 401.
+    expect((await bareApp.inject({ method: "GET", url: `/api/operator/policy/${kernelId}` })).statusCode).toBe(401);
+  });
+
   it("control: the owner reads its own policy, and the admin reads any", async () => {
     const kernelId = await ownedKernel("n31-policy-owner");
     const owner = await app.inject({ method: "GET", url: `/api/operator/policy/${kernelId}`, headers: asOwner() });

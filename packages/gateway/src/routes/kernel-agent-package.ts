@@ -20,6 +20,8 @@ import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
+import { checkAdminKey } from "../auth/admin-key.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 import {
   suggestTools,
   applyOperatorToolConfig,
@@ -70,6 +72,19 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
           .get();
         const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
 
+        // N31 / astra pack 110 F1 (CRITICAL): the operator policy (approvalMode,
+        // emergencyStop, operatingHours, pricingRules) is the operator's private
+        // guardrail posture — the same fields GET /api/operator/policy protects.
+        // A non-owner gets the public package (kernel, devices, capabilities,
+        // tools) but NO operator_policy, and a system prompt built from defaults
+        // so no private value leaks through the generated text. The owner and a
+        // valid admin secret see the real policy.
+        const callerId = (req as any).operatorId ?? (req as any).userId;
+        const isOwnerOrAdmin =
+          checkAdminKey(req).ok ||
+          (typeof callerId === "string" && sameIdentity((kernel as any).operatorAddress, callerId));
+        const viewPolicy = isOwnerOrAdmin ? policy : (DEFAULT_OPERATOR_POLICY as unknown as OperatorPolicy);
+
         // Extract adapter types and capability types
         const adapterTypes = [...new Set(
           devices
@@ -82,12 +97,12 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
         const suggestions = suggestTools(adapterTypes, capabilityTypes, isOperator);
 
         // Apply operator's tool configuration
-        const toolConfig = (policy as any).toolConfig ?? {};
+        const toolConfig = (viewPolicy as any).toolConfig ?? {};
         const tools = applyOperatorToolConfig(suggestions, toolConfig);
 
         // Build system prompt tailored to this kernel
         const baseUrl = `${req.protocol}://${req.hostname}`;
-        const systemPrompt = buildSystemPrompt(kernel, devices, caps, policy, baseUrl);
+        const systemPrompt = buildSystemPrompt(kernel, devices, caps, viewPolicy, baseUrl);
 
         // Build the agent package
         const agentPackage = {
@@ -118,13 +133,18 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
             materials: c.materials,
             pricing: c.pricing,
           })),
-          operator_policy: {
-            approvalMode: policy.approvalMode,
-            operatingHours: policy.operatingHours,
-            timezone: policy.timezone,
-            emergencyStop: policy.emergencyStop,
-            pricingRules: policy.pricingRules?.filter((r) => r.enabled) ?? [],
-          },
+          // operator_policy is the owner's/admin's alone (pack 110 F1); omitted otherwise.
+          ...(isOwnerOrAdmin
+            ? {
+                operator_policy: {
+                  approvalMode: policy.approvalMode,
+                  operatingHours: policy.operatingHours,
+                  timezone: policy.timezone,
+                  emergencyStop: policy.emergencyStop,
+                  pricingRules: policy.pricingRules?.filter((r) => r.enabled) ?? [],
+                },
+              }
+            : {}),
           batch_capable: suggestions.batchCapable,
           system_prompt: systemPrompt,
           tools: tools.map((t) => ({
