@@ -98,4 +98,15 @@ describe("agent context pack: routes that refuse are never listed as available",
     expect(listed.length).toBeGreaterThan(20);
     expect(listed.filter((r: string) => refused.has(r))).toEqual([]);
   });
+
+  it("NEGATIVE (F-E, reviewer r1b/r1a): every route the N34 families actually refuse is documented — refused ⊆ documented", () => {
+    // The existing tests above only check the forward direction (documented rows really
+    // refuse). They miss the reverse: a route that refuses but was never added to
+    // demoOnlyEndpoints, so an agent reading the pack sees it nowhere on the demo-only
+    // list and has no reason to expect a 501. Derived from the SAME `refused` set the
+    // tests above already trust (registered directly from the route plugins, demo off).
+    const documented = new Set(pack.demoOnlyEndpoints.endpoints.map((e: any) => norm(e.method, e.path)));
+    const missing = [...refused].filter((r) => !documented.has(r)).sort();
+    expect(missing, `${missing.length} refused route(s) missing from demoOnlyEndpoints`).toEqual([]);
+  });
 });
