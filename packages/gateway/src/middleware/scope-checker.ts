@@ -208,8 +208,8 @@ const MONEY_PATH_PREFIXES = ["/api/escrow/", "/api/fiat-ramp/", "/api/settlement
  * is an ordinary money write and stays on the floor.
  *
  * The Stripe/Yellowcard webhooks are also NOT exempted, deviating from sol's H2
- * suggestion for a concrete reason: they are RETIRED (410 unless a dev-only legacy
- * flag) precisely because an unsigned callback could forge a credit, so making
+ * suggestion for a concrete reason: they are RETIRED (410 in every environment; no
+ * flag re-enables them) precisely because an unsigned callback could forge a credit, so making
  * them public would re-open that hole. Their over-scope only changes the status
  * code of a dead endpoint, not a live callback — the public+provider-HMAC
  * end-state belongs with re-enabling them, not here.

@@ -378,9 +378,11 @@ describe("F. /cdp/provision never builds a checkout it cannot stand behind", () 
 // ── G ─────────────────────────────────────────────────────────────────────────
 
 describe("G. NEGATIVE: spend authority over a wallet belongs to its creator", () => {
+  // Demo mode names a mock wallet by its demoWalletRef, never an address (A06a r3).
   const issue = (wallet: string, principal: string | null, headers: Record<string, string> = {}, extra: Record<string, unknown> = {}) =>
-    call("POST", "/api/fiat-ramp/cdp/spend-permission", { walletAddress: wallet, spender: WALLET_B, allowanceUSDC: 5, ...extra }, principal, headers);
-  const createWallet = async (principal: string) => (await call("POST", "/api/fiat-ramp/cdp/wallet", undefined, principal)).json().walletAddress as string;
+    call("POST", "/api/fiat-ramp/cdp/spend-permission", { walletRef: wallet, spender: WALLET_B, allowanceUSDC: 5, ...extra }, principal, headers);
+  const createWallet = async (principal: string) => (await call("POST", "/api/fiat-ramp/cdp/wallet", undefined, principal)).json().demoWalletRef as string;
+  const UNKNOWN_REF = "demo-wallet-0000000000000000";
 
   it("the creator issues; anyone else, or an unknown wallet, gets 404 and nothing; X-Admin-Key issues", async () => {
     await buildApp({ PCC_DEMO_ROUTES: "true", PCC_ADMIN_KEY: ADMIN });
@@ -393,7 +395,7 @@ describe("G. NEGATIVE: spend authority over a wallet belongs to its creator", ()
       expect(res.statusCode, String(other)).toBe(404);
       expect(res.json().error).toBe("wallet_not_found");
     }
-    expect((await issue(WALLET_A, "OperatorA")).statusCode).toBe(404);
+    expect((await issue(UNKNOWN_REF, "OperatorA")).statusCode).toBe(404);
     expect((await issue(w, "OperatorB", { "x-admin-key": ADMIN })).statusCode).toBe(200);
     expect((await issue(w, "OperatorB", { "x-admin-key": ADMIN + "x" })).statusCode).toBe(404);
   });
@@ -412,7 +414,8 @@ describe("G. NEGATIVE: spend authority over a wallet belongs to its creator", ()
       { allowanceUSDC: 0 },
       { allowanceUSDC: "5" },
       { spender: "not-an-address" },
-      { walletAddress: "0x123" },
+      { walletRef: "demo-wallet-xyz" },
+      { walletRef: WALLET_A },
       { periodSec: 1.5 },
       { periodSec: 0 },
     ];
@@ -442,6 +445,28 @@ describe("H. NEGATIVE: a demo answer carries no payment instruction", () => {
     expect(res.json()).toMatchObject({ bankInfo: null, mock: true, demo: true });
     expect(res.json().session.mode).toBe("simulated");
     expect(res.body).not.toMatch(/4550440202|PAGA|PCC Escrow/);
+  });
+
+  it("demo wallet and provision (astra A06a r3, CRITICAL): no EVM address at all, since no key controls a mock wallet", async () => {
+    await buildApp({ PCC_DEMO_ROUTES: "true" });
+    for (const [method, url, body] of [["POST", "/api/fiat-ramp/cdp/wallet", undefined], ["POST", "/api/fiat-ramp/cdp/provision", {}]] as const) {
+      const res = await call(method, url, body);
+      expect(res.statusCode, url).toBe(200);
+      expect(res.json(), url).toMatchObject({ walletAddress: null, mock: true, demo: true, usableNow: false });
+      expect(res.json().demoWalletRef, url).toMatch(/^demo-wallet-[0-9a-f]{16}$/);
+      // Nothing address-shaped anywhere in the answer, whatever a client ignores.
+      expect(res.body, url).not.toMatch(/0x[0-9a-fA-F]{40}/);
+    }
+  });
+
+  it("demo spend permission: issued against the demo reference, and its answer names no mock address", async () => {
+    await buildApp({ PCC_DEMO_ROUTES: "true" });
+    const ref = (await call("POST", "/api/fiat-ramp/cdp/wallet", undefined, "OperatorA")).json().demoWalletRef as string;
+    const res = await call("POST", "/api/fiat-ramp/cdp/spend-permission", { walletRef: ref, spender: WALLET_B, allowanceUSDC: 5 }, "OperatorA");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ account: ref, spender: WALLET_B, mock: true, demo: true });
+    const minted = (res.body.match(/0x[0-9a-fA-F]{40}/g) ?? []).filter((a) => a.toLowerCase() !== WALLET_B.toLowerCase());
+    expect(minted).toEqual([]);
   });
 
   it("demo balance: null, not a 0 USDC read", async () => {
