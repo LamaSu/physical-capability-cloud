@@ -8,6 +8,8 @@
  * gateway's reason, and an empty epoch history is shown as empty.
  */
 
+import { isAddress } from "viem";
+
 export interface QueueStatus {
   batchEnabled: boolean;
   pending: number;
@@ -50,10 +52,14 @@ const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof
 /** A count the page can safely display or sum: a non-negative integer within Number's safe range. */
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const isTime = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+/** A record of per-key counts (byAgent / byOperation): every value is itself a safe count. */
+const isCountRecord = (v: unknown): v is Record<string, number> => isObj(v) && Object.values(v).every(isCount);
 const FLUSH_TRIGGERS: ReadonlySet<string> = new Set(["manual", "size", "age", "value"]);
 const isTrigger = (v: unknown): v is FlushTrigger => typeof v === "string" && FLUSH_TRIGGERS.has(v);
 /** An ERC-4337 UserOperation hash from the bundler: 0x + 32 bytes. */
 const isUserOpHash = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
+/** The gateway's own smart-account address shape (a real address, checksum not required). */
+const isSmartAccountAddress = (v: unknown): v is string => typeof v === "string" && isAddress(v, { strict: false });
 const isBatchDetail = (b: unknown): b is BatchDetail =>
   isObj(b) && isUserOpHash(b.userOpHash) && isCount(b.operationCount) && isTrigger(b.trigger);
 
@@ -74,7 +80,7 @@ export function statusFromResponse(httpStatus: number, body: unknown): Read<Queu
     !/^\d+$/.test(body.totalValue) ||
     !isTime(body.oldestAge) ||
     typeof body.autoFlush !== "boolean" ||
-    !(body.smartAccountAddress === null || typeof body.smartAccountAddress === "string")
+    !(body.smartAccountAddress === null || isSmartAccountAddress(body.smartAccountAddress))
   ) {
     return { state: "unavailable", reason: SHAPE };
   }
@@ -96,10 +102,10 @@ function isEpoch(e: unknown): e is EpochSummary {
     isObj(e) &&
     isCount(e.epochId) &&
     Array.isArray(e.batches) &&
-    e.batches.every((b) => isObj(b) && typeof b.userOpHash === "string" && isCount(b.operationCount) && typeof b.trigger === "string") &&
+    e.batches.every(isBatchDetail) &&
     isCount(e.totalIntents) &&
-    isObj(e.byAgent) &&
-    isObj(e.byOperation) &&
+    isCountRecord(e.byAgent) &&
+    isCountRecord(e.byOperation) &&
     isTime(e.startedAt) &&
     isTime(e.completedAt)
   );

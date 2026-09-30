@@ -19,7 +19,7 @@ import {
 const STATUS = { batchEnabled: true, pending: 2, totalValue: "1500000", oldestAge: 1200, autoFlush: false, smartAccountAddress: null };
 const EPOCH: EpochSummary = {
   epochId: 1,
-  batches: [{ userOpHash: "0xab", operationCount: 2, trigger: "manual" }],
+  batches: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 2, trigger: "manual" }],
   totalIntents: 2,
   byAgent: { a: 2 },
   byOperation: { release: 2 },
@@ -50,6 +50,19 @@ describe("statusFromResponse", () => {
       expect(statusFromResponse(200, bad).state, JSON.stringify(bad)).toBe("unavailable");
     }
   });
+
+  it("NEGATIVE (M4): smartAccountAddress must be null or a real 0x + 40-hex address, not any string", () => {
+    expect(statusFromResponse(200, { ...STATUS, smartAccountAddress: "not-an-address" }).state).toBe("unavailable");
+    expect(statusFromResponse(200, { ...STATUS, smartAccountAddress: "0xshort" }).state).toBe("unavailable");
+  });
+
+  it("a real 0x + 40-hex smartAccountAddress still reads", () => {
+    const addr = "0x" + "1".repeat(40);
+    expect(statusFromResponse(200, { ...STATUS, smartAccountAddress: addr })).toEqual({
+      state: "read",
+      value: { ...STATUS, smartAccountAddress: addr },
+    });
+  });
 });
 
 describe("epochsFromResponse", () => {
@@ -62,6 +75,43 @@ describe("epochsFromResponse", () => {
     expect(epochsFromResponse(401, { message: "Unauthorized" })).toEqual({ state: "unavailable", reason: "Unauthorized" });
     expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, totalIntents: "2" }] }).state).toBe("unavailable");
     expect(epochsFromResponse(200, {}).state).toBe("unavailable");
+  });
+
+  it("NEGATIVE (M4): byAgent/byOperation values, hashes and the trigger enum are validated, not just presence", () => {
+    // Reviewer's cheapest reproduction: currently returns `read` at 58a888b4.
+    const bad = {
+      epochs: [
+        {
+          ...EPOCH,
+          byAgent: { a: { bad: true } },
+          batches: [{ userOpHash: "", operationCount: 2, trigger: "settled" }],
+        },
+      ],
+    };
+    expect(epochsFromResponse(200, bad).state).toBe("unavailable");
+  });
+
+  it("NEGATIVE (M4): byOperation values must themselves be safe non-negative integers", () => {
+    const bad = { epochs: [{ ...EPOCH, byOperation: { release: -1 } }] };
+    expect(epochsFromResponse(200, bad).state).toBe("unavailable");
+  });
+
+  it("NEGATIVE (M4): a batch's userOpHash must be a real 0x + 64-hex UserOp hash", () => {
+    const bad = { epochs: [{ ...EPOCH, batches: [{ userOpHash: "0xnotahash", operationCount: 2, trigger: "manual" }] }] };
+    expect(epochsFromResponse(200, bad).state).toBe("unavailable");
+  });
+
+  it("NEGATIVE (M4): a batch's trigger must be one of manual|size|age|value", () => {
+    const bad = {
+      epochs: [{ ...EPOCH, batches: [{ userOpHash: "0x" + "ab".repeat(32), operationCount: 2, trigger: "settled" }] }],
+    };
+    expect(epochsFromResponse(200, bad).state).toBe("unavailable");
+  });
+
+  it("counts outside Number.isSafeInteger were already rejected by the isCount shared with flushOutcome (H1)", () => {
+    // Not a fresh M4 reproduction: isCount became Number.isSafeInteger project-wide in H1.
+    // Kept here as a regression guard for the epoch path specifically.
+    expect(epochsFromResponse(200, { epochs: [{ ...EPOCH, epochId: 2 ** 53 }] }).state).toBe("unavailable");
   });
 
   it("an unreachable gateway has its own reason", () => {
