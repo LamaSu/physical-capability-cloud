@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
+import { paidJobFlowRoutes, createJobFromSession } from "../routes/paid-job-flow.js";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 
@@ -67,6 +67,24 @@ describe("N69 paid path: submit-from-discovery validates the (kernel, capability
     const all = getStore().db.select().from(jobs).all() as Array<{ kernelId: string; capabilityId: string | null }>;
     expect(all.some((j) => j.kernelId === KERNEL_EMPTY), "no job on the empty kernel").toBe(false);
     expect(all.some((j) => j.capabilityId === "cap-default"), "no synthetic cap-default job anywhere").toBe(false);
+  });
+
+  it("[neg] a session naming a capability that belongs to ANOTHER kernel is refused (capability_not_on_kernel), before escrow", async () => {
+    // The session's kernel is the empty one, but it names KERNEL_OK's capability.
+    const session = {
+      id: `sess-n69paid-foreign-${Date.now().toString(36)}`,
+      kernelId: KERNEL_EMPTY,
+      capabilityType: CAP_TYPE,
+      capabilityId: `cap-${KERNEL_OK}-fdm`,
+      quote: { totalPrice: "10.00" },
+      contractTerms: { milestones: [{ stepId: "s1", amount: "10.00", bondAmount: "0.00", challengeWindowSeconds: 0 }] },
+      userAgentId: "n69paid-foreign-buyer",
+      cwmId: null,
+      jobId: null,
+    };
+    await expect(createJobFromSession(session as never)).rejects.toThrow(/capability_not_on_kernel|not on kernel/);
+    const all = getStore().db.select().from(jobs).all() as Array<{ kernelId: string }>;
+    expect(all.some((j) => j.kernelId === KERNEL_EMPTY)).toBe(false);
   });
 
   it("control: a kernel WITH the capability creates a job bound to that real capability", async () => {
