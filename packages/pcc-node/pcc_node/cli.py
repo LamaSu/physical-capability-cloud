@@ -328,7 +328,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
 
     # Start daemon
     click.echo("")
-    click.echo("Node running. Accepting jobs.")
+    click.echo("Node running. It keeps the kernel online and does not take jobs: devices run only through the operating agent's typed operations.")
     click.echo(f"  Dashboard: {config.pcc_base}/operator")
     click.echo("  Press Ctrl+C to stop.")
     click.echo("")
@@ -632,7 +632,7 @@ def ui_serve(port, ui_dir, pcc_base, api_key):
 @click.argument("template")
 @click.option("--port", default=3200, help="Server port (default: 3200)")
 def ui_open(template, port):
-    """Install and open a built-in template in the browser."""
+    """Install a built-in template and print the URL to open it at."""
     from .ui_gen import install_template, list_templates
 
     available = list_templates()
@@ -645,9 +645,7 @@ def ui_open(template, port):
         filename = install_template(template)
         url = f"http://localhost:{port}/{filename}"
         click.echo(f"Installed: {filename}")
-        click.echo(f"URL: {url}")
-        import webbrowser
-        webbrowser.open(url)
+        click.echo(f"Open it in your browser: {url}")
     except FileNotFoundError as e:
         click.echo(f"Error: {e}")
 
