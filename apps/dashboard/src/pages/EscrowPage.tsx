@@ -1,9 +1,10 @@
 import React from "react";
 import {
-  GlassPanel, AmountDisplay, TierBadge, GlowBadge, DataCell,
+  GlassPanel, TierBadge, GlowBadge, DataCell,
   EmptyState, LoadingShell,
 } from "@pcc/ui";
 import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+import { EscrowAmount } from "../components/EscrowAmount.js";
 import { useUIStore } from "../stores/ui-store.js";
 import { useEscrows } from "../api/hooks/use-pcc-data.js";
 import { DisputeModal } from "../components/escrow/DisputeModal.js";
@@ -80,7 +81,7 @@ export function EscrowPage() {
                     </GlowBadge>
                   </div>
                 </div>
-                {esc.totalAmount != null ? <AmountDisplay amount={esc.totalAmount} size="md" /> : <span className="text-white/40">—</span>}
+                <EscrowAmount amount={esc.totalAmount} currency={esc.currency} size="md" />
               </div>
               {selectedEscrow === esc.id && esc.milestones?.length > 0 && (
                 <div className="mt-4 pt-3 border-t border-white/[0.06] space-y-2">

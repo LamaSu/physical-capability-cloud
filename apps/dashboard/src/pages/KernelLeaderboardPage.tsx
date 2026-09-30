@@ -197,14 +197,26 @@ export function KernelLeaderboardPage() {
       {/* Leaderboard */}
       {rows.length === 0 ? (
         <GlassPanel padding="lg">
-          <EmptyState
-            title="No kernels on the network yet"
-            description="Leaderboard populates as kernels register capabilities and complete jobs with evidence."
-            action={{
-              label: "Onboard Equipment",
-              onClick: () => navigate("/onboard"),
-            }}
-          />
+          {kernels.length === 0 && complete ? (
+            <EmptyState
+              title="No kernels on the network yet"
+              description="Leaderboard populates as kernels register capabilities and complete jobs with evidence."
+              action={{
+                label: "Onboard Equipment",
+                onClick: () => navigate("/onboard"),
+              }}
+            />
+          ) : (
+            // Kernels exist but none lists a capability: that is not an empty network (astra 18b F5).
+            <EmptyState
+              title="Nothing to rank yet"
+              description={
+                kernels.length > 0
+                  ? `${kernels.length} kernel${kernels.length === 1 ? " is" : "s are"} registered, but none has listed a capability yet. Kernels are ranked by the capabilities they list.`
+                  : "No capability was read, so there is nothing to rank."
+              }
+            />
+          )}
         </GlassPanel>
       ) : (
         <GlassPanel padding="none" className="overflow-hidden">
