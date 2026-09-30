@@ -3,7 +3,7 @@
 > **Warning (status board rows N4a/N4b).** `ot2-executor.py` and `ot2-agent.py daemon`
 > run whatever the PCC relay hands them. That includes a shell-command tool, arbitrary
 > protocol uploads (an Opentrons protocol is Python code), and, in `ot2-agent.py`, an
-> LLM that holds the shell plus a self-update tool that downloads code from a URL.
+> LLM that holds the shell. (An earlier self-update tool that downloaded code from a URL is now disabled; see below.)
 >
 > The relay routes they poll (`/api/ot2/*`, and `/api/relay/*`, which shares the same
 > tables) do not yet bind a call to an accepted, funded job with a committed protocol
@@ -20,7 +20,9 @@ REFUSED: ot2-executor.py is not safe to run. ...        (exit 2)
 ```
 
 They run only with `--unsafe-local`, and only against addresses on your own machine or a
-private network. `ot2-executor.py` and `ot2-agent.py daemon` need a local `PCC_BASE` and
+private network -- plus the one fixed external origin the agent needs, the Claude API
+(`https://api.anthropic.com`), which only `ot2-agent.py` interactive and daemon register
+after their start. `ot2-executor.py` and `ot2-agent.py daemon` need a local `PCC_BASE` and
 `OT2_BASE`; any public gateway, `https://capability.network` included, is refused even
 with the flag. `ot2-agent.py interactive` and `ot2-agent.py health` do not poll PCC, but
 they drive the robot (and in interactive mode an LLM holds a shell on it), so they need
@@ -55,7 +57,7 @@ The rules are in `scripts/ot2_local_guard.py`, and neither script starts without
 - **What a start gates.** Until `start_guard()` (executor, agent daemon) or
   `start_interactive()` (agent interactive and health) accepts the process, these exit 2:
   `request()` and each script's `http()`, `pcc()`, `ot2()` and `claude()` helpers, the
-  tool dispatcher `execute_tool()` (the shell tool included), and the loops (`run()`,
+  tool dispatcher `execute_tool()` and the underlying `_execute_tool()` (the shell tool included), and the loops (`run()`,
   `daemon_mode()`, `interactive_mode()`). Importing a script and calling any of them
   does nothing.
 - **Self-update is disabled** in `ot2-agent.py`. It installed code downloaded from any URL.

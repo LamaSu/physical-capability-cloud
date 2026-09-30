@@ -168,13 +168,27 @@ def start_interactive(argv, ot2_base, name):
     return None
 
 
+# The ONLY external origin these scripts may reach after a start: the Claude
+# API. allow_external() accepts this origin alone -- a start never widens the
+# allowlist to an arbitrary host (N4a). The caller chooses WHETHER to register
+# it (interactive and daemon modes do; relay and health starts do not); it can
+# never choose a different host.
+ALLOWED_EXTERNAL = frozenset({"https://api.anthropic.com"})
+
+
 def allow_external(origin):
-    """After a start, allow one fixed https origin (scheme://host, default port)."""
+    """After a start, allow the one fixed external origin (the Claude API)."""
     require_mode("allow_external()")
     parts = urlsplit(origin)
     if parts.scheme != "https" or not parts.hostname or parts.path not in ("", "/") or parts.port or "@" in parts.netloc:
         raise ValueError(f"external origins must be a bare https origin, not {origin!r}")
-    GUARD.external.append(f"https://{parts.hostname}")
+    normalized = f"https://{parts.hostname}"
+    if normalized not in ALLOWED_EXTERNAL:
+        raise ValueError(
+            f"external origin {normalized!r} is not permitted; the only allowed external "
+            f"origin is the Claude API ({sorted(ALLOWED_EXTERNAL)[0]})"
+        )
+    GUARD.external.append(normalized)
 
 
 def require_mode(what):
@@ -216,7 +230,13 @@ def _authorized(url):
         return False
     if "@" in parts.netloc or "%" in parts.netloc or parts.fragment:
         return False
-    if any(seg in (".", "..") for seg in parts.path.split("/")) or "%2e" in parts.path.lower():
+    lowered_path = parts.path.lower()
+    if any(seg in (".", "..") for seg in parts.path.split("/")) or "%2e" in lowered_path:
+        return False
+    # Encoded path separators (%2f, %5c) and literal backslashes: a server or
+    # reverse proxy that decodes them before normalizing could read the target
+    # outside the accepted base, defeating the textual "under base/" check.
+    if "%2f" in lowered_path or "%5c" in lowered_path or "\\" in parts.path:
         return False
     target = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     for base in (GUARD.pcc_base, GUARD.ot2_base):

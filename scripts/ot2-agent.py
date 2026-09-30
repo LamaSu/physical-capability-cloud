@@ -307,12 +307,19 @@ OT2_TOOLS = [
 
 
 def execute_tool(name, args):
-    require_mode("execute_tool()")  # the shell tool below must not run on import alone
     return _execute_tool(name, args)
 
 
 def _execute_tool(name, args):
-    """Execute a tool call and return the result as a string."""
+    """Execute a tool call and return the result as a string.
+
+    N4a: the start guard is HERE, on the actual dispatcher, not only on the
+    public execute_tool() wrapper. An imported caller that reaches this
+    function directly (e.g. `_execute_tool("ot2_shell", ...)`) must still pass
+    require_mode() first, so the shell tool below can never run on import alone
+    or without an accepted --unsafe-local start.
+    """
+    require_mode("_execute_tool()")
     try:
         if name == "ot2_health":
             s, r = ot2("GET", "/health")

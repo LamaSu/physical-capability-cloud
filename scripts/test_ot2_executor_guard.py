@@ -450,11 +450,14 @@ class FixtureTests(FixtureCase):
         marker = os.path.join(tempfile.mkdtemp(), "shell-ran")
         shell = f"execute_tool('ot2_shell', {{'command': 'touch {marker}'}})"
         upload = "execute_tool('ot2_protocol_upload', {'filename': 'p.py', 'content': 'x'})"
+        # N4a F1: the actual dispatcher, reached directly by an importer, must be
+        # guarded too -- not just the public execute_tool() wrapper.
+        shell_direct = f"_execute_tool('ot2_shell', {{'command': 'touch {marker}'}})"
         common = (f"http('GET', {gateway.url + '/x'!r})", f"http('GET', {robot.url + '/health'!r})", shell, upload)
         calls = {
             "ot2-executor": ("run()", "pcc('GET', '/api/health')", "ot2('GET', '/health')") + common,
             "ot2-agent": ("daemon_mode()", "interactive_mode()", "pcc('GET', '/api/health')",
-                          "ot2('GET', '/health')", "claude([], [], 'x')") + common,
+                          "ot2('GET', '/health')", "claude([], [], 'x')", shell_direct) + common,
         }
         for module, snippets in calls.items():
             for snippet in snippets:
@@ -500,6 +503,23 @@ def started(module, gateway, robot, snippet):
 class BoundaryTests(FixtureCase):
     """Round 2 (astra): the checks must sit at the lowest HTTP boundary and at tool execution."""
 
+    def test_allow_external_accepts_only_the_claude_api(self):
+        # N4a F2: after a start, allow_external registers the fixed Claude API
+        # origin and NO other. A rejected origin is never authorized. Runs
+        # in-process, so the guard's module state is saved and restored.
+        import ot2_local_guard as g
+        saved = (g.GUARD.mode, list(g.GUARD.external), g.GUARD.pcc_base, g.GUARD.ot2_base)
+        try:
+            g.GUARD.mode, g.GUARD.external, g.GUARD.pcc_base, g.GUARD.ot2_base = "interactive", [], None, None
+            g.allow_external("https://api.anthropic.com")
+            self.assertTrue(g._authorized("https://api.anthropic.com/v1/messages"))
+            for bad in ("https://example.com", "https://api.anthropic.com.evil.com", "https://evil/api.anthropic.com"):
+                with self.assertRaises(ValueError, msg=f"allow_external accepted {bad!r}"):
+                    g.allow_external(bad)
+                self.assertFalse(g._authorized(bad + "/x"), f"{bad!r} is authorized after rejection")
+        finally:
+            g.GUARD.mode, g.GUARD.external, g.GUARD.pcc_base, g.GUARD.ot2_base = saved
+
     def test_an_accepted_start_still_refuses_every_destination_outside_its_bases(self):
         gateway = self.fixture(idle_gateway)
         robot = self.fixture(robot_responder)
@@ -512,6 +532,11 @@ class BoundaryTests(FixtureCase):
                 other.url + "/x",
                 gateway.url + "/api/../x",
                 gateway.url + "/api/%2e%2e/x",
+                # N4a F3: encoded separators / backslashes a proxy might decode
+                # outside the base must be refused, like %2e already is.
+                gateway.url + "/%2f../admin",
+                gateway.url + "/api/%2f../admin",
+                gateway.url + "/x%5cy",
                 f"http://127.0.0.1:{port}.evil/x",
                 f"http://user@127.0.0.1:{port}/x",
                 f"http://localhost:{port}/x",
