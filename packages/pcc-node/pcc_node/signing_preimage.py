@@ -52,17 +52,34 @@ def _refuse_non_standard_token(token):
     raise SigningPreimageError("malformed-json", "non-standard JSON token " + token)
 
 
-def _nesting_exceeds(value, limit):
-    stack = [(value, 1)]
-    while stack:
-        v, depth = stack.pop()
-        if not isinstance(v, (dict, list)):
-            continue
-        if depth > limit:
-            return True
-        for child in v.values() if isinstance(v, dict) else v:
-            if isinstance(child, (dict, list)):
-                stack.append((child, depth + 1))
+def _text_nesting_exceeds(text, limit):
+    """Does the JSON text nest deeper than ``limit`` containers anywhere?
+
+    Mirror of the TypeScript ``textNestingExceeds``: every ``[`` and ``{``
+    outside a string counts, including inside a value a later duplicate key
+    replaces. Decoding keeps only the last duplicate, so a scan of the decoded
+    value cannot see the first one (cross-family review A01b-q1). Only ASCII
+    characters change the state, so code points here and UTF-16 code units in
+    TypeScript give the same answer.
+    """
+    depth = 0
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "[" or ch == "{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif ch == "]" or ch == "}":
+            depth -= 1
     return False
 
 
@@ -80,21 +97,21 @@ def loads_strict(text):
       yields Infinity. ``parse_int=float`` decodes every number to a double, as
       JSON.parse does. The number domain then takes integral values by value.
     - It raises RecursionError near depth 1000, where V8 parses on. Both sides
-      refuse anything deeper than SIGNING_JSON_MAX_DEPTH.
+      refuse any TEXT nested deeper than SIGNING_JSON_MAX_DEPTH, before
+      decoding, so a duplicate key cannot hide the deeper value.
 
     Raises only SigningPreimageError ("malformed-json").
     """
     if not isinstance(text, str):
         raise SigningPreimageError("malformed-json", "expected JSON text")
+    if _text_nesting_exceeds(text, SIGNING_JSON_MAX_DEPTH):
+        raise SigningPreimageError("malformed-json", "nested deeper than %d" % SIGNING_JSON_MAX_DEPTH)
     try:
-        value = json.loads(text, parse_constant=_refuse_non_standard_token, parse_int=float)
+        return json.loads(text, parse_constant=_refuse_non_standard_token, parse_int=float)
     except SigningPreimageError:
         raise
     except (ValueError, RecursionError) as err:
         raise SigningPreimageError("malformed-json", "not RFC 8259 JSON: %s" % err)
-    if _nesting_exceeds(value, SIGNING_JSON_MAX_DEPTH):
-        raise SigningPreimageError("malformed-json", "nested deeper than %d" % SIGNING_JSON_MAX_DEPTH)
-    return value
 
 
 def is_tagged_digest(value):
