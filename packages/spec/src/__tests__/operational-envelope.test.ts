@@ -31,6 +31,8 @@ function confirmedOt2(): ConfirmedSafetyEnvelope {
         { field: "q3", quantity: "run_duration", unit: "min", min: 0, max: 120 },
       ],
       eStop: { mechanism: "adapter-stop", stopCommand: "POST /runs/{id}/actions stop" },
+      supervision: "attended",
+      hazards: ["heat", "mechanical"],
       maxCommandsPerMinute: 60,
     },
     references: [],
@@ -48,6 +50,8 @@ function confirmedPlateReader(): ConfirmedSafetyEnvelope {
         { field: "d", quantity: "read_duration", unit: "s", min: 1, max: 600 },
       ],
       eStop: { mechanism: "hardware", stopCommand: "ignored for hardware" },
+      supervision: "unattended",
+      hazards: ["heat"],
       maxCommandsPerMinute: 30,
     },
     references: [],
@@ -92,6 +96,8 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
       ],
       maxCommandsPerMinute: 60,
       eStop: { mechanism: "adapter-stop", stopCommand: "POST /runs/{id}/actions stop" },
+      supervision: "attended",
+      hazards: ["heat", "mechanical"],
     });
     expect(OperationalEnvelopeV1Schema.safeParse(rt).success).toBe(true);
   });
@@ -134,6 +140,18 @@ describe("compileOperationalEnvelope: the confirmed envelope, projected for the 
     const c = redigested(confirmedOt2(), (b) => (b.deviceClass = "unknown-robot"));
     expect(() => compileOperationalEnvelope(c)).toThrow(/unknown deviceClass/);
   });
+
+  it("refuses a re-digested body whose hazards are listed twice", () => {
+    const c = redigested(confirmedPlateReader(), (b) => (b.hazards = ["heat", "heat"]));
+    expect(() => compileOperationalEnvelope(c)).toThrow(/listed twice/);
+  });
+
+  it("refuses hazards out of canonical order, which confirm never produces", () => {
+    const c = redigested(confirmedOt2(), (b) => (b.hazards = ["mechanical", "heat"]));
+    expect(() => compileOperationalEnvelope(c)).toThrow(/canonical order/);
+    const rt = compileOperationalEnvelope(confirmedOt2());
+    expect(messages(parseChanged(rt, (e) => (e.hazards = ["mechanical", "heat"])))).toMatch(/hazards must be in canonical order/);
+  });
 });
 
 describe("OperationalEnvelopeV1Schema: strict, no defaults", () => {
@@ -171,6 +189,15 @@ describe("OperationalEnvelopeV1Schema: strict, no defaults", () => {
       expect(parseChanged(rt, (e) => (e.maxCommandsPerMinute = rate)).success, String(rate)).toBe(false);
     }
     expect(parseChanged(rt, (e) => delete e.maxCommandsPerMinute).success).toBe(false);
+  });
+
+  it("refuses invalid supervision or hazards, and accepts an empty hazards list", () => {
+    expect(parseChanged(rt, (e) => (e.supervision = "sometimes")).success).toBe(false);
+    expect(parseChanged(rt, (e) => delete e.supervision).success).toBe(false);
+    expect(parseChanged(rt, (e) => (e.hazards = ["radiation"])).success).toBe(false);
+    expect(messages(parseChanged(rt, (e) => (e.hazards = ["heat", "heat"])))).toMatch(/listed twice/);
+    expect(parseChanged(rt, (e) => delete e.hazards).success).toBe(false);
+    expect(parseChanged(rt, (e) => (e.hazards = [])).success).toBe(true);
   });
 
   it("refuses a stop that cannot stop the device", () => {

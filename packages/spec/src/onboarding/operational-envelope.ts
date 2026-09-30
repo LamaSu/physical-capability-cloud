@@ -32,6 +32,8 @@ import { UnitSchema } from "../csd/composition.js";
 import {
   DEVICE_CLASS_TEMPLATES,
   EnvelopeRefused,
+  HAZARDS,
+  SUPERVISION_MODES,
   computeSafetyEnvelopeDigest,
   type ConfirmedSafetyEnvelope,
 } from "./safety-envelope.js";
@@ -72,6 +74,10 @@ export const OperationalEnvelopeV1Schema = z
     limits: z.array(OperationalLimitSchema).min(1),
     maxCommandsPerMinute: z.number().int().min(1),
     eStop: OperationalEStopSchema,
+    /** How the device is supervised while it runs, as the operator confirmed it. */
+    supervision: z.enum(SUPERVISION_MODES),
+    /** The hazards the operator confirmed, each once; an empty list is the operator's "none". */
+    hazards: z.array(z.enum(HAZARDS)).refine((h) => new Set(h).size === h.length, { message: "a hazard is listed twice" }),
   })
   .strict()
   .superRefine((env, ctx) => {
@@ -82,6 +88,11 @@ export const OperationalEnvelopeV1Schema = z
       }
       seen.add(l.quantity);
     });
+    // One canonical order, as confirm commits it (a duplicate is reported by the hazards refinement).
+    const canonical = HAZARDS.filter((h) => env.hazards.includes(h));
+    if (canonical.length === env.hazards.length && canonical.some((h, i) => h !== env.hazards[i])) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["hazards"], message: "hazards must be in canonical order" });
+    }
     const template = templateOf(env.deviceClass);
     // "none" only for a known class that neither moves nor heats; an unknown class fails closed.
     if (env.eStop.mechanism === "none" && (!template || template.movesOrHeats)) {
@@ -131,6 +142,8 @@ export function compileOperationalEnvelope(confirmed: ConfirmedSafetyEnvelope): 
     limits,
     maxCommandsPerMinute: envelope.maxCommandsPerMinute,
     eStop,
+    supervision: envelope.supervision,
+    hazards: envelope.hazards,
   });
   if (!parsed.success) {
     throw new EnvelopeRefused(parsed.error.issues.map((i) => `${i.path.join(".") || "envelope"}: ${i.message}`));

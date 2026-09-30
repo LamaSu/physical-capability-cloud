@@ -14,10 +14,12 @@ import type {
   ConfirmedSafetyEnvelope,
   EnvelopeDecision,
   EStopDeclaration,
+  Hazard,
   IntakeLimit,
   ReferenceFinding,
   SafetyEnvelopeBody,
   SafetyEnvelopeInput,
+  Supervision,
 } from "../onboarding/safety-envelope.js";
 import { KNOWN_UNITS, ParameterDefinitionSchema, PortTypeSchema } from "../csd/composition.js";
 import { CsdEvidenceTierSchema, CsdParameterSchema } from "../csd/schema.js";
@@ -48,7 +50,7 @@ function emptyInput(deviceClass: string): SafetyEnvelopeInput {
   };
 }
 
-/** Every required quantity answered correctly by the operator, plus a valid e-stop and rate. */
+/** Every required quantity answered correctly by the operator, plus a valid e-stop, rate, supervision and hazards. */
 function fullyAnsweredInput(deviceClass: string): SafetyEnvelopeInput {
   return {
     deviceClass,
@@ -56,19 +58,20 @@ function fullyAnsweredInput(deviceClass: string): SafetyEnvelopeInput {
     intake: {
       limits: (GOOD_ANSWERS[deviceClass] ?? []).map((a) => ({ ...a })),
       eStop: { mechanism: "hardware" },
+      supervision: "attended",
+      hazards: ["heat"],
       maxCommandsPerMinute: 10,
     },
     references: [],
   };
 }
 
-/** A well-formed reference finding for incubation_temperature (lab-plate-reader), overridable. */
+/** A well-formed R5 reference finding for incubation_temperature (lab-plate-reader), overridable. */
 function ref(overrides: Partial<ReferenceFinding> = {}): ReferenceFinding {
   return {
     quantity: "incubation_temperature",
     unit: "degC",
-    min: 15,
-    max: 45,
+    value: { min: 15, max: 45 },
     claim: "operating range per datasheet",
     citation: { doc: "Datasheet Rev C", section: "4.2" },
     retrievedAt: "2026-01-15T00:00:00Z",
@@ -148,15 +151,17 @@ describe("draftSafetyEnvelope: malformed input is refused", () => {
 
 describe("draftSafetyEnvelope: nothing is ever defaulted", () => {
   for (const template of Object.values(DEVICE_CLASS_TEMPLATES)) {
-    it(`gives zero limits and exactly one question per requirement, plus e-stop and command-rate, for ${template.id}`, () => {
+    it(`gives zero limits and exactly one question per requirement, plus e-stop, command-rate, supervision and hazards, for ${template.id}`, () => {
       const draft = draftSafetyEnvelope(emptyInput(template.id));
       expect(draft.limits).toHaveLength(0);
-      expect(draft.questions).toHaveLength(template.requires.length + 2);
+      expect(draft.questions).toHaveLength(template.requires.length + 4);
       for (const req of template.requires) {
         expect(draft.questions.filter((q) => q.about === req.quantity)).toHaveLength(1);
       }
       expect(draft.questions.filter((q) => q.about === "e-stop")).toHaveLength(1);
       expect(draft.questions.filter((q) => q.about === "command-rate")).toHaveLength(1);
+      expect(draft.questions.filter((q) => q.about === "supervision")).toHaveLength(1);
+      expect(draft.questions.filter((q) => q.about === "hazards")).toHaveLength(1);
     });
 
     it(`never uses a template step value as a limit bound for ${template.id}`, () => {
@@ -354,7 +359,7 @@ describe("draftSafetyEnvelope: references", () => {
 
   it("drops a reference in the wrong unit", () => {
     const input = emptyInput("lab-plate-reader");
-    input.references = [ref({ unit: "K", min: 288, max: 318 })];
+    input.references = [ref({ unit: "K", value: { min: 288, max: 318 } })];
     const draft = draftSafetyEnvelope(input);
     expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
     expect(draft.dropped.some((d) => d.quantity === "incubation_temperature" && /"K"/.test(d.reason))).toBe(true);
@@ -364,8 +369,8 @@ describe("draftSafetyEnvelope: references", () => {
   it("proposes the tightest overlapping range from multiple references", () => {
     const input = emptyInput("lab-plate-reader");
     input.references = [
-      ref({ min: 15, max: 45, citation: { doc: "Manual A", section: "1" } }),
-      ref({ min: 20, max: 40, citation: { doc: "Manual B", section: "2" } }),
+      ref({ value: { min: 15, max: 45 }, citation: { doc: "Manual A", section: "1" } }),
+      ref({ value: { min: 20, max: 40 }, citation: { doc: "Manual B", section: "2" } }),
     ];
     const draft = draftSafetyEnvelope(input);
     const limit = draft.limits.find((l) => l.quantity === "incubation_temperature");
@@ -379,8 +384,8 @@ describe("draftSafetyEnvelope: references", () => {
   it("asks a question when references disagree (non-overlapping ranges)", () => {
     const input = emptyInput("lab-plate-reader");
     input.references = [
-      ref({ min: 10, max: 20, citation: { doc: "Manual A", section: "1" } }),
-      ref({ min: 30, max: 40, citation: { doc: "Manual B", section: "2" } }),
+      ref({ value: { min: 10, max: 20 }, citation: { doc: "Manual A", section: "1" } }),
+      ref({ value: { min: 30, max: 40 }, citation: { doc: "Manual B", section: "2" } }),
     ];
     const draft = draftSafetyEnvelope(input);
     expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
@@ -392,7 +397,7 @@ describe("draftSafetyEnvelope: references", () => {
   it("asks a question when a reference is tighter than the operator's answer, with no limit yet", () => {
     const input = emptyInput("lab-plate-reader");
     input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: 10, max: 50 }];
-    input.references = [ref({ min: 20, max: 40 })]; // tighter than 10..50 on both sides
+    input.references = [ref({ value: { min: 20, max: 40 } })]; // tighter than 10..50 on both sides
     const draft = draftSafetyEnvelope(input);
     expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
     const q = draft.questions.find((q) => q.about === "incubation_temperature");
@@ -403,7 +408,7 @@ describe("draftSafetyEnvelope: references", () => {
   it("keeps the operator's limit when a reference is looser, but lists the reference among its sources", () => {
     const input = emptyInput("lab-plate-reader");
     input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: 20, max: 40 }];
-    input.references = [ref({ min: 10, max: 50 })]; // looser than 20..40 on both sides
+    input.references = [ref({ value: { min: 10, max: 50 } })]; // looser than 20..40 on both sides
     const draft = draftSafetyEnvelope(input);
     const limit = draft.limits.find((l) => l.quantity === "incubation_temperature");
     expect(limit).toBeDefined();
@@ -443,6 +448,8 @@ describe("confirmSafetyEnvelope", () => {
         ],
         eStop: { mechanism: "hardware" },
         maxCommandsPerMinute: 10,
+        supervision: "attended",
+        hazards: ["heat"],
       }),
     );
 
@@ -476,6 +483,8 @@ describe("confirmSafetyEnvelope", () => {
         ],
         eStop: { mechanism: "hardware" },
         maxCommandsPerMinute: 10,
+        supervision: "attended",
+        hazards: ["heat"],
       }),
     );
     const incubation = confirmed.envelope.limits.find((l) => l.quantity === "incubation_temperature")!;
@@ -556,8 +565,14 @@ describe("confirmSafetyEnvelope", () => {
     expect(confirmed.envelope.maxCommandsPerMinute).toBe(7);
   });
 
-  it("is deterministic, and changes if a limit bound, the device id, or the e-stop changes", () => {
-    const build = (opts: { deviceId?: string; incubationMax?: number; eStop?: EStopDeclaration }) => {
+  it("is deterministic, and changes if a limit bound, the device id, the e-stop, or supervision or hazards change", () => {
+    const build = (opts: {
+      deviceId?: string;
+      incubationMax?: number;
+      eStop?: EStopDeclaration;
+      supervision?: Supervision;
+      hazards?: Hazard[];
+    }) => {
       const input = fullyAnsweredInput("lab-plate-reader");
       if (opts.deviceId) input.device.deviceId = opts.deviceId;
       if (opts.incubationMax !== undefined) {
@@ -566,20 +581,32 @@ describe("confirmSafetyEnvelope", () => {
         );
       }
       if (opts.eStop) input.intake.eStop = opts.eStop;
+      if (opts.supervision) input.intake.supervision = opts.supervision;
+      if (opts.hazards) input.intake.hazards = opts.hazards;
       const draft = draftSafetyEnvelope(input);
       return confirmSafetyEnvelope(draft, confirmDecision());
     };
 
-    const base = build({});
-    const same = build({});
-    const boundChanged = build({ incubationMax: 41 });
-    const deviceChanged = build({ deviceId: "dev-2" });
-    const eStopChanged = build({ eStop: { mechanism: "adapter-stop", stopCommand: "STOP" } });
+    // A two-hazard base, so reordering and duplication are meaningfully exercised below.
+    const base = build({ hazards: ["heat", "mechanical"] });
+    const same = build({ hazards: ["heat", "mechanical"] });
+    const boundChanged = build({ incubationMax: 41, hazards: ["heat", "mechanical"] });
+    const deviceChanged = build({ deviceId: "dev-2", hazards: ["heat", "mechanical"] });
+    const eStopChanged = build({ eStop: { mechanism: "adapter-stop", stopCommand: "STOP" }, hazards: ["heat", "mechanical"] });
+    const supervisionChanged = build({ supervision: "unattended", hazards: ["heat", "mechanical"] });
+    const hazardsChanged = build({ hazards: ["laser"] });
+    const hazardsReordered = build({ hazards: ["mechanical", "heat"] });
+    const hazardsWithDuplicate = build({ hazards: ["heat", "heat", "mechanical"] });
 
     expect(same.envelopeDigest).toBe(base.envelopeDigest);
     expect(boundChanged.envelopeDigest).not.toBe(base.envelopeDigest);
     expect(deviceChanged.envelopeDigest).not.toBe(base.envelopeDigest);
     expect(eStopChanged.envelopeDigest).not.toBe(base.envelopeDigest);
+    expect(supervisionChanged.envelopeDigest).not.toBe(base.envelopeDigest);
+    expect(hazardsChanged.envelopeDigest).not.toBe(base.envelopeDigest);
+    // Canonical ordering means order and duplicates never affect the digest.
+    expect(hazardsReordered.envelopeDigest).toBe(base.envelopeDigest);
+    expect(hazardsWithDuplicate.envelopeDigest).toBe(base.envelopeDigest);
   });
 });
 
@@ -712,7 +739,7 @@ describe("review additions: references", () => {
   it("asks when a reference is tighter on the min side only", () => {
     const input = emptyInput("lab-plate-reader");
     input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: 10, max: 40 }];
-    input.references = [ref({ min: 20, max: 40 })];
+    input.references = [ref({ value: { min: 20, max: 40 } })];
     const draft = draftSafetyEnvelope(input);
     expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
     expect(draft.questions.find((q) => q.about === "incubation_temperature")?.ask).toMatch(/Confirm your range or tighten it/);
@@ -721,21 +748,19 @@ describe("review additions: references", () => {
   it("asks when a reference is tighter on the max side only", () => {
     const input = emptyInput("lab-plate-reader");
     input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: 20, max: 50 }];
-    input.references = [ref({ min: 20, max: 40 })];
+    input.references = [ref({ value: { min: 20, max: 40 } })];
     const draft = draftSafetyEnvelope(input);
     expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
     expect(draft.questions.find((q) => q.about === "incubation_temperature")?.ask).toMatch(/Confirm your range or tighten it/);
   });
 
-  it("drops a reference whose range is unusable (min above max, or a bound missing)", () => {
-    for (const bad of [ref({ min: 45, max: 15 }), ref({ min: undefined })]) {
-      const input = emptyInput("lab-plate-reader");
-      input.references = [bad];
-      const draft = draftSafetyEnvelope(input);
-      expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
-      expect(draft.dropped.some((d) => d.quantity === "incubation_temperature" && /Datasheet Rev C/.test(d.reason))).toBe(true);
-      expect(draft.questions.some((q) => q.about === "incubation_temperature")).toBe(true);
-    }
+  it("drops a reference whose range is unusable (min above max)", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.references = [ref({ value: { min: 45, max: 15 } })];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
+    expect(draft.dropped.some((d) => d.quantity === "incubation_temperature" && /Datasheet Rev C/.test(d.reason))).toBe(true);
+    expect(draft.questions.some((q) => q.about === "incubation_temperature")).toBe(true);
   });
 });
 
@@ -762,6 +787,202 @@ describe("review additions: compile carries the confirmed values exactly", () =>
       const body = change(confirmed.envelope);
       const redigested = { ...confirmed, envelope: body, envelopeDigest: computeSafetyEnvelopeDigest(body) };
       expect(() => compileSafetyEnvelope(redigested), label).toThrow(reason);
+    }
+  });
+});
+
+// ── R5 findings and one-sided bounds ───────────────────────────────
+
+describe("draftSafetyEnvelope: R5 findings and one-sided bounds (lab-plate-reader, incubation_temperature, degC)", () => {
+  it("a single upper-only reference gives no limit, and asks for the lowest", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.references = [ref({ value: { max: 95 } })];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
+    const q = draft.questions.find((q) => q.about === "incubation_temperature");
+    expect(q).toBeDefined();
+    expect(q!.ask).toMatch(/at most 95 degC/);
+    expect(q!.ask).toMatch(/lowest/);
+  });
+
+  it("a single lower-only reference gives no limit, and asks for the highest", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.references = [ref({ value: { min: 4 } })];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
+    const q = draft.questions.find((q) => q.about === "incubation_temperature");
+    expect(q).toBeDefined();
+    expect(q!.ask).toMatch(/at least 4 degC/);
+    expect(q!.ask).toMatch(/highest/);
+  });
+
+  it("combines a lower-only reference from one doc and an upper-only reference from another into one limit", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.references = [
+      ref({ value: { min: 4 }, citation: { doc: "Doc A", section: "1" } }),
+      ref({ value: { max: 95 }, citation: { doc: "Doc B", section: "2" } }),
+    ];
+    const draft = draftSafetyEnvelope(input);
+    const limit = draft.limits.find((l) => l.quantity === "incubation_temperature");
+    expect(limit).toBeDefined();
+    expect(limit!.min).toBe(4);
+    expect(limit!.max).toBe(95);
+    expect(limit!.proposedBy).toBe("reference");
+    expect(limit!.sources).toHaveLength(2);
+  });
+
+  it("asks a 'do not overlap' question when a lower-only and an upper-only reference conflict", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.references = [
+      ref({ value: { min: 40 }, citation: { doc: "Doc A", section: "1" } }),
+      ref({ value: { max: 20 }, citation: { doc: "Doc B", section: "2" } }),
+    ];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
+    const q = draft.questions.find((q) => q.about === "incubation_temperature");
+    expect(q).toBeDefined();
+    expect(q!.ask).toMatch(/do not overlap/);
+  });
+
+  it("a one-sided reference tighter only on the max side (operator has an answer) asks to confirm or tighten", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: 10, max: 50 }];
+    input.references = [ref({ value: { max: 40 } })];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.limits.find((l) => l.quantity === "incubation_temperature")).toBeUndefined();
+    const q = draft.questions.find((q) => q.about === "incubation_temperature");
+    expect(q).toBeDefined();
+    expect(q!.ask).toMatch(/Confirm your range or tighten it/);
+  });
+
+  it("a one-sided reference looser on the min side (operator has an answer) keeps the operator's limit, listing the reference", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: 10, max: 50 }];
+    input.references = [ref({ value: { min: 5 } })];
+    const draft = draftSafetyEnvelope(input);
+    const limit = draft.limits.find((l) => l.quantity === "incubation_temperature");
+    expect(limit).toBeDefined();
+    expect(limit!.min).toBe(10);
+    expect(limit!.max).toBe(50);
+    expect(limit!.proposedBy).toBe("operator");
+    expect(limit!.sources).toHaveLength(2);
+    expect(draft.questions.some((q) => q.about === "incubation_temperature")).toBe(false);
+  });
+
+  it("drops a malformed reference value, each with a reason naming the doc, and keeps the question", () => {
+    const cases: Array<[string, unknown]> = [
+      ["no value key", undefined],
+      ["value is a number", 95],
+      ["value is empty (bounds neither side)", {}],
+      ["min is not a finite number", { min: "4" }],
+      ["max is not a finite number (a string Math.min would coerce)", { max: "95" }],
+      ["max is NaN beside a finite min", { min: 4, max: Number.NaN }],
+      ["min above max", { min: 50, max: 10 }],
+    ];
+    for (const [label, value] of cases) {
+      const input = emptyInput("lab-plate-reader");
+      input.references = [ref({ value: value as unknown as ReferenceFinding["value"] })];
+      const draft = draftSafetyEnvelope(input);
+      expect(draft.limits.find((l) => l.quantity === "incubation_temperature"), label).toBeUndefined();
+      expect(
+        draft.dropped.some((d) => d.quantity === "incubation_temperature" && d.reason.includes("Datasheet Rev C")),
+        label,
+      ).toBe(true);
+      expect(draft.questions.some((q) => q.about === "incubation_temperature"), label).toBe(true);
+    }
+  });
+});
+
+// ── supervision and hazards ─────────────────────────────────────────
+
+describe("draftSafetyEnvelope / confirmSafetyEnvelope / compileSafetyEnvelope: supervision and hazards", () => {
+  it("missing supervision and hazards each give a question, and the draft carries null for both", () => {
+    const draft = draftSafetyEnvelope(emptyInput("lab-plate-reader"));
+    expect(draft.questions.some((q) => q.about === "supervision")).toBe(true);
+    expect(draft.questions.some((q) => q.about === "hazards")).toBe(true);
+    expect(draft.supervision).toBeNull();
+    expect(draft.hazards).toBeNull();
+  });
+
+  it('hazards [] ("none") gives no question, and the confirmed body carries an empty array', () => {
+    const input = fullyAnsweredInput("lab-plate-reader");
+    input.intake.hazards = [];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.questions.some((q) => q.about === "hazards")).toBe(false);
+    expect(draft.hazards).toEqual([]);
+    const confirmed = confirmSafetyEnvelope(draft, confirmDecision());
+    expect(confirmed.envelope.hazards).toEqual([]);
+  });
+
+  it("draft refuses an invalid supervision value", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.intake.supervision = "sometimes" as unknown as Supervision;
+    expect(() => draftSafetyEnvelope(input)).toThrow(/is not attended, unattended or remote-supervised/);
+  });
+
+  it("draft refuses hazards that is not a list", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.intake.hazards = "heat" as unknown as Hazard[];
+    expect(() => draftSafetyEnvelope(input)).toThrow(/hazards must be a list/);
+  });
+
+  it("draft refuses an unknown hazard", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.intake.hazards = ["heat", "radiation"] as unknown as Hazard[];
+    expect(() => draftSafetyEnvelope(input)).toThrow(/unknown hazard/);
+  });
+
+  it("deduplicates and canonically orders hazards, in both the draft and the confirmed body", () => {
+    const input = fullyAnsweredInput("lab-plate-reader");
+    input.intake.hazards = ["mechanical", "heat", "heat"];
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.hazards).toEqual(["heat", "mechanical"]);
+    const confirmed = confirmSafetyEnvelope(draft, confirmDecision());
+    expect(confirmed.envelope.hazards).toEqual(["heat", "mechanical"]);
+  });
+
+  it("the decision answers open supervision and hazards questions", () => {
+    const input = emptyInput("lab-plate-reader");
+    input.intake.limits = GOOD_ANSWERS["lab-plate-reader"]!.map((a) => ({ ...a }));
+    input.intake.eStop = { mechanism: "hardware" };
+    input.intake.maxCommandsPerMinute = 10;
+    const draft = draftSafetyEnvelope(input);
+    expect(draft.questions.map((q) => q.about)).toEqual(["supervision", "hazards"]);
+    const confirmed = confirmSafetyEnvelope(draft, confirmDecision({ supervision: "remote-supervised", hazards: ["laser"] }));
+    expect(confirmed.envelope.supervision).toBe("remote-supervised");
+    expect(confirmed.envelope.hazards).toEqual(["laser"]);
+  });
+
+  it("refuses a decision with an invalid supervision or hazard", () => {
+    const draft = draftSafetyEnvelope(fullyAnsweredInput("lab-plate-reader"));
+    expect(() => confirmSafetyEnvelope(draft, confirmDecision({ supervision: "sometimes" as unknown as Supervision }))).toThrow(
+      /is not attended, unattended or remote-supervised/,
+    );
+    expect(() => confirmSafetyEnvelope(draft, confirmDecision({ hazards: ["radiation"] as unknown as Hazard[] }))).toThrow(
+      /unknown hazard/,
+    );
+  });
+
+  it("compile refuses a re-digested body with an invalid supervision or hazard", () => {
+    const confirmed = confirmSafetyEnvelope(draftSafetyEnvelope(fullyAnsweredInput("lab-plate-reader")), confirmDecision());
+
+    const badSupervision: SafetyEnvelopeBody = { ...confirmed.envelope, supervision: "sometimes" as unknown as Supervision };
+    const digest1 = computeSafetyEnvelopeDigest(badSupervision);
+    expect(() => compileSafetyEnvelope({ ...confirmed, envelope: badSupervision, envelopeDigest: digest1 })).toThrow(
+      /is not attended, unattended or remote-supervised/,
+    );
+
+    const badHazards: SafetyEnvelopeBody = { ...confirmed.envelope, hazards: ["radiation"] as unknown as Hazard[] };
+    const digest2 = computeSafetyEnvelopeDigest(badHazards);
+    expect(() => compileSafetyEnvelope({ ...confirmed, envelope: badHazards, envelopeDigest: digest2 })).toThrow(/unknown hazard/);
+  });
+
+  it("compile refuses a re-digested body whose hazards confirm could not have produced (a duplicate, or out of order)", () => {
+    const confirmed = confirmSafetyEnvelope(draftSafetyEnvelope(fullyAnsweredInput("lab-plate-reader")), confirmDecision());
+    for (const hazards of [["heat", "heat"], ["mechanical", "heat"]] as Hazard[][]) {
+      const body: SafetyEnvelopeBody = { ...confirmed.envelope, hazards };
+      const redigested = { ...confirmed, envelope: body, envelopeDigest: computeSafetyEnvelopeDigest(body) };
+      expect(() => compileSafetyEnvelope(redigested), hazards.join()).toThrow(/canonical order/);
     }
   });
 });

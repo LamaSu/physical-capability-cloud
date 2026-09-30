@@ -28,6 +28,15 @@
  * Every function is pure and deterministic: no I/O, no clock, no randomness.
  * Units come only from the composition unit table (`KNOWN_UNITS`), the one
  * the prism compiler parses.
+ *
+ * Inputs, by kits' permanent intake field ids (item 6, bus #4140):
+ *   - `safety.limits` gives the operator's answers, one per template quantity (`intake.limits`);
+ *   - `safety.estop` gives `intake.eStop`, `safety.supervision` gives
+ *     `intake.supervision`, and `safety.hazards` gives `intake.hazards`;
+ *   - R5 research findings give `references`, in R5's `{claim, value, unit,
+ *     citation, retrievedAt}` shape, each for the template quantity it was
+ *     asked about.
+ * All of these are never defaulted.
  */
 
 import { createHash } from "node:crypto";
@@ -62,17 +71,30 @@ export interface Citation {
   url?: string;
 }
 
-/** A value found in a manual, datasheet or paper (kits' R5 searches). */
+/**
+ * A value found in a manual, datasheet or paper: an R5 research finding
+ * (`{claim, value, unit, citation, retrievedAt}`) for one template quantity.
+ * For a limit, `value` is a range, and either side may be absent: "at most
+ * 95 degC" is `{max: 95}`, and it bounds only that side.
+ */
 export interface ReferenceFinding {
+  /** The template quantity R5 was asked about. */
   quantity: string;
-  unit: string;
-  min?: number;
-  max?: number;
   claim: string;
+  value: { min?: number; max?: number };
+  unit: string;
   citation: Citation;
   /** ISO-8601 date the reference was read. */
   retrievedAt: string;
 }
+
+/** Who watches the device while it runs (`safety.supervision`). */
+export const SUPERVISION_MODES = ["attended", "unattended", "remote-supervised"] as const;
+export type Supervision = (typeof SUPERVISION_MODES)[number];
+
+/** Hazard classes (`safety.hazards`). An empty list is the operator's explicit "none". */
+export const HAZARDS = ["biological", "chemical", "heat", "laser", "mechanical"] as const;
+export type Hazard = (typeof HAZARDS)[number];
 
 export interface EStopDeclaration {
   /** How the device is stopped: a hardware button or relay, the adapter's stop command, or nothing. */
@@ -95,6 +117,9 @@ export interface SafetyEnvelopeInput {
   intake: {
     limits: IntakeLimit[];
     eStop?: EStopDeclaration;
+    supervision?: Supervision;
+    /** An empty list means the operator said "none"; a missing list is a question. */
+    hazards?: Hazard[];
     /** The most commands per minute the operator allows; operator-only, never from a reference. */
     maxCommandsPerMinute?: number;
   };
@@ -217,7 +242,7 @@ export interface EnvelopeLimit {
 }
 
 export interface EnvelopeQuestion {
-  /** The quantity it is about, or "e-stop" / "command-rate". */
+  /** The quantity it is about, or "e-stop", "command-rate", "supervision" or "hazards". */
   about: string;
   ask: string;
   why: string;
@@ -236,6 +261,8 @@ export interface SafetyEnvelopeDraft {
   limits: EnvelopeLimit[];
   eStop: EStopDeclaration | null;
   maxCommandsPerMinute: number | null;
+  supervision: Supervision | null;
+  hazards: Hazard[] | null;
   /** Empty exactly when the draft is ready to confirm. */
   questions: EnvelopeQuestion[];
   dropped: DroppedInput[];
@@ -279,6 +306,49 @@ function eStopProblem(eStop: EStopDeclaration | null | undefined, template: Devi
 
 function rateProblem(rate: unknown): string | null {
   return Number.isInteger(rate) && (rate as number) >= 1 ? null : "maxCommandsPerMinute must be an integer >= 1";
+}
+
+/** Why a finding's value cannot bound a quantity, or null. Either side may be absent, but not both. */
+function boundProblem(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "has no {min, max} value";
+  const { min, max } = value as { min?: unknown; max?: unknown };
+  if (min === undefined && max === undefined) return "bounds neither side";
+  if (min !== undefined && !finite(min)) return "has a min that is not a finite number";
+  if (max !== undefined && !finite(max)) return "has a max that is not a finite number";
+  if (finite(min) && finite(max) && min > max) return `gives min ${min} above max ${max}`;
+  return null;
+}
+
+function describeBound(bound: { min?: number; max?: number }, unit: string): string {
+  if (bound.min !== undefined && bound.max !== undefined) return `${bound.min}..${bound.max} ${unit}`;
+  return bound.min !== undefined ? `at least ${bound.min} ${unit}` : `at most ${bound.max} ${unit}`;
+}
+
+function supervisionProblem(supervision: unknown): string | null {
+  return (SUPERVISION_MODES as readonly unknown[]).includes(supervision)
+    ? null
+    : `supervision ${JSON.stringify(String(supervision))} is not attended, unattended or remote-supervised`;
+}
+
+function hazardsProblem(hazards: unknown): string | null {
+  if (!Array.isArray(hazards)) return "hazards must be a list (an empty list means none)";
+  const unknown = hazards.filter((h) => !(HAZARDS as readonly unknown[]).includes(h));
+  return unknown.length > 0 ? `unknown hazard ${unknown.map((h) => JSON.stringify(String(h))).join(", ")}` : null;
+}
+
+/** Hazards in one canonical order, each once, so the same answer always digests the same. */
+function canonicalHazards(hazards: readonly Hazard[]): Hazard[] {
+  return HAZARDS.filter((h) => hazards.includes(h));
+}
+
+/** Why a committed hazards list is not one confirm produces (each once, in canonical order), or null. */
+function hazardsCanonicalProblem(hazards: unknown): string | null {
+  if (hazardsProblem(hazards)) return null; // hazardsProblem reports it
+  const list = hazards as Hazard[];
+  const canonical = canonicalHazards(list);
+  return canonical.length === list.length && canonical.every((h, i) => h === list[i])
+    ? null
+    : "hazards must each appear once, in canonical order";
 }
 
 function checkInput(input: SafetyEnvelopeInput): { template: DeviceClassTemplate } {
@@ -332,8 +402,8 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
         dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} has no valid retrievedAt` });
       } else if (r.unit !== req.unit) {
         dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} is in ${JSON.stringify(r.unit)}, not ${req.unit}` });
-      } else if (rangeProblem(r.min, r.max)) {
-        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} ${rangeProblem(r.min, r.max)}` });
+      } else if (boundProblem(r.value)) {
+        dropped.push({ quantity: req.quantity, reason: `a reference from ${r.citation.doc} ${boundProblem(r.value)}` });
       } else {
         references.push(r);
       }
@@ -352,12 +422,14 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
     }
     if (usableAnswers.length > 0) {
       const a = usableAnswers[0]!;
-      // A reference tighter than the operator's answer is asked about, never silently loosened past.
-      const tighter = references.filter((r) => (r.min as number) > (a.min as number) || (r.max as number) < (a.max as number));
+      // A reference tighter than the operator's answer, on either side, is asked about, never silently loosened past.
+      const tighter = references.filter(
+        (r) => (r.value.min !== undefined && r.value.min > (a.min as number)) || (r.value.max !== undefined && r.value.max < (a.max as number)),
+      );
       for (const r of tighter) {
         ask(
           req.why,
-          `${r.citation.doc} (${r.citation.section}) gives ${r.min}..${r.max} ${req.unit}; you gave ${a.min}..${a.max}. Confirm your range or tighten it.`,
+          `${r.citation.doc} (${r.citation.section}) gives ${describeBound(r.value, req.unit)}; you gave ${a.min}..${a.max}. Confirm your range or tighten it.`,
         );
       }
       if (tighter.length > 0) continue;
@@ -373,11 +445,19 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
       continue;
     }
     if (references.length > 0) {
-      // Several references: propose the tightest range they allow together; the operator confirms it.
-      const min = Math.max(...references.map((r) => r.min as number));
-      const max = Math.min(...references.map((r) => r.max as number));
-      if (min > max) {
+      // Propose the tightest range the references allow together; the operator confirms it.
+      // A one-sided bound constrains only its side, and a side nobody bounded is a question.
+      const mins = references.flatMap((r) => (r.value.min === undefined ? [] : [r.value.min]));
+      const maxes = references.flatMap((r) => (r.value.max === undefined ? [] : [r.value.max]));
+      const min = mins.length > 0 ? Math.max(...mins) : undefined;
+      const max = maxes.length > 0 ? Math.min(...maxes) : undefined;
+      if (min !== undefined && max !== undefined && min > max) {
         ask(req.why, `The references disagree on ${range}: they do not overlap. What range should apply?`);
+        continue;
+      }
+      if (min === undefined || max === undefined) {
+        const missing = min === undefined ? "lowest" : "highest";
+        ask(req.why, `The references give ${describeBound({ min, max }, req.unit)} for ${req.label.toLowerCase()}. What is the ${missing} it may be?`);
         continue;
       }
       limits.push({ quantity: req.quantity, unit: req.unit, param: req.param, min, max, proposedBy: "reference", sources: referenceSources });
@@ -412,6 +492,28 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
     throw new EnvelopeRefused([`intake.maxCommandsPerMinute must be an integer >= 1 (got ${String(rate)})`]);
   }
 
+  const supervision = input.intake.supervision ?? null;
+  if (supervision === null) {
+    questions.push({
+      about: "supervision",
+      ask: "Who watches this device while it runs: attended, unattended, or remote-supervised?",
+      why: "how the device is supervised is the operator's to state",
+    });
+  } else if (supervisionProblem(supervision)) {
+    throw new EnvelopeRefused([`intake.${supervisionProblem(supervision)}`]);
+  }
+
+  const givenHazards = input.intake.hazards;
+  if (givenHazards === undefined) {
+    questions.push({
+      about: "hazards",
+      ask: "Which hazards does this device present: biological, chemical, heat, laser, mechanical, or none?",
+      why: "none is an answer; silence is not",
+    });
+  } else if (hazardsProblem(givenHazards)) {
+    throw new EnvelopeRefused([`intake.${hazardsProblem(givenHazards)}`]);
+  }
+
   return {
     envelopeVersion: 1,
     deviceClass: template.id,
@@ -419,6 +521,8 @@ export function draftSafetyEnvelope(input: SafetyEnvelopeInput): SafetyEnvelopeD
     limits,
     eStop,
     maxCommandsPerMinute: rate ?? null,
+    supervision,
+    hazards: givenHazards === undefined ? null : canonicalHazards(givenHazards),
     questions,
     dropped,
   };
@@ -441,6 +545,8 @@ export interface EnvelopeDecision {
   edits?: EnvelopeEdit[];
   eStop?: EStopDeclaration;
   maxCommandsPerMinute?: number;
+  supervision?: Supervision;
+  hazards?: Hazard[];
 }
 
 /** The part of a confirmed envelope the digest commits. */
@@ -451,6 +557,9 @@ export interface SafetyEnvelopeBody {
   limits: EnvelopeLimit[];
   eStop: EStopDeclaration;
   maxCommandsPerMinute: number;
+  supervision: Supervision;
+  /** In canonical order; empty means the operator said none. */
+  hazards: Hazard[];
 }
 
 export interface ConfirmedSafetyEnvelope {
@@ -467,9 +576,11 @@ export function computeSafetyEnvelopeDigest(envelope: SafetyEnvelopeBody): Safet
 
 /**
  * The operator's one confirmation. Edits answer questions or change proposed
- * values; afterwards every required quantity must have a limit, the e-stop and
- * command rate must be settled, and no question may remain. Throws
- * `EnvelopeRefused` otherwise.
+ * values. Afterwards:
+ *   - every required quantity must have a limit;
+ *   - the e-stop, command rate, supervision and hazards must be settled;
+ *   - no question may remain.
+ * Throws `EnvelopeRefused` otherwise.
  */
 export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: EnvelopeDecision): ConfirmedSafetyEnvelope {
   const reasons: string[] = [];
@@ -510,6 +621,10 @@ export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: Enve
   if (decision.eStop) answered.add("e-stop");
   const rate = decision.maxCommandsPerMinute ?? draft.maxCommandsPerMinute;
   if (decision.maxCommandsPerMinute !== undefined) answered.add("command-rate");
+  const supervision = decision.supervision ?? draft.supervision;
+  if (decision.supervision !== undefined) answered.add("supervision");
+  const hazards = decision.hazards ?? draft.hazards;
+  if (decision.hazards !== undefined) answered.add("hazards");
 
   for (const q of draft.questions) {
     if (!answered.has(q.about)) reasons.push(`unanswered: ${q.ask}`);
@@ -521,7 +636,11 @@ export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: Enve
   if (stopProblem) reasons.push(stopProblem);
   const rateIssue = rateProblem(rate);
   if (rateIssue) reasons.push(rateIssue);
-  if (reasons.length > 0 || !eStop) throw new EnvelopeRefused(reasons);
+  const supervisionIssue = supervisionProblem(supervision);
+  if (supervisionIssue) reasons.push(supervisionIssue);
+  const hazardsIssue = hazardsProblem(hazards);
+  if (hazardsIssue) reasons.push(hazardsIssue);
+  if (reasons.length > 0 || !eStop || !hazards) throw new EnvelopeRefused(reasons);
 
   const envelope: SafetyEnvelopeBody = {
     envelopeVersion: 1,
@@ -534,6 +653,8 @@ export function confirmSafetyEnvelope(draft: SafetyEnvelopeDraft, decision: Enve
       ...(eStop.mechanism === "adapter-stop" ? { stopCommand: eStop.stopCommand } : {}),
     },
     maxCommandsPerMinute: rate as number,
+    supervision: supervision as Supervision,
+    hazards: canonicalHazards(hazards),
   };
   return {
     envelope,
@@ -568,9 +689,13 @@ export function compileSafetyEnvelope(confirmed: ConfirmedSafetyEnvelope): Compi
   const template = DEVICE_CLASS_TEMPLATES[envelope.deviceClass];
   if (!template) throw new EnvelopeRefused([`unknown deviceClass ${JSON.stringify(envelope.deviceClass)}`]);
   // A digest anyone can recompute, so the committed rules are checked again here.
-  const bodyProblems = [eStopProblem(envelope.eStop, template), rateProblem(envelope.maxCommandsPerMinute)].filter(
-    (p): p is string => p !== null,
-  );
+  const bodyProblems = [
+    eStopProblem(envelope.eStop, template),
+    rateProblem(envelope.maxCommandsPerMinute),
+    supervisionProblem(envelope.supervision),
+    hazardsProblem(envelope.hazards),
+    hazardsCanonicalProblem(envelope.hazards),
+  ].filter((p): p is string => p !== null);
   if (bodyProblems.length > 0) throw new EnvelopeRefused(bodyProblems);
 
   const parameters: CsdParameter[] = [];
