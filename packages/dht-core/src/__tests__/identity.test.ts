@@ -153,4 +153,46 @@ describe("identity", () => {
       expect(json).toContain('"kernelId":null');
     });
   });
+
+  // E1 finding 2: equal-priority endpoints enter the hashing/signing preimage,
+  // so their order must not depend on host ICU collation.
+  describe("equal-priority endpoints sort by UTF-16 code unit, never locale collation", () => {
+    const codeUnits = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    /** A non-JS mirror of canonicalIdentityJson: priority, then url by code unit. */
+    const mirror = (endpoints: PeerEndpoint[]) =>
+      JSON.stringify({
+        agentId: null,
+        did: "did:pcc:x",
+        endpoints: [...endpoints].sort((a, b) => a.priority - b.priority || codeUnits(a.url, b.url)),
+        kernelId: null,
+        publicKey: "00",
+      });
+
+    it("x_a vs x-a: the canonical JSON equals the code-unit mirror", () => {
+      // "-" (0x2d) < "_" (0x5f) by code unit; ICU collation puts "_" first.
+      const endpoints: PeerEndpoint[] = [
+        { transport: "websocket-direct", url: "wss://relay.example/x_a", priority: 1 },
+        { transport: "websocket-direct", url: "wss://relay.example/x-a", priority: 1 },
+      ];
+      expect(sortedEndpoints(endpoints).map((e) => e.url)).toEqual([
+        "wss://relay.example/x-a",
+        "wss://relay.example/x_a",
+      ]);
+      for (const order of [endpoints, [...endpoints].reverse()]) {
+        const id = createPeerIdentity({ did: "did:pcc:x", publicKey: "00", endpoints: order });
+        expect(canonicalIdentityJson(id)).toBe(mirror(endpoints));
+      }
+    });
+
+    it("urls that ICU calls equal still get one order, whatever the input order", () => {
+      const endpoints: PeerEndpoint[] = [
+        { transport: "websocket-direct", url: "wss://h.example/\u00e9", priority: 1 },
+        { transport: "websocket-direct", url: "wss://h.example/e\u0301", priority: 1 },
+      ];
+      const a = createPeerIdentity({ did: "did:pcc:x", publicKey: "00", endpoints });
+      const b = createPeerIdentity({ did: "did:pcc:x", publicKey: "00", endpoints: [...endpoints].reverse() });
+      expect(canonicalIdentityJson(a)).toBe(canonicalIdentityJson(b));
+      expect(canonicalIdentityJson(a)).toBe(mirror(endpoints));
+    });
+  });
 });

@@ -12,6 +12,7 @@
  * compare endpoints. Extracting this avoids two copies drifting.
  */
 
+import { compareCodeUnits } from "@pcc/spec";
 import type { PeerIdentity, PeerEndpoint, TransportType } from "@pcc/spec";
 
 // Re-export for convenience so dependants only need @pcc/dht-core
@@ -71,14 +72,14 @@ export function endpointsEqual(
 }
 
 /**
- * Sort endpoints by priority (asc), with stable secondary sort on URL
- * so the result is fully deterministic regardless of input ordering.
- * Lower priority value = preferred.
+ * Sort endpoints by priority (asc), with a secondary sort on URL in UTF-16
+ * code-unit order (never locale collation) so the result is deterministic
+ * regardless of input ordering or host ICU. Lower priority value = preferred.
  */
 export function sortedEndpoints(endpoints: PeerEndpoint[]): PeerEndpoint[] {
   return [...endpoints].sort((a, b) => {
     if (a.priority !== b.priority) return a.priority - b.priority;
-    return a.url.localeCompare(b.url);
+    return compareCodeUnits(a.url, b.url);
   });
 }
 
