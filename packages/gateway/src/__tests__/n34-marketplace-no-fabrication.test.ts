@@ -197,6 +197,31 @@ describe("NEGATIVE: outside demo, a fixture route refuses with 501 not_available
     expect((await req("POST", "/api/marketplace/orders", {})).statusCode).toBe(501);
   });
 
+  it("NEGATIVE (F-A, reviewer r1a): a gated write refuses BEFORE Fastify's body parser runs — malformed JSON is still 501, not 400", async () => {
+    // Cheapest reproduction from the finding: POST with Content-Type: application/json and
+    // a malformed payload. If the gate lives inside the handler (after body parsing),
+    // Fastify's own JSON content-type parser throws first and answers 400 — the intended
+    // unconditional 501 is never reached. Checked for every gated write, not just one.
+    for (const url of ["/api/marketplace/listings", "/api/marketplace/orders"]) {
+      const res = await app.inject({
+        method: "POST",
+        url,
+        headers: { "content-type": "application/json" },
+        payload: "{not json",
+      });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(501);
+      expect(res.json().error).toBe("not_available");
+    }
+    // PUT is a gated write too, and also takes a body.
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/marketplace/listings/lst-pla-175mm",
+      headers: { "content-type": "application/json" },
+      payload: "{not json",
+    });
+    expect(put.statusCode, put.body).toBe(501);
+  });
+
   it("an unknown id is 501 too, so the refusal does not reveal which fixture ids exist", async () => {
     for (const url of ["/api/marketplace/classes/nope", "/api/marketplace/listings/nope", "/api/marketplace/orders/nope"]) {
       expect((await req("GET", url)).statusCode).toBe(501);

@@ -242,7 +242,62 @@ const LISTINGS_NOT_RECORDED =
 const ORDERS_NOT_RECORDED =
   "Marketplace supply orders are not recorded on this gateway, so nothing is returned rather than an example.";
 
+// ── Demo gate, run BEFORE body parsing (board N34, reviewer-n34-a F-A) ──────
+//
+// The routes below used to gate with `if (!isDemoRoutesOn())` INSIDE each handler. Fastify
+// parses the JSON body before invoking a handler, so a malformed payload on a gated POST/PUT
+// (e.g. `{not json` with Content-Type: application/json) hit the parser's own 400 before the
+// intended unconditional 501 was ever reached — the refusal was supposed to happen before
+// ANY input is read, not just before the handler's own validation. Rewards/logistics/
+// orchestrator/protocols/spaces/agents already refuse in an encapsulated onRequest hook (runs
+// before preParsing), which is immune to this; this table brings marketplace's per-route
+// refusals (only, not the whole plugin — /categories and /roi stay live either way) into an
+// onRequest hook too, so the message and `see` stay exactly what each handler used to send.
+const REFUSED_ROUTE_KEYS: Readonly<Record<string, { message: string; see: string[] }>> = {
+  "GET /api/marketplace/classes": {
+    message: "Equipment classes and their market snapshots are not recorded on this gateway, so nothing is returned rather than an example.",
+    see: ["GET /api/capabilities/types", "GET /api/capabilities/templates", "GET /api/kernels/marketplace"],
+  },
+  "GET /api/marketplace/classes/:id": {
+    message: "Equipment class details, market snapshots and price history are not recorded on this gateway, so nothing is returned rather than an example.",
+    see: ["GET /api/capabilities/templates", "GET /api/capabilities/by-type/:type", "GET /api/kernels/marketplace"],
+  },
+  "GET /api/marketplace/demand-supply": {
+    message: "A network demand and supply timeline is not recorded on this gateway, so nothing is returned rather than an example.",
+    see: ["GET /api/jobs", "GET /api/kernels"],
+  },
+  "GET /api/marketplace/listings": { message: LISTINGS_NOT_RECORDED, see: [] },
+  "GET /api/marketplace/listings/:id": { message: LISTINGS_NOT_RECORDED, see: [] },
+  "POST /api/marketplace/listings": {
+    message: "Marketplace supply listings are not recorded on this gateway, so nothing was created.",
+    see: [],
+  },
+  "PUT /api/marketplace/listings/:id": {
+    message: "Marketplace supply listings are not recorded on this gateway, so nothing was changed.",
+    see: [],
+  },
+  "DELETE /api/marketplace/listings/:id": {
+    message: "Marketplace supply listings are not recorded on this gateway, so nothing was deleted.",
+    see: [],
+  },
+  "GET /api/marketplace/orders": { message: ORDERS_NOT_RECORDED, see: [] },
+  "GET /api/marketplace/orders/:id": { message: ORDERS_NOT_RECORDED, see: [] },
+  "POST /api/marketplace/orders": {
+    message: "Marketplace supply orders are not recorded on this gateway, so no order was placed.",
+    see: [],
+  },
+};
+
 export async function marketplaceRoutes(app: FastifyInstance) {
+  // Refuses a listed route before body parsing when demo mode is off; /categories and /roi
+  // are not in the table, so they always reach their own handler unchanged.
+  app.addHook("onRequest", async (req, reply) => {
+    if (isDemoRoutesOn()) return;
+    const refusal = REFUSED_ROUTE_KEYS[`${req.method} ${req.routeOptions.url ?? ""}`];
+    if (!refusal) return;
+    return notAvailable(reply, refusal.message, refusal.see);
+  });
+
   // List equipment classes with market snapshots
   app.get("/api/marketplace/classes", async (_req, reply) => {
     if (!isDemoRoutesOn()) {
