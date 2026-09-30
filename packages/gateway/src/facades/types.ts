@@ -21,6 +21,7 @@ import type {
   StepStatus,
   EscrowStatus,
   RegisteredSigner,
+  ExecutionPhase,
 } from "@pcc/spec";
 
 // ── Population Context ─────────────────────────────────────────────────────
@@ -132,10 +133,16 @@ export interface JobDTO {
   escrowStatus?: EscrowStatus;
   /** Estimated completion */
   estimatedCompletion?: Timestamp;
+  /**
+   * Execution phase read from `status` by the exact @pcc/spec table
+   * (executionPhaseOf). Undocumented values are `unknown`. It says nothing about
+   * evidence, verification or payment; for those use GET /api/jobs/:jobId/execution.
+   */
+  executionPhase?: ExecutionPhase;
 }
 
 export interface JobTimelineEvent {
-  type: "queued" | "started" | "progress" | "evidence_received" | "verification_started" | "verified" | "settled" | "failed" | "disputed";
+  type: "queued" | "started" | "progress" | "evidence_received" | "verification_started" | "verified" | "completed" | "settled" | "failed" | "disputed";
   timestamp: Timestamp;
   details?: Record<string, unknown>;
 }
