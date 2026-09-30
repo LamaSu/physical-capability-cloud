@@ -14,6 +14,13 @@
  * ±Infinity, cycles, sparse arrays, and objects that are neither plain nor
  * arrays (a Date, a Map, a class instance). An object member whose value is
  * undefined is dropped, as JSON and `canonicalize` both drop it.
+ *
+ * The copy holds exactly what canonical hashing covers, and nothing else:
+ *   - every copied object has a NULL prototype, so no value can be read
+ *     through inheritance (a polluted `Object.prototype`, changed after the
+ *     check, would otherwise supply terms the hash never covered);
+ *   - `-0` becomes `0`, as `canonicalize` writes both as "0";
+ *   - a key named `__proto__` is refused.
  */
 
 class NotPlainData extends Error {}
@@ -27,7 +34,7 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
     if (v === null || typeof v === "string" || typeof v === "boolean") return v;
     if (typeof v === "number") {
       if (!Number.isFinite(v)) throw new NotPlainData(`${at}: a non-finite number`);
-      return v;
+      return Object.is(v, -0) ? 0 : v;
     }
     if (typeof v !== "object") throw new NotPlainData(`${at}: a ${typeof v} is not JSON data`);
     if (ancestors.has(v)) throw new NotPlainData(`${at}: a cycle`);
@@ -46,7 +53,7 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
       }
       const proto: unknown = Object.getPrototypeOf(v);
       if (proto !== Object.prototype && proto !== null) throw new NotPlainData(`${at}: not a plain object`);
-      const out: Record<string, unknown> = {};
+      const out = Object.create(null) as Record<string, unknown>;
       for (const key of Object.keys(v)) {
         // `out["__proto__"] = x` would set the copy's PROTOTYPE, not a property: the
         // value would be read through inheritance but never hashed. JSON.parse makes
