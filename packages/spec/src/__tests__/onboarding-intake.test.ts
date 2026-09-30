@@ -10,6 +10,7 @@ import {
   INTAKE_FIELD_CLASSES,
   INTAKE_MILESTONES,
   INTAKE_FORBIDDEN_KEYS,
+  MILESTONE_IMPLIES,
   buildIntakeJsonSchema,
   buildFormHtml,
   IntakeAnswerSchema,
@@ -21,6 +22,7 @@ import {
   type IntakeRecord,
 } from "../onboarding/intake/index.js";
 import { getPrimitive } from "../evidence/primitives.js";
+import { RESEARCH_LIBRARY } from "../onboarding/research/index.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const SPEC_ROOT = join(TEST_DIR, "..", "..");
@@ -89,7 +91,10 @@ describe("INTAKE_FIELDS — registry integrity", () => {
     for (const field of INTAKE_FIELDS) {
       expect(INTAKE_FIELD_CLASSES).toContain(field.class);
       expect(INTAKE_GROUPS).toContain(field.group);
-      expect(INTAKE_MILESTONES).toContain(field.requiredFor);
+      expect(field.requiredFor.length).toBeGreaterThan(0);
+      for (const milestone of field.requiredFor) {
+        expect(INTAKE_MILESTONES).toContain(milestone);
+      }
       expect(field.fills.length).toBeGreaterThan(0);
       expect(field.question.length).toBeGreaterThan(0);
       expect(field.why.length).toBeGreaterThan(0);
@@ -200,6 +205,49 @@ describe("INTAKE_FIELDS — registry integrity", () => {
     // None of these are ever themselves a real intake field id.
     for (const key of INTAKE_FORBIDDEN_KEYS) {
       expect(INTAKE_FIELD_IDS.includes(key)).toBe(false);
+    }
+  });
+
+  it("location.cityCountry's question says plainly that the answer may be shown publicly", () => {
+    const field = INTAKE_FIELDS.find((f) => f.id === "location.cityCountry")!;
+    expect(field.question.toLowerCase()).toContain("public");
+  });
+
+  it("safety.supervision and safety.estop are required at both publish and accept-jobs (review fix), and stay neverDefault", () => {
+    const supervision = INTAKE_FIELDS.find((f) => f.id === "safety.supervision")!;
+    const estop = INTAKE_FIELDS.find((f) => f.id === "safety.estop")!;
+    for (const field of [supervision, estop]) {
+      expect([...field.requiredFor].sort()).toEqual(["accept-jobs", "publish"]);
+      expect(field.neverDefault).toBe(true);
+      // Never "register": that comes before any device is even described.
+      expect(field.requiredFor).not.toContain("register");
+    }
+  });
+});
+
+// ── 1b. MILESTONE_IMPLIES — the cumulative-readiness closure (review fix) ─
+
+describe("MILESTONE_IMPLIES — milestone implication closure", () => {
+  it("chains the onboarding ladder, the evidence ladder, and the two named cross-links", () => {
+    expect([...MILESTONE_IMPLIES.register].sort()).toEqual(["register"]);
+    expect([...MILESTONE_IMPLIES.identify].sort()).toEqual(["identify", "register"]);
+    expect([...MILESTONE_IMPLIES["register-device"]].sort()).toEqual(["identify", "register", "register-device"]);
+    expect([...MILESTONE_IMPLIES.publish].sort()).toEqual(["identify", "publish", "register", "register-device"]);
+    expect([...MILESTONE_IMPLIES["accept-jobs"]].sort()).toEqual(
+      ["accept-jobs", "identify", "publish", "register", "register-device"].sort(),
+    );
+    expect([...MILESTONE_IMPLIES.tier1].sort()).toEqual(["identify", "register", "register-device", "tier1"].sort());
+    expect([...MILESTONE_IMPLIES.tier2].sort()).toEqual(
+      ["identify", "register", "register-device", "tier1", "tier2"].sort(),
+    );
+    expect([...MILESTONE_IMPLIES["get-paid"]].sort()).toEqual(
+      ["get-paid", "identify", "publish", "register", "register-device"].sort(),
+    );
+    // "optional" implies nothing, and nothing implies it.
+    expect([...MILESTONE_IMPLIES.optional]).toEqual(["optional"]);
+    for (const milestone of INTAKE_MILESTONES) {
+      if (milestone === "optional") continue;
+      expect(MILESTONE_IMPLIES[milestone]).not.toContain("optional");
     }
   });
 });
@@ -325,8 +373,8 @@ describe("validateIntake — a fully and correctly answered record", () => {
     }
   });
 
-  it("publish requires exactly the expected 6 fields", () => {
-    const publishFields = INTAKE_FIELDS.filter((f) => f.requiredFor === "publish").map((f) => f.id).sort();
+  it("publish directly requires exactly the expected 8 fields (review fix: safety.estop/supervision now gate publish too)", () => {
+    const publishFields = INTAKE_FIELDS.filter((f) => f.requiredFor.includes("publish")).map((f) => f.id).sort();
     expect(publishFields).toEqual(
       [
         "capability.parameters",
@@ -335,8 +383,85 @@ describe("validateIntake — a fully and correctly answered record", () => {
         "pricing.currency",
         "pricing.minimum",
         "pricing.unitPrice",
+        "safety.estop",
+        "safety.supervision",
       ].sort(),
     );
+  });
+});
+
+// ── 3b. validateIntake — cumulative milestone readiness (review fix) ─────
+// Readiness for a later milestone in a chain also requires every field of
+// the milestones it implies (MILESTONE_IMPLIES) — a record can never be
+// "ready" for a later milestone while missing an earlier one's fields.
+
+describe("validateIntake — cumulative milestone readiness (review fix)", () => {
+  it("a record missing a publish-level field (pricing) is NOT ok for accept-jobs", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    delete record.answers["pricing.unitPrice"];
+
+    const publishReport = validateIntake(record, "publish");
+    expect(publishReport.ok).toBe(false);
+    expect(publishReport.missing).toContain("pricing.unitPrice");
+
+    const acceptJobsReport = validateIntake(record, "accept-jobs");
+    expect(acceptJobsReport.ok).toBe(false);
+    expect(acceptJobsReport.missing).toContain("pricing.unitPrice");
+  });
+
+  it("register-device readiness also requires identify and register fields", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    delete record.answers["device.description"]; // required for "identify"
+    delete record.answers["operator.displayName"]; // required for "register"
+
+    const report = validateIntake(record, "register-device");
+    expect(report.ok).toBe(false);
+    expect(report.missing).toEqual(expect.arrayContaining(["device.description", "operator.displayName"]));
+  });
+
+  it("get-paid readiness also requires publish fields", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    delete record.answers["capability.type"]; // required for "publish"
+
+    const report = validateIntake(record, "get-paid");
+    expect(report.ok).toBe(false);
+    expect(report.missing).toContain("capability.type");
+  });
+
+  it("a tier2 check also requires tier1 fields (and, transitively, register-device)", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    delete record.answers["evidence.executorDeviceId"]; // required for "tier1"
+    delete record.answers["device.vendor"]; // required for "register-device"
+
+    const tier1Report = validateIntake(record, "tier1");
+    expect(tier1Report.ok).toBe(false);
+    expect(tier1Report.missing).toEqual(expect.arrayContaining(["evidence.executorDeviceId", "device.vendor"]));
+
+    const tier2Report = validateIntake(record, "tier2");
+    expect(tier2Report.ok).toBe(false);
+    expect(tier2Report.missing).toEqual(expect.arrayContaining(["evidence.executorDeviceId", "device.vendor"]));
+  });
+
+  it("an optional field is never missing for any other milestone, only for 'optional' itself", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    delete record.answers["sla.acceptanceWindowSec"]; // requiredFor: ["optional"]
+
+    for (const milestone of INTAKE_MILESTONES) {
+      if (milestone === "optional") continue;
+      const report = validateIntake(record, milestone);
+      expect(report.missing).not.toContain("sla.acceptanceWindowSec");
+    }
+    expect(validateIntake(record, "optional").missing).toContain("sla.acceptanceWindowSec");
+  });
+
+  it("a device cannot be ready for publish without safety.supervision and safety.estop answered (review fix)", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    delete record.answers["safety.supervision"];
+    delete record.answers["safety.estop"];
+
+    const report = validateIntake(record, "publish");
+    expect(report.ok).toBe(false);
+    expect(report.missing).toEqual(expect.arrayContaining(["safety.supervision", "safety.estop"]));
   });
 });
 
@@ -456,6 +581,57 @@ describe("validateIntake — forbidden keys are always refused", () => {
   });
 });
 
+// ── 6b. Forbidden keys match loosely: case/underscore/hyphen-insensitive ──
+// (review fix — was exact-match only).
+
+describe("validateIntake — forbidden keys match loosely (case/underscore/hyphen-insensitive)", () => {
+  it.each([
+    "assurance_tier",
+    "AssuranceTier",
+    "ASSURANCE_TIER",
+    "private-key",
+    "PrivateKey",
+    "HASH",
+    "device_key_binding",
+  ])("treats %s as a variant of its canonical forbidden key inside an answer's value", (variant) => {
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["evidence.referenceSample"] = human({
+      available: true,
+      expectedResultRef: "cube-20mm",
+      [variant]: "smuggled",
+    });
+    const report = validateIntake(record, "tier1");
+    expect(report.ok).toBe(false);
+    expect(report.forbiddenKeys).toContain(`evidence.referenceSample.${variant}`);
+  });
+
+  it("treats a loose-variant field id as forbidden too", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    (record.answers as Record<string, IntakeAnswer>)["Assurance-Tier"] = human(true);
+    const report = validateIntake(record, "register");
+    expect(report.ok).toBe(false);
+    expect(report.forbiddenKeys).toContain("Assurance-Tier");
+  });
+
+  it("still refuses the exact canonical spelling (loose matching doesn't regress exact matches)", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["evidence.referenceSample"] = human({
+      available: true,
+      freshness: "now",
+    });
+    const report = validateIntake(record, "tier1");
+    expect(report.forbiddenKeys).toContain("evidence.referenceSample.freshness");
+  });
+
+  it("does not flag unrelated keys that merely share a substring with a forbidden key", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    // "restockedBy" shares no normalized form with any forbidden key; sanity
+    // check that ordinary field values are never swept up by loose matching.
+    const report = validateIntake(record, "accept-jobs");
+    expect(report.forbiddenKeys).toEqual([]);
+  });
+});
+
 // ── 7. Unknown fields ─────────────────────────────────────────────────────
 
 describe("validateIntake — unknown fields", () => {
@@ -517,6 +693,52 @@ describe("intakeFieldArtifactMap", () => {
     for (const field of INTAKE_FIELDS) {
       for (const fill of field.fills) {
         expect(map[fill.artifact]).toContain(field.id);
+      }
+    }
+  });
+});
+
+// ── 9b. IntakeFieldDef.ifUnknown — R2 rule 3 ("I don't know" routing) ────
+
+describe("IntakeFieldDef.ifUnknown", () => {
+  it("every ifUnknown.research id exists in RESEARCH_LIBRARY", () => {
+    const researchIds = new Set(RESEARCH_LIBRARY.map((e) => e.id));
+    for (const field of INTAKE_FIELDS) {
+      if (field.ifUnknown && "research" in field.ifUnknown) {
+        expect(
+          researchIds.has(field.ifUnknown.research),
+          `${field.id} -> unknown research id "${field.ifUnknown.research}"`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("every neverDefault field has an ifUnknown", () => {
+    for (const field of INTAKE_FIELDS) {
+      if (field.neverDefault) {
+        expect(field.ifUnknown, `${field.id} is neverDefault but has no ifUnknown`).toBeDefined();
+      }
+    }
+  });
+
+  it("money fields (pricing.*, payout.destination) always get a check, never a research-only shortcut", () => {
+    const moneyIds = ["pricing.unitPrice", "pricing.minimum", "pricing.currency", "payout.destination"];
+    for (const id of moneyIds) {
+      const field = INTAKE_FIELDS.find((f) => f.id === id)!;
+      expect(field.ifUnknown && "check" in field.ifUnknown, `${id} should have a check-type ifUnknown`).toBe(true);
+    }
+  });
+
+  it("the generated schema includes x-pcc-ifUnknown exactly where a field declares it", () => {
+    const schema = buildIntakeJsonSchema() as {
+      properties: { answers: { properties: Record<string, Record<string, unknown>> } };
+    };
+    const answerProps = schema.properties.answers.properties;
+    for (const field of INTAKE_FIELDS) {
+      if (field.ifUnknown) {
+        expect(answerProps[field.id]["x-pcc-ifUnknown"]).toEqual(field.ifUnknown);
+      } else {
+        expect(answerProps[field.id]["x-pcc-ifUnknown"]).toBeUndefined();
       }
     }
   });
