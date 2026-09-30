@@ -22,6 +22,7 @@ import {
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
+import { gatewayPaymentsGate } from "../services/gateway-spend-guard.js";
 
 /**
  * Look up an escrow row by its on-chain contract address. The single DB query
@@ -287,6 +288,19 @@ export async function escrowRoutes(app: FastifyInstance) {
             "Funding is limited to protocol-created escrows.",
         });
       }
+      // N46 (astra pack 104, HIGH): the gateway signer funds here. Refuse when
+      // the payment kill switch is off / the config is invalid / the clock
+      // regressed, and bind funding to the escrow's payer or the admin — before,
+      // any authenticated key could fund any known escrow, even with payments
+      // disabled. (The per-amount daily debit for deferred funding awaits the
+      // reservation ledger; this closes the open door and the disabled bypass.)
+      // N46 (astra pack 104, HIGH): the gateway signer funds here. The payment
+      // kill switch / a malformed config / a regressed clock must stop it — before,
+      // /fund signed even with payments disabled. (The caps PR is master-based;
+      // the payer-or-admin AUTHORITY binding for this route rides WP-A #326, where
+      // the owner helpers live. The per-amount daily debit awaits the ledger.)
+      const gate = gatewayPaymentsGate();
+      if (!gate.ok) return reply.status(gate.status).send({ error: gate.error, message: gate.message });
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
       const activityResult = await fundEscrowActivity.invoke({
         workflowRunId: `escrow:${address}`,

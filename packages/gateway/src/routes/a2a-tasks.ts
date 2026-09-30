@@ -511,8 +511,18 @@ export async function commitPccSession(
       .where(eq(negotiationSessions.id, sessionId))
       .get();
     if (committedRow) paidJob = await createJobFromSession(committedRow, spender);
-  } catch {
-    // best-effort
+  } catch (err) {
+    // N46 (astra pack 104, F3): never swallow a real-settlement failure into a
+    // false "committed". A spend-cap refusal and, in REAL settlement, any wiring
+    // error propagate so the dispatcher returns a JSON-RPC error. Mock/dev stays
+    // best-effort.
+    if (err instanceof GatewaySpendRefusedError) throw err;
+    if (!isMockSettlement()) throw err instanceof Error ? err : new Error(String(err));
+  }
+  // REAL settlement with no on-chain escrow is not a committed deal (money-path
+  // honesty, as the negotiation /commit route already enforces).
+  if (!isMockSettlement() && !paidJob?.escrowAddress) {
+    throw new Error("Real settlement completed without an on-chain escrow address");
   }
 
   return {

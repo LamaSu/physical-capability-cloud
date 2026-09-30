@@ -8,6 +8,7 @@ import {
   __resetGatewaySpendGuardForTests,
   admitFaucetDrip,
   admitGatewaySpend,
+  gatewayPaymentsGate,
   admitRelay,
   checkGatewaySpend,
   GATEWAY_SPEND_REFUSED_PREFIX,
@@ -257,6 +258,20 @@ describe("pack 103 fail-closed fixes", () => {
     }
     // A sixth call, same principal, a SIXTH key: refused on the principal bucket.
     expect(admitFaucetDrip({ wallet: "0xw6", amount: 1, spender: { principal: "victim", apiKeyId: "k6" } })).toMatchObject({ status: 429, error: "faucet_rate_limited" });
+  });
+
+  it("gatewayPaymentsGate: ok on an enabled testnet, refuses when disabled/misconfigured/regressed, and counts nothing", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    expect(gatewayPaymentsGate().ok).toBe(true);
+    // It must NOT consume any allowance (deferred funding was already admitted at creation).
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+    for (let i = 0; i < 100; i += 1) expect(gatewayPaymentsGate().ok).toBe(true);
+    expect(admitGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(25) }).ok).toBe(true);
+    delete process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD;
+    process.env.PCC_GATEWAY_PAYS_ENABLED = "false";
+    expect(gatewayPaymentsGate()).toMatchObject({ status: 503, error: "gateway_pays_disabled" });
+    process.env.PCC_GATEWAY_PAYS_ENABLED = " ";
+    expect(gatewayPaymentsGate()).toMatchObject({ status: 503, error: "gateway_pays_misconfigured" });
   });
 
   it("[neg] F4: a backward clock step across a UTC day is refused (no allowance replenish)", () => {

@@ -320,6 +320,28 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
  * counted even if the signer path later fails, because a failure can follow a
  * write that moved funds; the guard never under-counts.
  */
+/**
+ * The "may the gateway pay at all right now?" gate: the kill switch, a valid
+ * config, and a non-regressed clock — WITHOUT counting anything against the
+ * daily caps. Deferred-funding paths (the standalone /fund route, the settlement
+ * crank) use this so a disabled or misconfigured gateway never signs a funding,
+ * without double-counting an amount already admitted at escrow creation. The
+ * per-amount daily debit for deferred funding needs the reservation ledger
+ * (parked for the operator's schema approval).
+ */
+export function gatewayPaymentsGate(): GatewaySpendDecision {
+  const cfg = readConfig();
+  if (!cfg.ok) {
+    alertOnce(`misconfigured:${cfg.problem}`, `gateway-paid actions refused: ${cfg.problem}`);
+    return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." };
+  }
+  if (!cfg.enabled) {
+    return { ok: false, status: 503, error: "gateway_pays_disabled", message: "The gateway does not pay on callers' behalf here (PCC_GATEWAY_PAYS_ENABLED is off)." };
+  }
+  if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
+  return { ok: true };
+}
+
 export function admitGatewaySpend(input: GatewaySpendInput): GatewaySpendDecision {
   if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
   const decision = checkGatewaySpend(input);

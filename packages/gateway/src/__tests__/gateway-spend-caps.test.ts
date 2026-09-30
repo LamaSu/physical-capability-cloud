@@ -371,6 +371,35 @@ describe("N46: gateway-paid escrow funding is capped before the signer is asked"
     expect(negotiation.settlementFailureClass!("test: signer write intercepted")).toBe("settlement_failed:onchain_maybe_minted");
   });
 
+  it("[neg] 104/F3: submit-from-discovery does NOT leave a committed session when funding fails (rolls back, surfaces the error)", async () => {
+    const key = keyFor(uid("buyer-disc-rollback") + "@x.test");
+    const userAgentId = uid("disc-rollback-agent");
+    // Caps are generous; the intercepted signer write throws, so funding fails.
+    const res = await call("POST", "/api/jobs/submit-from-discovery", key, {
+      kernelId: KERNEL, capabilityType: CAP, userAgentId,
+    });
+    expect(res.statusCode, res.body).not.toBe(201);
+    expect(signer.writes.length).toBeGreaterThan(0);
+    const rows = getStore().db.select().from(negotiationSessions).where(eq(negotiationSessions.userAgentId, userAgentId)).all();
+    expect(rows, "no committed session must remain after a funding failure").toEqual([]);
+  });
+
+  it("[neg] 104/F3: A2A pcc-submit does NOT report COMPLETED with a null escrow when real settlement fails", async () => {
+    const key = keyFor(uid("buyer-a2a-honesty") + "@x.test");
+    const userAgentId = uid("a2a-honesty-agent");
+    const res = await app.inject({
+      method: "POST", url: "/a2a/tasks/send",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      payload: JSON.stringify({ jsonrpc: "2.0", id: uid("rpc"), method: "tasks/send", params: { skill: "pcc-submit", params: { userAgentId, kernelId: KERNEL, capabilityType: CAP } } }),
+    });
+    expect(res.statusCode).toBe(200); // JSON-RPC envelope
+    const body = res.json();
+    // Must be an error, never a COMPLETED task carrying a null escrow.
+    const completedNullEscrow = body.result?.state === "COMPLETED" && !body.result?.artifacts?.[0]?.data?.escrowAddress;
+    expect(completedNullEscrow, JSON.stringify(body).slice(0, 300)).toBe(false);
+    expect(signer.writes.length).toBeGreaterThan(0);
+  });
+
   it("control: a commit within every cap reaches the signer (the guard does not block legitimate spending)", async () => {
     const key = keyFor(uid("buyer-ok") + "@x.test");
     const res = await commit(await reviewedSession(key, "10.00"), key);

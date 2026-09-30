@@ -931,7 +931,20 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         return reply.status(500).send({ error: "Failed to create session" });
       }
 
-      const result = await createJobFromSession(sessionRow, spender);
+      let result;
+      try {
+        result = await createJobFromSession(sessionRow, spender);
+      } catch (err) {
+        // N46 (astra pack 104, F3): the session row was already inserted; a
+        // funding failure (a spend-cap refusal, or any wiring error) must NOT
+        // leave a committed session with no job. Remove it, then surface the
+        // error — never a false 201.
+        try { db.delete(negotiationSessions).where(eq(negotiationSessions.id, sessionId)).run(); } catch { /* best-effort cleanup */ }
+        if (err instanceof GatewaySpendRefusedError) {
+          return reply.status(err.status).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
 
       pipelineTelemetry.emit(result.jobId, "job_accepted", "completed", {
         metadata: {
