@@ -43,15 +43,7 @@ const BOUNDARY = "lib/gateway-base.ts";
  * times it occurs and why it was reviewed. An edit to such a line, or one
  * more copy of it, fails the test until it is reviewed again.
  */
-const DISPLAY_ONLY: Record<string, { line: string; count: number; why: string }[]> = {
-  "pages/AgentLinkPage.tsx": [
-    {
-      line: 'if (PCC_API_KEY) headers["Authorization"] = \\`Bearer \\${PCC_API_KEY}\\`;',
-      count: 2,
-      why: "text inside the two quickstart scripts the page shows for the user to copy (buildClaudeQuickstart, buildOpenAIQuickstart); a template string the dashboard never runs",
-    },
-  ],
-};
+const DISPLAY_ONLY: Record<string, { line: string; count: number; why: string }[]> = {};
 
 function productionFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
