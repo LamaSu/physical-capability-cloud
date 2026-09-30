@@ -32,7 +32,7 @@ import {
   type MeasurementProfileV1,
 } from "../evidence/measurement-profile.js";
 import { signingPreimage } from "../evidence/signing-preimage.js";
-import { hashBundle, hashEvent } from "../util/canonical.js";
+import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../evidence/subject-binding.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
@@ -1132,5 +1132,68 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
     expect(codes(r)).not.toContain("unbound-bundle");
     expect(codes(r)).not.toContain("contradictory-evidence");
     expect(r.decision).not.toBe("admit");
+  });
+});
+
+// ── astra r3 (pack 74, gpt-5.6-sol) ──
+describe("profile admission — astra r3 (pack 74): the committed profile is the evaluated profile", () => {
+  /** The pilot profile, JSON-parsed, with measurement.sampling holding only a "__proto__" member. */
+  function protoProfile(minSamples: number): MeasurementProfileV1 {
+    const json = JSON.stringify(inspectedPageProfile()).replace('"sampling":{"minSamples":1}', `"sampling":{"__proto__":{"minSamples":${minSamples}}}`);
+    expect(json).toContain('"__proto__"');
+    return JSON.parse(json) as MeasurementProfileV1;
+  }
+  /** The digest a copy that dropped the __proto__ member would carry: sampling hashed as {}. */
+  function digestOfStripped(p: MeasurementProfileV1): string {
+    const stripped = JSON.parse(JSON.stringify(p).replace(/"sampling":\{"__proto__":\{[^}]*\}\}/, '"sampling":{}'));
+    return "0x" + createHash("sha256").update(canonicalize({ domain: "PCC:measurement-profile:v1", profile: stripped })).digest("hex");
+  }
+
+  it("a JSON __proto__ member cannot carry a weaker minSamples under a stricter commitment: reject, never admit", async () => {
+    const committed = protoProfile(2);
+    const presented = protoProfile(1);
+    const committedDigest = digestOfStripped(committed);
+    expect(digestOfStripped(presented)).toBe(committedDigest); // the bytes a stripping copy would hash are identical
+    // One qualifying sample, its observation naming the committed digest (the commitment asked for two).
+    const drafts = PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), profileDigest: committedDigest } }));
+    const bundles = [await toBundle(drafts, inspectedPageProfile())];
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    // Called directly: the admit() helper computes a default digest from the presented profile,
+    // which now refuses a __proto__ member outright (computeMeasurementProfileDigest throws).
+    expect(() => computeMeasurementProfileDigest(presented)).toThrow(/__proto__/);
+    const r = await profileAdmitsBundle({
+      profile: presented,
+      committedDigest,
+      subject,
+      bundles,
+      pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    });
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toContain("profile-invalid");
+    expect(r.reasons.map((x) => x.detail).join(" ")).toMatch(/__proto__/);
+  });
+
+  it("a throwing getter on a top-level input field resolves to reject; the call never throws", async () => {
+    const p = inspectedPageProfile();
+    const bundles = [await toBundle(PILOT, p)];
+    const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+    const input = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject,
+      bundles,
+      verifyBundleSignature: verifySignature,
+      verifyPrimitiveInstance: () => true,
+    } as Record<string, unknown>;
+    Object.defineProperty(input, "pinnedBundleSetDigest", {
+      enumerable: true,
+      get() {
+        throw Object.create(null);
+      },
+    });
+    const r = await profileAdmitsBundle(input as unknown as ProfileAdmissionInput);
+    expect(r.decision).toBe("reject");
   });
 });
