@@ -280,6 +280,29 @@ describe("the DTO never claims what the gateway does not record", () => {
     expect(dto.bundles[0]!.events).toMatchObject({ count: 2, types: ["execution_completed", "photo_captured"], firstAt: expect.any(String), lastAt: expect.any(String) });
   });
 
+  it("NEGATIVE (M5): equivalent ISO-8601 offsets sort by actual time, not raw string, newest first", async () => {
+    const older = await loEvBundle("b-off", [ev("e1", "execution_completed")]);
+    older.createdAt = "2026-09-28T12:00:00+02:00"; // = 2026-09-28T10:00:00Z, chronologically OLDER
+    const newer = await loEvBundle("b-utc", [ev("e1", "execution_completed")]);
+    newer.createdAt = "2026-09-28T10:30:00Z"; // 30 minutes later than 10:00:00Z
+    const dto = await build([older, newer]);
+    expect(dto.bundles.map((b) => b.bundleId)).toEqual(["b-utc", "b-off"]);
+    // Still shown exactly as recorded, not normalized.
+    expect(dto.bundles[0]!.storedAt).toBe("2026-09-28T10:30:00Z");
+    expect(dto.bundles[1]!.storedAt).toBe("2026-09-28T12:00:00+02:00");
+  });
+
+  it("NEGATIVE (M5): an unparseable storedAt sorts last, not first; equal times break the tie by bundleId", async () => {
+    const bad = await loEvBundle("b-zzz", [ev("e1", "execution_completed")]);
+    bad.createdAt = "not a time";
+    const a = await loEvBundle("b-a", [ev("e1", "execution_completed")]);
+    a.createdAt = "2026-09-28T10:00:00.000Z";
+    const b = await loEvBundle("b-b", [ev("e1", "execution_completed")]);
+    b.createdAt = "2026-09-28T10:00:00.000Z";
+    const dto = await build([bad, b, a]);
+    expect(dto.bundles.map((x) => x.bundleId)).toEqual(["b-a", "b-b", "b-zzz"]);
+  });
+
   it("NEGATIVE: an unreadable store is unavailable with null counts, never none", async () => {
     const dto = await buildEvidenceProvenanceDTO("job-1", { ok: false }, AS_OF);
     expect(dto).toMatchObject({ state: "unavailable", counts: null, bundles: [], schemaId: "pcc.evidence-provenance/v1" });

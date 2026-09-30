@@ -239,6 +239,24 @@ const NO_VERDICT = {
   reason: "The gateway stores no verifier or oracle verdict for a bundle, so it cannot say this evidence was verified.",
 };
 
+/**
+ * Newest-first bundle order (spec: "Newest first"), by the time storedAt PARSES to, not its raw
+ * string (evidence M5: equivalent ISO-8601 offsets, e.g. "+02:00" vs "Z", can reverse actual time
+ * order under a string comparison). A storedAt that does not parse sorts after every bundle that
+ * does — it is never mistaken for the newest. Equal (or equally unparseable) times break the tie
+ * on bundleId, ascending, so the order is deterministic across reads. storedAt itself is always
+ * displayed exactly as recorded; only the sort key is parsed.
+ */
+function compareBundlesNewestFirst(a: ProvenanceBundle, b: ProvenanceBundle): number {
+  const aMs = Date.parse(a.storedAt);
+  const bMs = Date.parse(b.storedAt);
+  const aValid = Number.isFinite(aMs);
+  const bValid = Number.isFinite(bMs);
+  if (aValid && bValid && aMs !== bMs) return bMs - aMs; // newest first
+  if (aValid !== bValid) return aValid ? -1 : 1; // parseable before unparseable
+  return a.bundleId < b.bundleId ? -1 : a.bundleId > b.bundleId ? 1 : 0; // stable tiebreak
+}
+
 export async function buildEvidenceProvenanceDTO(
   jobId: string,
   read: SourceRead<ProvenanceBundleRow[]>,
@@ -249,7 +267,7 @@ export async function buildEvidenceProvenanceDTO(
     return { ...base, state: "unavailable", reason: "The evidence store could not be read.", bundles: [], counts: null };
   }
   const bundles = await Promise.all(read.value.map((b) => bundleOf(jobId, b)));
-  bundles.sort((a, b) => (a.storedAt < b.storedAt ? 1 : a.storedAt > b.storedAt ? -1 : a.bundleId < b.bundleId ? -1 : 1));
+  bundles.sort(compareBundlesNewestFirst);
   return {
     ...base,
     state: bundles.length === 0 ? "none" : "received",
