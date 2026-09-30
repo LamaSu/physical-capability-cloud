@@ -83,7 +83,7 @@ jobs:
   # — build once, deploy many.
   build-image:
     runs-on: ubuntu-latest
-    needs: [build-and-test, forge-tests]
+    needs: [build-and-test, forge-tests, scripts-python-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: read
@@ -228,3 +228,23 @@ jobs:
   # workflow_dispatch trigger. That "click to run" is our manual gate:
   # GitHub Free + private repos can't enforce required-reviewer rules on
   # environments, but a manual dispatch requires the same human intent.
+
+  # Board row N4a: the OT-2 executor start guard. Stdlib-only tests: no install step.
+  # Several Pythons, because ipaddress parsing changed between them (leading zeros,
+  # IPv6 zone ids); 3.10 is what current OT-2 robot software runs.
+  scripts-python-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: OT-2 executor start-guard tests
+        run: python -m unittest -v scripts/test_ot2_executor_guard.py
