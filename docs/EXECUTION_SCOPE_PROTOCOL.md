@@ -295,9 +295,33 @@ Query via: `GET /api/relay/:kernelId/scope/:scopeId/audit`
 
 ## Emergency Stop Integration
 
-The operator dashboard's Emergency Stop button:
-1. Revokes ALL active scopes for the kernel
-2. Sends "stop" action to all active runs
-3. Rejects all pending tool calls
-4. Sets kernel status to "emergency_stopped"
-5. Requires manual resume + new scope creation
+What `POST /api/operator/emergency-stop` does today (`routes/operator.ts`):
+1. Sets `operatorPolicies.policy.emergencyStop = true` for the kernel.
+2. Rejects that kernel's pending job **approvals**.
+
+What that flag then enforces:
+- **The relay refuses to dispatch.** While `emergencyStop` is set, `GET
+  /tool-call/pending` rejects every queued call (`emergency_stopped`) instead
+  of handing it to the device (see Dispatch, above). So no queued relay command
+  reaches the device under an engaged stop.
+
+Not yet done by the endpoint (planned; do not rely on it): it does not revoke
+active execution scopes, does not send a "stop" to an in-flight run, and does
+not change the kernel's status. Resume is by clearing the flag; scopes that were
+active remain active. Stopping an in-flight run and revoking scopes on e-stop is
+tracked follow-up.
+
+### The authoritative physical-safety boundary is the operator node
+
+The gateway relay is a best-effort **admission** gate: it re-checks the safety
+governor, the circuit breaker and the emergency stop at dispatch, and claims a
+row atomically so a revoked/expired/duplicate call is not handed out. But the
+breaker and governor state are **per gateway instance and in-memory**
+(`packages/kernel/src/safety/gateway.ts`): a horizontally-scaled second instance
+has independent safety truth, and a deploy resets it. And once a call is handed
+to the executor, the gateway cannot recall it. Therefore the authoritative,
+single-instance, per-device safety boundary is the **operator node**: the OT-2
+start guard (N4a) and pcc-node's per-command checks (N4b-robot), which sit in
+front of the actual actuator. Shared cross-instance safety state (a common
+breaker/e-stop store) is a separate gateway-scaling concern, tracked apart from
+this relay.

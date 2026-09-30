@@ -1674,4 +1674,36 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     expect((await poll()).count).toBe(0);
     expect(rowOf("tc-estop")).toMatchObject({ status: "rejected", error: "emergency_stopped" });
   });
+
+  it("F2: two concurrent polls never both claim the same row (atomic compare-and-set)", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    seedCall("tc-race", "run_create", scope);
+    // Delay validateOnly so both polls clear safety and race to claim.
+    const spy = vi.spyOn(getSafetyGateway(), "validateOnly").mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 15));
+      return { allowed: true, executed: false } as never;
+    });
+    try {
+      const [a, b] = await Promise.all([poll(), poll()]);
+      const returned = [...a.calls, ...b.calls]
+        .map((c: { id: string }) => c.id)
+        .filter((id) => id === "tc-race");
+      expect(returned).toEqual(["tc-race"]); // exactly one poll got it, not both
+      expect(rowOf("tc-race").status).toBe("claimed");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("F3: an open breaker stores the stable reason circuit_open", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    seedCall("tc-reason", "run_create", scope);
+    const gw = getSafetyGateway();
+    gw.resetCircuit("kernel-test-1");
+    gw.recordDeviceFailure("kernel-test-1");
+    gw.recordDeviceFailure("kernel-test-1");
+    gw.recordDeviceFailure("kernel-test-1");
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-reason").error).toBe("circuit_open");
+  });
 });

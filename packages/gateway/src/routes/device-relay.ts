@@ -755,7 +755,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       if (refusal) {
         db.update(toolCallRelay)
           .set({ status: "rejected", error: refusal, completedAt: now })
-          .where(eq(toolCallRelay.id, call.id))
+          .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
           .run();
         continue;
       }
@@ -768,7 +768,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       if (emergencyStopEngaged(kernelId)) {
         db.update(toolCallRelay)
           .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
-          .where(eq(toolCallRelay.id, call.id))
+          .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
           .run();
         continue;
       }
@@ -786,11 +786,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         if (!verdict.allowed) {
           db.update(toolCallRelay)
             .set({
+              // Prefer the top-level reason (e.g. "circuit_open") over the
+              // verbose nested verdict, so the stored reason is stable.
               status: "rejected",
-              error: verdict.verdict?.reason ?? verdict.reason ?? "safety_denied",
+              error: verdict.reason ?? verdict.verdict?.reason ?? "safety_denied",
               completedAt: now,
             })
-            .where(eq(toolCallRelay.id, call.id))
+            .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
             .run();
           continue;
         }
@@ -799,10 +801,19 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         // we cannot clear. Leave the call queued for the next poll.
         continue;
       }
-      db.update(toolCallRelay)
+      // Atomic, EXCLUSIVE claim (findings F1/F2): claim the row only if it is
+      // still `pending`. This is a compare-and-set — SQLite runs it as one
+      // statement — so (a) two concurrent polls cannot both take the same row
+      // (no duplicate dispatch past the budget), and (b) a revoke, expiry or
+      // e-stop that rejected the row while our async safety check awaited leaves
+      // it non-`pending`, so this claim changes 0 rows and we do NOT return it.
+      // The row is returned to the executor only if THIS poll won the claim.
+      const claimed = db
+        .update(toolCallRelay)
         .set({ status: "claimed", claimedAt: now })
-        .where(eq(toolCallRelay.id, call.id))
+        .where(and(eq(toolCallRelay.id, call.id), eq(toolCallRelay.status, "pending")))
         .run();
+      if ((claimed as { changes?: number }).changes !== 1) continue;
       pending.push(call);
     }
 
