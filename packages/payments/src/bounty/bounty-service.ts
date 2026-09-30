@@ -94,14 +94,22 @@ function snapshot<T>(value: T): Readonly<T> {
   return copy;
 }
 
+/**
+ * State is runtime-private (astra pack 36c): ES `#` fields, not TypeScript
+ * `private`, so a holder of an instance (the gateway's shared one included) can
+ * neither reach nor enumerate the stored maps. The instance is frozen, so no one
+ * can shadow its readers or flip the treasury switch after construction, and
+ * inputs are copied on the way in, so a caller keeps no alias into stored state.
+ */
 export class BountyService {
-  private demandSignals = new Map<string, DemandSignal>();
-  private bounties = new Map<string, CapabilityBounty>();
-  private hunters = new Map<string, BountyHunter>();
-  private readonly autoCreateTreasuryBounties: boolean;
+  #demandSignals = new Map<string, DemandSignal>();
+  #bounties = new Map<string, CapabilityBounty>();
+  #hunters = new Map<string, BountyHunter>();
+  readonly #autoCreateTreasuryBounties: boolean;
 
   constructor(options: BountyServiceOptions = {}) {
-    this.autoCreateTreasuryBounties = options.autoCreateTreasuryBounties === true;
+    this.#autoCreateTreasuryBounties = options.autoCreateTreasuryBounties === true;
+    Object.freeze(this);
   }
 
   // ── Demand Signals ──────────────────────────────────────────────
@@ -110,17 +118,17 @@ export class BountyService {
     input: Omit<DemandSignal, "id" | "createdAt" | "status">,
   ): Readonly<DemandSignal> {
     const signal: DemandSignal = {
-      ...input,
+      ...structuredClone(input),
       id: generateDemandId(),
       createdAt: new Date().toISOString(),
       status: "active",
     };
-    this.demandSignals.set(signal.id, signal);
+    this.#demandSignals.set(signal.id, signal);
     return snapshot(signal);
   }
 
   getDemandSignals(capabilityType?: string): Readonly<DemandSignal>[] {
-    const all = [...this.demandSignals.values()];
+    const all = [...this.#demandSignals.values()];
     const picked = capabilityType ? all.filter((s) => s.capabilityType === capabilityType) : all;
     return picked.map(snapshot);
   }
@@ -133,7 +141,7 @@ export class BountyService {
       { requesters: Set<string>; annualValue: number }
     >();
 
-    for (const signal of this.demandSignals.values()) {
+    for (const signal of this.#demandSignals.values()) {
       if (signal.status !== "active") continue;
       let entry = agg.get(signal.capabilityType);
       if (!entry) {
@@ -185,13 +193,13 @@ export class BountyService {
       currency: params.currency,
       ...(params.proposedFundingSource ? { proposedFundingSource: params.proposedFundingSource } : {}),
       fundingStatus: "unfunded",
-      requirements: params.requirements,
+      requirements: structuredClone(params.requirements),
       status: "open",
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
     };
 
-    this.bounties.set(bounty.id, bounty);
+    this.#bounties.set(bounty.id, bounty);
     return snapshot(bounty);
   }
 
@@ -199,7 +207,7 @@ export class BountyService {
     status?: CapabilityBounty["status"];
     capabilityType?: string;
   }): Readonly<CapabilityBounty>[] {
-    let result = [...this.bounties.values()];
+    let result = [...this.#bounties.values()];
     if (filter?.status) {
       result = result.filter((b) => b.status === filter.status);
     }
@@ -212,7 +220,7 @@ export class BountyService {
   }
 
   claimBounty(bountyId: string, operatorId: string): Readonly<CapabilityBounty> {
-    const bounty = this.bounties.get(bountyId);
+    const bounty = this.#bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
@@ -227,8 +235,8 @@ export class BountyService {
     bounty.claimedAt = new Date().toISOString();
 
     // Track the hunter
-    this.ensureHunter(operatorId);
-    const hunter = this.hunters.get(operatorId)!;
+    this.#ensureHunter(operatorId);
+    const hunter = this.#hunters.get(operatorId)!;
     hunter.bountiesClaimed += 1;
 
     return snapshot(bounty);
@@ -245,7 +253,7 @@ export class BountyService {
     _jobId: string,
     _verificationScore: number,
   ): never {
-    if (!this.bounties.has(bountyId)) {
+    if (!this.#bounties.has(bountyId)) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
     throw new Error(
@@ -262,7 +270,7 @@ export class BountyService {
    * bountiesCompleted, and no demand signal marked fulfilled.
    */
   payBounty(bountyId: string): never {
-    const bounty = this.bounties.get(bountyId);
+    const bounty = this.#bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
@@ -275,14 +283,14 @@ export class BountyService {
   // ── Auto-Bounty Creation ────────────────────────────────────────
 
   checkAndCreateBounties(): Readonly<CapabilityBounty>[] {
-    if (!this.autoCreateTreasuryBounties) return [];
+    if (!this.#autoCreateTreasuryBounties) return [];
 
     const topDemand = this.getTopDemand(100);
     const created: Readonly<CapabilityBounty>[] = [];
 
     // Collect capability types that already have an open or claimed bounty
     const existingBountyTypes = new Set<string>();
-    for (const bounty of this.bounties.values()) {
+    for (const bounty of this.#bounties.values()) {
       if (
         bounty.status === "open" ||
         bounty.status === "claimed"
@@ -307,7 +315,7 @@ export class BountyService {
       const bountyReward = Math.min(rawReward, BOUNTY_REWARD_CAP);
 
       // Find a representative description from the demand signals
-      const representativeSignal = [...this.demandSignals.values()].find(
+      const representativeSignal = [...this.#demandSignals.values()].find(
         (s) =>
           s.capabilityType === demand.capabilityType &&
           s.status === "active",
@@ -340,7 +348,7 @@ export class BountyService {
   // ── Leaderboard ─────────────────────────────────────────────────
 
   getLeaderboard(limit = 10): Readonly<BountyHunter>[] {
-    return [...this.hunters.values()]
+    return [...this.#hunters.values()]
       .sort((a, b) => b.totalEarned - a.totalEarned)
       .slice(0, limit)
       .map(snapshot);
@@ -348,9 +356,9 @@ export class BountyService {
 
   // ── Internal ────────────────────────────────────────────────────
 
-  private ensureHunter(operatorId: string): void {
-    if (!this.hunters.has(operatorId)) {
-      this.hunters.set(operatorId, {
+  #ensureHunter(operatorId: string): void {
+    if (!this.#hunters.has(operatorId)) {
+      this.#hunters.set(operatorId, {
         operatorId,
         operatorDid: `did:pcc:operator:${operatorId}`,
         bountiesClaimed: 0,

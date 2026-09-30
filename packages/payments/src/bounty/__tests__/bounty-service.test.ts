@@ -534,3 +534,89 @@ describe("pack 36b (astra): returned records are detached snapshots, so no calle
     expect(s.getDemandSignals()[0]!.status).toBe("active");
   });
 });
+
+describe("pack 36c (astra): stored state is runtime-private, so no holder of the service can forge it", () => {
+  const REQ = { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true };
+  function claimed() {
+    const s = new BountyService();
+    const b = s.createBounty({
+      capabilityType: "hplc",
+      description: "HPLC kit",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { ...REQ },
+      expiresInDays: 30,
+    });
+    s.claimBounty(b.id, "operator-1");
+    return { s, b };
+  }
+  const loose = (s: BountyService) => s as unknown as Record<string, unknown>;
+  const tryAssign = (o: unknown, patch: Record<string, unknown>) => {
+    try {
+      Object.assign(o as object, patch);
+    } catch {
+      /* refused: also fine */
+    }
+  };
+
+  it("HIGH 1: the stored maps are unreachable, by name or by enumeration; nothing becomes paid or funded, no earnings", () => {
+    const { s, b } = claimed();
+    // The verdict's reproduction: reach the maps by name ...
+    const bounties = loose(s).bounties as Map<string, object> | undefined;
+    const hunters = loose(s).hunters as Map<string, object> | undefined;
+    if (bounties?.get(b.id)) tryAssign(bounties.get(b.id), { status: "paid", fundingStatus: "funded", paidAt: "2026-01-01T00:00:00Z" });
+    if (hunters?.get("operator-1")) tryAssign(hunters.get("operator-1"), { totalEarned: 100, bountiesCompleted: 1 });
+    // ... or discover them without names.
+    for (const v of Object.values(loose(s))) {
+      if (v instanceof Map) for (const rec of v.values()) tryAssign(rec, { status: "paid", fundingStatus: "funded", totalEarned: 100, bountiesCompleted: 1 });
+    }
+    expect(Object.values(loose(s)).some((v) => v instanceof Map)).toBe(false);
+    const [after] = s.listBounties();
+    expect(after).toMatchObject({ status: "claimed", fundingStatus: "unfunded" });
+    expect("paidAt" in after!).toBe(false);
+    expect(s.getLeaderboard()[0]).toMatchObject({ totalEarned: 0, bountiesCompleted: 0 });
+  });
+
+  it("HIGH 2: no runtime path sets verified, a verification job or a score", () => {
+    const { s, b } = claimed();
+    const bounties = loose(s).bounties as Map<string, object> | undefined;
+    if (bounties?.get(b.id)) tryAssign(bounties.get(b.id), { status: "verified", verificationJobId: "invented", verificationScore: 1 });
+    const [after] = s.listBounties();
+    expect(after!.status).toBe("claimed");
+    expect("verificationJobId" in after!).toBe(false);
+    expect("verificationScore" in after!).toBe(false);
+  });
+
+  it("a holder of the shared instance cannot shadow its readers or add state", () => {
+    const { s } = claimed();
+    tryAssign(s, { listBounties: () => [{ status: "paid" }], getLeaderboard: () => [{ totalEarned: 100 }], extra: 1 });
+    expect(s.listBounties()[0]!.status).toBe("claimed");
+    expect(s.getLeaderboard()[0]!.totalEarned).toBe(0);
+    expect(Object.keys(s)).toEqual([]);
+    expect(Object.isFrozen(s)).toBe(true);
+  });
+
+  it("the treasury auto-bounty switch cannot be flipped on after construction", () => {
+    const s = new BountyService();
+    tryAssign(s, { autoCreateTreasuryBounties: true });
+    for (const r of ["r1", "r2", "r3"]) {
+      s.submitDemand(makeDemandInput({ requesterId: r, capabilityType: "ebw", estimatedJobValue: 5000, estimatedFrequency: "daily" }));
+    }
+    expect(s.checkAndCreateBounties()).toEqual([]);
+    expect(s.listBounties()).toEqual([]);
+  });
+
+  it("inputs are copied on the way in: mutating a caller's object later changes nothing stored", () => {
+    const s = new BountyService();
+    const requirements = { ...REQ };
+    s.createBounty({ capabilityType: "hplc", description: "d", bountyReward: 100, currency: "USDC", requirements, expiresInDays: 30 });
+    requirements.mustPassVerification = false;
+    requirements.minimumAssuranceTier = 0;
+    expect(s.listBounties()[0]!.requirements).toEqual(REQ);
+    // An out-of-schema nested value is copied too, never shared.
+    const input = { ...makeDemandInput(), extra: { note: "a" } };
+    s.submitDemand(input);
+    input.extra.note = "b";
+    expect((s.getDemandSignals()[0] as unknown as { extra?: { note: string } }).extra?.note).toBe("a");
+  });
+});
