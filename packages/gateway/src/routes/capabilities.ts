@@ -750,11 +750,20 @@ export async function capabilityRoutes(app: FastifyInstance) {
         ...(hints ? { hints } : {}),
       });
     }
-    const ignoredFields = bodyKeys.filter((k) => k !== "id" && k !== "kernelId" && k !== "type").sort();
+    // A differing kernelId or type is ignored too (astra pack 111 MEDIUM 4): the
+    // existing row is returned unchanged, so say so rather than hide it.
+    const body = req.body as unknown as Record<string, unknown>;
+    const conflicts = (["kernelId", "type"] as const).filter(
+      (k) => body[k] !== undefined && body[k] !== (capability as unknown as Record<string, unknown>)[k],
+    );
+    const ignoredFields = bodyKeys
+      .filter((k) => k !== "id" && ((k !== "kernelId" && k !== "type") || conflicts.includes(k as "kernelId" | "type")))
+      .sort();
     return {
       capability,
       created: false,
       ignoredFields,
+      ...(conflicts.length > 0 ? { conflicts } : {}),
       note:
         "This capability already exists; POST /api/capabilities never updates it. To change availability, use PUT /api/capabilities/:id/availability.",
     };

@@ -124,3 +124,20 @@ describe("POST /api/capabilities -- create contract (G12)", () => {
     expect((row as any)?.availability).toEqual(availability);
   });
 });
+
+describe("pack 111 MEDIUM 4: a duplicate create reports kernelId/type conflicts as ignored", () => {
+  it("reports a mismatched kernelId and type instead of hiding them", async () => {
+    const app = await buildApp();
+    try {
+      const first = await app.inject({ method: "POST", url: "/api/capabilities", payload: { id: "cap-x-conflict", kernelId: "kernel-nyc", type: "one" } });
+      expect(first.statusCode).toBe(201);
+      const second = await app.inject({ method: "POST", url: "/api/capabilities", payload: { id: "cap-x-conflict", kernelId: "kernel-la", type: "two" } });
+      expect(second.statusCode).toBe(200);
+      expect(second.json().created).toBe(false);
+      expect(second.json().ignoredFields).toEqual(expect.arrayContaining(["kernelId", "type"]));
+      expect(second.json().conflicts).toEqual(["kernelId", "type"]);
+    } finally {
+      await app.close();
+    }
+  });
+});
