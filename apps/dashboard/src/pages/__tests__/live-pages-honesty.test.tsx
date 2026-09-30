@@ -691,3 +691,265 @@ describe("G. Settings: each account section reports its own failure", () => {
     expect(t).not.toMatch(/unavailable \(/);
   });
 });
+
+// ── PX-3 round 4 (astra 18b review, eaedeb4c): reproduction tests, written
+// before the fix. Spec: pcc-reconciliation/returns/pcc-shell-work/px3-352-r4-repro-spec.md.
+// Verdict: pcc-reconciliation/review-packs-for-chatgpt-20260924/18b-px3-352-shelltruth-r3-eaedeb4c.astra.verdict.md.
+// Every case here is expected to FAIL at eaedeb4c; that failure is the reproduction.
+describe("R4: astra 18b findings, reproduced at eaedeb4c", () => {
+  describe("F1: money — an escrow's real currency and amount reach the page", () => {
+    const baseEscrow = {
+      id: "e1",
+      jobId: "j1",
+      status: "active",
+      totalAmount: "10",
+      currency: "ETH",
+      milestoneCount: 1,
+      releasedCount: 0,
+      disputedCount: 0,
+    };
+
+    it("R1a: Command Center shows an escrow's real currency, not USDC, and doesn't fabricate a dollar amount", async () => {
+      stubFetch({ ...EMPTY, "/api/escrow": { status: 200, body: { escrows: [baseEscrow] } } });
+      const t = await renderPage(<DashboardPage />);
+      expect(t).toContain("ETH");
+      expect(t).not.toContain("USDC");
+      expect(t).not.toContain("$10.00");
+    });
+
+    it("R1b: Escrow page shows an escrow's real currency, not USDC, and doesn't fabricate a dollar amount", async () => {
+      stubFetch({ ...EMPTY, "/api/escrow": { status: 200, body: { escrows: [baseEscrow] } } });
+      const t = await renderPage(<EscrowPage />);
+      expect(t).toContain("ETH");
+      expect(t).not.toContain("USDC");
+      expect(t).not.toContain("$10.00");
+    });
+
+    it("R1c: Revenue's active-escrows panel shows an escrow's real currency, not USDC, and doesn't fabricate a dollar amount", async () => {
+      stubFetch({ ...EMPTY, "/api/escrow": { status: 200, body: { escrows: [baseEscrow] } } });
+      const t = await renderPage(<RevenueDashboardPage />);
+      expect(t).toContain("ETH");
+      expect(t).not.toContain("USDC");
+      expect(t).not.toContain("$10.00");
+    });
+
+    it("R1d: a malformed amount is unavailable everywhere, never a fabricated $0.00", async () => {
+      const escrow = { ...baseEscrow, totalAmount: "not-money", currency: "USDC" };
+      stubFetch({ ...EMPTY, "/api/escrow": { status: 200, body: { escrows: [escrow] } } });
+      const escrowPageText = await renderPage(<EscrowPage />);
+      expect(escrowPageText).not.toContain("0.00");
+      expect(escrowPageText).not.toContain("$0.00");
+      expect(escrowPageText).toContain("Couldn't load escrows");
+
+      act(() => root.unmount());
+      root = createRoot(container);
+      stubFetch({ ...EMPTY, "/api/escrow": { status: 200, body: { escrows: [escrow] } } });
+      const dashboardText = await renderPage(<DashboardPage />);
+      expect(dashboardText).toContain("Couldn't load escrows");
+      expect(dashboardText).not.toContain("0.00");
+    });
+
+    it("R1e: an unrecognized currency doesn't fail the read, and doesn't get relabeled as USDC", async () => {
+      const escrow = { ...baseEscrow, currency: "XYZ" };
+      stubFetch({ ...EMPTY, "/api/escrow": { status: 200, body: { escrows: [escrow] } } });
+      const t = await renderPage(<EscrowPage />);
+      expect(t).toContain("Couldn't load escrows");
+      expect(t).not.toContain("USDC");
+    });
+  });
+
+  describe("F2: Discover presents templates as capabilities", () => {
+    it("R2a: a template-only catalog isn't counted or shown as live capability supply", async () => {
+      stubFetch({
+        ...EMPTY,
+        "/api/capabilities/templates": { status: 200, body: { templates: [{ name: "Template Only", capabilityType: "hplc" }] } },
+        "/api/capabilities": { status: 200, body: { items: [], total: 0, offset: 0, limit: 200 } },
+      });
+      const t = await renderPage(<DiscoverPage />);
+      expect(t).not.toMatch(/[1-9]\d* capabilit(y|ies) found/);
+      const shownUnlabeled = t.includes("Template Only") && !/template/i.test(t);
+      expect(shownUnlabeled).toBe(false);
+    });
+
+    it("R2b: an empty template row still counts as a capability found", async () => {
+      stubFetch({ ...EMPTY, "/api/capabilities/templates": { status: 200, body: { templates: [{}] } } });
+      const t = await renderPage(<DiscoverPage />);
+      expect(t).not.toContain("1 capability found");
+    });
+  });
+
+  describe("F3: off-schema rows still reach displayed numbers", () => {
+    it("R3a: a job with a noncanonical status is counted as a real job, not unavailable", async () => {
+      stubFetch({ ...EMPTY, "/api/jobs": { status: 200, body: { jobs: [{ id: "j1", status: "bogus" }] } } });
+      const t = await renderPage(<JobsPage />);
+      expect(t).not.toMatch(/Total Jobs\s*1/);
+      expect(t).toContain("Couldn't load jobs");
+    });
+
+    it("R3b: Command Center doesn't flag a job with a noncanonical status as a partial failure", async () => {
+      stubFetch({ ...EMPTY, "/api/jobs": { status: 200, body: { jobs: [{ id: "j1", status: "bogus" }] } } });
+      const t = await renderPage(<DashboardPage />);
+      expect(t).toContain("Some live data couldn't be loaded");
+    });
+
+    it("R3c: Command Center doesn't flag a kernel with a noncanonical status as a partial failure, and still counts it as 0/1", async () => {
+      stubFetch({ ...EMPTY, "/api/kernels": { status: 200, body: { kernels: [{ id: "k1", status: "bogus", isStale: false }] } } });
+      const t = await renderPage(<DashboardPage />);
+      expect(t).toContain("Some live data couldn't be loaded");
+      expect(t).not.toMatch(/\b0\/1\b/);
+      expect(t).not.toMatch(/\b1\/1\b/);
+    });
+
+    it("R3d: Escrow page doesn't reject an escrow with a noncanonical status", async () => {
+      stubFetch({
+        ...EMPTY,
+        "/api/escrow": {
+          status: 200,
+          body: { escrows: [{ id: "e1", jobId: "j1", status: "bogus", totalAmount: "10", currency: "USDC", milestoneCount: 1, releasedCount: 0, disputedCount: 0 }] },
+        },
+      });
+      const t = await renderPage(<EscrowPage />);
+      expect(t).toContain("Couldn't load escrows");
+    });
+
+    it("R3e: a capability missing its type doesn't fail the leaderboard read", async () => {
+      stubFetch({
+        ...EMPTY,
+        "/api/capabilities": { status: 200, body: { items: [{ id: "c1", kernelId: "k1", queueDepth: 0 }], total: 1, offset: 0, limit: 200 } },
+      });
+      const t = await renderPage(<KernelLeaderboardPage />);
+      expect(t).toContain("Couldn't load the leaderboard");
+    });
+
+    it("R3f: a capability with a negative queue depth doesn't fail the leaderboard read", async () => {
+      stubFetch({
+        ...EMPTY,
+        "/api/capabilities": { status: 200, body: { items: [{ id: "c1", kernelId: "k1", type: "hplc", queueDepth: -1 }], total: 1, offset: 0, limit: 200 } },
+      });
+      const t = await renderPage(<KernelLeaderboardPage />);
+      expect(t).toContain("Couldn't load the leaderboard");
+    });
+
+    it("R3g: Settings treats a negative or fractional key count as valid, not unavailable", async () => {
+      const identity = { operator: "operator@example.com", key_id: "key-12345678-abcd", key_name: "laptop", scopes: ["*"] };
+      stubFetch({
+        "/api/agent/me": {
+          status: 200,
+          body: { ok: true, as_of: "2026-09-24T12:00:00Z", identity, keys: { active: -1, wildcard_keys: 0 } },
+        },
+      });
+      const t = await renderPage(<SettingsPage />);
+      expect(t).toContain("unavailable");
+      expect(t).not.toContain("-1");
+
+      act(() => root.unmount());
+      root = createRoot(container);
+      stubFetch({
+        "/api/agent/me": {
+          status: 200,
+          body: { ok: true, as_of: "2026-09-24T12:00:00Z", identity, keys: { active: 2.5, wildcard_keys: 0 } },
+        },
+      });
+      const t2 = await renderPage(<SettingsPage />);
+      expect(t2).toContain("unavailable");
+      expect(t2).not.toContain("2.5");
+    });
+  });
+
+  describe("F4: the pager can certify an inconsistent multi-page read as complete", () => {
+    /**
+     * Like section F's stubPagedCapabilities, but each call to /api/capabilities
+     * returns the next entry in `pages` (by call order, not by offset) — so a
+     * later page's `total` can differ from an earlier page's, or repeat rows,
+     * the way a mid-read total shift or a duplicated page would.
+     */
+    function stubPagedCapabilitiesVarying(pages: Array<{ items: unknown[]; total: number }>, kernels: unknown[]) {
+      let call = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0]!;
+        let status = 200;
+        let body: unknown;
+        if (path === "/api/capabilities") {
+          const page = pages[Math.min(call, pages.length - 1)]!;
+          call++;
+          body = { items: page.items, total: page.total, offset: 0, limit: 200 };
+        } else if (path === "/api/health") {
+          body = { status: "ok" };
+        } else if (path === "/api/kernels") {
+          body = { kernels };
+        } else if (path === "/api/jobs") {
+          body = { jobs: [] };
+        } else if (path === "/api/escrow") {
+          body = { escrows: [] };
+        } else {
+          status = 404;
+          body = { error: `not stubbed: ${path}` };
+        }
+        return {
+          ok: status >= 200 && status < 300,
+          status,
+          statusText: status === 200 ? "OK" : "Error",
+          headers: { get: () => null },
+          json: async () => body,
+        } as unknown as Response;
+      });
+      vi.stubGlobal("fetch", fetchMock);
+    }
+
+    it("R4a: a shrinking total on the second page still certifies the ranking as complete", async () => {
+      const page1Items = Array.from({ length: 200 }, (_, i) => ({ id: `c${i}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+      stubPagedCapabilitiesVarying(
+        [
+          { items: page1Items, total: 250 },
+          { items: [], total: 100 },
+        ],
+        [{ id: "k1", name: "Kernel One", status: "online", isStale: false }],
+      );
+      const t = await renderPage(<KernelLeaderboardPage />);
+      expect(t).toMatch(/Ranked over the first|Couldn't load the leaderboard/);
+    });
+
+    it("R4b: duplicate rows across pages still certify the ranking as complete", async () => {
+      const page1Items = Array.from({ length: 200 }, (_, i) => ({ id: `c${i}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+      const page2Items = Array.from({ length: 50 }, (_, i) => ({ id: `c${i}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+      stubPagedCapabilitiesVarying(
+        [
+          { items: page1Items, total: 250 },
+          { items: page2Items, total: 250 },
+        ],
+        [{ id: "k1", name: "Kernel One", status: "online", isStale: false }],
+      );
+      const t = await renderPage(<KernelLeaderboardPage />);
+      expect(t).toMatch(/Ranked over the first|Couldn't load the leaderboard/);
+    });
+  });
+
+  describe("F5: categorical completeness claims over a partial read", () => {
+    it("R5a: the leaderboard says no kernels exist when registered kernels have no listed capabilities", async () => {
+      stubFetch({
+        ...EMPTY,
+        "/api/kernels": {
+          status: 200,
+          body: {
+            kernels: [
+              { id: "k1", status: "online", isStale: false },
+              { id: "k2", status: "online", isStale: false },
+            ],
+          },
+        },
+        "/api/capabilities": { status: 200, body: { items: [], total: 0, offset: 0, limit: 200 } },
+      });
+      const t = await renderPage(<KernelLeaderboardPage />);
+      expect(t).not.toContain("No kernels on the network yet");
+    });
+
+    it("R5b: Revenue says no completed jobs at all after reading only the first 50, without saying so", async () => {
+      const jobs = Array.from({ length: 50 }, (_, i) => ({ id: `job-${i}`, status: "in_progress" }));
+      stubFetch({ ...EMPTY, "/api/jobs": { status: 200, body: { jobs } } });
+      const t = await renderPage(<RevenueDashboardPage />);
+      expect(t).not.toContain("No completed jobs yet");
+      expect(t).toContain("in the first 50");
+    });
+  });
+});
