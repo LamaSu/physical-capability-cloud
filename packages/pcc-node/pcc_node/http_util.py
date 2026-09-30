@@ -1,13 +1,19 @@
 """Shared HTTP helpers using only stdlib (urllib.request).
 
 Every outbound request carries a User-Agent to avoid Cloudflare blocks.
-SSL verification is relaxed for local-network device probing.
+http() may relax TLS for local-network device probing. Requests to the PCC
+gateway go through gateway_request()/pcc_request(), which never do.
 """
 
+import ipaddress
 import json
+import logging
 import ssl
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 from urllib.error import HTTPError, URLError
+
+log = logging.getLogger("pcc-node.http")
 
 USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
 
@@ -67,8 +73,75 @@ def http(method, url, body=None, headers=None, timeout=30, verify_ssl=True):
         return 0, {"error": str(e)}
 
 
+def gateway_url_allowed(url):
+    """True if a PCC gateway URL may carry the operator's key and its answers.
+
+    Only https qualifies, or plain http to this machine (a rehearsal gateway on
+    loopback), where the key never leaves the host (verdict 68c, finding 1).
+    """
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http":
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """A 3xx from the gateway is an answer, never a new target for the key."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Verified TLS, and no redirects, for everything sent to the PCC gateway.
+_GATEWAY_OPENER = build_opener(_NoRedirect, HTTPSHandler(context=ssl.create_default_context()))
+
+
+def gateway_request(method, url, body=None, headers=None, timeout=30):
+    """One request to the PCC gateway. Returns (status_code, parsed_body).
+
+    Refused (status 0, no connection) unless ``gateway_url_allowed(url)``.
+    The certificate is always verified and redirects are never followed, so
+    the bearer key and the answers can only come from the configured gateway.
+    """
+    if not gateway_url_allowed(url):
+        log.warning("Refusing to contact a PCC gateway over plain http on another host: use https")
+        return 0, {"error": "insecure_gateway_url",
+                   "message": "a PCC gateway must be https (plain http only on this machine)"}
+    hdrs = dict(headers or {})
+    hdrs.setdefault("User-Agent", USER_AGENT)
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        hdrs.setdefault("Content-Type", "application/json")
+    req = Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with _GATEWAY_OPENER.open(req, timeout=timeout) as resp:
+            status, raw = resp.status, resp.read().decode("utf-8", "replace")
+    except HTTPError as e:
+        status, raw = e.code, e.read().decode("utf-8", "replace")
+    except (URLError, OSError) as e:
+        return 0, {"error": str(e)}
+    try:
+        return status, json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return status, raw
+
+
 def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30):
-    """Make a request to the PCC gateway.
+    """Make a request to the PCC gateway, through ``gateway_request``.
 
     Parameters
     ----------
@@ -79,7 +152,7 @@ def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30):
     body : dict | None
         JSON body.
     base_url : str
-        PCC gateway base URL.
+        PCC gateway base URL: https, or plain http on this machine only.
     api_key : str
         Bearer token.
     timeout : int
@@ -89,4 +162,4 @@ def pcc_request(method, path, body=None, *, base_url, api_key="", timeout=30):
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    return http(method, url, body, headers, timeout=timeout)
+    return gateway_request(method, url, body, headers, timeout=timeout)
