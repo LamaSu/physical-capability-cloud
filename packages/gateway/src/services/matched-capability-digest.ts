@@ -259,12 +259,6 @@ export function matchedCapabilityDigestV2PreImage(snap: MatchedCapabilitySnapsho
     if (typeof t !== "number" || !ASSURANCE_TIERS.has(t)) refuse("assuranceTiers", "may only hold the tiers 0 to 3");
     tiers.push(t);
   }
-  // Belt-and-suspenders: given tierCount > 0 and a loop that either pushes
-  // or throws on every iteration, `tiers` cannot actually be empty here —
-  // but the resulting set is checked explicitly rather than left implicit.
-  if (tiers.length === 0) {
-    refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
-  }
 
   if (typeof csd !== "object" || csd === null) refuse("csd", "is required (no contract, no digest)");
   const { url, contractDigest } = csd;
