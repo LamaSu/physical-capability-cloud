@@ -136,8 +136,29 @@ export type HeartbeatSkipReason =
 
 const ASSURANCE_TIERS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
 const MAX_DECLARED_TIERS = 16;
-/** A plain non-negative decimal string, as the pricing column stores money (never a JS number). */
-const DECLARED_DECIMAL = /^[0-9]{1,30}(\.[0-9]{1,30})?$/;
+/**
+ * A plain non-negative decimal string, as the pricing column stores money
+ * (never a JS number) — copied VERBATIM (437-M3, astra review, Q1 MEDIUM)
+ * from R10's canonical grammar (packages/gateway/src/services/
+ * plan-snapshot-revalidation.ts on the stacked branch, not present on this
+ * one — do not import it, copy the rule). The previous digit-count check
+ * (`[0-9]{1,30}` per side) accepted non-canonical spellings like "00.10"
+ * and "01" that R10 then rejects at acceptance time, so a capability could
+ * register here and never be sellable. No leading zeros in the integer
+ * part unless it is exactly "0"; trailing fractional zeros are fine:
+ * "00.10" and "01" are refused, "0.10", "6.50" and "7" are accepted.
+ */
+const DECLARED_DECIMAL = /^(0|[1-9][0-9]*)(?:\.([0-9]+))?$/;
+/** R10's matching length cap — a copy of its constant, not an import (same reason as above). */
+const DECLARED_DECIMAL_MAX_LENGTH = 100;
+/**
+ * Currency codes are restricted to alphanumeric characters (1-16 chars).
+ * This is narrower than the pricing column's `string` type and rejects
+ * dotted variants like "USDC.e" and symbols like "$". No supplied contract
+ * requires those spellings today, so this is a documented restriction, not
+ * a fix for a demonstrated settlement defect (astra review, PR #437, Q2) —
+ * broadening it later is a deliberate product decision.
+ */
 const DECLARED_CURRENCY = /^[A-Za-z0-9]{1,16}$/;
 const PRICE_COMPONENTS = ["baseCost", "minimum", "perMinute", "perGram", "perCm3"] as const;
 
@@ -171,7 +192,7 @@ export function declaredPricing(v: unknown): { ok: true; pricing: DeclaredPricin
   for (const k of PRICE_COMPONENTS) {
     const x = p[k];
     if (x === undefined) continue;
-    if (typeof x !== "string" || !DECLARED_DECIMAL.test(x)) return { ok: false, reason: "invalid-pricing" };
+    if (typeof x !== "string" || x.length > DECLARED_DECIMAL_MAX_LENGTH || !DECLARED_DECIMAL.test(x)) return { ok: false, reason: "invalid-pricing" };
     pricing[k] = x;
     if (/[1-9]/.test(x)) nonZero = true;
   }

@@ -158,6 +158,26 @@ describe("a heartbeat registers only declared terms (N23)", () => {
       insertSpy.mockRestore();
     }
   });
+
+  // 437-M3 (astra review, Q1 MEDIUM): "00.10" registered successfully here
+  // but R10 (packages/gateway/src/services/plan-snapshot-revalidation.ts on
+  // the stacked branch, not on this one) rejects it at acceptance time as a
+  // non-canonical spelling — an availability/interop defect, never a claim
+  // of incorrect payment. Never rewrite the declared string; skip + report.
+  it("heartbeat_rejects_noncanonical_leading_zero_price", async () => {
+    const res = await beat([{ type: "leading-zero", assuranceTiers: [0], pricing: { currency: "USDC", baseCost: "00.10", minimum: "0" } }]);
+    expect(res.json().capabilitiesSkipped).toEqual([{ type: "leading-zero", reason: "invalid-pricing" }]);
+    expect(row("leading-zero")).toBeUndefined();
+    expect(await listed("leading-zero")).toBe(false);
+  });
+
+  // Canonical-form control: R10's grammar accepts these exact spellings, so
+  // the heartbeat must too, or a declared price could never sell.
+  it("canonical decimal spellings (no leading zeros, trailing fractional zeros OK) register", async () => {
+    const res = await beat([{ type: "canonical-price", assuranceTiers: [0], pricing: { currency: "USDC", baseCost: "6.50", minimum: "7" } }]);
+    expect(res.json().capabilitiesSkipped).toEqual([]);
+    expect(row("canonical-price")?.pricing).toEqual({ currency: "USDC", baseCost: "6.50", minimum: "7" });
+  });
 });
 
 describe("declaredTiers and declaredPricing", () => {
@@ -187,6 +207,9 @@ describe("declaredTiers and declaredPricing", () => {
       { currency: "USDC", baseCost: "1e3", minimum: "5" },
       { currency: "USDC", baseCost: "5.", minimum: "5" },
       { currency: "USDC", baseCost: "5", minimum: "5", perGram: "abc" },
+      // 437-M3: non-canonical leading-zero spellings — R10 rejects these.
+      { currency: "USDC", baseCost: "00.10", minimum: "0" },
+      { currency: "USDC", baseCost: "01", minimum: "0" },
     ]) {
       expect(declaredPricing(bad)).toEqual({ ok: false, reason: "invalid-pricing" });
     }
@@ -195,6 +218,12 @@ describe("declaredTiers and declaredPricing", () => {
     expect(declaredPricing({ currency: "USDC", baseCost: "0", minimum: "0", perMinute: "0.25", note: "x" })).toEqual({
       ok: true,
       pricing: { currency: "USDC", baseCost: "0", minimum: "0", perMinute: "0.25" },
+    });
+    // 437-M3: R10's canonical grammar accepts a bare "0" integer part, and
+    // trailing fractional zeros — these must keep registering.
+    expect(declaredPricing({ currency: "USDC", baseCost: "0.10", minimum: "7" })).toEqual({
+      ok: true,
+      pricing: { currency: "USDC", baseCost: "0.10", minimum: "7" },
     });
   });
 });
