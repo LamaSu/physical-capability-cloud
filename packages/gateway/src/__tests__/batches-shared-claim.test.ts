@@ -115,7 +115,7 @@ describe("N49: the claimant is the authenticated caller", () => {
     const body = res.json();
     expect(body.claim.agentId).toBe(ALICE);
     expect(body.claim.slotIndices).toEqual([0, 1]);
-    expect(body.claim.amount).toBe("3.00");
+    expect(body.claim.amount).toBe("3"); // N49 F6: honest full-precision display amount
     expect(body.batchStatus).toBe("filling");
   });
 
@@ -339,7 +339,7 @@ describe("N49 round 2: claim input", () => {
 
   it("accepts at most slotCount sample labels of at most 200 characters, and pads the rest", async () => {
     const id = await createBatch(alice, 8);
-    for (const sampleLabels of ["a", [1, 2], ["a", "b", "c"], ["x".repeat(201)], { a: 1 }]) {
+    for (const sampleLabels of ["a", [1, 2], ["a", "b", "c"], ["x".repeat(201)], { a: 1 }, ["   "], ["ok", "   "]]) {
       const res = await claim(id, alice, { slotCount: 2, sampleLabels });
       expect(res.statusCode, JSON.stringify(sampleLabels)).toBe(400);
     }
@@ -360,7 +360,7 @@ describe("N49 round 2: what someone else's claim shows", () => {
     expect(JSON.stringify(asBob)).not.toContain(mine.id);
 
     const asAlice = (await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(alice) })).json();
-    expect(asAlice.batch.claimedSlots[0]).toMatchObject({ id: mine.id, amount: "3.00", own: true });
+    expect(asAlice.batch.claimedSlots[0]).toMatchObject({ id: mine.id, amount: "3", own: true });
   });
 });
 
@@ -467,5 +467,55 @@ describe("N49 round 2: the legacy batch-manifest routes", () => {
   it("answers 404 for an unknown batch", async () => {
     const res = await app.inject({ method: "GET", url: "/api/batches/batch-none", headers: auth(alice) });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ── gpt-5.6-sol round 3 findings ───────────────────────────────────────────
+import { projectBatchStreamEvent } from "../sse/batch-stream-projection.js";
+
+describe("N49 F1: the shared batch stream carries no per-sample data", () => {
+  it("drops every per-sample event (slotId, timing, resultHash, resultRef)", () => {
+    for (const type of ["sample_added", "sample_claimed", "sample_injecting", "sample_completed", "sample_failed"]) {
+      const msg = projectBatchStreamEvent({
+        type, batchId: "b1",
+        payload: { slotId: "slot-alice", position: "A1", resultHash: "0xsecret", resultRef: "ipfs://x", timestamp: "t" },
+      });
+      expect(msg, type).toBeNull();
+    }
+  });
+  it("passes batch-level events but only their aggregate fields", () => {
+    const sealed = projectBatchStreamEvent({ id: "e1", type: "batch_sealed", timestamp: "t", batchId: "b1", payload: { slotCount: 12, secret: "x" } });
+    expect(sealed?.payload).toEqual({ batchId: "b1", slotCount: 12 });
+    const done = projectBatchStreamEvent({ id: "e2", type: "batch_completed", timestamp: "t", batchId: "b1", payload: { completed: 10, failed: 2, resultHash: "0xsecret" } });
+    expect(done?.payload).toEqual({ batchId: "b1", completed: 10, failed: 2 });
+  });
+  it("drops an unlisted event type", () => {
+    expect(projectBatchStreamEvent({ type: "batch_new_thing", batchId: "b1", payload: { x: 1 } })).toBeNull();
+  });
+});
+
+describe("N49 F2: the legacy manifest view never exposes runConfig", () => {
+  it("omits runConfig (proprietary/customer params) from the public detail and list views", async () => {
+    const manifest = batchTracker.createBatch("kernel-lab", "dev-1", "cap-1", { secretProtocol: "tenant-secret", ph: 7.4 });
+    const detail = await app.inject({ method: "GET", url: `/api/batches/${manifest.id}`, headers: auth(alice) });
+    expect(detail.statusCode).toBe(200);
+    expect(JSON.stringify(detail.json())).not.toContain("tenant-secret");
+    expect(detail.json().batch.runConfig).toBeUndefined();
+    const list = await app.inject({ method: "GET", url: "/api/batches", headers: auth(alice) });
+    expect(JSON.stringify(list.json())).not.toContain("tenant-secret");
+  });
+});
+
+describe("N49 F6: a six-decimal price yields an honest display amount, never 0.00", () => {
+  it("computes 0.000001 * 3 = 0.000003 (not a two-decimal 0.00)", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/batches/shared", headers: auth(alice),
+      payload: { kernelId: "kernel-lab", capabilityType: "liquid-handling", totalSlots: 8, pricePerSlot: "0.000001", protocolType: "dilution" },
+    });
+    expect(res.statusCode).toBe(200);
+    const id = res.json().batch.id;
+    const c = await claim(id, bob, { slotCount: 3 });
+    expect(c.statusCode).toBe(200);
+    expect(c.json().claim.amount).toBe("0.000003");
   });
 });

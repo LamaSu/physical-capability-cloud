@@ -10,6 +10,7 @@ import { SensorPipeline, BatchTracker, EncryptionService, createLitEncryptionSer
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
+import { projectBatchStreamEvent } from "./sse/batch-stream-projection.js";
 
 // ── Sensor Pipeline ─────────────────────────────────────────────────
 
@@ -112,18 +113,14 @@ sensorPipeline.onAnomaly((anomaly) => {
 
 export const batchTracker = new BatchTracker();
 
-// Forward batch events to StreamHub
+// Forward batch events to StreamHub. N49 F1: only aggregate batch-LEVEL
+// events go on the SHARED stream (projectBatchStreamEvent); per-sample data
+// never reaches all subscribers. Per-sample events stay on the authenticated,
+// owner-projected HTTP surface (routes/batches.ts viewEvents).
 batchTracker.onBatchEvent((event) => {
-  streamHub.publish(
-    [{ type: "batch", id: event.batchId }],
-    {
-      id: event.id,
-      type: event.type,
-      timestamp: event.timestamp,
-      topic: { type: "batch", id: event.batchId },
-      payload: event,
-    },
-  );
+  const message = projectBatchStreamEvent(event as never);
+  if (!message) return;
+  streamHub.publish([{ type: "batch", id: event.batchId }], message as never);
 });
 
 // Seed demo batch

@@ -42,6 +42,19 @@ const MAX_OPEN_MS = 30 * 24 * 60 * 60_000;
 /** The in-memory store is bounded: per creator, and in total (N49 round 3). */
 const MAX_OPEN_BATCHES_PER_CREATOR = 20;
 const MAX_SHARED_BATCHES = 10_000;
+/** N49 F5: how long a no-longer-claimable batch is retained before it may be pruned to free store space. */
+const RETAINED_CLOSED_MS = 60 * 60_000;
+
+/** N49 F6: an honest display amount = pricePerSlot (up to 6 decimals) * count,
+ * computed in integer micro-units so 0.000001 * n is exact. Display only —
+ * never accepted economics or settlement (D6). Returns a trimmed decimal string. */
+function displayAmountMicros(pricePerSlot: string, count: number): string {
+  const [intPart, frac = ""] = pricePerSlot.split(".");
+  const micros = (BigInt(intPart) * 1_000_000n + BigInt((frac + "000000").slice(0, 6))) * BigInt(count);
+  const whole = micros / 1_000_000n;
+  const rem = (micros % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return rem ? `${whole}.${rem}` : `${whole}`;
+}
 /** Placeholder operator addresses that make a kernel nobody's. */
 const UNOWNED_OPERATOR_ADDRESSES = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
@@ -130,8 +143,23 @@ function viewSlot(slot: SampleSlot, viewer: string | null) {
   return { position: slot.position, status: slot.status, own: false };
 }
 
+// N49 F2 (CRITICAL): an explicit allowlist, never a spread. The legacy list and
+// detail routes are public, and `runConfig` is a free-form Record that can hold
+// proprietary protocol parameters or customer metadata; spreading the manifest
+// leaked it to everyone. Private execution configuration (runConfig, methodId)
+// is exposed only through a separately authorized operator view, never here.
 function viewManifest(batch: BatchManifest, viewer: string | null) {
-  return { ...batch, slots: batch.slots.map((s) => viewSlot(s, viewer)) };
+  return {
+    id: batch.id,
+    kernelId: batch.kernelId,
+    deviceId: batch.deviceId,
+    capabilityId: batch.capabilityId,
+    status: batch.status,
+    sealedAt: batch.sealedAt,
+    startedAt: batch.startedAt,
+    completedAt: batch.completedAt,
+    slots: batch.slots.map((s) => viewSlot(s, viewer)),
+  };
 }
 
 /** The payload fields a batch-level event may show anyone: aggregate counts only. */
@@ -322,6 +350,16 @@ export async function batchRoutes(app: FastifyInstance) {
     if (creatorsOpen.length >= MAX_OPEN_BATCHES_PER_CREATOR) {
       return reply.status(409).send({ error: "too_many_open_batches", limit: MAX_OPEN_BATCHES_PER_CREATOR });
     }
+    // N49 F5: the store is bounded, so prune batches that can no longer be
+    // claimed and are past a short retention window before counting against the
+    // cap. Without this, short-lived batches accumulate and creation is
+    // permanently unavailable (batch_store_full) until a process restart.
+    if (sharedBatches.size >= MAX_SHARED_BATCHES) {
+      const cutoff = now - RETAINED_CLOSED_MS;
+      for (const [id, b] of sharedBatches) {
+        if (!isOpenForClaims(b, now) && Date.parse(b.closesAt) < cutoff) sharedBatches.delete(id);
+      }
+    }
     if (sharedBatches.size >= MAX_SHARED_BATCHES) {
       return reply.status(503).send({ error: "batch_store_full" });
     }
@@ -416,9 +454,11 @@ export async function batchRoutes(app: FastifyInstance) {
       let labels: string[] | undefined;
       if (body.sampleLabels !== undefined) {
         const raw = body.sampleLabels;
-        if (!Array.isArray(raw) || raw.length > slotCount || !raw.every((l) => typeof l === "string" && l.length <= MAX_TEXT)) {
+        // N49 F4: every supplied label must be real text (isText), not merely a
+        // string of bounded length — a whitespace-only label is rejected.
+        if (!Array.isArray(raw) || raw.length > slotCount || !raw.every((l) => isText(l))) {
           return reply.status(400).send({
-            error: `sampleLabels must be an array of at most ${slotCount} strings of at most ${MAX_TEXT} characters`,
+            error: `sampleLabels must be an array of at most ${slotCount} non-empty strings of at most ${MAX_TEXT} characters`,
           });
         }
         labels = raw as string[];
@@ -463,16 +503,18 @@ export async function batchRoutes(app: FastifyInstance) {
         }
       }
 
-      // Display amount, computed in floating point from the validated decimal
-      // price. Exact base units belong with the money path (D6), not this store.
-      const perSlotPrice = parseFloat(batch.pricePerSlot);
+      // N49 F6: an honest, full-precision DISPLAY amount (pricePerSlot has up to
+      // 6 decimals). It is display only — the accepted price and settlement come
+      // from the money path (D6), never from this in-memory store. `displayAmount`
+      // is named so no caller mistakes it for settlement.
       const claim: BatchSlotClaim = {
         id: `claim-${crypto.randomUUID().slice(0, 12)}`,
         agentId: claimant,
         slotIndices: indices,
         sampleLabels: indices.map((slot, n) => labels?.[n] ?? `sample-${slot}`),
         status: "claimed",
-        amount: (perSlotPrice * slotCount).toFixed(2),
+        // Display only (see displayAmountMicros): full-precision, never settlement.
+        amount: displayAmountMicros(batch.pricePerSlot, slotCount),
         claimedAt: new Date().toISOString(),
       };
 
