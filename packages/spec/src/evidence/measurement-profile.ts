@@ -491,12 +491,19 @@ export function profileGoverns(
   }
   const copy = plainDataCopy(presentedProfile);
   if (!copy.ok) return refuse("profile-invalid", [`<root>: not plain JSON data (${copy.reason})`]);
-  const violations = validateMeasurementProfile(copy.value);
-  if (violations.length > 0) {
-    return refuse("profile-invalid", violations.map((x) => `${x.path || "<root>"}: ${x.message}`));
+  let profile: MeasurementProfileV1;
+  let presentedDigest: MeasurementProfileDigest;
+  try {
+    const violations = validateMeasurementProfile(copy.value);
+    if (violations.length > 0) {
+      return refuse("profile-invalid", violations.map((x) => `${x.path || "<root>"}: ${x.message}`));
+    }
+    profile = deepFreeze(copy.value) as MeasurementProfileV1;
+    presentedDigest = digestProfile(profile);
+  } catch {
+    // The copy is plain data, so this is a defect, not an input; still never throw.
+    return refuse("profile-invalid", ["<root>: the profile could not be validated"]);
   }
-  const profile = deepFreeze(copy.value) as MeasurementProfileV1;
-  const presentedDigest = digestProfile(profile);
   if (presentedDigest !== committedDigest) {
     return refuse(
       "digest-mismatch",

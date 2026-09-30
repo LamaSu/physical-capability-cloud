@@ -1197,3 +1197,71 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
     expect(r.decision).toBe("reject");
   });
 });
+
+// ── astra r4 (pack 125, gpt-5.6-sol): the snapshot must not inherit mutable, unhashed values ──
+describe("profile admission — astra r4 (pack 125): inherited values never reach the decision", () => {
+  it("a polluted Object.prototype cannot supply minSamples, before or after the first await", async () => {
+    const p = inspectedPageProfile() as unknown as Record<string, any>;
+    delete p.measurement.sampling.minSamples; // the profile's own term is gone
+    const proto = Object.prototype as Record<string, unknown>;
+    proto.minSamples = 2; // what validation would read through inheritance
+    try {
+      let committedDigest: string;
+      try {
+        committedDigest = computeMeasurementProfileDigest(p as unknown as MeasurementProfileV1);
+      } catch {
+        return; // refused: no commitment can be computed, which closes the bypass at its source
+      }
+      // An enumerable getter read during the copy schedules the prototype's change for after the first await.
+      const presented = { ...p };
+      Object.defineProperty(presented, "onMissingData", {
+        enumerable: true,
+        get() {
+          queueMicrotask(() => { proto.minSamples = 1; });
+          return "reject";
+        },
+      });
+      const drafts = PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), profileDigest: committedDigest } }));
+      const bundles = [await toBundle(drafts, inspectedPageProfile())];
+      const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+      const r = await profileAdmitsBundle({
+        profile: presented as unknown as MeasurementProfileV1,
+        committedDigest,
+        subject,
+        bundles,
+        pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
+        verifyBundleSignature: verifySignature,
+        verifyPrimitiveInstance: () => true,
+      });
+      expect(r.decision).not.toBe("admit");
+    } finally {
+      delete proto.minSamples;
+    }
+  });
+
+  it("an inherited getter that throws during validation resolves to reject; the call never throws", async () => {
+    const p = inspectedPageProfile() as unknown as Record<string, any>;
+    delete p.measurement.sampling.minSamples;
+    Object.defineProperty(Object.prototype, "minSamples", {
+      configurable: true,
+      get() {
+        throw Object.create(null);
+      },
+    });
+    try {
+      const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+      const r = await profileAdmitsBundle({
+        profile: p as unknown as MeasurementProfileV1,
+        committedDigest: "0x" + "0".repeat(64),
+        subject,
+        bundles: [],
+        pinnedBundleSetDigest: "sha256:" + "0".repeat(64),
+        verifyBundleSignature: verifySignature,
+        verifyPrimitiveInstance: () => true,
+      });
+      expect(r.decision).toBe("reject");
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).minSamples;
+    }
+  });
+});
