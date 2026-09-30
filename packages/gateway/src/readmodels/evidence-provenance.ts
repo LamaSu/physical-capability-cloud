@@ -5,8 +5,9 @@
  * `recomputed_match`. The /complete envelope hash is `storage_envelope_match` (model
  * gateway_envelope): the gateway's storage integrity, never evidence integrity. Neither
  * fabricated events, gateway-stamped events, nor events naming no device at all count toward
- * tier coverage, and the gateway's zero-address placeholder signature is no signature. Nothing
- * here reads "verified".
+ * tier coverage, and a gateway-created placeholder signature (the zero-address signer, or the
+ * deviceless-kernel setup route's "self-attest"/"none" pair) is no signature. Nothing here reads
+ * "verified".
  */
 import { createHash } from "node:crypto";
 import {
@@ -73,6 +74,11 @@ export function loadEvidenceProvenance(jobId: string, repos: EvidenceProvenanceR
 const GATEWAY_DEVICE = "gateway";
 /** The kernel emitter's marker for a test signature: not a signature. */
 const TEST_SIGNATURE_PREFIX = "test_sig_";
+/** routes/setup.ts's deviceless-kernel self-attest placeholder (:765,:783): a gateway-created,
+ *  non-cryptographic stand-in, never a real signature (evidence M4). */
+const SELF_ATTEST_SIGNER = "self-attest";
+/** The algorithm routes/setup.ts declares on that same placeholder: never a real algorithm. */
+const NO_ALGORITHM = "none";
 
 const gatewayStamped = (e: ProvenanceEventRow) => e.source?.deviceId === GATEWAY_DEVICE;
 
@@ -162,11 +168,16 @@ function signatureOf(sig: unknown): ProvenanceBundle["signature"] {
   const o = sig !== null && typeof sig === "object" ? (sig as Record<string, unknown>) : {};
   // A placeholder is no signature: the gateway's zero-address signer (evidence #3680 F2), any
   // value the gateway writes when it has no device signature (PUT /complete's "gateway-auto-sign",
-  // the operator relay's "operator-relay-auto": evidence #4088), or the emitter's test marker.
+  // the operator relay's "operator-relay-auto": evidence #4088), the emitter's test marker, or
+  // routes/setup.ts's deviceless-kernel self-attest placeholder — signer "self-attest" and
+  // algorithm "none" (evidence M4): a declared non-signature, not merely an unchecked one.
   // These are the non-signature checks isDeviceSignedSignature applies; the algorithm is not
-  // required to be ed25519, since a secp256k1 kernel signature is still a signature to show.
+  // otherwise required to be ed25519, since a secp256k1 kernel signature is still a signature
+  // to show.
   const placeholder =
     (typeof o.signer === "string" && o.signer.toLowerCase() === ZERO_ADDRESS) ||
+    (typeof o.signer === "string" && o.signer === SELF_ATTEST_SIGNER) ||
+    (typeof o.algorithm === "string" && o.algorithm === NO_ALGORITHM) ||
     (typeof o.value === "string" && (PLACEHOLDER_SIGNATURE_VALUES.has(o.value) || o.value.startsWith(TEST_SIGNATURE_PREFIX)));
   if (placeholder) return { signer: null, algorithm: null, checked: false };
   return {

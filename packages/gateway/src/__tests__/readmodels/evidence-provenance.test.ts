@@ -236,6 +236,27 @@ describe("the DTO never claims what the gateway does not record", () => {
     expect(sig["s-secp"]).toEqual({ signer: secp, algorithm: "secp256k1", checked: false });
   });
 
+  it("NEGATIVE (M4): the deviceless self-attest placeholder (routes/setup.ts) is no signature; real secp256k1/ed25519 signatures still show", async () => {
+    const withSig = async (id: string, kernelSignature: unknown) => {
+      const b = await loEvBundle(id, [ev("e1", "execution_completed")]);
+      return { ...b, kernelSignature };
+    };
+    const dto = await build([
+      // routes/setup.ts's deviceless branch writes exactly this shape (:765,:783).
+      await withSig("s-self-attest", {
+        signer: "self-attest",
+        algorithm: "none",
+        value: "self-attested by kernel kernel-nyc at 2026-09-28T10:00:00.000Z",
+      }),
+      await withSig("s-secp2", { signer: "0x2222222222222222222222222222222222222222", algorithm: "secp256k1", value: "0xbeef" }),
+      await withSig("s-ed2", { signer: "kernel-ed", algorithm: "ed25519", value: "0xfeed" }),
+    ]);
+    const sig = Object.fromEntries(dto.bundles.map((b) => [b.bundleId, b.signature]));
+    expect(sig["s-self-attest"]).toEqual({ signer: null, algorithm: null, checked: false });
+    expect(sig["s-secp2"]).toEqual({ signer: "0x2222222222222222222222222222222222222222", algorithm: "secp256k1", checked: false });
+    expect(sig["s-ed2"]).toEqual({ signer: "kernel-ed", algorithm: "ed25519", checked: false });
+  });
+
   it("NEGATIVE (evidence #3680 nit): first and last are ordered by time, not by string, and shown as recorded", async () => {
     const dto = await build([
       await loEvBundle("b-times", [

@@ -10,9 +10,10 @@
  *     `no_verdict_recorded` until one is stored. It is never read from a row existing, a count,
  *     or a status such as evidence_submitted.
  *   - "signed" or "authentic". No stored bundle's signature has ever been checked, so
- *     `signature.checked` is false. The signer is shown as stored, except the gateway's own
- *     placeholder (the zero-address signer that PUT /complete writes for events it synthesized),
- *     which is no signature at all: signer and algorithm null.
+ *     `signature.checked` is false. The signer is shown as stored, except a gateway-created
+ *     placeholder — the zero-address signer that PUT /complete writes for events it synthesized,
+ *     or the "self-attest"/algorithm:"none" pair the deviceless-kernel setup route writes
+ *     (routes/setup.ts) — which is no signature at all: signer and algorithm null.
  *   - "archived". No archive CID is stored for any bundle.
  *   - anything about fabricated or gateway-stamped events except that they exist. Neither counts
  *     toward tier coverage, nor does an event that names no device at all (a missing `source`, or
@@ -73,7 +74,10 @@ export interface ProvenanceBundle {
     firstAt: string | null;
     lastAt: string | null;
   };
-  /** As stored; the gateway's zero-address placeholder is no signature (signer and algorithm null). */
+  /**
+   * As stored; a gateway-created placeholder is no signature (signer and algorithm null): the
+   * zero-address signer, or the deviceless-kernel setup route's "self-attest"/"none" pair.
+   */
   signature: { signer: string | null; algorithm: string | null; checked: false };
   integrity: EvidenceIntegrity;
   /**
