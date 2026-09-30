@@ -62,10 +62,15 @@ export function computeKernelSigningKeySnapshotHash(entries: readonly KernelSign
   return computeMapSnapshotHash(mapEntries);
 }
 
-/** The device principal a signer stands for: a RegisteredSigner, a raw hex key, or a principal id. */
+/**
+ * The device principal a signer stands for: a RegisteredSigner, a raw hex key,
+ * or a principal id. Null for a key whose secret is public, however it is spelled.
+ */
 function signerPrincipal(signer: unknown): string | null {
   if (typeof signer === "string") {
-    if (parseDevicePrincipalId(signer)) return signer;
+    // Parsing a principal id checks only its syntax, so the leaked-key check is explicit here.
+    const parsed = parseDevicePrincipalId(signer);
+    if (parsed) return isCompromisedDevicePublicKey(parsed.publicKey) ? null : signer;
     try {
       return formatDevicePrincipalId(signer);
     } catch {
@@ -77,6 +82,25 @@ function signerPrincipal(signer: unknown): string | null {
 }
 
 export type RegisteredKeyResult = { ok: true } | { ok: false; reason: string };
+
+/** One registry row as read, once, off the untrusted snapshot. */
+type RegistryRow = Readonly<{ key: unknown; value: unknown }>;
+
+/**
+ * The inline entries as plain frozen rows, each entry and its key and value
+ * read exactly once. Validation, hashing, the kernel lookup and the signer
+ * comparison see only these rows, so an accessor or a proxy cannot show the
+ * hash one key and the comparison another. Null unless the entries are an array.
+ */
+function readRowsOnce(entries: unknown): readonly RegistryRow[] | null {
+  if (!Array.isArray(entries)) return null;
+  const rows: RegistryRow[] = [];
+  for (const e of entries as unknown[]) {
+    const { key, value } = (e ?? {}) as { key?: unknown; value?: unknown };
+    rows.push(Object.freeze({ key, value }));
+  }
+  return Object.freeze(rows);
+}
 
 /** A thrown value as text. It never throws itself: what was thrown may be untrusted input. */
 function errorText(err: unknown): string {
@@ -108,21 +132,23 @@ export function verifyRegisteredKey(input: {
     }
     if (snapshot.registryId !== pinned.registryId) return { ok: false, reason: "snapshot is from another registry" };
     if (snapshot.entriesLocator.kind !== "inline") return { ok: false, reason: "snapshot entries must be inline to verify" };
-    const entries = snapshot.entriesLocator.entries as { key?: unknown; value?: unknown }[];
-    for (const e of entries) {
-      const problem = entryProblem(e ?? {});
+    // From here on only the rows are read, never the snapshot's entry objects again.
+    const rows = readRowsOnce(snapshot.entriesLocator.entries);
+    if (rows === null) return { ok: false, reason: "snapshot entries must be an array" };
+    for (const e of rows) {
+      const problem = entryProblem(e);
       if (problem) return { ok: false, reason: `malformed registry entry: ${problem}` };
     }
     let recomputed: string;
     try {
-      recomputed = computeMapSnapshotHash(entries as { key: string; value: unknown }[]);
+      recomputed = computeMapSnapshotHash(rows as { key: string; value: unknown }[]);
     } catch (err) {
       return { ok: false, reason: `malformed registry: ${err instanceof Error ? err.message : String(err)}` };
     }
     if (recomputed !== snapshot.snapshotHash.toLowerCase() || recomputed !== pinned.snapshotHash.toLowerCase()) {
       return { ok: false, reason: "the snapshot does not hash to the pinned snapshotHash" };
     }
-    const row = entries.find((e) => e.key === kernelId);
+    const row = rows.find((e) => e.key === kernelId);
     if (!row) return { ok: false, reason: `kernel ${JSON.stringify(kernelId)} is not in the pinned registry` };
     const principal = signerPrincipal(signer);
     if (principal === null) return { ok: false, reason: "signer is not an Ed25519 key, or its secret is public" };

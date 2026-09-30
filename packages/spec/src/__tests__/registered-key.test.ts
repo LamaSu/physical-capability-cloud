@@ -118,6 +118,104 @@ describe("ident.registered_key PrimitiveVerifier", () => {
   });
 });
 
+describe("each registry entry is read once, and a leaked key never resolves (E2 finding 1)", () => {
+  const v = makeRegisteredKeyVerifier();
+  const ctx = { vocabVersion: 1 };
+  const LEAKED = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!;
+  const ATTACKER = "0x" + "c3".repeat(32);
+
+  /** A snapshot carrying `entries` but claiming the hash of `pinnedRows`, and the pin a deal holds for it. */
+  function pinnedAs(pinnedRows: KernelSigningKeyEntry[], entries: unknown[]) {
+    const snapshotHash = computeKernelSigningKeySnapshotHash(pinnedRows);
+    const snapshot = { ...SNAP, snapshotHash, entriesLocator: { kind: "inline", entries } } as RegistrySnapshot;
+    return { snapshot, pinned: { registryId: KERNEL_SIGNING_KEY_REGISTRY_ID, snapshotHash } };
+  }
+
+  /** Answers `first` for the first `n` reads and `later` from then on. */
+  function flipsAfter<T>(n: number, first: T, later: T): () => T {
+    let reads = 0;
+    return () => (++reads <= n ? first : later);
+  }
+
+  // The deal pinned kernel-a to KEY_A. Each shape shows the reads that validate
+  // and hash the snapshot the pinned rows, and any later read a row that makes
+  // `evil` kernel-a's key.
+  const attacks: [string, (evil: string) => ReturnType<typeof pinnedAs>][] = [
+    ["a value getter", (evil) => {
+      const value = flipsAfter(2, `ed25519:${KEY_A}`, `ed25519:${evil}`);
+      return pinnedAs([ENTRIES[0]!], [{ key: "kernel-a", get value() { return value(); } }]);
+    }],
+    ["a key getter on another kernel's row", (evil) => {
+      const key = flipsAfter(3, "kernel-x", "kernel-a");
+      return pinnedAs(
+        [ENTRIES[0]!, { kernelId: "kernel-x", devicePrincipalId: `ed25519:${evil}` }],
+        [{ get key() { return key(); }, value: `ed25519:${evil}` }, { key: "kernel-a", value: `ed25519:${KEY_A}` }],
+      );
+    }],
+    ["a proxied entries array", (evil) => {
+      const row = flipsAfter(2, { key: "kernel-a", value: `ed25519:${KEY_A}` }, { key: "kernel-a", value: `ed25519:${evil}` });
+      return pinnedAs([ENTRIES[0]!], new Proxy<unknown[]>([{}], { get: (t, p, r) => (p === "0" ? row() : Reflect.get(t, p, r)) }));
+    }],
+  ];
+
+  it.each(attacks)("%s cannot show the hash one row and the signer comparison another", async (_shape, attack) => {
+    const once = attack(ATTACKER);
+    expect(verifyRegisteredKey({ ...once, kernelId: "kernel-a", signer: ATTACKER })).toMatchObject({ ok: false });
+    const again = attack(ATTACKER);
+    const r = await v.verify({ snapshot: again.snapshot, kernelId: "kernel-a", signer: ATTACKER }, again.pinned, ctx);
+    expect(r).toMatchObject({ met: false });
+  });
+
+  it("reads each entry, and its key and value, exactly once", () => {
+    const reads: Record<string, number> = {};
+    const count = (what: string) => {
+      reads[what] = (reads[what] ?? 0) + 1;
+    };
+    const rows = ENTRIES.map((e, i) => ({
+      get key() {
+        count(`[${i}].key`);
+        return e.kernelId;
+      },
+      get value() {
+        count(`[${i}].value`);
+        return e.devicePrincipalId;
+      },
+    }));
+    const entries = new Proxy(rows, {
+      get: (t, p, r) => {
+        if (typeof p === "string" && /^\d+$/.test(p)) count(`[${p}]`);
+        return Reflect.get(t, p, r);
+      },
+    });
+    const snapshot = { ...SNAP, entriesLocator: { kind: "inline", entries } } as RegistrySnapshot;
+    expect(verify("kernel-a", KEY_A, snapshot)).toEqual({ ok: true });
+    expect(reads).toEqual({ "[0]": 1, "[0].key": 1, "[0].value": 1, "[1]": 1, "[1].key": 1, "[1].value": 1 });
+  });
+
+  it("the leaked key does not resolve through a value getter either", async () => {
+    const signer = `ed25519:${LEAKED}`;
+    const once = attacks[0]![1](LEAKED);
+    expect(verifyRegisteredKey({ ...once, kernelId: "kernel-a", signer })).toMatchObject({ ok: false });
+    const again = attacks[0]![1](LEAKED);
+    const r = await v.verify({ snapshot: again.snapshot, kernelId: "kernel-a", signer }, again.pinned, ctx);
+    expect(r).toMatchObject({ met: false });
+  });
+
+  it("still refuses inline entries that are not an array, even an iterable of the pinned rows", () => {
+    const set = new Set((SNAP.entriesLocator as { entries: unknown[] }).entries);
+    expect(verify("kernel-a", KEY_A, { ...SNAP, entriesLocator: { kind: "inline", entries: set } } as never).ok).toBe(false);
+  });
+
+  it("refuses the leaked key spelled as a principal id, as it does its raw and object spellings", () => {
+    for (const signer of [LEAKED, { algorithm: "ed25519", publicKey: LEAKED }, `ed25519:${LEAKED}`]) {
+      expect(verify("kernel-a", signer), JSON.stringify(signer)).toEqual({
+        ok: false,
+        reason: "signer is not an Ed25519 key, or its secret is public",
+      });
+    }
+  });
+});
+
 describe("verifyRegisteredKey fails closed on malformed runtime input and never throws (E2 finding 2)", () => {
   const good = { snapshot: SNAP, pinned: PINNED, kernelId: "kernel-a", signer: KEY_A };
   const inline = (entries: unknown) => ({ ...SNAP, entriesLocator: { kind: "inline", entries } });
