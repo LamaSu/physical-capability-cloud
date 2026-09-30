@@ -78,10 +78,22 @@ function signerPrincipal(signer: unknown): string | null {
 
 export type RegisteredKeyResult = { ok: true } | { ok: false; reason: string };
 
+/** A thrown value as text. It never throws itself: what was thrown may be untrusted input. */
+function errorText(err: unknown): string {
+  try {
+    return String(err instanceof Error ? err.message : err);
+  } catch {
+    return "unprintable error";
+  }
+}
+
 /**
  * Does `signer` resolve, for `kernelId`, in the pinned kernel signing-key
  * snapshot? The snapshot must be the pinned one (registryId and snapshotHash),
  * carry its entries inline, and hash to its own and the pinned snapshotHash.
+ * The input is untrusted at runtime whatever its static type: every read of it
+ * sits inside one exception boundary, so malformed input gives `{ ok: false }`
+ * and never throws.
  */
 export function verifyRegisteredKey(input: {
   snapshot: RegistrySnapshot;
@@ -89,32 +101,36 @@ export function verifyRegisteredKey(input: {
   kernelId: string;
   signer: unknown;
 }): RegisteredKeyResult {
-  const { snapshot, pinned, kernelId, signer } = input;
-  if (pinned.registryId !== KERNEL_SIGNING_KEY_REGISTRY_ID) {
-    return { ok: false, reason: `pinned registry ${JSON.stringify(pinned.registryId)} is not the kernel signing-key registry` };
-  }
-  if (snapshot.registryId !== pinned.registryId) return { ok: false, reason: "snapshot is from another registry" };
-  if (snapshot.entriesLocator.kind !== "inline") return { ok: false, reason: "snapshot entries must be inline to verify" };
-  const entries = snapshot.entriesLocator.entries as { key?: unknown; value?: unknown }[];
-  for (const e of entries) {
-    const problem = entryProblem(e ?? {});
-    if (problem) return { ok: false, reason: `malformed registry entry: ${problem}` };
-  }
-  let recomputed: string;
   try {
-    recomputed = computeMapSnapshotHash(entries as { key: string; value: unknown }[]);
+    const { snapshot, pinned, kernelId, signer } = input;
+    if (pinned.registryId !== KERNEL_SIGNING_KEY_REGISTRY_ID) {
+      return { ok: false, reason: `pinned registry ${JSON.stringify(pinned.registryId)} is not the kernel signing-key registry` };
+    }
+    if (snapshot.registryId !== pinned.registryId) return { ok: false, reason: "snapshot is from another registry" };
+    if (snapshot.entriesLocator.kind !== "inline") return { ok: false, reason: "snapshot entries must be inline to verify" };
+    const entries = snapshot.entriesLocator.entries as { key?: unknown; value?: unknown }[];
+    for (const e of entries) {
+      const problem = entryProblem(e ?? {});
+      if (problem) return { ok: false, reason: `malformed registry entry: ${problem}` };
+    }
+    let recomputed: string;
+    try {
+      recomputed = computeMapSnapshotHash(entries as { key: string; value: unknown }[]);
+    } catch (err) {
+      return { ok: false, reason: `malformed registry: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (recomputed !== snapshot.snapshotHash.toLowerCase() || recomputed !== pinned.snapshotHash.toLowerCase()) {
+      return { ok: false, reason: "the snapshot does not hash to the pinned snapshotHash" };
+    }
+    const row = entries.find((e) => e.key === kernelId);
+    if (!row) return { ok: false, reason: `kernel ${JSON.stringify(kernelId)} is not in the pinned registry` };
+    const principal = signerPrincipal(signer);
+    if (principal === null) return { ok: false, reason: "signer is not an Ed25519 key, or its secret is public" };
+    if (principal !== row.value) return { ok: false, reason: "signer is not the key the pinned registry holds for this kernel" };
+    return { ok: true };
   } catch (err) {
-    return { ok: false, reason: `malformed registry: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, reason: `malformed input: ${errorText(err)}` };
   }
-  if (recomputed !== snapshot.snapshotHash.toLowerCase() || recomputed !== pinned.snapshotHash.toLowerCase()) {
-    return { ok: false, reason: "the snapshot does not hash to the pinned snapshotHash" };
-  }
-  const row = entries.find((e) => e.key === kernelId);
-  if (!row) return { ok: false, reason: `kernel ${JSON.stringify(kernelId)} is not in the pinned registry` };
-  const principal = signerPrincipal(signer);
-  if (principal === null) return { ok: false, reason: "signer is not an Ed25519 key, or its secret is public" };
-  if (principal !== row.value) return { ok: false, reason: "signer is not the key the pinned registry holds for this kernel" };
-  return { ok: true };
 }
 
 /** The instance `ident.registered_key` verifies. */

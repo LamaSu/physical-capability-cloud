@@ -117,3 +117,34 @@ describe("ident.registered_key PrimitiveVerifier", () => {
     expect(r.met).toBe(false);
   });
 });
+
+describe("verifyRegisteredKey fails closed on malformed runtime input and never throws (E2 finding 2)", () => {
+  const good = { snapshot: SNAP, pinned: PINNED, kernelId: "kernel-a", signer: KEY_A };
+  const inline = (entries: unknown) => ({ ...SNAP, entriesLocator: { kind: "inline", entries } });
+  const unprintable = {
+    toString(): string {
+      throw new Error("cannot print");
+    },
+  };
+  const cases: [string, unknown][] = [
+    ["snapshot {} (the verdict's case)", { ...good, snapshot: {} }],
+    ["a kernel-registry snapshot with no entriesLocator", { ...good, snapshot: { registryId: KERNEL_SIGNING_KEY_REGISTRY_ID } }],
+    ["a null snapshot", { ...good, snapshot: null }],
+    ["inline entries that are not an array", { ...good, snapshot: inline(5) }],
+    ["a snapshotHash that is not a string", { ...good, snapshot: { ...SNAP, snapshotHash: 7 } }],
+    ["no pinned", { ...good, pinned: undefined }],
+    ["a pinned snapshotHash that is not a string", { ...good, pinned: { ...PINNED, snapshotHash: 7 } }],
+    ["a bigint kernel id", { ...good, kernelId: 10n }],
+    ["an entry getter that throws", { ...good, snapshot: inline([{ get key(): string { throw new Error("boom"); } }]) }],
+    ["an entry getter that throws an unprintable value", { ...good, snapshot: inline([{ get key(): string { throw unprintable; } }]) }],
+    ["no input at all", null],
+  ];
+
+  it.each(cases)("%s", (_name, input) => {
+    let r: unknown;
+    expect(() => {
+      r = verifyRegisteredKey(input as never);
+    }).not.toThrow();
+    expect(r).toEqual({ ok: false, reason: expect.any(String) });
+  });
+});
