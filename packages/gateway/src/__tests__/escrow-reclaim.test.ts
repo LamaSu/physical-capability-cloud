@@ -13,7 +13,8 @@ vi.mock("../contracts/escrow-client.js", () => ({
   getReclaimStateV3: vi.fn(),
   getSignerAddress: vi.fn(),
   isWriteEnabled: vi.fn(),
-  reclaimAfterDeadlineV3: vi.fn(),
+  signReclaimAfterDeadlineV3: vi.fn(),
+  broadcastSignedTransaction: vi.fn(),
   waitForReceipt: vi.fn(),
 }));
 vi.mock("../contracts/signer-lock.js", () => ({
@@ -116,9 +117,13 @@ describe("reclaimEscrowV3: the executor", () => {
     vi.mocked(chain.isWriteEnabled).mockReset().mockReturnValue(true);
     vi.mocked(chain.getSignerAddress).mockReset().mockReturnValue(SIGNER);
     vi.mocked(chain.getReclaimStateV3).mockReset();
-    vi.mocked(chain.reclaimAfterDeadlineV3)
+    vi.mocked(chain.signReclaimAfterDeadlineV3)
       .mockReset()
-      .mockImplementation(async (index: number) => ({ transactionHash: `0xtx${index}`, status: "submitted" }));
+      .mockImplementation(async (index: number) => ({
+        transactionHash: `0xtx${index}` as `0x${string}`,
+        serializedTransaction: `0x5169${index}` as `0x${string}`,
+      }));
+    vi.mocked(chain.broadcastSignedTransaction).mockReset().mockResolvedValue(undefined);
     vi.mocked(chain.waitForReceipt).mockReset().mockResolvedValue({ status: "success", blockNumber: 43 });
     vi.mocked(withSignerLock).mockClear();
   });
@@ -127,7 +132,7 @@ describe("reclaimEscrowV3: the executor", () => {
     vi.mocked(chain.isWriteEnabled).mockReturnValue(false);
     expect(await reclaimEscrowV3(ESCROW)).toEqual({ outcome: "refused", escrow: ESCROW, reason: "write_disabled" });
     expect(chain.getReclaimStateV3).not.toHaveBeenCalled();
-    expect(chain.reclaimAfterDeadlineV3).not.toHaveBeenCalled();
+    expect(chain.signReclaimAfterDeadlineV3).not.toHaveBeenCalled();
   });
 
   it("sends one reclaim per remaining milestone, waits for each receipt, all under the signer lock", async () => {
@@ -141,10 +146,11 @@ describe("reclaimEscrowV3: the executor", () => {
       ],
       alreadyRefunded: [0],
     });
-    expect(vi.mocked(chain.reclaimAfterDeadlineV3).mock.calls).toEqual([
+    expect(vi.mocked(chain.signReclaimAfterDeadlineV3).mock.calls).toEqual([
       [1, ESCROW],
       [2, ESCROW],
     ]);
+    expect(vi.mocked(chain.broadcastSignedTransaction).mock.calls).toEqual([["0x51691"], ["0x51692"]]);
     expect(chain.waitForReceipt).toHaveBeenCalledTimes(2);
     expect(withSignerLock).toHaveBeenCalledTimes(1);
   });
@@ -157,13 +163,13 @@ describe("reclaimEscrowV3: the executor", () => {
       reason: "not_reclaimable",
       milestones: [{ index: 1, status: S.Attested }],
     });
-    expect(chain.reclaimAfterDeadlineV3).not.toHaveBeenCalled();
+    expect(chain.signReclaimAfterDeadlineV3).not.toHaveBeenCalled();
   });
 
   it("already refunded: sends nothing and says so", async () => {
     vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Refunded] }));
     expect(await reclaimEscrowV3(ESCROW)).toEqual({ outcome: "already_refunded", escrow: ESCROW, alreadyRefunded: [0] });
-    expect(chain.reclaimAfterDeadlineV3).not.toHaveBeenCalled();
+    expect(chain.signReclaimAfterDeadlineV3).not.toHaveBeenCalled();
   });
 
   it("an RPC error reading a receipt (not a revert) after one success still returns what was sent (astra, #472 F1)", async () => {
@@ -179,16 +185,44 @@ describe("reclaimEscrowV3: the executor", () => {
     });
   });
 
-  it("a send that fails after one success still returns what was sent (astra, #472 F1)", async () => {
+  it("a PREPARE/SIGN failure after one success is proven unsent: not_sent, with no hash (astra, #472 F1)", async () => {
     vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Funded, S.Funded] }));
-    vi.mocked(chain.reclaimAfterDeadlineV3)
-      .mockResolvedValueOnce({ transactionHash: "0xtx0", status: "submitted" })
-      .mockRejectedValueOnce(new Error("nonce too low"));
+    vi.mocked(chain.signReclaimAfterDeadlineV3)
+      .mockResolvedValueOnce({ transactionHash: "0xtx0", serializedTransaction: "0x51690" })
+      .mockRejectedValueOnce(new Error("gas estimation failed"));
     await expect(reclaimEscrowV3(ESCROW)).resolves.toEqual({
       outcome: "incomplete",
       escrow: ESCROW,
       reclaimed: [{ index: 0, transactionHash: "0xtx0" }],
-      stoppedAt: { index: 1, receipt: "not_sent", error: "nonce too low" },
+      stoppedAt: { index: 1, receipt: "not_sent", error: "gas estimation failed" },
+    });
+    expect(chain.broadcastSignedTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("an error value that cannot even be printed still never loses the record (astra, #477 F1b)", async () => {
+    vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Funded, S.Funded] }));
+    vi.mocked(chain.waitForReceipt)
+      .mockResolvedValueOnce({ status: "success", blockNumber: 43 })
+      .mockRejectedValueOnce(Object.create(null));
+    await expect(reclaimEscrowV3(ESCROW)).resolves.toEqual({
+      outcome: "incomplete",
+      escrow: ESCROW,
+      reclaimed: [{ index: 0, transactionHash: "0xtx0" }],
+      stoppedAt: { index: 1, transactionHash: "0xtx1", receipt: "unknown", error: "unprintable error" },
+    });
+  });
+
+  it("a broadcast whose response was lost is NOT reported as unsent: it may have reached the node (astra, #477 F1a)", async () => {
+    vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Funded, S.Funded] }));
+    vi.mocked(chain.broadcastSignedTransaction)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("socket hang up"), { name: "HttpRequestError" }));
+    await expect(reclaimEscrowV3(ESCROW)).resolves.toEqual({
+      outcome: "incomplete",
+      escrow: ESCROW,
+      reclaimed: [{ index: 0, transactionHash: "0xtx0" }],
+      // indeterminate, WITH the hash signed before the broadcast, so the caller can look it up
+      stoppedAt: { index: 1, transactionHash: "0xtx1", receipt: "unknown", error: "socket hang up" },
     });
   });
 
@@ -203,6 +237,6 @@ describe("reclaimEscrowV3: the executor", () => {
       reclaimed: [{ index: 0, transactionHash: "0xtx0" }],
       stoppedAt: { index: 1, transactionHash: "0xtx1", receipt: "reverted" },
     });
-    expect(chain.reclaimAfterDeadlineV3).toHaveBeenCalledTimes(2);
+    expect(chain.signReclaimAfterDeadlineV3).toHaveBeenCalledTimes(2);
   });
 });
