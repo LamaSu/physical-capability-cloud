@@ -71,4 +71,35 @@ describe("sendBeacon is under the egress guard (A03c F1, reproduction B)", () =>
       uninstall();
     }
   });
+
+  it("refuses a beacon body it can't read synchronously, except to an origin registered for them", () => {
+    const beacon = withBeacon();
+    store.adoptApiKey(KEY);
+    const telemetry = "https://ingest.telemetry.example";
+    const uninstall = keyModule.installGatewayKeyGuard({ unreadableBeaconOrigins: [telemetry] });
+    try {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const blob = () => new Blob(['{"event":"pageleave"}'], { type: "application/json" });
+      const withFile = new FormData();
+      withFile.append("upload", new Blob(["x"]), "x.txt");
+      // PostHog sends Blob beacons on unload: allowed to the registered telemetry host only.
+      expect(navigator.sendBeacon(`${telemetry}/e/`, blob())).toBe(true);
+      expect(navigator.sendBeacon("https://foreign.example/collect", blob())).toBe(false);
+      expect(navigator.sendBeacon("https://foreign.example/collect", withFile)).toBe(false);
+      // A body the guard can read is still checked, whatever the origin.
+      expect(navigator.sendBeacon(`${telemetry}/e/`, KEY)).toBe(false);
+      expect(navigator.sendBeacon(`${telemetry}/e/?k=${KEY}`, blob())).toBe(false);
+      expect(beacon).toHaveBeenCalledTimes(1);
+    } finally {
+      uninstall();
+    }
+  });
+
+  it("uninstalling restores the page's own sendBeacon", () => {
+    const beacon = withBeacon();
+    const uninstall = keyModule.installGatewayKeyGuard();
+    expect(navigator.sendBeacon).not.toBe(beacon);
+    uninstall();
+    expect(navigator.sendBeacon).toBe(beacon);
+  });
 });
