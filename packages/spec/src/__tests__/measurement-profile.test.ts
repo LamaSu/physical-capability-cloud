@@ -520,3 +520,44 @@ describe("round 2 (astra pack 40)", () => {
     expect(() => computeMeasurementProfileDigest(p)).toThrow(InvalidMeasurementProfileError);
   });
 });
+
+// ── astra (packs 73 and 74, gpt-5.6-sol): the one-pass copy must not turn a JSON "__proto__"
+// key into inherited, unhashed authority, and must never throw on a hostile thrown value ──
+describe("plain-data boundary: __proto__ keys and hostile getters (astra packs 73, 74)", () => {
+  /** A JSON-parsed pilot profile whose measurement.sampling holds only a "__proto__" member. */
+  function protoSampling(minSamples: number): MeasurementProfileV1 {
+    const json = JSON.stringify(printPilotProfile()).replace(
+      '"sampling":{"minSamples":1}',
+      `"sampling":{"__proto__":{"minSamples":${minSamples}}}`,
+    );
+    expect(json).toContain('"__proto__"');
+    return JSON.parse(json) as MeasurementProfileV1;
+  }
+
+  it("a JSON __proto__ member is refused, so it can never yield a digest", () => {
+    expect(() => computeMeasurementProfileDigest(protoSampling(2))).toThrow(/__proto__/);
+  });
+
+  it("governance refuses a profile carrying a __proto__ member as invalid, whatever the digest", () => {
+    const g = profileGoverns(`0x${"0".repeat(64)}`, protoSampling(1));
+    expect(g.governs).toBe(false);
+    expect(g.code).toBe("profile-invalid");
+    expect(g.reasons.join(" ")).toMatch(/__proto__/);
+  });
+
+  it("a getter throwing a value String() cannot format yields governs:false, never a throw", () => {
+    const hostile = { ...printPilotProfile() } as Record<string, unknown>;
+    Object.defineProperty(hostile, "onMissingData", {
+      enumerable: true,
+      get() {
+        throw Object.create(null);
+      },
+    });
+    let result: ReturnType<typeof profileGoverns> | undefined;
+    expect(() => {
+      result = profileGoverns(`0x${"0".repeat(64)}`, hostile as unknown as MeasurementProfileV1);
+    }).not.toThrow();
+    expect(result?.governs).toBe(false);
+    expect(result?.code).toBe("profile-invalid");
+  });
+});

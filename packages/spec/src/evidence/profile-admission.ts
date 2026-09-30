@@ -230,6 +230,7 @@ export interface ProfileObservation {
 export type ProfileAdmissionDecision = "admit" | "reject" | "hold";
 
 export type ProfileAdmissionCode =
+  | "input-unreadable"
   | "digest-wrong-family"
   | "profile-invalid"
   | "digest-mismatch"
@@ -484,13 +485,33 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
  * answers, after that point can reach the decision.
  */
 export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
-  const pinnedBundleSetDigest: unknown = input.pinnedBundleSetDigest;
-  const verifyBundleSignature = input.verifyBundleSignature;
-  const verifyPrimitiveInstance = input.verifyPrimitiveInstance;
-  const subjectCopy = plainDataCopy(input.subject);
-  const bundlesCopy = plainDataCopy(input.bundles);
+  // Every read of `input` happens here, once, inside one guard: a getter or a
+  // proxy that throws resolves to a reject, never to a rejected promise.
+  let entry: {
+    pinnedBundleSetDigest: unknown;
+    verifyBundleSignature: ProfileAdmissionInput["verifyBundleSignature"];
+    verifyPrimitiveInstance: ProfileAdmissionInput["verifyPrimitiveInstance"];
+    subjectCopy: ReturnType<typeof plainDataCopy>;
+    bundlesCopy: ReturnType<typeof plainDataCopy>;
+    committedDigest: string;
+    presentedProfile: MeasurementProfileV1;
+  };
+  try {
+    entry = {
+      pinnedBundleSetDigest: input.pinnedBundleSetDigest,
+      verifyBundleSignature: input.verifyBundleSignature,
+      verifyPrimitiveInstance: input.verifyPrimitiveInstance,
+      subjectCopy: plainDataCopy(input.subject),
+      bundlesCopy: plainDataCopy(input.bundles),
+      committedDigest: input.committedDigest,
+      presentedProfile: input.profile,
+    };
+  } catch {
+    return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
+  }
+  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy } = entry;
 
-  const governance = profileGoverns(input.committedDigest, input.profile);
+  const governance = profileGoverns(entry.committedDigest, entry.presentedProfile);
   if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
     return reject(governance.code ?? "profile-invalid", governance.reasons.join("; "));
   }
