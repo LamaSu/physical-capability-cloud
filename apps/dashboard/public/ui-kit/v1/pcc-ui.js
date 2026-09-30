@@ -91,8 +91,30 @@
   //   key     the Idempotency-Key while this intent's outcome is UNRESOLVED (A/B/A reuses A's key)
   //   posting / done / gate: as above, for the intent
   var INTENT_STATE = Object.create(null);
+  // The intent is CANONICAL -- the request's meaning, not its spelling -- so a manifest cannot mint a
+  // "new" intent for the same effect by reordering body keys, %-encoding a path character or
+  // reordering query parameters: object keys are sorted at every depth; the target is the decoded
+  // pathname the gateway routes (desc.canonical) plus the decoded query parameters, sorted.
+  function canonicalJson(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    var i, out = [];
+    if (Array.isArray(v)) {
+      for (i = 0; i < v.length; i++) out.push(v[i] === undefined ? 'null' : canonicalJson(v[i]));
+      return '[' + out.join(',') + ']';
+    }
+    var ks = Object.keys(v).sort();
+    for (i = 0; i < ks.length; i++) { if (v[ks[i]] !== undefined) out.push(JSON.stringify(ks[i]) + ':' + canonicalJson(v[ks[i]])); }
+    return '{' + out.join(',') + '}';
+  }
+  function canonicalTarget(desc) {
+    var q = [];
+    try { new URL(desc.url).searchParams.forEach(function (val, key) { q.push([key, val]); }); } catch (e) { q = []; }
+    q.sort(function (x, y) { return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : (x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0); });
+    var qs = q.map(function (p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]); }).join('&');
+    return desc.canonical + (qs ? '?' + qs : '');
+  }
   function intentState(desc) {
-    var k = desc.method + ' ' + desc.url + '\n' + JSON.stringify(desc.body);
+    var k = desc.method + ' ' + canonicalTarget(desc) + '\n' + canonicalJson(desc.body);
     var it = INTENT_STATE[k];
     if (!it) { it = { key: null, posting: false, done: false, gate: null }; INTENT_STATE[k] = it; }
     return it;
@@ -1654,19 +1676,19 @@
     if (!desc || !desc.ok) { refuseStatus(status, desc); return null; }
     var it = intentState(desc);
     if (it.posting || it.done) { alreadySubmitted(status, it); return null; }
-    // Idempotency INTENTS (r1 finding 5; astra r2 F1/F3), kit-owned: one key per request intent
-    // (method, exact wire URL, body) while its outcome is UNRESOLVED, so A (unknown outcome) -> B ->
+    // Idempotency INTENTS (r1 finding 5; astra r2 F1/F3), kit-owned: one key per CANONICAL request
+    // intent (method, decoded route + sorted query, sorted-key body) while its outcome is UNRESOLVED, so A (unknown outcome) -> B ->
     // retry A resends A's key and the server dedupes instead of double-charging, and a CLONED action
     // for the same request reuses it too. A 2xx consumes the key (a non-money write may then re-send
     // under a new key; an accepted MONEY write is one-shot). A form reference (idempotencyFrom)
-    // DERIVES the key from (method, exact wire URL with its query, reference, body): the same logical
+    // DERIVES the key from (method, canonical target with its query, reference, body): the same logical
     // intent dedupes even across a reload, and never shares a key with another target or body.
-    var fp = JSON.stringify(desc.body);
+    var fp = canonicalJson(desc.body);
     var key = it.key;
     if (!key) {
       var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
       key = (ref != null && ref !== '')
-        ? 'idem-' + hash53(desc.method + ' ' + desc.url + '|' + String(ref) + '|' + fp)
+        ? 'idem-' + hash53(desc.method + ' ' + canonicalTarget(desc) + '|' + String(ref) + '|' + fp)
         : 'idem-' + uuid();
       it.key = key;
     }

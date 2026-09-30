@@ -1525,6 +1525,28 @@ describe("astra r2 (#342 @60137b16): reproduced findings (verify before fix)", (
     expect(posts(calls, "/fund").length).toBe(1);
   });
 
+  it("F1 (HIGH): the intent is CANONICAL: reordered body keys, an encoded path or a reordered query is the same request", async () => {
+    const variants: Array<Record<string, unknown>> = [
+      { ...clone, body: { amount: 5, escrowId: "e1" } },                      // body keys reordered
+      { ...clone, path: "/api/escrow/chain/0x%61bc/fund" },                   // %61 == 'a' (same route, same param)
+    ];
+    for (const v of variants) {
+      const calls = installFetch(() => ({ status: 200 }));
+      boot(man([{ kind: "actions", actions: [clone, v] }]));
+      const [b1, b2] = fundBtns();
+      b1!.click(); lastApprove()!.click(); await flush();
+      b2!.click(); const g = lastApprove(); if (g && !g.disabled) { g.click(); await flush(); }
+      expect(posts(calls, "/fund").length, JSON.stringify(v)).toBe(1);
+    }
+    const q1 = { ...clone, path: FUND + "?a=1&b=2" }, q2 = { ...clone, path: FUND + "?b=2&a=1" };
+    const calls = installFetch(() => ({ status: 200 }));
+    boot(man([{ kind: "actions", actions: [q1, q2] }]));
+    const [c1, c2] = fundBtns();
+    c1!.click(); lastApprove()!.click(); await flush();
+    c2!.click(); const g2 = lastApprove(); if (g2 && !g2.disabled) { g2.click(); await flush(); }
+    expect(posts(calls, "/fund").length).toBe(1);
+  });
+
   it("F3 (MEDIUM): an idempotencyFrom key covers the query string (different targets, different keys)", async () => {
     const calls = installFetch(() => ({ status: 200 }));
     const form = (q: string) => ({ kind: "form", schema: { properties: { ref: { type: "string", default: "R1" } } },
