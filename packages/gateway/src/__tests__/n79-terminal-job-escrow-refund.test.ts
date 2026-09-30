@@ -6,10 +6,14 @@
  * milestone stayed "funded": nothing ever refunded it.
  *
  * The rule under test: when a job ends without completing (`failed` or `cancelled`; the spec's `timed_out` too),
- * its escrow
+ * and the write comes from a writer entitled to give the escrow back, its escrow
  *   - under MOCK settlement is refunded at once: every unreleased milestone and the escrow read "refunded";
  *   - on a CHAIN escrow is marked "refund_pending": the refund is decided, but executing it on-chain is a
  *     separate step, and the gateway never releases a refund-pending escrow.
+ * The entitled writers are the gateway's own failure observations (the kernel service, the dispatch rollback) and
+ * the job facade (the owner-checked MCP cancel; PATCH). NOT the operator relay: it has no owner check yet (N85), so
+ * any key could post there. A relay report marks the job and gives nothing back (steward #4218; see
+ * n79-refund-authority.test.ts, which runs through the real API gate).
  * The escrow rows are asserted directly: they are what this change writes. The settlement READ is readmodels'.
  * An escrow that already completed (released) or was refunded is never touched.
  *
@@ -104,10 +108,9 @@ function escrowOf(jobId: string) {
   return { escrow: escrow!, milestones: getRepos().escrows.findMilestonesByEscrow(escrow!.id) };
 }
 
-async function reportFailed(app: FastifyInstance, jobId: string) {
-  const res = await app.inject({ method: "POST", url: "/api/operator/job-status", payload: { jobId, status: "failed" } });
-  expect(res.statusCode).toBe(200);
-  return res.json() as { updated: boolean; escrowRefund?: { outcome: string; reason?: string } };
+/** A failure the gateway observes itself (as the kernel service writes it): the refund's own trigger. */
+function failJob(jobId: string) {
+  return setJobStatusWithRefund(jobId, "failed");
 }
 
 describe("N79: a failed or cancelled job's escrow is refunded, never left funded", () => {
@@ -122,24 +125,36 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     closeStore();
   });
 
-  it("R0 G2: the operator node reports the job failed, and the mock escrow is refunded", async () => {
+  it("R0 G2's path, the operator relay, marks the job failed but gives nothing back until N85's owner check lands", async () => {
     const jobId = await submitPaidJob(app, "user-n79-failed");
-    const before = escrowOf(jobId);
-    expect(before.escrow.status).toBe("funded");
-    expect(before.milestones.every((m) => m.status === "funded")).toBe(true);
-
     const res = await app.inject({
       method: "POST",
       url: "/api/operator/job-status",
       payload: { jobId, status: "failed", metadata: { reason: "wavelength out of range" } },
     });
     expect(res.statusCode).toBe(200);
+    expect(getRepos().jobs.findById(jobId)?.status).toBe("failed");
+    const after = escrowOf(jobId);
+    expect(after.escrow.status).toBe("funded");
+    expect(after.milestones.every((m) => m.status === "funded")).toBe(true);
+  });
+
+  it("a failure the gateway observes itself gives the mock escrow back: the escrow and every milestone read refunded", async () => {
+    const jobId = await submitPaidJob(app, "user-n79-observed");
+    const before = escrowOf(jobId);
+    expect(before.escrow.status).toBe("funded");
+    expect(before.milestones.every((m) => m.status === "funded")).toBe(true);
+
+    expect(failJob(jobId).escrowRefund?.outcome).toBe("refunded");
 
     const after = escrowOf(jobId);
     expect(after.escrow.status).toBe("refunded");
     expect(after.milestones.map((m) => m.status)).toEqual(before.milestones.map(() => "refunded"));
+    expect(getRepos().jobs.findById(jobId)?.status).toBe("failed");
   });
 
+  // The facade path. In production PATCH currently answers 403 to every caller (its owner check compares columns that
+  // don't exist); the owner-checked MCP cancel reaches the same facade.
   it("a job cancelled through PATCH /api/jobs/:id/status is refunded too", async () => {
     const jobId = await submitPaidJob(app, "user-n79-cancelled");
     const res = await app.inject({
@@ -156,8 +171,8 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
 
   it("reporting the failure again changes nothing: the refund happens once", async () => {
     const jobId = await submitPaidJob(app, "user-n79-twice");
-    expect((await reportFailed(app, jobId)).escrowRefund?.outcome).toBe("refunded");
-    const again = await reportFailed(app, jobId);
+    expect(failJob(jobId).escrowRefund?.outcome).toBe("refunded");
+    const again = failJob(jobId);
     expect(again.escrowRefund).toEqual(expect.objectContaining({ outcome: "skipped", reason: "escrow_not_refundable" }));
     expect(escrowOf(jobId).escrow.status).toBe("refunded");
   });
@@ -171,7 +186,7 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     const { schema, eq } = await import("@pcc/store");
     db.update(schema.escrows).set({ contractAddress: "0x00000000000000000000000000000000000e5c0f", version: "v3" }).where(eq(schema.escrows.id, escrow.id)).run();
 
-    const res = await reportFailed(app, jobId);
+    const res = failJob(jobId);
     expect(res.escrowRefund?.outcome).toBe("refund_pending");
     const after = escrowOf(jobId);
     expect(after.escrow.status).toBe("refund_pending");
@@ -181,7 +196,7 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
   it("a failure reported while settlement is in flight does not refund underneath it", async () => {
     const jobId = await submitPaidJob(app, "user-n79-inflight");
     getRepos().jobs.updateStatus(jobId, "completing");
-    const res = await reportFailed(app, jobId);
+    const res = failJob(jobId);
     expect(res.escrowRefund).toEqual({ outcome: "skipped", reason: "settlement_in_progress" });
     expect(escrowOf(jobId).escrow.status).toBe("funded");
   });
@@ -190,7 +205,7 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     const jobId = await submitPaidJob(app, "user-n79-releasing");
     const { milestones } = escrowOf(jobId);
     getRepos().escrows.updateMilestoneStatus(milestones[0]!.id, "releasing");
-    const res = await reportFailed(app, jobId);
+    const res = failJob(jobId);
     expect(res.escrowRefund).toEqual(expect.objectContaining({ outcome: "skipped", reason: "milestone_past_funding" }));
     expect(escrowOf(jobId).escrow.status).toBe("funded");
   });
@@ -199,14 +214,14 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     const jobId = await submitPaidJob(app, "user-n79-completed");
     const { escrow } = escrowOf(jobId);
     getRepos().escrows.updateStatus(escrow.id, "completed");
-    const res = await reportFailed(app, jobId);
+    const res = failJob(jobId);
     expect(res.escrowRefund).toEqual(expect.objectContaining({ outcome: "skipped", reason: "escrow_not_refundable", escrowStatus: "completed" }));
     expect(escrowOf(jobId).escrow.status).toBe("completed");
   });
 
   it("a refunded escrow can never be released: PUT /complete and resume-settlement both refuse it", async () => {
     const jobId = await submitPaidJob(app, "user-n79-resurrect");
-    await reportFailed(app, jobId);
+    failJob(jobId);
     // Job statuses have no transition guard, so the job CAN be moved back to a runnable state...
     getRepos().jobs.updateStatus(jobId, "in_progress");
     // ...but its escrow was given back, so completing it must not release anything.

@@ -7,8 +7,20 @@
  * stayed funded.
  *
  * THE RULE. When a job's status becomes one that ends it without completing (`failed` or `cancelled`; the spec's
- * `timed_out` too, once anything writes it), its escrow is given back in the SAME database transaction as the status
- * write (so a crash cannot strand one without the other):
+ * `timed_out` too, once anything writes it), and the write comes from a writer ENTITLED to give the escrow back, its
+ * escrow is given back in the SAME database transaction as the status write (so a crash cannot strand one without
+ * the other).
+ *
+ * WHO MAY TRIGGER IT (steward #4218). A refund is sticky: every release path refuses a given-back escrow, so a
+ * trigger must come from someone entitled to give up the payout.
+ *   - The gateway's own failure observations: the kernel service's failure writes and the dispatch rollback.
+ *   - The job facade (`updateStatus`): the owner-checked MCP cancel (the job's own operator forfeits) and
+ *     PATCH /api/jobs/:id/status. On master that route answers 403 to every caller: its owner check compares
+ *     columns that don't exist.
+ *   - NOT the operator relay (POST /api/operator/job-status). It has no owner check (N85), so any key can post any
+ *     job's status there. A relay report marks the job and gives nothing back. Its refund waits on N85's owner check.
+ *
+ * The refund itself:
  *   - MOCK settlement (`mock-escrow-*`): there is no chain, so the refund is complete at once. Every milestone
  *     and the escrow read "refunded".
  *   - A CHAIN escrow (V2/V3): the refund is DECIDED here but not executed. The escrow and its milestones read
