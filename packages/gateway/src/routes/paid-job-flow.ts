@@ -57,6 +57,7 @@ import { driveSettlement } from "../services/settlement-crank.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
+  receivedAtSeconds,
   isDeviceSignedSignature,
   verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
@@ -1119,10 +1120,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               hash: ev.hash,
             })),
             subject: { jobId, kernelId: job.kernelId },
+            // When the gateway received the bundle: the relay row's createdAt.
+            ...(receivedAtSeconds(r.createdAt) !== undefined ? { receivedAt: receivedAtSeconds(r.createdAt) } : {}),
           }));
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
       }
+      // No operatorPrincipalId: the gateway has no authoritative funded operator
+      // (kernel.operatorAddress is self-registered; the funded operator J1 is the
+      // oracle's, at /settle), so session-signed evidence never anchors here.
       const settlementEvidence = await resolveSettlementEvidence({
         deviceBundles: seam2DeviceBundles,
         registeredSigner: seam2RegisteredSigner,

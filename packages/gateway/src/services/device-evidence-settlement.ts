@@ -294,6 +294,13 @@ export interface DeviceEvidenceVerifyInput {
   /** How many events the delegated session vouches for (the bundle's verified
    *  events). No more than the delegation's maxSignatures, as at /settle. */
   sessionSignedEventCount?: number;
+  /** The funded operator's principal id, from an AUTHORITATIVE source (the funded
+   *  deal), never from the evidence. A delegation's parentAgentId must equal it. */
+  operatorPrincipalId?: string;
+  /** When the gateway received this bundle (Unix seconds, the gateway's own clock:
+   *  the stored row's createdAt). The session must be valid then, whatever the
+   *  wall clock says at verification (recovery re-verifies later). */
+  receivedAt?: number;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
 }
@@ -334,6 +341,15 @@ export async function verifyDeviceSignedEvidence(
 
   if (input.sessionKeyAuthorization) {
     if (!input.contractId) return { ok: false, reason: "missing-contract-id" };
+    // Session evidence is only as good as the context it is checked in (cross-family
+    // review E3): the funded operator binds parentAgentId, and the receipt time closes
+    // the event window and judges expiry. The gateway holds no authoritative funded
+    // operator today (the oracle's /settle does, J1), so without both it never treats
+    // session evidence as a verified device anchor.
+    if (typeof input.operatorPrincipalId !== "string" || !Number.isSafeInteger(input.receivedAt)) {
+      return { ok: false, reason: "session-evidence-needs-trusted-context" };
+    }
+    const receivedAt = input.receivedAt as number;
     const auth = input.sessionKeyAuthorization;
     try {
       const sessionKey: SessionKey = {
@@ -360,9 +376,10 @@ export async function verifyDeviceSignedEvidence(
       // contract list is non-empty and names this job, maxSignatures is a safe
       // integer >= 1, and it covers the events the session vouches for.
       const scoped = checkDelegationScope(
-        { scope: sessionKey.scope },
+        { parentAgentId: auth.parentAgentId, scope: sessionKey.scope },
         {
           settlingJobId: input.contractId,
+          operatorPrincipalId: input.operatorPrincipalId,
           ...(input.sessionSignedEventCount !== undefined
             ? { sessionSignedEventCount: input.sessionSignedEventCount }
             : {}),
@@ -384,6 +401,8 @@ export async function verifyDeviceSignedEvidence(
       const result = new SessionKeyService().verifySessionSignedEvent({
         event,
         action: "evidence_submit",
+        // Valid when the gateway received it, not "valid now" (review E3 finding 3).
+        currentTimestamp: receivedAt,
       });
       if (!result.valid) return { ok: false, reason: result.failures[0] ?? "delegation-invalid" };
       return { ok: true, signer };
@@ -453,6 +472,9 @@ export interface SettlementEvidenceSlot {
   /** The stored evidence row this slot came from, so a device decision can pin
    *  that exact row (events + delegation) as the job's settlement anchor. */
   bundleId?: string;
+  /** When the gateway received this bundle (Unix seconds; the stored row's
+   *  createdAt). Session evidence needs it: see DeviceEvidenceVerifyInput. */
+  receivedAt?: number;
 }
 
 export interface SettlementEvidenceInput {
@@ -465,6 +487,9 @@ export interface SettlementEvidenceInput {
   deviceBundles?: readonly SettlementEvidenceSlot[];
   /** The device's registered signer (from the kernel registry). */
   registeredSigner: unknown;
+  /** The funded operator's principal id, from an authoritative source. Without it,
+   *  session-signed evidence never anchors (see DeviceEvidenceVerifyInput). */
+  operatorPrincipalId?: string;
   /** The gateway's own rebuilt anchor (today's behavior). */
   fallback: SettlementEvidenceSlot;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
@@ -532,16 +557,23 @@ export async function resolveSettlementEvidence(
  */
 async function verifyDeviceAnchor(
   slot: SettlementEvidenceSlot,
-  input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519">,
+  input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519" | "operatorPrincipalId">,
 ): Promise<{ ok: true; events: EvidenceEvent[] } | { ok: false; reason: string }> {
   if (!slot.subject) return { ok: false, reason: "missing-subject" };
   if (slot.contractId !== undefined && slot.contractId !== slot.subject.jobId) {
     return { ok: false, reason: "contract-subject-mismatch" };
   }
+  // A session's events lie in [issuedAt, min(expiresAt, receivedAt)] (the delegation
+  // time rule, pcc.evidence.delegation-time-rules.v1), checked on the hashed snapshots.
+  const auth = slot.sessionKeyAuthorization;
+  const window =
+    auth && Number.isSafeInteger(slot.receivedAt) && Number.isSafeInteger(auth.issuedAt) && Number.isSafeInteger(auth.expiresAt)
+      ? { notBefore: auth.issuedAt, notAfter: Math.min(auth.expiresAt, slot.receivedAt as number) }
+      : undefined;
   const binding = await verifyEvidenceSubjectBinding({
     bundleHash: slot.bundleHash,
     events: slot.events ?? [],
-    subject: slot.subject,
+    subject: window ? { ...slot.subject, eventTimeWindow: window } : slot.subject,
   });
   if (!binding.ok) return { ok: false, reason: binding.reason };
   const verified = await verifyDeviceSignedEvidence({
@@ -553,11 +585,20 @@ async function verifyDeviceAnchor(
       : {}),
     contractId: slot.subject.jobId,
     sessionSignedEventCount: binding.events.length,
+    ...(input.operatorPrincipalId !== undefined ? { operatorPrincipalId: input.operatorPrincipalId } : {}),
+    ...(slot.receivedAt !== undefined ? { receivedAt: slot.receivedAt } : {}),
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
   return verified.ok
     ? { ok: true, events: binding.events }
     : { ok: false, reason: verified.reason ?? "verify-failed" };
+}
+
+/** A stored row's createdAt (the gateway's receipt time) as Unix seconds, or undefined. */
+export function receivedAtSeconds(createdAt: unknown): number | undefined {
+  if (typeof createdAt !== "string") return undefined;
+  const ms = Date.parse(createdAt);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
 }
 
 // ── Recovery: re-verify the pinned settlement anchor ────────────────────────
@@ -591,6 +632,9 @@ export async function verifyPinnedSettlementEvidence(input: {
   row: PinnedEvidenceRow | null | undefined;
   events: readonly EvidenceEnvelopeEvent[];
   registeredSigner: unknown;
+  /** The funded operator's principal id, from an authoritative source (see
+   *  DeviceEvidenceVerifyInput); without it a session-signed anchor fails closed. */
+  operatorPrincipalId?: string;
   verifyEd25519?: VerifyEd25519;
 }): Promise<{ ok: true } | { ok: false; reason: string }> {
   const { row } = input;
@@ -606,9 +650,12 @@ export async function verifyPinnedSettlementEvidence(input: {
         ...(row.sessionKeyAuthorization ? { sessionKeyAuthorization: row.sessionKeyAuthorization } : {}),
         events: input.events,
         subject: { jobId: input.jobId, kernelId: input.kernelId },
+        // Judged as of when the gateway received it, never "now" (review E3 finding 3).
+        ...(receivedAtSeconds(row.createdAt) !== undefined ? { receivedAt: receivedAtSeconds(row.createdAt) } : {}),
       },
       {
         registeredSigner: input.registeredSigner,
+        ...(input.operatorPrincipalId !== undefined ? { operatorPrincipalId: input.operatorPrincipalId } : {}),
         ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
       },
     );

@@ -80,7 +80,7 @@ const SUBJECT_KERNEL = "kernel-seam2-subject";
  *  the signing key's signature over signingPreimage(bundleHash). `slot()`
  *  presents it to settlement for a subject, by default its own. */
 async function boundDeviceEvidence(
-  opts: { jobId?: string; kernelId?: string; keyPair?: nacl.SignKeyPair } = {},
+  opts: { jobId?: string; kernelId?: string; keyPair?: nacl.SignKeyPair; at?: number } = {},
 ) {
   const jobId = opts.jobId ?? SUBJECT_JOB;
   const kernelId = opts.kernelId ?? SUBJECT_KERNEL;
@@ -89,13 +89,13 @@ async function boundDeviceEvidence(
   const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
     {
       type: "execution_started",
-      timestamp: "2026-09-24T10:00:00.000Z",
+      timestamp: opts.at !== undefined ? new Date(opts.at * 1000).toISOString() : "2026-09-24T10:00:00.000Z",
       source,
       payload: { jobId, kernelId },
     },
     {
       type: "execution_completed",
-      timestamp: "2026-09-24T10:00:05.000Z",
+      timestamp: opts.at !== undefined ? new Date((opts.at + 5) * 1000).toISOString() : "2026-09-24T10:00:05.000Z",
       source,
       payload: { jobId, kernelId, outputHash: `sha256:${"5e".repeat(32)}` },
     },
@@ -291,6 +291,9 @@ describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (r
       registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
       contractId: jobId,
+      // The trusted context session evidence needs (cross-family review E3).
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
+      receivedAt: Math.floor(Date.now() / 1000),
     });
     expect(result).toMatchObject({ ok: true });
   });
@@ -647,7 +650,7 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
         nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey),
       ),
     };
-    const a = await boundDeviceEvidence({ jobId: "job-a", keyPair: session });
+    const a = await boundDeviceEvidence({ jobId: "job-a", keyPair: session, at: now });
     const signer = ed25519Signer(principal.publicKey);
 
     // job-b is inside the delegation's scope, so the signature leg accepts it.
@@ -658,6 +661,8 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
         registeredSigner: signer,
         sessionKeyAuthorization: auth,
         contractId: "job-b",
+        operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
+        receivedAt: now,
       }),
     ).toMatchObject({ ok: true });
 
@@ -665,7 +670,9 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
       deviceBundle: {
         ...a.slot({ jobId: "job-b", kernelId: a.kernelId }),
         sessionKeyAuthorization: auth,
+        receivedAt: now,
       },
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
       registeredSigner: signer,
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
@@ -673,7 +680,8 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
     expect(replayed).toMatchObject({ source: "gateway-fallback", reason: "job-mismatch" });
 
     const own = await resolveSettlementEvidence({
-      deviceBundle: { ...a.slot(), sessionKeyAuthorization: auth },
+      deviceBundle: { ...a.slot(), sessionKeyAuthorization: auth, receivedAt: now },
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
       registeredSigner: signer,
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
@@ -718,11 +726,13 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
       events: storedEvents,
       subject,
+      receivedAt: Math.floor(Date.now() / 1000),
     });
     const signer = ed25519Signer(principal.publicKey);
 
     const own = await resolveSettlementEvidence({
       deviceBundle: slot({ jobId, kernelId }),
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
       registeredSigner: signer,
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
@@ -731,6 +741,7 @@ describe("LO-EV-9 — settlement binds device evidence to the accepted job and k
 
     const other = await resolveSettlementEvidence({
       deviceBundle: slot({ jobId: "job-sdk-other", kernelId }),
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
       registeredSigner: signer,
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
@@ -817,9 +828,10 @@ describe("device evidence — the delegation scope rule is /settle's (checkDeleg
       publicKey: toHex(session.publicKey),
       parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
     };
-    const a = await boundDeviceEvidence({ jobId: "job-scope", keyPair: session });
+    const a = await boundDeviceEvidence({ jobId: "job-scope", keyPair: session, at: now });
     const decision = await resolveSettlementEvidence({
-      deviceBundle: { ...a.slot(), sessionKeyAuthorization: auth },
+      deviceBundle: { ...a.slot(), sessionKeyAuthorization: auth, receivedAt: now },
+      operatorPrincipalId: "eip155:1:0x0000000000000000000000000000000000000001",
       registeredSigner: ed25519Signer(principal.publicKey),
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
@@ -916,6 +928,8 @@ describe("device evidence — derivationPath absent, empty and non-empty, agains
         ...(path !== undefined ? { derivationPath: path } : {}),
       } as SessionKeyAuthorization,
       contractId: "job-path",
+      operatorPrincipalId: base.parentAgentId,
+      receivedAt: now,
     });
   };
 
@@ -1049,5 +1063,115 @@ describe("verifyPinnedSettlementEvidence — what recovery may settle on", () =>
         registeredSigner: null,
       }),
     ).toEqual({ ok: false, reason: "no-pinned-evidence" });
+  });
+});
+
+describe("session evidence needs the funded operator and the receipt time (cross-family review E3)", () => {
+  const OPERATOR = "eip155:1:0x0000000000000000000000000000000000000001";
+  const now = Math.floor(Date.now() / 1000);
+
+  async function sessionBundle(o: { parentAgentId?: string; issuedAt: number; expiresAt: number; eventsAt: number }) {
+    const principal = nacl.sign.keyPair();
+    const sessionKp = nacl.sign.keyPair();
+    const body = {
+      sessionId: "session-e3",
+      parentAgentId: o.parentAgentId ?? OPERATOR,
+      publicKey: sessionKp.publicKey,
+      issuedAt: o.issuedAt,
+      expiresAt: o.expiresAt,
+      scope: { allowedActions: ["evidence_submit"], contractIds: [SUBJECT_JOB], maxSignatures: 10 },
+    };
+    const auth: SessionKeyAuthorization = {
+      ...body,
+      publicKey: toHex(sessionKp.publicKey),
+      parentSignature: toHex(nacl.sign.detached(sessionKeyDelegationPreimage(body), principal.secretKey)),
+    };
+    const a = await boundDeviceEvidence({ keyPair: sessionKp, at: o.eventsAt });
+    return { a, auth, signer: ed25519Signer(principal.publicKey) };
+  }
+
+  const decide = (
+    b: Awaited<ReturnType<typeof sessionBundle>>,
+    trust: { operatorPrincipalId?: string; receivedAt?: number },
+  ) =>
+    resolveSettlementEvidence({
+      deviceBundle: {
+        ...b.a.slot(),
+        sessionKeyAuthorization: b.auth,
+        ...(trust.receivedAt !== undefined ? { receivedAt: trust.receivedAt } : {}),
+      },
+      ...(trust.operatorPrincipalId !== undefined ? { operatorPrincipalId: trust.operatorPrincipalId } : {}),
+      registeredSigner: b.signer,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+
+  it("anchors with the funded operator and the receipt time, its events inside the delegation window", async () => {
+    const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
+    expect(await decide(b, { operatorPrincipalId: OPERATOR, receivedAt: now })).toMatchObject({ source: "device", bundleHash: b.a.bundleHash });
+  });
+
+  it("NEGATIVE: without both the funded operator and the receipt time, session evidence never anchors", async () => {
+    const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
+    for (const trust of [{}, { receivedAt: now }, { operatorPrincipalId: OPERATOR }]) {
+      expect(await decide(b, trust), JSON.stringify(trust)).toMatchObject({
+        source: "gateway-fallback",
+        reason: "session-evidence-needs-trusted-context",
+      });
+    }
+  });
+
+  it("NEGATIVE: a parentAgentId that is not the funded operator is refused", async () => {
+    for (const parent of [" attacker ", `${OPERATOR} `, "eip155:1:0x0000000000000000000000000000000000000002"]) {
+      const b = await sessionBundle({ parentAgentId: parent, issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 30 });
+      expect(await decide(b, { operatorPrincipalId: OPERATOR, receivedAt: now }), parent).toMatchObject({
+        source: "gateway-fallback",
+        reason: "parent-not-operator",
+      });
+    }
+  });
+
+  it("NEGATIVE: an event an hour before the delegation was issued is refused", async () => {
+    const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 240, eventsAt: now - 3660 });
+    expect(await decide(b, { operatorPrincipalId: OPERATOR, receivedAt: now })).toMatchObject({
+      source: "gateway-fallback",
+      reason: "event-time-outside-window",
+    });
+  });
+
+  it("NEGATIVE: an event after the gateway received the bundle is refused (the window closes at min(expiresAt, receivedAt))", async () => {
+    const b = await sessionBundle({ issuedAt: now - 60, expiresAt: now + 3600, eventsAt: now + 1200 });
+    expect(await decide(b, { operatorPrincipalId: OPERATOR, receivedAt: now })).toMatchObject({
+      source: "gateway-fallback",
+      reason: "event-time-outside-window",
+    });
+  });
+
+  it("recovery judges expiry at the receipt time, not the wall clock (E3 finding 3)", async () => {
+    // Valid when the gateway received it, expired since.
+    const issuedAt = now - 2000;
+    const b = await sessionBundle({ issuedAt, expiresAt: now - 1000, eventsAt: now - 1900 });
+    const row = {
+      id: "ev-pinned-e3",
+      jobId: SUBJECT_JOB,
+      stepId: "step-e3",
+      kernelId: SUBJECT_KERNEL,
+      assuranceTier: 0,
+      createdAt: new Date((now - 1800) * 1000).toISOString(),
+      bundleHash: b.a.bundleHash,
+      kernelSignature: b.a.signature,
+      sessionKeyAuthorization: b.auth,
+    };
+    const verify = (operatorPrincipalId?: string) =>
+      verifyPinnedSettlementEvidence({
+        jobId: SUBJECT_JOB,
+        kernelId: SUBJECT_KERNEL,
+        row,
+        events: b.a.events,
+        registeredSigner: b.signer,
+        ...(operatorPrincipalId !== undefined ? { operatorPrincipalId } : {}),
+      });
+    expect(await verify(OPERATOR)).toEqual({ ok: true });
+    expect(await verify()).toEqual({ ok: false, reason: "session-evidence-needs-trusted-context" });
   });
 });
