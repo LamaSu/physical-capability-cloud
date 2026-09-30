@@ -125,7 +125,7 @@ describe("attempt reports: accepted shape", () => {
       ids: { kernelId: "kernel_abc-123", capabilityId: "pcc://capabilities/liquid-handling/v1", kitId: "kit:lh/1", jobId: "job_9" },
       device: { make: "Opentrons", model: "OT-2", class: "lab_instrument" },
       harness: { name: "claude-code", version: "2.3.1", model: "claude-opus-5-5" },
-      pack: { version: "2.20.0", digestPrefix: "sha256:0123456789abcdef" },
+      pack: { version: "2.20.0" },
       env: { os: "linux", python: "3.12.4", pccNode: "0.9.2" },
       tokens: { in: 1200, out: 340, source: "self_reported" },
       proposal: { target: "runbook", path: "runbook.json#register", text: "Ask for the evidence tier during intake" },
@@ -222,12 +222,12 @@ describe("attempt reports: redaction and limits", () => {
     expect(stored()[0].ids).toEqual({ jobId: "job_ok-1" });
   });
 
-  it("stores a pack digest only as a 16-hex prefix, and drops a malformed one", async () => {
+  it("stores no part of a pack digest, only the version (round 1 H1g)", async () => {
     await post(attempt({ seq: 1, pack: { version: "2.20.0", digest: `sha256:${HEX64}` } }));
-    await post(attempt({ seq: 2, pack: { digest: "md5:abc" } }));
+    await post(attempt({ seq: 2, pack: { digest: `sha256:${HEX64}` } }));
     const [a, b] = stored();
-    expect(a.pack).toEqual({ version: "2.20.0", digestPrefix: `sha256:${"a".repeat(16)}` });
-    expect(storedLines()[0]).not.toContain(HEX64);
+    expect(a.pack).toEqual({ version: "2.20.0" });
+    expect(storedLines().join("\n")).not.toContain("a".repeat(16));
     expect(b.pack).toBeNull();
   });
 
@@ -286,7 +286,7 @@ describe("attempt reports: transcripts (operator item 99)", () => {
 describe("attempt reports: dedup, principal, roll-up", () => {
   it("collapses a retried report (same sessionId and seq) but keeps distinct seqs and sessions", async () => {
     expect((await post(attempt({ seq: 7 }))).statusCode).toBe(201);
-    const retry = await post(attempt({ seq: 7, summary: "different text, same report" }));
+    const retry = await post(attempt({ seq: 7 }));
     expect(retry.statusCode).toBe(200);
     expect(retry.json()).toMatchObject({ deduped: true, submitted: false, sessionId: SID });
     expect((await post(attempt({ seq: 8 }))).statusCode).toBe(201);
@@ -370,9 +370,10 @@ describe("attempt reports: observability and admin", () => {
     expect(stored()[0]).toMatchObject({ kind: "feedback", summary: "contact me at zoe@example.com" });
   });
 
-  it("shares the per-IP rate limit with classic reports", async () => {
+  it("gives attempt reports their own per-IP bucket, so they can't exhaust a classic report's limit", async () => {
     for (let i = 0; i < 50; i++) await post(attempt({ seq: i }));
     expect((await post(attempt({ seq: 999 }))).statusCode).toBe(429);
+    expect((await post({ type: "bug", summary: "classic report still accepted" })).statusCode).toBe(201);
   });
 });
 
@@ -394,6 +395,8 @@ describe("attempt reports: Discord hears only failed / blocked / budget_stop", (
         }
         await new Promise((r) => setTimeout(r, 20));
         expect(fetchSpy).toHaveBeenCalledTimes(3);
+        const body = JSON.parse((fetchSpy.mock.calls[0] as unknown as [string, { body: string }])[1].body);
+        expect(body.allowed_mentions).toEqual({ parse: [] });
       } finally {
         await a.close();
       }
@@ -403,3 +406,88 @@ describe("attempt reports: Discord hears only failed / blocked / budget_stop", (
     }
   });
 });
+
+describe("round-1 fixes (#458 @9e9fe4f8 review)", () => {
+  const UA = `PCC-Agent Bearer ${"A".repeat(20)} alice@example.com`;
+
+  it("H1a/H1c: sanitises the User-Agent in the record and the audit event", async () => {
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => undefined) as never);
+    await app.inject({ method: "POST", url: "/api/feedback", headers: { "user-agent": UA }, payload: attempt() });
+    const line = storedLines()[0]!;
+    expect(line).not.toContain("alice@example.com");
+    expect(line).not.toContain("A".repeat(20));
+    expect(JSON.parse(line).userAgent).toBe("PCC-Agent Bearer [redacted] [redacted-email]");
+    const entry = spy.mock.calls.map((c) => c[0] as { eventType: string; userAgent?: string }).find((e) => e.eventType === "agent.attempt");
+    expect(entry?.userAgent).toBe("PCC-Agent Bearer [redacted] [redacted-email]");
+  });
+
+  it("H1e: redacts emails in logs[].path", async () => {
+    await post(attempt({ logs: [{ step: 1, path: "/users/alice@example.com/run", status: 500 }] }));
+    expect(stored()[0].logs[0].path).toBe("/users/[redacted-email]/run");
+  });
+
+  it("H1f: redacts PEM private keys, Google, Stripe, GitHub and Hugging Face keys, and key=value secrets", async () => {
+    const pem = ["-----BEGIN ", "RSA PRIVATE KEY-----\n", "MIIEpAIBAAKCAQEA", "x".repeat(40), "\n-----END ", "RSA PRIVATE KEY-----"].join("");
+    const google = "AI" + "za" + "Sy" + "B".repeat(33);
+    const stripe = "sk" + "_live_" + "c".repeat(24);
+    const github = "gh" + "s_" + "d".repeat(30);
+    const hf = "hf" + "_" + "e".repeat(34);
+    await post(attempt({ summary: `${google} ${stripe} ${github} ${hf} token=abc12345xyz`, detail: `key:\n${pem}\nafter` }));
+    const line = storedLines()[0]!;
+    for (const leak of [google, stripe, github, hf, "abc12345xyz", "PRIVATE KEY", "MIIEpAIBAAKCAQEA"]) expect(line).not.toContain(leak);
+    expect(stored()[0].detail).toBe("key:\n[redacted-private-key]\nafter");
+  });
+
+  it("M1: a report with the same (sessionId, seq) but different content is stored; an identical retry is not", async () => {
+    await post(attempt({ seq: 7, outcome: "ok", summary: "forged first" }));
+    const real = await post(attempt({ seq: 7, outcome: "failed", summary: "the real failure" }));
+    expect(real.statusCode).toBe(201);
+    const retry = await post(attempt({ seq: 7, outcome: "failed", summary: "the real failure" }));
+    expect(retry.json()).toMatchObject({ deduped: true });
+    expect(stored().map((r) => r.summary)).toEqual(["forged first", "the real failure"]);
+  });
+
+  it("M2: caps attempt summary at 1000 and detail at 4000 characters", async () => {
+    await post(attempt({ summary: "s".repeat(5000), detail: "z".repeat(20000) }));
+    const rec = stored()[0];
+    expect(rec.summary).toHaveLength(1000);
+    expect(rec.detail).toHaveLength(4000);
+  });
+
+  it("M3: drops Unicode direction controls from attempt text", async () => {
+    await post(attempt({ summary: "safe\u202Etxt.exe\u2066x" }));
+    expect(stored()[0].summary).toBe("safetxt.exex");
+  });
+
+  it("H2a: a rejected hit is not recorded, so one IP's state stays at the limit", async () => {
+    for (let i = 0; i < 80; i++) await post(attempt({ seq: i }));
+    expect(mod.__feedbackStateSizes().maxHitsPerIp).toBeLessThanOrEqual(50);
+  });
+
+  it("H2b/H2c: an idle IP and expired dedup keys are dropped", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-09-29T10:00:00.000Z"));
+      const quiet = await buildApp();
+      try {
+        await quiet.inject({ method: "POST", url: "/api/feedback", remoteAddress: "198.51.100.7", payload: attempt({ seq: 1 }) });
+      } finally {
+        await quiet.close();
+      }
+      expect(mod.__feedbackStateSizes()).toMatchObject({ attemptHits: 1, dedup: 1 });
+      vi.setSystemTime(new Date("2026-09-29T10:10:00.000Z"));
+      await post(attempt({ seq: 2 }));
+      expect(mod.__feedbackStateSizes()).toMatchObject({ attemptHits: 1, dedup: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("LOW: rejects a duplicated admin filter instead of ignoring it", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/admin/feedback?kind=attempt&kind=feedback", headers: { "x-admin-token": ADMIN_TOKEN } });
+    expect(res.statusCode).toBe(400);
+    const sid = await app.inject({ method: "GET", url: `/api/admin/feedback?sessionId=${SID}&sessionId=${SID2}`, headers: { "x-admin-token": ADMIN_TOKEN } });
+    expect(sid.statusCode).toBe(400);
+  });
+});
+

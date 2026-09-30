@@ -37,18 +37,68 @@ const FEEDBACK_FILE = `${DATA_DIR}/feedback.jsonl`;
 // volume. Tunable via env for ops + tests.
 const RATE_MAX = Number.parseInt(process.env.PCC_FEEDBACK_RATE_MAX ?? "60", 10);
 const RATE_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_RATE_WINDOW_MS ?? "60000", 10);
+// Attempt reports have their own per-IP bucket, so a burst of them can't starve a
+// classic report, plus a global cap per window: behind a proxy that passes on a
+// caller-chosen X-Forwarded-For, per-IP limits can be sidestepped, and the global
+// cap still bounds how fast the durable sink can grow (#458 round 1).
+const ATTEMPT_RATE_MAX = Number.parseInt(process.env.PCC_ATTEMPT_RATE_MAX ?? String(RATE_MAX), 10);
+const ATTEMPT_GLOBAL_MAX = Number.parseInt(process.env.PCC_ATTEMPT_GLOBAL_RATE_MAX ?? "600", 10);
+// State stays bounded: a rejected hit is not recorded, the least recently seen IP
+// is evicted past MAX_TRACKED_IPS, and an idle IP at the front is dropped.
+const MAX_TRACKED_IPS = 10_000;
 const hits = new Map<string, number[]>();
-function rateLimited(ip: string): boolean {
+const attemptHits = new Map<string, number[]>();
+let attemptWindowStart = 0;
+let attemptWindowCount = 0;
+
+function limitedIn(bucket: Map<string, number[]>, ip: string, max: number): boolean {
   const now = Date.now();
-  const arr = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
-  arr.push(now);
-  hits.set(ip, arr);
-  return arr.length > RATE_MAX;
+  const first = bucket.entries().next().value as [string, number[]] | undefined;
+  if (first && first[0] !== ip) {
+    const last = first[1][first[1].length - 1];
+    if (last === undefined || now - last >= RATE_WINDOW_MS) bucket.delete(first[0]);
+  }
+  const arr = (bucket.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  bucket.delete(ip); // re-set below, so Map order is least recently seen first
+  const limited = arr.length >= max;
+  if (!limited) arr.push(now);
+  bucket.set(ip, arr);
+  if (bucket.size > MAX_TRACKED_IPS) {
+    const oldest = bucket.keys().next().value;
+    if (oldest !== undefined) bucket.delete(oldest);
+  }
+  return limited;
 }
 
-/** Reset the in-memory rate-limit counter. Test-only export. */
+function rateLimited(ip: string): boolean {
+  return limitedIn(hits, ip, RATE_MAX);
+}
+
+function attemptRateLimited(ip: string): boolean {
+  if (limitedIn(attemptHits, ip, ATTEMPT_RATE_MAX)) return true;
+  const now = Date.now();
+  if (now - attemptWindowStart >= RATE_WINDOW_MS) {
+    attemptWindowStart = now;
+    attemptWindowCount = 0;
+  }
+  if (attemptWindowCount >= ATTEMPT_GLOBAL_MAX) return true;
+  attemptWindowCount++;
+  return false;
+}
+
+/** Reset the in-memory rate-limit counters. Test-only export. */
 export function __resetFeedbackRateLimit(): void {
   hits.clear();
+  attemptHits.clear();
+  attemptWindowStart = 0;
+  attemptWindowCount = 0;
+}
+
+/** Sizes of the rate-limit and dedup state. Test-only export. */
+export function __feedbackStateSizes(): { hits: number; attemptHits: number; maxHitsPerIp: number; dedup: number } {
+  let maxHitsPerIp = 0;
+  for (const arr of [...hits.values(), ...attemptHits.values()]) maxHitsPerIp = Math.max(maxHitsPerIp, arr.length);
+  return { hits: hits.size, attemptHits: attemptHits.size, maxHitsPerIp, dedup: recentReports.size };
 }
 
 // Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
@@ -62,16 +112,29 @@ const DEDUP_WINDOW_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 300000; // 5 min default
 })();
 const recentReports = new Map<string, number>();
+// Bounded (#458 round 1): at most MAX_DEDUP_KEYS keys, oldest evicted first.
+const MAX_DEDUP_KEYS = 10_000;
 // PEEK — prune expired keys and report whether this one is present, WITHOUT recording
 // it. The key is marked only after a successful append (markSeen), so a failed write
-// can't permanently dedup a report that never persisted (review #3).
+// can't permanently dedup a report that never persisted (review #3). Keys are
+// inserted in time order (markSeen re-inserts at the end), so expired keys sit at
+// the front and pruning stops at the first live one instead of scanning the map.
 function seenRecently(key: string): boolean {
   const now = Date.now();
-  for (const [k, t] of recentReports) if (now - t > DEDUP_WINDOW_MS) recentReports.delete(k);
+  for (const [k, t] of recentReports) {
+    if (now - t <= DEDUP_WINDOW_MS) break;
+    recentReports.delete(k);
+  }
   return recentReports.has(key);
 }
 function markSeen(key: string): void {
+  recentReports.delete(key);
   recentReports.set(key, Date.now());
+  while (recentReports.size > MAX_DEDUP_KEYS) {
+    const oldest = recentReports.keys().next().value;
+    if (oldest === undefined) break;
+    recentReports.delete(oldest);
+  }
 }
 /** Reset the in-memory dedup window. Test-only export. */
 export function __resetFeedbackDedup(): void {
@@ -250,6 +313,8 @@ async function notifyDiscord(rec: Record<string, unknown>): Promise<void> {
 
     const payload = {
       username: "PCC Feedback",
+      // Never ping @everyone, @here, a role or a user from report text (#458 round 1).
+      allowed_mentions: { parse: [] as string[] },
       embeds: [
         {
           title: `New ${rec.type}`,
@@ -279,14 +344,15 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const b = (req.body ?? {}) as Record<string, any>;
     if (b.website || b.hp) return { status: "ok" }; // honeypot — accept silently, drop
 
-    if (rateLimited(req.ip)) {
+    const isAttempt = b.kind === "attempt";
+    if (isAttempt ? attemptRateLimited(req.ip) : rateLimited(req.ip)) {
       return reply
         .code(429)
         .send({ error: "rate_limited", message: "Too many submissions — try again shortly." });
     }
 
     // ADK attempt reports have their own contract (section at the end of this file).
-    if (b.kind === "attempt") return handleAttemptReport(req, reply, b);
+    if (isAttempt) return handleAttemptReport(req, reply, b);
 
     // Accept the canonical agent shape AND tolerate the legacy dashboard shape
     // and the /api/feedback/agent-report aliases — no migration, fields ride along:
@@ -450,6 +516,11 @@ export async function feedbackRoutes(app: FastifyInstance) {
   app.get("/api/admin/feedback", async (req, reply) => {
     if (!adminOk(req, reply)) return;
     const q = (req.query ?? {}) as Record<string, unknown>;
+    for (const key of ["kind", "sessionId"]) {
+      if (q[key] !== undefined && typeof q[key] !== "string") {
+        return reply.code(400).send({ error: "bad_request", message: `\`${key}\` must be given once.` });
+      }
+    }
     let items = readAll(FEEDBACK_FILE) as Array<Record<string, unknown>>;
     if (typeof q.kind === "string" && q.kind !== "") {
       items = items.filter((r) => (r.kind ?? "feedback") === q.kind);
@@ -505,9 +576,14 @@ export const PROPOSAL_TARGETS = ["runbook", "agent-package", "docs", "code", "pr
 export const TOKEN_SOURCES = ["self_reported", "harness", "metered", "unknown"] as const;
 
 const ALERT_OUTCOMES = new Set(["failed", "blocked", "budget_stop"]);
+// Tighter than a classic report's caps: attempt text describes a failure, never a
+// conversation (#458 round 1). Consent for transcripts is operator item 99.
+const ATTEMPT_SUMMARY_MAX = 1000;
+const ATTEMPT_DETAIL_MAX = 4000;
+// Unicode direction controls can reorder what a reader sees; attempt text drops them.
+const BIDI_CONTROLS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ATTEMPT_ID = /^[A-Za-z0-9:._/-]{1,200}$/;
-const PACK_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_SEQ = 10_000;
 const MAX_DURATION_MS = 86_400_000;
 const MAX_TOKENS = 1_000_000_000;
@@ -520,11 +596,19 @@ function redactEmails(s: string): string {
   return s.replace(EMAIL_IN_TEXT, "[redacted-email]");
 }
 
-/** Attempt free text: bound, redact secrets and emails, then clamp (redact before clamp). */
+/** Attempt free text: bound, redact secrets and emails, drop direction controls, then clamp. */
 function attemptText(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
   const bounded = v.length > PRE_REDACT_MAX ? v.slice(0, PRE_REDACT_MAX) : v;
-  return clampStr(redactEmails(redactSecrets(bounded)), max);
+  return clampStr(redactEmails(redactSecrets(bounded)).replace(BIDI_CONTROLS, ""), max);
+}
+
+/** Text for a Discord embed: no newlines, no Markdown, no mentions. */
+function discordSafe(s: unknown): string {
+  return String(s ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/([\\*_`~|>\[\]()#])/g, "\\$1")
+    .replace(/@/g, "@\u200b");
 }
 
 function asObject(v: unknown): Record<string, unknown> | null {
@@ -554,14 +638,21 @@ function attemptId(v: unknown): string | null {
   return redactSecrets(v) === v ? v : null;
 }
 
-/** Redact emails in log notes before clampLogs redacts secrets and clamps them. */
-function preRedactLogNotes(v: unknown): unknown {
+/** Redact emails in log notes and paths before clampLogs redacts secrets and clamps them. */
+function preRedactLogs(v: unknown): unknown {
   if (!Array.isArray(v)) return v;
   return v.slice(0, MAX_LOG_ENTRIES).map((raw) => {
     const e = asObject(raw);
-    if (e === null || typeof e.note !== "string") return raw;
-    const bounded = e.note.length > PRE_REDACT_MAX ? e.note.slice(0, PRE_REDACT_MAX) : e.note;
-    return { ...e, note: redactEmails(bounded) };
+    if (e === null) return raw;
+    const out: Record<string, unknown> = { ...e };
+    for (const k of ["note", "path", "endpoint"]) {
+      const val = e[k];
+      if (typeof val === "string") {
+        const bounded = val.length > PRE_REDACT_MAX ? val.slice(0, PRE_REDACT_MAX) : val;
+        out[k] = redactEmails(bounded).replace(BIDI_CONTROLS, "");
+      }
+    }
+    return out;
   });
 }
 
@@ -613,16 +704,14 @@ function attemptHarness(v: unknown): Record<string, string | null> | null {
   return out.name || out.version || out.model ? out : null;
 }
 
-// A 64-hex value is exactly what redaction treats as a private key, so a pack
-// digest is stored only as its first 16 hex digits: enough to tell pack builds
-// apart, never a whole 256-bit value.
-function attemptPack(v: unknown): { version: string | null; digestPrefix: string | null } | null {
+// No part of a client-sent pack digest is stored: a 64-hex value is exactly what
+// redaction treats as a private key, and even a prefix of one is part of a secret
+// (#458 round 1). The pack version identifies the release.
+function attemptPack(v: unknown): { version: string | null } | null {
   const o = asObject(v);
   if (o === null) return null;
   const version = attemptText(o.version, 64);
-  const d = typeof o.digest === "string" ? o.digest.trim().toLowerCase() : "";
-  const digestPrefix = PACK_DIGEST.test(d) ? d.slice(0, "sha256:".length + 16) : null;
-  return version || digestPrefix ? { version, digestPrefix } : null;
+  return version ? { version } : null;
 }
 
 function attemptEnv(v: unknown): Record<string, string | null> | null {
@@ -646,7 +735,7 @@ function attemptTokens(v: unknown): { in: number | null; out: number | null; sou
 function attemptProposal(v: unknown): { target: string; path: string | null; text: string } | null {
   const o = asObject(v);
   if (o === null) return null;
-  const text = attemptText(o.text, SUMMARY_MAX);
+  const text = attemptText(o.text, ATTEMPT_SUMMARY_MAX);
   if (text === null) return null;
   const path = pathClamp(o.path, FIELD_MAX);
   return { target: enumValue(o.target, PROPOSAL_TARGETS) ?? "other", path: path === null ? null : redactEmails(path), text };
@@ -681,9 +770,9 @@ export function parseAttemptReport(b: Record<string, unknown>): AttemptParse {
     outcome,
     ...(outcome === "unknown" ? { outcomeLabel: attemptText(b.outcome, 64) } : {}),
     durationMs: boundedInt(b.durationMs, MAX_DURATION_MS),
-    summary: attemptText(b.summary, SUMMARY_MAX) ?? `${phase}: ${outcome}`,
-    detail: attemptText(b.detail, DETAIL_MAX),
-    logs: clampLogs(preRedactLogNotes(b.logs)),
+    summary: attemptText(b.summary, ATTEMPT_SUMMARY_MAX) ?? `${phase}: ${outcome}`,
+    detail: attemptText(b.detail, ATTEMPT_DETAIL_MAX),
+    logs: clampLogs(preRedactLogs(b.logs)),
     ...(phase === "session" ? { phases: attemptRollup(b.phases) } : {}),
     ids: attemptIds(b.ids),
     device: attemptDevice(b.device),
@@ -720,11 +809,15 @@ async function handleAttemptReport(req: FastifyRequest, reply: FastifyReply, b: 
       : { principalHash: createHash("sha256").update(JSON.stringify(principal)).digest("hex") }),
     status: "new",
     createdAt: new Date().toISOString(),
-    userAgent: clampStr(req.headers["user-agent"], 200),
+    // Sanitised like any attempt text: a User-Agent can carry a token or an email.
+    userAgent: attemptText(req.headers["user-agent"], 200),
   };
 
+  // The content digest keeps a report with the same (sessionId, seq) but different
+  // content from suppressing the real one; an identical retry still collapses.
+  const contentDigest = createHash("sha256").update(JSON.stringify(f)).digest("hex");
   const dedupKey = createHash("sha256")
-    .update(JSON.stringify(["attempt", principal, f.sessionId, f.seq]))
+    .update(JSON.stringify(["attempt", principal, f.sessionId, f.seq, contentDigest]))
     .digest("hex");
   if (seenRecently(dedupKey)) {
     return reply.code(200).send({
@@ -740,15 +833,15 @@ async function handleAttemptReport(req: FastifyRequest, reply: FastifyReply, b: 
   markSeen(dedupKey);
   if (ALERT_OUTCOMES.has(String(f.outcome))) {
     const harness = f.harness as { name?: string | null } | null;
+    // Discord gets escaped, single-line text and never the detail field.
     notifyDiscord({
       id: rec.id,
       type: `attempt ${String(f.phase)}/${String(f.outcome)}`,
-      summary: rec.summary,
-      detail: rec.detail,
-      traceId: rec.traceId,
+      summary: discordSafe(rec.summary),
+      traceId: rec.traceId === null ? null : discordSafe(rec.traceId),
       agentId: harness?.name ?? null,
       createdAt: rec.createdAt,
-      userAgent: rec.userAgent,
+      userAgent: discordSafe(rec.userAgent),
     }).catch(() => {});
   }
   try {
@@ -769,7 +862,7 @@ async function handleAttemptReport(req: FastifyRequest, reply: FastifyReply, b: 
         has_proposal: f.proposal !== null,
         transcript_dropped: f.transcriptDropped === true,
       },
-      userAgent: req.headers["user-agent"] as string | undefined,
+      userAgent: (rec.userAgent as string | null) ?? undefined,
     });
   } catch {
     /* best-effort observability */
