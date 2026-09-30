@@ -166,28 +166,40 @@ export interface RegisteredKeyInstance {
   signer: unknown;
 }
 
+/** A pinned snapshotHash: 0x + 64 hex, in any case, since it is compared lowercased. */
+const SNAPSHOT_HASH = /^0x[0-9a-f]{64}$/i;
+
 /**
  * The `ident.registered_key` PrimitiveVerifier. `params` is the primitive's
  * {registryId, snapshotHash}: the registry state the accepted deal pinned.
- * No instance yet means pending, and anything malformed fails closed. It never
- * throws.
+ * Missing or malformed params fail closed first: a deal that pins no kernel
+ * signing-key snapshot can never be met, so it is never pending. With
+ * well-formed params, no instance yet means pending, and anything malformed
+ * fails closed. It never throws.
  */
 export function makeRegisteredKeyVerifier(): PrimitiveVerifier {
   return {
     id: IDENT_REGISTERED_KEY_ID,
     async verify(instance: unknown, params: unknown, _ctx: PrimitiveVerifyContext): Promise<PrimitiveVerifyResult> {
-      if (instance === null || instance === undefined) {
-        return { met: "pending", detail: ["no registry resolution yet"] };
-      }
       try {
         const p = (params ?? {}) as { registryId?: unknown; snapshotHash?: unknown };
-        if (typeof p.registryId !== "string" || typeof p.snapshotHash !== "string") {
+        const { registryId, snapshotHash } = p;
+        if (typeof registryId !== "string" || typeof snapshotHash !== "string") {
           return { met: false, detail: ["params.registryId and params.snapshotHash are required: the deal pins the registry state"] };
+        }
+        if (registryId !== KERNEL_SIGNING_KEY_REGISTRY_ID) {
+          return { met: false, detail: [`pinned registry ${JSON.stringify(registryId)} is not the kernel signing-key registry`] };
+        }
+        if (!SNAPSHOT_HASH.test(snapshotHash)) {
+          return { met: false, detail: ["params.snapshotHash must be 0x + 64 hex: the hash of the pinned registry snapshot"] };
+        }
+        if (instance === null || instance === undefined) {
+          return { met: "pending", detail: ["no registry resolution yet"] };
         }
         const inst = instance as RegisteredKeyInstance;
         const r = verifyRegisteredKey({
           snapshot: inst.snapshot,
-          pinned: { registryId: p.registryId, snapshotHash: p.snapshotHash },
+          pinned: { registryId, snapshotHash },
           kernelId: inst.kernelId,
           signer: inst.signer,
         });

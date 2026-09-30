@@ -246,3 +246,33 @@ describe("verifyRegisteredKey fails closed on malformed runtime input and never 
     expect(r).toEqual({ ok: false, reason: expect.any(String) });
   });
 });
+
+describe("ident.registered_key checks the pinned params before the pending rule (E2 finding 3)", () => {
+  const v = makeRegisteredKeyVerifier();
+  const ctx = { vocabVersion: 1 };
+  const cases: [string, unknown][] = [
+    ["no params", undefined],
+    ["null params", null],
+    ["empty params (the verdict's case)", {}],
+    ["no snapshotHash", { registryId: KERNEL_SIGNING_KEY_REGISTRY_ID }],
+    ["no registryId", { snapshotHash: SNAP.snapshotHash }],
+    ["a registryId that is not a string", { registryId: 7, snapshotHash: SNAP.snapshotHash }],
+    ["another registry", { registryId: "pcc.registry.other.v1", snapshotHash: SNAP.snapshotHash }],
+    ["a snapshotHash that is not a hash", { registryId: KERNEL_SIGNING_KEY_REGISTRY_ID, snapshotHash: "0x1234" }],
+  ];
+
+  it.each(cases)("not met, never pending, with %s and no instance yet", async (_name, params) => {
+    expect(await v.verify(null, params, ctx)).toMatchObject({ met: false });
+    expect(await v.verify(undefined, params, ctx)).toMatchObject({ met: false });
+  });
+
+  it("well-formed params still wait for an instance, and a digest in any case is the same hash", async () => {
+    const instance = { snapshot: SNAP, kernelId: "kernel-a", signer: KEY_A };
+    const upper = SNAP.snapshotHash.toUpperCase();
+    for (const snapshotHash of [SNAP.snapshotHash, upper, "0x" + upper.slice(2)]) {
+      const params = { registryId: KERNEL_SIGNING_KEY_REGISTRY_ID, snapshotHash };
+      expect((await v.verify(null, params, ctx)).met, snapshotHash).toBe("pending");
+      expect((await v.verify(instance, params, ctx)).met, snapshotHash).toBe(true);
+    }
+  });
+});
