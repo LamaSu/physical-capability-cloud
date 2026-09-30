@@ -310,9 +310,9 @@ function buildFullValidRecord(): IntakeRecord {
     "network.outboundHttps": human(true),
     "network.inboundBlocked": human(true),
     "safety.supervision": human("attended"),
-    "safety.estop": human({ present: true, type: "physical button", whoCanPress: "operator" }),
+    "safety.estop": human({ mechanism: "hardware" }),
     "safety.hazards": human(["heat"]),
-    "safety.limits": confirmed([{ parameter: "bed temp", max: 120, unit: "C" }]),
+    "safety.limits": confirmed([{ quantity: "bed temperature", unit: "C", min: 0, max: 120 }]),
     "consumables.items": human(["PLA filament"]),
     "consumables.restockedBy": human("operator, monthly"),
     "consumables.loadedMaterial": human("PLA"),
@@ -774,5 +774,34 @@ describe("generated docs are in sync with the committed files", () => {
       expect(prop["x-pcc-neverDefault"]).toBe(field.neverDefault ?? false);
       expect(prop["x-pcc-sensitive"]).toBe(field.sensitive ?? false);
     }
+  });
+});
+
+describe("safety field shapes match sensors' R8 (#4200)", () => {
+  const field = (id: string) => INTAKE_FIELDS.find((f) => f.id === id)!;
+
+  it("safety.estop is {mechanism, stopCommand?}", () => {
+    const schema = field("safety.estop").valueSchema;
+    expect(schema.safeParse({ mechanism: "hardware" }).success).toBe(true);
+    expect(schema.safeParse({ mechanism: "adapter-stop", stopCommand: "M112" }).success).toBe(true);
+    expect(schema.safeParse({ mechanism: "none" }).success).toBe(true);
+    expect(schema.safeParse({ mechanism: "big red button" }).success).toBe(false);
+    expect(schema.safeParse({ present: true }).success).toBe(false);
+  });
+
+  it("safety.limits needs quantity, unit and BOTH bounds, with min <= max", () => {
+    const schema = field("safety.limits").valueSchema;
+    expect(schema.safeParse([{ quantity: "volume", unit: "uL", min: 1, max: 1000 }]).success).toBe(true);
+    expect(schema.safeParse([{ quantity: "volume", unit: "uL", max: 1000 }]).success).toBe(false);
+    expect(schema.safeParse([{ quantity: "volume", unit: "uL", min: 10, max: 1 }]).success).toBe(false);
+    expect(schema.safeParse([{ parameter: "volume", unit: "uL", min: 1, max: 2 }]).success).toBe(false);
+    expect(schema.safeParse([]).success).toBe(false);
+  });
+
+  it("safety.hazards accepts an explicit empty list (none), and supervision is the R8 enum", () => {
+    expect(field("safety.hazards").valueSchema.safeParse([]).success).toBe(true);
+    const sup = field("safety.supervision").valueSchema;
+    for (const v of ["attended", "unattended", "remote-supervised"]) expect(sup.safeParse(v).success, v).toBe(true);
+    expect(sup.safeParse("sometimes").success).toBe(false);
   });
 });

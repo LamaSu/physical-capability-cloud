@@ -149,7 +149,7 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     mustReturn: ["limits", "hazards", "ppe", "supervision", "estop", "citation"],
     acceptance:
       "Safety limits and hazard guidance quoted from a manufacturer manual or safety datasheet, never a forum guess or inference.",
-    fills: ["safety.limits", "safety.hazards"],
+    fills: ["safety.limits", "safety.hazards", "safety.estop"],
     humanConfirmRequired: true,
     coaching: {
       ask: "Ask me: find the safety limits and e-stop requirements for the {model} in its manual, quoted word for word.",
@@ -297,6 +297,8 @@ export type ResearchCitation = z.infer<typeof ResearchCitationSchema>;
  */
 export const ResearchFindingSchema = z
   .object({
+    /** The template quantity the finding is about (R8 keys limits by it); needed for limits and I/O ranges. */
+    quantity: z.string().min(1).max(120).optional(),
     claim: z.string().min(1),
     value: z.union([z.string(), z.number(), z.boolean()]),
     unit: z.string().optional(),

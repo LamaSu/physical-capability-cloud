@@ -234,3 +234,26 @@ describe("ResearchFindingSchema — a value without a citation can never become 
     expect(ResearchFindingSchema.safeParse(withoutRetrievedAt).success).toBe(false);
   });
 });
+
+describe("research findings carry the template quantity for R8 (#4200)", () => {
+  it("accepts an optional quantity and still refuses a value without a citation", async () => {
+    const { ResearchFindingSchema } = await import("../onboarding/research/index.js");
+    const base = {
+      claim: "max aspirate volume",
+      value: 1000,
+      unit: "uL",
+      citation: { doc: "OT-2 P1000 GEN2 spec sheet", section: "Volume range" },
+      retrievedAt: "2026-09-29T20:00:00Z",
+    };
+    expect(ResearchFindingSchema.safeParse({ ...base, quantity: "volume" }).success).toBe(true);
+    expect(ResearchFindingSchema.safeParse(base).success).toBe(true);
+    const { citation: _drop, ...uncited } = base;
+    expect(ResearchFindingSchema.safeParse({ ...uncited, quantity: "volume" }).success).toBe(false);
+  });
+
+  it("find-safety-limits feeds the e-stop field too", async () => {
+    const { RESEARCH_LIBRARY } = await import("../onboarding/research/index.js");
+    const entry = RESEARCH_LIBRARY.find((e: { id: string }) => e.id === "find-safety-limits")!;
+    expect(entry.fills).toContain("safety.estop");
+  });
+});

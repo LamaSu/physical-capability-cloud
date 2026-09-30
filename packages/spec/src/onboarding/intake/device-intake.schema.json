@@ -915,18 +915,22 @@
             "value": {
               "type": "object",
               "properties": {
-                "present": {
-                  "type": "boolean"
+                "mechanism": {
+                  "type": "string",
+                  "enum": [
+                    "hardware",
+                    "adapter-stop",
+                    "none"
+                  ]
                 },
-                "type": {
-                  "type": "string"
-                },
-                "whoCanPress": {
-                  "type": "string"
+                "stopCommand": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
                 }
               },
               "required": [
-                "present"
+                "mechanism"
               ],
               "additionalProperties": false
             },
@@ -1052,28 +1056,7 @@
           "properties": {
             "value": {
               "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "parameter": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "min": {
-                    "type": "number"
-                  },
-                  "max": {
-                    "type": "number"
-                  },
-                  "unit": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "parameter"
-                ],
-                "additionalProperties": false
-              },
+              "items": {},
               "minItems": 1
             },
             "provenance": {

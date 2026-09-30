@@ -457,11 +457,11 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     requiredFor: ["publish", "accept-jobs"],
     neverDefault: true,
     ifUnknown: { research: "find-safety-limits" },
+    // Sensors' R8 shape (#4200, draft #465): the safety envelope reads it as is.
     valueSchema: z
       .object({
-        present: z.boolean(),
-        type: z.string().optional(),
-        whoCanPress: z.string().optional(),
+        mechanism: z.enum(["hardware", "adapter-stop", "none"]),
+        stopCommand: z.string().min(1).max(200).optional(),
       })
       .strict(),
   },
@@ -493,15 +493,18 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
     neverDefault: true,
     ifUnknown: { research: "find-safety-limits" },
     valueSchema: z
+      // Sensors' R8 shape (#4200): one confirmed limit per template quantity. A
+      // limit needs BOTH sides; a one-sided research bound stays a question in R8.
       .array(
         z
           .object({
-            parameter: z.string().min(1),
-            min: z.number().optional(),
-            max: z.number().optional(),
-            unit: z.string().optional(),
+            quantity: z.string().min(1).max(120),
+            unit: z.string().min(1).max(40),
+            min: z.number().finite(),
+            max: z.number().finite(),
           })
-          .strict(),
+          .strict()
+          .refine((l) => l.min <= l.max, { message: "a limit's min must not exceed its max" }),
       )
       .min(1),
   },
