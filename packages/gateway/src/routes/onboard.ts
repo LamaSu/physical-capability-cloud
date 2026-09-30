@@ -42,6 +42,7 @@ import { adminOrCaller, mayAccess } from "../auth/admin-secret-gate.js";
 // time so once the flag flips, scoped listing yields correct rows without a
 // data backfill.
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -669,7 +670,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     const owner = registrationOwner(reg);
-    if (!owner || owner !== callerId) {
+    if (!owner || !sameIdentity(owner, callerId)) {
       return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
     }
     if (reg.status === "deleted") {
@@ -741,7 +742,7 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     const owner = registrationOwner(reg);
-    if (!owner || owner !== callerId) {
+    if (!owner || !sameIdentity(owner, callerId)) {
       return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
     }
     if (reg.status === "deleted") {
@@ -855,7 +856,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           // Only the registration's owner may submit its evidence. No owner (or
           // the zero-address placeholder) matches nobody.
           const owner = registrationOwner(reg);
-          if (!owner || owner !== actor) {
+          if (!owner || !sameIdentity(owner, actor)) {
             return reply.status(403).send({
               error: "forbidden",
               message: owner
