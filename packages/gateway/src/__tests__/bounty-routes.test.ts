@@ -57,7 +57,7 @@ describe("POST /api/bounty/demand", () => {
 });
 
 describe("GET /api/bounty/demand", () => {
-  it("returns only the public fields of each signal", async () => {
+  it("returns no rows and leaks no requester data (suppressed like /top)", async () => {
     const app = makeApp();
     await app.inject({
       method: "POST",
@@ -70,15 +70,12 @@ describe("GET /api/bounty/demand", () => {
       url: "/api/bounty/demand?capabilityType=kits-test-redaction",
     });
     expect(res.statusCode).toBe(200);
-    const [signal] = res.json().signals;
-    expect(Object.keys(signal).sort()).toEqual(
-      ["assuranceTier", "capabilityType", "createdAt", "estimatedFrequency", "id", "status"],
-    );
+    expect(res.json().signals).toEqual([]);
+    expect(res.json().suppressed).toBe(true);
     const raw = res.body;
     expect(raw).not.toContain("secret-requester");
     expect(raw).not.toContain("private need");
     expect(raw).not.toContain("Building 7");
-    expect(raw).not.toContain("estimatedJobValue");
   });
 });
 
@@ -146,5 +143,20 @@ describe("POST /api/bounty/verify", () => {
     expect(after.status).toBe("claimed");
     expect(after.verificationScore).toBeUndefined();
     expect(after.fundingStatus).toBe("unfunded");
+  });
+});
+
+describe("pack 36 (astra) MEDIUM: the demand list is suppressed like /top", () => {
+  it("six signals for one capability reveal no rows and no count on GET /api/bounty/demand", async () => {
+    const app = makeApp();
+    for (const r of ["a", "b", "c", "d", "e", "f"]) {
+      await app.inject({ method: "POST", url: "/api/bounty/demand", payload: demand("kits-test-count", r) });
+    }
+    const res = await app.inject({ method: "GET", url: "/api/bounty/demand?capabilityType=kits-test-count" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.suppressed).toBe(true);
+    expect(body.signals ?? []).toEqual([]);
+    expect(body.total).toBeUndefined();
   });
 });

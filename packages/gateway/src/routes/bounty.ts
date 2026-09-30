@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { BountyService, type DemandSignal } from "@pcc/payments";
+import { BountyService } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
 // Shared service instance (in-memory mock)
@@ -17,20 +17,6 @@ export function _bountyServiceForTests(): BountyService {
   return bountyService;
 }
 
-/**
- * The only demand-signal fields any caller may read back. Requester identity,
- * free-text descriptions, locations and self-declared budgets are private.
- */
-function redactSignal(s: DemandSignal) {
-  return {
-    id: s.id,
-    capabilityType: s.capabilityType,
-    estimatedFrequency: s.estimatedFrequency,
-    assuranceTier: s.assuranceTier,
-    createdAt: s.createdAt,
-    status: s.status,
-  };
-}
 
 /**
  * Demand aggregates stay unpublished until requester identity is bound to a
@@ -87,15 +73,17 @@ export async function bountyRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get<{ Querystring: { capabilityType?: string } }>(
-    "/api/bounty/demand",
-    async (req) => {
-      const signals = bountyService
-        .getDemandSignals(req.query.capabilityType)
-        .map(redactSignal);
-      return { signals, total: signals.length };
-    },
-  );
+  // Suppressed like /top (astra pack 36, MEDIUM): record-level rows, even
+  // redacted, let a caller rebuild the exact per-capability counts, ranking and
+  // arrival order that /top withholds. Demand stays private until requester
+  // identity is bound (R29/N2).
+  app.get<{ Querystring: { capabilityType?: string } }>("/api/bounty/demand", async () => {
+    return {
+      signals: [],
+      suppressed: true,
+      reason: DEMAND_AGGREGATES_SUPPRESSED_REASON,
+    };
+  });
 
   app.get("/api/bounty/demand/top", async () => {
     return {
