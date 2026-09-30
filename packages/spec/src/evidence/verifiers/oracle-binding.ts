@@ -179,9 +179,18 @@ function extractChain(
     }
     byPrevious.set(entry.previousHash, entry);
   }
+  // An entry hash covers {capturedAt, rawContent, source}, not previousHash, so two
+  // identical entries share a hash and the second can name the first, or itself, as
+  // its predecessor. Counting steps would then count one entry twice and leave
+  // another unread; so each entry is visited at most once, and a revisit refuses.
   const ordered: Record<string, unknown>[] = [];
+  const visited = new Set<Record<string, unknown>>();
   let next = byPrevious.get(GENESIS_HASH);
-  while (next !== undefined && ordered.length < perEntry.length) {
+  while (next !== undefined) {
+    if (visited.has(next)) {
+      return { ok: false, reason: `the ${logKind} chain revisits an entry (a cycle: two entries share an entry hash), so one entry would count twice` };
+    }
+    visited.add(next);
     ordered.push(next);
     next = byPrevious.get(next.entryHash);
   }

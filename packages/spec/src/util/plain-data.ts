@@ -48,6 +48,10 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
       if (proto !== Object.prototype && proto !== null) throw new NotPlainData(`${at}: not a plain object`);
       const out: Record<string, unknown> = {};
       for (const key of Object.keys(v)) {
+        // `out["__proto__"] = x` would set the copy's PROTOTYPE, not a property: the
+        // value would be read through inheritance but never hashed. JSON.parse makes
+        // it an ordinary own key, so it reaches here; no PCC document uses it.
+        if (key === "__proto__") throw new NotPlainData(`${at}: a key named __proto__ is refused`);
         const item: unknown = (v as Record<string, unknown>)[key];
         if (item === undefined) continue;
         out[key] = walk(item, path ? `${path}.${key}` : key);
@@ -60,6 +64,14 @@ export function plainDataCopy(value: unknown): PlainDataCopy {
   try {
     return { ok: true, value: walk(value, "") };
   } catch (err) {
-    return { ok: false, reason: err instanceof NotPlainData ? err.message : `not JSON data (${err instanceof Error ? err.message : String(err)})` };
+    // A getter or proxy can throw anything, including a value that `instanceof`,
+    // `.message` or `String()` would throw on in turn; never format a foreign value.
+    let reason = "not JSON data (reading it threw)";
+    try {
+      if (err instanceof NotPlainData) reason = err.message;
+    } catch {
+      // keep the generic reason
+    }
+    return { ok: false, reason };
   }
 }
