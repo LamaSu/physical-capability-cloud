@@ -369,6 +369,14 @@ export class PoolService {
       throw new Error(`Bounty ${bountyId} not found`);
     }
 
+    // A proposed reward is not money (astra pack 36 follow-up): a pool may stake
+    // only a bounty that is actually funded, and none is today.
+    if ((bounty.fundingStatus as string) !== "funded") {
+      throw new Error(
+        `Bounty ${bountyId} is unfunded: its proposed reward is not a treasury stake, so no pool is created from it`,
+      );
+    }
+
     // Create pool from bounty
     const pool = this.createPool({
       capabilityType: bounty.capabilityType,

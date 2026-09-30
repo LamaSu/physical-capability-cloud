@@ -468,7 +468,7 @@ describe("PoolService", () => {
   // ── Bounty Integration ────────────────────────────────────────
 
   describe("createPoolFromBounty", () => {
-    it("converts a bounty into an investment pool", () => {
+    it("refuses to convert an unfunded bounty: a proposed reward is not a treasury stake (astra pack 36)", () => {
       const bountyService = new BountyService();
       const bounty = bountyService.createBounty({
         capabilityType: "electron-beam-welding",
@@ -481,19 +481,11 @@ describe("PoolService", () => {
           mustPassVerification: true,
         },
         expiresInDays: 90,
-        fundedBy: "treasury",
+        proposedFundingSource: "treasury",
       });
 
       const poolSvc = new PoolService({}, bountyService);
-      const pool = poolSvc.createPoolFromBounty(bounty.id);
-
-      expect(pool.capabilityType).toBe("electron-beam-welding");
-      expect(pool.description).toBe("E-beam welding capability");
-      expect(pool.currency).toBe("USDC");
-      expect(pool.totalStaked).toBe(500); // bounty reward became treasury stake
-      expect(pool.stakes).toHaveLength(1);
-      expect(pool.stakes[0].staker).toBe("treasury");
-      expect(pool.stakes[0].amount).toBe(500);
+      expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/unfunded/);
     });
 
     it("throws when bounty service not configured", () => {
@@ -640,5 +632,22 @@ describe("PoolService", () => {
       expect(bobEarnings.totalEarned).toBe(800); // 400 + 400
       expect(bobEarnings.roi).toBe(2); // 800 / 400
     });
+  });
+});
+
+describe("pack 36 (astra) follow-up: an unfunded bounty never becomes a treasury stake", () => {
+  it("createPoolFromBounty refuses an unfunded bounty and stakes nothing", () => {
+    const bountyService = new BountyService();
+    const bounty = bountyService.createBounty({
+      capabilityType: "hplc",
+      description: "HPLC kit",
+      bountyReward: 500,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
+      expiresInDays: 90,
+    });
+    const poolSvc = new PoolService({}, bountyService);
+    expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/unfunded/);
+    expect(poolSvc.listPools?.() ?? []).toHaveLength(0);
   });
 });
