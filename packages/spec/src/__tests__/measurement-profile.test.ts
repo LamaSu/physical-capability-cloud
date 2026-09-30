@@ -561,3 +561,46 @@ describe("plain-data boundary: __proto__ keys and hostile getters (astra packs 7
     expect(result?.code).toBe("profile-invalid");
   });
 });
+
+// ── astra (pack 125, gpt-5.6-sol) and pack 124's follow-up: the copy holds exactly what the hash covers ──
+describe("plain-data boundary: no inherited values, and -0 is 0 (astra packs 124, 125)", () => {
+  it("a polluted Object.prototype cannot supply a term: the copy has no prototype", () => {
+    const p = printPilotProfile() as unknown as Record<string, any>;
+    delete p.measurement.sampling.minSamples;
+    const proto = Object.prototype as Record<string, unknown>;
+    proto.minSamples = 2;
+    try {
+      expect(() => computeMeasurementProfileDigest(p as unknown as MeasurementProfileV1)).toThrow(/minSamples/);
+      const g = profileGoverns(`0x${"0".repeat(64)}`, p as unknown as MeasurementProfileV1);
+      expect(g.governs).toBe(false);
+      expect(g.code).toBe("profile-invalid");
+    } finally {
+      delete proto.minSamples;
+    }
+  });
+
+  it("an inherited getter that throws never makes profileGoverns throw", () => {
+    const p = printPilotProfile() as unknown as Record<string, any>;
+    delete p.measurement.sampling.minSamples;
+    Object.defineProperty(Object.prototype, "minSamples", { configurable: true, get() { throw Object.create(null); } });
+    try {
+      let g: ReturnType<typeof profileGoverns> | undefined;
+      expect(() => { g = profileGoverns(`0x${"0".repeat(64)}`, p as unknown as MeasurementProfileV1); }).not.toThrow();
+      expect(g?.governs).toBe(false);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).minSamples;
+    }
+  });
+
+  it("-0 is copied as 0, so the governed profile is the one the digest covers", () => {
+    const withTarget = (t: number) => {
+      const p = printPilotProfile();
+      p.measurement = { method: "load-cell", quantity: "mass", unit: "kg", sampling: { minSamples: 1 }, tolerance: { comparator: "<=", target: t } };
+      return p;
+    };
+    const g = profileGoverns(computeMeasurementProfileDigest(withTarget(0)), withTarget(-0));
+    expect(g.governs).toBe(true);
+    expect(Object.is(g.profile?.measurement.tolerance?.target, 0)).toBe(true);
+    expect(Object.getPrototypeOf(g.profile)).toBeNull();
+  });
+});
