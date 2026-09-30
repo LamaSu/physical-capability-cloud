@@ -165,8 +165,9 @@ Each is a `fund()` or `initialize()` revert decided by content the caller alread
 - **Parties** (`compileVNextPolicy`): the payer is nonzero, and `operator != payer`.
 - **Acceptance shape** (`checkAcceptance`, not the compile, which never sees an acceptance): each signature is `<= 1024` bytes, and a sender other than the payer must carry the payer's signature (`OnlyPayer`). The second check needs the sender. The preflight runs `checkAcceptance` with it.
 - **Calldata** (`encodeFundCalldata`): the complete `fund()` calldata is `<= 26372` bytes. Any config inside the limits above, with signatures of at most 1024 bytes, fits by construction; the helper checks it anyway.
-- **This policy** (`preflightVNextFunding`, before any chain read: it is the one helper that holds the compile and the acceptance together): the acceptance's own `expiry` must equal the compiled expiry. The signatures cover a digest that includes the expiry, so an acceptance signed for a different expiry is a different policy. The chain might fund it, but it is not the policy that was compiled.
 - **Relative to the expected funding time** (`compileVNextPolicy`): `expiry` and every reclaim window are checked against the `fundingTime` the compile is given. The expiry is inclusive (`fundingTime > expiry` is refused, as the factory refuses `block.timestamp > expiry`). The contract checks both against `block.timestamp`, so they are re-checked live (§5.2).
+
+**Not a contract rule: the compiled-policy consistency check.** `preflightVNextFunding` also checks that the acceptance's own `expiry` equals the compiled expiry. The signatures cover a digest that includes the expiry, so an acceptance signed for a different expiry is a different policy: the chain might fund it, but it is not the policy that was compiled. This check is the preflight's alone. It is recorded before the first chain read, it fails the preflight's `ok`, and the preflight still goes on to collect every live result. It is neither a `fund()` revert nor a short-circuit.
 
 ### 5.2 Live prerequisites: only the chain can answer these
 
