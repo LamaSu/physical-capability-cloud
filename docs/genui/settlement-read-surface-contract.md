@@ -31,10 +31,13 @@ Field semantics (unit-state-mapper):
 or `/receipt` with `finalState: "SETTLED_RELEASED"`, `isAllocated: false` and `phase: "settled"`. Any disagreement or
 missing field is unknown. `@pcc/spec` `classifySettlementRecord` is DESIGNED to implement this, and a gateway suite
 (`settlement-read-money-status.test.ts`) is designed to pin it by classifying the routes' own bodies — **both live only
-on PR #313 (`fix/genui-statusmap` @ `8f946499`), which is UNMERGED.** Neither file nor symbol exists at this branch's
+on PR #313 (`fix/genui-statusmap`), which is UNMERGED.** Neither file nor symbol exists at this branch's
 SHA (`ed229845`) or anywhere on `docs/genui-read-surface-contract` (verified: `git cat-file -e` fails for the test
 path; a repo-wide `classifySettlementRecord` search returns zero hits). **Do not call this kit "shipped" until #313
 merges.**
+Also on #313 (astra round 2): the settled-green (and refunded) presentation needs a LIVE read of the exact per-unit
+settlement route (`classifySettlementRead`, `SETTLEMENT_READ_ROUTE`). A baked snapshot, a fallback, a stream event or a
+settled-shaped body from any other route is never shown as final.
 
 **Why this section exists.** #313's first cut assumed `isAllocated` was true for 6-9, since the implemented shape
 was never written down. A genuinely settled unit therefore rendered "fields disagree" and never went green. Found by

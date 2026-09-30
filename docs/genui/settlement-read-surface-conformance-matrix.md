@@ -47,7 +47,7 @@ for states 1-5; `finalState: RELEASE_ALLOCATED` / `REFUND_ALLOCATED` for 6/7, fr
     #3163) — **announced, not yet in the route** at `ed229845` (`settlement-read.ts:388-402` emits no `unitState`).
   - Until then, a `/receipt`-only read of 6/7 shows "outcome decided - not yet paid out", with no direction.
 - **Will be pinned by** `packages/gateway/src/__tests__/settlement-read-money-status.test.ts` — **this test, and the
-  `classifySettlementRecord` it exercises, live only on PR #313 (unmerged; `fix/genui-statusmap` @ `8f946499`).**
+  `classifySettlementRecord` it exercises, live only on PR #313 (unmerged; `fix/genui-statusmap`).**
   Neither exists on master or on this branch at `ed229845` (`git cat-file -e` fails for the test path;
   `classifySettlementRecord` has zero hits repo-wide). It is designed to classify the routes' own bodies for states
   1-9, and a receipt with `unitState`, against the spec — but none of this is "the shipped kit" until #313 merges.
