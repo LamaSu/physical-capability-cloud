@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { generateApiKey } from "../auth/api-key-auth.js";
-import { findIdentityCollisions } from "../auth/identity-collisions.js";
+import { findIdentityCollisions, collisionAuditExit } from "../auth/identity-collisions.js";
 
 let seq = 0;
 function key(operatorId: string): void {
@@ -58,5 +58,55 @@ describe("findIdentityCollisions", () => {
     const all = collisions.flatMap((c) => c.spellings);
     expect(all).not.toContain("alıce@x.test");
     expect(all).not.toContain("bob@x.test");
+  });
+});
+
+
+/**
+ * AZ-9 (astra pack 95, HIGH): the pre-deploy audit must FAIL CLOSED. Before the
+ * fix, identity-collision-audit.mjs exited 0 whenever no new merge was found —
+ * including when EVERY identity source threw and the audit read nothing. It then
+ * reported "safe to deploy" after examining zero identities.
+ */
+describe("collisionAuditExit — the pre-deploy audit fails closed (AZ-9)", () => {
+  const ALL_SOURCES = [
+    "api_keys.operator_id",
+    "shop_kernels.operator_address",
+    "machine_registrations.tenant_id",
+    "machine_registrations.operator.walletAddress",
+    "machine_registrations.operator.email",
+    "job_offers.poster_did",
+    "ui_artifacts.owner",
+  ];
+
+  it("[neg] a Reader whose prepare() always throws skips every source, and the exit is 4 (not 0)", () => {
+    const throwing = { prepare() { throw new Error("no such table"); } };
+    const { collisions, read, skipped } = findIdentityCollisions(throwing);
+    expect(collisions).toEqual([]);
+    expect(read).toEqual([]);
+    expect(skipped.length).toBe(ALL_SOURCES.length);
+    const verdict = collisionAuditExit({ newMerges: 0, read, skipped, allowedAbsent: [] });
+    expect(verdict.code).toBe(4);
+  });
+
+  it("[neg] a required source (api_keys / shop_kernels) that is unreadable is exit 4, even if allowlisted", () => {
+    expect(collisionAuditExit({ newMerges: 0, read: ["shop_kernels.operator_address"], skipped: ["api_keys.operator_id"], allowedAbsent: ["api_keys.operator_id"] }).code).toBe(4);
+    expect(collisionAuditExit({ newMerges: 0, read: ["api_keys.operator_id"], skipped: ["shop_kernels.operator_address"], allowedAbsent: [] }).code).toBe(4);
+  });
+
+  it("[neg] an unreadable OPTIONAL source is exit 4 unless it is explicitly allowlisted", () => {
+    const read = ["api_keys.operator_id", "shop_kernels.operator_address"];
+    expect(collisionAuditExit({ newMerges: 0, read, skipped: ["ui_artifacts.owner"], allowedAbsent: [] }).code).toBe(4);
+    expect(collisionAuditExit({ newMerges: 0, read, skipped: ["ui_artifacts.owner"], allowedAbsent: ["ui_artifacts.owner"] }).code).toBe(0);
+  });
+
+  it("a NEW merge is exit 3, and a clean full read is exit 0", () => {
+    const read = ALL_SOURCES;
+    expect(collisionAuditExit({ newMerges: 2, read, skipped: [], allowedAbsent: [] }).code).toBe(3);
+    expect(collisionAuditExit({ newMerges: 0, read, skipped: [], allowedAbsent: [] }).code).toBe(0);
+  });
+
+  it("[neg] a blocking skip OUTRANKS a clean no-merge result (incomplete beats safe)", () => {
+    expect(collisionAuditExit({ newMerges: 0, read: ["api_keys.operator_id"], skipped: ["shop_kernels.operator_address"], allowedAbsent: [] }).code).toBe(4);
   });
 });
