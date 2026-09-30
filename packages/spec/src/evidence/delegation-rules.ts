@@ -105,22 +105,32 @@ export function checkDelegationScope(delegation: unknown, expected: DelegationSc
   if (typeof delegation !== "object" || delegation === null) return { ok: false, reason: "malformed-delegation" };
   const d = delegation as { parentAgentId?: unknown; scope?: unknown };
   const scope = d.scope as { contractIds?: unknown; maxSignatures?: unknown } | null | undefined;
-  if (
-    typeof scope !== "object" ||
-    scope === null ||
-    !Array.isArray(scope.contractIds) ||
-    !scope.contractIds.every((c) => typeof c === "string")
-  ) {
+  if (typeof scope !== "object" || scope === null || !Array.isArray(scope.contractIds)) {
     return { ok: false, reason: "malformed-delegation" };
   }
-  if (scope.contractIds.length === 0) return { ok: false, reason: "contract-ids-empty" };
-  if (!scope.contractIds.includes(expected.settlingJobId)) return { ok: false, reason: "contract-not-allowed" };
+  // Every index must be an own string: `every` skips holes and `includes` reads
+  // inherited indices, so a sparse or prototype-backed list could name the job
+  // without holding it (cross-family review E3).
+  const ids = scope.contractIds as unknown[];
+  let names = false;
+  for (let i = 0; i < ids.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(ids, i) || typeof ids[i] !== "string") {
+      return { ok: false, reason: "malformed-delegation" };
+    }
+    if (ids[i] === expected.settlingJobId) names = true;
+  }
+  if (ids.length === 0) return { ok: false, reason: "contract-ids-empty" };
+  if (!names) return { ok: false, reason: "contract-not-allowed" };
   if (!Number.isSafeInteger(scope.maxSignatures) || (scope.maxSignatures as number) < 1) {
     return { ok: false, reason: "max-signatures-invalid" };
   }
   if (
     expected.sessionSignedEventCount !== undefined &&
-    !(Number.isSafeInteger(expected.sessionSignedEventCount) && expected.sessionSignedEventCount <= (scope.maxSignatures as number))
+    !(
+      Number.isSafeInteger(expected.sessionSignedEventCount) &&
+      expected.sessionSignedEventCount >= 0 &&
+      expected.sessionSignedEventCount <= (scope.maxSignatures as number)
+    )
   ) {
     return { ok: false, reason: "scope-signatures-exhausted" };
   }
@@ -128,6 +138,13 @@ export function checkDelegationScope(delegation: unknown, expected: DelegationSc
     return { ok: false, reason: "parent-not-operator" };
   }
   return { ok: true };
+}
+
+/** An own property's value, or undefined: never one read through the prototype chain. */
+function ownValue(o: unknown, key: string): unknown {
+  return typeof o === "object" && o !== null && Object.prototype.hasOwnProperty.call(o, key)
+    ? (o as Record<string, unknown>)[key]
+    : undefined;
 }
 
 export type EventTimeRuleCode =
@@ -186,8 +203,9 @@ export function checkEventTimes(
   let start: number | null = null;
   let end: number | null = null;
   if (bounds !== undefined) {
-    start = parseEvidenceTimeBound((bounds as { start?: unknown } | null)?.start);
-    end = parseEvidenceTimeBound((bounds as { end?: unknown } | null)?.end);
+    // Own properties only, as for event timestamps: an inherited bound is not the package's.
+    start = parseEvidenceTimeBound(ownValue(bounds, "start"));
+    end = parseEvidenceTimeBound(ownValue(bounds, "end"));
     if (start === null || end === null) return { ok: false, reason: "malformed-time-bounds" };
     if (start > end) return { ok: false, reason: "time-bounds-inverted" };
   }

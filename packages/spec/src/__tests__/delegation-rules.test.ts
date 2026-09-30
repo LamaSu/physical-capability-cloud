@@ -117,3 +117,39 @@ describe("LO-EV-9 carries the time window (step 10)", () => {
     }
   });
 });
+
+describe("the rules read only own data, as they promise (cross-family review E3, finding 2)", () => {
+  it("NEGATIVE: a sparse contractIds list is malformed, even when the job sits at a filled index", () => {
+    const ids = new Array(2);
+    ids[1] = "job-1";
+    expect(checkDelegationScope({ scope: { contractIds: ids, maxSignatures: 1 } }, { settlingJobId: "job-1" })).toEqual({
+      ok: false,
+      reason: "malformed-delegation",
+    });
+  });
+
+  it("NEGATIVE: a job reachable only through an inherited index is malformed", () => {
+    const proto = Object.create(Array.prototype) as Record<number, string>;
+    proto[0] = "job-1";
+    const ids = Object.setPrototypeOf(new Array(1), proto) as string[];
+    expect(Array.isArray(ids)).toBe(true);
+    expect(checkDelegationScope({ scope: { contractIds: ids, maxSignatures: 1 } }, { settlingJobId: "job-1" })).toEqual({
+      ok: false,
+      reason: "malformed-delegation",
+    });
+  });
+
+  it("NEGATIVE: a negative session-signed event count is refused", () => {
+    expect(
+      checkDelegationScope({ scope: { contractIds: ["job-1"], maxSignatures: 1 } }, { settlingJobId: "job-1", sessionSignedEventCount: -1 }),
+    ).toEqual({ ok: false, reason: "scope-signatures-exhausted" });
+  });
+
+  it("NEGATIVE: evidenceTimeBounds inherited from a prototype are malformed", () => {
+    const bounds = Object.create({ start: "1700000000", end: "1700000100" }) as EvidenceTimeBounds;
+    expect(checkEventTimes([{ timestamp: "2023-11-14T22:13:20Z" }], { notBefore: 1699999000, notAfter: 1700001000 }, bounds)).toEqual({
+      ok: false,
+      reason: "malformed-time-bounds",
+    });
+  });
+});
