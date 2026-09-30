@@ -369,27 +369,11 @@ export class PoolService {
       throw new Error(`Bounty ${bountyId} not found`);
     }
 
-    // A proposed reward is not money (astra pack 36 follow-up): a pool may stake
-    // only a bounty that is actually funded, and none is today.
-    if ((bounty.fundingStatus as string) !== "funded") {
-      throw new Error(
-        `Bounty ${bountyId} is unfunded: its proposed reward is not a treasury stake, so no pool is created from it`,
-      );
-    }
-
-    // Create pool from bounty
-    const pool = this.createPool({
-      capabilityType: bounty.capabilityType,
-      description: bounty.description,
-      currency: bounty.currency,
-    });
-
-    // Treasury stake from bounty reward
-    if (bounty.bountyReward > 0) {
-      this.stake(pool.id, "treasury", bounty.bountyReward);
-    }
-
-    return pool;
+    // No bounty is funded, and a runtime label is not funding (astra pack 36b):
+    // until authoritative escrow funding exists, no bounty can seed a pool.
+    throw new Error(
+      `Bounty ${bounty.id} cannot seed a pool: no bounty is funded, and a proposed reward is not a treasury stake`,
+    );
   }
 
   // ── Internal ────────────────────────────────────────────────────

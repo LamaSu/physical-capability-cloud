@@ -30,7 +30,6 @@ export interface CapabilityBounty {
   /** Proposed reward amount. Nothing is escrowed for it: see `fundingStatus`. */
   bountyReward: number;
   currency: "USDC" | "CREDITS";
-  /** The INTENDED funding source. No treasury or requester escrow backs it. */
   /** Who is PROPOSED to fund it. A proposal only, never a funding fact: see fundingStatus. */
   proposedFundingSource?: "treasury" | "requesters" | "mixed";
   /**
@@ -41,14 +40,15 @@ export interface CapabilityBounty {
   fundingStatus: "unfunded";
   /** Requirements to claim */
   requirements: BountyRequirements;
-  status: "open" | "claimed" | "verified" | "paid" | "expired";
+  /**
+   * "verified" and "paid" are retired (astra pack 36/36b): verification is
+   * server-derived from job evidence and payment runs only through escrow, so
+   * this unfunded in-memory record can never reach either.
+   */
+  status: "open" | "claimed" | "expired";
   /** Who claimed it (operator onboarding the capability) */
   claimedBy?: string;
   claimedAt?: string;
-  /** Verification: first job evidence */
-  verificationJobId?: string;
-  verificationScore?: number;
-  paidAt?: string;
   createdAt: string;
   expiresAt: string;
 }

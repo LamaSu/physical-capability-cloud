@@ -485,7 +485,7 @@ describe("PoolService", () => {
       });
 
       const poolSvc = new PoolService({}, bountyService);
-      expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/unfunded/);
+      expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/cannot seed a pool/);
     });
 
     it("throws when bounty service not configured", () => {
@@ -647,7 +647,28 @@ describe("pack 36 (astra) follow-up: an unfunded bounty never becomes a treasury
       expiresInDays: 90,
     });
     const poolSvc = new PoolService({}, bountyService);
-    expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/unfunded/);
+    expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/cannot seed a pool/);
     expect(poolSvc.listPools?.() ?? []).toHaveLength(0);
+  });
+});
+
+describe("pack 36b (astra): no bounty can seed a pool, even one a caller relabels 'funded'", () => {
+  it("createPoolFromBounty refuses unconditionally", () => {
+    const bountyService = new BountyService();
+    const bounty = bountyService.createBounty({
+      capabilityType: "hplc",
+      description: "HPLC kit",
+      bountyReward: 500,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
+      expiresInDays: 90,
+    });
+    try {
+      Object.assign(bountyService.listBounties()[0] as object, { fundingStatus: "funded" });
+    } catch {
+      /* frozen snapshot */
+    }
+    const poolSvc = new PoolService({}, bountyService);
+    expect(() => poolSvc.createPoolFromBounty(bounty.id)).toThrow(/cannot seed a pool/);
   });
 });

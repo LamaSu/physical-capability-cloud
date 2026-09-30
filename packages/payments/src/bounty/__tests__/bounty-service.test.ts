@@ -104,15 +104,17 @@ describe("BountyService", () => {
       expect(top[0].annualValue).toBe(3_600);
     });
 
-    it("should exclude fulfilled signals from getTopDemand", () => {
+    it("a returned signal is a frozen snapshot: mutating it cannot fulfil it or change the counts (astra pack 36b)", () => {
       const s1 = svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "ebw" }));
       svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "ebw" }));
 
-      // Manually set one to fulfilled
-      (s1 as DemandSignal).status = "fulfilled";
+      expect(Object.isFrozen(s1)).toBe(true);
+      expect(() => {
+        (s1 as { status: string }).status = "fulfilled";
+      }).toThrow(TypeError);
 
       const top = svc.getTopDemand();
-      expect(top[0].count).toBe(1); // only r2 counted
+      expect(top[0].count).toBe(2); // both still active: nothing outside the service can fulfil a signal
     });
   });
 
@@ -469,8 +471,6 @@ describe("pack 36 (astra) findings: an unfunded bounty is never verified by a ca
 
   it("HIGH 1: payBounty refuses an unfunded bounty; nothing becomes paid and no earnings appear", () => {
     const { s, b } = claimed();
-    // Even a bounty some other path marked verified must not be payable while unfunded.
-    (s.listBounties().find((x) => x.id === b.id) as { status: string }).status = "verified";
     expect(() => s.payBounty(b.id)).toThrow(/payment is retired/);
     const after = s.listBounties().find((x) => x.id === b.id)!;
     expect(after.status).not.toBe("paid");
@@ -493,5 +493,44 @@ describe("pack 36 (astra) findings: an unfunded bounty is never verified by a ca
     expect(sig.id).toMatch(new RegExp(`^demand-${UUID}$`));
     const { b } = claimed();
     expect(b.id).toMatch(new RegExp(`^bounty-${UUID}$`));
+  });
+});
+
+describe("pack 36b (astra): returned records are detached snapshots, so no caller can forge state", () => {
+  it("mutating every returned object never changes a later read", () => {
+    const s = new BountyService();
+    const created = s.createBounty({
+      capabilityType: "hplc",
+      description: "HPLC kit",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
+      expiresInDays: 30,
+    });
+    const claimedRec = s.claimBounty(created.id, "operator-1");
+    const forge = (o: unknown, patch: Record<string, unknown>) => {
+      try {
+        Object.assign(o as object, patch);
+      } catch {
+        /* a frozen snapshot refusing the write is also fine */
+      }
+    };
+    forge(created, { status: "paid", paidAt: "2026-01-01T00:00:00Z", fundingStatus: "funded" });
+    forge(claimedRec, { status: "verified", verificationScore: 1, verificationJobId: "invented" });
+    forge(s.listBounties()[0], { status: "paid", fundingStatus: "funded" });
+    forge(s.getLeaderboard()[0], { totalEarned: 999, bountiesCompleted: 7 });
+    const sig = s.submitDemand(makeDemandInput());
+    forge(sig, { status: "fulfilled" });
+    forge(s.getDemandSignals()[0], { status: "fulfilled" });
+
+    const stored = s.listBounties().find((b) => b.id === created.id)!;
+    expect(stored.status).toBe("claimed");
+    expect(stored.fundingStatus).toBe("unfunded");
+    expect("paidAt" in stored).toBe(false);
+    expect("verificationScore" in stored).toBe(false);
+    const hunter = s.getLeaderboard()[0]!;
+    expect(hunter.totalEarned).toBe(0);
+    expect(hunter.bountiesCompleted).toBe(0);
+    expect(s.getDemandSignals()[0]!.status).toBe("active");
   });
 });

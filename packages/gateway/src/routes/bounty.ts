@@ -99,7 +99,7 @@ export async function bountyRoutes(app: FastifyInstance) {
     "/api/bounty/list",
     async (req) => {
       const bounties = bountyService.listBounties({
-        status: req.query.status as "open" | "claimed" | "verified" | "paid" | "expired" | undefined,
+        status: req.query.status as "open" | "claimed" | "expired" | undefined,
         capabilityType: req.query.capabilityType,
       });
       return { bounties, total: bounties.length };

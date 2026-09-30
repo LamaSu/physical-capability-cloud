@@ -77,6 +77,23 @@ export interface BountyServiceOptions {
   autoCreateTreasuryBounties?: boolean;
 }
 
+/**
+ * A detached, deeply frozen copy (astra pack 36b). Every public read returns
+ * one, so no caller can forge a stored record's status, funding, earnings or
+ * demand state by mutating what it was handed.
+ */
+function snapshot<T>(value: T): Readonly<T> {
+  const copy = structuredClone(value);
+  const freeze = (o: unknown): void => {
+    if (o !== null && typeof o === "object" && !Object.isFrozen(o)) {
+      Object.freeze(o);
+      for (const v of Object.values(o as Record<string, unknown>)) freeze(v);
+    }
+  };
+  freeze(copy);
+  return copy;
+}
+
 export class BountyService {
   private demandSignals = new Map<string, DemandSignal>();
   private bounties = new Map<string, CapabilityBounty>();
@@ -91,7 +108,7 @@ export class BountyService {
 
   submitDemand(
     input: Omit<DemandSignal, "id" | "createdAt" | "status">,
-  ): DemandSignal {
+  ): Readonly<DemandSignal> {
     const signal: DemandSignal = {
       ...input,
       id: generateDemandId(),
@@ -99,15 +116,13 @@ export class BountyService {
       status: "active",
     };
     this.demandSignals.set(signal.id, signal);
-    return signal;
+    return snapshot(signal);
   }
 
-  getDemandSignals(capabilityType?: string): DemandSignal[] {
+  getDemandSignals(capabilityType?: string): Readonly<DemandSignal>[] {
     const all = [...this.demandSignals.values()];
-    if (capabilityType) {
-      return all.filter((s) => s.capabilityType === capabilityType);
-    }
-    return all;
+    const picked = capabilityType ? all.filter((s) => s.capabilityType === capabilityType) : all;
+    return picked.map(snapshot);
   }
 
   getTopDemand(
@@ -154,7 +169,7 @@ export class BountyService {
     proposedFundingSource?: "treasury" | "requesters" | "mixed";
     demandCount?: number;
     estimatedAnnualValue?: number;
-  }): CapabilityBounty {
+  }): Readonly<CapabilityBounty> {
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + params.expiresInDays * 24 * 60 * 60 * 1000,
@@ -177,13 +192,13 @@ export class BountyService {
     };
 
     this.bounties.set(bounty.id, bounty);
-    return bounty;
+    return snapshot(bounty);
   }
 
   listBounties(filter?: {
     status?: CapabilityBounty["status"];
     capabilityType?: string;
-  }): CapabilityBounty[] {
+  }): Readonly<CapabilityBounty>[] {
     let result = [...this.bounties.values()];
     if (filter?.status) {
       result = result.filter((b) => b.status === filter.status);
@@ -193,10 +208,10 @@ export class BountyService {
         (b) => b.capabilityType === filter.capabilityType,
       );
     }
-    return result;
+    return result.map(snapshot);
   }
 
-  claimBounty(bountyId: string, operatorId: string): CapabilityBounty {
+  claimBounty(bountyId: string, operatorId: string): Readonly<CapabilityBounty> {
     const bounty = this.bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
@@ -216,7 +231,7 @@ export class BountyService {
     const hunter = this.hunters.get(operatorId)!;
     hunter.bountiesClaimed += 1;
 
-    return bounty;
+    return snapshot(bounty);
   }
 
   /**
@@ -229,7 +244,7 @@ export class BountyService {
     bountyId: string,
     _jobId: string,
     _verificationScore: number,
-  ): CapabilityBounty {
+  ): never {
     if (!this.bounties.has(bountyId)) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
@@ -246,7 +261,7 @@ export class BountyService {
    * changes nothing: no "paid" state, no paidAt, no totalEarned or
    * bountiesCompleted, and no demand signal marked fulfilled.
    */
-  payBounty(bountyId: string): CapabilityBounty {
+  payBounty(bountyId: string): never {
     const bounty = this.bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
@@ -259,19 +274,18 @@ export class BountyService {
 
   // ── Auto-Bounty Creation ────────────────────────────────────────
 
-  checkAndCreateBounties(): CapabilityBounty[] {
+  checkAndCreateBounties(): Readonly<CapabilityBounty>[] {
     if (!this.autoCreateTreasuryBounties) return [];
 
     const topDemand = this.getTopDemand(100);
-    const created: CapabilityBounty[] = [];
+    const created: Readonly<CapabilityBounty>[] = [];
 
     // Collect capability types that already have an open or claimed bounty
     const existingBountyTypes = new Set<string>();
     for (const bounty of this.bounties.values()) {
       if (
         bounty.status === "open" ||
-        bounty.status === "claimed" ||
-        bounty.status === "verified"
+        bounty.status === "claimed"
       ) {
         existingBountyTypes.add(bounty.capabilityType);
       }
@@ -325,10 +339,11 @@ export class BountyService {
 
   // ── Leaderboard ─────────────────────────────────────────────────
 
-  getLeaderboard(limit = 10): BountyHunter[] {
+  getLeaderboard(limit = 10): Readonly<BountyHunter>[] {
     return [...this.hunters.values()]
       .sort((a, b) => b.totalEarned - a.totalEarned)
-      .slice(0, limit);
+      .slice(0, limit)
+      .map(snapshot);
   }
 
   // ── Internal ────────────────────────────────────────────────────
