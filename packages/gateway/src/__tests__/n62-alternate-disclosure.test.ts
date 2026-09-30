@@ -139,6 +139,16 @@ describe("N62 alternate disclosure (astra pack 89)", () => {
       evidence: { deviceHealth: { status: "idle" } },
     });
     expect(prove.statusCode, prove.body).not.toBe(403);
+    // DELETE too: a fresh registration owned by the mixed-case spelling, deleted
+    // by the lowercase key, must not 403.
+    const regU2 = await inj("POST", "/api/onboard/register", keyOwnerUpper, {}, {
+      name: "Owner's second mill",
+      category: "cnc",
+      operator: { email: OWNER_UPPER, displayName: "Owner", certifications: [], trainingAcknowledgments: {} },
+    });
+    const regOwner2 = (regU2.json() as { registration: { id: string } }).registration.id;
+    const del = await inj("DELETE", `/api/onboard/registrations/${regOwner2}`, keyOwnerLower);
+    expect(del.statusCode, del.body).not.toBe(403);
   });
 
   it("control: a true stranger still cannot PATCH or prove someone else's registration", async () => {
