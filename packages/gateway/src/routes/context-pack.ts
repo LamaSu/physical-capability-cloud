@@ -235,7 +235,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/swf/claims | Claim SWF dividends |
 | POST | /api/swf/proposals | Create governance proposal |
 | GET | /api/swf/equity/portfolio | Equity portfolio overview |
-| POST | /api/swf/equity/record-revenue | Record revenue for equity |
+| POST | /api/swf/equity/record-revenue | 501 not_available: nothing funds the SWF (a design artifact) |
 | POST | /api/swf/terms/propose | Propose new fund terms |
 
 ### Fiat On/Off Ramp
