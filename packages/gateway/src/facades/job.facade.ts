@@ -40,12 +40,12 @@ export function isRealAdapterHealthy(
   healthy: boolean,
   adapterType: string | null | undefined,
 ): boolean {
-  return (
-    healthy === true &&
-    !!adapterType &&
-    adapterType !== "mock" &&
-    adapterType !== "generic-http"
-  );
+  return healthy === true && isExecutingAdapter(adapterType);
+}
+
+/** A real adapter: not the "mock" simulator and not the "generic-http" placeholder. */
+export function isExecutingAdapter(adapterType: string | null | undefined): boolean {
+  return !!adapterType && adapterType !== "mock" && adapterType !== "generic-http";
 }
 
 // ── Input interfaces ────────────────────────────────────────────────────────
@@ -439,9 +439,18 @@ export class JobFacade extends BaseFacade {
    */
   async checkDeviceHealth(
     deviceId: string,
+    opts: { operatorId?: string | null } = {},
   ): Promise<Result<{ healthy: boolean; details: unknown }>> {
     return this.execute("checkDeviceHealth", async () => {
       const svc = getKernelService();
+      // Snapshot the device row BEFORE the check, so the funnel attributes the
+      // result to the device that was actually checked (#469 round 1).
+      let before: { kernelId?: string | null; adapterType?: string | null } | undefined;
+      try {
+        before = this.repos.kernels.findDeviceById(deviceId);
+      } catch {
+        before = undefined;
+      }
       const result = await svc.checkDeviceHealth(deviceId);
 
       // Update DB health record (best-effort)
@@ -461,13 +470,19 @@ export class JobFacade extends BaseFacade {
       // DB row (the health-check route only has deviceId) — if the row
       // can't be found, there's nothing to attribute the stage to, so we
       // don't record. Telemetry must never break a health-check response.
+      // Recorded only for an authenticated caller, and only if the device row is
+      // unchanged across the check: a device moved to another kernel (or given
+      // another adapter) mid-check is not attributed to either (#469 round 1).
       try {
-        const deviceRow = this.repos.kernels.findDeviceById(deviceId);
+        const after = this.repos.kernels.findDeviceById(deviceId);
         if (
-          deviceRow?.kernelId &&
-          isRealAdapterHealthy(result.healthy, deviceRow.adapterType)
+          opts.operatorId &&
+          before?.kernelId &&
+          after?.kernelId === before.kernelId &&
+          after?.adapterType === before.adapterType &&
+          isRealAdapterHealthy(result.healthy, before.adapterType)
         ) {
-          recordOperatorStage(deviceRow.kernelId, "adapter_ready", { deviceId });
+          recordOperatorStage(before.kernelId, "adapter_ready", { deviceId, operatorId: opts.operatorId });
         }
       } catch {
         /* funnel tracking must never break a health-check response */

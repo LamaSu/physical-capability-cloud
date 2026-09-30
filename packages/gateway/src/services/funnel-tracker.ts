@@ -353,8 +353,13 @@ const MAX_TRACKED_KERNELS = 5000;
 const operatorSeen = new Map<string, Set<OperatorStage>>();
 const operatorKernelOrder: string[] = [];
 
-/** Returns true the FIRST time (kernelId, stage) is seen; false afterwards. */
-function recordOperatorOnce(kernelId: string, stage: OperatorStage): boolean {
+/** Whether this process already recorded (kernelId, stage). */
+function operatorSeenHas(kernelId: string, stage: OperatorStage): boolean {
+  return operatorSeen.get(kernelId)?.has(stage) ?? false;
+}
+
+/** Remember (kernelId, stage) as recorded; the map stays bounded to MAX_TRACKED_KERNELS. */
+function markOperatorSeen(kernelId: string, stage: OperatorStage): void {
   let stages = operatorSeen.get(kernelId);
   if (!stages) {
     if (operatorSeen.size >= MAX_TRACKED_KERNELS && operatorKernelOrder.length > 0) {
@@ -365,9 +370,24 @@ function recordOperatorOnce(kernelId: string, stage: OperatorStage): boolean {
     operatorSeen.set(kernelId, stages);
     operatorKernelOrder.push(kernelId);
   }
-  if (stages.has(stage)) return false;
   stages.add(stage);
-  return true;
+}
+
+/**
+ * Whether the audit log already holds this (kernelId, stage) row. The in-memory
+ * map is only a cache: eviction, a restart or a second gateway instance would
+ * otherwise write the stage again (#469 round 1). Two instances racing past this
+ * check can still both write; read-side counts are distinct per kernel, so a rare
+ * duplicate never changes the funnel.
+ */
+function operatorStageDurable(kernelId: string, stage: OperatorStage): boolean {
+  try {
+    return auditService
+      .query({ eventType: OPERATOR_FUNNEL_AUDIT_EVENT, resourceType: "kernel", resourceId: kernelId, limit: 50 })
+      .some((r) => r.action === stage);
+  } catch {
+    return false;
+  }
 }
 
 /** Reset operator-funnel dedup state. Test-only. */
@@ -415,16 +435,23 @@ export function recordOperatorStage(
   if (!funnelEnabled()) return false;
   if (typeof kernelId !== "string" || !OPERATOR_KERNEL_ID_RE.test(kernelId)) return false;
   if (kernelId === DEV_PLACEHOLDER_KERNEL_ID) return false;
-  if (!recordOperatorOnce(kernelId, stage)) return false;
+  if (operatorSeenHas(kernelId, stage)) return false;
+  if (operatorStageDurable(kernelId, stage)) {
+    markOperatorSeen(kernelId, stage);
+    return false;
+  }
 
   const operatorId = meta?.operatorId ?? null;
   const deviceId = meta?.deviceId ?? null;
   const capabilityId = meta?.capabilityId ?? null;
   const jobId = meta?.jobId ?? null;
 
-  // 1. Durable audit row (system of record) — mirrors recordStage's shape.
+  // 1. Durable audit row (system of record) — mirrors recordStage's shape. The
+  // stage counts as recorded only once this row is written, so a failed write
+  // leaves it free to record on the next success (#469 round 1).
+  let written = false;
   try {
-    auditService.log({
+    written = auditService.log({
       eventType: OPERATOR_FUNNEL_AUDIT_EVENT,
       actor: operatorId ?? "unknown",
       resourceType: "kernel",
@@ -437,10 +464,12 @@ export function recordOperatorStage(
         capability_id: capabilityId,
         job_id: jobId,
       },
-    });
+    }) === true;
   } catch {
     /* funnel tracking must never affect request handling */
   }
+  if (!written) return false;
+  markOperatorSeen(kernelId, stage);
 
   // 2. PostHog — capture per stage, distinctId = kernelId so PostHog funnels
   // reconstruct the operator-onboarding chart natively.

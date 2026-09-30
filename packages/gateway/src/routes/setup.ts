@@ -17,6 +17,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
+import { isExecutingAdapter } from "../facades/job.facade.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
@@ -881,13 +882,18 @@ export async function setupRoutes(app: FastifyInstance) {
     // submitResult.deviceId, and — critically — on the CALLER having
     // supplied kernelId explicitly (never the "kernel_dev_001" default),
     // per the stage inventory's self-attest/shared-placeholder trap.
+    // The job must have run on a real-adapter device that belongs to that very
+    // kernel, the kernel must exist, and the caller must be authenticated:
+    // otherwise a completed job on a mock device, or on another kernel's device,
+    // would count (#469 round 1). Ownership of the kernel is WP-C's guard (#445).
     try {
-      if (kernelId && finalStatus === "completed" && submitResult.deviceId) {
-        recordOperatorStage(kernelId, "test_job_passed", {
-          deviceId: submitResult.deviceId,
-          jobId,
-          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
-        });
+      const operatorId = (req as unknown as { operatorId?: string | null }).operatorId ?? null;
+      if (kernelId && operatorId && finalStatus === "completed" && submitResult.deviceId) {
+        const repos = getRepos();
+        const device = repos.kernels.findDeviceById(submitResult.deviceId);
+        if (repos.kernels.findById(kernelId) && device?.kernelId === kernelId && isExecutingAdapter(device.adapterType)) {
+          recordOperatorStage(kernelId, "test_job_passed", { deviceId: submitResult.deviceId, jobId, operatorId });
+        }
       }
     } catch {
       /* funnel tracking must never break the test-job response */

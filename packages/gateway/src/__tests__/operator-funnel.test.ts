@@ -41,11 +41,18 @@ const h = vi.hoisted(() => {
 
 vi.mock("../services/audit-service.js", () => ({
   auditService: {
+    // Mirrors the real service: returns whether the row was written.
     log: (e: Record<string, unknown>) => {
       h.logged.push({ ...e });
+      return true;
     },
-    query: (opts: { eventType?: string }) =>
-      h.logged.filter((r) => !opts?.eventType || r.eventType === opts.eventType),
+    query: (opts: { eventType?: string; resourceType?: string; resourceId?: string }) =>
+      h.logged.filter(
+        (r) =>
+          (!opts?.eventType || r.eventType === opts.eventType) &&
+          (!opts?.resourceType || r.resourceType === opts.resourceType) &&
+          (!opts?.resourceId || r.resourceId === opts.resourceId),
+      ),
     stats: () => [],
   },
 }));
@@ -201,7 +208,7 @@ describe("recordOperatorStage", () => {
     expect(opFunnelRows().filter((r) => r.action === "kernel_created")).toHaveLength(500);
   });
 
-  it("evicts the oldest kernel once MAX_TRACKED_KERNELS (5000) is exceeded", () => {
+  it("evicts the oldest kernel once MAX_TRACKED_KERNELS (5000) is exceeded, without writing a duplicate row", () => {
     // Fill exactly to the bound — all still independently deduped.
     for (let i = 0; i < 5000; i++) {
       recordOperatorStage(`kernel-evict-${i}`, "kernel_created");
@@ -214,10 +221,11 @@ describe("recordOperatorStage", () => {
     // OLDEST tracked kernel (kernel-evict-0, the first ever inserted).
     expect(recordOperatorStage("kernel-evict-5000", "kernel_created")).toBe(true);
 
-    // kernel-evict-0's dedup entry is now gone, so recording the SAME
-    // (kernelId, stage) pair again succeeds — proof the map actually
-    // evicted it rather than just growing unbounded.
-    expect(recordOperatorStage("kernel-evict-0", "kernel_created")).toBe(true);
+    // kernel-evict-0's in-memory entry is gone, but its audit row is not, so
+    // recording the same (kernelId, stage) again writes no duplicate row
+    // (#469 round 1: durable idempotency across eviction).
+    expect(recordOperatorStage("kernel-evict-0", "kernel_created")).toBe(false);
+    expect(opFunnelRows().filter((r) => r.resourceId === "kernel-evict-0")).toHaveLength(1);
   });
 
   it("calls the audit sink with the documented eventType/resourceId/action/metadata shape", () => {
@@ -358,6 +366,12 @@ async function buildFullApp(): Promise<FastifyInstance> {
   _mockService.checkDeviceHealth.mockResolvedValue({ healthy: true, details: "idle" });
 
   const app = Fastify({ logger: false });
+  // An authenticated caller, as apiGate sets it in production. Tests that need an
+  // anonymous caller clear it with the x-test-anonymous header.
+  app.decorateRequest("operatorId", null);
+  app.addHook("onRequest", async (req) => {
+    if (req.headers["x-test-anonymous"] !== "1") (req as unknown as { operatorId: string }).operatorId = "op-test";
+  });
   await app.register(kernelRoutes);
   await app.register(setupRoutes);
   await app.register(capabilityRoutes);
@@ -482,6 +496,11 @@ describe("operator funnel call sites (Fastify inject)", () => {
 
   describe("POST /api/setup/test-job", () => {
     it("records test_job_passed for a completed device run with an explicit kernelId", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: { kernelId: "kernel-nyc", deviceId: "dev-of-machine", type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://192.168.1.50:5000", apiKey: "k" } },
+      });
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/test-job",
@@ -725,3 +744,89 @@ describe("GET /api/admin/observability/operator-funnel", () => {
     }
   });
 });
+
+// ── #469 round-1 regressions ──────────────────────────────────────────────
+
+const OCTO_DEVICE = { type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://192.168.1.50:5000", apiKey: "k" } };
+
+describe("#469 round-1 fixes", () => {
+  let app: FastifyInstance;
+  beforeEach(async () => { app = await buildFullApp(); });
+  afterEach(async () => { await app.close(); closeStore(); resetKernelService(); });
+
+  async function testJob(kernelId: string, deviceId: string, extraHeaders: Record<string, string> = {}) {
+    _mockService.submitJob.mockResolvedValue({ jobId: "j", deviceId, status: "accepted" });
+    return app.inject({ method: "POST", url: "/api/setup/test-job", headers: extraHeaders, payload: { kernelId, deviceId } });
+  }
+  const passed = () => opFunnelRows().filter((r) => r.action === "test_job_passed");
+
+  it("F1a: a completed test job on a MOCK device does not count", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-mock-tj", type: "machine", model: "Mock", adapterType: "mock" } });
+    await testJob("kernel-nyc", "dev-mock-tj");
+    expect(passed()).toHaveLength(0);
+  });
+
+  it("F1b: a test job never credits a device of kernel-nyc to the caller-supplied kernel-la", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-a", ...OCTO_DEVICE } });
+    await testJob("kernel-la", "dev-a");
+    expect(passed()).toHaveLength(0);
+  });
+
+  it("F1c: a test job never credits a kernel that does not exist", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-b", ...OCTO_DEVICE } });
+    await testJob("kernel-does-not-exist", "dev-b");
+    expect(passed()).toHaveLength(0);
+  });
+
+  it("F1: a real device of the named kernel still counts, attributed to the operator", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-ok", ...OCTO_DEVICE } });
+    await testJob("kernel-nyc", "dev-ok");
+    expect(passed()).toHaveLength(1);
+    expect(passed()[0]).toMatchObject({ resourceId: "kernel-nyc", actor: "op-test" });
+  });
+
+  it("F2: an unauthenticated caller's test job or health check records nothing; an authenticated one is attributed", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-anon", ...OCTO_DEVICE } });
+    await testJob("kernel-nyc", "dev-anon", { "x-test-anonymous": "1" });
+    await app.inject({ method: "POST", url: "/api/devices/dev-anon/health", headers: { "x-test-anonymous": "1" } });
+    expect(passed()).toHaveLength(0);
+    expect(opFunnelRows().filter((r) => r.action === "adapter_ready")).toHaveLength(0);
+    await app.inject({ method: "POST", url: "/api/devices/dev-anon/health" });
+    const ready = opFunnelRows().filter((r) => r.action === "adapter_ready");
+    expect(ready).toHaveLength(1);
+    expect(ready[0]).toMatchObject({ resourceId: "kernel-nyc", actor: "op-test" });
+  });
+
+  it("F3: a device moved to another kernel during the health check is attributed to neither", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-t", ...OCTO_DEVICE } });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    _mockService.checkDeviceHealth.mockImplementationOnce(async () => { await gate; return { healthy: true, details: "idle" }; });
+    const pending = app.inject({ method: "POST", url: "/api/devices/dev-t/health" });
+    await new Promise((r) => setTimeout(r, 20));
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-la", deviceId: "dev-t", ...OCTO_DEVICE } });
+    release();
+    expect((await pending).statusCode).toBe(200);
+    expect(opFunnelRows().filter((r) => r.action === "adapter_ready")).toHaveLength(0);
+  });
+});
+
+describe("#469 round-1 fix F4: durable recording", () => {
+  it("a failed audit write leaves the stage free to record on the next success", () => {
+    const orig = h.logged.push;
+    (h.logged as unknown as { push: () => never }).push = () => { throw new Error("audit down"); };
+    const first = recordOperatorStage("kernel-audit-fail", "kernel_created");
+    (h.logged as unknown as { push: typeof orig }).push = orig;
+    expect(first).toBe(false);
+    expect(recordOperatorStage("kernel-audit-fail", "kernel_created")).toBe(true);
+    expect(opFunnelRows().filter((r) => r.resourceId === "kernel-audit-fail")).toHaveLength(1);
+  });
+
+  it("a restart (cleared memory) writes no duplicate row: the audit log is the source of truth", () => {
+    expect(recordOperatorStage("kernel-restart", "device_registered")).toBe(true);
+    __resetOperatorFunnelState();
+    expect(recordOperatorStage("kernel-restart", "device_registered")).toBe(false);
+    expect(opFunnelRows().filter((r) => r.resourceId === "kernel-restart")).toHaveLength(1);
+  });
+});
+
