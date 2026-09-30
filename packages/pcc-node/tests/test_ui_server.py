@@ -15,6 +15,7 @@ from pcc_node.ui_server import (
     get_submissions,
     pop_submission,
     clear_submissions,
+    read_ui_token,
 )
 from pcc_node.ui_gen import (
     generate_form_ui,
@@ -38,18 +39,13 @@ def ui_dir(tmp_path):
 
 
 @pytest.fixture()
-def server(ui_dir):
+def server(ui_dir, tmp_path, monkeypatch):
     """Start the UI server on a random-ish port for testing."""
     clear_submissions()
+    monkeypatch.setenv("PCC_NODE_UI_TOKEN_FILE", str(tmp_path / "state" / "ui-token"))
     # Use a port unlikely to be in use
     port = 13200 + os.getpid() % 1000
-    srv = start_ui_server(
-        port=port,
-        ui_dir=str(ui_dir),
-        background=True,
-        pcc_base="",
-        pcc_api_key="",
-    )
+    srv = start_ui_server(port=port, ui_dir=str(ui_dir), background=True)
     # Give the server thread a moment to bind
     time.sleep(0.2)
     yield {"server": srv, "port": port, "ui_dir": ui_dir}
@@ -57,12 +53,18 @@ def server(ui_dir):
     clear_submissions()
 
 
+_AGENT_PATHS = ("/api/submissions", "/api/submissions/pop", "/api/generate")
+
+
+def _agent_headers(path):
+    """The agent API needs the server's token (see test_ui_server_authority.py)."""
+    return {"Authorization": "Bearer " + read_ui_token()} if path in _AGENT_PATHS else {}
+
+
 def _get(port, path):
     """GET a path from the test server, return (status, parsed_body)."""
     url = f"http://127.0.0.1:{port}{path}"
-    # The submission queue is for the agent, which identifies itself with this header.
-    hdrs = {"X-PCC-Node-Client": "1"} if path.startswith("/api/submissions") else {}
-    req = Request(url, method="GET", headers=hdrs)
+    req = Request(url, method="GET", headers=_agent_headers(path))
     try:
         with urlopen(req, timeout=5) as resp:
             raw = resp.read().decode("utf-8")
@@ -82,7 +84,7 @@ def _post(port, path, body, headers=None):
     """POST JSON to the test server, return (status, parsed_body)."""
     url = f"http://127.0.0.1:{port}{path}"
     data = json.dumps(body).encode("utf-8")
-    hdrs = {"Content-Type": "application/json"}
+    hdrs = {"Content-Type": "application/json", **_agent_headers(path)}
     if headers:
         hdrs.update(headers)
     req = Request(url, data=data, headers=hdrs, method="POST")
@@ -164,20 +166,20 @@ class TestUIServerSubmissions:
         _post(server["port"], "/api/submit", {"second": True})
 
         # Pop first
-        status, body = _get(server["port"], "/api/submissions/pop")
+        status, body = _post(server["port"], "/api/submissions/pop", {})
         assert status == 200
         assert body["submission"]["data"]["first"] is True
 
         # Pop second
-        status, body = _get(server["port"], "/api/submissions/pop")
+        status, body = _post(server["port"], "/api/submissions/pop", {})
         assert body["submission"]["data"]["second"] is True
 
         # Pop empty
-        status, body = _get(server["port"], "/api/submissions/pop")
+        status, body = _post(server["port"], "/api/submissions/pop", {})
         assert body["submission"] is None
 
     def test_pop_empty_queue(self, server):
-        status, body = _get(server["port"], "/api/submissions/pop")
+        status, body = _post(server["port"], "/api/submissions/pop", {})
         assert status == 200
         assert body["submission"] is None
 

@@ -7,7 +7,9 @@ operations. User input reaches PCC only through the agent, which reads
 /api/submit, validates it, and calls PCC with its own key. These tests pin that:
 there is no credentialed gateway proxy, other web origins cannot drive or read
 the API (CORS, Sec-Fetch-Site, DNS-rebinding Host check), bodies are bounded,
-the hub escapes agent-chosen filenames, and pages cannot be framed.
+the hub escapes agent-chosen filenames, and pages cannot be framed. The agent
+API's token (verdict 91) is covered in test_ui_server_authority.py; the agent
+calls here carry it.
 """
 
 import http.client
@@ -65,21 +67,18 @@ def upstream():
 
 
 @pytest.fixture()
-def node(tmp_path, upstream):
-    """The node UI server, configured the way `pcc-node start` configures it."""
+def node(tmp_path, upstream, monkeypatch):
+    """The node UI server, configured the way `pcc-node start` configures it: no gateway
+    credentials, which start_ui_server no longer accepts (verdict 91, M2)."""
     clear_submissions()
+    token_file = tmp_path / "state" / "ui-token"
+    monkeypatch.setenv("PCC_NODE_UI_TOKEN_FILE", str(token_file))
     ui_dir = tmp_path / "ui"
     ui_dir.mkdir()
     port = _free_port()
-    srv = start_ui_server(
-        port=port,
-        ui_dir=str(ui_dir),
-        background=True,
-        pcc_base=upstream["base"],
-        pcc_api_key=SECRET,
-    )
+    srv = start_ui_server(port=port, ui_dir=str(ui_dir), background=True)
     time.sleep(0.1)
-    yield {"port": port, "ui_dir": ui_dir, "upstream": upstream}
+    yield {"port": port, "ui_dir": ui_dir, "upstream": upstream, "token_file": token_file}
     srv.shutdown()
     srv.server_close()
     clear_submissions()
@@ -111,6 +110,11 @@ def _req(port, method, path, body=None, headers=None, host=None):
 
 def _own(port, host="localhost"):
     return f"http://{host}:{port}"
+
+
+def _auth(node):
+    """The agent's credential: the token the server wrote to its private file."""
+    return {"Authorization": "Bearer " + node["token_file"].read_text().strip()}
 
 
 # ---------- No credentialed proxy: the origin holds no authority ----------
@@ -181,26 +185,28 @@ class TestCrossOriginLockdown:
         assert get_submissions() == []
 
     @pytest.mark.parametrize("site", ["cross-site", "same-site"])
-    def test_cross_site_no_cors_get_cannot_pop(self, node, site):
-        # e.g. <img src="http://localhost:3200/api/submissions/pop"> on any site, or on
-        # another localhost port (same-site): no Origin, but the browser marks the site.
-        # The agent header is included so this pins the Sec-Fetch layer on its own.
+    @pytest.mark.parametrize("method", ["GET", "POST"])
+    def test_cross_site_no_cors_request_cannot_pop(self, node, site, method):
+        # e.g. a no-cors request from any site, or from another localhost port (same-site):
+        # no Origin, but the browser marks the site. The agent's token is included so this
+        # pins the Sec-Fetch layer on its own.
         _req(node["port"], "POST", "/api/submit", {"keep": "me"})
-        status, _, _ = _req(node["port"], "GET", "/api/submissions/pop",
-                            headers={"Sec-Fetch-Site": site, "Sec-Fetch-Mode": "no-cors",
-                                     "X-PCC-Node-Client": "1"})
+        status, _, _ = _req(node["port"], method, "/api/submissions/pop", body={} if method == "POST" else None,
+                            headers={"Sec-Fetch-Site": site, "Sec-Fetch-Mode": "no-cors", **_auth(node)})
         assert status == 403
         assert len(get_submissions()) == 1
 
-    def test_pop_without_the_agent_header_is_refused(self, node):
+    def test_pop_and_read_without_the_token_are_refused(self, node):
         # A browser that sends no Fetch Metadata (older Safari, some WebViews) reaches the
-        # server with neither Origin nor Sec-Fetch-Site; it still cannot add the header.
+        # server with neither Origin nor Sec-Fetch-Site; it still has no token. The
+        # state-changing GET pop is gone altogether.
         _req(node["port"], "POST", "/api/submit", {"keep": "me"})
-        for method in ("GET", "POST"):
-            status, _, _ = _req(node["port"], method, "/api/submissions/pop", body={} if method == "POST" else None)
-            assert status == 403, method
+        status, _, _ = _req(node["port"], "POST", "/api/submissions/pop", body={})
+        assert status == 401
+        status, hdrs, _ = _req(node["port"], "GET", "/api/submissions/pop")
+        assert status == 405 and hdrs.get("allow") == "POST"
         status, _, body = _req(node["port"], "GET", "/api/submissions")
-        assert status == 403 and "keep" not in body
+        assert status == 401 and "keep" not in body
         assert len(get_submissions()) == 1
 
     def test_another_localhost_port_is_a_foreign_origin(self, node):
@@ -260,17 +266,16 @@ class TestOwnUiStillWorks:
         allowed = hdrs.get("access-control-allow-headers", "").lower()
         assert "content-type" in allowed and "x-ui-source" in allowed
 
-    def test_agent_client_without_browser_headers_works(self, node):
+    def test_agent_client_with_the_token_works(self, node):
         status, _, _ = _req(node["port"], "POST", "/api/generate",
-                            {"filename": "agent.html", "content": "<p>a</p>"})
+                            {"filename": "agent.html", "content": "<p>a</p>"}, _auth(node))
         assert status == 201
         status, _, _ = _req(node["port"], "POST", "/api/submit", {"x": 1})
         assert status == 200
-        status, _, body = _req(node["port"], "GET", "/api/submissions/pop", headers={"X-PCC-Node-Client": "1"})
+        status, _, body = _req(node["port"], "GET", "/api/submissions", headers=_auth(node))
+        assert status == 200 and json.loads(body)["submissions"][0]["data"] == {"x": 1}
+        status, _, body = _req(node["port"], "POST", "/api/submissions/pop", {}, _auth(node))
         assert status == 200 and json.loads(body)["submission"]["data"] == {"x": 1}
-        _req(node["port"], "POST", "/api/submit", {"y": 2})
-        status, _, body = _req(node["port"], "POST", "/api/submissions/pop", {}, {"X-PCC-Node-Client": "1"})
-        assert status == 200 and json.loads(body)["submission"]["data"] == {"y": 2}
 
     def test_same_origin_fetch_reads_health(self, node):
         status, _, _ = _req(node["port"], "GET", "/api/health",
@@ -293,6 +298,7 @@ class TestBoundsAndEscaping:
         conn.putrequest("POST", "/api/generate")
         conn.putheader("Content-Type", "application/json")
         conn.putheader("Content-Length", str(50 * 1024 * 1024))
+        conn.putheader("Authorization", _auth(node)["Authorization"])
         conn.endheaders()
         resp = conn.getresponse()
         assert resp.status == 413
@@ -320,7 +326,7 @@ class TestBoundsAndEscaping:
     @pytest.mark.parametrize("name", ["<b>.html", ".hidden.html", "a b.html", ""])
     def test_generate_rejects_unsafe_filenames(self, node, name):
         status, _, _ = _req(node["port"], "POST", "/api/generate",
-                            {"filename": name, "content": "x"})
+                            {"filename": name, "content": "x"}, _auth(node))
         assert status == 400
 
     def test_pages_cannot_be_framed_or_sniffed(self, node):
@@ -338,7 +344,7 @@ class TestBoundsAndEscaping:
 class TestReviewerAlphaHardening:
     def test_generate_requires_filename_and_content(self, node):
         for body in ({"filename": "x.html"}, {"content": "<p/>"}, {}):
-            status, _, _ = _req(node["port"], "POST", "/api/generate", body)
+            status, _, _ = _req(node["port"], "POST", "/api/generate", body, _auth(node))
             assert status == 400, body
         assert not (node["ui_dir"] / "generated.html").exists()
 
@@ -347,6 +353,7 @@ class TestReviewerAlphaHardening:
         conn.putrequest("POST", "/api/generate")
         conn.putheader("Content-Type", "application/json")
         conn.putheader("Transfer-Encoding", "chunked")
+        conn.putheader("Authorization", _auth(node)["Authorization"])
         conn.endheaders()
         conn.send(b"0\r\n\r\n")
         resp = conn.getresponse()
@@ -356,7 +363,7 @@ class TestReviewerAlphaHardening:
 
     @pytest.mark.parametrize("name", ["CON.html", "com1.html", "LPT9.txt", "nul", "aux.html", "a.", "page.html."])
     def test_windows_reserved_and_trailing_dot_names_are_refused(self, node, name):
-        status, _, _ = _req(node["port"], "POST", "/api/generate", {"filename": name, "content": "x"})
+        status, _, _ = _req(node["port"], "POST", "/api/generate", {"filename": name, "content": "x"}, _auth(node))
         assert status == 400
 
     @pytest.mark.parametrize("length", ["+7", "1_0", " 7x", "07.0"])
