@@ -55,6 +55,7 @@ import {
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
 import { buildJobSettlementRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
+import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
@@ -1854,10 +1855,16 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
   // A projection of the execution read model's settlement axis (legacy-settlement.ts):
   // `status`, `settled` and `paidAmount` say only what this job's own escrow records show.
   // A completed job is never "settled" by its row, a mock escrow is "simulated", and
-  // `paidAmount` is null unless this job's milestone record says released.
+  // `paidAmount` is null unless a settlement read confirms this job's release (no gateway
+  // record does: a recorded release is `reported_released`, its amount `reportedReleasedAmount`).
+  // Read behind #353's identity-first object authorization (see loadLegacySettlement).
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
+    if (loaded.kind === "refused") {
+      const refusal = JOB_READ_REFUSAL[loaded.reason];
+      return reply.status(refusal.status).send(refusal.body);
+    }
     if (loaded.kind === "unavailable") {
       return reply.status(503).send({
         error: "read_model_unavailable",

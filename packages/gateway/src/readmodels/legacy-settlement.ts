@@ -27,8 +27,11 @@ import { schema, eq } from "@pcc/store";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import {
+  authorizeJobRead,
   buildJobExecutionDTO,
+  jobReadCallerOf,
   loadJobExecutionSources,
+  precheckJobRead,
   type EvidenceBundleRow,
   type JobExecutionRepos,
   type JobExecutionSources,
@@ -290,13 +293,21 @@ export type LegacySettlementLoad =
       sessions: SessionRead;
     }
   | { kind: "not_found" }
-  | { kind: "unavailable" };
+  | { kind: "unavailable" }
+  | { kind: "refused"; reason: "unauthenticated" | "identity_unverified" };
 
 /**
- * Read one job's records for a legacy settlement read: the job row (a failed read is
- * `unavailable`, a missing row or another tenant's row under TENANT_ENFORCE is
- * `not_found`), then the same sources as the execution read model. The read time is
- * taken before any read.
+ * Read one job's records for a legacy settlement read, behind the same identity-first object
+ * authorization as GET /api/jobs/:jobId/execution (#353; cross-family review r1 of #382):
+ * - before the job is read: no credential is `refused` (401), and a credential without a proven
+ *   wallet is `refused` (403 identity_unverified), for every job id alike;
+ * - then the job row: a failed read is `unavailable`, and a missing row or another tenant's row
+ *   under TENANT_ENFORCE is `not_found`;
+ * - then, unless the caller holds X-Admin-Key, only a proven wallet that is the job's kernel
+ *   operator or recorded buyer reads it. Anyone else gets the same `not_found` as a missing job,
+ *   and a failed authorization read is `unavailable`;
+ * - then the same sources as the execution read model.
+ * The read time is taken before any read.
  */
 export function loadLegacySettlement(
   req: FastifyRequest,
@@ -304,6 +315,8 @@ export function loadLegacySettlement(
   opts: { sessions?: boolean } = {},
 ): LegacySettlementLoad {
   const asOf = new Date().toISOString();
+  const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+  if (!pre.proceed) return { kind: "refused", reason: pre.reason };
   let store: ReturnType<typeof getStore>;
   let job: (JobRow & LegacyJobRow) | undefined;
   try {
@@ -317,6 +330,17 @@ export function loadLegacySettlement(
 
   const tenant = tenantOpts(req as any);
   if (tenant && (job.tenantId ?? null) !== tenant.tenantId) return { kind: "not_found" };
+
+  if (pre.as === "proven") {
+    let allowed: boolean;
+    try {
+      allowed = authorizeJobRead(job, pre.wallet, store.repos as unknown as JobExecutionRepos, store.db).allow;
+    } catch (error) {
+      req.log.error({ jobId, err: error }, "legacy settlement read: authorization read failed");
+      return { kind: "unavailable" };
+    }
+    if (!allowed) return { kind: "not_found" };
+  }
 
   const onReadError = (source: string, error: unknown) =>
     req.log.warn({ jobId, source, err: error }, "legacy settlement read: source read failed");
