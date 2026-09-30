@@ -243,11 +243,20 @@ export function buildJobSettlementRead(
     evidenceHash: bundle?.bundleHash ?? null,
     evidenceBundleId: bundle?.id ?? job.evidenceBundleId ?? null,
     // Every milestone of the linked escrow record; an escrow covers all steps of one CWM.
+    // A milestone is this job's only when the settlement axis attributed it (an exact, unshared
+    // match); one for this step that another job could claim is `same_step_unattributed`
+    // (cross-family review r1 of #382: step equality alone is not attribution).
     milestones: linked
       ? (linked.milestones as unknown as MilestoneRecord[]).map((ms) => ({
           id: ms.id,
           stepId: ms.stepId,
-          forThisJob: ms.stepId === job.stepId,
+          forThisJob: milestone !== null && ms.id === milestone.milestoneId,
+          association:
+            milestone !== null && ms.id === milestone.milestoneId
+              ? ("this_job" as const)
+              : ms.stepId === job.stepId
+                ? ("same_step_unattributed" as const)
+                : ("other_step" as const),
           amount: ms.amount,
           bondAmount: ms.bondAmount ?? null,
           status: ms.status,

@@ -218,9 +218,11 @@ export async function settlementRoutes(app: FastifyInstance) {
   // ── Settlement status for a job ───────────────────────────────────
   //
   // A projection of the execution read model's settlement axis (legacy-settlement.ts):
-  // `settled` is true only when this job's own milestone record says released, a mock
-  // escrow is `simulated`, and `status` uses the same vocabulary as
-  // GET /api/jobs/:jobId/settlement. The job row's own status is `jobStatus`.
+  // `settled` is true only when a settlement read confirms this job's release; no gateway
+  // record does (a milestone record saying released is `reported_released`, with
+  // `settled: false`). A mock escrow is `simulated`, and `status` uses the same vocabulary as
+  // GET /api/jobs/:jobId/settlement. The job row's own status is `jobStatus`. Read behind
+  // #353's identity-first object authorization (see loadLegacySettlement).
 
   app.get<{ Params: { jobId: string } }>("/api/settlement/:jobId", async (req, reply) => {
     // Guard against routes that look like ":jobId" matching "status", "epochs", "submit", etc.
