@@ -38,21 +38,30 @@ ALLOWED_STARTS.add(("asyncio", "create_subprocess_exec"))
 REFUSED = {
     "os": {"system", "popen", "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
            "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
-           "posix_spawn", "posix_spawnp", "fork", "forkpty"},
+           "posix_spawn", "posix_spawnp", "fork", "forkpty", "startfile"},
     "pty": {"spawn", "fork"},
     "subprocess": {"getoutput", "getstatusoutput"},
     "asyncio": {"create_subprocess_shell"},
-    "importlib": {"import_module"},
+    "importlib": {"import_module", "__import__"},
     "runpy": {"run_module", "run_path"},
     "pickle": {"load", "loads", "Unpickler"},
     "marshal": {"load", "loads"},
     "yaml": {"load", "unsafe_load", "full_load", "load_all", "unsafe_load_all"},
     "code": {"interact", "InteractiveInterpreter", "InteractiveConsole"},
+    "builtins": {"eval", "exec", "compile", "__import__"},
+    "sys": {"modules"},
 }
+# Modules with no business in pcc-node: each can run code or start processes.
+REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "nt", "_posixsubprocess",
+                   "commands", "codeop", "shelve"}
 REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "env", "busybox",
           "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "python", "python3"}
 MODULES = set(REFUSED) | {m for m, _ in ALLOWED_STARTS}
+
+
+def _root(name):
+    return name.split(".")[0]
 
 
 def violations(source, filename="<src>"):
@@ -68,15 +77,21 @@ def violations(source, filename="<src>"):
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
+                if _root(alias.name) in REFUSED_IMPORTS:
+                    bad(node, f"import {alias.name}")
                 if alias.name in MODULES:
                     modules[alias.asname or alias.name] = alias.name
-                if alias.name in ("commands",):
-                    bad(node, f"import {alias.name}")
-        elif isinstance(node, ast.ImportFrom) and node.module in MODULES:
-            for alias in node.names:
-                names[alias.asname or alias.name] = (node.module, alias.name)
-                if alias.name == "*" or alias.name in REFUSED.get(node.module, ()):
-                    bad(node, f"from {node.module} import {alias.name}")
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if _root(node.module) in REFUSED_IMPORTS:
+                bad(node, f"from {node.module} import ...")
+            if node.module in MODULES:
+                for alias in node.names:
+                    names[alias.asname or alias.name] = (node.module, alias.name)
+                    if alias.name == "*" or alias.name in REFUSED.get(node.module, ()):
+                        bad(node, f"from {node.module} import {alias.name}")
+
+    # Names used as the object of an attribute access (os in os.path.join).
+    attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
 
     def target(func):
         """(module, attr) a call resolves to, if it is one we track."""
@@ -87,45 +102,50 @@ def violations(source, filename="<src>"):
         return None
 
     for node in ast.walk(tree):
+        # A module object used as a value (assigned, passed, vars(os)) hides its calls.
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id in modules and id(node) not in attribute_bases:
+                bad(node, f"module {modules[node.id]} used as a value")
+            elif node.id == "__builtins__":
+                bad(node, "__builtins__")
+        # Any reference to a refused attribute, called or not (invoke = os.system).
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
+            module = modules[node.value.id]
+            if node.attr in REFUSED.get(module, ()):
+                bad(node, f"{module}.{node.attr}")
+            elif node.attr.startswith("__"):
+                bad(node, f"{module}.{node.attr}")
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Name) and func.id in REFUSED_BUILTINS:
             bad(node, f"{func.id}() runs code from data")
             continue
-        if isinstance(func, ast.Name) and func.id == "getattr" and node.args:
-            obj = node.args[0]
-            if isinstance(obj, ast.Name) and obj.id in modules:
-                attr = node.args[1] if len(node.args) > 1 else None
-                if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)
-                        and attr.value not in REFUSED.get(modules[obj.id], ())
-                        and (modules[obj.id], attr.value) not in ALLOWED_STARTS):
-                    bad(node, f"getattr on {modules[obj.id]}")
-            continue
         resolved = target(func)
-        if resolved is None:
+        if resolved is None or (resolved[0], resolved[1]) not in ALLOWED_STARTS:
             continue
         module, attr = resolved
-        if attr in REFUSED.get(module, ()):
-            bad(node, f"{module}.{attr}")
-        elif (module, attr) in ALLOWED_STARTS:
-            for kw in node.keywords:
-                if kw.arg is None:
+        for kw in node.keywords:
+            if kw.arg is None:
+                spread = kw.value
+                constant_keys = isinstance(spread, ast.Dict) and all(
+                    isinstance(k, ast.Constant) and isinstance(k.value, str) for k in spread.keys)
+                if not constant_keys or any(k.value == "shell" for k in spread.keys):
                     bad(node, f"{module}.{attr}(**...) can hide shell=True")
-                elif kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
-                    bad(node, f"{module}.{attr}(shell=...)")
-            argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
-            if attr == "create_subprocess_exec":
-                first = argv
-            elif isinstance(argv, (ast.List, ast.Tuple)) and argv.elts:
-                first = argv.elts[0]
-            else:
-                bad(node, f"{module}.{attr} argv must be a list literal")
-                continue
-            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
-                bad(node, f"{module}.{attr}: the executable must be a fixed string")
-            elif pathlib.PurePath(first.value).name.lower() in SHELLS:
-                bad(node, f"{module}.{attr}: {first.value!r} is a shell or interpreter")
+            elif kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+                bad(node, f"{module}.{attr}(shell=...)")
+        argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
+        if attr == "create_subprocess_exec":
+            first = argv
+        elif isinstance(argv, (ast.List, ast.Tuple)) and argv.elts:
+            first = argv.elts[0]
+        else:
+            bad(node, f"{module}.{attr} argv must be a list literal")
+            continue
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            bad(node, f"{module}.{attr}: the executable must be a fixed string")
+        elif pathlib.PurePath(first.value).name.lower() in SHELLS:
+            bad(node, f"{module}.{attr}: {first.value!r} is a shell or interpreter")
     return found
 
 
@@ -192,12 +212,27 @@ EVASIONS = {
     "marshal.loads": "import marshal\nmarshal.loads(blob)",
     "yaml.load": "import yaml\nyaml.load(text)",
     "from pickle import loads": "from pickle import loads\nloads(blob)",
+    # Verdict 68c, finding 2: aliases through assignment and nesting, and the
+    # modules and attributes the first AST guard did not track.
+    "assignment alias": "import os\ninvoke = os.system\ninvoke(payload)",
+    "lambda wrapper": "import os\nrun = lambda c: os.system(c)",
+    "ctypes": "import ctypes\nctypes.CDLL(None).system(b'id')",
+    "multiprocessing": "import multiprocessing\nmultiprocessing.Process(target=f).start()",
+    "webbrowser": "import webbrowser\nwebbrowser.open(url)",
+    "os.startfile": "import os\nos.startfile(path)",
+    "sys.modules": "import sys\nsys.modules['os'].system('id')",
+    "builtins.eval": "import builtins\nbuiltins.eval(x)",
+    "__builtins__": "__builtins__['eval'](x)",
+    "vars(os)": "import os\nvars(os)['system']('id')",
+    "os.__dict__": "import os\nos.__dict__['system']('id')",
+    "subprocess module passed around": "import subprocess\nrunner = subprocess\nrunner.run(x, shell=True)",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
     "shell=False": "import subprocess\nsubprocess.run(('arp', '-a'), shell=False)",
     "fixed exec": "import asyncio\nasyncio.create_subprocess_exec('ffmpeg', '-i', dev)",
     "yaml.safe_load": "import yaml\nyaml.safe_load(text)",
+    "constant ** without shell": "import subprocess\nsubprocess.run(['git', 'status'], **{'check': True})",
 }
 
 
