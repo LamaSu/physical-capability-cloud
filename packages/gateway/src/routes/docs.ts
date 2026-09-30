@@ -156,7 +156,7 @@ export async function docRoutes(app: FastifyInstance) {
 <body>
   <div class="hero">
     <h1>Physical Capability Cloud</h1>
-    <p>AWS for the physical world — documentation &amp; specs</p>
+    <p>Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.</p>
   </div>
 
   <div class="agent-box">

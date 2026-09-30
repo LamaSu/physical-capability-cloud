@@ -921,7 +921,7 @@ export async function createGateway(port = 3200) {
           schema: "pcc-agent-view/1.0",
           name: "Physical Capability Cloud",
           description:
-            "A decentralized control plane for discovering, contracting, running, and verifying physical manufacturing and laboratory capabilities.",
+            "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.",
           apiBase: "https://capability.network",
           auth: {
             method: "api-key",

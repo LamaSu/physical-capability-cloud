@@ -147,7 +147,8 @@ const START_HTML = `<!doctype html>
       <div class="ascii-art">PCC | Physical Capability Cloud</div>
       <h1>Use PCC through Claude</h1>
       <p>
-        PCC is open infrastructure for agents to buy and sell from each other - anything,
+        PCC: turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.
+        Public beta: payments settle on a test network. Agents buy and sell from each other - anything,
         not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares,
         ticket purchases, custom commissions. Pick your Claude surface below; transact in plain English.
       </p>
