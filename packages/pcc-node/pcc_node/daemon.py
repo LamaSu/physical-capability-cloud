@@ -241,12 +241,8 @@ def run_daemon(config: NodeConfig):
     # Start UI server in background
     try:
         from .ui_server import start_ui_server
-        start_ui_server(
-            port=3200,
-            background=True,
-            pcc_base=config.pcc_base,
-            pcc_api_key=config.pcc_api_key,
-        )
+        # No gateway credentials: the pages it serves are agent-generated.
+        start_ui_server(port=3200, background=True)
         log.info("UI server: http://localhost:3200")
     except Exception as e:
         log.warning(f"UI server failed to start: {e}")

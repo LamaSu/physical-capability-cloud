@@ -32,7 +32,6 @@ from .register import (
     provision_api_key,
     register_kernel,
     register_devices,
-    announce_capabilities,
     register_signing_key,
 )
 from .log_capture import LogSigningRefused
@@ -309,15 +308,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     except LogSigningRefused as exc:
         click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
-    # Announce capabilities
-    if devices:
-        announce_capabilities(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            devices,
-            secret_key=secret_key,
-        )
+    # No capability announcement: this node takes no jobs (verdict 68d, finding 3).
 
     # First-run diagnostics banner (no-op if already acknowledged)
     _maybe_prompt_diagnostics(config)
