@@ -12,7 +12,7 @@ import { initStore, closeStore, getRepos } from "../db.js";
 import { capabilityAvailabilityRoutes } from "../routes/capability-availability.js";
 import { operatorStatusRoutes } from "../routes/operator-status.js";
 
-const OWNER = "owner@kits.test";
+const OWNER = "0x2222222222222222222222222222222222222222"; // a wallet: only a SIWE session proves identity (pack 111)
 const WALLET = "0x282fa9c122b433864f8c8a8f2efe411b52067539";
 
 beforeAll(() => {
@@ -110,7 +110,7 @@ describe("PUT /api/capabilities/:capId/availability: authorization fails closed"
   });
 
   it("404 for an unknown capability", async () => {
-    const app = await buildAuthedApp({ operatorId: OWNER });
+    const app = await buildAuthedApp({ userId: OWNER });
     const res = await put(app, "cap-does-not-exist", { mode: "always" });
     expect(res.statusCode).toBe(404);
     await app.close();
@@ -119,7 +119,7 @@ describe("PUT /api/capabilities/:capId/availability: authorization fails closed"
 
 describe("PUT /api/capabilities/:capId/availability: the owner sets it", () => {
   it("stores mode always, and operator-status stops reporting the slot missing", async () => {
-    const app = await buildAuthedApp({ operatorId: OWNER });
+    const app = await buildAuthedApp({ userId: OWNER });
     const before = await app.inject({ method: "GET", url: `/api/operators/${OWNER}/status` });
     expect(before.statusCode).toBe(200);
     expect(JSON.stringify(before.json().missing)).toMatch(/availability \(slot 4\) — 2\/2/);
@@ -148,11 +148,37 @@ describe("PUT /api/capabilities/:capId/availability: the owner sets it", () => {
     await app.close();
   });
 
-  it("matches the owner with WP-A's fold (trimmed, case-insensitive)", async () => {
-    const app = await buildAuthedApp({ operatorId: "  OWNER@Kits.Test " });
-    const res = await put(app, "cap-avail-a", { mode: "manual-claim" });
+  it("matches the owner's EVM address with ASCII hex case-folding only (pack 111 HIGH 2)", async () => {
+    const upper = await buildAuthedApp({ userId: "0x" + OWNER.slice(2).toUpperCase() });
+    const res = await put(upper, "cap-avail-a", { mode: "manual-claim" });
     expect(res.statusCode).toBe(200);
     expect(stored("cap-avail-a")).toEqual({ mode: "manual-claim" });
+    await upper.close();
+    for (const lookalike of [` ${OWNER} `, `${OWNER}\u200b`]) {
+      const app = await buildAuthedApp({ userId: lookalike });
+      const r = await put(app, "cap-avail-a", { mode: "always" });
+      expect(r.statusCode, JSON.stringify(lookalike)).toBe(403);
+      await app.close();
+    }
+    expect(stored("cap-avail-a")).toEqual({ mode: "manual-claim" });
+  });
+
+  it("a key-authenticated caller gets 403 proven_identity_required even when its operatorId equals the owner", async () => {
+    const app = Fastify({ logger: false });
+    app.decorateRequest("operatorId", null);
+    app.decorateRequest("userId", null);
+    app.decorateRequest("apiKeyId", null);
+    app.addHook("onRequest", async (req) => {
+      const r = req as unknown as { operatorId: string; userId: string; apiKeyId: string };
+      r.apiKeyId = "key-1";
+      r.operatorId = OWNER;
+      r.userId = OWNER;
+    });
+    await app.register(capabilityAvailabilityRoutes);
+    await app.ready();
+    const res = await put(app, "cap-avail-a", { mode: "always" });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("proven_identity_required");
     await app.close();
   });
 
@@ -167,7 +193,7 @@ describe("PUT /api/capabilities/:capId/availability: the owner sets it", () => {
 
 describe("PUT /api/capabilities/:capId/availability: strict body", () => {
   it("refuses delegate-to-agent and any agentEndpoint (the gateway would POST to that URL)", async () => {
-    const app = await buildAuthedApp({ operatorId: OWNER });
+    const app = await buildAuthedApp({ userId: OWNER });
     const before = stored("cap-avail-a");
     for (const body of [
       { mode: "delegate-to-agent", agentEndpoint: "http://169.254.169.254/latest" },
@@ -182,7 +208,7 @@ describe("PUT /api/capabilities/:capId/availability: strict body", () => {
   });
 
   it("rejects malformed availability and leaves the stored value unchanged", async () => {
-    const app = await buildAuthedApp({ operatorId: OWNER });
+    const app = await buildAuthedApp({ userId: OWNER });
     const before = stored("cap-avail-b");
     const bad: unknown[] = [
       { mode: "sometimes" },
@@ -210,6 +236,71 @@ describe("PUT /api/capabilities/:capId/availability: strict body", () => {
     });
     expect(str.statusCode).toBe(400);
     expect(stored("cap-avail-b")).toEqual(before);
+    await app.close();
+  });
+});
+
+// ── astra pack 111 findings (reproduced first on 2cc53580) ──────────────────
+import { apiGate } from "../middleware/api-gate.js";
+import { provisionRoutes } from "../routes/provision.js";
+
+describe("pack 111 HIGH 1: a key minted by public provisioning for the owner's identity cannot write", () => {
+  it("the real apiGate + provisioning: the impersonating key gets 403 and changes nothing", async () => {
+    seedKernel("kernel-imp-email", "victim@kits.test");
+    seedCapability("cap-imp-email", "kernel-imp-email");
+    seedKernel("kernel-imp-wallet", "0x1111111111111111111111111111111111111111");
+    seedCapability("cap-imp-wallet", "kernel-imp-wallet");
+    const app = Fastify({ logger: false });
+    await app.register(apiGate);
+    await app.register(provisionRoutes);
+    await app.register(capabilityAvailabilityRoutes);
+    await app.ready();
+    try {
+      for (const [who, capId] of [
+        [{ email: "victim@kits.test" }, "cap-imp-email"],
+        [{ walletAddress: "0x1111111111111111111111111111111111111111" }, "cap-imp-wallet"],
+      ] as const) {
+        const prov = await app.inject({ method: "POST", url: "/api/auth/provision", payload: who });
+        expect(prov.statusCode, JSON.stringify(who)).toBeLessThan(300);
+        const key = prov.json().api_key as string;
+        const res = await app.inject({
+          method: "PUT", url: `/api/capabilities/${capId}/availability`,
+          headers: { authorization: `Bearer ${key}` }, payload: { mode: "always" },
+        });
+        expect(res.statusCode, capId).toBe(403);
+        expect(res.json().error).toBe("proven_identity_required");
+        expect(stored(capId)).toEqual({});
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("pack 111 HIGH 2: a Unicode case-fold lookalike never matches the owner", () => {
+  it("a Kelvin-sign principal does not own k@example.com's capability", async () => {
+    seedKernel("kernel-kelvin", "k@example.com");
+    seedCapability("cap-kelvin", "kernel-kelvin");
+    const app = await buildAuthedApp({ userId: "K@example.com" });
+    const res = await put(app, "cap-kelvin", { mode: "always" });
+    expect(res.statusCode).toBe(403);
+    expect(stored("cap-kelvin")).toEqual({});
+    await app.close();
+  });
+});
+
+describe("pack 111 MEDIUM 3: cron and timezone must be real, not just shaped", () => {
+  it("refuses a nonexistent timezone and a non-cron five-field string", async () => {
+    const app = await buildAuthedApp({ userId: WALLET });
+    for (const body of [
+      { mode: "cron", cron: "x x x x x", timezone: "UTC" },
+      { mode: "cron", cron: "0 9 * * 1-5", timezone: "Mars/Olympus" },
+      { mode: "cron", cron: "61 9 * * *" },
+      { mode: "cron", cron: "0 24 * * *" },
+    ]) {
+      const res = await put(app, "cap-avail-w", body);
+      expect(res.statusCode, JSON.stringify(body)).toBe(400);
+    }
     await app.close();
   });
 });
