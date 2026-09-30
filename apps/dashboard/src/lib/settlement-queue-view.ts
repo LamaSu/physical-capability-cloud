@@ -147,6 +147,18 @@ export function flushConfirmation(q: QueueStatus): string {
   );
 }
 
+/**
+ * What the epoch-detail panel says when nothing is selected: the read's own reason when the
+ * epoch history is not a real answer yet (loading or unavailable — M2), "no epoch" only for a
+ * real, empty answer, else a prompt to pick one. A failed or loading read must never look like
+ * an empty history.
+ */
+export function epochDetailNote(epochs: Read<EpochSummary[]>): string {
+  if (epochs.state === "loading") return "Loading…";
+  if (epochs.state === "unavailable") return epochs.reason;
+  return epochs.value.length > 0 ? "Click an epoch to see breakdown" : "No epoch to show";
+}
+
 /** Exact USDC from base units (6 decimals), at least 2 decimals shown; null for anything but an integer string. */
 export function formatUsdcBaseUnits(baseUnits: string): string | null {
   if (!/^\d+$/.test(baseUnits)) return null;

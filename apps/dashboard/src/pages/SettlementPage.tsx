@@ -11,6 +11,7 @@ import {
   LOADING,
   UNREACHABLE,
   UNREACHABLE_REASON,
+  epochDetailNote,
   epochsFromResponse,
   flushConfirmation,
   flushOutcome,
@@ -348,7 +349,7 @@ export function SettlementPage() {
           ) : (
             <GlassPanel>
               <p className="text-sm text-white/30 text-center py-8">
-                {list && list.length > 0 ? "Click an epoch to see breakdown" : "No epoch to show"}
+                {epochDetailNote(epochs)}
               </p>
             </GlassPanel>
           )}

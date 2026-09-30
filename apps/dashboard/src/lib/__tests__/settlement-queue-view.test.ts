@@ -4,16 +4,19 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  LOADING,
   UNREACHABLE,
+  epochDetailNote,
   epochsFromResponse,
   flushConfirmation,
   flushOutcome,
   formatUsdcBaseUnits,
   statusFromResponse,
+  type EpochSummary,
 } from "../settlement-queue-view.js";
 
 const STATUS = { batchEnabled: true, pending: 2, totalValue: "1500000", oldestAge: 1200, autoFlush: false, smartAccountAddress: null };
-const EPOCH = {
+const EPOCH: EpochSummary = {
   epochId: 1,
   batches: [{ userOpHash: "0xab", operationCount: 2, trigger: "manual" }],
   totalIntents: 2,
@@ -62,6 +65,20 @@ describe("epochsFromResponse", () => {
 
   it("an unreachable gateway has its own reason", () => {
     expect(UNREACHABLE).toEqual({ state: "unavailable", reason: "The gateway could not be reached." });
+  });
+});
+
+describe("epochDetailNote: the detail panel's placeholder when nothing is selected (M2)", () => {
+  it("NEGATIVE: a loading or unavailable epoch read is never presented as an empty state", () => {
+    expect(epochDetailNote(LOADING)).toBe("Loading…");
+    expect(epochDetailNote({ state: "unavailable", reason: "The gateway answered HTTP 500." })).toBe(
+      "The gateway answered HTTP 500.",
+    );
+  });
+
+  it("'no epoch' only for a real, empty answer; otherwise a prompt to pick one", () => {
+    expect(epochDetailNote({ state: "read", value: [] })).toBe("No epoch to show");
+    expect(epochDetailNote({ state: "read", value: [EPOCH] })).toBe("Click an epoch to see breakdown");
   });
 });
 
