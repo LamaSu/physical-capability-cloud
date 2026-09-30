@@ -7,6 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { compareCodeUnits } from "@pcc/spec";
 import type { VerifierNodeInfo, HumanVerificationRequest } from "./types.js";
 
 export class VerifierSelector {
@@ -111,7 +112,7 @@ export class VerifierSelector {
     return nodes.slice().sort((a, b) => {
       const hashA = createHash("sha256").update(`${seed}:${a.id}`).digest("hex");
       const hashB = createHash("sha256").update(`${seed}:${b.id}`).digest("hex");
-      return hashA.localeCompare(hashB);
+      return compareCodeUnits(hashA, hashB); // code units, never the host's collation
     });
   }
 }

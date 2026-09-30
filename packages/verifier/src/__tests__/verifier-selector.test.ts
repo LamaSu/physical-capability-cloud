@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import { VerifierSelector } from "../network/verifier-selector.js";
 import type { VerifierNodeInfo, HumanVerificationRequest } from "../network/types.js";
 
@@ -50,6 +51,15 @@ describe("VerifierSelector", () => {
   ];
 
   const request = makeRequest();
+
+  it("orders the not-enough-nodes fallback by code units, never the host's collation (review E1)", () => {
+    // Under a Danish LANG, localeCompare sorts "aa..." after "ed..." ("aa" collates as "\u00e5").
+    const pool = [makeNode("node-6", 100, 5000), makeNode("node-13", 100, 5000)];
+    const digest = (id: string) => createHash("sha256").update(`${SEED}:${id}`).digest("hex");
+    expect(digest("node-13").slice(0, 2)).toBe("aa");
+    expect(digest("node-6").slice(0, 2)).toBe("ed");
+    expect(selector.selectVerifiers(request, pool, 10, SEED).map((n) => n.id)).toEqual(["node-13", "node-6"]);
+  });
 
   it("returns exactly count nodes when pool is larger", () => {
     const result = selector.selectVerifiers(request, nodes, 3, SEED);
