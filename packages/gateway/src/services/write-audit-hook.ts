@@ -3,10 +3,11 @@
  * and DELETE to the audit log, so each state-changing call is captured without
  * per-route boilerplate. Individual routes may also log richer events.
  *
- * Moved out of server.ts unchanged, with one exception (#458 round 1): for the
+ * Moved out of server.ts unchanged, with one exception (#458 rounds 1-2): for the
  * public, unauthenticated telemetry sink the caller's IP and User-Agent are not
- * kept. Anyone can post there, a User-Agent can carry a token or an email, and
- * the sink's own records store neither for attempt reports.
+ * kept, and the URL is the registered route path, never the raw URL with its
+ * query string. Anyone can post there, and a User-Agent or a query string can
+ * carry a token or an email.
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -32,7 +33,7 @@ export async function writeAuditHook(request: FastifyRequest, reply: FastifyRepl
       action: method.toLowerCase(),
       metadata: {
         method,
-        url: request.url,
+        url: omitClient ? (request.routeOptions?.url ?? request.url.split("?")[0]) : request.url,
         statusCode: reply.statusCode,
         duration_ms: Math.round(reply.elapsedTime ?? 0),
       },

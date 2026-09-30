@@ -125,4 +125,29 @@ describe("attempt reports through the production wiring", () => {
     expect("principalHash" in rec).toBe(false);
     expect(lines()[0]).not.toContain("made-up-token-123");
   });
+
+  it("record only the route path, never the raw query string, in the sink's write audit (round 2)", async () => {
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => true) as never);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/feedback?token=abc123456789&email=alice@example.com",
+      payload: attempt(),
+    });
+    expect(res.statusCode).toBe(201);
+    await settle();
+    const audits = spy.mock.calls.map((c) => c[0] as Audit);
+    const writeAudit = audits.find((a) => a.eventType === "http.write" && String(a.metadata?.url).startsWith("/api/feedback"));
+    expect(writeAudit?.metadata?.url).toBe("/api/feedback");
+    expect(JSON.stringify(audits)).not.toContain("abc123456789");
+    expect(JSON.stringify(audits)).not.toContain("alice@example.com");
+  });
+
+  it("keep the raw URL in other routes' write audit", async () => {
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => true) as never);
+    await app.inject({ method: "POST", url: "/api/other-write?page=2", payload: {} });
+    await settle();
+    const writeAudit = spy.mock.calls.map((c) => c[0] as Audit).find((a) => a.eventType === "http.write" && String(a.metadata?.url).startsWith("/api/other-write"));
+    expect(writeAudit?.metadata?.url).toBe("/api/other-write?page=2");
+  });
 });
+
