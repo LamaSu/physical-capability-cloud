@@ -31,8 +31,8 @@ const REPO_ROOT = join(SPEC_ROOT, "..", "..");
 // ── 1. Registry integrity ────────────────────────────────────────────────
 
 describe("INTAKE_FIELDS — registry integrity", () => {
-  it("has 41 fields, all with unique ids", () => {
-    expect(INTAKE_FIELDS).toHaveLength(41);
+  it("has 42 fields, all with unique ids", () => {
+    expect(INTAKE_FIELDS).toHaveLength(42);
     const ids = INTAKE_FIELDS.map((f) => f.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
@@ -76,6 +76,7 @@ describe("INTAKE_FIELDS — registry integrity", () => {
       "pricing.currency",
       "pricing.minimum",
       "pricing.unitPrice",
+      "safety.commandRate",
       "safety.estop",
       "safety.hazards",
       "safety.limits",
@@ -119,6 +120,7 @@ describe("INTAKE_FIELDS — registry integrity", () => {
       "safety.estop",
       "safety.hazards",
       "safety.limits",
+      "safety.commandRate",
       "pricing.unitPrice",
       "pricing.minimum",
       "pricing.currency",
@@ -161,6 +163,7 @@ describe("INTAKE_FIELDS — registry integrity", () => {
       "safety.estop",
       "safety.hazards",
       "safety.limits",
+      "safety.commandRate",
       "consumables.items",
       "consumables.restockedBy",
       "consumables.loadedMaterial",
@@ -312,6 +315,7 @@ function buildFullValidRecord(): IntakeRecord {
     "safety.supervision": human("attended"),
     "safety.estop": human({ mechanism: "hardware" }),
     "safety.hazards": human(["heat"]),
+    "safety.commandRate": human(60),
     "safety.limits": confirmed([{ quantity: "bed temperature", unit: "C", min: 0, max: 120 }]),
     "consumables.items": human(["PLA filament"]),
     "consumables.restockedBy": human("operator, monthly"),
@@ -685,7 +689,7 @@ describe("intakeFieldArtifactMap", () => {
     expect(map.kernel?.sort()).toEqual(["location.streetAddress", "operator.displayName"].sort());
     expect(map.gatewayPayoutStore).toEqual(["payout.destination"]);
     expect(map.safetyEnvelope).toEqual(
-      ["consumables.loadedMaterial", "safety.estop", "safety.hazards", "safety.limits", "safety.supervision"].sort(),
+      ["consumables.loadedMaterial", "safety.commandRate", "safety.estop", "safety.hazards", "safety.limits", "safety.supervision"].sort(),
     );
   });
 
@@ -803,5 +807,15 @@ describe("safety field shapes match sensors' R8 (#4200)", () => {
     const sup = field("safety.supervision").valueSchema;
     for (const v of ["attended", "unattended", "remote-supervised"]) expect(sup.safeParse(v).success, v).toBe(true);
     expect(sup.safeParse("sometimes").success).toBe(false);
+  });
+});
+
+describe("safety.commandRate (sensors #4254)", () => {
+  it("is a never-defaulted positive integer of commands per minute, required before accept-jobs", () => {
+    const f = INTAKE_FIELDS.find((x) => x.id === "safety.commandRate")!;
+    expect(f.neverDefault).toBe(true);
+    expect(f.requiredFor).toContain("accept-jobs");
+    expect(f.valueSchema.safeParse(60).success).toBe(true);
+    for (const bad of [0, -1, 2.5, "60", null]) expect(f.valueSchema.safeParse(bad).success, String(bad)).toBe(false);
   });
 });

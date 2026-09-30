@@ -1110,6 +1110,64 @@
             "research": "find-safety-limits"
           }
         },
+        "safety.commandRate": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100000
+            },
+            "provenance": {
+              "type": "string",
+              "enum": [
+                "human",
+                "probe",
+                "research",
+                "confirmed"
+              ]
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "doc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "section": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "required": [
+                "doc"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "question": "At most how many commands per minute may PCC send to this device?",
+          "x-pcc-class": "C",
+          "x-pcc-fills": [
+            "safetyEnvelope:commandRate.maxPerMinute"
+          ],
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
+          "x-pcc-neverDefault": true,
+          "x-pcc-sensitive": false,
+          "x-pcc-why": "The safety envelope refuses commands faster than this, so a runaway job can't overload the device.",
+          "x-pcc-ifUnknown": {
+            "research": "find-safety-limits"
+          }
+        },
         "consumables.items": {
           "type": "object",
           "properties": {

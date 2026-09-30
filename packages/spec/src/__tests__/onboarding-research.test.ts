@@ -257,3 +257,21 @@ describe("research findings carry the template quantity for R8 (#4200)", () => {
     expect(entry.fills).toContain("safety.estop");
   });
 });
+
+describe("research findings may carry a range value for R8 (#4254)", () => {
+  it("accepts {min?, max?} with at least one side and min <= max", async () => {
+    const { ResearchFindingSchema } = await import("../onboarding/research/index.js");
+    const base = {
+      quantity: "volume",
+      claim: "aspirate volume range",
+      unit: "uL",
+      citation: { doc: "OT-2 P1000 GEN2 spec sheet", section: "Volume range" },
+      retrievedAt: "2026-09-29T20:00:00Z",
+    };
+    expect(ResearchFindingSchema.safeParse({ ...base, value: { min: 100, max: 1000 } }).success).toBe(true);
+    expect(ResearchFindingSchema.safeParse({ ...base, value: { max: 1000 } }).success).toBe(true);
+    expect(ResearchFindingSchema.safeParse({ ...base, value: {} }).success).toBe(false);
+    expect(ResearchFindingSchema.safeParse({ ...base, value: { min: 10, max: 1 } }).success).toBe(false);
+    expect(ResearchFindingSchema.safeParse({ ...base, value: { min: 1, max: 2, extra: 3 } }).success).toBe(false);
+  });
+});

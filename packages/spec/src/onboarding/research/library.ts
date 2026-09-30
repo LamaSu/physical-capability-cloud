@@ -149,7 +149,7 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     mustReturn: ["limits", "hazards", "ppe", "supervision", "estop", "citation"],
     acceptance:
       "Safety limits and hazard guidance quoted from a manufacturer manual or safety datasheet, never a forum guess or inference.",
-    fills: ["safety.limits", "safety.hazards", "safety.estop"],
+    fills: ["safety.limits", "safety.hazards", "safety.estop", "safety.commandRate"],
     humanConfirmRequired: true,
     coaching: {
       ask: "Ask me: find the safety limits and e-stop requirements for the {model} in its manual, quoted word for word.",
@@ -295,12 +295,22 @@ export type ResearchCitation = z.infer<typeof ResearchCitationSchema>;
  * Every R5 finding's shape. `citation` is required (not optional) — a value
  * without a citation can never become a limit, per the spec addendum.
  */
+/** A one- or two-sided bound. R8 turns it into a limit only when both sides are known. */
+export const ResearchRangeSchema = z
+  .object({ min: z.number().finite().optional(), max: z.number().finite().optional() })
+  .strict()
+  .refine((r) => r.min !== undefined || r.max !== undefined, { message: "a range needs min or max" })
+  .refine((r) => r.min === undefined || r.max === undefined || r.min <= r.max, {
+    message: "a range's min must not exceed its max",
+  });
+
 export const ResearchFindingSchema = z
   .object({
     /** The template quantity the finding is about (R8 keys limits by it); needed for limits and I/O ranges. */
     quantity: z.string().min(1).max(120).optional(),
     claim: z.string().min(1),
-    value: z.union([z.string(), z.number(), z.boolean()]),
+    /** A scalar, or a range {min?, max?} for limits and I/O bounds (sensors' R8 reads ranges; #4254). */
+    value: z.union([z.string(), z.number(), z.boolean(), ResearchRangeSchema]),
     unit: z.string().optional(),
     citation: ResearchCitationSchema,
     retrievedAt: z.string().datetime({ offset: true }),

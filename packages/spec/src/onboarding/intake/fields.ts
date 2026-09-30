@@ -509,6 +509,20 @@ export const INTAKE_FIELDS: readonly IntakeFieldDef[] = [
       .min(1),
   },
 
+  {
+    // Sensors' R8 (#4254): the operator's own ceiling on how fast PCC may command the device.
+    id: "safety.commandRate",
+    group: "safety",
+    class: "C",
+    question: "At most how many commands per minute may PCC send to this device?",
+    why: "The safety envelope refuses commands faster than this, so a runaway job can't overload the device.",
+    fills: [{ artifact: "safetyEnvelope", path: "commandRate.maxPerMinute" }],
+    requiredFor: ["accept-jobs"],
+    neverDefault: true,
+    ifUnknown: { research: "find-safety-limits" },
+    valueSchema: z.number().int().positive().max(100000),
+  },
+
   // ── consumables ───────────────────────────────────────────────────
   {
     id: "consumables.items",

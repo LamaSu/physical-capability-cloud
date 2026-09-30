@@ -185,6 +185,15 @@
         <div class="meta">required for: accept-jobs</div>
         <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-safety-limits&quot; in the research library)</div>
       </div>
+      <div class="field" id="safety.commandRate">
+        <div class="field-id">safety.commandRate</div>
+        <div class="question">At most how many commands per minute may PCC send to this device?</div>
+        <div class="why">The safety envelope refuses commands faster than this, so a runaway job can&#39;t overload the device.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-safety-limits&quot; in the research library)</div>
+      </div>
     </section>
     <section class="group">
       <h2>Consumables</h2>
