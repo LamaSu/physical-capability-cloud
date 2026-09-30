@@ -67,6 +67,7 @@ const {
   ot2ChatMessages,
   shopKernels,
   negotiationSessions,
+  operatorPolicies,
 } = schema;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -294,6 +295,14 @@ function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | nul
 }
 
 /**
+/** True when this kernel's operator has engaged the emergency stop. */
+function emergencyStopEngaged(kernelId: string): boolean {
+  const { db } = getStore();
+  const row = db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
+  return (row?.policy as Record<string, unknown> | undefined)?.emergencyStop === true;
+}
+
+/**
  * Why a queued call may not be handed to the device now, or null when it may.
  * GET /tool-call/pending is where a call leaves the gateway, so it re-checks
  * what admission checked: a row can wait while its scope expires or is
@@ -301,10 +310,17 @@ function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | nul
  *   - A named scope must exist and be on the call's own kernel, for any tool.
  *   - A call with no scope must be a safe tool; admission lets only the
  *     operator queue one.
- *   - A write's scope must still be active and unexpired, allow the tool, and
- *     pass the escrow parity check.
- * The command count is not re-checked: admission already counted this call.
+ *   - A SCOPED call — safe OR non-safe — needs its scope still active and
+ *     unexpired at dispatch (finding F2: a holder's `home` moves the robot, so
+ *     it must not dispatch after the scope expired; only an operator's
+ *     scope-free safe call skips the scope).
+ *   - A non-safe write must also be in the scope's allowed tools, be within the
+ *     command budget re-derived from the rows (finding F3, so a legacy row
+ *     admission never counted can't exceed maxCommands), and pass escrow parity.
  * Throws when the escrow lookup fails; the caller then leaves the call queued.
+ * The physical-safety governor/breaker and the emergency stop are re-checked
+ * separately, at the dispatch site (finding F1), because they are async and
+ * time-varying.
  */
 function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: string): string | null {
   const safe = isToolSafe(deviceType, call.toolName);
@@ -313,8 +329,29 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: st
   const scope = db.select().from(executionScopes).where(eq(executionScopes.id, call.scopeId)).get();
   if (!scope) return "scope_not_found";
   if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
+  // F2: a scoped call needs live scope authority, safe tool or not.
+  if (scope.status !== "active") return "scope_not_active";
+  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
   if (safe) return null;
-  return scopeWriteRefusal(scope, call.toolName) ?? (escrowRefusal(scope) ? "escrow_not_funded" : null);
+  if (!(scope.allowedTools as string[]).includes(call.toolName)) return "tool_not_allowed";
+  // F3: re-derive the command budget from the rows. Admission increments
+  // scope.commandCount, but a legacy row it never saw would not have been
+  // counted; counting the scope's already-dispatched non-safe calls (claimed or
+  // terminal, excluding this one) catches that. If the cap is already reached,
+  // this queued call is beyond budget.
+  const dispatchedNonSafe = db
+    .select()
+    .from(toolCallRelay)
+    .where(and(eq(toolCallRelay.scopeId, scope.id), eq(toolCallRelay.kernelId, call.kernelId)))
+    .all()
+    .filter(
+      (c) =>
+        c.id !== call.id &&
+        (c.status === "claimed" || c.status === "completed" || c.status === "failed") &&
+        !isToolSafe(deviceType, c.toolName),
+    );
+  if (dispatchedNonSafe.length >= scope.maxCommands) return "max_commands_reached";
+  return escrowRefusal(scope) ? "escrow_not_funded" : null;
 }
 
 // ── Camera streams (per kernel) ─────────────────────────────────────────────
@@ -720,6 +757,46 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           .set({ status: "rejected", error: refusal, completedAt: now })
           .where(eq(toolCallRelay.id, call.id))
           .run();
+        continue;
+      }
+      // F1: re-establish the physical-safety boundary at the dispatch site. A
+      // call admitted while the breaker was closed must not reach the device
+      // after failures opened it, and an engaged emergency stop blocks every
+      // dispatch. Fail closed: an e-stop, an open breaker or a governor denial
+      // rejects the row; if the safety gateway can't be consulted, the call is
+      // left queued (like an escrow-lookup failure) rather than dispatched.
+      if (emergencyStopEngaged(kernelId)) {
+        db.update(toolCallRelay)
+          .set({ status: "rejected", error: "emergency_stopped", completedAt: now })
+          .where(eq(toolCallRelay.id, call.id))
+          .run();
+        continue;
+      }
+      try {
+        const gateway = getSafetyGateway();
+        const verdict = await gateway.validateOnly({
+          commandId: generateId("cmd"),
+          deviceId: kernelId,
+          class: call.scopeId ? "scoped" : "safe",
+          type: call.toolName,
+          params: (call.toolArgs ?? {}) as Record<string, unknown>,
+          agentDid: kernelId,
+          scopeId: call.scopeId ?? undefined,
+        });
+        if (!verdict.allowed) {
+          db.update(toolCallRelay)
+            .set({
+              status: "rejected",
+              error: verdict.verdict?.reason ?? verdict.reason ?? "safety_denied",
+              completedAt: now,
+            })
+            .where(eq(toolCallRelay.id, call.id))
+            .run();
+          continue;
+        }
+      } catch {
+        // The safety gateway is unavailable — do not dispatch a physical command
+        // we cannot clear. Leave the call queued for the next poll.
         continue;
       }
       db.update(toolCallRelay)

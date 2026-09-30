@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
@@ -1595,5 +1595,83 @@ describe("N4b-gw: a scope's creator keeps its own records after the scope ends",
 
     const revoke = await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope}/revoke`, headers: who });
     expect(revoke.statusCode).toBe(200);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// N4b-gw round 4 (gpt-5.6-sol r3 on 620f888d): the dispatch site is a true
+// USE-TIME safety boundary. It re-checks live scope authority for scoped safe
+// calls (F2), a row-derived command budget (F3), and the physical-safety
+// governor/breaker and emergency stop (F1) before any queued call is claimed.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", () => {
+  const poll = async () =>
+    (await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/tool-call/pending", headers: op })).json();
+  const rowOf = (id: string) =>
+    getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get()!;
+  function seedCall(id: string, toolName: string, scopeId: string | null, status = "pending") {
+    getStore().db.insert(toolCallRelay).values({
+      id, scopeId, kernelId: "kernel-test-1", toolName, toolArgs: {}, status,
+      createdAt: new Date().toISOString(),
+    }).run();
+  }
+  const setScope = (id: string, fields: Partial<typeof executionScopes.$inferInsert>) =>
+    getStore().db.update(executionScopes).set(fields).where(eq(executionScopes.id, id)).run();
+
+  afterEach(() => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    getStore().db.run(sql`DELETE FROM operator_policies`);
+  });
+
+  it("F2: a scoped SAFE call does not dispatch after its scope expires", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    seedCall("tc-safe-scoped", "home", scope); // home is safe, but submitted under a scope
+    setScope(scope, { expiresAt: new Date(Date.now() - 1000).toISOString() });
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-safe-scoped")).toMatchObject({ status: "rejected", error: "scope_expired" });
+  });
+
+  it("F2 control: the operator's scope-free safe call still dispatches", async () => {
+    seedCall("tc-safe-free", "home", null);
+    const body = await poll();
+    expect(body.calls.map((c: { id: string }) => c.id)).toContain("tc-safe-free");
+    expect(rowOf("tc-safe-free").status).toBe("claimed");
+  });
+
+  it("F3: a legacy row cannot exceed maxCommands (budget re-derived from rows)", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/scope", headers: op,
+      payload: { createdBy: "agent-q", allowedTools: ["run_create"], maxCommands: 1 },
+    });
+    const scope = res.json().id as string;
+    seedCall("tc-counted", "run_create", scope, "claimed"); // one non-safe call already dispatched
+    seedCall("tc-legacy", "run_create", scope, "pending");  // an uncounted legacy row
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-legacy")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
+  });
+
+  it("F1: an open circuit breaker blocks dispatch of an admitted call", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    seedCall("tc-breaker", "run_create", scope);
+    const gw = getSafetyGateway();
+    gw.resetCircuit("kernel-test-1");
+    gw.recordDeviceFailure("kernel-test-1");
+    gw.recordDeviceFailure("kernel-test-1");
+    gw.recordDeviceFailure("kernel-test-1"); // threshold 3 -> OPEN
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-breaker").status).toBe("rejected");
+  });
+
+  it("F1: an engaged emergency stop blocks dispatch", async () => {
+    const scope = await mintScope("agent-q", ["run_create"]);
+    seedCall("tc-estop", "run_create", scope);
+    getStore().db.insert(schema.operatorPolicies).values({
+      kernelId: "kernel-test-1",
+      policy: { emergencyStop: true } as never,
+      updatedAt: new Date().toISOString(),
+      updatedBy: "test",
+    }).run();
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-estop")).toMatchObject({ status: "rejected", error: "emergency_stopped" });
   });
 });

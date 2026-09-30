@@ -164,15 +164,26 @@ only on its own kernel.
 - **Dispatch.** `GET /tool-call/pending` re-checks every queued call, oldest
   first, before handing it to the device:
   - a named scope must exist and be on the call's own kernel, for any tool;
-  - a call with no scope must be a safe tool;
-  - a write's scope must still be active and unexpired, must allow the tool,
-    and must pass the funding parity check below.
+  - a call with no scope must be a safe tool (only the operator can queue one);
+  - a SCOPED call — safe tool or not — must still hold an active, unexpired
+    scope. A safe tool such as `home` still moves the robot, so a holder's
+    scoped `home` does not dispatch after the scope expires; only the
+    operator's scope-free safe call skips the scope;
+  - a non-safe write must also be in the scope's allowed tools, be within the
+    command budget re-derived from the rows (so a legacy row admission never
+    counted cannot exceed `maxCommands`), and pass the funding parity check;
+  - then, at the dispatch site, the **physical-safety governor and circuit
+    breaker** are re-run (`validateOnly`) and the **emergency stop** is checked.
+    A command admitted while the breaker was closed does not reach the device
+    after failures open it, and an engaged emergency stop blocks every dispatch.
 
   A refused call is closed as `rejected` with its reason, so no later poll can
   claim it and it does not hold back the calls behind it. The reasons are
   `scope_kernel_mismatch`, `scope_not_found`, `scope_required`,
-  `scope_not_active`, `scope_expired`, `tool_not_allowed` and
-  `escrow_not_funded`. A call whose escrow lookup fails stays queued, and a
+  `scope_not_active`, `scope_expired`, `tool_not_allowed`, `max_commands_reached`,
+  `escrow_not_funded`, `emergency_stopped` and the governor/breaker's
+  `safety_denied`/`circuit_open`. A call whose escrow lookup fails, or which
+  cannot be cleared because the safety gateway is unavailable, stays queued; a
   claim that times out is re-checked the same way. So a call recorded on one
   kernel under another kernel's scope (rows the retired writer could leave)
   never reaches a device and grants that scope's holder nothing, and a revoke
@@ -231,14 +242,22 @@ Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     │  each queued call, oldest first, until 5 are handed out:
     ├── names a scope that is missing or on another kernel? → REJECTED
     ├── no scope, and not a safe tool? → REJECTED
-    ├── a write whose scope is not active, has expired or does not allow the tool? → REJECTED
-    ├── a write whose job's escrow is not funded? → REJECTED (lookup error: stays queued)
+    ├── a SCOPED call (safe or not) whose scope is not active/has expired? → REJECTED
+    ├── a write not in allowed tools, over the row-derived budget, or unfunded? → REJECTED
+    ├── emergency stop engaged, or the safety governor/breaker denies? → REJECTED
+    │      (the safety gateway being unavailable → stays queued)
     │
     ▼
 CLAIMED → handed to the executor
 ```
 
-## Protocol Hash Enforcement
+## Protocol Hash Enforcement (planned — not yet enforced)
+
+> **Status:** this is the DESIGN for protocol-hash binding; it is board row
+> N4b-gw item 5 / R30, not yet implemented. The execution-scope table and the
+> scope-creation request carry no `protocolHash` field today, and dispatch does
+> not compare an upload's content hash. Treat this section as the target
+> behavior, not current enforcement.
 
 For protocol upload, the scope includes a `protocolHash` — the SHA-256 of the approved protocol content. The gateway validates:
 
