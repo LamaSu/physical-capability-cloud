@@ -9,6 +9,7 @@ import { useJobs, useKernels, useEscrows, useGatewayHealth, useProductHome } fro
 import { isActiveJob, JOBS_PAGE_SIZE, mayBeTruncated } from "../lib/live-status.js";
 import { readSection, sectionReason } from "../lib/product-home.js";
 import { UnavailableState } from "../components/LiveState.js";
+import { EscrowAmount } from "../components/EscrowAmount.js";
 
 /** Canonical job statuses (types/dto.ts StepStatus) to a pulse; the label always carries the status text. */
 const jobStatusToPulse: Record<string, "online" | "executing" | "completed" | "failed" | "offline"> = {
@@ -239,7 +240,7 @@ export function DashboardPage() {
                   <div key={esc.id} className="flex items-center justify-between py-1.5 text-xs gap-4">
                     <span className="text-white/40 font-mono truncate">{esc.id}</span>
                     <span className="text-white/50">{esc.status}</span>
-                    {esc.totalAmount != null ? <AmountDisplay amount={esc.totalAmount} size="sm" /> : <Unavailable />}
+                    <EscrowAmount amount={esc.totalAmount} currency={esc.currency} size="sm" />
                   </div>
                 ))}
               </div>
