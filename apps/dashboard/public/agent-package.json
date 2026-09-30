@@ -1,7 +1,7 @@
 {
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
-  "description": "Open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares, ticket purchases, custom commissions. Drop this package into a Claude conversation and Claude can transact on the user's behalf.",
+  "description": "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. Open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares, ticket purchases, custom commissions. Drop this package into a Claude conversation and Claude can transact on the user's behalf.",
   "version": "2.19.2",
   "toolCount": 253,
   "lastUpdated": "2026-09-29T23:59:55.000Z",

@@ -112,7 +112,7 @@ PCC ships a library-only durable execution package at `packages/workflow/` — e
 
 ## 1. What Is PCC
 
-PCC is AWS for the physical world. It is a cloud control plane for physical manufacturing capabilities.
+PCC exists to turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. It is a cloud control plane for physical capabilities, organised much like a cloud provider:
 
 - **Shop Kernels** = Availability Zones. Each kernel is a physical site (lab, workshop, factory) with equipment.
 - **Capabilities** = billable units. Not machines — what machines can DO (3D printing, CNC milling, HPLC analysis).

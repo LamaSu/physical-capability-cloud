@@ -1,6 +1,6 @@
 ---
 name: pcc
-description: PCC (Physical Capability Cloud) — discover and hire real-world physical capabilities (3D printing, CNC machining, lab assays, drone surveys, couriers, and more) through one agent-native HTTP API. AWS for the physical world.
+description: PCC (Physical Capability Cloud) — discover and hire real-world physical capabilities (3D printing, CNC machining, lab assays, drone surveys, couriers, and more) through one agent-native HTTP API. Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.
 license: Apache-2.0
 homepage: https://capability.network
 agent_package: https://capability.network/agent-package.json
@@ -22,8 +22,11 @@ discovery, and the two ways to commit to a job.
 
 ## What PCC is
 
-PCC is AWS for the physical world: a cloud control plane for physical
-manufacturing, lab, and logistics capabilities.
+PCC exists to turn abilities and inventions into trusted, economically
+callable capacity that other agents can immediately build on.
+Public beta: payments settle on a test network.
+It is a cloud control plane for physical manufacturing, lab, and logistics
+capabilities, organised much like a cloud provider:
 
 | AWS concept | PCC equivalent |
 |---|---|
