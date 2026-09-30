@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   LOADING,
   UNREACHABLE,
+  createFlushController,
   epochDetailNote,
   epochsFromResponse,
   flushConfirmation,
@@ -243,5 +244,95 @@ describe("the gateway's real answers", () => {
       caller_scopes: ["operator"],
     };
     expect(flushOutcome(403, body)).toEqual({ ok: false, message: body.message });
+  });
+});
+
+describe("createFlushController: no double-flush, disabled through the reload (M5)", () => {
+  it("a second confirm while one flush (post + reload) is in flight sends no second POST", async () => {
+    let postCalls = 0;
+    let resolvePost!: (v: { ok: boolean; message: string }) => void;
+    const postPromise = new Promise<{ ok: boolean; message: string }>((res) => {
+      resolvePost = res;
+    });
+    let resolveReload!: () => void;
+    const reloadPromise = new Promise<void>((res) => {
+      resolveReload = res;
+    });
+
+    const results: Array<{ ok: boolean; message: string }> = [];
+    const flushingStates: boolean[] = [];
+
+    const controller = createFlushController<{ ok: boolean; message: string }>({
+      post: () => {
+        postCalls += 1;
+        return postPromise;
+      },
+      reload: () => reloadPromise,
+      onResult: (r) => results.push(r),
+      onError: () => {},
+      onFlushingChange: (f) => flushingStates.push(f),
+    });
+
+    const first = controller.confirmFlush();
+    expect(controller.isFlushing()).toBe(true);
+
+    // A second confirm while the POST is still in flight: no second POST.
+    expect(await controller.confirmFlush()).toBe(false);
+    expect(postCalls).toBe(1);
+
+    resolvePost({ ok: true, message: "flushed" });
+    // Let the post's continuation (onResult, then reaching `await reload()`) run.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The POST resolved, but the authoritative reload has not — still disabled.
+    expect(controller.isFlushing()).toBe(true);
+    expect(await controller.confirmFlush()).toBe(false);
+    expect(postCalls).toBe(1); // still just the one POST, ever
+
+    resolveReload();
+    expect(await first).toBe(true);
+
+    expect(controller.isFlushing()).toBe(false);
+    expect(results).toEqual([{ ok: true, message: "flushed" }]);
+    expect(postCalls).toBe(1);
+    expect(flushingStates).toEqual([true, false]);
+  });
+
+  it("a normal flush: flushing is true until the reload settles, then false", async () => {
+    const states: boolean[] = [];
+    const controller = createFlushController<{ ok: boolean; message: string }>({
+      post: async () => ({ ok: true, message: "ok" }),
+      reload: async () => {},
+      onResult: () => {},
+      onError: () => {},
+      onFlushingChange: (f) => states.push(f),
+    });
+    expect(await controller.confirmFlush()).toBe(true);
+    expect(states).toEqual([true, false]);
+    expect(controller.isFlushing()).toBe(false);
+  });
+
+  it("NEGATIVE: a POST failure still runs the authoritative reload and clears the in-flight guard", async () => {
+    let reloaded = false;
+    let caught: unknown;
+    const controller = createFlushController<{ ok: boolean; message: string }>({
+      post: async () => {
+        throw new Error("network");
+      },
+      reload: async () => {
+        reloaded = true;
+      },
+      onResult: () => {},
+      onError: (e) => {
+        caught = e;
+      },
+      onFlushingChange: () => {},
+    });
+    await controller.confirmFlush();
+    expect(reloaded).toBe(true);
+    expect((caught as Error).message).toBe("network");
+    expect(controller.isFlushing()).toBe(false);
   });
 });

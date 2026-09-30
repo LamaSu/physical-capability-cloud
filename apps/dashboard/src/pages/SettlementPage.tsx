@@ -11,6 +11,7 @@ import {
   LOADING,
   UNREACHABLE,
   UNREACHABLE_REASON,
+  createFlushController,
   epochDetailNote,
   epochsFromResponse,
   flushConfirmation,
@@ -77,18 +78,27 @@ export function SettlementPage() {
     void reload();
   }, [reload]);
 
-  const handleFlush = async () => {
-    setFlushing(true);
-    setFlushResult(null);
-    try {
-      const r = await fetch("/api/settlement/flush", { method: "POST", headers: { ...getAuthHeaders() } });
-      setFlushResult(flushOutcome(r.status, await readJson(r)));
-    } catch {
-      setFlushResult({ ok: false, message: UNREACHABLE_REASON });
-    } finally {
-      setFlushing(false);
-      await reload();
-    }
+  // Framework-free controller (M5): a synchronous in-flight guard, and `flushing` stays true
+  // through the authoritative reload (not just the POST), so a second confirm mid-reload can
+  // never fire another POST off a stale queue status. Built once — `reload` is itself stable.
+  const [flushController] = React.useState(() =>
+    createFlushController<{ ok: boolean; message: string }>({
+      post: async () => {
+        const r = await fetch("/api/settlement/flush", { method: "POST", headers: { ...getAuthHeaders() } });
+        return flushOutcome(r.status, await readJson(r));
+      },
+      reload,
+      onResult: (result) => setFlushResult(result),
+      onError: () => setFlushResult({ ok: false, message: UNREACHABLE_REASON }),
+      onFlushingChange: (f) => {
+        setFlushing(f);
+        if (f) setFlushResult(null);
+      },
+    }),
+  );
+
+  const handleFlush = () => {
+    void flushController.confirmFlush();
   };
 
   const q = status.state === "read" ? status.value : null;

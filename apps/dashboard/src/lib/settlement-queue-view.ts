@@ -180,6 +180,58 @@ export function epochDetailNote(epochs: Read<EpochSummary[]>): string {
   return epochs.value.length > 0 ? "Click an epoch to see breakdown" : "No epoch to show";
 }
 
+export interface FlushControllerDeps<T> {
+  /** Send the flush request and resolve its outcome (never expected to reject in normal use;
+   * a rejection — e.g. the fetch itself throwing — is still handled, see onError). */
+  post: () => Promise<T>;
+  /** The authoritative reload: re-fetch queue status and epoch history after a flush. */
+  reload: () => Promise<void>;
+  onResult: (result: T) => void;
+  onError: (error: unknown) => void;
+  onFlushingChange: (flushing: boolean) => void;
+}
+
+export interface FlushController {
+  isFlushing: () => boolean;
+  /** Attempt a flush. Resolves false without calling `post` if one is already in flight
+   * (including its reload) — the synchronous in-flight guard (M5). */
+  confirmFlush: () => Promise<boolean>;
+}
+
+/**
+ * A framework-free controller for the manual-flush flow (M5). Two problems in the old
+ * page-level handler: (1) `flushing` was cleared in a `finally` BEFORE awaiting the reload, so
+ * `canFlush` was briefly recomputed from the stale, pre-flush queue status — long enough for a
+ * second confirm to send a second POST while the first flush's authoritative reload was still
+ * in flight; (2) there was no reentrancy guard other than that same (buggy) `flushing` state.
+ * This controller sets an in-flight flag SYNCHRONOUSLY before any await, and only clears it
+ * after the reload settles — success or failure — so a second confirmFlush() at any point
+ * before the reload finishes is a same-tick no-op.
+ */
+export function createFlushController<T>(deps: FlushControllerDeps<T>): FlushController {
+  let flushing = false;
+  return {
+    isFlushing: () => flushing,
+    async confirmFlush() {
+      if (flushing) return false;
+      flushing = true;
+      deps.onFlushingChange(true);
+      try {
+        deps.onResult(await deps.post());
+      } catch (err) {
+        deps.onError(err);
+      }
+      try {
+        await deps.reload();
+      } finally {
+        flushing = false;
+        deps.onFlushingChange(false);
+      }
+      return true;
+    },
+  };
+}
+
 /** Exact USDC from base units (6 decimals), at least 2 decimals shown; null for anything but an integer string. */
 export function formatUsdcBaseUnits(baseUnits: string): string | null {
   if (!/^\d+$/.test(baseUnits)) return null;
