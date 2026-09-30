@@ -149,16 +149,15 @@ export interface ToolCatalogListing {
 
 /**
  * Demand signal targeting a capability TYPE rather than a specific operator.
- * The catalog routes the bounty/demand to tool maintainers who implement that
- * capability type, even if no operator is currently running their tool.
- *
- * Companion to existing /api/bounty endpoints; this one fans out per-type.
+ * The route records nothing and notifies no maintainer: the response says so with
+ * literal-false notified/persisted/funded fields. Durable demand is the kit-build
+ * job offer path.
  */
 export interface TypeLevelBountyRequest {
   capabilityType: string;
   description: string;
   budgetUSD: number;
-  /** Optional: target specific maintainers; otherwise all matching tools get notified */
+  /** Optional: preferred maintainers. Accepted for compatibility; nobody is notified */
   preferredMaintainers?: Id[];
   /** Optional: deadline (ISO 8601). Defaults to 30 days from now */
   deadline?: Timestamp;

@@ -3,10 +3,10 @@
  * live operator instances. Companion to /api/capabilities (operator-bound)
  * and /api/marketplace (live offerings).
  *
- * Demand signals at the capability-type level (POST /api/tool-catalog/bounty)
- * route to tool maintainers, enabling pull-side market discovery: buyers
- * signal want, tool maintainers see signal even with no live operator, then
- * recruit/stand-up an operator or build the missing tool.
+ * POST /api/tool-catalog/bounty accepts a capability-type-level demand signal
+ * but stores, funds and routes NOTHING and notifies nobody: it answers 200 with
+ * an ephemeral, unresolvable reference and notified/persisted/funded = false.
+ * Durable, funded demand is the kit-build job offer path (kits K2).
  *
  * Storage: in-memory Map for the initial scaffold. Production wiring will
  * replace with the same persistence layer used by /api/marketplace + /api/bounty
