@@ -150,7 +150,8 @@ export class BountyService {
     currency: "USDC" | "CREDITS";
     requirements: BountyRequirements;
     expiresInDays: number;
-    fundedBy?: "treasury" | "requesters" | "mixed";
+    /** Who is PROPOSED to fund it. A proposal only: nothing funds a bounty (see fundingStatus). */
+    proposedFundingSource?: "treasury" | "requesters" | "mixed";
     demandCount?: number;
     estimatedAnnualValue?: number;
   }): CapabilityBounty {
@@ -167,7 +168,7 @@ export class BountyService {
       estimatedAnnualValue: params.estimatedAnnualValue ?? 0,
       bountyReward: params.bountyReward,
       currency: params.currency,
-      fundedBy: params.fundedBy ?? "treasury",
+      ...(params.proposedFundingSource ? { proposedFundingSource: params.proposedFundingSource } : {}),
       fundingStatus: "unfunded",
       requirements: params.requirements,
       status: "open",
@@ -218,73 +219,42 @@ export class BountyService {
     return bounty;
   }
 
+  /**
+   * RETIRED (astra pack 36, HIGH 2). A caller-supplied job id and score are not
+   * verification authority: verification must be derived by the server from real
+   * job evidence (ledger R45). Always refuses and changes nothing; the signature
+   * stays for API compatibility.
+   */
   verifyBounty(
     bountyId: string,
-    jobId: string,
-    verificationScore: number,
+    _jobId: string,
+    _verificationScore: number,
   ): CapabilityBounty {
-    const bounty = this.bounties.get(bountyId);
-    if (!bounty) {
+    if (!this.bounties.has(bountyId)) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
-    if (bounty.status !== "claimed") {
-      throw new Error(
-        `Bounty ${bountyId} cannot be verified (status: ${bounty.status})`,
-      );
-    }
-
-    bounty.verificationJobId = jobId;
-    bounty.verificationScore = verificationScore;
-
-    if (verificationScore >= MIN_VERIFICATION_SCORE) {
-      bounty.status = "verified";
-    }
-    // If score is too low, bounty stays "claimed" — operator can retry
-
-    return bounty;
+    throw new Error(
+      `Bounty verification is retired: a caller-supplied score is not authority (bounty ${bountyId}). ` +
+        "Verification is derived by the server from real job evidence (ledger R45).",
+    );
   }
 
+  /**
+   * RETIRED (astra pack 36, HIGH 1). Nothing funds a bounty (fundingStatus is
+   * always "unfunded"), so no bounty can be paid and no earnings may be recorded.
+   * Payment happens only through the accepted-plan escrow path. Always refuses and
+   * changes nothing: no "paid" state, no paidAt, no totalEarned or
+   * bountiesCompleted, and no demand signal marked fulfilled.
+   */
   payBounty(bountyId: string): CapabilityBounty {
     const bounty = this.bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
-    if (bounty.status !== "verified") {
-      throw new Error(
-        `Bounty ${bountyId} cannot be paid (status: ${bounty.status})`,
-      );
-    }
-
-    bounty.status = "paid";
-    bounty.paidAt = new Date().toISOString();
-
-    // Update hunter stats
-    if (bounty.claimedBy) {
-      const hunter = this.hunters.get(bounty.claimedBy);
-      if (hunter) {
-        hunter.bountiesCompleted += 1;
-        hunter.totalEarned += bounty.bountyReward;
-        if (!hunter.capabilitiesOnboarded.includes(bounty.capabilityType)) {
-          hunter.capabilitiesOnboarded.push(bounty.capabilityType);
-        }
-        // Reputation = completed / claimed ratio * 100
-        hunter.reputation = Math.round(
-          (hunter.bountiesCompleted / hunter.bountiesClaimed) * 100,
-        );
-      }
-    }
-
-    // Mark matching demand signals as fulfilled
-    for (const signal of this.demandSignals.values()) {
-      if (
-        signal.capabilityType === bounty.capabilityType &&
-        signal.status === "active"
-      ) {
-        signal.status = "fulfilled";
-      }
-    }
-
-    return bounty;
+    throw new Error(
+      `Bounty payment is retired: nothing funds bounty ${bountyId} (fundingStatus ${bounty.fundingStatus}). ` +
+        "Payment happens only through the accepted-plan escrow path.",
+    );
   }
 
   // ── Auto-Bounty Creation ────────────────────────────────────────
@@ -342,7 +312,7 @@ export class BountyService {
           mustPassVerification: true,
         },
         expiresInDays: 90,
-        fundedBy: "treasury",
+        proposedFundingSource: "treasury",
         demandCount: demand.count,
         estimatedAnnualValue: demand.annualValue,
       });

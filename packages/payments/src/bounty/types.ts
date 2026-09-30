@@ -31,7 +31,8 @@ export interface CapabilityBounty {
   bountyReward: number;
   currency: "USDC" | "CREDITS";
   /** The INTENDED funding source. No treasury or requester escrow backs it. */
-  fundedBy: "treasury" | "requesters" | "mixed";
+  /** Who is PROPOSED to fund it. A proposal only, never a funding fact: see fundingStatus. */
+  proposedFundingSource?: "treasury" | "requesters" | "mixed";
   /**
    * Whether real funds back the reward. This in-memory service has no escrow
    * binding, so every bounty it creates is "unfunded". A durable, escrow-backed
