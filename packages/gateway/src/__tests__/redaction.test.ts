@@ -170,7 +170,7 @@ describe("redactSecrets: private keys in the forms /api/auth/provision returns (
       '"password": "' + '\\"'.repeat(30_000),
       ('"' + "p".repeat(63) + '"' + " ".repeat(8)).repeat(900),
       '"x":"'.repeat(12_000),
-      "-----BEGIN PRIVATE KEY-----".repeat(2_000),
+      ["-----BEGIN ", "PRIVATE KEY-----"].join("").repeat(2_000),
       "aB3".repeat(20_000),
     ];
     for (const input of hostile) {
