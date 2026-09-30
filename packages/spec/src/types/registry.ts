@@ -206,6 +206,9 @@ export function setContains(
   if (entries === null) {
     throw new Error(`Cannot query IPFS-backed registry without resolved entries`);
   }
+  // Members are printable ASCII, so any other candidate is not one. Checked before
+  // lowercasing: toLowerCase maps some non-ASCII letters (U+212A KELVIN SIGN) to ASCII.
+  if (typeof candidate !== "string" || !REGISTRY_KEY.test(candidate)) return false;
   const target = candidate.toLowerCase();
   return entries.some((e) => e.toLowerCase() === target);
 }
@@ -225,6 +228,8 @@ export function mapGet(
   if (entries === null) {
     throw new Error(`Cannot query IPFS-backed registry without resolved entries`);
   }
+  // Keys are printable ASCII, so any other key is absent (see setContains).
+  if (typeof key !== "string" || !REGISTRY_KEY.test(key)) return undefined;
   const target = key.toLowerCase();
   const hit = entries.find((e) => e.key.toLowerCase() === target);
   return hit?.value;
