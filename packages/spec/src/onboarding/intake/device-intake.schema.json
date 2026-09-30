@@ -54,13 +54,15 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "What name should buyers and the network see for you or your shop?",
+          "question": "What name should buyers see as the operator of this device?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "kernel:name",
             "operatorProfile:displayName"
           ],
-          "x-pcc-requiredFor": "register",
+          "x-pcc-requiredFor": [
+            "register"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "This is the name that appears on every listing and job you accept."
@@ -107,13 +109,15 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "What email should we use for job notifications and key provisioning?",
+          "question": "What email should account and job notices go to?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "operatorProfile:contactEmail",
             "notificationChannel:email"
           ],
-          "x-pcc-requiredFor": "register",
+          "x-pcc-requiredFor": [
+            "register"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "We need a channel to reach you about jobs, approvals, and account security."
@@ -159,15 +163,20 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Do you have the authority to offer this machine's time on PCC?",
+          "question": "Is this device yours to offer, or are you setting it up for someone who decides about it?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "registration:attestation.authority"
           ],
-          "x-pcc-requiredFor": "register",
+          "x-pcc-requiredFor": [
+            "register"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Only someone authorized to commit the machine's time may register it — this is never assumed."
+          "x-pcc-why": "Only the person who controls a device can offer it for work — this is never assumed.",
+          "x-pcc-ifUnknown": {
+            "check": "Pause here and check with whoever owns or controls this device before continuing — don't guess or decide on someone else's behalf."
+          }
         },
         "device.description": {
           "type": "object",
@@ -218,10 +227,15 @@
             "identifyDeviceInput:description",
             "csdSearch:query"
           ],
-          "x-pcc-requiredFor": "identify",
+          "x-pcc-requiredFor": [
+            "identify"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This seeds device identification and the search for a matching capability contract."
+          "x-pcc-why": "This seeds device identification and the search for a matching capability contract.",
+          "x-pcc-ifUnknown": {
+            "check": "Take a photo of the label and describe whatever you see — a rough guess of what it does is enough for the agent to search from."
+          }
         },
         "device.vendor": {
           "type": "object",
@@ -272,10 +286,15 @@
             "adapterConfig:vendor",
             "kit:compatibility.models[].vendor"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "The vendor name drives the adapter config and which kits can match this device."
+          "x-pcc-why": "The vendor name drives the adapter config and which kits can match this device.",
+          "x-pcc-ifUnknown": {
+            "research": "identify-make-model"
+          }
         },
         "device.model": {
           "type": "object",
@@ -326,10 +345,15 @@
             "adapterConfig:model",
             "kit:compatibility.models[].model"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "The exact model is how we find the right manual, safety limits, and remote-control protocol."
+          "x-pcc-why": "The exact model is how we find the right manual, safety limits, and remote-control protocol.",
+          "x-pcc-ifUnknown": {
+            "research": "identify-make-model"
+          }
         },
         "device.serialNumber": {
           "type": "object",
@@ -379,10 +403,15 @@
           "x-pcc-fills": [
             "deviceRecord:serialNumber"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "The serial number ties this specific unit to its device record."
+          "x-pcc-why": "The serial number ties this specific unit to its device record.",
+          "x-pcc-ifUnknown": {
+            "check": "Look for a printed serial number on the device's data plate or a sticker near the power input. If it truly has none, say so."
+          }
         },
         "device.firmware": {
           "type": "object",
@@ -432,10 +461,15 @@
           "x-pcc-fills": [
             "deviceRecord:firmware"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Firmware version affects which commands and safety behaviors are available (N83 G8)."
+          "x-pcc-why": "Firmware version affects which commands and safety behaviors are available (N83 G8).",
+          "x-pcc-ifUnknown": {
+            "check": "Check the device's display, status page, or companion app's \"About\" or \"System Info\" screen for a firmware or software version."
+          }
         },
         "device.adapterType": {
           "type": "object",
@@ -491,10 +525,15 @@
           "x-pcc-fills": [
             "registerDevice:adapterType"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This selects the real adapter that will run jobs — it is never \"mock\" for a live device."
+          "x-pcc-why": "This selects the real adapter that will run jobs — it is never \"mock\" for a live device.",
+          "x-pcc-ifUnknown": {
+            "research": "find-remote-interface"
+          }
         },
         "location.cityCountry": {
           "type": "object",
@@ -552,15 +591,17 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "What city and country is this device located in?",
+          "question": "What city and country is this device located in? (Shown publicly on your listing.)",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "capability:location"
           ],
-          "x-pcc-requiredFor": "publish",
+          "x-pcc-requiredFor": [
+            "publish"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Buyers need a coarse location to judge shipping time and jurisdiction."
+          "x-pcc-why": "Buyers need this to judge shipping time and jurisdiction — it's shown publicly, so keep it to city and country, never a street address."
         },
         "location.streetAddress": {
           "type": "object",
@@ -617,7 +658,9 @@
           "x-pcc-fills": [
             "kernel:physicalAddress"
           ],
-          "x-pcc-requiredFor": "optional",
+          "x-pcc-requiredFor": [
+            "optional"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": true,
           "x-pcc-why": "We need this for couriers and installers, but it is never published — public listings only ever show city and country."
@@ -682,10 +725,15 @@
             "adapterConfig:baseUrl",
             "deploymentChoice:topology"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This decides whether we can reach it directly or need pcc-node as a relay."
+          "x-pcc-why": "This decides whether we can reach it directly or need pcc-node as a relay.",
+          "x-pcc-ifUnknown": {
+            "check": "Ask whoever manages your network whether this device has a fixed IP, and whether it's on the same network segment as the machine running the agent."
+          }
         },
         "network.outboundHttps": {
           "type": "object",
@@ -733,10 +781,15 @@
           "x-pcc-fills": [
             "deploymentChoice:outboundHttps"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Outbound-only connectivity lets us use pcc-node without opening any inbound ports."
+          "x-pcc-why": "Outbound-only connectivity lets us use pcc-node without opening any inbound ports.",
+          "x-pcc-ifUnknown": {
+            "check": "Try loading any https:// page from a browser on the same network as the device — if that works, outbound HTTPS is very likely allowed."
+          }
         },
         "network.inboundBlocked": {
           "type": "object",
@@ -784,10 +837,15 @@
           "x-pcc-fills": [
             "deploymentChoice:inboundBlocked"
           ],
-          "x-pcc-requiredFor": "register-device",
+          "x-pcc-requiredFor": [
+            "register-device"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This confirms whether pcc-node's outbound-only design is required."
+          "x-pcc-why": "This confirms whether pcc-node's outbound-only design is required.",
+          "x-pcc-ifUnknown": {
+            "check": "Ask whoever manages your router or firewall whether inbound connections to this device are blocked — most home and office routers block inbound by default."
+          }
         },
         "safety.supervision": {
           "type": "object",
@@ -835,15 +893,21 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Will this device run attended, unattended, or remote-supervised?",
+          "question": "When it runs a job, will someone be nearby, or will it run unattended? If someone's nearby, who?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "safetyEnvelope:supervision"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "publish",
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Supervision level is never assumed — it directly bounds which jobs are safe to accept."
+          "x-pcc-why": "Supervision level is never assumed — it directly bounds which jobs are safe to accept.",
+          "x-pcc-ifUnknown": {
+            "check": "Decide whether someone will be physically present, watching remotely, or nobody at all while a job runs — this is a decision only you can make."
+          }
         },
         "safety.estop": {
           "type": "object",
@@ -901,15 +965,21 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Is there a physical e-stop? What type, and who can reach it?",
+          "question": "How do you stop this device in an emergency — for example a stop button, a power switch, or a lid switch — and where is it?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "safetyEnvelope:estop"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "publish",
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "An e-stop's presence and reachability is safety-critical and is never defaulted."
+          "x-pcc-why": "Before anything runs, we need a way to stop it that doesn't depend on software — this is never assumed.",
+          "x-pcc-ifUnknown": {
+            "research": "find-safety-limits"
+          }
         },
         "safety.hazards": {
           "type": "object",
@@ -967,10 +1037,15 @@
           "x-pcc-fills": [
             "safetyEnvelope:hazards"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Hazard classes shape the safety envelope — an empty answer blocks job acceptance rather than assuming \"none\"."
+          "x-pcc-why": "Hazard classes shape the safety envelope — an empty answer blocks job acceptance rather than assuming \"none\".",
+          "x-pcc-ifUnknown": {
+            "research": "find-safety-limits"
+          }
         },
         "safety.limits": {
           "type": "object",
@@ -1036,16 +1111,21 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Confirm the safety limits we found for this device (e.g. max temperature, max volume, allowed materials) — or tell us if any are wrong.",
+          "question": "Here are the safety limits we found for this device, with where each came from — confirm each one, or correct it.",
           "x-pcc-class": "B",
           "x-pcc-fills": [
             "safetyEnvelope:limits",
             "csd:typedIO.bounds"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Safety limits come from the manual, but only a human confirmation makes them binding — never a guess."
+          "x-pcc-why": "The device refuses any operation outside these limits, so they must be right for your unit — never a guess.",
+          "x-pcc-ifUnknown": {
+            "research": "find-safety-limits"
+          }
         },
         "consumables.items": {
           "type": "object",
@@ -1092,15 +1172,20 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "What consumables does this device use (materials, tips, filters, etc.)?",
+          "question": "What does each job use up — for example tips, reagents, filament, or paper?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "capabilityAvailability:consumables.items"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This lets buyers and the scheduler know what's needed to run a job."
+          "x-pcc-why": "This lets buyers and the scheduler know what's needed to run a job.",
+          "x-pcc-ifUnknown": {
+            "research": "find-consumables"
+          }
         },
         "consumables.restockedBy": {
           "type": "object",
@@ -1144,15 +1229,20 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Who restocks these consumables, and how often?",
+          "question": "Who refills these consumables, and how often?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "capabilityAvailability:consumables.restockedBy"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This sets expectations for availability and avoids mid-job surprises."
+          "x-pcc-why": "This sets expectations for availability and avoids mid-job surprises.",
+          "x-pcc-ifUnknown": {
+            "research": "find-consumables"
+          }
         },
         "consumables.loadedMaterial": {
           "type": "object",
@@ -1201,10 +1291,15 @@
           "x-pcc-fills": [
             "safetyEnvelope:loadedMaterial"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "The loaded material determines which operating bands from the manual actually apply right now."
+          "x-pcc-why": "The loaded material determines which operating bands from the manual actually apply right now.",
+          "x-pcc-ifUnknown": {
+            "check": "Look at what's physically loaded right now and name it as specifically as you can (brand and material, not just \"filament\")."
+          }
         },
         "calibration.lastDate": {
           "type": "object",
@@ -1253,11 +1348,16 @@
           "x-pcc-fills": [
             "evidencePlan:calibration.lastDate"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "This is self-declared only — we never infer or default a calibration date.",
           "x-pcc-selfDeclaredOnly": true,
+          "x-pcc-ifUnknown": {
+            "check": "Check your maintenance log or the device's calibration sticker. If you're still not sure, calibrate it now and record today's date."
+          },
           "x-pcc-evidencePrimitive": {
             "id": "decl.self_attested",
             "status": "live"
@@ -1310,11 +1410,16 @@
           "x-pcc-fills": [
             "evidencePlan:calibration.procedureRef"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "Research can suggest a procedure, but only your confirmation makes it the record — self-declared only.",
           "x-pcc-selfDeclaredOnly": true,
+          "x-pcc-ifUnknown": {
+            "research": "find-calibration"
+          },
           "x-pcc-evidencePrimitive": {
             "id": "decl.self_attested",
             "status": "live"
@@ -1367,10 +1472,15 @@
           "x-pcc-fills": [
             "provenanceRecipe:executorDeviceId"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This is the raw fact the evidence plan is built from — independence is derived from it, never asked directly."
+          "x-pcc-why": "This is the raw fact the evidence plan is built from — independence is derived from it, never asked directly.",
+          "x-pcc-ifUnknown": {
+            "check": "Name the device id of the machine that actually performs the job — not a camera or sensor only watching it."
+          }
         },
         "evidence.observerDeviceIds": {
           "type": "object",
@@ -1422,10 +1532,15 @@
           "x-pcc-fills": [
             "provenanceRecipe:observerDeviceIds"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "An observer that isn't also the executor is what makes an inspection independent — we derive that, we don't ask you to assert it."
+          "x-pcc-why": "An observer that isn't also the executor is what makes an inspection independent — we derive that, we don't ask you to assert it.",
+          "x-pcc-ifUnknown": {
+            "check": "List the device ids of any camera or sensor that watches the job without controlling it. Leave it empty if nothing else observes."
+          }
         },
         "evidence.executionMode": {
           "type": "object",
@@ -1478,7 +1593,9 @@
           "x-pcc-fills": [
             "evidencePlan:confirm.execution_mode"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "A mock or dry-run answer caps the job's evidence at tier 0 — it can lower the tier, never raise it.",
@@ -1554,15 +1671,20 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Is there a camera? Does it see the work area, does it see the output, is it fixed or handheld, and which device id captures it?",
+          "question": "Where could a camera see this job's result — does it see the work area, does it see the output, is it fixed or handheld, and which device id captures it?",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "evidencePlan:capture.photo_nonced.placement"
           ],
-          "x-pcc-requiredFor": "tier2",
+          "x-pcc-requiredFor": [
+            "tier2"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "The camera must be a separate device from the machine — this is what lets us capture believable photo evidence.",
+          "x-pcc-why": "Buyers pay against evidence that the work happened, and what the camera can see decides how strong that evidence is.",
+          "x-pcc-ifUnknown": {
+            "check": "Look for a camera already pointed at the work area or output — a webcam, a phone on a stand, a security camera. If there isn't one yet, say so; the agent can suggest a placement."
+          },
           "x-pcc-evidencePrimitive": {
             "id": "capture.photo_nonced",
             "status": "stub",
@@ -1620,10 +1742,15 @@
           "x-pcc-fills": [
             "evidencePlan:operatorPresence"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Operator presence shapes what kind of evidence and approval is realistic to collect."
+          "x-pcc-why": "Operator presence shapes what kind of evidence and approval is realistic to collect.",
+          "x-pcc-ifUnknown": {
+            "check": "Think about your usual routine: are you standing at the device while it runs, checking in occasionally, or away entirely?"
+          }
         },
         "evidence.approver": {
           "type": "object",
@@ -1685,10 +1812,15 @@
           "x-pcc-fills": [
             "evidencePlan:approval.expert.approver"
           ],
-          "x-pcc-requiredFor": "tier2",
+          "x-pcc-requiredFor": [
+            "tier2"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "We need to know who will attest to job quality before we register how they sign.",
+          "x-pcc-ifUnknown": {
+            "check": "Name the specific person who will review job evidence for this device — a name and contact, not a role or team."
+          },
           "x-pcc-evidencePrimitive": {
             "id": "approval.expert",
             "status": "stub",
@@ -1758,10 +1890,15 @@
           "x-pcc-fills": [
             "evidencePlan:machine.execution_log"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "A per-job exportable log is what lets us build a trustworthy machine execution record.",
+          "x-pcc-ifUnknown": {
+            "research": "find-evidence-signals"
+          },
           "x-pcc-evidencePrimitive": {
             "id": "machine.execution_log",
             "status": "stub",
@@ -1815,10 +1952,15 @@
             "evidencePlan:receipt.kernel_signed",
             "evidencePlan:ident.registered_key"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (companion primitive: receipt.kernel_signed).",
+          "x-pcc-ifUnknown": {
+            "research": "find-evidence-signals"
+          },
           "x-pcc-evidencePrimitive": {
             "id": "ident.registered_key",
             "status": "stub",
@@ -1883,10 +2025,15 @@
           "x-pcc-fills": [
             "evidencePlan:measure.io_test_pair"
           ],
-          "x-pcc-requiredFor": "tier1",
+          "x-pcc-requiredFor": [
+            "tier1"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "A known-good test pair is the strongest cheap proof that the capability actually works.",
+          "x-pcc-ifUnknown": {
+            "check": "Check whether you have a past output with a known-good result to compare a new job against. If not, say so — this proof method just isn't available yet."
+          },
           "x-pcc-evidencePrimitive": {
             "id": "measure.io_test_pair",
             "status": "stub",
@@ -1941,10 +2088,15 @@
             "capability:type",
             "kit:capabilities[]"
           ],
-          "x-pcc-requiredFor": "publish",
+          "x-pcc-requiredFor": [
+            "publish"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "We search the registry before authoring anything new — reuse comes first."
+          "x-pcc-why": "We search the registry before authoring anything new — reuse comes first.",
+          "x-pcc-ifUnknown": {
+            "research": "search-existing-csd"
+          }
         },
         "capability.parameters": {
           "type": "object",
@@ -2014,10 +2166,15 @@
           "x-pcc-fills": [
             "csd:typedIO"
           ],
-          "x-pcc-requiredFor": "publish",
+          "x-pcc-requiredFor": [
+            "publish"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Buyers configure jobs against these typed ranges — they must be confirmed, not guessed."
+          "x-pcc-why": "Buyers configure jobs against these typed ranges — they must be confirmed, not guessed.",
+          "x-pcc-ifUnknown": {
+            "research": "find-io-ranges"
+          }
         },
         "pricing.unitPrice": {
           "type": "object",
@@ -2061,15 +2218,20 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "What is your price per unit for this capability?",
+          "question": "What should one job cost? During the public beta, payments settle on a test network, so no real money moves yet.",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "capability:pricing.basePrice"
           ],
-          "x-pcc-requiredFor": "publish",
+          "x-pcc-requiredFor": [
+            "publish"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "Price is never defaulted or guessed — only you set it."
+          "x-pcc-why": "Only you decide what your work costs — this is never assumed or guessed.",
+          "x-pcc-ifUnknown": {
+            "check": "Look at what comparable services charge as a reference point, then decide your own price — a reference is never the answer itself."
+          }
         },
         "pricing.minimum": {
           "type": "object",
@@ -2118,10 +2280,15 @@
           "x-pcc-fills": [
             "capability:pricing.minimumCharge"
           ],
-          "x-pcc-requiredFor": "publish",
+          "x-pcc-requiredFor": [
+            "publish"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "A minimum protects you from unprofitable small jobs — never assumed."
+          "x-pcc-why": "A minimum protects you from unprofitable small jobs — never assumed.",
+          "x-pcc-ifUnknown": {
+            "check": "Decide whether a small job would be unprofitable at your per-unit price. If so, set a minimum; if not, say there isn't one."
+          }
         },
         "pricing.currency": {
           "type": "object",
@@ -2171,10 +2338,15 @@
           "x-pcc-fills": [
             "capability:pricing.currency"
           ],
-          "x-pcc-requiredFor": "publish",
+          "x-pcc-requiredFor": [
+            "publish"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This is never assumed — it changes what buyers actually pay."
+          "x-pcc-why": "This is never assumed — it changes what buyers actually pay.",
+          "x-pcc-ifUnknown": {
+            "check": "Decide which currency you want to be paid in — this is never assumed on your behalf."
+          }
         },
         "payout.destination": {
           "type": "object",
@@ -2226,15 +2398,20 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "Where should payouts be sent? (Stored securely in the payout system — never written into this record.)",
+          "question": "Which wallet address should your payments go to? (During the beta this is a test-network address. Never a private key or recovery phrase.)",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "gatewayPayoutStore:destination"
           ],
-          "x-pcc-requiredFor": "get-paid",
+          "x-pcc-requiredFor": [
+            "get-paid"
+          ],
           "x-pcc-neverDefault": true,
           "x-pcc-sensitive": true,
-          "x-pcc-why": "Payout details are sensitive: they go straight to the payout store (N21), and this record only ever keeps a \"set\" flag."
+          "x-pcc-why": "Your earnings go only where you say — this is never assumed, and the address itself is never written into this record; it goes straight to the payout store.",
+          "x-pcc-ifUnknown": {
+            "check": "Have your wallet address ready (a test-network address during the beta). Never type a private key or recovery phrase here."
+          }
         },
         "availability.schedule": {
           "type": "object",
@@ -2319,15 +2496,17 @@
             "provenance"
           ],
           "additionalProperties": false,
-          "question": "When can this device take jobs — always, specific windows, a cron schedule, or manual claim? What timezone?",
+          "question": "When can this device take jobs — for example \"weekdays 9 to 5\" or \"any time\"? Tell us the mode (always, specific windows, a cron schedule, or manual claim) and the timezone.",
           "x-pcc-class": "C",
           "x-pcc-fills": [
             "capability:availability"
           ],
-          "x-pcc-requiredFor": "accept-jobs",
+          "x-pcc-requiredFor": [
+            "accept-jobs"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
-          "x-pcc-why": "This is what the scheduler uses to decide when to offer you jobs."
+          "x-pcc-why": "Buyers plan around it, and jobs shouldn't arrive when nobody can refill or supervise it."
         },
         "sla.acceptanceWindowSec": {
           "type": "object",
@@ -2376,7 +2555,9 @@
           "x-pcc-fills": [
             "capability:sla.acceptanceWindowSec"
           ],
-          "x-pcc-requiredFor": "optional",
+          "x-pcc-requiredFor": [
+            "optional"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "This sets buyer expectations for how quickly you respond."
@@ -2428,7 +2609,9 @@
           "x-pcc-fills": [
             "capability:sla.completionDeadlineSec"
           ],
-          "x-pcc-requiredFor": "optional",
+          "x-pcc-requiredFor": [
+            "optional"
+          ],
           "x-pcc-neverDefault": false,
           "x-pcc-sensitive": false,
           "x-pcc-why": "This sets the SLA buyers see and what counts as a late job."
