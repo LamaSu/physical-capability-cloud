@@ -442,7 +442,7 @@ function renderStepper(){
   $("#stepper").innerHTML=STEPS.map((s,i)=>`
     <button type="button" class="step-pip ${i===S.step?'active':i<S.step?'done':''}" data-i="${i}" ${i===S.step?'aria-current="step"':''} ${i>maxReached?'disabled':''} aria-label="Step ${i+1}: ${s}${i<S.step?' (done)':''}">
       <span class="n" aria-hidden="true">${i<S.step?'✓':i+1}</span><span class="lbl" aria-hidden="true">${s}</span></button>`).join("");
-  $("#stepper").querySelectorAll(".step-pip").forEach(p=>p.onclick=()=>{const i=+p.dataset.i;if(i<=maxReached)go(i);});
+  $("#stepper").querySelectorAll(".step-pip").forEach(p=>p.onclick=()=>{const i=+p.dataset.i;if(i<=maxReached&&i!==S.step)go(i);});
 }
 let maxReached=0;
 
@@ -663,7 +663,7 @@ function go(n){
   const from=S.step;
   S.step=Math.max(0,Math.min(5,n)); maxReached=Math.max(maxReached,S.step);
   renderStepper();renderStep();renderPlan();
-  window.scrollTo({top:0,behavior:"smooth"});
+  window.scrollTo({top:0,behavior:(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches)?"auto":"smooth"});
   // a11y (N74): a new step moves focus to its question, so keyboard and screen-reader users land on it
   if(S.step!==from){const q=$("#stepBody .q, #stepBody h2");if(q)q.focus();}
 }
