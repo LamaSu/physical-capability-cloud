@@ -584,7 +584,7 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 For operators who prefer CLI:
 ```bash
-pip install 'pcc-node[crypto]>=0.1.1'
+pip install "pcc-node[crypto]>=0.1.1"
 pcc-node start
 ```
 
@@ -998,7 +998,7 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 ### Install and run
 
 ```bash
-pip install 'pcc-node[crypto]>=0.1.1'
+pip install "pcc-node[crypto]>=0.1.1"
 pcc-node start
 ```
 
