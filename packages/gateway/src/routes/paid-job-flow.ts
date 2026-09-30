@@ -243,6 +243,35 @@ function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
   }
 }
 
+/**
+ * N69 (astra pack 92b, HIGH): a job's (kernel, capability) pair must be
+ * consistent on the PAID paths too, not only JobFacade.submit. Resolve and
+ * validate the capability BEFORE any escrow side effect, and never substitute a
+ * synthetic "cap-default": a named capability must exist and be on this kernel;
+ * with none named, one is resolved among the kernel's OWN capabilities, or the
+ * submission is refused. Mirrors the facade's check.
+ */
+function resolveSessionCapabilityId(
+  repos: ReturnType<typeof getRepos>,
+  session: { kernelId: string; capabilityType?: string | null; capabilityId?: string | null },
+): string {
+  const named = session.capabilityId;
+  if (named) {
+    const cap = repos.capabilities.findById(named);
+    if (!cap) throw Object.assign(new Error(`Capability '${named}' not found`), { name: "BadRequestError", code: "capability_not_found" });
+    if (cap.kernelId !== session.kernelId) {
+      throw Object.assign(new Error(`Capability '${named}' is not on kernel '${session.kernelId}'`), { name: "BadRequestError", code: "capability_not_on_kernel" });
+    }
+    return named;
+  }
+  const caps = repos.capabilities.findByKernel(session.kernelId);
+  if (caps.length === 0) {
+    throw Object.assign(new Error(`No capabilities found for kernel '${session.kernelId}'`), { name: "BadRequestError", code: "no_capability_found_for_kernel" });
+  }
+  const matching = caps.find((c) => c.type === session.capabilityType) ?? caps[0];
+  return matching.id;
+}
+
 export async function createJobFromSession(
   session: typeof negotiationSessions.$inferSelect,
 ): Promise<{
@@ -288,6 +317,10 @@ export async function createJobFromSession(
   // Job id is needed BEFORE escrow creation so V2 milestones can bind it on-chain
   // (keccak256(bytes(jobId)) is stored per-milestone for EAS payload validation).
   const jobId = session.jobId ?? `job-${crypto.randomUUID().slice(0, 12)}`;
+
+  // N69 (astra pack 92b): validate the (kernel, capability) pair BEFORE escrow,
+  // so an invalid pair never spends the signer or stores a bogus capability.
+  const resolvedCapabilityId = resolveSessionCapabilityId(repos, session);
 
   // ── 1. Create or reference escrow ──────────────────────────────────
   const escrowId = `esc-${crypto.randomUUID().slice(0, 12)}`;
@@ -600,9 +633,8 @@ export async function createJobFromSession(
   // bind it on-chain.)
 
   // Resolve capability ID for this kernel + type
-  const caps = repos.capabilities.findByKernel(session.kernelId);
-  const matchingCap = caps.find((c) => c.type === session.capabilityType) ?? caps[0];
-  const capabilityId = matchingCap?.id ?? "cap-default";
+  // Resolved and validated before escrow (N69, above).
+  const capabilityId = resolvedCapabilityId;
 
   // Job stepId mirrors the first normalized milestone (== on-chain milestone 0).
   const stepId = normalizedMilestones[0].stepId;
