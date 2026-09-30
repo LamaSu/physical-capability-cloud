@@ -18,13 +18,16 @@
  * IDEMPOTENT. A milestone already Refunded is skipped, so a repeat sends only what is left. With nothing left, the
  * outcome is `already_refunded`.
  *
- * ONE TRANSACTION PER MILESTONE, so an escrow with several milestones is not atomic on-chain. Two cases leave some
- * milestones Refunded and the rest not, and the outcome is then `incomplete`, naming what was sent and where it
- * stopped:
- *   - a third party attests a remaining milestone between the read and a send (the contract makes that race safe
- *     either way);
- *   - a transaction is dropped.
- * A retry finishes the rest, or refuses it with the reason.
+ * ONE TRANSACTION PER MILESTONE, so an escrow with several milestones is not atomic on-chain. When a sequence stops
+ * part-way, the outcome is `incomplete`: it names every reclaim that went through and exactly where and why it stopped
+ * (astra, #472 F1). It never throws away that record. Where it stopped, `receipt` says:
+ *   - `not_sent`: the broadcast itself failed. Nothing was sent for that milestone.
+ *   - `reverted`: the transaction executed and reverted. For example, a third party attested that milestone between
+ *     the read and the send; the contract makes that race safe either way.
+ *   - `timeout` or `unknown`: the transaction was sent, but its confirmation could not be read (a receipt timeout, or
+ *     an RPC error). It may still mine.
+ * A retry finishes the rest, or refuses it with the reason. Refunded milestones are skipped, so a retry never pays a
+ * principal twice.
  * The whole sequence runs under the signer lock, so the gateway's own writes cannot interleave with it.
  */
 import type { Address, Hex } from "viem";
@@ -108,8 +111,16 @@ export type ReclaimOutcomeV3 =
       outcome: "incomplete";
       escrow: Address;
       reclaimed: Array<{ index: number; transactionHash: string }>;
-      stoppedAt: { index: number; transactionHash: string; receipt: "reverted" | "timeout" };
+      stoppedAt: {
+        index: number;
+        /** Absent when the broadcast itself failed (`not_sent`). */
+        transactionHash?: string;
+        receipt: "not_sent" | "reverted" | "timeout" | "unknown";
+        error?: string;
+      };
     };
+
+const messageOf = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] ?? e.message : String(e));
 
 /**
  * Reclaim every milestone of a V3 escrow whose deadline has passed, from the gateway signer (the payer), all or
@@ -129,8 +140,23 @@ export async function reclaimEscrowV3(escrow: Address): Promise<ReclaimOutcomeV3
 
     const reclaimed: Array<{ index: number; transactionHash: string }> = [];
     for (const index of plan.toReclaim) {
-      const { transactionHash } = await reclaimAfterDeadlineV3(index, escrow);
-      const receipt = await waitForReceipt(transactionHash as Hex);
+      let transactionHash: string;
+      try {
+        ({ transactionHash } = await reclaimAfterDeadlineV3(index, escrow));
+      } catch (e) {
+        return { outcome: "incomplete", escrow, reclaimed, stoppedAt: { index, receipt: "not_sent", error: messageOf(e) } };
+      }
+      let receipt: Awaited<ReturnType<typeof waitForReceipt>>;
+      try {
+        receipt = await waitForReceipt(transactionHash as Hex);
+      } catch (e) {
+        return {
+          outcome: "incomplete",
+          escrow,
+          reclaimed,
+          stoppedAt: { index, transactionHash, receipt: "unknown", error: messageOf(e) },
+        };
+      }
       if (receipt.status !== "success") {
         return { outcome: "incomplete", escrow, reclaimed, stoppedAt: { index, transactionHash, receipt: receipt.status } };
       }

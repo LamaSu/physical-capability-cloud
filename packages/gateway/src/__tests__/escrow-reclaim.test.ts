@@ -166,6 +166,32 @@ describe("reclaimEscrowV3: the executor", () => {
     expect(chain.reclaimAfterDeadlineV3).not.toHaveBeenCalled();
   });
 
+  it("an RPC error reading a receipt (not a revert) after one success still returns what was sent (astra, #472 F1)", async () => {
+    vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Funded, S.Funded, S.Funded] }));
+    vi.mocked(chain.waitForReceipt)
+      .mockResolvedValueOnce({ status: "success", blockNumber: 43 })
+      .mockRejectedValueOnce(new Error("RPC unavailable"));
+    await expect(reclaimEscrowV3(ESCROW)).resolves.toEqual({
+      outcome: "incomplete",
+      escrow: ESCROW,
+      reclaimed: [{ index: 0, transactionHash: "0xtx0" }],
+      stoppedAt: { index: 1, transactionHash: "0xtx1", receipt: "unknown", error: "RPC unavailable" },
+    });
+  });
+
+  it("a send that fails after one success still returns what was sent (astra, #472 F1)", async () => {
+    vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Funded, S.Funded] }));
+    vi.mocked(chain.reclaimAfterDeadlineV3)
+      .mockResolvedValueOnce({ transactionHash: "0xtx0", status: "submitted" })
+      .mockRejectedValueOnce(new Error("nonce too low"));
+    await expect(reclaimEscrowV3(ESCROW)).resolves.toEqual({
+      outcome: "incomplete",
+      escrow: ESCROW,
+      reclaimed: [{ index: 0, transactionHash: "0xtx0" }],
+      stoppedAt: { index: 1, receipt: "not_sent", error: "nonce too low" },
+    });
+  });
+
   it("a reverted reclaim stops the sequence and reports exactly what was sent", async () => {
     vi.mocked(chain.getReclaimStateV3).mockResolvedValue(state({ statuses: [S.Funded, S.Funded, S.Funded] }));
     vi.mocked(chain.waitForReceipt)
