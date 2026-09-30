@@ -265,6 +265,22 @@ describe("GET /api/jobs/:jobId/settlement projection", () => {
     expect(r.milestones.map((m) => [m.id, m.forThisJob])).toEqual([["ms-x", true], ["ms-y", false]]);
   });
 
+  it("NEGATIVE (astra r1 on #382, MEDIUM): a milestone another job could claim is never marked this job's", () => {
+    // Two jobs on the escrow's CWM and this step: the settlement axis attributes no milestone.
+    const shared = { ...linked(escrow(), [milestone({ status: "released" }), milestone({ id: "ms-y", stepId: "other" })]), stepClaimants: 2 };
+    const r = jobRead({ settlement: ok(shared as SettlementSource) });
+    expect(r.payoutUnknownReason).toBe("milestone_shared");
+    expect(r.milestones.map((m) => [m.id, m.forThisJob, m.association])).toEqual([
+      ["ms-x", false, "same_step_unattributed"],
+      ["ms-y", false, "other_step"],
+    ]);
+  });
+
+  it("an exactly attributed milestone is this job's; another step's is not", () => {
+    const r = jobRead({ settlement: ok(linked(escrow(), [milestone(), milestone({ id: "ms-y", stepId: "other" })])) });
+    expect(r.milestones.map((m) => [m.id, m.association])).toEqual([["ms-x", "this_job"], ["ms-y", "other_step"]]);
+  });
+
   it("NEGATIVE: settledAt is never the job's completion time", () => {
     const r = jobRead({ job: job({ status: "completed", completedAt: "2026-09-21T10:00:00.000Z" }), settlement: ok(linked(escrow(), [milestone({ status: "released" })])) });
     expect(r.status).toBe("reported_released");
