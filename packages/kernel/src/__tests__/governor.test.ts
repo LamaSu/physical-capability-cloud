@@ -547,6 +547,62 @@ describe("SafetyGovernor: N86 envelope gaps", () => {
 
   it("G8: a declared allowedGcodes list is refused at construction, since nothing here enforces it", () => {
     expect(() => new SafetyGovernor({ allowedGcodes: ["G28"] })).toThrow(/allowedGcodes is not enforced/);
-    expect(() => new SafetyGovernor({ allowedGcodes: [] })).not.toThrow();
+    // Round 2 (astra pack 113): an empty list is refused too; see the round-2 block.
+    expect(() => new SafetyGovernor({ allowedGcodes: undefined })).not.toThrow();
+  });
+});
+
+// ── N86 round 2 (astra pack 113, gpt-5.6-sol): what the checks read is what the executor reads ──
+describe("SafetyGovernor: N86 round 2, params are plain data", () => {
+  const move = (params: Record<string, unknown>) => makeCmd({ class: "safe", type: "move", params });
+
+  it("G4: a bounded parameter present with the value undefined is refused, not skipped", async () => {
+    const verdict = await new SafetyGovernor({ maxVelocity: 100 }).validateCommand(move({ velocity: undefined }));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/Velocity must be a finite number \(got undefined\)/);
+  });
+
+  it("a getter cannot show one value to the checks and another to the executor", async () => {
+    let reads = 0;
+    const params: Record<string, unknown> = {};
+    Object.defineProperty(params, "velocity", { enumerable: true, get: () => (++reads === 1 ? 1 : 1000) });
+    const verdict = await new SafetyGovernor({ maxVelocity: 100 }).validateCommand(move(params));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/getter/);
+  });
+
+  it("a getter on an unbounded parameter cannot slip past a forbidden pattern", async () => {
+    let reads = 0;
+    const params: Record<string, unknown> = {};
+    Object.defineProperty(params, "mode", { enumerable: true, get: () => (++reads === 1 ? "safe" : "unsafe") });
+    const verdict = await new SafetyGovernor({ forbiddenPatterns: [/unsafe/] }).validateCommand(move(params));
+    expect(verdict.allowed).toBe(false);
+  });
+
+  it("a bigint anywhere in params is a structured denial, not a thrown error", async () => {
+    const gov = new SafetyGovernor({ forbiddenPatterns: [/x/] });
+    const verdict = await gov.validateCommand(move({ count: 10n }));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.checks.find((c) => c.name === "params_plain_data")?.passed).toBe(false);
+  });
+
+  it("G8: a declared allowedGcodes is refused even when empty (an empty list must not read as deny-all)", () => {
+    expect(() => new SafetyGovernor({ allowedGcodes: [] })).toThrow(/allowedGcodes is not enforced/);
+  });
+
+  it("a bounded value inherited from a polluted prototype is refused, never read through inheritance", async () => {
+    Object.defineProperty(Object.prototype, "velocity", { value: 50, configurable: true, writable: true, enumerable: false });
+    try {
+      const verdict = await new SafetyGovernor({ maxVelocity: 100 }).validateCommand(move({}));
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.reason).toMatch(/inherited/);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).velocity;
+    }
+  });
+
+  it("plain JSON params still pass (nested objects, arrays, null)", async () => {
+    const verdict = await new SafetyGovernor().validateCommand(move({ velocity: 10, path: [{ x: 1, y: 2 }], note: null, tool: { id: "t1" } }));
+    expect(verdict.allowed).toBe(true);
   });
 });

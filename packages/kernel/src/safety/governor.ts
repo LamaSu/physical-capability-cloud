@@ -47,8 +47,9 @@ export interface OperationalEnvelope {
   maxForce?: number;
   /**
    * Allowed G-code commands. NOT enforced here: the governor never sees G-code
-   * (jobs carry a gcodeHash), so a non-empty list throws at construction rather
-   * than look enforced. Enforce it in the adapter that emits the G-code.
+   * (jobs carry a gcodeHash), so any declared list, even an empty one, throws at
+   * construction rather than look enforced. Enforce it in the adapter that
+   * emits the G-code.
    */
   allowedGcodes?: string[];
   /** Forbidden parameter patterns (matched without the g or y flag, so every call is checked the same way) */
@@ -101,9 +102,47 @@ const BOUNDED_PARAMS = [
 
 function describeValue(value: unknown): string {
   if (typeof value === "number") return String(value);
+  if (value === undefined) return "undefined";
   if (value === null) return "null";
   if (Array.isArray(value)) return "an array";
   return typeof value === "string" ? JSON.stringify(value) : `a ${typeof value}`;
+}
+
+/**
+ * Why `params` is not plain data that every reader sees alike, or null. A
+ * getter or setter could answer one way to these checks and another way to the
+ * executor, and a bigint makes the pattern check throw instead of deny. (A proxy
+ * can still lie to an in-process caller; both production paths pass parsed JSON
+ * or an object literal.)
+ */
+function paramsProblem(params: unknown): string | null {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) return "params: not a plain object";
+  const ancestors = new Set<object>();
+  const walk = (value: unknown, path: string): string | null => {
+    if (value === null || value === undefined) return null;
+    const type = typeof value;
+    if (type === "string" || type === "boolean" || type === "number") return null;
+    if (type !== "object") return `${path}: a ${type} is not data`;
+    const obj = value as object;
+    if (ancestors.has(obj)) return `${path}: a cycle`;
+    const proto: unknown = Object.getPrototypeOf(obj);
+    if (!Array.isArray(obj) && proto !== Object.prototype && proto !== null) return `${path}: not a plain object`;
+    ancestors.add(obj);
+    try {
+      for (const key of Reflect.ownKeys(obj)) {
+        if (typeof key === "symbol") return `${path}: a symbol-keyed property`;
+        const descriptor = Object.getOwnPropertyDescriptor(obj, key);
+        if (descriptor === undefined) continue;
+        if (!("value" in descriptor)) return `${path}.${key}: a getter or setter, not data`;
+        const problem = walk(descriptor.value, `${path}.${key}`);
+        if (problem !== null) return problem;
+      }
+      return null;
+    } finally {
+      ancestors.delete(obj);
+    }
+  };
+  return walk(params, "params");
 }
 
 export class SafetyGovernor {
@@ -119,7 +158,8 @@ export class SafetyGovernor {
     const declared = Object.fromEntries(
       Object.entries(envelope ?? {}).filter(([, value]) => value !== undefined),
     ) as Partial<OperationalEnvelope>;
-    if (declared.allowedGcodes?.length) {
+    // Any declared list, even an empty one: [] must not read as "deny all" when nothing enforces it.
+    if (declared.allowedGcodes !== undefined) {
       throw new Error(
         "allowedGcodes is not enforced by the SafetyGovernor, which never sees G-code; enforce it in the adapter, or leave it out",
       );
@@ -191,13 +231,19 @@ export class SafetyGovernor {
         : undefined,
     });
 
-    // 4. Operational envelope (parameter range validation)
-    const envelopeChecks = this.checkEnvelope(cmd);
-    checks.push(...envelopeChecks);
+    // 4. Params are plain data, so the checks below read what the executor will read.
+    const paramsIssue = paramsProblem(cmd.params);
+    checks.push({ name: "params_plain_data", passed: paramsIssue === null, detail: paramsIssue ?? undefined });
 
-    // 5. Forbidden patterns (dangerous parameter combinations)
-    const patternCheck = this.checkForbiddenPatterns(cmd);
-    checks.push(patternCheck);
+    if (paramsIssue === null) {
+      // 5. Operational envelope (parameter range validation)
+      const envelopeChecks = this.checkEnvelope(cmd);
+      checks.push(...envelopeChecks);
+
+      // 6. Forbidden patterns (dangerous parameter combinations)
+      const patternCheck = this.checkForbiddenPatterns(cmd);
+      checks.push(patternCheck);
+    }
 
     // Final verdict
     const allPassed = checks.every((c) => c.passed);
@@ -257,9 +303,16 @@ export class SafetyGovernor {
     const checks: SafetyCheck[] = [];
 
     for (const { param, limit, label, unit, magnitude } of BOUNDED_PARAMS) {
-      const value = cmd.params[param];
-      if (value === undefined) continue; // the command does not set it
+      if (!(param in cmd.params)) continue; // the command does not set it
       const name = `${param}_envelope`;
+      // Only the command's own value counts: an inherited one is refused, and a
+      // present undefined is checked (and refused) like any other non-number.
+      const own = Object.getOwnPropertyDescriptor(cmd.params, param);
+      if (own === undefined || !("value" in own)) {
+        checks.push({ name, passed: false, detail: `${label} is inherited or computed, not the command's own value` });
+        continue;
+      }
+      const value: unknown = own.value;
       const max = this.envelope[limit];
       // A present value is checked or refused, never skipped: a numeric string,
       // an object, null or NaN would otherwise pass unchecked.
