@@ -29,17 +29,26 @@ Field semantics (unit-state-mapper):
 **Consumer rule (Surface A).** Settled-green comes only from a consistent state 8. That means `/lifecycle` with
 `unitState: 8`, `finalState: "SETTLED_RELEASED"`, `isTerminal: true`, `isAllocated: false` and `phase: "settled"`,
 or `/receipt` with `finalState: "SETTLED_RELEASED"`, `isAllocated: false` and `phase: "settled"`. Any disagreement or
-missing field is unknown. `@pcc/spec` `classifySettlementRecord` implements this (#313), pinned by a gateway suite that
-classifies the routes' own bodies (`settlement-read-money-status.test.ts`, #313).
+missing field is unknown. `@pcc/spec` `classifySettlementRecord` is DESIGNED to implement this, and a gateway suite
+(`settlement-read-money-status.test.ts`) is designed to pin it by classifying the routes' own bodies — **both live only
+on PR #313 (`fix/genui-statusmap` @ `8f946499`), which is UNMERGED.** Neither file nor symbol exists at this branch's
+SHA (`ed229845`) or anywhere on `docs/genui-read-surface-contract` (verified: `git cat-file -e` fails for the test
+path; a repo-wide `classifySettlementRecord` search returns zero hits). **Do not call this kit "shipped" until #313
+merges.**
 
 **Why this section exists.** #313's first cut assumed `isAllocated` was true for 6-9, since the implemented shape
 was never written down. A genuinely settled unit therefore rendered "fields disagree" and never went green. Found by
-checking the real routes; fixed in #313 @7061730a.
+checking the real routes; the fix landed in #313 @7061730a — **still only on that unmerged PR, not on master or this
+branch.**
 
 **Resolved by escrow's ruling #3163 (the money-semantics owner): the target is master's routes.**
 - The golden matrix §A is updated to match them; the #667 rows it replaced are superseded.
-- The one additive change: gateway adds the staticcall `unitState` to `/receipt`, so a receipt-only consumer can tell 6 (release decided) from 7 (refund decided).
-- Consumers key that direction off `unitState`, never off `finalState`. #313's classifier already accepts it.
+- The one additive change: gateway is ADDING the staticcall `unitState` to `/receipt`, so a receipt-only consumer can
+  tell 6 (release decided) from 7 (refund decided) — **announced, not yet in the route** at `ed229845`
+  (`packages/gateway/src/routes/settlement-read.ts:388-402` emits no `unitState` today). Until it lands, a
+  `/receipt`-only read of 6/7 shows "outcome decided - not yet paid out" with no direction.
+- Consumers key that direction off `unitState`, never off `finalState`. #313's classifier is WRITTEN to accept it, but
+  #313 itself is unmerged (see above) — treat this as designed, not wired, until it merges.
 
 **Serves (read-only, one build, two consumers):** the gen-UI settlement render ("Surface A": value chain + settlement)
 and composition's child-accepts-parent digest check.
@@ -69,7 +78,10 @@ by **omitting** every field a naive renderer would show as proof.
 type SettlementReceiptDTO = {
   unitId: string; chainId: number; escrow: string;        // domain context: a bare unitId is not portable or renderable
   network: "base-mainnet" | "base-sepolia";               // derived server-side from chainId, so Surface A shows a TEST badge without a UI-side chain table. A test-USDC settlement must NEVER render as a real payment.
-  finalState: "SETTLED_RELEASED" | "SETTLED_REFUNDED" | "RELEASE_ALLOCATED" | "REFUND_ALLOCATED"; // STRING enum, NEVER a settled boolean (REFUNDED is a settlement where the operator was NOT paid).
+  finalState: "SETTLED_RELEASED" | "SETTLED_REFUNDED" | null; // STRING enum or null, NEVER a settled boolean (REFUNDED is a settlement where the operator was NOT paid).
+                                                          // TERMINAL-ONLY per rule 12 / escrow ruling #3163: null for EVERY non-terminal state (1-7),
+                                                          // never `RELEASE_ALLOCATED` / `REFUND_ALLOCATED` — see "Implemented on master" above. The
+                                                          // pre-#3163 design DTO (superseded) allowed the two allocated values here; master never emits them.
   // A RECEIPT EXISTING DOES NOT MEAN SETTLED. The receipt is written at ALLOCATION and finalized when the last claim
   // discharges. Normally that is the same tx, but a payout leg that falls back to a collateralized claim (the
   // recipient transfer reverts, so a claim is recorded instead of discharged) leaves the unit in *_ALLOCATED with the
@@ -96,11 +108,21 @@ type SettlementReceiptDTO = {
   compositionRoot: string | null;                         // hex; null = non-composed. The anchor a verifier proves preimages against (Route 2).
   // Allocation is split from finalization. A *_ALLOCATED receipt has NO settlement block yet: do NOT fabricate one.
   allocatedBlock: number;                                 // block the receipt was written (ALWAYS present)
-  finalizedBlock: number | null;                          // block the last claim discharged: NULL until finalState ∈ {SETTLED_RELEASED, SETTLED_REFUNDED}.
+  finalizedBlock: number | null;                          // the TERMINAL-TRANSITION block: NULL until finalState ∈ {SETTLED_RELEASED, SETTLED_REFUNDED}.
                                                           // (finalizedBlock is not finality; a cross-chain consumer still needs a state proof.)
                                                           // Do NOT key this off the `Finalized` EVENT: Finalized fires at ALLOCATION (entering 6/7), so keying off it
-                                                          // makes finalizedBlock non-null at state 6. The true settlement block is the block of the dischargeClaim that
-                                                          // zeroed remainingClaimCount, which emits only ClaimDischarged. LOG-derived (reorg-exposed): mark per rule 21.
+                                                          // makes finalizedBlock non-null at state 6. TWO shapes reach 8/9 and BOTH must be covered:
+                                                          //   (a) INLINE — every leg discharges during the allocation call itself (remainingClaimCount is
+                                                          //       already 0 when the unit enters 8/9). Allocation and settlement are the SAME tx/block, so
+                                                          //       finalizedBlock IS the allocation block. No dischargeClaim / ClaimDischarged is ever emitted.
+                                                          //   (b) DEFERRED — a leg falls back to a collateralized claim; the unit sits at 6/7 until a later
+                                                          //       dischargeClaim() zeros remainingClaimCount, emitting ClaimDischarged. finalizedBlock IS that block.
+                                                          // LOG-derived either way (reorg-exposed): mark per rule 21.
+                                                          // IMPLEMENTATION GAP at master `ac86a404` (confirmed by trace, triage-350-r2 D2): the route/reader
+                                                          // ask ONLY for the deferred-case block (`readZeroingDischargeBlock`). For the inline case (a) there
+                                                          // is no zeroing-discharge event, the reader returns `undefined`, and `/receipt` currently emits
+                                                          // `finalizedBlock: null` for a unit that IS terminal. Gateway-owned fix: `SettlementUnitReader` needs
+                                                          // an allocation-block-aware read before this field's "non-null in 8/9" guarantee holds end-to-end.
   // Asset reality and RELEASE-VERIFIED economics (rule 14). assetReality is a registry-derived classification, NOT inferred
   // from chainId alone (a fake mainnet token could pose as USDC).
   assetReality: "real" | "test" | "unknown";              // rule 15: registry-derived from the DEPLOYMENT TUPLE, never chainId; FAILS CLOSED to "unknown" for an unrecognized token
@@ -173,14 +195,19 @@ type ProvenanceDTO =
 
 ---
 
-## Route 3: live lifecycle (states 2-5 are invisible to the receipt route)
+## Route 3: live lifecycle (states 1-5 carry no terminal outcome)
 `GET /api/settlement/units/:unitId/lifecycle` → `Result<LifecycleDTO>`
 
-The settlement state machine has 10 states. The receipt (Route 1) is written only at ALLOCATION (states 6-9), so the
-pre-outcome states, the ones a payer or operator most needs to see ("your settlement is in a 2-day challenge window",
-"an appeal is running, decision by ..."), have no receipt and would otherwise render as "nothing happened yet". This
-route serves them, **separately from the receipt**. Do NOT widen `finalState` to 10 values: that recollapses in-flight
-and settled.
+> **Superseded by escrow's ruling #3163** (see "Implemented on master" above): the paragraph below originally assumed
+> `/receipt` returned nothing at all for states 0-5 (the pre-#3163 #667 design gating). Master's actual `/receipt`
+> answers 200 for states 1-5 too, with `finalState: null, isAllocated: false` — it never withholds a response before
+> allocation. What is still true, and still the reason this route exists: `/receipt` never carries the pre-outcome
+> PROGRESS signal (challenge window, appeal deadline, escalation state) — that is this route's job, not the receipt's.
+
+The settlement state machine has 10 states. `/receipt` (Route 1) carries no terminal outcome until allocation (states
+6-9): a payer or operator watching a pre-outcome unit ("your settlement is in a 2-day challenge window", "an appeal is
+running, decision by ...") needs the STATE AND TIME info this route serves, **separately from the receipt**. Do NOT
+widen `finalState` to 10 values: that recollapses in-flight and settled.
 
 ```ts
 type LifecycleDTO = {
@@ -234,7 +261,11 @@ type LifecycleDTO = {
 
 ## Failure semantics: the `Result<T>` error union
 Every route returns `Result<T>`; the error side is a DEFINED union so consumers handle it deterministically:
-- `UNKNOWN_UNIT` → 404 · `TENANT_FORBIDDEN` → 403. To a cross-tenant caller, 403 and "unknown" SHOULD be indistinguishable (do not leak existence). Not retryable.
+- `UNKNOWN_UNIT` → 404. A foreign-tenant unit maps to the EXACT SAME external response: 404 `UNKNOWN_UNIT`, byte-for-byte
+  indistinguishable from an unknown unit (do not leak existence across tenants). `TENANT_FORBIDDEN` may exist as an
+  INTERNAL authorization label, but it is NEVER surfaced as its own status code — a distinct 403 would itself be a
+  cross-tenant existence oracle. Confirmed by implementation: `settlement-read.ts:163-176,275-288` maps
+  `TENANT_FORBIDDEN` to `{status: 404, code: "UNKNOWN_UNIT"}`, identical to `UNKNOWN_UNIT`. Not retryable.
 - `INVALID_CURSOR` / `EXPIRED_CURSOR` (the revision moved under the cursor) → 409; restart pagination. Retryable.
 - `REORG` / `REVISION_MISMATCH` (asOfBlock superseded) → 409; re-read. Retryable.
 - `INDEX_NOT_READY` (provenance index still building, or no reader registered) → 503 + `Retry-After`. Retryable. Distinct from `WITHHELD`.
@@ -247,17 +278,18 @@ A cross-layer review confirmed the design above and added rules 15-20. Each is s
 
 15. **`assetReality` binds the DEPLOYMENT TUPLE and FAILS CLOSED.** `assetReality = "real"` ONLY when ALL of these match an approved immutable deployment record: `{chainId, factory, implementation codehash, escrow-clone provenance, escrow.USDC(), the canonical Circle USDC for that chain, deployment marked canonical and approved}`. Canonical Circle USDC: Base mainnet `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, Base Sepolia `0x036CbD53842c5426634e7929541eC2318f3dCF7e`. An unrecognized token on any chain is `"unknown"`, NEVER `"real"`: chainId alone is insufficient.
 16. **Block consistency: one pinned block, hash-anchored.** Read EVERY value in a response at ONE block. All three DTOs carry **`asOfBlockHash: string`** alongside `asOfBlock`. NEVER join a live contract read to an unversioned indexer row: a claim discharged between two "latest" reads yields a torn record that never coexisted (for example a `RELEASE_ALLOCATED` state joined to a `remainingClaimCount == 0` counter). Reorg / revision mismatch → 409. The cursor binding includes `asOfBlockHash`.
-17. **The exact 10-state → presentation table (the mapper spec).** A single `settled` / `paid` / `success` / receipt-exists boolean is PROHIBITED (an implementation and test rule, not a DTO field):
+17. **The exact 10-state → presentation table (the mapper spec).** A single `settled` / `paid` / `success` / receipt-exists boolean is PROHIBITED (an implementation and test rule, not a DTO field). **The "receipt route" column below is superseded by escrow's ruling #3163** (v1.3 predates it, 2026-08-06 vs 2026-09-24) — master's `/receipt` answers 200 for 1-7 as well; see the golden table in "Implemented on master" above and matrix §A for the current-truth version:
 
     | state | receipt route | presentation |
     |---|---|---|
-    | 0-5 | no receipt | in flight: use the lifecycle route |
-    | 6 RELEASE_ALLOCATED | present | release allocated; **payment incomplete** |
-    | 7 REFUND_ALLOCATED | present | refund allocated; refund incomplete |
-    | 8 SETTLED_RELEASED | terminal | operator distribution discharged |
-    | 9 SETTLED_REFUNDED | terminal | **payer refunded; operator NOT paid** |
+    | 0 | 503, fails closed (unreachable state; never a real unit) | never rendered |
+    | 1-5 | 200; `finalState: null`, `isAllocated: false` | in flight, no terminal outcome: use the lifecycle route for state + time |
+    | 6 RELEASE_ALLOCATED | 200; `finalState: null`, `isAllocated: true` | release allocated; **payment incomplete** |
+    | 7 REFUND_ALLOCATED | 200; `finalState: null`, `isAllocated: true` | refund allocated; refund incomplete |
+    | 8 SETTLED_RELEASED | 200; `finalState: "SETTLED_RELEASED"` | operator distribution discharged |
+    | 9 SETTLED_REFUNDED | 200; `finalState: "SETTLED_REFUNDED"` | **payer refunded; operator NOT paid** |
 
-    `finalizedBlock` is NULL in states 6-7 and non-null only after 8/9. Lifecycle `phase` (server-derived): 0 = funding · 1 = active · 2-3 = contest · 4-5 = escalation · 6-7 = allocated · 8-9 = settled. Windows are computed from contract state plus frozen constants at the pinned block, never from wall-clock UI code.
+    `finalizedBlock` is NULL in states 6-7 and non-null only after 8/9 (see the finalizedBlock note on Route 1 above for the inline-vs-deferred derivation and its current implementation gap). Lifecycle `phase` (server-derived): 0 = funding · 1 = active · 2-3 = contest · 4-5 = escalation · 6-7 = allocated · 8-9 = settled. Windows are computed from contract state plus frozen constants at the pinned block, never from wall-clock UI code.
 18. **`SETTLED_RELEASED` ≠ "all funds paid".** `remainingClaimCount` counts only job-family claims (principal / fee / refund); bond, delay-compensation and burn claims are SEPARATE liability buckets that do not hold `SETTLED_*` open. Valid: "job payout distribution released." FALSE: "all funds for this dispute are paid." The DTO exposes auxiliary-liability status separately, OR makes no total-payment claim.
 19. **The EAS mirror is provenance, NEVER current state or economics.** The mirror carries a mirror-TIME `unitState` snapshot (possibly pre-acceptance, stale, or a sentinel): read `unitState()` at the pinned block, never the mirror's state. An EAS UID proves only that the asynchronous mirror returned a UID, not a payment authorization. Verdict or economics reconstructed from events must hash back to the assertion id and match `{chain, attester, escrow, unit}`; unavailable material yields `null` / `UNAVAILABLE`, never a fabricated value; a mirror payload NEVER overrides frozen contract economics.
 20. **Render cohort-disable HONESTLY.** "Disable ⇒ no payment" is NOT the state-machine rule; the kill switch is monotone toward refund and bounded. NEVER show a cohort-disabled unit as "cancelled" / "refund guaranteed" / "no payment". Disable blocks NEW assertions, adjudications and acceptances; already-accepted authorities resolve through the frozen state machine and CAN still release. Render the actual state.

@@ -43,23 +43,38 @@ for states 1-5; `finalState: RELEASE_ALLOCATED` / `REFUND_ALLOCATED` for 6/7, fr
 
 - **404 `UNKNOWN_UNIT`** is answered only for an unknown unit, and indistinguishably for another tenant's (rule 7).
 - **The 6-vs-7 direction comes from `unitState`, never from `finalState`.**
-  - `/lifecycle` already carries `unitState`. Gateway is adding the staticcall `unitState` to `/receipt` (additive, #3163).
+  - `/lifecycle` already carries `unitState`. Gateway is ADDING the staticcall `unitState` to `/receipt` (additive,
+    #3163) — **announced, not yet in the route** at `ed229845` (`settlement-read.ts:388-402` emits no `unitState`).
   - Until then, a `/receipt`-only read of 6/7 shows "outcome decided - not yet paid out", with no direction.
-- **Pinned by** `packages/gateway/src/__tests__/settlement-read-money-status.test.ts` (#313). It classifies the routes' own bodies for states 1-9, and a receipt with `unitState`, with the spec and the shipped kit.
+- **Will be pinned by** `packages/gateway/src/__tests__/settlement-read-money-status.test.ts` — **this test, and the
+  `classifySettlementRecord` it exercises, live only on PR #313 (unmerged; `fix/genui-statusmap` @ `8f946499`).**
+  Neither exists on master or on this branch at `ed229845` (`git cat-file -e` fails for the test path;
+  `classifySettlementRecord` has zero hits repo-wide). It is designed to classify the routes' own bodies for states
+  1-9, and a receipt with `unitState`, against the spec — but none of this is "the shipped kit" until #313 merges.
 
 Assert per row: `isTerminal == finalState ∈ {SETTLED_RELEASED, SETTLED_REFUNDED}`; `operatorPaid == (finalState == SETTLED_RELEASED)`
 (as a test rule, NOT a DTO boolean); `finalizedBlock` null iff not terminal; the exact `phase`; `windowEndsAt` / `windowKind`
 present for states 2-5 and computed from contract state plus frozen constants at `asOfBlock`, never wall clock.
 
-**`finalizedBlock` derivation (anti-trap):** null in 6/7 and non-null in 8/9 as tabled, BUT derive the value from the
-block of the `dischargeClaim` that zeroed `remainingClaimCount`, NOT from the `Finalized` event. `Finalized` fires at
-ALLOCATION (entering 6/7), so keying `finalizedBlock` off it makes it non-null at state 6 and breaks rows 6/7. The real
-6→8 / 7→9 flip emits no `Finalized` (only `ClaimDischarged`). It is an intermittent trap: when every leg pays inline, the
-allocation block equals the settlement block and the naive derivation is accidentally right. LOG-derived and source-marked.
-**Reader-port obligation:** the mapper's `deriveFinalizedBlock` TRUSTS its input block; it cannot itself prove the caller
-passed the zeroing-`dischargeClaim` block rather than an allocation-time `Finalized` block. So this anti-trap is a contract
-on the concrete `SettlementUnitReader` (`readZeroingDischargeBlock`), not on the pure function. When a live reader is wired,
-check this hardest.
+**`finalizedBlock` derivation (anti-trap):** null in 6/7 and non-null in 8/9 as tabled. The TERMINAL-TRANSITION block is
+the block of whichever call actually zeroed `remainingClaimCount` to 0 — NEVER the `Finalized` event, which fires at
+ALLOCATION (entering 6/7) and would make `finalizedBlock` non-null at state 6, breaking rows 6/7. Two shapes reach the
+zero, and a reader must cover BOTH (§B fixtures 1a/1b):
+  - **Inline** (1a): every leg discharges during the allocation call itself, so `remainingClaimCount` is already 0
+    when the unit enters 8/9. There is no later `dischargeClaim()` and no `ClaimDischarged` for this unit — the
+    allocation block IS the settlement block.
+  - **Deferred** (1b): a leg falls back to a collateralized claim; the unit sits at 6/7 until a later
+    `dischargeClaim()` zeros `remainingClaimCount`, emitting `ClaimDischarged`. That block IS the settlement block.
+LOG-derived and source-marked either way.
+**Reader-port obligation:** the mapper's `deriveFinalizedBlock` TRUSTS its input block; it cannot itself prove which of
+the two shapes produced it. So covering both is a contract on the concrete `SettlementUnitReader`, not on the pure
+function — it must return the allocation block for the inline case and the zeroing-discharge block for the deferred
+case. A `readZeroingDischargeBlock` that only ever looks for `ClaimDischarged` covers the deferred case ONLY.
+**Implementation gap at master `ac86a404`** (confirmed by trace, `triage-350-r2` D2): the current route
+(`settlement-read.ts:365-370`) calls only `readZeroingDischargeBlock`, so an inline-settled terminal unit (fixture 1a)
+gets `finalizedBlock: null` today even though it IS terminal. This is a gateway-owned gap, not a gen-UI one: the
+`SettlementUnitReader` interface needs an allocation-block-aware read before this table's "non-null in 8/9" guarantee
+holds for inline settlement. Until fixed, a consumer MUST NOT treat `finalizedBlock: null` at 8/9 as "not yet settled".
 
 **State 0 (AWAITING_FUNDING) is unreachable:** a unit is registered as existing only after its state is set to
 FUNDED_ACTIVE, so an existing unit is always ≥ state 1, and `unitState()` is `onlyExisting`, reverting `UnitNotFound` for
@@ -72,7 +87,13 @@ observable**; 6/7 are skippable (see the fixture note in §B); 0 is unreachable.
 (from `settlement()`), NOT by window arithmetic. Key off `unitState` + `backupLane_`.
 
 ## §B: money-outcome fixtures → expected DTO
-1. Release, every leg discharged → state 8, `refundReason: NONE`.
+1a. Release, every leg discharged INLINE during the allocation call → state 8 in the same tx as allocation,
+    `refundReason: null` (no cause to name on a release path; `RefundReason` has no `NONE` member — see
+    `settlement-read.ts:353-363,400`). `finalizedBlock` SHOULD be the allocation block, but currently reads `null` at
+    master `ac86a404` (implementation gap — see the `finalizedBlock` derivation note in §A above).
+1b. Release, every leg discharged, but at least one via a DEFERRED `dischargeClaim()` after allocation → state 6 then
+    state 8 across two blocks, `refundReason: null`, `finalizedBlock` = the zeroing `dischargeClaim` block (this path
+    IS correctly covered by `readZeroingDischargeBlock` today).
 2. Release, one **principal** claim pending → state 6, `finalizedBlock: null`, presentation "payment incomplete".
 3. Release, one **fee** claim pending → state 6 (same); auxiliary status exposed separately (rule 18).
 4. Refund, refund claim pending → state 7.
