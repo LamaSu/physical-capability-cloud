@@ -25,6 +25,10 @@
  * operator-ux and refvertical build against this shape. Any change needs
  * their ack on the bus first; a breaking change is a new version. adk (#3785)
  * and operator-ux (#3997) acked amendment A1.
+ *
+ * Versioning: pre-release until first merge; afterwards EVERY shape or enum
+ * change bumps OPERATOR_BINDING_SCHEMA, enforced by the pinned shape
+ * fingerprint in kits-contracts.test.ts (astra pack 112 MEDIUM 8).
  */
 
 import { z } from "zod";
@@ -45,7 +49,8 @@ export interface OperatorBindingEntry {
   /** The Capability Kit version this binding hosts, if any. */
   kitDigest: SHA256 | null;
   presence: "online" | "offline" | "unknown";
-  availability: Record<string, unknown> | null;
+  /** A typed summary of the capability's availability; never an endpoint or any authority field. */
+  availability: AvailabilitySummary | null;
   /** Capped by the server from proven evidence; never the self-declared tier. */
   assuranceTierCap: 0 | 1 | 2 | 3;
   lastSeenAt: Timestamp | null;
@@ -57,6 +62,15 @@ export interface OperatorUnmappedCapacity {
   id: string;
   /** The legacy type string as recorded, e.g. "3d-printing". */
   legacyType: string;
+}
+
+/** What a binding may say about availability (astra pack 112 MEDIUM 5): a closed, typed shape. */
+export interface AvailabilitySummary {
+  mode: "always" | "windows" | "cron" | "manual-claim" | "delegate-to-agent";
+  windows?: Array<{ start: string; end: string; daysOfWeek?: number[]; timezone?: string }>;
+  cron?: string;
+  timezone?: string;
+  describe?: string;
 }
 
 export interface OperatorPayeeView {
@@ -102,20 +116,45 @@ export function maskPayoutDestination(destination: string): string {
   return `${d.slice(0, 6)}${MASK}${d.slice(-4)}`;
 }
 
-const FULL_EVM_ADDRESS = /0x[0-9a-fA-F]{40}/;
+/**
+ * Exactly the two shapes maskPayoutDestination produces (astra pack 112 MEDIUM
+ * 5): "…" + the last 2 characters, or the first 6 + "…" + the last 4. A full
+ * address of any case or kind, with or without an ellipsis, cannot fit.
+ */
+const MASKED_DESTINATION = new RegExp(`^(?:${MASK}[^${MASK}]{2}|[^${MASK}]{6}${MASK}[^${MASK}]{4})$`);
 
 export const OperatorPayeeViewSchema = z
   .object({
     kind: z.enum(["wallet", "fiat_ref"]),
     maskedDestination: z
       .string()
-      .min(1)
-      .max(64)
-      .refine((v) => v.includes(MASK) && !FULL_EVM_ADDRESS.test(v), {
-        message: "maskedDestination must be masked (see maskPayoutDestination)",
-      }),
+      .regex(MASKED_DESTINATION, "maskedDestination must be masked exactly as maskPayoutDestination masks it"),
     source: z.string().min(1).max(200),
     verified: z.boolean(),
+  })
+  .strict();
+
+const IsoTimestamp = z.string().datetime({ offset: true });
+
+export const AvailabilitySummarySchema = z
+  .object({
+    mode: z.enum(["always", "windows", "cron", "manual-claim", "delegate-to-agent"]),
+    windows: z
+      .array(
+        z
+          .object({
+            start: z.string().min(1).max(40),
+            end: z.string().min(1).max(40),
+            daysOfWeek: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+            timezone: z.string().min(1).max(64).optional(),
+          })
+          .strict(),
+      )
+      .max(50)
+      .optional(),
+    cron: z.string().min(1).max(120).optional(),
+    timezone: z.string().min(1).max(64).optional(),
+    describe: z.string().max(2000).optional(),
   })
   .strict();
 
@@ -126,9 +165,9 @@ export const OperatorBindingEntrySchema = z
     capabilityType: z.string().regex(CSD_CAPABILITY_URL_PATTERN, "Must be a CSD url"),
     kitDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable(),
     presence: z.enum(["online", "offline", "unknown"]),
-    availability: z.record(z.unknown()).nullable(),
+    availability: AvailabilitySummarySchema.nullable(),
     assuranceTierCap: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
-    lastSeenAt: z.string().nullable(),
+    lastSeenAt: IsoTimestamp.nullable(),
   })
   .strict();
 
@@ -157,7 +196,7 @@ export const OperatorBindingDTOSchema = z
     executionAuthority: z
       .object({ canClaimCapabilityTypes: z.array(z.string().regex(CSD_CAPABILITY_URL_PATTERN, "Must be a CSD url")) })
       .strict(),
-    asOf: z.string().min(1),
+    asOf: IsoTimestamp,
   })
   .strict()
   .superRefine((dto, ctx) => {

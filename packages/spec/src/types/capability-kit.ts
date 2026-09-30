@@ -42,6 +42,12 @@
  * conventions above), A6 (artifact names are safe relative paths) and A7
  * (artifact roles intake-schema and safety-envelope), and shares the CSD url
  * pattern with the binding and opportunity contracts.
+ *
+ * Versioning: pre-release until first merge (no deployed producer or consumer
+ * yet), so amendment 1 and the pack-112 fixes land under the same literal. After
+ * the first merge, EVERY shape or enum change bumps KIT_MANIFEST_SCHEMA; the
+ * pinned shape fingerprint in kits-contracts.test.ts fails until that is done
+ * deliberately (astra pack 112 MEDIUM 8).
  */
 
 import { z } from "zod";
@@ -138,7 +144,11 @@ export type KitCompatibility = z.infer<typeof KitCompatibilitySchema>;
 
 export const KitEconomicsSchema = z
   .object({
-    /** SPDX license id for the kit's own software and design artifacts. */
+    /**
+     * SPDX license expression for the kit's own software and design artifacts.
+     * Parsing keeps any string; validateKitCompleteness counts only a valid
+     * expression (isSpdxLicenseExpression) as a license.
+     */
     spdxLicense: z.string().min(1).max(100).optional(),
     /**
      * Economics-lane hashes over the builder's clause set. Self-asserted (L0):
@@ -186,10 +196,49 @@ export const CapabilityKitManifestV1Schema = z
       }
       seenCsd.add(c.csdUrl);
     }
+    // Set-valued lists hold each value once (astra pack 112 MEDIUM 6): a duplicate
+    // is refused, never silently collapsed, so two accepted manifests never share
+    // a digest.
+    const lists: Array<[string, readonly unknown[] | undefined]> = [
+      ["compatibility.deviceFamilies", m.compatibility?.deviceFamilies],
+      ["compatibility.models", m.compatibility?.models],
+      ["compatibility.interfaces", m.compatibility?.interfaces],
+      ["compatibility.platforms", m.compatibility?.platforms],
+      ["declaredAssuranceTiers", m.declaredAssuranceTiers],
+    ];
+    for (const [path, list] of lists) {
+      if (list && new Set(list).size !== list.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate entry in ${path}` });
+      }
+    }
+    // Text is Unicode NFC, so NFC and NFD spellings of a name can't be two kits.
+    const walk = (v: unknown, path: string): void => {
+      if (typeof v === "string") {
+        if (v.normalize("NFC") !== v) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${path} must be Unicode NFC` });
+        }
+      } else if (Array.isArray(v)) {
+        v.forEach((x, i) => walk(x, `${path}[${i}]`));
+      } else if (v !== null && typeof v === "object") {
+        for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, path ? `${path}.${k}` : k);
+      }
+    };
+    walk(m, "");
   });
 export type CapabilityKitManifestV1 = z.infer<typeof CapabilityKitManifestV1Schema>;
 
-const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** Unicode code-point order (not UTF-16 unit order), portable across languages. */
+const cmp = (a: string, b: string): number => {
+  const A = Array.from(a);
+  const B = Array.from(b);
+  const n = Math.min(A.length, B.length);
+  for (let i = 0; i < n; i++) {
+    const x = A[i]!.codePointAt(0)!;
+    const y = B[i]!.codePointAt(0)!;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return A.length - B.length;
+};
 const sortedUnique = (xs: string[] | undefined): string[] | undefined =>
   xs === undefined ? undefined : [...new Set(xs)].sort(cmp);
 
@@ -237,22 +286,97 @@ export const KIT_REQUIRED_ROLES: readonly KitArtifactRole[] = [
 
 export interface KitCompleteness {
   complete: boolean;
-  /** Human-readable gaps, e.g. "role:tests", "implementation", "license". */
+  /** Human-readable gaps, e.g. "role:tests", "implementation", "license", "distinct-artifacts". */
   missing: string[];
 }
 
+const SPDX_LICENSE_IDS: ReadonlySet<string> = new Set([
+  "0BSD", "AGPL-3.0-only", "AGPL-3.0-or-later", "Apache-2.0", "Artistic-2.0", "BSD-2-Clause", "BSD-3-Clause",
+  "BSL-1.0", "CC-BY-4.0", "CC-BY-SA-4.0", "CC0-1.0", "CERN-OHL-P-2.0", "CERN-OHL-S-2.0", "CERN-OHL-W-2.0",
+  "EPL-2.0", "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "ISC", "LGPL-2.1-only",
+  "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "MIT", "MPL-2.0", "OFL-1.1", "PostgreSQL",
+  "Python-2.0", "TAPR-OHL-1.0", "Unlicense", "Zlib",
+]);
+const SPDX_EXCEPTION_IDS: ReadonlySet<string> = new Set(["Classpath-exception-2.0", "GCC-exception-3.1", "LLVM-exception"]);
+const lowerAll = (ids: ReadonlySet<string>): ReadonlySet<string> => new Set([...ids].map((id) => id.toLowerCase()));
+const SPDX_LICENSE_KEYS = lowerAll(SPDX_LICENSE_IDS);
+const SPDX_EXCEPTION_KEYS = lowerAll(SPDX_EXCEPTION_IDS);
+/** SPDX ids match case-insensitively (SPDX Annex D), folded as ASCII only: no Unicode case folding. */
+const spdxKey = (t: string | undefined): string | null =>
+  t !== undefined && /^[A-Za-z0-9.+-]+$/.test(t) ? t.toLowerCase() : null;
+
 /**
- * Whether a manifest is a REUSABLE kit rather than a one-off listing: another
- * operator can deploy it from the manifest alone. It needs an implementation
- * (an adapter or a method), tests, an install recipe, a provenance recipe and
- * a license (an SPDX id or a rights-terms hash). A kit-build bounty accepts
- * only a complete kit.
+ * A valid SPDX license expression over a curated list of license ids (common
+ * software, content and open-hardware licenses) plus `LicenseRef-<id>`: ids
+ * joined by AND / OR (upper case), optional `WITH <exception>`, and
+ * parentheses. Anything else, e.g. "not-a-license", is not a license.
+ */
+export function isSpdxLicenseExpression(expr: string): boolean {
+  const tokens = expr.match(/\(|\)|[^\s()]+/g);
+  if (!tokens || tokens.length === 0) return false;
+  let i = 0;
+  const isLicense = (t: string | undefined) =>
+    SPDX_LICENSE_KEYS.has(spdxKey(t) ?? "") || /^LicenseRef-[A-Za-z0-9.-]+$/.test(t ?? "");
+  const term = (): boolean => {
+    if (tokens[i] === "(") {
+      i++;
+      if (!expression() || tokens[i] !== ")") return false;
+      i++;
+      return true;
+    }
+    if (!isLicense(tokens[i])) return false;
+    i++;
+    if (tokens[i] === "WITH") {
+      i++;
+      if (!SPDX_EXCEPTION_KEYS.has(spdxKey(tokens[i]) ?? "")) return false;
+      i++;
+    }
+    return true;
+  };
+  const expression = (): boolean => {
+    if (!term()) return false;
+    while (tokens[i] === "AND" || tokens[i] === "OR") {
+      i++;
+      if (!term()) return false;
+    }
+    return true;
+  };
+  return expression() && i === tokens.length;
+}
+
+/**
+ * STRUCTURAL completeness only (astra pack 112 HIGH 2): whether a manifest has
+ * the SHAPE of a reusable kit rather than a one-off listing. It needs an
+ * implementation (an adapter or a method), tests, an install recipe and a
+ * provenance recipe as DISTINCT artifacts, and a license: a valid SPDX
+ * expression or an economics rights-terms hash.
+ *
+ * It is NEVER the acceptance rule for a paid kit-build bounty. Acceptance (kits
+ * K2) must fetch every referenced artifact, verify each digest, run role-specific
+ * checks (the tests run, the install recipe installs, the provenance recipe
+ * emits what it declares) and resolve the license or rights terms.
  */
 export function validateKitCompleteness(manifest: CapabilityKitManifestV1): KitCompleteness {
   const roles = new Set(manifest.artifacts.map((a) => a.role));
   const missing: string[] = [];
   if (!roles.has("adapter") && !roles.has("method")) missing.push("implementation");
   for (const r of KIT_REQUIRED_ROLES) if (!roles.has(r)) missing.push(`role:${r}`);
-  if (!manifest.economics?.spdxLicense && !manifest.economics?.rightsTermsHash) missing.push("license");
+  const spdx = manifest.economics?.spdxLicense;
+  const licensed = (spdx !== undefined && isSpdxLicenseExpression(spdx)) || Boolean(manifest.economics?.rightsTermsHash);
+  if (!licensed) missing.push("license");
+  // One artifact may not stand in for another required role (same bytes for the
+  // implementation, the tests and a recipe is not a kit).
+  const requiredGroups: KitArtifactRole[][] = [["adapter", "method"], ["tests"], ["install-recipe"], ["provenance-recipe"]];
+  const owner = new Map<string, number>();
+  let shared = false;
+  requiredGroups.forEach((group, gi) => {
+    for (const a of manifest.artifacts) {
+      if (!group.includes(a.role)) continue;
+      const prev = owner.get(a.digest);
+      if (prev !== undefined && prev !== gi) shared = true;
+      owner.set(a.digest, gi);
+    }
+  });
+  if (shared) missing.push("distinct-artifacts");
   return { complete: missing.length === 0, missing };
 }
