@@ -19,6 +19,10 @@ import { ot2RelayRoutes } from "../routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
+import { settlementRoutes } from "../routes/settlement.js";
+import { resetSettlementService } from "../services/settlement-service.js";
+import { closeWorkflowStore } from "../workflow-store.js";
+import { isWriteEnabled } from "../contracts/escrow-client.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema } from "@pcc/store";
 
@@ -68,7 +72,10 @@ let app: FastifyInstance;
 beforeEach(async () => {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  process.env.WORKFLOW_DB_PATH = ":memory:";
+  closeWorkflowStore();
   initStore({ seed: true });
+  resetSettlementService();
   app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
@@ -76,6 +83,7 @@ beforeEach(async () => {
   await app.register(ot2ScopeRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);
+  await app.register(settlementRoutes);
   await app.ready();
 });
 
@@ -151,13 +159,20 @@ describe("N85(a): a paid job is finished only by its settlement path", () => {
     expect(res.json().updated).toBe(true);
     expect(statusOf(jobId)).toBe("in_progress");
     expect((await patch(jobId, "paused")).statusCode).toBe(200);
+    const withProgress = await app.inject({ method: "PATCH", url: `/api/jobs/${jobId}/status`, payload: { status: "in_progress", progress: 37 } });
+    expect(withProgress.statusCode).toBe(200);
+    expect(getRepos().jobs.findById(jobId)!.progress).toBe(37);
   });
 
   it("an escrow for the job's workflow alone makes it paid (seeded job-001, no session)", async () => {
     const { db } = getStore();
     const job = getRepos().jobs.findById("job-001")!;
     expect(db.select().from(schema.escrows).all().some((e) => e.cwmId === job.cwmId)).toBe(true);
+    expect(db.select().from(schema.negotiationSessions).all().some((x) => x.jobId === job.id)).toBe(false);
+    // Seeded "executing", which no generic writer overwrites on any job; the link must decide.
+    getRepos().jobs.updateStatus("job-001", "in_progress");
     expect((await relay("job-001", "completed")).statusCode).toBe(409);
+    expect(statusOf("job-001")).toBe("in_progress");
   });
 
   it("a negotiation session bound to the job alone makes it paid", async () => {
@@ -176,7 +191,10 @@ describe("N85(a): a paid job is finished only by its settlement path", () => {
         expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
       })
       .run();
+    // Seeded "executing", as above; the link must decide.
+    getRepos().jobs.updateStatus(job.id, "in_progress");
     expect((await relay(job.id, "completed")).statusCode).toBe(409);
+    expect(statusOf(job.id)).toBe("in_progress");
   });
 
   it("the MCP cancel operation's path (JobFacade.updateStatus) refuses to cancel a paid job", async () => {
@@ -199,11 +217,74 @@ describe("N85(a): a paid job is finished only by its settlement path", () => {
     const withSession = new Set(db.select().from(schema.negotiationSessions).all().map((x) => x.jobId));
     const unpaid = getRepos()
       .jobs.findAll()
-      .find((j) => !escrowed.has(j.cwmId) && !withSession.has(j.id) && !["completed", "failed", "cancelled"].includes(j.status));
+      .find((j) => !escrowed.has(j.cwmId) && !withSession.has(j.id));
     expect(unpaid).toBeDefined();
+    // A node's job is queued or in progress; "executing" is the local kernel's own status.
+    getRepos().jobs.update(unpaid!.id, { status: "in_progress", completedAt: null });
     const res = await relay(unpaid!.id, "completed");
     expect(res.statusCode).toBe(200);
     expect(res.json().updated).toBe(true);
     expect(statusOf(unpaid!.id)).toBe("completed");
+    // The same write as the repository's: a completion is stamped.
+    expect(getRepos().jobs.findById(unpaid!.id)!.completedAt).toEqual(expect.any(String));
   });
+});
+
+describe("astra, round 1 of #475: jobs settled without a session or escrow link, and every protected state", () => {
+  const attestation = () => ({
+    version: 1,
+    escrowAddress: "0xDeAdBeEf00000000000000000000000000000001",
+    jobId: "job-bio-42",
+    evidenceHash: `0x${"aa".repeat(32)}`,
+    tier: 0,
+    verified: true,
+    timestamp: 1700000000,
+    nonce: `0x${"c".repeat(64)}`,
+    extraData: "0x",
+    signature: "0x",
+  });
+
+  it("F1: a job the release route settled (no session, no escrow link) cannot be re-opened", async () => {
+    const { db } = getStore();
+    expect(db.select().from(schema.escrows).all().some((e) => e.cwmId === getRepos().jobs.findById("job-bio-42")!.cwmId)).toBe(false);
+    vi.mocked(isWriteEnabled).mockReturnValue(true);
+    const released = await app.inject({
+      method: "POST",
+      url: "/api/settlement/release",
+      payload: { jobId: "job-bio-42", milestoneIndex: 0, contractAddress: "0xDeAdBeEf00000000000000000000000000000001", attestation: attestation() },
+    });
+    vi.mocked(isWriteEnabled).mockReturnValue(false);
+    expect(released.statusCode).toBe(200);
+    expect(statusOf("job-bio-42")).toBe("settled");
+    expect((await patch("job-bio-42", "queued")).statusCode).toBe(409);
+    expect((await relay("job-bio-42", "in_progress")).statusCode).toBe(409);
+    expect(statusOf("job-bio-42")).toBe("settled");
+  });
+
+  it.each(["executing", "completing", "evidence_submitted", "settled"])(
+    "F1: an unlinked job in %s (a status only the system writes) takes no generic write",
+    async (state) => {
+      getRepos().jobs.updateStatus("job-bio-42", state);
+      for (const [write, target] of [[relay, "in_progress"], [relay, "completed"], [patch, "queued"], [patch, "failed"]] as const) {
+        const res = await write("job-bio-42", target);
+        expect(res.statusCode, `${target} from ${state}`).toBe(409);
+      }
+      expect(statusOf("job-bio-42")).toBe(state);
+    },
+  );
+
+  it.each(["completing", "evidence_submitted", "settled", "completed", "failed", "cancelled"])(
+    "F2: a paid job in %s takes no progress write, and its status and progress are unchanged",
+    async (state) => {
+      const jobId = await paidJob();
+      getRepos().jobs.updateStatus(jobId, state, 42);
+      for (const [write, target] of [[relay, "in_progress"], [patch, "queued"]] as const) {
+        const res = await write(jobId, target);
+        expect(res.statusCode, `${target} from ${state}`).toBe(409);
+      }
+      const job = getRepos().jobs.findById(jobId)!;
+      expect(job.status).toBe(state);
+      expect(job.progress).toBe(42);
+    },
+  );
 });

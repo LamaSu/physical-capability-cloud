@@ -11,8 +11,13 @@
  *     settlement, since /complete then refuses, or releases the escrow early;
  *   - write at all once the job is terminal or inside the settlement pipeline.
  *     That would re-open it and let /complete settle it a second time.
- * On a paid job the write is ONE conditional UPDATE, as /complete's claim is, so
- * a completion claimed in between is never overwritten.
+ * The statuses only the system itself sets (executing, completing,
+ * evidence_submitted, settled; none is in the vocabulary a generic writer may
+ * set) belong to it on EVERY job, paid or not: a job can be settled without a
+ * session or escrow link, through a configured escrow contract (astra, round 1
+ * of #475). A generic writer never writes over them.
+ * Every write is ONE conditional UPDATE, as /complete's claim is, so a status
+ * the system sets in between is never overwritten.
  *
  * A job without a settlement record is unchanged: its node finishes it (adk
  * #452). The system's own writers (the kernel service, the settlement path)
@@ -24,8 +29,10 @@ import { getRepos, getStore } from "../db.js";
 
 /** Terminal statuses only the settlement path may set on a paid job. */
 const TERMINAL = ["completed", "failed", "cancelled"] as const;
-/** Statuses a generic writer may never move a paid job out of: terminal, or /complete's pipeline. */
-const SETTLEMENT_OWNED = ["completing", "evidence_submitted", "settled", "completed", "failed", "cancelled"] as const;
+/** Statuses only the system's own writers set: the kernel service and the settlement paths. */
+const SYSTEM_OWNED = ["executing", "completing", "evidence_submitted", "settled"] as const;
+/** On a paid job, a generic writer also never moves it out of a terminal status. */
+const PAID_OWNED = [...SYSTEM_OWNED, ...TERMINAL] as const;
 
 type JobRow = NonNullable<ReturnType<ReturnType<typeof getRepos>["jobs"]["findById"]>>;
 
@@ -35,7 +42,7 @@ export type GuardedStatusWrite =
   | { readonly kind: "written"; readonly job: JobRow };
 
 export const SETTLEMENT_OWNED_MESSAGE =
-  "A paid job is finished only by its settlement path (PUT /api/jobs/:jobId/complete). Progress can be reported while it is open.";
+  "A paid job is finished only by its settlement path (PUT /api/jobs/:jobId/complete), and a job the gateway itself is running or settling is written only by the gateway. Progress can be reported on an open paid job.";
 
 /** Whether the job has a settlement record: a negotiation session bound to it, or an escrow for its workflow. */
 export function hasSettlementRecord(job: { readonly id: string; readonly cwmId?: string | null }): boolean {
@@ -54,14 +61,14 @@ export function writeJobStatusGuarded(jobId: string, status: string, progress?: 
   const repos = getRepos();
   const job = repos.jobs.findById(jobId);
   if (!job) return { kind: "not_found" };
-  if (!hasSettlementRecord(job)) {
-    const written = repos.jobs.updateStatus(jobId, status, progress);
-    return written ? { kind: "written", job: written } : { kind: "not_found" };
-  }
-  if ((TERMINAL as readonly string[]).includes(status)) return { kind: "refused", currentStatus: job.status };
+  const paid = hasSettlementRecord(job);
+  if (paid && (TERMINAL as readonly string[]).includes(status)) return { kind: "refused", currentStatus: job.status };
+  const owned: readonly string[] = paid ? PAID_OWNED : SYSTEM_OWNED;
   const { db } = getStore();
-  const data: { status: string; progress?: number } = { status };
+  // The same fields the repository's updateStatus writes.
+  const data: { status: string; progress?: number; completedAt?: string } = { status };
   if (progress !== undefined) data.progress = progress;
+  if (status === "completed") data.completedAt = new Date().toISOString();
   const written = db
     .update(schema.jobs)
     .set(data)
@@ -69,7 +76,7 @@ export function writeJobStatusGuarded(jobId: string, status: string, progress?: 
       and(
         eq(schema.jobs.id, jobId),
         sql`${schema.jobs.status} NOT IN (${sql.join(
-          SETTLEMENT_OWNED.map((s) => sql`${s}`),
+          owned.map((s) => sql`${s}`),
           sql`, `,
         )})`,
       ),
