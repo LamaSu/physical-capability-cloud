@@ -13,6 +13,20 @@ RUNBOOK = STARTER / "runbook"
 PHASES = ["prerequisites", "identify", "intake", "research", "build", "register", "verify", "operate", "publish", "session"]
 
 
+OUTCOMES = ["ok", "failed", "blocked", "skipped", "budget_stop", "abandoned", "in_progress"]
+
+
+def headings(text):
+    """Markdown headings outside fenced code blocks."""
+    found, fenced = set(), False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("#"):
+            found.add(line.lstrip("#").strip())
+    return found
+
+
 def text_files():
     for path in sorted(STARTER.rglob("*")):
         if path.is_file() and path.suffix in (".md", ".json") and ".pcc" not in path.parts:
@@ -41,6 +55,38 @@ class TestPhaseGraph(unittest.TestCase):
 
     def test_the_asking_rule_forbids_defaulting_money_and_safety(self):
         self.assertIn("never defaulted", self.book["askingRule"])
+
+
+class TestIndex(unittest.TestCase):
+    """R6: events map to what to do and where the runbook covers it."""
+
+    def setUp(self):
+        self.events = json.loads((RUNBOOK / "index.json").read_text(encoding="utf-8"))["events"]
+
+    def test_the_runbook_points_at_the_index(self):
+        book = json.loads((RUNBOOK / "runbook.json").read_text(encoding="utf-8"))
+        self.assertEqual(book["index"], "index.json")
+
+    def test_every_event_is_keyed_by_its_phase(self):
+        self.assertGreater(len(self.events), 0)
+        for key, event in self.events.items():
+            self.assertRegex(key, r"^[a-z]+\.[a-z0-9-]+$")
+            self.assertEqual(key.split(".")[0], event["phase"], key)
+            self.assertIn(event["phase"], PHASES, key)
+            self.assertTrue(event["trigger"] and event["do"], key)
+
+    def test_every_event_points_at_a_real_section(self):
+        for key, event in self.events.items():
+            path = RUNBOOK / event["file"]
+            self.assertTrue(path.is_file(), key)
+            if event["section"] is not None:
+                self.assertIn(event["section"], headings(path.read_text(encoding="utf-8")), key)
+
+    def test_reports_use_the_contract(self):
+        for key, event in self.events.items():
+            if event["report"] is not None:
+                self.assertEqual(event["report"]["phase"], event["phase"], key)
+                self.assertIn(event["report"]["outcome"], OUTCOMES, key)
 
 
 class TestTruths(unittest.TestCase):

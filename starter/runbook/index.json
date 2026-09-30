@@ -1,0 +1,219 @@
+{
+  "schema": "pcc-adk/runbook-index@1",
+  "about": "Events an onboarding agent can hit, each mapped to what to do and where the runbook covers it (R6). Keys are <phase>.<event>. When an event happens, read its entry, then its runbook section; if guidance/<key>.md exists in this starter, read that too. An entry's report says which phase and outcome to report when the event ends the phase.",
+  "guidance": "guidance/{key}.md",
+  "events": {
+    "prerequisites.no-gateway": {
+      "phase": "prerequisites",
+      "trigger": "No gateway URL was given, and .pcc/base does not exist.",
+      "do": "Ask the human which PCC gateway to use (class C). Never guess one, and never use production unless told to.",
+      "file": "00-prerequisites.md",
+      "section": "1. The gateway: PCC_BASE",
+      "report": {
+        "phase": "prerequisites",
+        "outcome": "blocked"
+      }
+    },
+    "prerequisites.gateway-unreachable": {
+      "phase": "prerequisites",
+      "trigger": "GET <gateway>/api/health does not answer 200 with JSON.",
+      "do": "Stop and report what you saw. Don't try another address.",
+      "file": "00-prerequisites.md",
+      "section": "1. The gateway: PCC_BASE",
+      "report": {
+        "phase": "prerequisites",
+        "outcome": "blocked"
+      }
+    },
+    "prerequisites.no-crypto": {
+      "phase": "prerequisites",
+      "trigger": "import nacl.signing fails, or pcc-node refuses with LogSigningRefused or mentions pynacl.",
+      "do": "Install pcc-node with the crypto extra. Without it the node can never sign evidence, so its work can never verify.",
+      "file": "00-prerequisites.md",
+      "section": "2. pcc-node, with the crypto extra",
+      "report": {
+        "phase": "prerequisites",
+        "outcome": "failed"
+      }
+    },
+    "prerequisites.key-leaked": {
+      "phase": "prerequisites",
+      "trigger": "An API key, a .pcc header file or a private key was printed, pasted into the conversation, or committed.",
+      "do": "Tell the human. Provision a new key (phase 0 step 4, same email) and rewrite .pcc/api-key and .pcc/auth.header. Then revoke the leaked key: find its id with GET /api/auth/keys (match its prefix) and send DELETE /api/auth/keys/<id> with the new key. Never repeat the leaked value.",
+      "file": "00-prerequisites.md",
+      "section": "4. An operator API key, captured without logging it",
+      "report": {
+        "phase": "prerequisites",
+        "outcome": "blocked"
+      }
+    },
+    "identify.device-unreachable": {
+      "phase": "identify",
+      "trigger": "The device does not answer at the recorded address.",
+      "do": "Check that the address includes its port and that the device is on. Ask the human only to power it up or give its address.",
+      "file": "01-identify.md",
+      "section": "1. Ask the device",
+      "report": {
+        "phase": "identify",
+        "outcome": "blocked"
+      }
+    },
+    "identify.device-unknown": {
+      "phase": "identify",
+      "trigger": "Neither the device's own API, nor its manual, nor its label names the make and model.",
+      "do": "Describe it to POST /api/onboard/identify-device, or send a photo. Pass on only the clarifying questions you can't answer yourself.",
+      "file": "01-identify.md",
+      "section": "2. If the device can't say what it is",
+      "report": null
+    },
+    "intake.dont-know": {
+      "phase": "intake",
+      "trigger": "The human answers \"don't know\" to a class C question.",
+      "do": "Don't press. Treat it as class B: research it, then propose a value with its source for the human to confirm. Money and safety are never defaulted.",
+      "file": "02-intake.md",
+      "section": "The asking rule (R2)",
+      "report": null
+    },
+    "intake.asks-about-pay": {
+      "phase": "intake",
+      "trigger": "The human asks how prices, payouts, fees or contributor pay work.",
+      "do": "Answer from the runbook. The price is theirs to set, and payouts go only to the wallet they give. Publishing a kit adds a license that the buyer pays on top (phase 8). Quote no number that isn't in the runbook or the gateway.",
+      "file": "08-publish.md",
+      "section": "How contributor pay works (tell the human this before they choose)",
+      "report": null
+    },
+    "intake.asks-about-safety": {
+      "phase": "intake",
+      "trigger": "The human asks what the emergency stop, supervision or limits mean.",
+      "do": "A physical stop is required; PCC's remote stop is best effort, not a safety device. Every limit comes from a cited source, or from the human, and the human confirms the envelope once.",
+      "file": "02-intake.md",
+      "section": "The class C questions",
+      "report": null
+    },
+    "research.sources-conflict": {
+      "phase": "research",
+      "trigger": "Two sources, or a source and the human's answer, give different values for the same quantity.",
+      "do": "Don't pick one. List both with their citations and ask the human.",
+      "file": "03-research.md",
+      "section": "The rule",
+      "report": null
+    },
+    "research.no-citation": {
+      "phase": "research",
+      "trigger": "A limit, input range or output you need has no unit or no citation.",
+      "do": "It cannot become a limit yet. Research it with the ready-to-fire prompts, or ask the human for a value they confirm.",
+      "file": "03-research.md",
+      "section": "Ready-to-fire prompts",
+      "report": null
+    },
+    "build.envelope-edited": {
+      "phase": "build",
+      "trigger": "The human changes a value in the safety envelope, or the envelope changes after it was confirmed.",
+      "do": "Re-check the value's unit and source, show the changed lines, and record a new confirmation with the new digest. Never run under an envelope the human hasn't confirmed.",
+      "file": "04-build.md",
+      "section": "3. The safety envelope: draft, then one confirmation (R8)",
+      "report": null
+    },
+    "register.refused": {
+      "phase": "register",
+      "trigger": "A register call (kernel, signing key, capability, device or channel) answers 4xx.",
+      "do": "Read the {error, message} body and fix what it names. Report the route and the status, never a key.",
+      "file": "05-register.md",
+      "section": null,
+      "report": {
+        "phase": "register",
+        "outcome": "failed"
+      }
+    },
+    "register.signing-refused": {
+      "phase": "register",
+      "trigger": "register_signing_key refuses with LogSigningRefused, or mentions pynacl.",
+      "do": "Install the crypto extra, delete .pcc/node-keys.json and .pcc/node-public-key, run phase 0 step 3 again, then the signing step.",
+      "file": "05-register.md",
+      "section": "2. The kernel's signing key",
+      "report": {
+        "phase": "register",
+        "outcome": "failed"
+      }
+    },
+    "verify.job-missing": {
+      "phase": "verify",
+      "trigger": "The test job never shows up in GET /api/operator/jobs for your kernel.",
+      "do": "Check that the submit answered with a jobId and that the job names your kernel, then report it. Don't fall back to /api/setup/test-job: it runs on a built-in mock device.",
+      "file": "06-verify.md",
+      "section": "2. Run it the way the operating loop will (phase 7), once, by hand",
+      "report": {
+        "phase": "verify",
+        "outcome": "blocked"
+      }
+    },
+    "verify.params-refused": {
+      "phase": "verify",
+      "trigger": "A job's parameters fail the type check or the envelope check.",
+      "do": "Don't touch the device. Set the job's status to failed with the reason.",
+      "file": "07-operate.md",
+      "section": "The operating loop",
+      "report": {
+        "phase": "verify",
+        "outcome": "failed"
+      }
+    },
+    "verify.device-busy": {
+      "phase": "verify",
+      "trigger": "The device reports busy or estopped when a job is due to run.",
+      "do": "Don't run it, and don't queue over it. Try again later, and report it if it stays busy.",
+      "file": "06-verify.md",
+      "section": "2. Run it the way the operating loop will (phase 7), once, by hand",
+      "report": null
+    },
+    "verify.estop-drill-failed": {
+      "phase": "verify",
+      "trigger": "During the drill a job was taken, or the device did not stop.",
+      "do": "Stop onboarding and report exactly what happened. Clear the stop only after the human confirms the device is safe.",
+      "file": "06-verify.md",
+      "section": "3. Emergency-stop drill",
+      "report": {
+        "phase": "verify",
+        "outcome": "failed"
+      }
+    },
+    "operate.estop-active": {
+      "phase": "operate",
+      "trigger": "GET /api/operator/policy/<kernelId> shows emergencyStop: true, or cannot be read.",
+      "do": "Take no job this round. On entering the state, send the device its stop once. Resume only after the human clears the stop.",
+      "file": "07-operate.md",
+      "section": "The operating loop",
+      "report": null
+    },
+    "operate.device-down": {
+      "phase": "operate",
+      "trigger": "The device stops answering, or its consumables run out.",
+      "do": "Stop taking jobs, and say so in the capability description or with the emergency stop. Report it.",
+      "file": "07-operate.md",
+      "section": "Keep the listing honest",
+      "report": {
+        "phase": "operate",
+        "outcome": "blocked"
+      }
+    },
+    "publish.asks-about-license": {
+      "phase": "publish",
+      "trigger": "The human asks what a kit license is, or what rate to choose.",
+      "do": "Explain it: 0-100 bps of each job's gross, 50 by default, 0 allowed, paid by the buyer on top, and shared with upstream kits when forked. Pay is shown in test mode for now. The rate is theirs to choose.",
+      "file": "08-publish.md",
+      "section": "How contributor pay works (tell the human this before they choose)",
+      "report": null
+    },
+    "session.stopping-early": {
+      "phase": "session",
+      "trigger": "You are blocked, the human stops, or you run out of budget.",
+      "do": "Send the session report anyway, with abandoned or budget_stop, saying where and why.",
+      "file": "09-session.md",
+      "section": null,
+      "report": {
+        "phase": "session",
+        "outcome": "abandoned"
+      }
+    }
+  }
+}

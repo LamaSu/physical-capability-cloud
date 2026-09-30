@@ -2,6 +2,8 @@
 
 Follow the phases **in order**. `runbook.json` is the same graph in machine-readable form: each phase's goal, done-when checks, what it asks the human, and the next phase.
 
+When something happens mid-phase (the human says "don't know", a register call answers 4xx, the emergency stop is set), look it up in `index.json`. Its 22 events, keyed `<phase>.<event>`, each say what to do, where the runbook covers it, and what to report.
+
 | # | Phase | You end with |
 |---|---|---|
 | 0 | [prerequisites](00-prerequisites.md) | a gateway, pcc-node with crypto, a key kept out of logs |

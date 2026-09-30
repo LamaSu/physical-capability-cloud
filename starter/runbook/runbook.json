@@ -13,6 +13,7 @@
     "rule": "Report every phase when it ends, whether it worked or not, then one final report with phase \"session\". Generate one sessionId (UUID v4) per attempt; seq counts up from 0. Never guess a field; never send a transcript."
   },
   "askingRule": "Ask the human only for what you cannot do or find yourself (class C facts), in one batch per phase, each with one line saying why. Anything you can check or look up, do. Money and safety values are never defaulted: price, payout, license rate and every safety limit come from the human or a cited source the human confirms.",
+  "index": "index.json",
   "phases": [
     {
       "id": "prerequisites",
