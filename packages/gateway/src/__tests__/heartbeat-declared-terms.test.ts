@@ -120,6 +120,44 @@ describe("a heartbeat registers only declared terms (N23)", () => {
     expect(row("mixed-ok")?.assuranceTiers).toEqual([1]);
     expect(row("mixed-bad")).toBeUndefined();
   });
+
+  // 437-M1 (astra review, Q1 MEDIUM): `cap.type` was read via a bare type
+  // assertion, outside any per-entry try/catch. A `null` entry threw at
+  // that read, escaping the whole loop and aborting every later entry —
+  // including ones with perfectly valid declared terms.
+  it("null_announcement_does_not_abort_later_valid_entries", async () => {
+    const res = await beat([null as unknown as Record<string, unknown>, { type: "after-null", assuranceTiers: [1], pricing: PRICING }]);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().capabilitiesReceived).toBe(2);
+    expect(res.json().capabilitiesSkipped).toEqual([{ type: "unknown", reason: "invalid-entry" }]);
+    expect(row("after-null")?.assuranceTiers).toEqual([1]);
+    expect(await listed("after-null")).toBe(true);
+  });
+
+  // 437-M1 continued: the same bare assertion let a non-string `type`
+  // (or `capability_type`) reach id interpolation and insertion uncoerced.
+  it("a non-string type is skipped and reported, never interpolated into an id", async () => {
+    const res = await beat([{ type: 12345, assuranceTiers: [1], pricing: PRICING }]);
+    expect(res.json().capabilitiesSkipped).toEqual([{ type: "unknown", reason: "invalid-entry" }]);
+    expect(row("12345")).toBeUndefined();
+  });
+
+  // 437-M2 (astra review, Q1 MEDIUM): an insertion exception was swallowed by
+  // the outer non-fatal catch with no skip reason, so the response
+  // acknowledged a capability that was never persisted.
+  it("failed_insert_is_reported_as_unregistered", async () => {
+    const insertSpy = vi.spyOn(getRepos().capabilities, "insert").mockImplementationOnce(() => {
+      throw new Error("simulated storage failure");
+    });
+    try {
+      const res = await beat([{ type: "storage-fail", assuranceTiers: [0], pricing: PRICING }]);
+      expect(res.json().capabilitiesSkipped).toEqual([{ type: "storage-fail", reason: "storage-failed" }]);
+      expect(row("storage-fail")).toBeUndefined();
+      expect(await listed("storage-fail")).toBe(false);
+    } finally {
+      insertSpy.mockRestore();
+    }
+  });
 });
 
 describe("declaredTiers and declaredPricing", () => {

@@ -130,7 +130,9 @@ export type HeartbeatSkipReason =
   | "invalid-tiers"
   | "no-declared-pricing"
   | "invalid-pricing"
-  | "zero-price";
+  | "zero-price"
+  | "invalid-entry"
+  | "storage-failed";
 
 const ASSURANCE_TIERS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
 const MAX_DECLARED_TIERS = 16;
@@ -578,38 +580,68 @@ export class KernelFacade extends BaseFacade {
       let capabilitiesReceived = 0;
       const capabilitiesSkipped: HeartbeatResult["capabilitiesSkipped"] = [];
       if (capabilities && capabilities.length > 0) {
-        for (const cap of capabilities) {
-          const capType = (cap.type as string) ?? (cap.capability_type as string);
-          if (!capType) continue;
-          const capId = `cap-${kernelId}-${capType}`;
+        for (const rawCap of capabilities) {
+          capabilitiesReceived++;
+          // `capabilities` is typed `Array<Record<string, unknown>>`, but a
+          // heartbeat body is parsed JSON from the wire — a caller can send
+          // `null`, a string, or a number in this slot. The old code read
+          // `cap.type` via a bare assertion with no runtime check: a `null`
+          // entry threw OUTSIDE any per-entry boundary (aborting every later,
+          // otherwise-valid entry in the same announcement), and a non-string
+          // `type`/`capability_type` was accepted uncoerced into the id and
+          // the insert (437-M1, astra review). Treat the entry as `unknown`
+          // and validate it explicitly before touching any of its fields.
+          const cap: unknown = rawCap;
+          let capType: string | undefined;
           try {
+            if (cap === null || typeof cap !== "object" || Array.isArray(cap)) {
+              capabilitiesSkipped.push({ type: "unknown", reason: "invalid-entry" });
+              continue;
+            }
+            const capRecord = cap as Record<string, unknown>;
+            const rawType = capRecord.type ?? capRecord.capability_type;
+            if (typeof rawType !== "string" || rawType.length === 0) {
+              capabilitiesSkipped.push({ type: "unknown", reason: "invalid-entry" });
+              continue;
+            }
+            capType = rawType;
+            const capId = `cap-${kernelId}-${capType}`;
             const existing = repos.capabilities.findById(capId);
             if (!existing) {
               // Only DECLARED terms are registered (see declaredTiers / declaredPricing above).
-              const tiers = declaredTiers(cap.assuranceTiers);
-              const pricing = declaredPricing(cap.pricing);
+              const tiers = declaredTiers(capRecord.assuranceTiers);
+              const pricing = declaredPricing(capRecord.pricing);
               if (!tiers.ok) {
                 capabilitiesSkipped.push({ type: capType, reason: tiers.reason });
               } else if (!pricing.ok) {
                 capabilitiesSkipped.push({ type: capType, reason: pricing.reason });
               } else {
-                repos.capabilities.insert({
-                  id: capId,
-                  kernelId,
-                  type: capType,
-                  name: (cap.name as string) ?? `${capType} — ${kernelId}`,
-                  description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
-                  materials: (cap.materials as string[]) ?? [],
-                  assuranceTiers: tiers.tiers,
-                  pricing: pricing.pricing,
-                  availability: (cap.availability as any) ?? {},
-                  location: (cap.location as any) ?? { lat: 0, lng: 0 },
-                  lastHeartbeatAt: now,
-                  validUntil,
-                } as any);
+                try {
+                  repos.capabilities.insert({
+                    id: capId,
+                    kernelId,
+                    type: capType,
+                    name: (capRecord.name as string) ?? `${capType} — ${kernelId}`,
+                    description: (capRecord.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
+                    materials: (capRecord.materials as string[]) ?? [],
+                    assuranceTiers: tiers.tiers,
+                    pricing: pricing.pricing,
+                    availability: (capRecord.availability as any) ?? {},
+                    location: (capRecord.location as any) ?? { lat: 0, lng: 0 },
+                    lastHeartbeatAt: now,
+                    validUntil,
+                  } as any);
+                } catch {
+                  // Storage failure — report it rather than silently
+                  // acknowledging a capability that was never persisted
+                  // (437-M2, astra review). Never surface the raw DB error.
+                  capabilitiesSkipped.push({ type: capType, reason: "storage-failed" });
+                }
               }
             } else {
-              // Existing capability — refresh its TTL.
+              // Existing capability — refresh its TTL. A failure here keeps
+              // the row's prior terms and validUntil untouched; it is not a
+              // registration event, so no skip entry is reported for it.
               try {
                 repos.capabilities.update(capId, {
                   lastHeartbeatAt: now,
@@ -620,9 +652,10 @@ export class KernelFacade extends BaseFacade {
               }
             }
           } catch {
-            // non-fatal
+            // Truly unexpected failure validating/reading this entry — still
+            // don't abort the loop; report what we can identify.
+            capabilitiesSkipped.push({ type: capType ?? "unknown", reason: "invalid-entry" });
           }
-          capabilitiesReceived++;
         }
       } else {
         // Heartbeat with no capabilities body — refresh TTL on EVERY
