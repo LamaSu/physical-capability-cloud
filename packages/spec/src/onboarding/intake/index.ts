@@ -16,6 +16,7 @@ import {
   INTAKE_FIELDS,
   INTAKE_FORBIDDEN_KEYS,
   INTAKE_PROVENANCE_VALUES,
+  MILESTONE_IMPLIES,
   type IntakeFieldDef,
   type IntakeMilestone,
 } from "./fields.js";
@@ -95,10 +96,25 @@ const FIELD_INDEX: ReadonlyMap<string, IntakeFieldDef> = new Map(
   INTAKE_FIELDS.map((f) => [f.id, f]),
 );
 
-const FORBIDDEN_KEY_SET: ReadonlySet<string> = new Set(INTAKE_FORBIDDEN_KEYS);
+/** Case/underscore/hyphen-insensitive normalization so `assurance_tier`,
+ *  `AssuranceTier`, `private-key`, `PrivateKey`, and `HASH` all match their
+ *  canonical INTAKE_FORBIDDEN_KEYS spelling (review fix — was exact-match). */
+function normalizeForbiddenKey(key: string): string {
+  return key.toLowerCase().replace(/[_-]/g, "");
+}
 
-/** Recursively collect any INTAKE_FORBIDDEN_KEYS key found as an object key
- *  inside `node` (arrays are walked, primitives are ignored). */
+const FORBIDDEN_KEY_NORMALIZED_SET: ReadonlySet<string> = new Set(
+  INTAKE_FORBIDDEN_KEYS.map(normalizeForbiddenKey),
+);
+
+function isForbiddenKey(key: string): boolean {
+  return FORBIDDEN_KEY_NORMALIZED_SET.has(normalizeForbiddenKey(key));
+}
+
+/** Recursively collect any INTAKE_FORBIDDEN_KEYS key (loosely matched — see
+ *  isForbiddenKey) found as an object key inside `node` (arrays are walked,
+ *  primitives are ignored). The literal key encountered is recorded (not its
+ *  canonical spelling), so the report shows exactly what was found. */
 function collectForbiddenKeys(node: unknown, out: Set<string>): void {
   if (node === null || typeof node !== "object") return;
   if (Array.isArray(node)) {
@@ -106,7 +122,7 @@ function collectForbiddenKeys(node: unknown, out: Set<string>): void {
     return;
   }
   for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    if (FORBIDDEN_KEY_SET.has(key)) out.add(key);
+    if (isForbiddenKey(key)) out.add(key);
     collectForbiddenKeys(value, out);
   }
 }
@@ -128,14 +144,19 @@ function valueSatisfiesField(field: IntakeFieldDef, value: unknown): boolean {
  *     {set: true} — never the real payload.
  *   - rule 6 (provenance + source): structural — enforced by
  *     `IntakeAnswerSchema` at record-construction time, not re-checked here.
- * Milestone matching is exact (`field.requiredFor === milestone`); a caller
- * wanting tier1+tier2 cumulative readiness calls this twice and merges — kept
- * simple/composable rather than hard-coding tier cumulativeness into the gate.
+ * Milestone matching is CUMULATIVE (review fix): a field is required for
+ * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
+ * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
+ * implies publish, so a record missing a publish-level field can never be
+ * "ready" for accept-jobs; tier2 implies tier1, register-device, identify and
+ * register). "optional" implies nothing, so an optional field never blocks
+ * any other milestone.
  */
 export function validateIntake(
   record: IntakeRecord,
   milestone: IntakeMilestone,
 ): IntakeValidationReport {
+  const impliedMilestones: ReadonlySet<IntakeMilestone> = new Set(MILESTONE_IMPLIES[milestone]);
   const neverDefaultViolations = new Set<string>();
   const forbiddenKeyHits = new Set<string>();
   const sensitiveViolations = new Set<string>();
@@ -144,7 +165,7 @@ export function validateIntake(
   for (const [fieldId, answer] of Object.entries(record.answers)) {
     const field = FIELD_INDEX.get(fieldId);
     if (!field) unknownFields.add(fieldId);
-    if (FORBIDDEN_KEY_SET.has(fieldId)) forbiddenKeyHits.add(fieldId);
+    if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(fieldId);
 
     const keyHits = new Set<string>();
     collectForbiddenKeys(answer.value, keyHits);
@@ -163,7 +184,7 @@ export function validateIntake(
 
   const missing: string[] = [];
   for (const field of INTAKE_FIELDS) {
-    if (field.requiredFor !== milestone) continue;
+    if (!field.requiredFor.some((rf) => impliedMilestones.has(rf))) continue;
     const answer = record.answers[field.id];
     if (!answer) {
       missing.push(field.id);

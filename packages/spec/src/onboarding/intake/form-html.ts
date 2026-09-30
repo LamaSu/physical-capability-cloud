@@ -51,13 +51,26 @@ function fieldBadges(field: IntakeFieldDef): string {
   return badges.join("\n        ");
 }
 
+/** Plain-language line for what "I don't know" does for this field (R2 rule
+ *  3) — either points at the research entry that runs, or states the
+ *  physical/decision check the human makes themselves. Omitted when the
+ *  field has no `ifUnknown` (fields no human is ever asked to answer cold). */
+function ifUnknownSection(field: IntakeFieldDef): string {
+  if (!field.ifUnknown) return "";
+  const text =
+    "research" in field.ifUnknown
+      ? `the agent will research this (see "${field.ifUnknown.research}" in the research library)`
+      : field.ifUnknown.check;
+  return `\n        <div class="if-unknown">If you don't know: ${escapeHtml(text)}</div>`;
+}
+
 function fieldSection(field: IntakeFieldDef): string {
   return `      <div class="field" id="${escapeHtml(field.id)}">
         <div class="field-id">${escapeHtml(field.id)}</div>
         <div class="question">${escapeHtml(field.question)}</div>
         <div class="why">${escapeHtml(field.why)}</div>
         ${fieldBadges(field)}
-        <div class="meta">required for: ${escapeHtml(field.requiredFor)}</div>
+        <div class="meta">required for: ${escapeHtml(field.requiredFor.join(", "))}</div>${ifUnknownSection(field)}
       </div>`;
 }
 
@@ -92,6 +105,7 @@ export function buildFormHtml(fields: readonly IntakeFieldDef[]): string {
   .question { font-weight: 600; margin: 0.25rem 0; }
   .why { color: #444; font-size: 0.92rem; margin-bottom: 0.5rem; }
   .meta { font-size: 0.8rem; color: #666; margin-top: 0.4rem; }
+  .if-unknown { font-size: 0.85rem; color: #444; margin-top: 0.4rem; font-style: italic; }
   .badge { display: inline-block; font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 999px; margin: 0.1rem 0.3rem 0.1rem 0; border: 1px solid #999; }
   .badge-class { background: #eef; }
   .badge-never-default { background: #fee; border-color: #c33; color: #900; }

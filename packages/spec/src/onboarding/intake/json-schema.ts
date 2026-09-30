@@ -120,6 +120,7 @@ function fieldAnnotations(field: IntakeFieldDef): Record<string, unknown> {
     "x-pcc-why": field.why,
   };
   if (field.selfDeclaredOnly) annotations["x-pcc-selfDeclaredOnly"] = true;
+  if (field.ifUnknown) annotations["x-pcc-ifUnknown"] = field.ifUnknown;
   if (field.evidencePrimitive) {
     annotations["x-pcc-evidencePrimitive"] = {
       id: field.evidencePrimitive.id,
