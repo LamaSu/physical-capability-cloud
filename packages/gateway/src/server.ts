@@ -5,6 +5,7 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 import { writeAuditHook } from "./services/write-audit-hook.js";
+import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook } from "./services/telemetry-privacy.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -180,7 +181,9 @@ export async function createGateway(port = 3200) {
   initKernelService();
 
   const app = Fastify({
-    logger: true,
+    // Default pino logger, with a request serializer that never logs the public
+    // telemetry sink's raw URL, IP or host details (#458 round 3).
+    logger: GATEWAY_LOGGER_OPTIONS,
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
@@ -387,6 +390,9 @@ export async function createGateway(port = 3200) {
   // POST/PUT/PATCH/DELETE requests to the audit log. The public telemetry sink's
   // audit rows omit the caller's IP and User-Agent (#458 round 1).
   app.addHook("onResponse", writeAuditHook);
+  // An unrouted lookalike of the public telemetry sink gets a fixed 404 before the
+  // default not-found handler can log its raw URL (#458 round 3).
+  app.addHook("onRequest", telemetryLookalikeHook);
 
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);

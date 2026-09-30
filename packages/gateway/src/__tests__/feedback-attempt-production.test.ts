@@ -14,6 +14,8 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vite
 import Fastify, { type FastifyInstance } from "fastify";
 import { auditService } from "../services/audit-service.js";
 import { writeAuditHook } from "../services/write-audit-hook.js";
+import { GATEWAY_LOGGER_OPTIONS, canonicalRequestPath, isTelemetrySinkRequest, telemetryLookalikeHook } from "../services/telemetry-privacy.js";
+import { Writable } from "node:stream";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,12 +39,22 @@ beforeAll(async () => {
   mod = await import("../routes/feedback.js");
 });
 
+let logLines: string[] = [];
+const logStream = new Writable({
+  write(chunk, _enc, cb) {
+    logLines.push(String(chunk));
+    cb();
+  },
+});
+
 async function buildProductionApp(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
+  // The production logger configuration (server.ts), writing to a capture stream.
+  const app = Fastify({ logger: { ...GATEWAY_LOGGER_OPTIONS, level: "info", stream: logStream }, bodyLimit: 1_048_576, trustProxy: true });
   app.decorateRequest("userId", null);
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
   app.addHook("onResponse", writeAuditHook);
+  app.addHook("onRequest", telemetryLookalikeHook);
   await app.register(mod.feedbackRoutes);
   app.post("/api/other-write", async () => ({ ok: true }));
   await app.ready();
@@ -52,6 +64,7 @@ async function buildProductionApp(): Promise<FastifyInstance> {
 let app: FastifyInstance;
 
 beforeEach(async () => {
+  logLines = [];
   rmSync(file, { force: true });
   mod.__resetFeedbackRateLimit();
   mod.__resetFeedbackDedup();
@@ -148,6 +161,51 @@ describe("attempt reports through the production wiring", () => {
     await settle();
     const writeAudit = spy.mock.calls.map((c) => c[0] as Audit).find((a) => a.eventType === "http.write" && String(a.metadata?.url).startsWith("/api/other-write"));
     expect(writeAudit?.metadata?.url).toBe("/api/other-write?page=2");
+  });
+
+  it("treat malformed and encoded lookalikes of the sink as the sink (round 3)", async () => {
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => true) as never);
+    for (const url of ["/api/feedback//token-abc", "/api/%66eedback/token-def?x=1", "/API/Feedback/token-ghi"]) {
+      await app.inject({ method: "POST", url, headers: { "user-agent": UA, "x-forwarded-for": "203.0.113.9" }, payload: attempt() });
+    }
+    await settle();
+    const writes = spy.mock.calls.map((c) => c[0] as Audit).filter((a) => a.eventType === "http.write");
+    expect(writes).toHaveLength(3);
+    for (const w of writes) {
+      expect(w.metadata).toMatchObject({ url: "/api/feedback", route_matched: false });
+      expect(w.ip).toBeUndefined();
+      expect(w.userAgent).toBeUndefined();
+    }
+    const everything = JSON.stringify(spy.mock.calls) + logLines.join("");
+    for (const leak of ["token-abc", "token-def", "token-ghi", "203.0.113.9", "alice@example.com"]) expect(everything).not.toContain(leak);
+  });
+
+  it("keep the sink's raw URL, IP and host out of the production request log, and leave other routes' log lines as they were (round 3)", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback?token=abc123456789&email=alice@example.com", headers: { "x-forwarded-for": "203.0.113.9" }, payload: attempt() });
+    await app.inject({ method: "POST", url: "/api/other-write?page=2", headers: { "x-forwarded-for": "198.51.100.4" }, payload: {} });
+    const all = logLines.join("");
+    expect(all).toContain("incoming request");
+    for (const leak of ["abc123456789", "alice@example.com", "203.0.113.9"]) expect(all).not.toContain(leak);
+    const sinkLine = logLines.map((l) => JSON.parse(l)).find((l) => l.msg === "incoming request" && l.req?.url === "/api/feedback");
+    expect(sinkLine?.req).toEqual({ method: "POST", url: "/api/feedback" });
+    const otherLine = logLines.map((l) => JSON.parse(l)).find((l) => l.msg === "incoming request" && String(l.req?.url).startsWith("/api/other-write"));
+    expect(otherLine?.req).toMatchObject({ method: "POST", url: "/api/other-write?page=2", remoteAddress: "198.51.100.4" });
+  });
+});
+
+describe("telemetry-privacy path rules", () => {
+  it("canonicalises the path: no query or fragment, decoded, lower-cased, single slashes", () => {
+    expect(canonicalRequestPath("/API//Feedback/%61bc?x=1#frag")).toBe("/api/feedback/abc");
+    expect(canonicalRequestPath("/api/feedback/%E0%A4%A")).toBe("/api/feedback/%e0%a4%a");
+  });
+
+  it("treats the sink and anything imitating it as the sink, and nothing else", () => {
+    for (const u of ["/api/feedback", "/api/feedback?t=1", "/api/feedback//x", "/api/%66eedback", "/API/FEEDBACK/agent-report"]) {
+      expect(isTelemetrySinkRequest(u)).toBe(true);
+    }
+    for (const u of ["/api/other-write", "/api/feeds", "/feedback", "/api/admin/feedback"]) {
+      expect(isTelemetrySinkRequest(u)).toBe(false);
+    }
   });
 });
 

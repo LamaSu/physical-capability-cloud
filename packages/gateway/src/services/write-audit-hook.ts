@@ -3,17 +3,14 @@
  * and DELETE to the audit log, so each state-changing call is captured without
  * per-route boilerplate. Individual routes may also log richer events.
  *
- * Moved out of server.ts unchanged, with one exception (#458 rounds 1-2): for the
- * public, unauthenticated telemetry sink the caller's IP and User-Agent are not
- * kept, and the URL is the registered route path, never the raw URL with its
- * query string. Anyone can post there, and a User-Agent or a query string can
- * carry a token or an email.
+ * Moved out of server.ts unchanged, with one exception (#458 rounds 1-3): for a
+ * request that targets or imitates the public telemetry sink, the audit keeps
+ * the route path only (the canonical sink path when no route matched) and never
+ * the caller's IP, User-Agent or raw URL. See services/telemetry-privacy.ts.
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
-
-/** Routes (as registered) whose write audit omits the caller's IP and User-Agent. */
-export const WRITE_AUDIT_NO_CLIENT_META = new Set(["/api/feedback"]);
+import { auditableUrl, isTelemetrySinkRequest } from "./telemetry-privacy.js";
 
 export async function writeAuditHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const method = request.method;
@@ -22,7 +19,8 @@ export async function writeAuditHook(request: FastifyRequest, reply: FastifyRepl
   const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
     request.headers.authorization ? "authenticated" : "anonymous"
   );
-  const omitClient = WRITE_AUDIT_NO_CLIENT_META.has(request.routeOptions?.url ?? "");
+  const omitClient = isTelemetrySinkRequest(request.url);
+  const routeUrl = request.routeOptions?.url || undefined;
 
   try {
     const { auditService: audit } = await import("./audit-service.js");
@@ -33,7 +31,8 @@ export async function writeAuditHook(request: FastifyRequest, reply: FastifyRepl
       action: method.toLowerCase(),
       metadata: {
         method,
-        url: omitClient ? (request.routeOptions?.url ?? request.url.split("?")[0]) : request.url,
+        url: auditableUrl(request.url, routeUrl),
+        ...(omitClient && routeUrl === undefined ? { route_matched: false } : {}),
         statusCode: reply.statusCode,
         duration_ms: Math.round(reply.elapsedTime ?? 0),
       },
