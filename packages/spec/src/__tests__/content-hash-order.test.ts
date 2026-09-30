@@ -8,7 +8,13 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { canonicalize } from "../util/canonical.js";
 import { compareCodeUnits } from "../util/code-unit-order.js";
-import { computeMapSnapshotHash, type MapEntry } from "../types/registry.js";
+import {
+  computeMapSnapshotHash,
+  computeSetSnapshotHash,
+  MapEntrySchema,
+  SetEntrySchema,
+  type MapEntry,
+} from "../types/registry.js";
 import { computeWorkSchemaHash } from "../types/work-schema.js";
 import { assertJobSpecIsWellFormed, computeJobSpecHash, type JobSpec } from "../types/job-spec.js";
 import vectors from "../util/code-unit-order.vectors.json" with { type: "json" };
@@ -42,6 +48,38 @@ describe("computeMapSnapshotHash sorts keys by code unit", () => {
   it("is not the hash over the ICU order the vector's entries are listed in", () => {
     expect(sha(canonicalize({ entries }))).toBe(vectors.mapSnapshot.negativeIcuOrderHash);
     expect(computeMapSnapshotHash(entries)).not.toBe(vectors.mapSnapshot.negativeIcuOrderHash);
+  });
+});
+
+// E1 finding 4: toLowerCase() applies full, Unicode-version-dependent case
+// mapping, so hash-bearing registry keys are printable ASCII (0x21-0x7e),
+// checked before lowercasing.
+describe("registry keys are printable ASCII before lowercasing", () => {
+  const refused = ["\u0130", "\u212A", "\uA7CB", "\u00e9", "a b", "a\t", "a\u007f", "\ud800", ""];
+
+  it("refuses U+0130, which JavaScript lowercases to two code units", () => {
+    expect("\u0130".toLowerCase()).toBe("i\u0307");
+    expect(() => computeSetSnapshotHash(["\u0130"])).toThrow(/printable ASCII/);
+    expect(() => computeMapSnapshotHash([{ key: "\u0130", value: 1 }])).toThrow(/printable ASCII/);
+  });
+
+  it("refuses non-ASCII, space, controls and the empty string in sets, maps and the entry schemas", () => {
+    // U+212A (Kelvin sign) lowercases to ASCII "k": the check must run before lowercasing.
+    for (const bad of refused) {
+      expect(() => computeSetSnapshotHash(["ok", bad])).toThrow(/printable ASCII/);
+      expect(() => computeMapSnapshotHash([{ key: bad, value: 1 }])).toThrow(/printable ASCII/);
+      expect(SetEntrySchema.safeParse(bad).success).toBe(false);
+      expect(MapEntrySchema.safeParse({ key: bad, value: 1 }).success).toBe(false);
+    }
+  });
+
+  it("accepts every printable ASCII character; lowercasing then touches A-Z only", () => {
+    const printable = Array.from({ length: 0x7e - 0x21 + 1 }, (_, i) => String.fromCharCode(0x21 + i)).join("");
+    expect(SetEntrySchema.safeParse(printable).success).toBe(true);
+    expect(MapEntrySchema.safeParse({ key: printable, value: 1 }).success).toBe(true);
+    const asciiLower = printable.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+    expect(computeSetSnapshotHash([printable])).toBe(computeSetSnapshotHash([asciiLower]));
+    expect(computeMapSnapshotHash([{ key: printable, value: 1 }])).toBe(computeMapSnapshotHash([{ key: asciiLower, value: 1 }]));
   });
 });
 
