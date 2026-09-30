@@ -697,6 +697,7 @@ export async function setupRoutes(app: FastifyInstance) {
   // ── POST /api/setup/test-job ──────────────────────────────────────────────
 
   app.post<{ Body: TestJobBody }>("/api/setup/test-job", async (req, reply) => {
+   try {
     const { kernelId, deviceId, assuranceTier = 0 } = req.body ?? {};
 
     // N59 (board) / ADK item 8: a test job must exercise the OPERATOR's own
@@ -731,13 +732,19 @@ export async function setupRoutes(app: FastifyInstance) {
     }
 
     // Owner check: the authenticated principal apiGate resolved must be the
-    // kernel's operator. An unowned placeholder address is never a match.
-    const principal =
+    // kernel's operator. Both identities are trimmed (N59 F3: a whitespace
+    // principal must not match a whitespace/legacy operatorAddress), a
+    // normalized-empty principal is rejected, and the zero address is matched
+    // case-insensitively as an unowned placeholder.
+    const principal = (
       (typeof req.userId === "string" && req.userId) ||
       (typeof req.operatorId === "string" && req.operatorId) ||
-      null;
-    const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
-    if (!principal || UNOWNED.has(kernel.operatorAddress) || kernel.operatorAddress !== principal) {
+      ""
+    ).trim();
+    const operatorAddress = (kernel.operatorAddress ?? "").trim();
+    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+    const isUnowned = operatorAddress === "" || operatorAddress.toLowerCase() === ZERO_ADDRESS;
+    if (!principal || isUnowned || operatorAddress !== principal) {
       return reply.code(403).send({
         error: "not_kernel_operator",
         message: "Only this kernel's operator may run its test job.",
@@ -772,6 +779,24 @@ export async function setupRoutes(app: FastifyInstance) {
       return reply.code(503).send({
         error: "kernel_service_not_ready",
         message: "KernelService is not initialized",
+        ran: false,
+        passed: false,
+      });
+    }
+
+    // N59 F1 (CRITICAL): the gateway runs jobs only for its OWN in-process
+    // kernel. The runner map is keyed by device id alone, so without this a
+    // device-id that collides with another kernel's loaded device could be
+    // actuated by this kernel's owner. Bind the run to the service's kernel
+    // identity before anything is loaded or dispatched.
+    if (svc.kernelId !== kernelId) {
+      return reply.code(409).send({
+        error: "gateway_does_not_run_this_kernel",
+        message:
+          `This gateway runs kernel "${svc.kernelId}", not "${kernelId}". Run the test job on ` +
+          "the node that operates this kernel (for example `pcc-node`), which submits real " +
+          "evidence back to the gateway.",
+        kernelId,
         ran: false,
         passed: false,
       });
@@ -896,18 +921,37 @@ export async function setupRoutes(app: FastifyInstance) {
       }
     }
 
-    // A real adapter ran here (ran:true). It passes only when that run
-    // reached "completed"; "failed", "unknown" (ran without DB tracking) and a
-    // poll timeout are not passes.
+    // A real adapter ran here (ran:true). It passes only when that run reached
+    // "completed" AND the device is not a simulator (N59 F2: a mock/simulated
+    // adapter's completion is not a hardware pass). "failed", "unknown" (ran
+    // without DB tracking) and a poll timeout are not passes either.
+    const simulated = deviceRow.adapterType === "mock" || svc.deviceIsSimulated(deviceId);
     return {
       jobId,
       deviceId: submitResult.deviceId,
       status: finalStatus,
       ran: true,
-      passed: finalStatus === "completed",
+      passed: finalStatus === "completed" && !simulated,
+      simulated,
+      passReason: simulated
+        ? "simulated: a mock/simulator run is not a hardware pass (real verification is D4a)"
+        : finalStatus === "completed"
+          ? null
+          : `not completed: status ${finalStatus}`,
       evidenceBundleId: evidenceBundleId ?? null,
       duration: Date.now() - startTime,
     };
+   } catch (err) {
+     // N59 F4: every reply from this route carries ran/passed, even an
+     // unexpected internal error, so no caller reads a bare Fastify 500 as
+     // an ambiguous result.
+     return reply.code(500).send({
+       error: "test_job_error",
+       message: err instanceof Error ? err.message : String(err),
+       ran: false,
+       passed: false,
+     });
+   }
   });
 
   // ── GET /api/setup/status ────────────────────────────────────────────────

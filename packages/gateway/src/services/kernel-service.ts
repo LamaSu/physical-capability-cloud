@@ -210,7 +210,27 @@ export class KernelService {
   refreshDeviceFromDb(deviceId: string): { installed: boolean; reason?: string } {
     const row = getRepos().kernels.findDeviceById(deviceId);
     if (!row) return { installed: false, reason: "row_not_found" };
+    // N59 F1: never load a device from another kernel into this service's
+    // runtime. The runners map is keyed by device id alone, and the emitter and
+    // adapters here belong to THIS kernel; loading a foreign row would let a
+    // device-id collision actuate the wrong kernel's hardware.
+    if (row.kernelId !== this.config.kernelId) {
+      return { installed: false, reason: "foreign_kernel" };
+    }
     return this.installMachineFromDbRow(row);
+  }
+
+  /**
+   * Whether the loaded runner for `deviceId` is a simulator/mock rather than
+   * real hardware. Used by /api/setup/test-job so a simulated completion is
+   * never reported as passed. Returns true when nothing real is loaded.
+   * (Authoritative physical verification is D4a, #428, against the kernel's
+   * registered key; this only keeps an obvious simulator from passing.)
+   */
+  deviceIsSimulated(deviceId: string): boolean {
+    const machine = this.machines.get(deviceId);
+    if (!machine) return true;
+    return /mock|chatterbox|stub|simulat|fake/i.test(machine.constructor?.name ?? "");
   }
 
   /**

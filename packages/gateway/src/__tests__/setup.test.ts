@@ -42,9 +42,11 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
     getJobStatus: vi.fn().mockResolvedValue({ status: "completed", progress: 100 }),
     listDevices: vi.fn().mockResolvedValue(_mockDevices),
     checkDeviceHealth: vi.fn().mockResolvedValue({ healthy: true, details: "idle" }),
-    // test-job (N59): whether a real runner is loaded here, and DB refresh.
+    // test-job (N59): whether a real runner is loaded here, a DB refresh, and
+    // whether the loaded runner is a simulator (a mock never passes).
     hasRunner: vi.fn().mockReturnValue(true),
     refreshDeviceFromDb: vi.fn().mockReturnValue({ installed: true }),
+    deviceIsSimulated: vi.fn().mockReturnValue(false),
   };
 
   return {
@@ -119,35 +121,36 @@ async function buildApp(): Promise<FastifyInstance> {
 
 // A kernel owned by OWNER, with one machine device, for the test-job cases.
 const OWNER = "op-owner";
-function seedOwnedKernelAndDevice(): void {
-  const repos = getRepos();
+function seedKernel(id: string, operatorAddress: string): void {
   const now = new Date().toISOString();
-  repos.kernels.insert({
-    id: "kernel-owned",
-    name: "Owned Kernel",
-    operatorAddress: OWNER,
-    location: { lat: 0, lng: 0 },
-    physicalAddress: "1 Lab St",
-    maxAssuranceTier: 2,
-    publicKey: "pk",
-    reputation: 0,
-    totalJobsCompleted: 0,
-    status: "online",
-    registeredAt: now,
-    lastHeartbeat: now,
-    version: "1",
+  getRepos().kernels.insert({
+    id, name: id, operatorAddress,
+    location: { lat: 0, lng: 0 }, physicalAddress: "1 Lab St", maxAssuranceTier: 2,
+    publicKey: "pk", reputation: 0, totalJobsCompleted: 0, status: "online",
+    registeredAt: now, lastHeartbeat: now, version: "1",
   } as never);
-  repos.kernels.insertDevice({
-    id: "dev-owned",
-    kernelId: "kernel-owned",
-    type: "machine",
-    model: "SIM",
-    firmware: "1.0",
-    status: "idle",
-    contributesToCapabilities: [],
-    lastUpdated: now,
-    adapterType: "mock",
+}
+
+function seedDevice(id: string, kernelId: string, adapterType: string): void {
+  getRepos().kernels.insertDevice({
+    id, kernelId, type: "machine", model: "SIM", firmware: "1.0", status: "idle",
+    contributesToCapabilities: [], lastUpdated: new Date().toISOString(), adapterType,
   } as never);
+}
+
+function seedOwnedKernelAndDevice(): void {
+  // The gateway's in-process KernelService runs kernel "kernel-setup-test"
+  // (the mock's kernelId), so test jobs pass only for THAT kernel (N59 F1).
+  seedKernel("kernel-setup-test", OWNER);
+  seedDevice("dev-owned", "kernel-setup-test", "opentrons"); // a real (non-mock) adapter
+  seedDevice("dev-mock", "kernel-setup-test", "mock");       // a simulator -> never passes
+  // A second kernel the OWNER also owns, but which THIS gateway does not run.
+  seedKernel("kernel-other", OWNER);
+  seedDevice("dev-other", "kernel-other", "opentrons");
+  // A kernel with a whitespace-only operatorAddress (legacy/corrupt). The owner
+  // check runs before the gateway-kernel (F1) check, so this is the F3 gate.
+  seedKernel("kernel-ws", "   ");
+  seedDevice("dev-ws", "kernel-ws", "opentrons");
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +694,9 @@ describe("Setup API", () => {
       hasRunner: ReturnType<typeof vi.fn>;
       getJobStatus: ReturnType<typeof vi.fn>;
       submitJob: ReturnType<typeof vi.fn>;
+      deviceIsSimulated: ReturnType<typeof vi.fn>;
     } })._mockService;
+    const GW_KERNEL = "kernel-setup-test"; // the kernel this gateway's service runs
     const owner = { "x-test-key": OWNER };
     const post = (payload: unknown, headers: Record<string, string> = owner) =>
       app.inject({ method: "POST", url: "/api/setup/test-job", headers, payload });
@@ -701,6 +706,7 @@ describe("Setup API", () => {
       _svc.hasRunner.mockReturnValue(true);
       _svc.getJobStatus.mockResolvedValue({ status: "completed", progress: 100 });
       _svc.submitJob.mockResolvedValue({ jobId: "test-job-mock", deviceId: "dev-owned", status: "accepted" });
+      _svc.deviceIsSimulated.mockReturnValue(false);
     });
 
     it("requires kernelId", async () => {
@@ -716,25 +722,43 @@ describe("Setup API", () => {
     });
 
     it("403s a caller who is not the kernel operator, and an anonymous caller", async () => {
-      const stranger = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" }, { "x-test-key": "someone-else" });
+      const stranger = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, { "x-test-key": "someone-else" });
       expect(stranger.statusCode).toBe(403);
       expect(stranger.json()).toMatchObject({ error: "not_kernel_operator", ran: false, passed: false });
-      const anon = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" }, {});
+      const anon = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, {});
       expect(anon.statusCode).toBe(403);
     });
 
+    it("403s a whitespace principal against a whitespace/legacy operatorAddress (F3)", async () => {
+      // kernel-ws has operatorAddress "   ". A whitespace principal must NOT
+      // match it: both normalize to empty (unowned), so the owner check refuses.
+      const res = await post({ kernelId: "kernel-ws", deviceId: "dev-ws" }, { "x-test-key": "   " });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("not_kernel_operator");
+      expect(_svc.submitJob).not.toHaveBeenCalled();
+    });
+
     it("requires a deviceId, and it must be on the kernel", async () => {
-      const missing = await post({ kernelId: "kernel-owned" });
+      const missing = await post({ kernelId: GW_KERNEL });
       expect(missing.statusCode).toBe(400);
       expect(missing.json().error).toBe("device_id_required");
-      const foreign = await post({ kernelId: "kernel-owned", deviceId: "dev-elsewhere" });
+      const foreign = await post({ kernelId: GW_KERNEL, deviceId: "dev-elsewhere" });
       expect(foreign.statusCode).toBe(404);
       expect(foreign.json().error).toBe("device_not_on_kernel");
     });
 
+    it("refuses a kernel this gateway does not run, even for its owner (F1)", async () => {
+      // kernel-other is registered and owned by OWNER, but the gateway's service
+      // runs kernel-setup-test. A device-id collision must not actuate it.
+      const res = await post({ kernelId: "kernel-other", deviceId: "dev-other" });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "gateway_does_not_run_this_kernel", ran: false, passed: false });
+      expect(_svc.submitJob).not.toHaveBeenCalled();
+    });
+
     it("refuses a device this gateway does not run — never a self-attested pass", async () => {
       _svc.hasRunner.mockReturnValue(false);
-      const res = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" });
+      const res = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" });
       expect(res.statusCode).toBe(409);
       const body = res.json();
       expect(body).toMatchObject({ error: "device_not_runnable_here", ran: false, passed: false });
@@ -742,20 +766,44 @@ describe("Setup API", () => {
       expect(_svc.submitJob).not.toHaveBeenCalled();
     });
 
-    it("runs the operator's own device and passes only when the run completes", async () => {
-      const res = await post({ kernelId: "kernel-owned", deviceId: "dev-owned", assuranceTier: 0 });
+    it("runs the operator's own real device and passes only when the run completes", async () => {
+      const res = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned", assuranceTier: 0 });
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body).toMatchObject({ deviceId: "dev-owned", status: "completed", ran: true, passed: true });
+      expect(body).toMatchObject({ deviceId: "dev-owned", status: "completed", ran: true, passed: true, simulated: false });
       expect(body.jobId).toMatch(/^test-job-/);
       expect(typeof body.duration).toBe("number");
     });
 
+    it("never passes a simulated/mock device, even on completed (F2)", async () => {
+      // By the device's adapterType "mock"...
+      const byType = await post({ kernelId: GW_KERNEL, deviceId: "dev-mock" });
+      expect(byType.statusCode).toBe(200);
+      expect(byType.json()).toMatchObject({ status: "completed", ran: true, passed: false, simulated: true });
+      // ...and by the runner reporting itself simulated, even for a non-mock adapterType.
+      _svc.deviceIsSimulated.mockReturnValue(true);
+      const byRunner = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" });
+      expect(byRunner.json()).toMatchObject({ ran: true, passed: false, simulated: true });
+    });
+
     it("does not pass when the run does not complete", async () => {
       _svc.getJobStatus.mockResolvedValue({ status: "failed", progress: 0 });
-      const res = await post({ kernelId: "kernel-owned", deviceId: "dev-owned" });
+      const res = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ ran: true, passed: false, status: "failed" });
+    });
+
+    it("an uncaught internal error still returns ran/passed (F4)", async () => {
+      const spy = vi.spyOn(getRepos().kernels, "findById").mockImplementation(() => {
+        throw new Error("db boom");
+      });
+      try {
+        const res = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" });
+        expect(res.statusCode).toBe(500);
+        expect(res.json()).toMatchObject({ ran: false, passed: false });
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 
