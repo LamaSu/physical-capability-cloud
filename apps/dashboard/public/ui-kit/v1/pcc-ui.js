@@ -387,12 +387,15 @@
     RELEASE_ALLOCATED: 'allocated', REFUND_ALLOCATED: 'allocated',
     SETTLED_RELEASED: 'settled', SETTLED_REFUNDED: 'settled'
   });
-  // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass).
+  // Generic (non-money) run/action states. NEVER consulted for money data (see dataStatusClass). Green
+  // means money finally reached the payee and nothing else is ever green, so a generic success word is a
+  // NEUTRAL acknowledgement (st-ack): whatever the routing heuristic decides, it cannot paint money green
+  // (astra r2 on #313, F2).
   var GENERIC_STATES = Object.freeze({
     RUNNING: 'st-running', IN_PROGRESS: 'st-running', PROGRESS: 'st-running', STREAMING: 'st-running', BUILDING: 'st-running', CONNECTING: 'st-running',
     PENDING: 'st-waiting', QUEUED: 'st-waiting', WAITING: 'st-waiting', PAUSED: 'st-waiting', REVIEW: 'st-waiting', CONFIRM: 'st-waiting', NEEDS_INPUT: 'st-waiting', NEEDS_YOU: 'st-waiting',
     ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
-    DONE: 'st-settled', COMPLETE: 'st-settled', COMPLETED: 'st-settled', OK: 'st-settled', SUCCESS: 'st-settled', SUCCEEDED: 'st-settled', RESOLVED: 'st-settled', READY: 'st-settled'
+    DONE: 'st-ack', COMPLETE: 'st-ack', COMPLETED: 'st-ack', OK: 'st-ack', SUCCESS: 'st-ack', SUCCEEDED: 'st-ack', RESOLVED: 'st-ack', READY: 'st-ack'
   });
   // NON-money data only (a job, a kernel): generic run/action states first, then the flat money
   // table (which has no green). Callers route money data away from here (dataStatusClass).
@@ -490,9 +493,23 @@
     }
     return false;
   }
-  function dataStatusClass(bindingPath, row, s) {
+  // The only routes whose LIVE reads may present a FINAL settlement state (mirrors the spec's
+  // SETTLEMENT_READ_ROUTE; the unit id is the route's own UNIT_ID_RE).
+  var SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+  // DISPLAY class of a settlement record given where it came from -> [pillClass, label, text]. Mirrors
+  // classifySettlementRead: a FINAL V-next state (settled 8, refunded 9) needs a LIVE read of an exact
+  // per-unit settlement route. Field shape is not provenance (astra r2 on #313, F1): a baked snapshot,
+  // a fallback, a stream event or a settled-shaped body from any other route is unknown.
+  function settlementReadClass(o, bindingPath, live) {
+    var rc = settlementRecordClass(o);
+    if (!isVNextRecord(o) || (rc[0] !== 'st-settled' && rc[0] !== 'st-refunded')) return rc;
+    var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
+    if (live === true && SETTLEMENT_READ_ROUTE.test(p)) return rc;
+    return ['st-unknown', 'final state not shown - not a live read of a settlement route', rc[2]];
+  }
+  function dataStatusClass(bindingPath, row, s, live) {
     if (!isMoneyData(bindingPath, row)) return statusClass(s);
-    if (isVNextRecord(row)) return settlementRecordClass(row)[0]; // a read model: by its schema
+    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0]; // a read model: schema AND source
     return moneyStatusClass(s); // a bare money word: never green
   }
   // </status-map v2>
@@ -846,7 +863,7 @@
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st), String(st)));
+          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, !r.stale), String(st)));
         }
         listNode.appendChild(li);
       }
@@ -977,13 +994,14 @@
       elapsed.textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed';
     }, 1000);
 
-    function apply(statusVal, latestVal, data, full) {
+    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
+    function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
-        var rc = settlementRecordClass(data); // a settlement read model: by its schema
+        var rc = settlementReadClass(data, bpath, live); // a settlement read model: by its schema AND source
         pill.textContent = rc[2]; pill.className = 'pcc-pill ' + rc[0];
       } else if (statusVal != null) {
-        pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + dataStatusClass(bpath, data, statusVal);
+        pill.textContent = String(statusVal); pill.className = 'pcc-pill ' + dataStatusClass(bpath, data, statusVal, live);
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
         pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
@@ -998,7 +1016,7 @@
 
     if (ctx.mode === 'snapshot') {
       var snap = ctx.snapshot[w.binding.path];
-      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true);
+      apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true, false);
       var stat = dot(snap, w.statusFrom);
       pill.textContent = String(stat != null ? stat : 'snapshot');
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
@@ -1016,7 +1034,7 @@
     function poll(delay) {
       if (stopped) return;
       ctx.tx.getJSON(w.binding.path, w.binding.query).then(function (d) {
-        apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true);
+        apply(dot(d, w.statusFrom), dot(d, w.latestFrom), d, true, true);
         // timeline feed if the response carries one
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
         if (Array.isArray(tl)) { clear(feed); for (var i = 0; i < tl.length; i++) feedLine((tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' · ' : '') + (tl[i].type || JSON.stringify(tl[i]))); }
@@ -1024,6 +1042,8 @@
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
+        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
+        pill.textContent = 'unknown · read failed'; pill.className = 'pcc-pill st-unknown';
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
       });
@@ -1032,7 +1052,7 @@
     if (w.binding.sse) {
       ctx.tx.streamSSE(w.binding.sse, function (ev) {
         apply(dot(ev, w.statusFrom) != null ? dot(ev, w.statusFrom) : ev.status,
-              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false);
+              dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
         feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' · ' : '') + (ev.type || ev.status || JSON.stringify(ev)));
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll
@@ -1151,7 +1171,7 @@
       // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
       // or "not a settlement record"), never by a bare status word. Never inferred from a count or
       // from the receipt's existence (contract rule 12).
-      var rec = settlementRecordClass(e);
+      var rec = settlementReadClass(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot');
       var railRow = el('div', 'pcc-receipt-rail');
       railRow.appendChild(el('span', 'pcc-pill ' + rec[0], rec[2]));
       if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + rec[1]));
@@ -1656,6 +1676,8 @@
       '.pcc-pill.st-running{background:var(--info-dim);color:var(--info);}',
       '.pcc-pill.st-refunded{background:var(--wait-dim);color:var(--wait);}',
       '.pcc-pill.st-unknown{background:var(--surface-3);color:var(--ink-3);}',
+      /* neutral acknowledgement: an HTTP 2xx is never settlement (ruling 2) -- no hue */
+      '.pcc-pill.st-ack{background:var(--surface-3);color:var(--ink-2);}',
       /* type helpers */
       '.pcc-muted{color:var(--ink-3);font:400 13px/18px var(--font);}',
       '.pcc-mono{font-family:var(--mono);font-size:12px;color:var(--ink-3);}',

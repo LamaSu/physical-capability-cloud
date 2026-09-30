@@ -22,6 +22,7 @@ import path from "node:path";
 import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
+  classifySettlementRead, SETTLEMENT_READ_ROUTE,
 } from "../money/money-status.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,8 @@ type KitRegion = {
   VNEXT_STATE_PRESENTATION: Record<string, [string, string]>;
   VNEXT_PHASE: Record<string, string>;
   settlementRecordClass: (r: unknown) => [string, string | null, string];
+  settlementReadClass: (r: unknown, path: unknown, live: unknown) => [string, string | null, string];
+  SETTLEMENT_READ_ROUTE: RegExp;
 };
 
 function extractRegion(): KitRegion {
@@ -52,7 +55,7 @@ function extractRegion(): KitRegion {
       " this.statusClass = statusClass; this.moneyStatusClass = moneyStatusClass;" +
       " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;" +
       " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION; this.VNEXT_PHASE = VNEXT_PHASE;" +
-      " this.settlementRecordClass = settlementRecordClass;",
+      " this.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.SETTLEMENT_READ_ROUTE = SETTLEMENT_READ_ROUTE;",
     ctx,
   );
   return ctx as unknown as KitRegion;
@@ -93,10 +96,10 @@ describe("shipped kit money table == canonical @pcc/spec map", () => {
     }
   });
 
-  it("off-schema success words never green a MONEY surface (but still tone a generic one)", () => {
+  it("off-schema success words never green a MONEY surface, and a generic surface reads them NEUTRAL (never green)", () => {
     for (const w of ["done", "success", "ok", "ready", "resolved", "succeeded", "complete"]) {
       expect(kit.moneyStatusClass(w), w).toBe("st-unknown");
-      expect(kit.statusClass(w), w).toBe("st-settled"); // a generic run/action surface
+      expect(kit.statusClass(w), w).toBe("st-ack"); // astra r2 F2: nothing but a live settlement read is green
     }
   });
 
@@ -115,8 +118,8 @@ describe("shipped kit money table == canonical @pcc/spec map", () => {
       expect(kit.dataStatusClass("/api/some/unlisted/read", { status: w }, w), w).not.toBe("st-settled"); // fail closed
     }
     // a non-money read without money fields keeps generic tones (a completed JOB is done)
-    expect(kit.dataStatusClass("/api/jobs", { status: "completed" }, "completed")).toBe("st-settled");
-    expect(kit.dataStatusClass("/api/jobs/j1", { status: "done" }, "done")).toBe("st-settled");
+    expect(kit.dataStatusClass("/api/jobs", { status: "completed" }, "completed")).toBe("st-ack"); // neutral, never green
+    expect(kit.dataStatusClass("/api/jobs/j1", { status: "done" }, "done")).toBe("st-ack");
     // ...but a job row that carries money is money data
     expect(kit.dataStatusClass("/api/jobs", { status: "completed", amount: "5" }, "completed")).toBe("st-waiting");
     expect(kit.dataStatusClass("/api/jobs", { status: "success", escrowAddress: "0xabc" }, "success")).toBe("st-unknown");
@@ -205,11 +208,11 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
     expect(r.rail).toContain("operator NOT paid");
   });
 
-  it("a genuine final release (a consistent V-next receipt) renders settled with its direction label", async () => {
+  it("a consistent V-next receipt in a baked SNAPSHOT is not shown as final (astra r2 F1: shape is not provenance)", async () => {
     const r = await renderedPill({ finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" }); // the /receipt wire shape
-    expect(r.cls).toContain("st-settled");
-    expect(r.text).toBe("SETTLED_RELEASED");
-    expect(r.rail).toContain("payout distribution discharged");
+    expect(r.cls).toContain("st-unknown");
+    expect(r.rail).toContain("final state not shown - not a live read of a settlement route");
+    // the LIVE, exact-route case (green, with its direction label) is pinned in the "astra r2" block below
   });
 
   it("a bare status word, even SETTLED_RELEASED, is not a settlement read (never green)", async () => {
@@ -258,7 +261,7 @@ describe("reviewer-bravo F3/F4: 'completed' and generic success words never gree
 
   it("a JOB list keeps generic tones for non-money rows (completed job = done)", async () => {
     const pills = await listPills("/api/jobs", [{ id: "j1", status: "completed" }, { id: "j2", status: "completed", amount: "5" }]);
-    expect(pills[0]).toContain("st-settled");
+    expect(pills[0]).toContain("st-ack"); // a completed job: neutral, never green
     expect(pills[1]).toContain("st-waiting"); // a paid job row is money data
   });
 });
@@ -356,7 +359,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
 
   it("a V-next receipt with no payer, payee, currency or rail invents none of them", async () => {
     const r = await receiptOf(RC, { chainId: 84532, escrow: "0xE", unitId: "u1", finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", economics: null });
-    expect(r.cls).toContain("st-settled");
+    expect(r.cls).toContain("st-unknown"); // a snapshot is never shown as final
     expect(r.body).toContain("payer not reported");
     expect(r.body).toContain("payee not reported");
     expect(r.body).toContain("amount not reported");
@@ -370,7 +373,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
 
   it("a real V-next receipt's economics.amount (base units, no decimals) is never shown as a sum", async () => {
     const r = await receiptOf(RC, settledReceipt(ECON));
-    expect(r.cls).toContain("st-settled");
+    expect(r.cls).toContain("st-unknown"); // a snapshot is never shown as final
     expect(r.body).toContain("1000000 base units (decimals not reported)");
     expect(r.body).not.toContain("1,000,000");
     expect(r.body).not.toContain("USDC");
@@ -399,7 +402,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
   it("a /lifecycle read with a numeric unitState renders by its ordinal; a disagreement is unknown", async () => {
     const LC = "/api/settlement/units/u1/lifecycle";
     const ok = await receiptOf(LC, lifecycle(8));
-    expect(ok.cls).toContain("st-settled");
+    expect(ok.cls).toContain("st-unknown"); // named by its ordinal, but a snapshot is never shown as final
     expect(ok.text).toBe("SETTLED_RELEASED");
     const six = await receiptOf(LC, lifecycle(6));
     expect(six.cls).toContain("st-waiting");
@@ -418,7 +421,7 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
 
   it("a run over a settlement read model is classified by its schema", async () => {
     const g = await runPill("/api/settlement/units/u1/lifecycle", lifecycle(8));
-    expect(g.cls).toContain("st-settled");
+    expect(g.cls).toContain("st-unknown"); // a snapshot run is never shown as final
     const w = await runPill("/api/settlement/units/u1/lifecycle", lifecycle(7));
     expect(w.cls).toContain("st-waiting");
   });
@@ -431,5 +434,102 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
   it("a full run snapshot with NO status reads unknown (an earlier state is never kept)", async () => {
     const r = await runPill("/api/jobs/j1", { id: "j1", message: "tick" });
     expect(r.cls).toContain("st-unknown");
+  });
+});
+
+// ── astra round 2 on #313 @8f946499 (verify before fix): each finding reproduced by a failing test ──
+describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an exact settlement route", () => {
+  const UNIT = "0x" + "ab".repeat(32);
+  const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
+  const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
+  const SETTLED_RECEIPT = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" };
+  const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+  const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
+  type Reply = { status: number; body?: unknown } | "reject";
+  function bootLive(manifest: string, reply: (url: string, n: number) => Reply) {
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+    document.body.appendChild(mNode); // no #pcc-snapshot node: LIVE mode
+    let n = 0;
+    (window as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+      const r = reply(String(url), n++);
+      if (r === "reject") return Promise.reject(new Error("network down"));
+      return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: () => null }, json: () => Promise.resolve(r.body ?? {}) });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+  }
+  const receiptPill = () => (document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className;
+  const receiptWin = (path: string) => man([{ kind: "receipt", binding: { path } }]);
+
+  it("F1 (HIGH): a settled-SHAPED body bound to a job route is never green", async () => {
+    bootLive(receiptWin("/api/jobs/j1"), () => ({ status: 200, body: SETTLED_RECEIPT }));
+    await flush();
+    expect(receiptPill()).not.toContain("st-settled");
+  });
+
+  it("F1 (HIGH): a baked (unsigned) snapshot of a settled receipt is never green, even at the settlement route", async () => {
+    boot({}, receiptWin(RC_LIVE), { _ts: "2026-09-24T00:00:00Z", [RC_LIVE]: SETTLED_RECEIPT });
+    await flush();
+    expect(receiptPill()).not.toContain("st-settled");
+  });
+
+  it("F1 positive control: a LIVE read of the exact settlement receipt route in the settled shape is green", async () => {
+    bootLive(receiptWin(RC_LIVE), () => ({ status: 200, body: SETTLED_RECEIPT }));
+    await flush();
+    expect(receiptPill()).toContain("st-settled");
+    expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("payout distribution discharged");
+  });
+
+  it("F1: only the exact per-unit route counts (the route's own unit-id format; a query such as ?asOf is fine)", async () => {
+    const cases: Array<[string, boolean]> = [
+      [LC_LIVE, true], [RC_LIVE + "?asOf=0x" + "cd".repeat(32), true],
+      ["/api/settlement/units/u1/receipt", false], ["/api/settlement/units/" + UNIT + "/receipt/x", false],
+      ["/api/settlement/units/" + UNIT + "/provenance", false], ["/API/settlement/units/" + UNIT + "/receipt", false],
+    ];
+    for (const [p, green] of cases) {
+      const body = p.indexOf("lifecycle") >= 0 ? LC8 : SETTLED_RECEIPT;
+      bootLive(receiptWin(p), () => ({ status: 200, body }));
+      await flush();
+      expect(receiptPill().indexOf("st-settled") >= 0, p).toBe(green);
+    }
+  });
+
+  it("F1: kit settlementReadClass == spec classifySettlementRead over records x sources", () => {
+    const kit = extractRegion();
+    expect(kit.SETTLEMENT_READ_ROUTE.source).toBe(SETTLEMENT_READ_ROUTE.source);
+    const records: unknown[] = [SETTLED_RECEIPT, LC8, { ...LC8, unitState: 9, finalState: "SETTLED_REFUNDED" },
+      { finalState: "SETTLED_REFUNDED", isAllocated: false, phase: "settled" }, { ...LC8, unitState: 6, finalState: null, isTerminal: false, isAllocated: true, phase: "allocated" },
+      { status: "refunded", contractAddress: "0x1" }, { status: "completed", id: "j1" }, null, "SETTLED_RELEASED"];
+    const sources: unknown[] = [{ path: RC_LIVE, live: true }, { path: LC_LIVE, live: true }, { path: RC_LIVE, live: false },
+      { path: "/api/jobs/j1", live: true }, { path: RC_LIVE + "?asOf=x", live: true }, { path: RC_LIVE, live: "true" }, null, undefined, {}];
+    for (const r of records) for (const src of sources) {
+      const spec = classifySettlementRead(r, src as never);
+      const [cls, label] = kit.settlementReadClass(r, (src as { path?: unknown } | null)?.path, (src as { live?: unknown } | null)?.live);
+      const tag = JSON.stringify(r) + " @ " + JSON.stringify(src);
+      expect(cls, tag).toBe("st-" + spec.tone);
+      expect(label, tag).toBe(spec.label);
+    }
+  });
+
+  it("F2 (HIGH): a generic success word is never green, whatever the routing heuristic decides", () => {
+    const kit = extractRegion() as unknown as { dataStatusClass: (p: string, r: unknown, s: unknown) => string; statusClass: (s: unknown) => string };
+    expect(kit.dataStatusClass("/api/jobs", { status: "success", economics: { amount: "5" } }, "success")).not.toBe("st-settled");
+    for (const w of ["success", "done", "completed", "ok", "resolved", "ready"]) expect(kit.statusClass(w), w).not.toBe("st-settled");
+  });
+
+  it("F3 (MEDIUM): a failed poll after a settled read does not keep the pill green", async () => {
+    bootLive(man([{ kind: "run", binding: { path: LC_LIVE, pollMs: 5 }, statusFrom: "status", latestFrom: "message" }]),
+      (_u, n) => (n === 0 ? { status: 200, body: LC8 } : "reject"));
+    await flush();
+    const pill = () => (document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className;
+    expect(pill()).toContain("st-settled"); // the first, live read of the exact lifecycle route
+    await new Promise((r) => setTimeout(r, 60)); // later polls reject
+    expect(pill()).not.toContain("st-settled");
+    expect(pill()).toContain("st-unknown");
   });
 });
