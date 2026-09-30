@@ -6,11 +6,14 @@ pricing, camera, and poll intervals.
 """
 
 import json
+import logging
 import os
 import hashlib
 import time
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any
+
+log = logging.getLogger("pcc-node.config")
 
 
 @dataclass
@@ -95,19 +98,54 @@ def generate_config(devices: list) -> NodeConfig:
 
 
 def save_config(config: NodeConfig, path: str = "./pcc-node.json") -> str:
-    """Save config to a JSON file.  Returns the absolute path written."""
+    """Save config to a JSON file.  Returns the absolute path written.
+
+    The config carries ``pcc_api_key``, so the file is created owner-only
+    (0600) whatever the umask. It is written to a new temporary file beside
+    the target and renamed over it: an existing readable config, or a symlink
+    at *path*, is replaced rather than written through, and a failed write
+    leaves the old config (or nothing) instead of a partial file.
+    """
     abs_path = os.path.abspath(path)
-    with open(abs_path, "w") as f:
-        json.dump(config.to_dict(), f, indent=2)
+    directory = os.path.dirname(abs_path)
+    tmp_path = os.path.join(directory, f".{os.path.basename(abs_path)}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config.to_dict(), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, abs_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
     return abs_path
 
 
 def load_config(path: str = "./pcc-node.json") -> NodeConfig:
     """Load config from a JSON file.
 
-    Raises FileNotFoundError if the file does not exist.
+    Raises FileNotFoundError if the file does not exist. Warns (without
+    printing the key) when the file holds an API key that other users can read.
     """
     abs_path = os.path.abspath(path)
     with open(abs_path) as f:
         data = json.load(f)
+        mode = os.fstat(f.fileno()).st_mode & 0o777
+    if os.name != "nt" and mode & 0o077 and _holds_a_key(data):
+        log.warning(
+            "%s holds an API key and other users can read it (mode %s). "
+            "Restrict it with: chmod 600 %s", abs_path, oct(mode), abs_path,
+        )
     return NodeConfig.from_dict(data)
+
+
+def _holds_a_key(data: dict) -> bool:
+    """True if the config carries the PCC API key or a device's own API key."""
+    if data.get("pcc_api_key"):
+        return True
+    devices = data.get("devices") or []
+    return any(isinstance(d, dict) and (d.get("api_key") or d.get("apiKey")) for d in devices)
