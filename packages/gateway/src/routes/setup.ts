@@ -557,8 +557,10 @@ export async function setupRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterDeviceBody }>(
     "/api/setup/register-device",
     async (req, reply) => {
+      // An absent or null body still gets the missing-fields 400 (astra pack 111 MEDIUM 5).
+      const body = (req.body ?? {}) as RegisterDeviceBody;
       const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits, firmware } =
-        req.body;
+        body;
 
       if (!kernelId || !deviceId || !type || !adapterType) {
         const missing: string[] = [];

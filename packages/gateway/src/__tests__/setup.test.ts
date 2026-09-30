@@ -851,3 +851,16 @@ describe("Setup API", () => {
     });
   });
 });
+
+describe("pack 111 MEDIUM 5: register-device with no body gets the missing-fields 400", () => {
+  it("an absent body lists all four required fields", async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({ method: "POST", url: "/api/setup/register-device" });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().missing).toEqual(["kernelId", "deviceId", "type", "adapterType"]);
+    } finally {
+      await app.close();
+    }
+  });
+});
