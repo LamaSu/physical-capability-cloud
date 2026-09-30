@@ -93,10 +93,18 @@ describe("a heartbeat registers only declared terms (N23)", () => {
   });
 
   it("an existing row is only refreshed: a later heartbeat never rewrites its terms", async () => {
-    const res = await beat([{ type: "fdm", assuranceTiers: [1, 3], pricing: { currency: "USDC", baseCost: "1", minimum: "1" } }]);
+    // 437-M4d (astra review Q5 test gap): this used to rely on the
+    // preceding test's "fdm" insertion (order-dependent). Own setup with a
+    // distinct type makes it pass regardless of execution order.
+    const pricing = { currency: "USDC", baseCost: "0", minimum: "0", perMinute: "0.25" };
+    const created = await beat([{ type: "fdm-refresh", assuranceTiers: [2, 0, 2], pricing }]);
+    expect(created.json().capabilitiesSkipped).toEqual([]);
+    expect(row("fdm-refresh")?.assuranceTiers).toEqual([0, 2]);
+
+    const res = await beat([{ type: "fdm-refresh", assuranceTiers: [1, 3], pricing: { currency: "USDC", baseCost: "1", minimum: "1" } }]);
     expect(res.json().capabilitiesSkipped).toEqual([]);
-    expect(row("fdm")?.assuranceTiers).toEqual([0, 2]);
-    expect(row("fdm")?.pricing).toEqual({ currency: "USDC", baseCost: "0", minimum: "0", perMinute: "0.25" });
+    expect(row("fdm-refresh")?.assuranceTiers).toEqual([0, 2]);
+    expect(row("fdm-refresh")?.pricing).toEqual(pricing);
   });
 
   it("the operator heartbeat, which pcc-node's daemon calls with {type, deviceId, protocol}, applies the same rule", async () => {
@@ -177,6 +185,70 @@ describe("a heartbeat registers only declared terms (N23)", () => {
     const res = await beat([{ type: "canonical-price", assuranceTiers: [0], pricing: { currency: "USDC", baseCost: "6.50", minimum: "7" } }]);
     expect(res.json().capabilitiesSkipped).toEqual([]);
     expect(row("canonical-price")?.pricing).toEqual({ currency: "USDC", baseCost: "6.50", minimum: "7" });
+  });
+
+  // 437-M4a (astra review Q5 test gap): capability_type is an alias for
+  // type and must follow the exact same validation, both for a valid
+  // string and for a malformed runtime type.
+  it("capability_type alias registers exactly like type", async () => {
+    const res = await beat([{ capability_type: "welding", assuranceTiers: [0], pricing: PRICING }]);
+    expect(res.json().capabilitiesSkipped).toEqual([]);
+    expect(row("welding")?.assuranceTiers).toEqual([0]);
+  });
+
+  it("capability_type alias with a non-string runtime type is skipped like type", async () => {
+    const res = await beat([{ capability_type: 999, assuranceTiers: [0], pricing: PRICING }]);
+    expect(res.json().capabilitiesSkipped).toEqual([{ type: "unknown", reason: "invalid-entry" }]);
+  });
+
+  // 437-M4b (astra review Q5 test gap): repeated types within ONE heartbeat
+  // use the first successfully inserted declaration; a later occurrence in
+  // the same array only refreshes TTL — it is never re-validated or allowed
+  // to overwrite the first.
+  it("duplicate type in one heartbeat, invalid-first then valid-second: the second registers", async () => {
+    const res = await beat([
+      { type: "dup-a", assuranceTiers: [9] }, // invalid tier value: skipped, no row created yet
+      { type: "dup-a", assuranceTiers: [1], pricing: PRICING },
+    ]);
+    expect(res.json().capabilitiesSkipped).toEqual([{ type: "dup-a", reason: "invalid-tiers" }]);
+    expect(row("dup-a")?.assuranceTiers).toEqual([1]);
+  });
+
+  it("duplicate type in one heartbeat, valid-first then invalid-second: the first is unchanged", async () => {
+    const pricing = { currency: "USDC", baseCost: "3", minimum: "1" };
+    const res = await beat([
+      { type: "dup-b", assuranceTiers: [1], pricing },
+      { type: "dup-b", assuranceTiers: [9] }, // now an existing row: TTL refresh only, not re-validated or reported
+    ]);
+    expect(res.json().capabilitiesSkipped).toEqual([]);
+    expect(row("dup-b")?.assuranceTiers).toEqual([1]);
+    expect(row("dup-b")?.pricing).toEqual(pricing);
+  });
+
+  // 437-M4c (astra review Q5 test gap): an existing row's TTL advances and
+  // its terms are preserved on BOTH a termless heartbeat for that specific
+  // type and an empty-list heartbeat (which bulk-refreshes every row for
+  // the kernel via the no-capabilities-body path).
+  it("an existing row's TTL advances and terms are preserved on a termless heartbeat", async () => {
+    const pricing = { currency: "USDC", baseCost: "2", minimum: "1" };
+    await beat([{ type: "vinyl-cut", assuranceTiers: [1], pricing }]);
+    const res = await beat([{ type: "vinyl-cut" }]); // same type, no assuranceTiers/pricing at all
+    expect(res.json().capabilitiesSkipped).toEqual([]);
+    const after = getRepos().capabilities.findById(`cap-${kernelId}-vinyl-cut`) as { assuranceTiers: number[]; pricing: Record<string, string>; validUntil: string };
+    expect(after.assuranceTiers).toEqual([1]);
+    expect(after.pricing).toEqual(pricing);
+    expect(after.validUntil).toBe(res.json().validUntil);
+  });
+
+  it("an existing row's TTL advances and terms are preserved on an empty-list heartbeat", async () => {
+    const pricing = { currency: "USDC", baseCost: "4", minimum: "1" };
+    await beat([{ type: "empty-list-cap", assuranceTiers: [2], pricing }]);
+    const res = await beat([]); // capabilities: [] -> bulk-refresh (no-body) path
+    expect(res.json().capabilitiesSkipped).toEqual([]);
+    const after = getRepos().capabilities.findById(`cap-${kernelId}-empty-list-cap`) as { assuranceTiers: number[]; pricing: Record<string, string>; validUntil: string };
+    expect(after.assuranceTiers).toEqual([2]);
+    expect(after.pricing).toEqual(pricing);
+    expect(after.validUntil).toBe(res.json().validUntil);
   });
 });
 
