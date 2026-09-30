@@ -13,7 +13,10 @@ computed argv and ``/usr/bin/env sh``). The rules:
    check_output/Popen`` or ``asyncio.create_subprocess_exec``. Its first
    argument is a list or tuple literal whose first item is a fixed executable
    name, never a shell, ``env`` or ``busybox``, and never a variable. No
-   ``shell=`` other than the literal ``False``, and no ``**`` keyword expansion.
+   ``shell=`` other than the literal ``False``, no ``executable=``, and no ``**``
+   keyword expansion (a dict with constant keys and no ``shell`` is allowed).
+   A starter is only ever called directly: binding it to another name or
+   passing it as a value is refused (verdict 68d, finding 2).
 2. Every other way to start a process or replace this one is refused:
    ``os.system/popen/exec*/spawn*/posix_spawn*``, ``pty.spawn``,
    ``subprocess.getoutput/getstatusoutput``,
@@ -90,8 +93,9 @@ def violations(source, filename="<src>"):
                     if alias.name == "*" or alias.name in REFUSED.get(node.module, ()):
                         bad(node, f"from {node.module} import {alias.name}")
 
-    # Names used as the object of an attribute access (os in os.path.join).
+    # Names used as the object of an attribute access (os in os.path.join), and called expressions.
     attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
 
     def target(func):
         """(module, attr) a call resolves to, if it is one we track."""
@@ -115,6 +119,15 @@ def violations(source, filename="<src>"):
                 bad(node, f"{module}.{node.attr}")
             elif node.attr.startswith("__"):
                 bad(node, f"{module}.{node.attr}")
+        # An allowed starter bound to another name, or passed as a value, escapes the call checks.
+        if id(node) not in call_funcs:
+            ref = None
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
+                ref = (modules[node.value.id], node.attr)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names:
+                ref = names[node.id]
+            if ref in ALLOWED_STARTS:
+                bad(node, f"{ref[0]}.{ref[1]} used as a value")
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -134,6 +147,8 @@ def violations(source, filename="<src>"):
                     bad(node, f"{module}.{attr}(**...) can hide shell=True")
             elif kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
                 bad(node, f"{module}.{attr}(shell=...)")
+            elif kw.arg == "executable":
+                bad(node, f"{module}.{attr}(executable=...) replaces the fixed executable")
         argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
         if attr == "create_subprocess_exec":
             first = argv
@@ -226,6 +241,12 @@ EVASIONS = {
     "vars(os)": "import os\nvars(os)['system']('id')",
     "os.__dict__": "import os\nos.__dict__['system']('id')",
     "subprocess module passed around": "import subprocess\nrunner = subprocess\nrunner.run(x, shell=True)",
+    # Verdict 68d, finding 2: an allowed starter bound to another name, and executable=.
+    "starter alias": "import subprocess\ninvoke = subprocess.run\ninvoke(remote_argv, shell=True)",
+    "imported starter alias": "from subprocess import run\ninvoke = run\ninvoke(remote_argv, shell=True)",
+    "starter passed as a value": "import subprocess\nloop.run_in_executor(None, subprocess.run, argv)",
+    "executable=/bin/sh": "import subprocess\nsubprocess.run(['ignored', '-c', payload], executable='/bin/sh')",
+    "executable= variable": "import subprocess as sp\nsp.Popen(['ls'], executable=exe)",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
