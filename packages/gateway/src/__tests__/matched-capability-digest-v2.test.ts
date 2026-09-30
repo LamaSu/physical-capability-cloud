@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   geohash,
   matchedCapabilityDigest,
+  matchedCapabilityDigestPreImage,
   matchedCapabilityDigestV2,
   matchedCapabilityDigestV2PreImage,
   type MatchedCapabilitySnapshotV2,
@@ -160,5 +161,76 @@ describe("matched-capability digest v2 (board N20)", () => {
     });
     expect(v1).toMatch(/^0x[0-9a-f]{64}$/);
     expect(v1).not.toBe(GOLDEN_DIGEST);
+  });
+
+  it("rejects_empty_or_substituted_tier_iteration", () => {
+    // A substituted iterator that yields nothing must not silently hash an
+    // empty tier set (board N20 follow-up #440-A).
+    const emptyIterator = [0];
+    emptyIterator[Symbol.iterator] = function* () {};
+    expect(() => v2({ assuranceTiers: emptyIterator })).toThrow(TypeError);
+
+    // The real element (99) is invalid; a substituted iterator must not be
+    // able to launder it into a different, valid-looking value (3) either.
+    const fakeIterator = [99];
+    fakeIterator[Symbol.iterator] = function* () {
+      yield 3;
+    };
+    expect(() => v2({ assuranceTiers: fakeIterator })).toThrow(TypeError);
+  });
+
+  it("pins existing behavior: an ordinary sparse tier array throws (a hole, not skipped)", () => {
+    const sparse: number[] = [0, , 2];
+    expect(() => v2({ assuranceTiers: sparse })).toThrow(TypeError);
+  });
+
+  it("pins existing behavior: a NaN tier throws", () => {
+    expect(() => v2({ assuranceTiers: [Number.NaN] })).toThrow(TypeError);
+  });
+
+  it("pins existing behavior: -0 normalizes to 0 in assuranceTiers", () => {
+    expect(v2({ assuranceTiers: [-0, 1, 2, 2] })).toBe(GOLDEN_DIGEST);
+  });
+
+  it("pins existing behavior: an identifier cannot break out of its JSON string to forge another key", () => {
+    const injected = 'x","capabilityType":"forged';
+    const preimage = matchedCapabilityDigestV2PreImage({ ...GOLDEN, capabilityId: injected });
+    const parsed = JSON.parse(preimage) as { capabilityId: string; capabilityType: string };
+    expect(parsed.capabilityId).toBe(injected);
+    expect(parsed.capabilityType).toBe(GOLDEN.capabilityType);
+    expect(() => matchedCapabilityDigestV2({ ...GOLDEN, capabilityId: injected })).not.toThrow();
+  });
+
+  it("pins existing behavior: a trailing slash in the CSD url throws; a query string without another slash is accepted literally", () => {
+    expect(() =>
+      v2({ csd: { ...GOLDEN.csd, url: "pcc://capabilities/document-print-and-mail/v1/" } }),
+    ).toThrow(TypeError);
+
+    const withQuery = "pcc://capabilities/document-print-and-mail/v1?rev=2";
+    const preimage = matchedCapabilityDigestV2PreImage({ ...GOLDEN, csd: { ...GOLDEN.csd, url: withQuery } });
+    expect((JSON.parse(preimage) as { csd: { url: string } }).csd.url).toBe(withQuery);
+  });
+
+  it("pins_v1_preimage_and_digest_to_base_vector", () => {
+    // Computed from the v1 implementation as it is at this revision (v1 is
+    // untouched by #440) -- pins exact bytes so a future change to v1's
+    // preimage or price precision is caught here, not just by a shape
+    // check against v2 (board N20 follow-up #440-B).
+    const fixture = {
+      capabilityId: "cap-v1-pin-fixture",
+      capabilityType: "wood-fired-pizza",
+      kernelId: "kernel-v1-pin",
+      price: 12.5,
+      currency: "USDC",
+      assuranceTiers: [1, 0],
+    };
+    const expectedPreImage =
+      '{"assuranceTiers":[0,1],"capabilityId":"cap-v1-pin-fixture","capabilityType":"wood-fired-pizza",' +
+      '"currency":"USDC","kernelId":"kernel-v1-pin","price":"12.50"}';
+    const expectedDigest = "0x3f07c6dd4d7242f19d067c576532eaf8376371c6952c723c9092f587fe29c5d2";
+
+    expect(matchedCapabilityDigestPreImage(fixture)).toBe(expectedPreImage);
+    expect(Buffer.byteLength(expectedPreImage, "utf8")).toBe(157);
+    expect(matchedCapabilityDigest(fixture)).toBe(expectedDigest);
   });
 });

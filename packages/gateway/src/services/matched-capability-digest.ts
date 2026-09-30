@@ -130,6 +130,15 @@ export interface MatchedCapabilitySnapshotV2 {
   kernelLocation: { lat: number; lng: number };
 }
 
+// ── Acceptance limits NOT stated in the quoted N20 spec text (board N20
+// follow-up #440-C) ──────────────────────────────────────────────────────
+// MAX_TIER_ENTRIES and the per-component length caps inside CSD_URL_PATTERN
+// (64 for <class>, 32 for <version>) are DELIBERATE restrictions this
+// implementation adds on top of N20's text, to bound the cost of
+// validating/sorting/hashing a hostile input. They are kept, not removed —
+// a conforming re-implementation in another language should adopt them
+// explicitly as part of THIS module's contract, rather than infer them.
+// Flagged here for the spec owner to fold into N20's text.
 const MAX_PRICE_MINOR_UNITS = (1n << 128n) - 1n;
 const MAX_TIER_ENTRIES = 16;
 const CURRENCY_PATTERN = /^[A-Za-z0-9]{1,16}$/;
@@ -214,13 +223,42 @@ export function matchedCapabilityDigestV2PreImage(snap: MatchedCapabilitySnapsho
     refuse("priceMinorUnits", "must be a bigint from 1 to 2^128 - 1");
   }
 
-  if (!Array.isArray(assuranceTiers) || assuranceTiers.length === 0 || assuranceTiers.length > MAX_TIER_ENTRIES) {
+  if (!Array.isArray(assuranceTiers)) {
+    refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
+  }
+  // Reject a substituted iterator outright instead of trusting it: a
+  // caller-defined Symbol.iterator can serve fewer, different, or zero
+  // entries than bounded index access sees on the SAME object (board N20
+  // follow-up #440-A) — its mere presence makes the array's real content
+  // unknowable, so this refuses rather than tries to "see through" it.
+  if ((assuranceTiers as unknown as Record<symbol, unknown>)[Symbol.iterator] !== Array.prototype[Symbol.iterator]) {
+    refuse("assuranceTiers", "must be a plain array with the built-in iterator");
+  }
+  // `.length` is read exactly ONCE, right here, and never again — a Proxy
+  // that answers differently across repeated reads (e.g. one value during
+  // this check, another during iteration) cannot smuggle a different
+  // element count past this check, because there is no separate iteration
+  // step left for it to diverge on.
+  const tierCount = assuranceTiers.length;
+  if (!Number.isInteger(tierCount) || tierCount === 0 || tierCount > MAX_TIER_ENTRIES) {
     refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
   }
   const tiers: number[] = [];
-  for (const t of assuranceTiers as readonly unknown[]) {
+  for (let i = 0; i < tierCount; i++) {
+    // Bounded index scan via hasOwnProperty, never the iterable protocol: a
+    // sparse hole must throw here (Array#every silently skips holes instead).
+    if (!Object.prototype.hasOwnProperty.call(assuranceTiers, i)) {
+      refuse("assuranceTiers", "may only hold the tiers 0 to 3");
+    }
+    const t = (assuranceTiers as readonly unknown[])[i];
     if (typeof t !== "number" || !ASSURANCE_TIERS.has(t)) refuse("assuranceTiers", "may only hold the tiers 0 to 3");
     tiers.push(t);
+  }
+  // Belt-and-suspenders: given tierCount > 0 and a loop that either pushes
+  // or throws on every iteration, `tiers` cannot actually be empty here —
+  // but the resulting set is checked explicitly rather than left implicit.
+  if (tiers.length === 0) {
+    refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
   }
 
   if (typeof csd !== "object" || csd === null) refuse("csd", "is required (no contract, no digest)");
