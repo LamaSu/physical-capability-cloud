@@ -321,10 +321,12 @@ export class KernelFacade extends BaseFacade {
           lastHeartbeat: new Date().toISOString(),
           status: "online",
         };
-        // Legacy rows may carry the historical zero-address placeholder rather
-        // than an owner. Their first authenticated mutation claims ownership;
-        // subsequent heartbeats/profile updates are owner-only like new rows.
-        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
+        // Legacy rows may carry "" or the historical zero-address placeholder
+        // rather than an owner. They are NOT claimed by whoever re-registers them
+        // first: an API key's operatorId is asserted, not proven, and a kernel's
+        // operator is the root of ownership for its capabilities' IP (/api/ip), so
+        // a first-come claim let any key take over a legacy kernel's IP (astra
+        // A07b, #385 round 3). Such a row stays unowned until an admin migration.
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.

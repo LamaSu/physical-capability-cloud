@@ -13,13 +13,14 @@
 
 import type { EvidenceBundle } from "@pcc/spec";
 import { isFabricated } from "@pcc/spec";
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
   isWriteEnabled,
+  waitForReceipt,
 } from "../contracts/escrow-client.js";
 import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
@@ -43,7 +44,11 @@ export interface SettlementResult {
 export interface ReleaseResult {
   jobId: string;
   txHash: string;
-  status: "released" | "failed";
+  /**
+   * "released" only on a successful receipt. "submitted": broadcast, but no receipt within the bound (or it
+   * could not be read), so the release is unconfirmed. "failed": not sent, or the chain reverted it.
+   */
+  status: "released" | "submitted" | "failed";
   error?: string;
 }
 
@@ -486,6 +491,23 @@ export class SettlementService {
         attestation,
         contractAddress as Address,
       );
+
+      // A broadcast is not a release (astra A07b, #385 round 3): the write resolves on the transaction hash,
+      // before the chain has run it. The milestone is reported released, and the job marked settled, only when
+      // the receipt shows success. A reverted release failed. A receipt that did not arrive within the bound,
+      // or could not be read, leaves the release submitted, with its hash, for a later chain read to settle.
+      let receipt: "success" | "reverted" | "timeout";
+      try {
+        receipt = (await waitForReceipt(writeResult.transactionHash as Hex)).status;
+      } catch {
+        receipt = "timeout";
+      }
+      if (receipt === "reverted") {
+        return { jobId, txHash: writeResult.transactionHash, status: "failed", error: "release_reverted" };
+      }
+      if (receipt !== "success") {
+        return { jobId, txHash: writeResult.transactionHash, status: "submitted", error: "release_unconfirmed" };
+      }
 
       try {
         const repos = getRepos();

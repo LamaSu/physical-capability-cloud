@@ -50,6 +50,8 @@ vi.mock("../contracts/escrow-client.js", () => ({
     transactionHash: "0xtest_release_tx456",
     status: "submitted",
   }),
+  // A release is reported only on a successful receipt (astra A07b): these releases land.
+  waitForReceipt: vi.fn().mockResolvedValue({ status: "success", blockNumber: 1 }),
   isWriteEnabled: vi.fn().mockReturnValue(false), // default: no private key configured
   getSignerAddress: vi.fn().mockReturnValue(undefined),
   // Batch settlement re-exports from the same mock

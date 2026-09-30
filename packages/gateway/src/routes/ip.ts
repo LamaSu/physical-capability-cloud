@@ -38,6 +38,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { createHash } from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
 import { parseUnits } from "viem";
 import { getRepos } from "../db.js";
@@ -208,10 +209,18 @@ function requireWallet(req: FastifyRequest, reply: FastifyReply): string | null 
   return wallet;
 }
 
-/** The operator of a kernel, lowercase, or null when the kernel is unknown. */
+const UNOWNED_OPERATORS = new Set(["", "0x0000000000000000000000000000000000000000"]);
+
+/**
+ * The operator of a kernel, lowercase, or null when the kernel is unknown or has no recorded owner. A legacy
+ * row carries "" or the zero address instead of an owner: nobody owns it, and nobody manages its IP until an
+ * admin migration records one (astra A07b; re-registering such a row no longer claims it).
+ */
 function kernelOperator(kernelId: string): string | null {
   const kernel = getRepos().kernels.findById(kernelId);
-  return kernel ? kernel.operatorAddress.toLowerCase() : null;
+  if (!kernel) return null;
+  const operator = kernel.operatorAddress.toLowerCase();
+  return UNOWNED_OPERATORS.has(operator) ? null : operator;
 }
 
 /**
@@ -317,12 +326,15 @@ const ESCROW_CURRENCY_DECIMALS: Readonly<Record<string, number>> = { USDC: 6 };
  * The escrow milestone that settles a job: the job's step in the escrow of the job's OWN workflow.
  * There is no fallback across workflows: another workflow's released milestone and payer must never
  * settle this job (coord-watch #2974). A job whose workflow id matches no escrow is not settleable.
+ * The milestone must settle this job ALONE: jobs.(cwm_id, step_id) is not unique either, and when two jobs
+ * name one milestone, whichever settled first would choose the schedule that consumes it (astra A07b).
  */
-function findJobMilestone(job: { cwmId: string; stepId: string }):
+function findJobMilestone(job: { id: string; cwmId: string; stepId: string }):
   | { escrow: { id: string; payer: string; currency: string }; milestone: { id: string; stepId: string; amount: string; status: string } }
   | "none"
   | "ambiguous" {
   const repos = getRepos();
+  if (repos.jobs.findAll().some((j) => j.id !== job.id && j.cwmId === job.cwmId && j.stepId === job.stepId)) return "ambiguous";
   // escrows.cwm_id is not unique, and findByCwm returns whichever row comes first: several escrows for one
   // workflow are ambiguous and settle nothing (astra, #385 r2).
   const escrows = repos.escrows.findAll().filter((e) => e.cwmId === job.cwmId);
@@ -367,6 +379,21 @@ function activeSettlementClaims(milestoneId: string): number {
   return claims - releases;
 }
 
+/**
+ * What a milestone's FIRST claim bound it to: its job, its evidence IP and the digest of its payout schedule.
+ * A claim released on Story's nonexecution may be tried again, but only for that same obligation: a retry
+ * never pays another job, another child or a schedule that changed since (astra A07b). null: never claimed.
+ */
+function settlementBinding(milestoneId: string): { jobId: unknown; childIpId: unknown; scheduleDigest: unknown } | null {
+  const first = getRepos()
+    .auditLog.query({ eventType: SETTLEMENT_EVENT, resourceType: SETTLEMENT_RESOURCE, limit: Number.MAX_SAFE_INTEGER })
+    .filter((r) => r.resourceId === milestoneId && r.action === "claim")
+    .sort((a, b) => a.id - b.id)[0];
+  if (!first) return null;
+  const m = (first.metadata ?? {}) as Record<string, unknown>;
+  return { jobId: m.jobId, childIpId: m.childIpId, scheduleDigest: m.scheduleDigest };
+}
+
 function recordSettlement(action: SettlementAction, milestoneId: string, actor: string, metadata: Record<string, unknown>): void {
   getRepos().auditLog.insert({
     timestamp: new Date().toISOString(),
@@ -387,6 +414,8 @@ function recordSettlement(action: SettlementAction, milestoneId: string, actor: 
 
 export async function ipRoutes(app: FastifyInstance) {
   const svc = getStoryIPService();
+  /** Jobs whose evidence registration is in flight in this process (see register-job-evidence). */
+  const registeringJobEvidence = new Set<string>();
   const engine = getLicensingEngine();
 
   // ── POST /api/ip/register-capability ─────────────────────────────────────
@@ -517,6 +546,12 @@ export async function ipRoutes(app: FastifyInstance) {
           message: `Only the recorded owner of ${parentIpId} may register derivatives of it.`,
         });
       }
+      // One job, one evidence IP: a second would give its milestone two royalty schedules to choose from
+      // (astra A07b). A registration in flight counts too, so two concurrent requests cannot both pass.
+      if (registeringJobEvidence.has(job.id) || repos.story.findDerivativeLinksByJob(job.id).length > 0) {
+        return reply.code(409).send({ error: "job_evidence_already_registered", message: `Job ${job.id}'s evidence is already registered as IP.` });
+      }
+      registeringJobEvidence.add(job.id);
 
       try {
         const link = await svc.registerJobAsDerivative(parentIpId, {
@@ -550,6 +585,8 @@ export async function ipRoutes(app: FastifyInstance) {
         return { link };
       } catch (err) {
         return storyFailure(reply, err, "derivative_registration_failed");
+      } finally {
+        registeringJobEvidence.delete(job.id);
       }
     },
   );
@@ -666,7 +703,10 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: "no_settlement_record", message: `Job ${jobId} has no escrow milestone.` });
       }
       if (found === "ambiguous") {
-        return reply.code(409).send({ error: "settlement_ambiguous", message: `More than one escrow, or more than one milestone, matches job ${jobId}; nothing is settled.` });
+        return reply.code(409).send({
+          error: "settlement_ambiguous",
+          message: `More than one escrow or milestone matches job ${jobId}, or another job settles through the same milestone; nothing is settled.`,
+        });
       }
       const { escrow, milestone } = found;
 
@@ -699,8 +739,14 @@ export async function ipRoutes(app: FastifyInstance) {
       if (payerAddress !== undefined && payerAddress.toLowerCase() !== escrow.payer.toLowerCase()) {
         return reply.code(409).send({ error: "payer_mismatch", message: `Job ${jobId} was paid by its escrow's payer, not ${payerAddress}.` });
       }
-      // The child IP must be this job's own evidence.
-      if (!repos.story.findDerivativeLinksByJob(job.id).some((l) => l.childIpId === childIpId)) {
+      // The payable schedule is the job's ONE evidence IP's, from server state. A job with several would let
+      // the caller choose which schedule consumes the milestone (astra A07b), so that is refused; the body's
+      // childIpId can only agree with the recorded one.
+      const evidenceIps = new Set(repos.story.findDerivativeLinksByJob(job.id).map((l) => l.childIpId));
+      if (evidenceIps.size > 1) {
+        return reply.code(409).send({ error: "settlement_ambiguous", message: `Job ${jobId} has ${evidenceIps.size} evidence IPs, so its royalty schedule is ambiguous; nothing is settled.` });
+      }
+      if (!evidenceIps.has(childIpId)) {
         return reply.code(409).send({ error: "ip_not_linked_to_job", message: `IP ${childIpId} is not the registered evidence of job ${jobId}.` });
       }
 
@@ -713,7 +759,9 @@ export async function ipRoutes(app: FastifyInstance) {
         return storyFailure(reply, err, "settle_royalties_failed");
       }
       const payable = distributions.filter((d) => d.amount !== "0");
-      const obligation = { escrowId: escrow.id, milestoneId: milestone.id, jobId: job.id, childIpId };
+      const schedule = payable.map((d) => ({ ipId: d.ipId, recipientAddress: d.recipientAddress.toLowerCase(), amount: d.amount }));
+      const scheduleDigest = createHash("sha256").update(JSON.stringify(schedule)).digest("hex");
+      const obligation = { escrowId: escrow.id, milestoneId: milestone.id, jobId: job.id, childIpId, scheduleDigest };
       if (payable.length > 0) {
         // Check and claim the milestone with no await in between: once-only within this process.
         try {
@@ -721,6 +769,13 @@ export async function ipRoutes(app: FastifyInstance) {
             return reply.code(409).send({
               error: "already_settled",
               message: `Royalties on job ${jobId}'s released milestone were already settled, or its settlement awaits reconciliation. They are never paid twice.`,
+            });
+          }
+          const bound = settlementBinding(milestone.id);
+          if (bound !== null && (bound.jobId !== job.id || bound.childIpId !== childIpId || bound.scheduleDigest !== scheduleDigest)) {
+            return reply.code(409).send({
+              error: "settlement_binding_changed",
+              message: `Job ${jobId}'s milestone was first claimed for another job, evidence IP or royalty schedule. A retry pays only that obligation; this one is held for reconciliation.`,
             });
           }
           recordSettlement("claim", milestone.id, wallet, { ...obligation, revenue, payer: escrow.payer, rows: payable.length });
@@ -736,28 +791,70 @@ export async function ipRoutes(app: FastifyInstance) {
       const rows: Row[] = [];
       let totalDistributed = 0n;
       let notExecuted = 0;
-      const journal = (action: SettlementAction, row: Record<string, unknown>) => {
+      // A journal row that cannot be written stops the settlement (astra A07b): nothing is paid without its
+      // intent on record, and an outcome that could not be recorded makes the answer reconciliation-required.
+      const journal = (action: SettlementAction, row: Record<string, unknown>): boolean => {
         try {
           recordSettlement(action, milestone.id, wallet, { ...obligation, ...row });
+          return true;
         } catch {
-          /* the claim already blocks a repeat; a missing journal row leaves the payment for reconciliation */
+          return false;
         }
       };
+      let unjournaled = false;
       for (const dist of payable) {
         const row = { ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount };
-        journal("intent", row);
+        if (!journal("intent", row)) {
+          unjournaled = true;
+          break;
+        }
         try {
           const { txHash } = await svc.payJobRoyalty(dist.ipId, dist.amount, escrow.payer);
-          journal("paid", { ...row, txHash });
           rows.push({ ...row, outcome: "paid", txHash });
           totalDistributed += BigInt(dist.amount);
+          if (!journal("paid", { ...row, txHash })) {
+            unjournaled = true;
+            break;
+          }
         } catch (err) {
           const nonexecution = isStoryNotExecuted(err);
           if (nonexecution) notExecuted++;
           const error = err instanceof Error ? err.message : String(err);
-          journal("failed", { ...row, error, notExecuted: nonexecution });
           rows.push({ ...row, outcome: "failed", error });
+          if (!journal("failed", { ...row, error, notExecuted: nonexecution })) {
+            unjournaled = true;
+            break;
+          }
         }
+      }
+      if (unjournaled) {
+        // Nothing was attempted when the first intent could not be written: nonexecution is established, so the
+        // claim is released if the journal takes that. Otherwise the claim stands, for reconciliation.
+        let released = false;
+        if (rows.length === 0) {
+          try {
+            recordSettlement("release", milestone.id, wallet, { ...obligation, reason: "the journal could not record an intent; nothing was paid" });
+            released = true;
+          } catch {
+            /* the claim stands: a later attempt is refused, which is the safe side */
+          }
+        }
+        const notAttempted = payable.slice(rows.length).map((d) => ({ ipId: d.ipId, recipientAddress: d.recipientAddress, amount: d.amount }));
+        const unrecorded = { jobId, childIpId, revenue, payerAddress: escrow.payer, distributions: rows, notAttempted, totalDistributed: String(totalDistributed), reconciliationRequired: !released };
+        if (rows.length === 0) {
+          return reply.code(503).send({
+            error: "journal_unavailable",
+            message: released
+              ? "The settlement journal could not record a payment's intent, so nothing was paid. The settlement may be tried again."
+              : "The settlement journal could not record a payment's intent, so nothing was paid; the milestone's claim could not be released either, so it is held for reconciliation.",
+            ...unrecorded,
+          });
+        }
+        return reply.code(502).send({
+          error: "settlement_unrecorded",
+          message: "A payment's outcome could not be written to the settlement journal. The rows say what was paid; the milestone is held for reconciliation and is never retried automatically.",
+          ...unrecorded,
+        });
       }
       const failed = rows.filter((r) => r.outcome === "failed").length;
       if (payable.length > 0 && notExecuted === payable.length) {

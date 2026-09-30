@@ -316,18 +316,6 @@ describe("N10a: /api/ip/* authorization", () => {
       expect(journal()).toEqual(["claim", "intent", "failed", "release", "claim", "intent", "paid"]);
     });
 
-    it("a released milestone is settled once, whichever of the job's child IPs names it (astra #385 r2)", async () => {
-      const { parent, child, jobId } = await settled();
-      // Nothing stops one job having two derivative links, so the obligation is the milestone, not the child.
-      const second = `0x${"c2".repeat(20)}`;
-      getRepos().story.insertDerivativeLink({ id: "dl-second", parentIpId: parent, childIpId: second, licenseTokenId: "lt-2", jobId, evidenceBundleHash: "sha256:second", txHash: `0x${"cd".repeat(32)}`, linkedAt: new Date().toISOString() });
-      owe10Percent(parent, second);
-      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
-      const res = await settle(BUYER, { jobId, childIpId: second });
-      expect(res.statusCode).toBe(409);
-      expect(res.json<{ error: string }>().error).toBe("already_settled");
-    });
-
     it("a Story service built in real mode is refused even when STORY_MOCK no longer says so (astra #385 r2)", async () => {
       const { child, jobId } = await settled();
       // The instance fixed its mode when it was built; the environment now says mock. Only the instance signs.
@@ -591,6 +579,174 @@ describe("N10a: /api/ip/* authorization", () => {
       expect(res.json<{ raisedBy: string }>().raisedBy).toBe(OTHER);
       const unknown = await app.inject({ method: "POST", url: "/api/ip/0xunrecorded/dispute", headers: as(OTHER), payload: { evidenceHash: "0xe", reason: "r" } });
       expect(unknown.json<{ error: string }>().error).toBe("ip_owner_unknown");
+    });
+  });
+
+  describe("astra A07b (round 3 at 4df69fae)", () => {
+    const THIRD = "0x3333333333333333333333333333333333333333";
+    const settle = (who: string, body: object) => app.inject({ method: "POST", url: "/api/ip/settle-royalties", headers: as(who), payload: body });
+    /** The licensing engine owes the parent `revSharePercent` of the child's revenue, paid to `recipientAddress`. */
+    const grant = (parentIpId: string, childIpId: string, revSharePercent: number, recipientAddress: string) => {
+      const evaluation = { approved: true, revSharePercent, derivativeDepth: 1, effectiveRevShare: revSharePercent, reasons: [] } as unknown as LicenseEvaluation;
+      getLicensingEngine().grantLicense(evaluation, { parentIpId, childIpId, licensingTermsId: `terms-${childIpId}`, recipientAddress });
+    };
+    async function settledJob() {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const child = await registerEvidenceIp(app, parent, jobId);
+      grant(parent, child, 10, OWNER);
+      return { parent, child, jobId };
+    }
+    const settlementJournal = () =>
+      getRepos()
+        .auditLog.query({ eventType: "ip.royalties.settlement", limit: 1000 })
+        .sort((a, b) => a.id - b.id)
+        .map((r) => r.action);
+    /** Make the settlement journal refuse one action, as a full disk or a lost database would. */
+    const journalRefuses = (action: string) => {
+      const log = getRepos().auditLog;
+      const insert = log.insert.bind(log);
+      vi.spyOn(log, "insert").mockImplementation((row) => {
+        if (row.eventType === "ip.royalties.settlement" && row.action === action) throw new Error("disk full");
+        return insert(row);
+      });
+    };
+
+    it("F1: a job with two evidence IPs is ambiguous, so no caller picks the schedule that consumes the milestone", async () => {
+      const { parent, child, jobId } = await settledJob();
+      // A second evidence IP of the same job that owes the parent more and pays someone else, recorded directly
+      // (the route no longer registers a second one: see below).
+      const second = `0x${"c2".repeat(20)}`;
+      getRepos().story.insertDerivativeLink({ id: "dl-second", parentIpId: parent, childIpId: second, licenseTokenId: "lt-2", jobId, evidenceBundleHash: "sha256:second", txHash: `0x${"cd".repeat(32)}`, linkedAt: new Date().toISOString() });
+      grant(parent, second, 50, THIRD);
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      for (const childIpId of [second, child]) {
+        const res = await settle(BUYER, { jobId, childIpId });
+        expect(res.statusCode).toBe(409);
+        expect(res.json<{ error: string }>().error).toBe("settlement_ambiguous");
+      }
+      expect(pay).not.toHaveBeenCalled();
+    });
+
+    it("F1: a job's evidence is registered once: a second evidence IP for the same job is refused", async () => {
+      const { parent, jobId } = await settledJob();
+      const again = await app.inject({
+        method: "POST",
+        url: "/api/ip/register-job-evidence",
+        headers: as(OWNER),
+        payload: { parentIpId: parent, jobId, evidenceBundleHash: "0xbundle2", operatorAddress: OWNER, operatorName: "NYC" },
+      });
+      expect(again.statusCode).toBe(409);
+      expect(again.json<{ error: string }>().error).toBe("job_evidence_already_registered");
+      expect(getRepos().story.findDerivativeLinksByJob(jobId)).toHaveLength(1);
+    });
+
+    it("F1: two concurrent evidence registrations for one job register one IP", async () => {
+      const parent = await registerCapabilityIp(app);
+      const jobId = seedSettledJob();
+      const register = () =>
+        app.inject({ method: "POST", url: "/api/ip/register-job-evidence", headers: as(OWNER), payload: { parentIpId: parent, jobId, evidenceBundleHash: "0xbundle", operatorAddress: OWNER, operatorName: "NYC" } });
+      // Hold the first registration inside Story until the second has made its check.
+      const svc = getStoryIPService();
+      const original = svc.registerJobAsDerivative.bind(svc);
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      vi.spyOn(svc, "registerJobAsDerivative").mockImplementation(async (...args) => {
+        await gate;
+        return original(...args);
+      });
+      const pending = [register(), register()];
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      open();
+      const codes = (await Promise.all(pending)).map((r) => r.statusCode).sort();
+      expect(codes).toEqual([200, 409]);
+      expect(getRepos().story.findDerivativeLinksByJob(jobId)).toHaveLength(1);
+    });
+
+    it("F1: two jobs that settle through one milestone are ambiguous; neither settles it", async () => {
+      const { parent, child, jobId } = await settledJob();
+      const job = getRepos().jobs.findById(jobId)!;
+      getRepos().jobs.insert({ id: "job-twin", stepId: job.stepId, cwmId: job.cwmId, capabilityId: job.capabilityId, kernelId: job.kernelId, status: "completed", assignedDevices: [], progress: 100 });
+      const twinChild = await registerEvidenceIp(app, parent, "job-twin");
+      grant(parent, twinChild, 50, THIRD);
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      for (const [id, childIpId] of [["job-twin", twinChild], [jobId, child]] as const) {
+        const res = await settle(BUYER, { jobId: id, childIpId });
+        expect(res.statusCode).toBe(409);
+        expect(res.json<{ error: string }>().error).toBe("settlement_ambiguous");
+      }
+      expect(pay).not.toHaveBeenCalled();
+    });
+
+    it("F1: the milestone's first claim binds its job, child and schedule: a retry after nonexecution cannot pay a changed one", async () => {
+      const { parent, child, jobId } = await settledJob();
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      pay.mockRejectedValueOnce(Object.assign(new Error("Story real mode is not executed"), { code: "STORY_NOT_EXECUTED" }));
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(501); // nothing paid; the claim is released
+      grant(parent, child, 50, THIRD); // the schedule changes before the retry
+      const retry = await settle(BUYER, { jobId, childIpId: child });
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json<{ error: string }>().error).toBe("settlement_binding_changed");
+      expect(pay).toHaveBeenCalledTimes(1);
+      grant(parent, child, 10, OWNER); // the bound schedule again: the retry pays it, once
+      expect((await settle(BUYER, { jobId, childIpId: child })).statusCode).toBe(200);
+      expect(pay).toHaveBeenCalledTimes(2);
+    });
+
+    it("F2: a payment whose outcome the journal cannot record makes the response reconciliation-required", async () => {
+      const { child, jobId } = await settledJob();
+      journalRefuses("paid");
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(502);
+      const body = res.json<{ error: string; reconciliationRequired: boolean; distributions: Array<{ outcome: string; txHash?: string }> }>();
+      expect(body.error).toBe("settlement_unrecorded");
+      expect(body.reconciliationRequired).toBe(true);
+      expect(body.distributions).toEqual([expect.objectContaining({ outcome: "paid", txHash: expect.any(String) })]);
+      expect(settlementJournal()).toEqual(["claim", "intent"]);
+      // The claim stands: nothing is paid again.
+      expect((await settle(BUYER, { jobId, childIpId: child })).json<{ error: string }>().error).toBe("already_settled");
+    });
+
+    it("F2: nothing is paid when its intent cannot be journaled", async () => {
+      const { child, jobId } = await settledJob();
+      journalRefuses("intent");
+      const pay = vi.spyOn(getStoryIPService(), "payJobRoyalty");
+      const res = await settle(BUYER, { jobId, childIpId: child });
+      expect(res.statusCode).toBe(503);
+      expect(res.json<{ error: string }>().error).toBe("journal_unavailable");
+      expect(pay).not.toHaveBeenCalled();
+      expect(settlementJournal()).toEqual(["claim", "release"]); // nothing was paid, so the claim is released
+    });
+
+    it("F3: a kernel with no recorded owner is not claimed by re-registering it with an API key, so its IPs stay ownerless", async () => {
+      await app.close();
+      closeStore();
+      process.env.PCC_DB_PATH = ":memory:";
+      initStore({ seed: true });
+      app = Fastify({ logger: false });
+      // What apiGate does for an API key: sets the key's (self-asserted) operatorId.
+      app.addHook("onRequest", async (req) => {
+        const op = req.headers["x-test-operator"];
+        if (typeof op === "string") (req as { operatorId?: string }).operatorId = op;
+      });
+      await app.register(ipRoutes);
+      await app.register(kernelRoutes);
+      await app.ready();
+      const ipId = await registerCapabilityIp(app); // registered while kernel-nyc was OWNER's
+      for (const legacy of ["0x0000000000000000000000000000000000000000", ""]) {
+        getRepos().kernels.update("kernel-nyc", { operatorAddress: legacy }); // a legacy row: no recorded owner
+        const claim = await app.inject({
+          method: "POST",
+          url: "/api/kernels",
+          headers: { "x-test-operator": OTHER },
+          payload: { id: "kernel-nyc", name: "mine now", location: { lat: 0, lng: 0 }, physicalAddress: "elsewhere", maxAssuranceTier: 0 },
+        });
+        expect(claim.statusCode).toBeLessThan(500);
+        expect(getRepos().kernels.findById("kernel-nyc")!.operatorAddress).toBe(legacy);
+        expect(recordedIpOwner(ipId)).toBeNull();
+        const splits = { ipId, splits: [{ address: OTHER, role: "integrator", percentage: 100, label: "all" }] };
+        expect((await app.inject({ method: "POST", url: "/api/ip/distribute-royalties", headers: as(OTHER), payload: splits })).statusCode).toBe(403);
+      }
     });
   });
 });
