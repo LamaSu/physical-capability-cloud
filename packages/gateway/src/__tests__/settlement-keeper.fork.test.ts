@@ -83,6 +83,7 @@ function makeRepos(rows: { id: string; contractAddress: string; status: string; 
   const repos = {
     escrows: {
       findAll: () => rows,
+      findById: (id: string) => rows.find((x) => x.id === id),
       updateStatus: (id: string, status: string) => {
         updates.push({ id, status });
         const r = rows.find((x) => x.id === id);

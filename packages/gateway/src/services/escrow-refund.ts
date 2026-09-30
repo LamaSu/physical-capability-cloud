@@ -44,7 +44,7 @@
  */
 import { getAddress, isAddress } from "viem";
 import { getRepos, getStore } from "../db.js";
-import { schema, eq } from "@pcc/store";
+import { schema, eq, and } from "@pcc/store";
 // The words this module writes live in @pcc/spec, so the job read (readmodels) reads the same ones.
 import { ESCROW_REFUND_STATUS, TERMINAL_JOB_STATUSES } from "@pcc/spec";
 
@@ -66,6 +66,14 @@ const SETTLEMENT_PHASE_JOB_STATUSES: ReadonlySet<string> = new Set([
 /** Escrow statuses a refund may start from. */
 const REFUNDABLE_ESCROW_STATUSES: ReadonlySet<string> = new Set(["funded", "active"]);
 
+/**
+ * The escrow status that means A SETTLEMENT OWNS THIS ESCROW (astra round 2 on #462, F1/F3). A settlement takes it,
+ * synchronously, at its claim: /complete, resume-settlement and SettlementService.releaseMilestone. While an escrow
+ * reads it, no refund lands, however often the job's status is rewritten meanwhile (the job status is mutable by
+ * other writers; this row is not). It is already in @pcc/spec's escrow vocabulary.
+ */
+export const SETTLEMENT_OWNED_ESCROW_STATUS = "completing";
+
 /** Milestone statuses with nothing yet claimed against them. */
 const REFUNDABLE_MILESTONE_STATUSES: ReadonlySet<string> = new Set(["unfunded", "funded", "locked"]);
 
@@ -84,9 +92,12 @@ export type EscrowRefundOutcome =
         | "no_escrow"
         | "settlement_in_progress"
         | "escrow_not_refundable"
-        | "milestone_past_funding";
+        | "milestone_past_funding"
+        | "escrow_shared";
       escrowId?: string;
       escrowStatus?: string;
+      /** For `escrow_shared`: the other jobs that reference the same escrow. */
+      sharedWith?: string[];
     };
 
 /** A mock-settlement escrow has no chain behind it; its refund completes at once. */
@@ -148,8 +159,17 @@ export function refundEscrowForTerminalJob(jobId: string, priorStatus?: string):
   }
   const escrow = escrowForJob(jobId);
   if (!escrow) return { outcome: "skipped", reason: "no_escrow" };
+  if (escrow.status === SETTLEMENT_OWNED_ESCROW_STATUS) {
+    return { outcome: "skipped", reason: "settlement_in_progress", escrowId: escrow.id, escrowStatus: escrow.status };
+  }
   if (!REFUNDABLE_ESCROW_STATUSES.has(escrow.status)) {
     return { outcome: "skipped", reason: "escrow_not_refundable", escrowId: escrow.id, escrowStatus: escrow.status };
+  }
+  // The whole escrow is given back, so it must be this job's alone. A job that ends does not speak for another job's
+  // milestones on a shared escrow (astra round 2, F2).
+  const sharedWith = otherJobsOnEscrow(jobId, escrow.cwmId);
+  if (sharedWith.length > 0) {
+    return { outcome: "skipped", reason: "escrow_shared", escrowId: escrow.id, escrowStatus: escrow.status, sharedWith };
   }
   const milestones = repos.escrows.findMilestonesByEscrow(escrow.id);
   if (milestones.some((m) => !REFUNDABLE_MILESTONE_STATUSES.has(m.status))) {
@@ -159,6 +179,112 @@ export function refundEscrowForTerminalJob(jobId: string, priorStatus?: string):
   for (const m of milestones) repos.escrows.updateMilestoneStatus(m.id, target);
   repos.escrows.updateStatus(escrow.id, target);
   return { outcome: target === ESCROW_REFUND_STATUS.DONE ? "refunded" : "refund_pending", escrowId: escrow.id, milestones: milestones.length };
+}
+
+/** Every other job that references the escrow's CWM (and so the escrow). */
+function otherJobsOnEscrow(jobId: string, cwmId: string): string[] {
+  const { db } = getStore();
+  return db
+    .select({ id: schema.jobs.id })
+    .from(schema.jobs)
+    .where(eq(schema.jobs.cwmId, cwmId))
+    .all()
+    .map((r) => r.id)
+    .filter((id) => id !== jobId);
+}
+
+/** What a settlement took when it claimed a job's escrow, to hand back if it gives up. */
+export interface SettlementClaim {
+  escrowId?: string;
+  /** The status the escrow had before this claim. Undefined when this claim changed nothing. */
+  prior?: string;
+}
+
+/**
+ * Take settlement ownership of a job's escrow: a compare-and-set from `funded`/`active` to `completing`. Call it
+ * synchronously, with no await between it and the claim that starts the settlement. An escrow that is already
+ * `completing` stays owned (a resume continues the same settlement); any other status is not the refund's to touch,
+ * so it is left alone.
+ */
+export function claimEscrowForSettlement(jobId: string): SettlementClaim {
+  const escrow = escrowForJob(jobId);
+  return escrow ? claimEscrowRow(escrow) : {};
+}
+
+/**
+ * The same claim for routes that act by CONTRACT ADDRESS rather than by job (the raw chain release route). Also names
+ * the escrow's job, so a release that gives up can reconcile a refund for it.
+ */
+export function claimEscrowByAddressForSettlement(contractAddress: string): { claim: SettlementClaim; jobId?: string } {
+  const escrow = escrowByContractAddress(contractAddress);
+  if (!escrow) return { claim: {} };
+  const { db } = getStore();
+  const session = db
+    .select()
+    .from(schema.negotiationSessions)
+    .where(eq(schema.negotiationSessions.cwmId, escrow.cwmId))
+    .get();
+  return { claim: claimEscrowRow(escrow), jobId: session?.jobId ?? undefined };
+}
+
+function claimEscrowRow(escrow: { id: string; status: string }): SettlementClaim {
+  if (!REFUNDABLE_ESCROW_STATUSES.has(escrow.status)) return { escrowId: escrow.id };
+  const { db } = getStore();
+  const took = db
+    .update(schema.escrows)
+    .set({ status: SETTLEMENT_OWNED_ESCROW_STATUS })
+    .where(and(eq(schema.escrows.id, escrow.id), eq(schema.escrows.status, escrow.status)))
+    .returning()
+    .all();
+  return took.length === 1 ? { escrowId: escrow.id, prior: escrow.status } : { escrowId: escrow.id };
+}
+
+/**
+ * Hand an escrow back after a settlement gave up WITHOUT recording evidence: it returns to the status it had before
+ * the claim (only if it still reads `completing`). Then, if the job ended without completing meanwhile (a failure write
+ * landed while the settlement owned the escrow), give the escrow back now (astra round 2, F4). One transaction.
+ */
+export function releaseEscrowFromSettlement(
+  jobId: string | undefined,
+  claim: SettlementClaim,
+): EscrowRefundOutcome | undefined {
+  const { db } = getStore();
+  return db.transaction(() => {
+    if (claim.escrowId && claim.prior) {
+      db.update(schema.escrows)
+        .set({ status: claim.prior })
+        .where(and(eq(schema.escrows.id, claim.escrowId), eq(schema.escrows.status, SETTLEMENT_OWNED_ESCROW_STATUS)))
+        .run();
+    }
+    if (!jobId) return undefined;
+    const job = getRepos().jobs.findById(jobId);
+    return job && TERMINAL_FAILURE_JOB_STATUSES.has(job.status) ? refundEscrowForTerminalJob(jobId) : undefined;
+  });
+}
+
+/**
+ * Record a release that went through for a settlement holding `claim`: the milestone at `milestoneIndex` reads
+ * `released`. Once every milestone does, the escrow reads `completed`. Otherwise a claim this settlement took is handed
+ * back (the escrow returns to its prior status); one it did not take stays with its owner. One transaction.
+ */
+export function recordMilestoneReleased(milestoneIndex: number, claim: SettlementClaim): void {
+  if (!claim.escrowId) return;
+  const escrowId = claim.escrowId;
+  const { db } = getStore();
+  const repos = getRepos();
+  db.transaction(() => {
+    const milestone = repos.escrows.findMilestonesByEscrow(escrowId)[milestoneIndex];
+    if (milestone) repos.escrows.updateMilestoneStatus(milestone.id, "released");
+    const all = repos.escrows.findMilestonesByEscrow(escrowId);
+    if (all.length > 0 && all.every((m) => m.status === "released")) {
+      repos.escrows.updateStatus(escrowId, "completed");
+    } else if (claim.prior) {
+      db.update(schema.escrows)
+        .set({ status: claim.prior })
+        .where(and(eq(schema.escrows.id, escrowId), eq(schema.escrows.status, SETTLEMENT_OWNED_ESCROW_STATUS)))
+        .run();
+    }
+  });
 }
 
 /**

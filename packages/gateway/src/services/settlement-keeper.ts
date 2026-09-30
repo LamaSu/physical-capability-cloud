@@ -272,6 +272,16 @@ export async function runKeeperSweep(
         continue;
       }
 
+      // N79: re-read the row right before driving. The sweep's rows are a snapshot taken before any await, and this
+      // escrow may have been given back while the sweep awaited another one (astra round 2 on #462).
+      const current = repos.escrows.findById(escrow.id);
+      if (!current || TERMINAL_ESCROW_STATUSES.has(current.status)) {
+        allReleased = false;
+        result.skippedTerminal += 1;
+        record({ disposition: "terminal_other", reason: `escrow ${current?.status ?? "missing"} since the sweep began` });
+        break;
+      }
+
       // ── Hand the release to the crank. skipFund + no evidence/uid keeps the
       //    keeper a pure release-leg closer; the crank owns every safety check. ──
       try {

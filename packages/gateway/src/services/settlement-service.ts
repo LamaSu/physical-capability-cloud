@@ -16,7 +16,12 @@ import { isFabricated } from "@pcc/spec";
 import type { Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
-import { givenBackEscrow } from "./escrow-refund.js";
+import {
+  claimEscrowForSettlement,
+  givenBackEscrow,
+  recordMilestoneReleased,
+  releaseEscrowFromSettlement,
+} from "./escrow-refund.js";
 import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
@@ -465,12 +470,25 @@ export class SettlementService {
       contractAddress = defaultAddr;
     }
 
+    // N79: this release owns the job's escrow from here, synchronously after the checks above and before any await, so
+    // no refund lands while the chain call is out (astra round 2, F3).
+    const claim = claimEscrowForSettlement(jobId);
+    let released = false;
+
     try {
       const writeResult = await onChainReleaseMilestone(
         milestoneIndex,
         attestation,
         contractAddress as Address,
       );
+      released = true;
+
+      try {
+        recordMilestoneReleased(milestoneIndex, claim);
+      } catch (recordErr) {
+        // The release happened on-chain; a failed bookkeeping write must not report it as failed.
+        console.warn("[settlement] Released on-chain, but recording it failed:", recordErr instanceof Error ? recordErr.message : recordErr);
+      }
 
       try {
         const repos = getRepos();
@@ -517,6 +535,15 @@ export class SettlementService {
         status: "failed",
         error: err instanceof Error ? err.message : "release_failed",
       };
+    } finally {
+      // Nothing was released: hand the escrow back, and give it to the payer if the job ended meanwhile.
+      if (!released) {
+        try {
+          releaseEscrowFromSettlement(jobId, claim);
+        } catch {
+          // best-effort
+        }
+      }
     }
   }
 }

@@ -247,6 +247,21 @@ describe("N79: a failed or cancelled job's escrow is refunded, never left funded
     expect(escrowOf(jobId).escrow.status).toBe("funded");
   });
 
+  it("a failure on the LAST write (the escrow's, after every milestone changed) rolls back the milestones and the status", async () => {
+    const jobId = await submitPaidJob(app, "user-n79-atomic-last");
+    const repos = getRepos();
+    const spy = vi.spyOn(repos.escrows, "updateStatus").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    expect(() => setJobStatusWithRefund(jobId, "failed")).toThrow("disk full");
+    spy.mockRestore();
+    expect(repos.jobs.findById(jobId)?.status).not.toBe("failed");
+    const after = escrowOf(jobId);
+    expect(after.escrow.status).toBe("funded");
+    expect(after.milestones.length).toBeGreaterThan(0);
+    expect(after.milestones.every((m) => m.status === "funded")).toBe(true);
+  });
+
   it("a non-terminal status write never touches the escrow", async () => {
     const jobId = await submitPaidJob(app, "user-n79-progress");
     const { escrowRefund } = setJobStatusWithRefund(jobId, "in_progress");

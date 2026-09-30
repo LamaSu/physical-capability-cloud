@@ -77,6 +77,7 @@ function makeRepos(rows: FakeEscrow[]): {
   const repos = {
     escrows: {
       findAll: () => rows,
+      findById: (id: string) => rows.find((r) => r.id === id),
       updateStatus,
     },
   } as unknown as IRepositories;
@@ -352,6 +353,45 @@ describe("runKeeperSweep — filtering & resilience", () => {
     expect(r.skippedTerminal).toBe(1);
     expect(mState).not.toHaveBeenCalled();
     expect(mDrive).not.toHaveBeenCalled();
+  });
+
+  it("N79: an escrow given back WHILE the sweep awaits another escrow is not driven (it re-reads, not the snapshot)", async () => {
+    // A real repository's findAll() returns a snapshot; findById() reads the row as it is now.
+    const table = new Map<string, FakeEscrow>([
+      ["esc-a", { id: "esc-a", contractAddress: ADDR("ab"), status: "funded", version: "v2" }],
+      ["esc-b", { id: "esc-b", contractAddress: ADDR("cd"), status: "funded", version: "v2" }],
+    ]);
+    const repos = {
+      escrows: {
+        findAll: () => [...table.values()].map((r) => ({ ...r })),
+        findById: (id: string) => {
+          const r = table.get(id);
+          return r ? { ...r } : undefined;
+        },
+        updateStatus: vi.fn((id: string, status: string) => {
+          const r = table.get(id);
+          if (r) r.status = status;
+          return r;
+        }),
+      },
+    } as unknown as IRepositories;
+
+    let releaseA!: () => void;
+    const aRead = new Promise<void>((r) => (releaseA = r));
+    const attestedPastWindow = [milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST })];
+    mState.mockImplementation(async (address) => {
+      if (address === ADDR("ab")) await aRead;
+      return escrowState(address as string, attestedPastWindow);
+    });
+    mDrive.mockResolvedValue(driveResult({ settled: true, outcome: "released", finalStatus: "Released" }));
+
+    const sweep = runKeeperSweep(repos, { nowSeconds: NOW });
+    await vi.waitFor(() => expect(mState).toHaveBeenCalledWith(ADDR("ab")));
+    table.get("esc-b")!.status = "refund_pending"; // its job failed while the sweep was busy with A
+    releaseA();
+    await sweep;
+
+    expect(mDrive.mock.calls.map((c) => c[0])).toEqual([ADDR("ab")]);
   });
 
   it("skips a mock / non-hex escrow address (never a live release target)", async () => {

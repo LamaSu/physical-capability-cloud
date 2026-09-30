@@ -40,7 +40,13 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
-import { escrowForJob, NON_RELEASABLE_ESCROW_STATUSES } from "../services/escrow-refund.js";
+import {
+  claimEscrowForSettlement,
+  escrowForJob,
+  NON_RELEASABLE_ESCROW_STATUSES,
+  releaseEscrowFromSettlement,
+  type SettlementClaim,
+} from "../services/escrow-refund.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -905,6 +911,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
     // Set once we've won the completion claim below, so a failure before
     // evidence is durably recorded can release the claim (see the catch).
     let claimedOriginalStatus: string | undefined;
+    // N79: the escrow this completion took for its settlement, and whether evidence is recorded yet.
+    let escrowClaim: SettlementClaim | undefined;
+    let evidenceRecorded = false;
 
     try {
       const repos = getRepos();
@@ -957,6 +966,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         });
       }
       claimedOriginalStatus = job.status;
+      // N79: the settlement now owns the escrow, durably, in the same synchronous stretch as the claim. No refund lands
+      // underneath it, however often the job's status is rewritten meanwhile.
+      escrowClaim = claimEscrowForSettlement(jobId);
 
       // #3 — the REAL assurance tier this job was negotiated at. N3 now writes
       // this tier on-chain as the milestone's requiredTier, so the evidence
@@ -1174,6 +1186,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         evidenceBundleId: bundleId,
         status: "evidence_submitted",
       });
+      evidenceRecorded = true;
 
       // ── 2b. Archive evidence to IPFS (Storacha/Helia) — best effort ──
       let ipfsCid: string | null = null;
@@ -1520,6 +1533,16 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           // best-effort — a stuck 'completing' row is still safe (blocks double-run)
         }
       }
+      // N79: a completion that gives up before recording evidence hands the escrow back. If the job ended without
+      // completing meanwhile (a failure write landed while this settlement owned the escrow), the escrow goes back to
+      // the payer now. After evidence is recorded, the settlement still owns the escrow: resume-settlement continues it.
+      if (escrowClaim && !evidenceRecorded) {
+        try {
+          releaseEscrowFromSettlement(jobId, escrowClaim);
+        } catch {
+          // best-effort, like the job rollback above
+        }
+      }
       return reply.status(500).send({
         error: "completion_failed",
         details: err instanceof Error ? err.message : String(err),
@@ -1589,6 +1612,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         });
       }
       reclaimed = true;
+      // N79: the settlement owns the escrow (normally since /complete; this takes it for an escrow claimed before that
+      // existed). Evidence exists here, so the claim is never handed back: the settlement is not abandoned.
+      claimEscrowForSettlement(jobId);
 
       // Reuse the existing evidence bundle — never rebuild. Its absence means an
       // inconsistent row; release the claim and refuse rather than settle blind.
