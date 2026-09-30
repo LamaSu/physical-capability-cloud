@@ -212,12 +212,6 @@ Then: order me a pizza for delivery to ...</div>
         live <code>/a/&lt;slug&gt;</code> page rendered by the
         <a href="/ui-kit/v1/pcc-ui.js">pcc-ui kit</a>. Ask it to "keep me posted" on any order.
       </p>
-      <p>
-        Building programmatically? See
-        <a href="https://www.npmjs.com/package/@pcc/decompose-skill">@pcc/decompose-skill</a>,
-        <a href="https://www.npmjs.com/package/@pcc/operator-agent-runtime">@pcc/operator-agent-runtime</a>,
-        <a href="https://www.npmjs.com/package/@pcc/evidence-judge">@pcc/evidence-judge</a>.
-      </p>
     </div>
   </div>
 </body>

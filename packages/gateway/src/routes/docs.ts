@@ -89,7 +89,7 @@ function wrapHtml(title: string, markdown: string): string {
 <body>
   <nav class="nav">
     <a href="/docs/whitepaper">Whitepaper</a>
-    <a href="/docs/agent-guide">Agent Guide</a>
+    <a href="/agent-package.json">Agent Package</a>
     <a href="/docs/csd-spec">CSD Spec</a>
     <a href="/docs/setup-spec">Setup Spec</a>
     <a href="/docs/story-plan">Story Protocol</a>
@@ -117,7 +117,7 @@ function wrapHtml(title: string, markdown: string): string {
 }
 
 const DOCS: Record<string, { title: string; path: string }> = {
-  whitepaper: { title: "Technical Whitepaper", path: "docs/WHITEPAPER.md" },
+  whitepaper: { title: "Technical Whitepaper", path: "apps/dashboard/public/whitepaper.md" },
   "agent-guide": { title: "Agent Onboarding Guide", path: "packages/onboard-kit/AGENT_INSTRUCTIONS.md" },
   "csd-spec": { title: "Capability StructureDefinitions", path: "docs/CAPABILITY_PROFILES.md" },
   "setup-spec": { title: "Setup Agent Specification", path: "docs/SETUP_AGENT_SPEC.md" },
@@ -161,11 +161,11 @@ export async function docRoutes(app: FastifyInstance) {
 
   <div class="agent-box">
     <h3>Hand This to Your Agent</h3>
-    <p>Copy the agent onboarding guide and give it to any Claude Code / Cursor / LLM agent. It will walk through setting up a physical device on the PCC network.</p>
-    <button class="copy-btn" id="copy-agent" onclick="copyAgentGuide()">Copy Agent Guide to Clipboard</button>
+    <p>Copy this prompt into Claude, ChatGPT, Cursor or any other tool-using agent. It loads the PCC agent package and asks what you want to do: buy something, offer a capability, or connect a machine.</p>
+    <button class="copy-btn" id="copy-agent" onclick="copyAgentPrompt()">Copy the agent prompt</button>
     <span id="copy-status" style="margin-left: 1rem; color: #94a3b8; font-size: 0.85rem;"></span>
     <br><br>
-    <small><a href="/docs/agent-guide?format=md">View raw markdown</a> · <a href="/docs/agent-guide">View formatted</a></small>
+    <small><a href="/snippet.md">View the prompt</a> · <a href="/agent-package.json">Agent package</a></small>
   </div>
 
   <div class="cards">
@@ -179,15 +179,11 @@ export async function docRoutes(app: FastifyInstance) {
     </a>
     <a href="/docs/story-plan" class="card">
       <h3>Story Protocol Integration</h3>
-      <p>IP ownership for physical work. Royalty flows, derivative chains, collaborative labor equity, revenue-generating NFTs.</p>
+      <p>IP ownership for physical work. Royalty flows, derivative chains, collaborative labor equity.</p>
     </a>
     <a href="/docs/setup-spec" class="card">
       <h3>Setup Agent Spec</h3>
-      <p>29 MCP tools, 6 A2A intents, SetupAgent class. The blueprint for zero-config device onboarding.</p>
-    </a>
-    <a href="/docs/agent-guide" class="card">
-      <h3>Agent Onboarding Guide</h3>
-      <p>12-step machine-readable guide. Hand to any LLM agent to onboard a device onto PCC.</p>
+      <p>The SetupAgent class, its setup tools and intents. The blueprint for zero-config device onboarding.</p>
     </a>
   </div>
 
@@ -196,9 +192,9 @@ export async function docRoutes(app: FastifyInstance) {
   </div>
 
   <script>
-    async function copyAgentGuide() {
+    async function copyAgentPrompt() {
       try {
-        const res = await fetch('/docs/agent-guide?format=md');
+        const res = await fetch('/snippet.md');
         const text = await res.text();
         await navigator.clipboard.writeText(text);
         document.getElementById('copy-status').textContent = 'Copied! Paste into your agent.';
