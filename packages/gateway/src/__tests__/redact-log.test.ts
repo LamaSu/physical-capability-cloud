@@ -41,7 +41,7 @@ describe("redact-log (FC-8)", () => {
   });
 
   it("isSensitiveLogKey matches the credential families and spares ordinary ids", () => {
-    for (const k of ["key", "api_key", "apiKey", "usageKey", "x-oracle-key", "private_key", "privateKey", "secret", "clientSecret", "authorization", "sessionKey", "mnemonic", "seedPhrase", "password"]) {
+    for (const k of ["key", "api_key", "apiKey", "usageKey", "x-oracle-key", "private_key", "privateKey", "secret", "clientSecret", "authorization", "sessionKey", "mnemonic", "seedPhrase", "password", "csrfToken", "downloadKey", "webhookToken"]) {
       expect(isSensitiveLogKey(k), k).toBe(true);
     }
     for (const k of ["kernelId", "status", "count", "operatorAddress", "escrowAddress", "jobId", "email"]) {
