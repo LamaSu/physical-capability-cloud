@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import { runInNewContext } from "node:vm";
 import { keccak_256 } from "@noble/hashes/sha3";
 import {
@@ -337,6 +338,77 @@ async function refusalOfAsync(fn: () => Promise<unknown>): Promise<EvidenceBlock
   throw new Error("expected an EvidenceBlockInputError, but the call resolved");
 }
 
+// ── E7c helpers: input code that runs during a call must never get to replace a global ──────────────
+
+/**
+ * The reviewer's attack: code that replaces Object.freeze with the identity function and queues the
+ * restoration for the next microtask, so every freeze that runs in between is a no-op and the events
+ * handed back stay mutable. `run()` is what a hostile getter or Proxy trap would call. `restore()` puts
+ * the real function back: every test that arms this calls it in a finally, so a failing test cannot
+ * leave the sabotage behind.
+ */
+function freezeSaboteur() {
+  const realFreeze = Object.freeze;
+  const state = { runs: 0 };
+  const install = (fn: unknown) => {
+    (Object as unknown as { freeze: unknown }).freeze = fn;
+  };
+  return {
+    state,
+    realFreeze,
+    run() {
+      state.runs++;
+      install((o: unknown) => o);
+      queueMicrotask(() => install(realFreeze));
+    },
+    restore() {
+      install(realFreeze);
+    },
+  };
+}
+
+/** Whether `root` and every object reachable from it (through own data properties) is frozen. */
+function isDeeplyFrozen(root: unknown): boolean {
+  const pending: unknown[] = [root];
+  const seen = new Set<unknown>();
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node === null || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    if (!Object.isFrozen(node)) return false;
+    for (const key of Reflect.ownKeys(node)) pending.push(Object.getOwnPropertyDescriptor(node, key)?.value);
+  }
+  return true;
+}
+
+/** A Proxy handler whose EVERY trap records its name (and calls `onTrap`), then forwards to the target. A refused Proxy must leave `log` empty. */
+function recordingHandler(log: string[], onTrap?: (name: string) => void): ProxyHandler<object> {
+  const traps = [
+    "get",
+    "set",
+    "has",
+    "deleteProperty",
+    "defineProperty",
+    "getOwnPropertyDescriptor",
+    "ownKeys",
+    "getPrototypeOf",
+    "setPrototypeOf",
+    "isExtensible",
+    "preventExtensions",
+    "apply",
+    "construct",
+  ] as const;
+  const handler: Record<string, unknown> = {};
+  for (const name of traps) {
+    handler[name] = (...args: unknown[]) => {
+      log.push(name);
+      onTrap?.(name);
+      return (Reflect[name] as (...a: unknown[]) => unknown)(...args);
+    };
+  }
+  return handler as ProxyHandler<object>;
+}
+
 // ── F1 (HIGH): the events root is recomputed, not trusted ────────────────────
 describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead of trusting carried hashes", () => {
   const raw: Array<Omit<EvidenceEvent, "id" | "hash">> = [
@@ -462,21 +534,105 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
     expect((await computeKernelSignedEventsRoot({ events: renamed, bundleHash: b.bundleHash })).root).toBe(PINNED_ROOT);
   });
 
-  it("reads the bundle's events and bundleHash exactly once each", async () => {
+  // E7c. This test used to ACCEPT a getter on the bundle and pin that it ran exactly once. That was the
+  // hole: a getter runs caller code before any snapshot exists, and that code can swap Object.freeze for
+  // one microtask so the events handed back stay mutable (see the reproduction below). The bundle is now
+  // read from its own descriptors, never with a [[Get]], and an accessor is refused unread.
+  it("refuses a getter on the bundle, for events and for bundleHash, and never runs it", async () => {
     const b = await honest();
-    const reads = { events: 0, bundleHash: 0 };
-    const live = {
+    for (const name of ["events", "bundleHash"] as const) {
+      let runs = 0;
+      const getter = (value: unknown) => ({
+        enumerable: true,
+        get: () => {
+          runs++;
+          return value;
+        },
+      });
+      const live = Object.defineProperties(
+        {},
+        {
+          events: name === "events" ? getter(b.events) : { enumerable: true, value: b.events },
+          bundleHash: name === "bundleHash" ? getter(b.bundleHash) : { enumerable: true, value: b.bundleHash },
+        },
+      );
+      const err = await refusalOfAsync(() => computeKernelSignedEventsRoot(live as never));
+      expect(err.field, name).toBe(name);
+      expect(err.message, name).toMatch(/a getter on the bundle runs code/);
+      expect(runs, `the ${name} getter must not run`).toBe(0);
+    }
+  });
+
+  it("(a) the reviewer's reproduction (E7c): an honest bundle behind an events getter that swaps Object.freeze is refused, and the getter never runs", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    try {
+      const bundle = {
+        get events() {
+          sab.run(); // Object.freeze := identity, restored by a microtask the call would only reach at its first await
+          return b.events;
+        },
+        bundleHash: b.bundleHash,
+      };
+      const err = await refusalOfAsync(() => computeKernelSignedEventsRoot(bundle as never));
+      expect(err.field).toBe("events");
+      expect(err.message).toMatch(/a getter on the bundle runs code/);
+      expect(sab.state.runs, "the getter must not run").toBe(0);
+      expect(Object.freeze, "Object.freeze must be untouched").toBe(sab.realFreeze);
+    } finally {
+      sab.restore();
+    }
+    // The same honest bundle as plain data is accepted, and what comes back is frozen at every depth,
+    // so the reviewer's step 5 (mutate result.events[0].payload) throws instead of diverging the hash.
+    const result = await computeKernelSignedEventsRoot({ events: b.events, bundleHash: b.bundleHash });
+    expect(result.root).toBe(PINNED_ROOT);
+    expect(isDeeplyFrozen(result)).toBe(true);
+    expect(() => {
+      (result.events[0]!.payload as { ok: boolean }).ok = false;
+    }).toThrow(TypeError);
+  });
+
+  it("refuses a getter the bundle inherits from its class, and a property it only inherits or lacks", async () => {
+    const b = await honest();
+    let runs = 0;
+    class Lazy {
       get events() {
-        reads.events++;
+        runs++;
         return b.events;
-      },
+      }
       get bundleHash() {
-        reads.bundleHash++;
+        runs++;
         return b.bundleHash;
-      },
-    };
-    expect((await computeKernelSignedEventsRoot(live)).root).toBe(PINNED_ROOT);
-    expect(reads).toEqual({ events: 1, bundleHash: 1 });
+      }
+    }
+    expect((await refusalOfAsync(() => computeKernelSignedEventsRoot(new Lazy() as never))).field).toBe("events");
+    expect(runs, "an inherited getter must not run").toBe(0);
+    const inherited = Object.create({ events: b.events, bundleHash: b.bundleHash });
+    expect((await refusalOfAsync(() => computeKernelSignedEventsRoot(inherited))).field).toBe("events");
+    expect((await refusalOfAsync(() => computeKernelSignedEventsRoot({ bundleHash: b.bundleHash } as never))).field).toBe("events");
+    const noHash = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: b.events } as never));
+    expect(noHash.field).toBe("bundleHash");
+    expect(noHash.message).toMatch(/own data property/);
+  });
+
+  it("still accepts a bundle that holds events and bundleHash as own data properties, however it was built", async () => {
+    const b = await honest();
+    class Fields {
+      events = b.events;
+      bundleHash = b.bundleHash;
+    }
+    const shapes: Array<[string, unknown]> = [
+      ["a plain object", { events: b.events, bundleHash: b.bundleHash }],
+      ["a frozen object", Object.freeze({ events: b.events, bundleHash: b.bundleHash })],
+      ["a null-prototype object", Object.assign(Object.create(null), b)],
+      ["a class instance with fields", new Fields()],
+      ["non-enumerable own data properties", Object.defineProperties({}, { events: { value: b.events }, bundleHash: { value: b.bundleHash } })],
+    ];
+    for (const [label, bundle] of shapes) {
+      const result = await computeKernelSignedEventsRoot(bundle as never);
+      expect(result.root, label).toBe(PINNED_ROOT);
+      expect(isDeeplyFrozen(result), label).toBe(true);
+    }
   });
 
   it("an accessor on an event is refused without being invoked: a hash getter that changes its answer cannot split verification from hashing", async () => {
@@ -503,17 +659,33 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
     expect(reads).toBe(0);
   });
 
-  it("reads each element of the events array once", async () => {
+  // E7c. This test used to ACCEPT a Proxy events array and pin that each element was read once through
+  // its `get` trap. A trap is caller code that runs before the snapshot exists: it is refused unasked.
+  it("refuses an events array that is a Proxy, without running a single trap", async () => {
     const b = await honest();
-    const reads: Record<string, number> = {};
-    const counted = new Proxy([...b.events], {
-      get(target, key, receiver) {
-        if (typeof key === "string" && /^\d+$/.test(key)) reads[key] = (reads[key] ?? 0) + 1;
-        return Reflect.get(target, key, receiver);
+    const traps: string[] = [];
+    const counted = new Proxy([...b.events], recordingHandler(traps));
+    const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: counted, bundleHash: b.bundleHash } as never));
+    expect(err.field).toBe("events");
+    expect(err.message).toMatch(/is a Proxy/);
+    expect(traps, "no trap may run").toEqual([]);
+  });
+
+  it("refuses an accessor element of the events array without running it", async () => {
+    const b = await honest();
+    let runs = 0;
+    const events = [...b.events];
+    Object.defineProperty(events, 1, {
+      enumerable: true,
+      get: () => {
+        runs++;
+        return b.events[1];
       },
     });
-    expect((await computeKernelSignedEventsRoot({ events: counted, bundleHash: b.bundleHash })).root).toBe(PINNED_ROOT);
-    expect(reads).toEqual({ "0": 1, "1": 1 });
+    const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events, bundleHash: b.bundleHash } as never));
+    expect(err.field).toBe("events[1]");
+    expect(err.message).toMatch(/accessor element/);
+    expect(runs, "the element getter must not run").toBe(0);
   });
 });
 
@@ -787,38 +959,36 @@ describe("E7b — computeKernelSignedEventsRoot verifies, commits and returns on
     });
   });
 
-  it("(g) reads a Proxy event once, through its reflection traps, so a shifting answer cannot split what is hashed from what is returned", async () => {
+  // E7c. This test used to ACCEPT a Proxy event and pin that it was read once through its reflection
+  // traps, so a shifting answer could not split what was hashed from what was returned. A trap is caller
+  // code, and code that runs while the snapshot is made can swap Object.freeze (see the E7c block below):
+  // a Proxy is now refused before any trap runs, so there is no second answer to guard against.
+  it("(g) refuses a Proxy event before any trap runs, whatever its traps would answer", async () => {
     const b = await twoEvents();
     const first = b.events[0]!;
-    const descriptorReads: Record<string, number> = {};
-    let ownKeysCalls = 0;
+    const traps: string[] = [];
+    let payloadReads = 0;
     const shifting = new Proxy(
       { ...first },
       {
-        get() {
-          throw new Error("[[Get]] must never be performed on the input");
-        },
-        ownKeys(target) {
-          ownKeysCalls++;
-          return Reflect.ownKeys(target);
-        },
+        ...recordingHandler(traps),
         getOwnPropertyDescriptor(target, key) {
-          const name = String(key);
-          descriptorReads[name] = (descriptorReads[name] ?? 0) + 1;
+          traps.push("getOwnPropertyDescriptor");
           const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
           // From the second read on, payload would answer differently from what was hashed.
-          return name === "payload" && descriptorReads[name]! > 1 && descriptor !== undefined
+          return key === "payload" && ++payloadReads > 1 && descriptor !== undefined
             ? { ...descriptor, value: { ok: false } }
             : descriptor;
         },
       },
     );
-    const result = await computeKernelSignedEventsRoot({ events: [shifting as never, b.events[1]!], bundleHash: b.bundleHash });
-    expect(result.events[0]!.payload).toEqual(first.payload);
-    expect(await hashEvent(result.events[0]!)).toBe(first.hash);
-    expect(ownKeysCalls).toBe(1);
-    expect(descriptorReads.payload).toBe(1);
-    expect(Object.values(descriptorReads).every((n) => n === 1)).toBe(true);
+    const err = await refusalOfAsync(() =>
+      computeKernelSignedEventsRoot({ events: [shifting as never, b.events[1]!], bundleHash: b.bundleHash }),
+    );
+    expect(err.field).toBe("events[0]");
+    expect(err.message).toMatch(/is a Proxy/);
+    expect(traps, "no trap may run").toEqual([]);
+    expect(payloadReads).toBe(0);
   });
 
   it("a value nested beyond the engine's recursion limit is refused as an EvidenceBlockInputError, never a RangeError", async () => {
@@ -842,6 +1012,351 @@ describe("E7b — computeKernelSignedEventsRoot verifies, commits and returns on
     expect(err.field.length).toBeLessThanOrEqual(203);
     expect(err.message.length).toBeLessThan(700);
     expect(err.message).toMatch(/NaN/);
+  });
+});
+
+// ── E7c (HIGH): input that can run code is refused before it is read ─────────────────────────────────
+// A getter on the bundle, a Proxy at any depth and an accessor all run CALLER code while the snapshot is
+// being made, and that code can replace Object.freeze for one microtask (queueMicrotask restores it): the
+// freezes become no-ops, result.events stay mutable, and the events a consumer evaluates are no longer the
+// events that were committed (recomputing a mutated event's hash no longer matches the carried hash and
+// root). The reviewer's exact reproduction, (a), sits beside "refuses a getter on the bundle" in the F1
+// block above. Every such input is refused before it is read, and every function the module calls on the
+// input is captured at load, so a global replaced later cannot change the freeze either.
+describe("E7c — input that can run code is refused before it is read, and the snapshot freeze cannot be undone", () => {
+  type Body = Omit<EvidenceEvent, "id" | "hash">;
+  const bodies: Body[] = [
+    { type: "execution_completed", timestamp: "2026-10-01T00:00:00Z", source, payload: { ok: true, nested: { list: [1, 2, { deep: "x" }] } } },
+    { type: "cv_inspection_result", timestamp: "2026-10-01T00:00:05Z", source, payload: { pass: 1, defects: 0 } },
+  ];
+  /** An honest bundle: its carried hashes are the true ones, so WITHOUT the refusals every case below would succeed and the attack would work. */
+  const honest = async () => {
+    const events = await Promise.all(bodies.map(async (e, i) => ({ ...e, id: `e${i}`, hash: await hashEvent(e) })));
+    return { events, bundleHash: await hashBundle(events) };
+  };
+  const refuse = (bundle: unknown) => refusalOfAsync(() => computeKernelSignedEventsRoot(bundle as never));
+  const REAL_FREEZE = Object.freeze;
+  afterEach(() => {
+    const leaked = Object.freeze !== REAL_FREEZE;
+    (Object as unknown as { freeze: unknown }).freeze = REAL_FREEZE; // do not poison the tests that follow
+    expect(leaked, "a test left Object.freeze replaced").toBe(false);
+  });
+
+  it("(b) an events ARRAY that is a Proxy, live or revoked, is refused before a trap can swap Object.freeze", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    const traps: string[] = [];
+    try {
+      const events = new Proxy([...b.events], recordingHandler(traps, () => sab.run()));
+      const err = await refuse({ events, bundleHash: b.bundleHash });
+      expect(err.field).toBe("events");
+      expect(err.message).toMatch(/is a Proxy/);
+      // Array.isArray throws a TypeError on a revoked Proxy: the Proxy test must come first.
+      const revoked = Proxy.revocable([...b.events], {});
+      revoked.revoke();
+      expect((await refuse({ events: revoked.proxy, bundleHash: b.bundleHash })).field).toBe("events");
+      expect(traps, "no trap may run").toEqual([]);
+      expect(sab.state.runs, "no trap may run").toBe(0);
+    } finally {
+      sab.restore();
+    }
+  });
+
+  it("(c) a Proxy anywhere inside an event is refused before a trap can swap Object.freeze", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    const traps: string[] = [];
+    const proxied = <T extends object>(target: T): T => new Proxy(target, recordingHandler(traps, () => sab.run()));
+    type Clone = { payload: { nested: { list: unknown[] } }; source: object } & Record<string, unknown>;
+    const first = () => structuredClone(b.events[0]!) as unknown as Clone;
+    const second = () => structuredClone(b.events[1]!) as unknown as Clone;
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const cases: Array<[string, () => unknown[], string]> = [
+      ["the payload", () => { const e = first(); e.payload = proxied(e.payload); return [e, b.events[1]]; }, "events[0].payload"],
+      ["a member three levels down", () => { const e = first(); e.payload.nested.list[2] = proxied(e.payload.nested.list[2] as object); return [e, b.events[1]]; }, "events[0].payload.nested.list[2]"],
+      ["an array inside the payload", () => { const e = first(); e.payload.nested.list = proxied(e.payload.nested.list); return [e, b.events[1]]; }, "events[0].payload.nested.list"],
+      ["the source", () => { const e = first(); e.source = proxied(e.source); return [e, b.events[1]]; }, "events[0].source"],
+      ["the event itself", () => [proxied(first()), b.events[1]], "events[0]"],
+      ["the second event's payload", () => { const e = second(); e.payload = proxied(e.payload); return [b.events[0], e]; }, "events[1].payload"],
+      ["a callable Proxy", () => { const e = first(); e.payload.nested.list[2] = proxied(function () {}); return [e, b.events[1]]; }, "events[0].payload.nested.list[2]"],
+      ["a revoked Proxy", () => { const e = first(); e.payload.nested.list[2] = revoked.proxy; return [e, b.events[1]]; }, "events[0].payload.nested.list[2]"],
+    ];
+    try {
+      for (const [label, build, field] of cases) {
+        const err = await refuse({ events: build(), bundleHash: b.bundleHash });
+        expect(err.field, label).toBe(field);
+        expect(err.message, label).toMatch(/is a Proxy/);
+      }
+      expect(traps, "no trap may run").toEqual([]);
+      expect(sab.state.runs, "no trap may run").toBe(0);
+    } finally {
+      sab.restore();
+    }
+  });
+
+  it("(c) a Proxy as the PROTOTYPE of an event or of a payload object is refused without being asked anything", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    const traps: string[] = [];
+    const proxied = () => new Proxy({}, recordingHandler(traps, () => sab.run()));
+    try {
+      const withProtoPayload = structuredClone(b.events[0]!) as unknown as { payload: object };
+      Object.setPrototypeOf(withProtoPayload.payload, proxied());
+      const err = await refuse({ events: [withProtoPayload, b.events[1]], bundleHash: b.bundleHash });
+      expect(err.field).toBe("events[0].payload");
+      expect(err.message).toMatch(/non-plain object/);
+      const event = Object.setPrototypeOf(structuredClone(b.events[0]!), proxied());
+      expect((await refuse({ events: [event, b.events[1]], bundleHash: b.bundleHash })).field).toBe("events[0]");
+      expect(traps, "no trap may run").toEqual([]);
+      expect(sab.state.runs, "no trap may run").toBe(0);
+    } finally {
+      sab.restore();
+    }
+  });
+
+  it("(d) a bundle that is a Proxy, live or revoked, is refused before a trap can swap Object.freeze", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    const traps: string[] = [];
+    try {
+      const bundle = new Proxy({ events: b.events, bundleHash: b.bundleHash }, recordingHandler(traps, () => sab.run()));
+      const err = await refuse(bundle);
+      expect(err.field).toBe("bundle");
+      expect(err.message).toMatch(/is a Proxy/);
+      const revoked = Proxy.revocable({ events: b.events, bundleHash: b.bundleHash }, {});
+      revoked.revoke();
+      expect((await refuse(revoked.proxy)).field).toBe("bundle");
+      expect(traps, "no trap may run").toEqual([]);
+      expect(sab.state.runs, "no trap may run").toBe(0);
+    } finally {
+      sab.restore();
+    }
+  });
+
+  it("(e) a bundleHash getter that swaps Object.freeze is refused, and never runs", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    try {
+      const bundle = {
+        events: b.events,
+        get bundleHash() {
+          sab.run();
+          return b.bundleHash;
+        },
+      };
+      const err = await refuse(bundle);
+      expect(err.field).toBe("bundleHash");
+      expect(err.message).toMatch(/a getter on the bundle runs code/);
+      expect(sab.state.runs, "the getter must not run").toBe(0);
+    } finally {
+      sab.restore();
+    }
+  });
+
+  it("(f) a caller that replaces Object.freeze for the whole call still gets deeply frozen events: the freeze is a captured reference", async () => {
+    const b = await honest();
+    const sab = freezeSaboteur();
+    let result: Awaited<ReturnType<typeof computeKernelSignedEventsRoot>>;
+    try {
+      // Replaced before the call and kept replaced across every await in it (the reviewer's attack only
+      // replaced it for one microtask; this is the stronger form, which the final freeze would also lose).
+      (Object as unknown as { freeze: unknown }).freeze = (o: unknown) => o;
+      result = await computeKernelSignedEventsRoot(b as never);
+    } finally {
+      sab.restore();
+    }
+    expect(result.root).toBe(taggedDigestToBytes32(b.bundleHash));
+    expect(isDeeplyFrozen(result), "the result, its events array and every event at every depth").toBe(true);
+    expect(() => {
+      (result.events[0]!.payload as { ok: boolean }).ok = false;
+    }).toThrow(TypeError);
+    for (const e of result.events) expect(await hashEvent(e)).toBe(e.hash);
+  });
+
+  it("an accessor in an event is refused before a JSON-type defect that sorts ahead of it, and is never run", async () => {
+    const b = await honest();
+    let runs = 0;
+    const payload: Record<string, unknown> = { a: NaN, z: 1 };
+    Object.defineProperty(payload, "z", {
+      enumerable: true,
+      get: () => {
+        runs++;
+        return 1;
+      },
+    });
+    const err = await refuse({ events: [{ ...structuredClone(b.events[0]!), payload }, b.events[1]], bundleHash: b.bundleHash });
+    // canonicalSnapshot alone reports the NaN first (keys are visited in sorted order): the walk runs first.
+    expect(err.field).toBe("events[0].payload.z");
+    expect(err.message).toMatch(/accessor property: its getter runs code/);
+    expect(runs, "the getter must not run").toBe(0);
+  });
+
+  it("a Proxy at the bottom of a very deep event is found without overflowing the stack, and without running a trap", async () => {
+    const b = await honest();
+    const traps: string[] = [];
+    let deep: Record<string, unknown> = { leaf: new Proxy({}, recordingHandler(traps)) };
+    for (let i = 0; i < 50_000; i++) deep = { d: deep };
+    const err = await refuse({ events: [{ ...structuredClone(b.events[0]!), payload: deep }, b.events[1]], bundleHash: b.bundleHash });
+    expect(err.message).toMatch(/is a Proxy/);
+    expect(err.field.startsWith("events[0].payload.d.d.d")).toBe(true);
+    expect(err.field.length).toBeLessThanOrEqual(203);
+    expect(traps, "no trap may run").toEqual([]);
+  });
+
+  it("refuses an object canonicalize would refuse as non-plain before its members are looked at", async () => {
+    const b = await honest();
+    const traps: string[] = [];
+    let runs = 0;
+    class Holder {
+      constructor() {
+        Object.defineProperty(this, "x", {
+          enumerable: true,
+          get: () => {
+            runs++;
+            return 1;
+          },
+        });
+      }
+    }
+    class Wrapper {
+      member: object = new Proxy({}, recordingHandler(traps));
+    }
+    class Sub extends Array {}
+    const cases: Array<[string, unknown]> = [
+      ["a class instance with an accessor member", new Holder()],
+      ["a class instance holding a Proxy", new Wrapper()],
+      ["an Error", new Error("x")],
+      ["a typed array", new Uint8Array(4)],
+      ["an Array subclass", Sub.from([1])],
+      ["an array with a substituted prototype", Object.setPrototypeOf([1], null)],
+    ];
+    for (const [label, odd] of cases) {
+      const payload = { ok: true, odd };
+      const err = await refuse({ events: [{ ...structuredClone(b.events[0]!), payload }, b.events[1]], bundleHash: b.bundleHash });
+      expect(err.field, label).toBe("events[0].payload.odd");
+      expect(err.message, label).toMatch(/non-plain object|substituted prototype/);
+      expect(err.message, `${label}: its members must not be enumerated`).not.toMatch(/accessor|Proxy/);
+    }
+    expect(runs, "no getter may run").toBe(0);
+    expect(traps, "no trap may run").toEqual([]);
+  });
+
+  it("walks a shared node once, and leaves a cycle to canonicalSnapshot: neither is refused as code-running", async () => {
+    const shared = { k: 1 };
+    const body = { ...bodies[0]!, payload: { a: shared, b: shared } };
+    const event = { ...body, id: "e0", hash: await hashEvent(body) };
+    const bundle = { events: [event], bundleHash: await hashBundle([event]) };
+    const result = await computeKernelSignedEventsRoot(bundle as never);
+    const payload = result.events[0]!.payload as { a: object; b: object };
+    expect(payload.a).toEqual({ k: 1 });
+    expect(payload.a).not.toBe(payload.b); // the snapshot holds two copies of what was hashed twice
+    const cyclic: Record<string, unknown> = { ...event };
+    cyclic.self = cyclic;
+    expect((await refuse({ events: [cyclic], bundleHash: bundle.bundleHash })).field).toBe("events[0].self");
+  });
+
+  it("calls none of the replaceable intrinsics at call time: each one is a reference captured when the module loaded", async () => {
+    const b = await honest();
+    const auth = structuredClone(sessionKeyAuth);
+    const counts: Record<string, number> = {};
+    const restores: Array<() => void> = [];
+    const spy = (target: object, name: string, label: string) => {
+      const holder = target as Record<string, (...args: unknown[]) => unknown>;
+      const real = holder[name]!;
+      counts[label] = 0;
+      holder[name] = (...args: unknown[]) => {
+        counts[label] = counts[label]! + 1;
+        return real(...args);
+      };
+      restores.push(() => {
+        holder[name] = real;
+      });
+    };
+    let live: Record<string, number> = {};
+    let used: Record<string, number> = {};
+    let pending: Promise<unknown> | undefined;
+    try {
+      spy(Object, "freeze", "Object.freeze");
+      spy(Object, "getOwnPropertyDescriptor", "Object.getOwnPropertyDescriptor");
+      spy(Object, "getPrototypeOf", "Object.getPrototypeOf");
+      spy(Array, "isArray", "Array.isArray");
+      spy(Reflect, "ownKeys", "Reflect.ownKeys");
+      spy(Reflect, "getOwnPropertyDescriptor", "Reflect.getOwnPropertyDescriptor");
+      spy(Reflect, "getPrototypeOf", "Reflect.getPrototypeOf");
+      spy(Number, "isSafeInteger", "Number.isSafeInteger");
+      spy(utilTypes, "isProxy", "util.types.isProxy");
+      // The spies are live: the same calls made through the globals are counted.
+      Object.freeze({});
+      Object.getOwnPropertyDescriptor({}, "x");
+      Object.getPrototypeOf({});
+      Array.isArray([]);
+      Reflect.ownKeys({});
+      Reflect.getOwnPropertyDescriptor({}, "x");
+      Reflect.getPrototypeOf({});
+      Number.isSafeInteger(1);
+      utilTypes.isProxy({});
+      live = { ...counts };
+      for (const label of Object.keys(counts)) counts[label] = 0;
+      // All of this runs synchronously, so nothing else can call an intrinsic in between. The events call
+      // runs to its first await: admission, both walks, the snapshots and their freezes.
+      pending = computeKernelSignedEventsRoot(b as never);
+      sessionKeyAuthSnapshot(auth);
+      computeAttestationSetRoot(attJob, roles);
+      computeAttestationRoleDigest(attJob, roles[0]!);
+      used = { ...counts };
+    } finally {
+      for (const restore of restores) restore();
+    }
+    await pending;
+    for (const [label, n] of Object.entries(live)) expect(n, `${label}: the spy must be live`).toBeGreaterThan(0);
+    expect(used).toEqual(Object.fromEntries(Object.keys(counts).map((label) => [label, 0])));
+  });
+
+  it("the integer checks of the unit context use the captured Number.isSafeInteger", () => {
+    // @noble/hashes calls Number.isSafeInteger itself (inside keccak), so the calls are compared, not
+    // expected to be zero: a number input reaches this module's own check, a bigint input does not, so
+    // the two counts are equal exactly when the module's check does not go through the global.
+    const holder = Number as unknown as { isSafeInteger: (v: unknown) => boolean };
+    const real = holder.isSafeInteger;
+    let calls = 0;
+    const callsOf = (fn: () => unknown) => {
+      calls = 0;
+      fn();
+      return calls;
+    };
+    let asBigint: number;
+    let asNumber: number;
+    try {
+      holder.isSafeInteger = (v) => {
+        calls++;
+        return real(v);
+      };
+      asBigint = callsOf(() => computeSettlementUnitId(unit));
+      asNumber = callsOf(() => computeSettlementUnitId({ ...unit, chainId: 8453, milestoneIndex: 3 }));
+    } finally {
+      holder.isSafeInteger = real;
+    }
+    expect(asBigint).toBeGreaterThan(0); // the spy is live: keccak's own check was counted
+    expect(asNumber).toBe(asBigint);
+  });
+
+  it("a replaced util.types.isProxy does not let a Proxy through: the check is a reference captured at load", async () => {
+    const b = await honest();
+    const traps: string[] = [];
+    const events = new Proxy([...b.events], recordingHandler(traps));
+    const holder = utilTypes as unknown as { isProxy: unknown };
+    const real = holder.isProxy;
+    let pending: Promise<unknown>;
+    try {
+      holder.isProxy = () => false;
+      pending = computeKernelSignedEventsRoot({ events, bundleHash: b.bundleHash } as never);
+      pending.catch(() => {}); // the refusal is already settled by now: do not let it be reported as unhandled
+    } finally {
+      holder.isProxy = real;
+    }
+    await expect(pending).rejects.toMatchObject({ name: "EvidenceBlockInputError", field: "events" });
+    expect(traps, "no trap may run").toEqual([]);
   });
 });
 
@@ -1184,6 +1699,35 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
       expect(reads).toBe(0);
     });
 
+    // E7c, found while capturing the intrinsics: the plain-object test asked an object's PROTOTYPE for its own
+    // prototype, which runs a Proxy prototype's getPrototypeOf trap (code that could swap Object.freeze before
+    // the snapshot below is frozen). A Proxy prototype, and a revoked Proxy, are now refused unasked.
+    it("refuses an object whose PROTOTYPE is a Proxy, and a revoked Proxy, without running a trap", () => {
+      const traps: string[] = [];
+      const hostile = Object.setPrototypeOf(freshAuth(), new Proxy({}, recordingHandler(traps)));
+      expect(refuseAuth(hostile).field).toBe(P);
+      const scope = freshAuth();
+      Object.setPrototypeOf(scope.scope, new Proxy({}, recordingHandler(traps)));
+      expect(refuseAuth(scope).field).toBe(`${P}.scope`);
+      expect(traps, "no trap may run").toEqual([]);
+      const revoked = Proxy.revocable(freshAuth(), {});
+      revoked.revoke();
+      expect(refuseAuth(revoked.proxy).field).toBe(P);
+    });
+
+    it("returns a deeply frozen snapshot even when the caller replaces Object.freeze: the freeze is a captured reference", () => {
+      const real = Object.freeze;
+      let snap: ReturnType<typeof sessionKeyAuthSnapshot>;
+      try {
+        (Object as unknown as { freeze: unknown }).freeze = (o: unknown) => o;
+        snap = sessionKeyAuthSnapshot(freshAuth());
+      } finally {
+        (Object as unknown as { freeze: unknown }).freeze = real;
+      }
+      expect(isDeeplyFrozen(snap)).toBe(true);
+      expect(snap.digest).toBe(sha(canonicalize(snap.value)));
+    });
+
     it("refuses an unknown own key, a symbol key and a non-enumerable field", () => {
       const extra = refuseAuth({ ...freshAuth(), extra: 1 });
       expect(extra.field).toBe(P);
@@ -1517,6 +2061,9 @@ describe("E7 F3 extension — the unit context is read once", () => {
 // A Proxy over an array passes Array.isArray, and `NaN < 1` is false, so a `count < 1`
 // check alone would treat such an array as non-empty, loop zero times and accept an
 // EMPTY bundle, role set or hash list. The explicit safe-integer check closes that.
+// (E7c: the bundle's events array is now refused as a Proxy before its length is asked, so the
+// "bundle events" case below holds by that refusal; the length check stays as a second line. The
+// role set and the attestation hashes still accept a Proxy, so they still need the check.)
 describe("E7 — an array with a non-integer length is refused, never treated as empty", () => {
   const lying = <T>(items: T[], length: unknown) =>
     new Proxy(items, { get: (target, key, receiver) => (key === "length" ? length : Reflect.get(target, key, receiver)) });

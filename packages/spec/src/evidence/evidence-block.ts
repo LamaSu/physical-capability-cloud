@@ -67,6 +67,27 @@
  * refusing it would take a second read of the input, and would make this step stricter than
  * the `verifyEventHash` that accepts the same event.
  *
+ * INPUT THAT CAN RUN CODE IS REFUSED BEFORE IT IS READ (E7c). A Proxy runs its traps on every
+ * reflection operation and an accessor runs its getter on every [[Get]]. Code that runs while the
+ * snapshot is being made can replace `Object.freeze` (or `Reflect.*`) for one microtask, so that the
+ * freezes become no-ops and the returned events stay mutable, or can answer a later read
+ * differently: the events a consumer evaluates could then differ from the events that were
+ * committed. So `computeKernelSignedEventsRoot` refuses, before it reads a value from it:
+ *   - a bundle that is a Proxy, and a bundle whose `events` or `bundleHash` is not an OWN DATA
+ *     property (a getter on the bundle, a getter inherited from a class, a missing property). Each
+ *     is read from its own descriptor, never with a [[Get]];
+ *   - an events array that is a Proxy, and an element that is a hole or an accessor;
+ *   - a Proxy anywhere inside an event, and an accessor anywhere inside an event
+ *     (`assertNoCodeRunningInput`: an iterative walk that touches only what cannot run code), and
+ *     an object that `canonicalize` would refuse as non-plain, whose members are never enumerated.
+ * What is left is `canonicalSnapshot` over a graph proven free of Proxies and accessors, so no code
+ * of the input runs during the call. Everything this module calls on caller data is a reference
+ * captured when it loads (`Object.freeze`, `Array.isArray`, `Reflect.ownKeys`,
+ * `Reflect.getOwnPropertyDescriptor`, `Reflect.getPrototypeOf`, `Number.isSafeInteger`,
+ * `util.types.isProxy`), as #359's canonical.ts does for the encoder, so a global replaced after
+ * load cannot turn the freeze of the snapshot into a no-op. A caller that replaces globals itself
+ * is outside the threat model: it already runs arbitrary code in this process.
+ *
  * The session authorization is snapshotted before it is hashed (E7 F3, F4): a frozen
  * plain copy of exactly the declared fields, read once, with `publicKey` pinned to 64
  * and `parentSignature` to 128 lowercase hex characters with NO 0x prefix, the form the
@@ -107,6 +128,28 @@ import { types as utilTypes } from "node:util";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { NonCanonicalValueError, canonicalSnapshot, canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
+
+// Everything this module calls on caller-supplied data is captured here, when the module loads, and
+// the code below calls only these references (#359's canonical.ts does the same for the encoder). A
+// global replaced AFTER this point (Object.freeze, Reflect.ownKeys, util.types.isProxy ...) cannot
+// change what the freezes, the key enumeration, the array and Proxy tests below do: in particular
+// the snapshot's freeze cannot be made a no-op. The traversal of the two walks below
+// (`assertNoCodeRunningInput` and `deepFreeze`) looks nothing up at call time: `set.has(v)` and
+// `arr.push(v)` would find a method on the object, so they use the bound captures and linked frames
+// instead. (Only the text of a refusal is built with ordinary calls.)
+const freeze = Object.freeze;
+const isArray = Array.isArray;
+const ownKeys = Reflect.ownKeys;
+const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+const getPrototypeOf = Reflect.getPrototypeOf;
+const isSafeInteger = Number.isSafeInteger;
+const isProxy = utilTypes.isProxy;
+const OBJECT_PROTOTYPE = Object.prototype;
+const ARRAY_PROTOTYPE = Array.prototype;
+const WeakSetConstructor = WeakSet;
+const call = Function.prototype.call;
+const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
+const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
 
 export type Bytes32Hex = `0x${string}`;
 
@@ -158,7 +201,7 @@ function addressWord(field: string, value: unknown): Uint8Array {
 function uintWord(field: string, value: unknown, bits: number): Uint8Array {
   let n: bigint;
   if (typeof value === "bigint") n = value;
-  else if (typeof value === "number" && Number.isSafeInteger(value)) {
+  else if (typeof value === "number" && isSafeInteger(value)) {
     // Number.isSafeInteger(-0) is true and BigInt(-0) is 0n, so -0 would reach the same word
     // as 0. It is not the pinned spelling of zero: refuse it.
     if (Object.is(value, -0)) {
@@ -271,31 +314,154 @@ function printable(text: string, max: number): string {
   return text.length > max ? `${clean}...` : clean;
 }
 
+/** What `ownDataValue` returns for a missing property and for an accessor. Module-private, so neither can equal a value read from input. */
+const ABSENT = Symbol("evidence-block: no such own property");
+const ACCESSOR = Symbol("evidence-block: accessor property");
+
 /**
- * Freeze `root` and every object and array reachable from it. The tree is a fresh JSON parse, so it
- * is acyclic and holds only own data properties; the walk is iterative, so depth cannot overflow the
- * stack.
+ * The value of `owner`'s OWN data property `key`, or ABSENT (no own property of that name: an
+ * inherited one does not count) or ACCESSOR. It is read from the property's own descriptor through
+ * the captured reflection, never with a [[Get]], so a getter is never invoked. A descriptor
+ * describes a data property only when it OWNS `value` and no `get` or `set` (as #359's `dataValueOf`
+ * judges it, never with `in`, which would also find a value inherited from a polluted
+ * Object.prototype).
+ *
+ * `owner` must not be a Proxy: a Proxy answers a descriptor request with its own code. Callers test
+ * `isProxy` first.
+ */
+function ownDataValue(owner: object, key: PropertyKey): unknown {
+  const descriptor = getOwnPropertyDescriptor(owner, key);
+  if (descriptor === undefined) return ABSENT;
+  const value = getOwnPropertyDescriptor(descriptor, "value");
+  if (
+    value === undefined ||
+    getOwnPropertyDescriptor(descriptor, "get") !== undefined ||
+    getOwnPropertyDescriptor(descriptor, "set") !== undefined
+  ) {
+    return ACCESSOR;
+  }
+  return value.value;
+}
+
+/** One entry of a linked stack: no array, so nothing is looked up on Array.prototype while walking. */
+interface FreezeFrame {
+  readonly node: unknown;
+  readonly below: FreezeFrame | null;
+}
+
+/**
+ * Freeze `root` and every object and array reachable from it, with the captured `Object.freeze`
+ * (a replaced global cannot make this a no-op). The tree is a fresh JSON parse, so it is acyclic and
+ * holds only own data properties, each fetched from its own descriptor; the walk is iterative, so
+ * depth cannot overflow the stack.
  */
 function deepFreeze<T>(root: T): T {
-  const pending: unknown[] = [root];
-  while (pending.length > 0) {
-    const node = pending.pop();
+  let top: FreezeFrame | null = { node: root, below: null };
+  while (top !== null) {
+    const node: unknown = top.node;
+    top = top.below;
     if (node === null || typeof node !== "object") continue;
-    Object.freeze(node);
-    const keys = Reflect.ownKeys(node);
-    for (let i = 0; i < keys.length; i++) pending.push(Reflect.get(node, keys[i]));
+    freeze(node);
+    const keys = ownKeys(node);
+    for (let i = 0; i < keys.length; i++) {
+      const member = ownDataValue(node, keys[i]);
+      if (member !== ABSENT && member !== ACCESSOR) top = { node: member, below: top };
+    }
   }
   return root;
+}
+
+/** One node of the walk: the value, the node it hangs from and the key it hangs under, and the frame below it on the stack. */
+interface WalkFrame {
+  readonly value: unknown;
+  readonly parent: WalkFrame | null;
+  readonly key: PropertyKey | null;
+  readonly below: WalkFrame | null;
+}
+
+/** The field of a node in a refusal: `rootField` plus the keys on the way down, e.g. `events[0].payload.list[2]`. */
+function walkField(rootField: string, frame: WalkFrame): string {
+  const segments: string[] = [];
+  for (let at: WalkFrame | null = frame; at !== null && at.parent !== null; at = at.parent) {
+    const key = String(at.key); // a symbol key reads as Symbol(description)
+    segments.push(isArray(at.parent.value) || typeof at.key === "symbol" ? `[${key}]` : `.${key}`);
+  }
+  let field = rootField;
+  for (let i = segments.length - 1; i >= 0; i--) field += segments[i];
+  return field;
+}
+
+/**
+ * Refuse, before anything of it is read, every part of `root` that can run code: a Proxy at any
+ * depth (its traps run on the first reflection call) and an accessor anywhere (its getter runs on a
+ * [[Get]]). Code that runs during the snapshot can replace `Object.freeze` for one microtask and so
+ * leave the returned events mutable (E7c), so it must never run at all.
+ *
+ * The walk is iterative (depth cannot overflow the stack), uses only the captured functions, and
+ * touches an object only after proving it is no Proxy: the own keys and descriptors of a non-Proxy
+ * run no code. A node is enumerated only when `canonicalize` would descend into it too, a plain
+ * object or an ordinary array: any other object (a Buffer, a typed array, a class instance, an Error)
+ * is refused here, before its members are touched, which is exactly what `canonicalize` does with it
+ * and is O(1) where enumerating a large typed array is not. Everything else JSON cannot carry (NaN, a
+ * bigint, an undefined element, a cycle ...) is left to `canonicalSnapshot`, which runs next on a
+ * graph this walk has proven free of Proxies and accessors. `seen` skips a node that was already
+ * walked, so a cycle ends the walk and a shared node is walked once.
+ */
+function assertNoCodeRunningInput(root: unknown, rootField: string, seen: WeakSet<object>): void {
+  let top: WalkFrame | null = { value: root, parent: null, key: null, below: null };
+  while (top !== null) {
+    const frame: WalkFrame = top;
+    top = frame.below;
+    const node = frame.value;
+    if (node === null || (typeof node !== "object" && typeof node !== "function")) continue;
+    if (isProxy(node)) {
+      throw new EvidenceBlockInputError(
+        printable(walkField(rootField, frame), 200),
+        "is a Proxy: its traps run code, so it is refused before it is read",
+      );
+    }
+    if (typeof node === "function" || weakSetHas(seen, node)) continue; // a function is no JSON data: canonicalSnapshot refuses it
+    weakSetAdd(seen, node);
+    const proto = getPrototypeOf(node);
+    if (isArray(node) ? proto !== ARRAY_PROTOTYPE : proto !== OBJECT_PROTOTYPE && proto !== null) {
+      throw new EvidenceBlockInputError(
+        printable(walkField(rootField, frame), 200),
+        isArray(node)
+          ? "is not plain JSON evidence data (an array with a substituted prototype or an Array subclass)"
+          : "is not plain JSON evidence data (a non-plain object: its prototype is not Object.prototype or null)",
+      );
+    }
+    const keys = ownKeys(node);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const member = ownDataValue(node, key);
+      if (member === ACCESSOR || member === ABSENT) {
+        throw new EvidenceBlockInputError(
+          printable(walkField(rootField, { value: undefined, parent: frame, key, below: null }), 200),
+          member === ACCESSOR
+            ? "is an accessor property: its getter runs code, so it is refused before it is read"
+            : "is a property that vanished while it was read",
+        );
+      }
+      if (member !== null && (typeof member === "object" || typeof member === "function")) {
+        top = { value: member, parent: frame, key, below: top };
+      }
+    }
+  }
 }
 
 /**
  * One event as deep-frozen plain data (E7b). The raw value is taken through `canonicalSnapshot`
  * (#359): canonicalize it from its own property descriptors, then parse the canonical text once.
- * No getter and no `toJSON` of the input runs, a Proxy is read once through its reflection traps,
- * and what cannot be written as JSON exactly (an accessor, NaN, a bigint, a class instance, a hole,
- * ...) is refused rather than normalised, as the JSON.stringify/parse round trip this replaces
- * normalised NaN to null. The event is the snapshot's own value, so nothing but the snapshot
- * is ever hashed, returned or evaluated. A refusal names the event and the member that caused it.
+ * No getter and no `toJSON` of the input runs, and what cannot be written as JSON exactly (an
+ * accessor, NaN, a bigint, a class instance, a hole, ...) is refused rather than normalised, as the
+ * JSON.stringify/parse round trip this replaces normalised NaN to null. The event is the snapshot's
+ * own value, so nothing but the snapshot is ever hashed, returned or evaluated. A refusal names the
+ * event and the member that caused it.
+ *
+ * The caller has already run `assertNoCodeRunningInput` over `event` (E7c): it holds no Proxy and no
+ * accessor, so `canonicalSnapshot` runs none of the input's code here and nothing can replace a
+ * global between the read and the freeze.
  */
 function snapshotEvent(field: string, event: unknown): EvidenceEvent {
   let value: unknown;
@@ -312,7 +478,7 @@ function snapshotEvent(field: string, event: unknown): EvidenceEvent {
     }
     throw new EvidenceBlockInputError(field, "could not be read as plain JSON evidence data");
   }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (value === null || typeof value !== "object" || isArray(value)) {
     throw new EvidenceBlockInputError(field, "expected an event object");
   }
   return deepFreeze(value as EvidenceEvent);
@@ -338,13 +504,20 @@ export interface KernelSignedEventsSnapshot {
  * `event.hash`, so on its own two bundles with different payloads and the same
  * carried hashes share a root.
  *
- * Each event is snapshotted once with `canonicalSnapshot` (see `snapshotEvent`): it is read
- * through own property descriptors only, so no getter and no `toJSON` of the input runs. A Proxy
- * is not refused: it is read once, through its reflection traps, so what is hashed is what is
- * returned and evaluated, however its traps answer a later read. Anything JSON cannot carry exactly
- * is refused rather than normalised. Every event hash is recomputed with `hashEvent` over that
- * snapshot and must equal the carried `event.hash`; `hashBundle` is recomputed over the snapshot
- * and must equal `bundle.bundleHash`; an empty event list is refused. Throws
+ * Input that can run code is refused before it is read (E7c; see the module header): a bundle that
+ * is a Proxy, a bundle whose `events` or `bundleHash` is not an own DATA property (a getter on the
+ * bundle runs code), an events array that is a Proxy, an element that is a hole or an accessor, and
+ * a Proxy or an accessor anywhere inside an event. Each property is read from its own descriptor,
+ * never with a [[Get]], so no code of the caller runs during this call and the snapshot cannot be
+ * undone by a global that the input replaces. A caller that mutates globals itself is outside the
+ * threat model; the captured intrinsics still make the snapshot freeze immune to later global
+ * mutation.
+ *
+ * Each event is then snapshotted once with `canonicalSnapshot` (see `snapshotEvent`) over data
+ * proven free of Proxies and accessors, so no getter, trap or `toJSON` runs. Anything JSON cannot
+ * carry exactly is refused rather than normalised. Every event hash is recomputed with `hashEvent`
+ * over that snapshot and must equal the carried `event.hash`; `hashBundle` is recomputed over the
+ * snapshot and must equal `bundle.bundleHash`; an empty event list is refused. Throws
  * `EvidenceBlockInputError` on any failure, naming the event and the member that caused it.
  *
  * Returns `{ root, events }`. `events` is exactly the data whose hashes were recomputed and
@@ -359,18 +532,42 @@ export async function computeKernelSignedEventsRoot(
   if (bundle === null || typeof bundle !== "object") {
     throw new EvidenceBlockInputError("bundle", "expected an evidence bundle object");
   }
-  // Each bundle property is read exactly once; only the local copies are used after this.
-  const rawEvents: unknown = bundle.events;
-  const carriedBundleHash: unknown = bundle.bundleHash;
-  if (!Array.isArray(rawEvents)) {
+  // Admission (E7c). Everything up to the first `await` runs without any code of the caller: the
+  // Proxy test comes before any other operation on a value (Array.isArray throws on a revoked
+  // Proxy), and each property is read exactly once, from its own descriptor.
+  if (isProxy(bundle)) {
+    throw new EvidenceBlockInputError("bundle", "is a Proxy: its traps run code, so it is refused before it is read");
+  }
+  const rawEvents = readBundleProperty(bundle, "events");
+  const carriedBundleHash = readBundleProperty(bundle, "bundleHash");
+  if (isProxy(rawEvents)) {
+    throw new EvidenceBlockInputError("events", "is a Proxy: its traps run code, so it is refused before it is read");
+  }
+  if (!isArray(rawEvents)) {
     throw new EvidenceBlockInputError("events", "expected an array of evidence events");
   }
-  const count = rawEvents.length;
-  if (!Number.isSafeInteger(count) || count < 1) {
+  const count = ownDataValue(rawEvents, "length");
+  if (typeof count !== "number" || !isSafeInteger(count) || count < 1) {
     throw new EvidenceBlockInputError("events", "expected at least one event (an empty bundle commits to nothing)");
   }
+  const seen = new WeakSetConstructor<object>();
   const events: EvidenceEvent[] = [];
-  for (let i = 0; i < count; i++) events.push(snapshotEvent(`events[${i}]`, rawEvents[i]));
+  for (let i = 0; i < count; i++) {
+    const field = `events[${i}]`;
+    const element = ownDataValue(rawEvents, i);
+    if (element === ABSENT || element === ACCESSOR) {
+      throw new EvidenceBlockInputError(
+        field,
+        element === ABSENT
+          ? "is a hole in the events array: an element must be an own data property"
+          : "is an accessor element of the events array: its getter runs code, so it is refused before it is read",
+      );
+    }
+    assertNoCodeRunningInput(element, field, seen);
+    events.push(snapshotEvent(field, element));
+  }
+  // The array is frozen before any other code is handed it (hashBundle receives it below).
+  freeze(events);
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
     if ((await hashEvent(event)) !== event.hash) {
@@ -384,7 +581,27 @@ export async function computeKernelSignedEventsRoot(
   if (bundleHash !== carriedBundleHash) {
     throw new EvidenceBlockInputError("bundleHash", "does not match the hash recomputed from the bundle's event hashes");
   }
-  return Object.freeze({ root: taggedDigestToBytes32(bundleHash), events: Object.freeze(events) });
+  return freeze({ root: taggedDigestToBytes32(bundleHash), events });
+}
+
+/**
+ * A property of the bundle, read from its OWN descriptor (E7c): a data property or a refusal, never
+ * a [[Get]]. A getter on the bundle runs caller code, and so does a getter the bundle inherits from
+ * its class, so neither is invoked; a missing property, or one that is only inherited, is refused
+ * too. `bundle` must not be a Proxy.
+ */
+function readBundleProperty(bundle: object, field: "events" | "bundleHash"): unknown {
+  const value = ownDataValue(bundle, field);
+  if (value === ACCESSOR) {
+    throw new EvidenceBlockInputError(
+      field,
+      "is an accessor property of the bundle: a getter on the bundle runs code, so it is refused before it is read (pass the bundle as plain data)",
+    );
+  }
+  if (value === ABSENT) {
+    throw new EvidenceBlockInputError(field, "is required as an own data property of the bundle (a missing or inherited one is refused)");
+  }
+  return value;
 }
 
 // ── The session authorization ────────────────────────────────────────────────
@@ -434,12 +651,14 @@ export interface SessionKeyAuthSnapshot {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value) || utilTypes.isProxy(value)) {
+  // The Proxy test comes first: Array.isArray throws on a revoked Proxy, and a Proxy answers with its own code.
+  if (value === null || typeof value !== "object" || isProxy(value) || isArray(value)) {
     return false;
   }
   // The Object.prototype of any realm has a null prototype itself; class instances, Map and Date do not.
-  const proto = Object.getPrototypeOf(value);
-  return proto === null || Object.getPrototypeOf(proto) === null;
+  // A prototype that is a Proxy is refused unasked: asking it for ITS prototype would run its trap.
+  const proto = getPrototypeOf(value);
+  return proto === null || (!isProxy(proto) && getPrototypeOf(proto) === null);
 }
 
 /**
@@ -452,11 +671,11 @@ function readPlainFields(path: string, input: unknown, allowed: readonly string[
     throw new EvidenceBlockInputError(path, "expected a plain object (not null, an array, a Proxy or a class instance)");
   }
   const fields = new Map<string, unknown>();
-  for (const key of Reflect.ownKeys(input)) {
+  for (const key of ownKeys(input)) {
     if (typeof key === "symbol" || !allowed.includes(key)) {
       throw new EvidenceBlockInputError(path, `unknown own key ${JSON.stringify(String(key).slice(0, 64))}`);
     }
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    const descriptor = getOwnPropertyDescriptor(input, key);
     if (descriptor === undefined || !("value" in descriptor)) {
       throw new EvidenceBlockInputError(`${path}.${key}`, "accessor properties are not accepted; pass plain data");
     }
@@ -509,16 +728,16 @@ function requirePinnedHex(field: string, value: unknown, pattern: RegExp, expect
  * sorted or de-duplicated: one authorization has one digest.
  */
 function readCanonicalStringSet(path: string, input: unknown): readonly string[] {
-  if (!Array.isArray(input) || utilTypes.isProxy(input)) {
+  if (isProxy(input) || !isArray(input)) {
     throw new EvidenceBlockInputError(path, "expected a plain array of strings");
   }
   const length = input.length;
-  if (Reflect.ownKeys(input).length !== length + 1) {
+  if (ownKeys(input).length !== length + 1) {
     throw new EvidenceBlockInputError(path, "expected a dense array with no extra properties");
   }
   const out: string[] = [];
   for (let i = 0; i < length; i++) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, i);
+    const descriptor = getOwnPropertyDescriptor(input, i);
     if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
       throw new EvidenceBlockInputError(`${path}[${i}]`, "expected an enumerable data element");
     }
@@ -536,7 +755,7 @@ function readCanonicalStringSet(path: string, input: unknown): readonly string[]
       );
     }
   }
-  return Object.freeze(out);
+  return freeze(out);
 }
 
 /**
@@ -583,17 +802,17 @@ export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKe
     Number.MAX_SAFE_INTEGER,
   );
 
-  const value: FrozenSessionKeyAuthorization = Object.freeze({
+  const value: FrozenSessionKeyAuthorization = freeze({
     sessionId,
     parentAgentId,
     publicKey,
     issuedAt,
     expiresAt,
-    scope: Object.freeze({ allowedActions, contractIds, maxSignatures }),
+    scope: freeze({ allowedActions, contractIds, maxSignatures }),
     parentSignature,
     ...(derivationPath === undefined ? {} : { derivationPath }),
   });
-  return Object.freeze({ value, digest: sha256Canonical(value) });
+  return freeze({ value, digest: sha256Canonical(value) });
 }
 
 /** The sessionKeyAuthDigest: 0x + sha256(canonicalize(frozen snapshot of the authorization)). */
@@ -622,7 +841,7 @@ function requireToken(field: string, value: unknown): string {
 
 /** A safe integer in [min, max]. Negative zero is refused: it is not the pinned spelling of 0. */
 function boundedInt(field: string, value: unknown, min: number, max: number): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || Object.is(value, -0) || value < min || value > max) {
+  if (typeof value !== "number" || !isSafeInteger(value) || Object.is(value, -0) || value < min || value > max) {
     throw new EvidenceBlockInputError(field, `expected a safe integer in [${min}, ${max}]`);
   }
   return value;
@@ -662,11 +881,11 @@ function snapshotAttestationRole(path: string, input: unknown): AttestationRoleS
   }
   const minScore = boundedInt(`${path}.minScore`, minScoreRaw, 0, 100);
 
-  if (!Array.isArray(hashesRaw)) {
+  if (!isArray(hashesRaw)) {
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected an array of attestation hashes");
   }
   const count = hashesRaw.length;
-  if (!Number.isSafeInteger(count) || count < 1) {
+  if (!isSafeInteger(count) || count < 1) {
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "expected at least one attestation hash");
   }
   if (count > total) {
@@ -681,16 +900,16 @@ function snapshotAttestationRole(path: string, input: unknown): AttestationRoleS
   if (new Set(attestationHashes).size !== attestationHashes.length) {
     throw new EvidenceBlockInputError(`${path}.attestationHashes`, "attestation hashes must be distinct");
   }
-  return Object.freeze({ roleId, minPositive, total, minScore, attestationHashes: Object.freeze(attestationHashes) });
+  return freeze({ roleId, minPositive, total, minScore, attestationHashes: freeze(attestationHashes) });
 }
 
 /** Validate and snapshot a whole role set: at least one role, distinct roleIds. */
 function snapshotAttestationRoles(input: unknown): readonly AttestationRoleSnapshot[] {
-  if (!Array.isArray(input)) {
+  if (!isArray(input)) {
     throw new EvidenceBlockInputError("roles", "expected an array of roles");
   }
   const count = input.length;
-  if (!Number.isSafeInteger(count) || count < 1) {
+  if (!isSafeInteger(count) || count < 1) {
     throw new EvidenceBlockInputError("roles", "expected at least one role (the mirror defines no empty attestation set)");
   }
   const roles: AttestationRoleSnapshot[] = [];
@@ -703,7 +922,7 @@ function snapshotAttestationRoles(input: unknown): readonly AttestationRoleSnaps
     seen.add(role.roleId);
     roles.push(role);
   }
-  return Object.freeze(roles);
+  return freeze(roles);
 }
 
 function roleDigestOf(job: string, role: AttestationRoleSnapshot): Bytes32Hex {
