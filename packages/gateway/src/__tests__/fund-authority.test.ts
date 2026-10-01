@@ -196,10 +196,12 @@ describe("N46 /fund authority: only the recorded payer or the admin makes the ga
     expect(fundSpy).not.toHaveBeenCalled();
   });
 
-  it("[neg] the zero-address placeholder is no payer either: a key carrying that very identity is refused", async () => {
-    const e = seedEscrow(ZERO);
-    const res = await fund(e.stored, asKey(zeroKey));
-    expect(res.statusCode, res.body).toBe(403);
+  it("[neg] the zero-address placeholder is no payer either, in any spelling: a key carrying that very identity is refused", async () => {
+    for (const placeholder of [ZERO, "0X0000000000000000000000000000000000000000", `０x${"0".repeat(39)}0`, ` ${ZERO} `]) {
+      const e = seedEscrow(placeholder);
+      const res = await fund(e.stored, asKey(zeroKey));
+      expect(res.statusCode, `${JSON.stringify(placeholder)}: ${res.body}`).toBe(403);
+    }
     expect(fundSpy).not.toHaveBeenCalled();
   });
 
