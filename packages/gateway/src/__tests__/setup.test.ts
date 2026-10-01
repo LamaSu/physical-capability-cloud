@@ -545,6 +545,77 @@ describe("Setup API", () => {
       expect(res.json().error).toBe("missing_required_fields");
     });
 
+    // N83 tests below (missing-fields list, firmware): WP-C made register-device
+    // owner-only, so each one now acts as the kernel-nyc owner (asNyc()).
+    it("returns missing: [\"deviceId\"] when only deviceId is absent", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        headers: asNyc(),
+        payload: {
+          kernelId: "kernel-nyc",
+          type: "machine",
+          adapterType: "mock",
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe("missing_required_fields");
+      expect(body.missing).toEqual(["deviceId"]);
+      expect(body.message).toContain("deviceId");
+      expect(body.message).toContain("sim-pr1-0001");
+    });
+
+    it("lists every missing field, in kernelId/deviceId/type/adapterType order", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        headers: asNyc(),
+        payload: { kernelId: "kernel-nyc" },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.missing).toEqual(["deviceId", "type", "adapterType"]);
+      expect(body.message).toContain("deviceId");
+      expect(body.message).toContain("type");
+      expect(body.message).toContain("adapterType");
+    });
+
+    it("stores and returns a provided firmware string", async () => {
+      const deviceId = `dev-setup-firmware-${Date.now()}`;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        headers: asNyc(),
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId,
+          type: "machine",
+          adapterType: "mock",
+          firmware: "1.4.2",
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().device.firmware).toBe("1.4.2");
+    });
+
+    it('defaults firmware to "unknown" when absent', async () => {
+      const deviceId = `dev-setup-no-firmware-${Date.now()}`;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        headers: asNyc(),
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId,
+          type: "machine",
+          adapterType: "mock",
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().device.firmware).toBe("unknown");
+    });
+
     // WP-C R3: old 400 kernel_not_found -> new 404 kernel_not_found. The
     // shared ownership check now runs before any write and reports an
     // unknown kernel as 404, like every other owner-only route. Still a
@@ -937,5 +1008,26 @@ describe("Setup API", () => {
       const body = res.json();
       expect(body.overall).not.toBe("ready");
     });
+  });
+});
+
+describe("pack 111 MEDIUM 5: register-device with no body gets the missing-fields 400", () => {
+  it("an absent body lists all four required fields", async () => {
+    const app = await buildApp();
+    try {
+      // WP-C: register-device resolves the actor first (401 without one), so the
+      // request is made as the kernel-nyc owner. buildApp() opened a fresh
+      // in-memory store, so the owner's key is provisioned into THIS store.
+      const ownerKey = provisionApiKey({ operatorId: NYC_OWNER, scopes: ["operator"] }).rawKey;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        headers: { authorization: `Bearer ${ownerKey}` },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().missing).toEqual(["kernelId", "deviceId", "type", "adapterType"]);
+    } finally {
+      await app.close();
+    }
   });
 });
