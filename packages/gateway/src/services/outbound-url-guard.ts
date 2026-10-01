@@ -15,7 +15,11 @@
  *  2. guardedFetch(): at send time it resolves the host ONCE, vetoes the send
  *     if ANY answer is in a blocked range, and then dials only the validated
  *     addresses (pinned). A second resolution at connect time would reopen the
- *     DNS-rebinding window, so none ever happens.
+ *     DNS-rebinding window, so none ever happens. The resolution itself is
+ *     BOUNDED: a deadline stops the caller waiting, not the lookup (getaddrinfo
+ *     cannot be cancelled), so resolutions pass through a small gate that holds
+ *     each slot until the lookup really settles and refuses the excess at once.
+ *     See createDnsGate().
  *
  *  3. createPinnedLookup(): the connect-time hook handed to the socket layer.
  *     It can only ever return the pinned addresses and re-validates every one
@@ -344,12 +348,15 @@ export type OutboundTransport = (req: OutboundTransportRequest) => Promise<Outbo
 export interface OutboundDeps {
   resolve: OutboundResolver;
   transport: OutboundTransport;
+  /** Admission control for name resolution (see createDnsGate()). */
+  dnsGate: DnsGate;
 }
 
 export type OutboundErrorCode =
   | "invalid_url"
   | "blocked_destination"
   | "dns_failure"
+  | "dns_busy"
   | "redirect_not_followed"
   | "timeout"
   | "request_failed";
@@ -398,6 +405,8 @@ function pinnedError(message: string): NodeJS.ErrnoException {
  * (never a fresh DNS answer) and refuses if any of them is blocked, whatever
  * the caller already checked. Supports both calling conventions of net.connect:
  * `all: true` (array, used by autoSelectFamily) and the single-address form.
+ * It answers from memory, synchronously, and never calls into node:dns, so
+ * connect time adds no native resolver work and needs no gate.
  */
 export function createPinnedLookup(addresses: ReadonlyArray<ResolvedAddress> | null): net.LookupFunction {
   return (_hostname, options, callback) => {
@@ -418,6 +427,90 @@ export function createPinnedLookup(addresses: ReadonlyArray<ResolvedAddress> | n
     if (usable.length === 0) return fail("no pinned address for the requested family");
     if (opts.all) return cb(null, usable.map((a) => ({ address: a.address, family: a.family })));
     return cb(null, usable[0]!.address, usable[0]!.family);
+  };
+}
+
+// ── bounded name resolution ──────────────────────────────────────────────────
+
+/**
+ * Name resolutions kept in flight at once. dns.promises.lookup() is a getaddrinfo
+ * call on libuv's thread pool (4 threads unless UV_THREADPOOL_SIZE says otherwise)
+ * and Node cannot cancel it, so a deadline only stops the CALLER waiting: the
+ * lookup runs on until the system resolver answers or gives up. Without a bound,
+ * each slow lookup that times out leaves native work behind and repeated sends
+ * pile it up (astra pack 144, MEDIUM). A resolution holds its slot until the
+ * lookup itself settles.
+ */
+export const DNS_MAX_CONCURRENT = 8;
+/** Resolutions allowed to wait for a slot. Beyond that a send is refused at once. */
+export const DNS_MAX_QUEUED = 16;
+
+export interface DnsLimits {
+  /** Resolutions running at once (at least 1). */
+  maxConcurrent: number;
+  /** Resolutions waiting for a slot; any more are refused immediately. */
+  maxQueued: number;
+}
+
+export interface DnsGate {
+  /**
+   * Runs `work` (one name resolution) as soon as a slot is free. The slot comes
+   * back when `work` settles, whatever became of the caller in the meantime: a
+   * caller that timed out does not free it. With every slot busy and the queue
+   * full, refuses at once with dns_busy. A queued resolution whose `signal`
+   * aborts leaves the queue and never starts.
+   */
+  run<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T>;
+}
+
+/** A gate with its own slots and queue; the module keeps one for production use. */
+export function createDnsGate(limits: Partial<DnsLimits> = {}): DnsGate {
+  const maxConcurrent = limits.maxConcurrent ?? DNS_MAX_CONCURRENT;
+  const maxQueued = limits.maxQueued ?? DNS_MAX_QUEUED;
+  let running = 0;
+  // Set iteration order is insertion order: the queue is first come, first served.
+  const waiting = new Set<() => void>();
+
+  const start = <T>(work: () => Promise<T>): Promise<T> => {
+    running++;
+    let lookup: Promise<T>;
+    try {
+      lookup = Promise.resolve(work());
+    } catch (e) {
+      lookup = Promise.reject(e);
+    }
+    // The slot is returned when the lookup settles (answer, error or the
+    // resolver's own timeout), never when a caller's deadline fires.
+    const release = () => {
+      running--;
+      for (const turn of waiting) {
+        if (running >= maxConcurrent) return;
+        waiting.delete(turn);
+        turn();
+      }
+    };
+    lookup.then(release, release);
+    return lookup;
+  };
+
+  return {
+    run<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
+      if (signal.aborted) return Promise.reject(new OutboundError("timeout", "name resolution aborted"));
+      if (running < maxConcurrent) return start(work);
+      if (waiting.size >= maxQueued) return Promise.reject(new OutboundError("dns_busy", "outbound DNS busy"));
+      return new Promise<T>((resolve, reject) => {
+        const turn = () => {
+          signal.removeEventListener("abort", leave);
+          start(work).then(resolve, reject);
+        };
+        const leave = () => {
+          waiting.delete(turn);
+          reject(new OutboundError("timeout", "name resolution aborted"));
+        };
+        signal.addEventListener("abort", leave, { once: true });
+        waiting.add(turn);
+      });
+    },
   };
 }
 
@@ -504,13 +597,16 @@ export const nodeTransport: OutboundTransport = (req) =>
     clientReq.end();
   });
 
-let activeDeps: OutboundDeps = { resolve: defaultResolve, transport: nodeTransport };
+let activeDeps: OutboundDeps = { resolve: defaultResolve, transport: nodeTransport, dnsGate: createDnsGate() };
 
 /**
- * TEST SEAM. Swaps the resolver and/or transport used by guardedFetch() so a
- * test can prove the decision logic without real DNS or sockets; null restores
- * the production defaults. Refuses to run when NODE_ENV is "production". It is
- * not reachable from configuration, environment variables or any request.
+ * TEST SEAM. Swaps the resolver, transport and/or resolution gate used by
+ * guardedFetch() so a test can prove the decision logic without real DNS or
+ * sockets; null restores the production defaults. Every call installs a FRESH
+ * default gate unless one is given, so a lookup an earlier test left hanging
+ * cannot hold a slot in the next one. Refuses to run when NODE_ENV is
+ * "production". It is not reachable from configuration, environment variables
+ * or any request.
  */
 export function _setOutboundDepsForTests(deps: Partial<OutboundDeps> | null): void {
   if (process.env.NODE_ENV === "production") {
@@ -519,6 +615,7 @@ export function _setOutboundDepsForTests(deps: Partial<OutboundDeps> | null): vo
   activeDeps = {
     resolve: deps?.resolve ?? defaultResolve,
     transport: deps?.transport ?? nodeTransport,
+    dnsGate: deps?.dnsGate ?? createDnsGate(),
   };
 }
 
@@ -553,6 +650,7 @@ export async function guardedFetch(
   const deps: OutboundDeps = {
     resolve: overrides?.resolve ?? activeDeps.resolve,
     transport: overrides?.transport ?? activeDeps.transport,
+    dnsGate: overrides?.dnsGate ?? activeDeps.dnsGate,
   };
   const timeoutMs = init.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxResponseBytes = init.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
@@ -568,12 +666,22 @@ export async function guardedFetch(
   if (net.isIP(host) === 0) {
     // Resolve exactly once. Every answer must be public: one private answer
     // among public ones vetoes the send (an attacker controls the DNS answer set).
+    // The lookup goes through the gate: at most DNS_MAX_CONCURRENT run at once,
+    // each slot is held until its lookup settles (the deadline below frees the
+    // caller, not the slot), and a send that finds no slot and no queue room is
+    // refused at once with a generic error. A caller that gives up while still
+    // queued leaves the queue, so its lookup never starts. A late answer is only
+    // ever a settled promise nobody is waiting on: it cannot resume this send.
     let answers: ReadonlyArray<ResolvedAddress>;
+    const resolution = new AbortController();
     try {
       answers = await withDeadline(
-        deps.resolve(host),
+        deps.dnsGate.run(() => deps.resolve(host), resolution.signal),
         remaining(),
-        () => new OutboundError("timeout", `name resolution timed out after ${timeoutMs}ms`),
+        () => {
+          resolution.abort();
+          return new OutboundError("timeout", `name resolution timed out after ${timeoutMs}ms`);
+        },
       );
     } catch (e) {
       if (e instanceof OutboundError) throw e;
