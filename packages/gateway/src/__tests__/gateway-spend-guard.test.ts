@@ -285,3 +285,44 @@ describe("pack 103 fail-closed fixes", () => {
     expect(admitGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(25) })).toMatchObject({ status: 503, error: "gateway_pays_clock_regressed" });
   });
 });
+
+/**
+ * astra pack 103b, F4 (HIGH): the clock's high-water mark protected only the
+ * ADMISSION path, but a PREFLIGHT (checkGatewaySpend) also pruned the day ledger,
+ * so a preflight at another day erased counted spending without moving the mark.
+ */
+describe("pack 103b F4: a preflight must not erase counted spending", () => {
+  it("[neg] F4: a preflight at the NEXT UTC day, then back to day D, must not replenish D's allowance (astra's repro, verbatim)", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+
+    expect(spend("p", 25).ok).toBe(true);
+    expect(spend("p", 25).ok).toBe(true);
+    expect(spend("p", 1).ok).toBe(false);
+
+    t += 86_400_000;
+    expect(checkGatewaySpend({
+      spender: { action: "commit", principal: "p" },
+      amountMicro: usd(1),
+    }).ok).toBe(true);
+
+    t -= 86_400_000;
+    expect(spend("p", 1).ok).toBe(false); // Currently returns true.
+  });
+
+  it("[neg] F4: a preflight at the PREVIOUS UTC day, then back to day D, must not replenish D's allowance (the backward counterpart)", () => {
+    process.env.PCC_NETWORK = "base-sepolia";
+    process.env.PCC_GATEWAY_PAYS_MAX_GLOBAL_DAY_USD = "50";
+
+    expect(spend("p", 25).ok).toBe(true);
+    expect(spend("p", 25).ok).toBe(true);
+    expect(spend("p", 1).ok).toBe(false);
+
+    t -= 86_400_000;
+    // What the preflight answers at the wrong day is not under test here; what it leaves behind is.
+    checkGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(1) });
+
+    t += 86_400_000;
+    expect(spend("p", 1).ok).toBe(false);
+  });
+});
