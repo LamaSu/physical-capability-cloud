@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import printAndMailCsd from "../csds/document-print-and-mail.csd.json" with { type: "json" };
 import {
   COMMITTED_PROGRAM_REGISTRY,
+  INDEPENDENT_PROVENANCE,
   PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM,
   PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM_HASH,
   PRINT_AND_MAIL_INDEPENDENCE_PROGRAM,
@@ -842,5 +843,145 @@ describe("assertAcceptedProgramForTier — the committed hash is read in the acc
     for (const bad of [undefined, null, 7, { toString: () => HASH }, [HASH], new String(HASH)]) {
       expect(gate(bad), String(bad)).toEqual({ ok: false, code: "program-hash-mismatch" });
     }
+  });
+});
+
+describe("checkCommittedProgramForTier — independence rests on evidence-owned provenance, not on the stage's own list (E8 F1)", () => {
+  const HASH = PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH;
+  const stageOf = (p: CommittedProgram, id: string) => p.stages.find((st) => st.id === id)!;
+  const variant = (mutate: (p: CommittedProgram) => void): CommittedProgram => {
+    const p = structuredClone(PRINT_AND_MAIL_INDEPENDENCE_PROGRAM);
+    mutate(p);
+    return p;
+  };
+  const violationsFor = (p: CommittedProgram) => checkCommittedProgramForTier(p, tiers.tier2!).violations;
+  const NOT_INDEPENDENT = { code: "independence-not-established", stageId: "mail", eventType: "courier_pickup_confirmed" };
+  const stray = (stageId: string) => ({ code: "provenance-on-dependent-stage", stageId });
+  const gateWithRegistered = (program: CommittedProgram) => {
+    const e = entry("tier2", program);
+    return assertAcceptedProgramForTierWith({ csd: CSD, tierKey: "tier2", evidence: fixedTiers(), committedProgramHash: e.programHash }, [e], {
+      primitiveIndex: LIVE,
+    });
+  };
+
+  it("INDEPENDENT_PROVENANCE is frozen null-prototype data holding exactly the carrier acceptance scan", () => {
+    expect(Object.getPrototypeOf(INDEPENDENT_PROVENANCE)).toBeNull();
+    expect(Object.isFrozen(INDEPENDENT_PROVENANCE)).toBe(true);
+    expect(Object.isFrozen(INDEPENDENT_PROVENANCE["courier_pickup_confirmed"])).toBe(true);
+    expect(Object.entries(INDEPENDENT_PROVENANCE)).toEqual([["courier_pickup_confirmed", ["independent_carrier_scan"]]]);
+    expect(() => {
+      (INDEPENDENT_PROVENANCE as Record<string, readonly string[]>)["execution_completed"] = ["operator_self_report"];
+    }).toThrow(TypeError);
+    expect(() => (INDEPENDENT_PROVENANCE["courier_pickup_confirmed"] as string[]).push("operator_self_report")).toThrow(TypeError);
+  });
+
+  it("the pinned programs, their hashes and the registry are unchanged, and both pinned programs pass the tier check", () => {
+    expect(PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH).toBe("0xd229c8daa76cb3022041b6ff076d30a5ecb614d71f50a07f80f680629dcc2b86");
+    expect(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM_HASH).toBe("0x6e00cad1095c6a2913671e30969436897bd12ce60b3957f7b259f56875c863e0");
+    expect(computeCommittedProgramHash(PRINT_AND_MAIL_INDEPENDENCE_PROGRAM)).toBe(PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH);
+    expect(computeCommittedProgramHash(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM)).toBe(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM_HASH);
+    expect(COMMITTED_PROGRAM_REGISTRY).toEqual([
+      { csd: CSD, tier: "tier2", program: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM, programHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
+    ]);
+    expect(violationsFor(PRINT_AND_MAIL_INDEPENDENCE_PROGRAM)).toEqual([]);
+    expect(violationsFor(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM)).toEqual([]);
+    expect(assertAcceptedProgramForTierWith({ csd: CSD, tierKey: "tier2", evidence: fixedTiers(), committedProgramHash: HASH }, COMMITTED_PROGRAM_REGISTRY, { primitiveIndex: LIVE })).toEqual({
+      ok: true,
+      registryPins: KERNEL_KEY_PIN,
+    });
+  });
+
+  it("the reviewer's repro: the independence program with an operator_self_report allowlist is refused by the check and by the gate", () => {
+    const evil = variant((p) => {
+      stageOf(p, "mail").allowedProvenance = ["operator_self_report"];
+    });
+    expect(computeCommittedProgramHash(evil)).not.toBe(HASH); // it hashes differently, so it needs its own registry entry
+    expect(violationsFor(evil)).toEqual([NOT_INDEPENDENT]);
+    expect(gateWithRegistered(evil)).toEqual({ ok: false, code: "program-fails-tier-check", violations: [NOT_INDEPENDENT] });
+  });
+
+  const attacks: Array<[string, (p: CommittedProgram) => void]> = [
+    ["allowedProvenance absent", (p) => void delete stageOf(p, "mail").allowedProvenance],
+    ["allowedProvenance empty", (p) => void (stageOf(p, "mail").allowedProvenance = [])],
+    ["a duplicate label", (p) => void (stageOf(p, "mail").allowedProvenance = ["independent_carrier_scan", "independent_carrier_scan"])],
+    ["a superset that also admits operator_self_report", (p) => void (stageOf(p, "mail").allowedProvenance = ["independent_carrier_scan", "operator_self_report"])],
+    ["a label that is only close: wrong case", (p) => void (stageOf(p, "mail").allowedProvenance = ["Independent_Carrier_Scan"])],
+    ["a label that is only close: padded", (p) => void (stageOf(p, "mail").allowedProvenance = ["independent_carrier_scan "])],
+    ["a string instead of an array", (p) => void (stageOf(p, "mail").allowedProvenance = "independent_carrier_scan" as unknown as string[])],
+    ["null instead of an array", (p) => void (stageOf(p, "mail").allowedProvenance = null as unknown as string[])],
+    ["an object instead of an array", (p) => void (stageOf(p, "mail").allowedProvenance = { 0: "independent_carrier_scan", length: 1 } as unknown as string[])],
+    ["a non-string element", (p) => void (stageOf(p, "mail").allowedProvenance = ["independent_carrier_scan", 1 as unknown as string])],
+    ["a nested array element", (p) => void (stageOf(p, "mail").allowedProvenance = [["independent_carrier_scan"] as unknown as string])],
+    [
+      "a sparse array: the hole is not a label",
+      (p) => {
+        const sparse: string[] = [];
+        sparse[1] = "independent_carrier_scan";
+        stageOf(p, "mail").allowedProvenance = sparse;
+      },
+    ],
+  ];
+  for (const [name, mutate] of attacks) {
+    it(`an independent stage with ${name} is refused by the check and by the gate`, () => {
+      const program = variant(mutate);
+      expect(violationsFor(program)).toEqual([NOT_INDEPENDENT]);
+      expect(gateWithRegistered(program)).toEqual({ ok: false, code: "program-fails-tier-check", violations: [NOT_INDEPENDENT] });
+    });
+  }
+
+  it("independence is event-specific: a label listed for the carrier scan does not make execution_completed independent", () => {
+    const program = variant((p) => {
+      const printOk = stageOf(p, "print-ok");
+      printOk.predicate = "event-present-independent";
+      printOk.allowedProvenance = ["independent_carrier_scan"];
+    });
+    expect(violationsFor(program)).toEqual([{ code: "independence-not-established", stageId: "print-ok", eventType: "execution_completed" }]);
+  });
+
+  it("allowedProvenance on any other stage is stray and refused, even empty or null", () => {
+    for (const [stageId, label] of [
+      ["print-ok", "event-present"],
+      ["print-not-failed", "event-absent"],
+      ["auth", "not-simulated"],
+    ] as const) {
+      for (const value of [["independent_carrier_scan"], [], null]) {
+        const program = variant((p) => {
+          stageOf(p, stageId).allowedProvenance = value as unknown as string[];
+        });
+        expect(violationsFor(program), `${label} carrying ${JSON.stringify(value)}`).toEqual([stray(stageId)]);
+        expect(gateWithRegistered(program)).toEqual({ ok: false, code: "program-fails-tier-check", violations: [stray(stageId)] });
+      }
+    }
+    // The honest-asymmetry program's mail stage is a plain event-present, so provenance there is stray too.
+    const honest = structuredClone(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM);
+    stageOf(honest, "mail").allowedProvenance = ["independent_carrier_scan"];
+    expect(violationsFor(honest)).toEqual([stray("mail")]);
+  });
+
+  it("an explicitly undefined allowedProvenance is no provenance at all, so it is not stray", () => {
+    const program = variant((p) => {
+      stageOf(p, "auth").allowedProvenance = undefined;
+    });
+    expect(violationsFor(program)).toEqual([]);
+  });
+
+  it("the new rules add to the existing violations without reordering them, one per offending stage in stage order", () => {
+    const program = variant((p) => {
+      stageOf(p, "print-ok").allowedProvenance = ["independent_carrier_scan"];
+      stageOf(p, "mail").allowedProvenance = ["operator_self_report"];
+    });
+    expect(violationsFor(program)).toEqual([stray("print-ok"), NOT_INDEPENDENT]);
+    // An unknown predicate is refused as such, and its provenance is not also counted as stray.
+    const unknown: CommittedProgram = {
+      ...PRINT_ONLY,
+      stages: [...PRINT_ONLY.stages, { id: "x", predicate: "event-count" as never, eventType: "execution_completed", allowedProvenance: ["a"] }],
+    };
+    expect(checkCommittedProgramForTier(unknown, tiers.tier1!).violations).toEqual([{ code: "unknown-predicate", stageId: "x" }]);
+    // An independent stage with no usable event type is refused for that, and not also as non-independent.
+    const noEvent: CommittedProgram = {
+      ...PRINT_ONLY,
+      stages: [...PRINT_ONLY.stages, { id: "y", predicate: "event-present-independent", allowedProvenance: ["independent_carrier_scan"] }],
+    };
+    expect(checkCommittedProgramForTier(noEvent, tiers.tier1!).violations).toEqual([{ code: "stage-missing-event-type", stageId: "y" }]);
   });
 });

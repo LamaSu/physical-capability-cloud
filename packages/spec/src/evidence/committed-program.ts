@@ -21,6 +21,11 @@
  *     event type the tier binds through a primitive that is not marked
  *     `role: "supporting"`, and that proves an outcome level (`evidenceLevelOf`
  *     rulings: `printer_job_verified` proves none);
+ *   - every event-present-independent stage names an evidence-owned independent
+ *     provenance for its event type (`INDEPENDENT_PROVENANCE`): its
+ *     `allowedProvenance` is a non-empty list of distinct labels, all listed there.
+ *     Any other stage that carries `allowedProvenance` is refused, because the
+ *     field means nothing on it;
  *   - some positive stage proves device_reported or stronger;
  *   - a `not-simulated` stage is present;
  *   - an event-present `execution_completed` is paired with event-absent
@@ -81,6 +86,11 @@ export interface CommittedStage {
   id: string;
   predicate: CommittedStagePredicate;
   eventType?: string;
+  /**
+   * Provenance labels an `event-present-independent` stage releases on. This is the
+   * program author's claim, not evidence: it counts as independence only for labels
+   * listed in `INDEPENDENT_PROVENANCE` for the stage's event type.
+   */
   allowedProvenance?: string[];
 }
 
@@ -164,10 +174,35 @@ export const COMMITTED_PROGRAM_REGISTRY: readonly CommittedProgramEntry[] = [
 
 // ── The tier check ──────────────────────────────────────────────────────────
 
+/**
+ * The independent provenance labels the evidence lane recognises, per raw event
+ * type (E8 F1). An `event-present-independent` stage releases on an event whose
+ * provenance is in the stage's `allowedProvenance`, and that list is the stage's
+ * own claim. A label counts as independent only if the evidence lane lists it
+ * here for that event type, so a caller-controlled string cannot establish
+ * independence: `checkCommittedProgramForTier` refuses an independent stage whose
+ * labels are not all listed here for its event type.
+ *
+ * Today the one independent provenance is the carrier's authenticated acceptance
+ * scan, which the gateway stamps into the `courier_pickup_confirmed` payload as a
+ * fixed literal. No shared provenance vocabulary exists elsewhere (the emitter
+ * manifest's `via` is a free string). A label is only a name: the oracle must
+ * authenticate the label's source when it evaluates the stage.
+ *
+ * Frozen null-prototype data, read by own property only.
+ */
+export const INDEPENDENT_PROVENANCE: Readonly<Record<string, readonly string[]>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+    courier_pickup_confirmed: Object.freeze(["independent_carrier_scan"]),
+  }),
+);
+
 export type TierAssuranceViolation =
   | { code: "unknown-predicate"; stageId: string }
   | { code: "stage-missing-event-type"; stageId: string }
   | { code: "stage-event-not-in-vocabulary"; stageId: string; eventType: string }
+  | { code: "independence-not-established"; stageId: string; eventType: string }
+  | { code: "provenance-on-dependent-stage"; stageId: string }
   | { code: "positive-stage-not-bound-by-tier"; stageId: string; eventType: string }
   | { code: "positive-stage-on-supporting-evidence"; stageId: string; eventType: string }
   | { code: "positive-stage-proves-no-level"; stageId: string; eventType: string }
@@ -191,6 +226,25 @@ const COMPLETION_OR_STRONGER = new Set<string>([
 
 function isSupporting(params: Record<string, unknown> | undefined): boolean {
   return params?.role === "supporting";
+}
+
+/**
+ * An `event-present-independent` stage establishes independence only when its
+ * `allowedProvenance` is a non-empty array of distinct strings, every one listed in
+ * `INDEPENDENT_PROVENANCE` for the stage's event type (own-property lookup only).
+ */
+function establishesIndependence(stage: CommittedStage, eventType: string): boolean {
+  const listed = Object.hasOwn(INDEPENDENT_PROVENANCE, eventType) ? INDEPENDENT_PROVENANCE[eventType] : undefined;
+  const claimed: unknown = stage.allowedProvenance;
+  if (listed === undefined || !Array.isArray(claimed) || claimed.length === 0) return false;
+  const seen = new Set<string>();
+  // An indexed loop, not every(): every() skips the holes of a sparse array, and a hole is not a label.
+  for (let i = 0; i < claimed.length; i++) {
+    const label: unknown = claimed[i];
+    if (typeof label !== "string" || !listed.includes(label) || seen.has(label)) return false;
+    seen.add(label);
+  }
+  return true;
 }
 
 /** Check a committed program against the CSD tier it is meant to back. */
@@ -220,6 +274,10 @@ export function checkCommittedProgramForTier(
       violations.push({ code: "unknown-predicate", stageId: stage.id });
       continue;
     }
+    // allowedProvenance means something only on an independent stage; elsewhere it is stray.
+    if (stage.predicate !== "event-present-independent" && stage.allowedProvenance !== undefined) {
+      violations.push({ code: "provenance-on-dependent-stage", stageId: stage.id });
+    }
     if (stage.predicate === "not-simulated") {
       sawNotSimulated = true;
       continue;
@@ -239,6 +297,9 @@ export function checkCommittedProgramForTier(
     }
     // A positive stage: the program releases on this event being present.
     required.add(eventType);
+    if (stage.predicate === "event-present-independent" && !establishesIndependence(stage, eventType)) {
+      violations.push({ code: "independence-not-established", stageId: stage.id, eventType });
+    }
     if (eventType === "execution_completed") completionPresent = true;
     if (!bound.has(eventType)) {
       violations.push(
