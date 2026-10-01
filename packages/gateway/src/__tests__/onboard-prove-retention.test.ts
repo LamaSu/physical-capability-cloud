@@ -20,7 +20,7 @@ import path from "node:path";
 import { onboardRoutes } from "../routes/onboard.js";
 import { getEvidencePhotoStore, setEvidencePhotoStoreForTests } from "../routes/onboard-evidence.js";
 import { LocalBlobBackend, computeCid } from "../services/cid-blob-storage.js";
-import { initStore, closeStore, getRepos } from "../db.js";
+import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { b64, makePng } from "./fixtures/onboard-images.js";
 
 vi.mock("../services/posthog-service.js", () => ({
@@ -121,6 +121,46 @@ function afterPhotoWrite(during: () => void) {
     };
   }
   setEvidencePhotoStoreForTests(wrapped as never);
+}
+
+/**
+ * Make the next database transaction fail at COMMIT. Its callback runs to the
+ * end first, so every write in it is made and the staged photo is placed; then
+ * an error is thrown, which rolls the writes back, as a failed COMMIT does.
+ */
+function failNextCommit() {
+  const db = getStore().db as unknown as { transaction: (fn: (tx: unknown) => unknown, config?: unknown) => unknown };
+  const real = db.transaction.bind(db);
+  return vi.spyOn(db, "transaction").mockImplementationOnce(((fn: (tx: unknown) => unknown, config?: unknown) =>
+    real((tx: unknown) => {
+      fn(tx);
+      throw new Error("SQLITE_FULL: database or disk is full");
+    }, config)) as never);
+}
+
+/**
+ * Wrap the real evidence-photo store and record what each staged photo's
+ * commit() returned: true when that call created the blob, false when the CID
+ * was already stored.
+ */
+function recordPlacements(): boolean[] {
+  const real = getEvidencePhotoStore();
+  const placements: boolean[] = [];
+  setEvidencePhotoStoreForTests({
+    async stage(bytes, mediaType) {
+      const staged = await real.stage(bytes, mediaType);
+      return {
+        cid: staged.cid,
+        commit() {
+          const created = staged.commit();
+          placements.push(created);
+          return created;
+        },
+        discard: (finish) => staged.discard(finish),
+      };
+    },
+  });
+  return placements;
 }
 
 describe("/prove photo retention is bounded (M4)", () => {
@@ -245,5 +285,32 @@ describe("/prove photo retention is bounded (M4)", () => {
     expect(storedCids()).toEqual([]);
     expect(stagingFiles()).toEqual([]);
     expect(proofRows(regId)).toHaveLength(5);
+  });
+
+  // astra pack 88, Q3: the photo is placed under its CID inside the
+  // transaction, so a database commit that fails afterwards used to leave it.
+  it("a database commit that fails after a fresh photo was placed leaves no blob (astra pack 88, Q3)", async () => {
+    const regId = await register(app);
+    const cid = computeCid(PNG_A);
+    const placements = recordPlacements();
+    failNextCommit();
+
+    const res = await prove(app, regId, { photoBase64: b64(PNG_A), deviceHealth: DEVICE_HEALTH });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("transition_failed");
+    // The transaction rolled back ...
+    expect(proofRows(regId)).toHaveLength(0);
+    expect(getRepos().registrations.findById(regId)!.status).toBe("submitted");
+    expect(stagingFiles()).toEqual([]);
+    // ... after this request had created the blob (so this is the failure the
+    // verdict names), and nothing references it, so it is not left behind.
+    expect(placements).toEqual([true]);
+    expect(storedCids()).toEqual([]);
+
+    // The same photo can be submitted again, and is stored once.
+    const retry = await prove(app, regId, { photoBase64: b64(PNG_A), deviceHealth: DEVICE_HEALTH });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json().evidence.photo.retained).toEqual({ store: "cid-blob-local", cid });
+    expect(storedCids()).toEqual([cid]);
   });
 });

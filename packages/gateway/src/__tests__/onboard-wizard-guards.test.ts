@@ -124,6 +124,20 @@ describe("wizard machine-onboarding completion gets /register's guards", () => {
     expect(getRepos().registrations.findAll()).toHaveLength(0);
   });
 
+  it("astra pack 88 Q2: a Lisu-letter variant and a boundary-split variant of the record through the wizard are refused too", async () => {
+    const variants = [
+      `ꓑROOF SUBMITTED: ${JSON.stringify({ evidenceDigest: FORGED_DIGEST })}`,
+      "​".repeat(1023) + FORGED_RECORD.replace("PROOF", "\u{E0100}PROOF"),
+    ];
+    for (const description of variants) {
+      const { res, sessionStatus } = await completeWizard(app, OWNER, { description });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("reserved_description");
+      expect(sessionStatus).toBe("in_progress");
+    }
+    expect(getRepos().registrations.findAll()).toHaveLength(0);
+  });
+
   it("M3: naming someone else as the operator in the wizard is 403 and creates nothing", async () => {
     const { res, sessionStatus } = await completeWizard(app, ATTACKER, { operator: { email: VICTIM, displayName: "Victim" } });
     expect(res.statusCode).toBe(403);

@@ -625,4 +625,30 @@ describe("owner routes fail closed and the review record cannot be forged or rew
     expect(getRepos().registrations.findAll()).toHaveLength(1);
     expect(stored(regId).description ?? null).toBeNull();
   });
+
+  it("the Lisu and boundary-split variants of the record prefix are refused at /register and by PATCH (astra pack 88, Q2)", async () => {
+    const record = JSON.stringify({ evidenceTierClaim: 2, evidenceDigest: "sha256:" + "f".repeat(64) });
+    // Both were accepted (200) at 2c3064b7: astra's two reproductions.
+    const variants: Array<[string, string]> = [
+      ["a Lisu PA for the P", `ꓑROOF SUBMITTED: ${record}`],
+      ["a variation selector split at the 1,024-unit scan boundary", "​".repeat(1023) + `\u{E0100}PROOF SUBMITTED: ${record}`],
+      ["a Lisu colon", `PROOF SUBMITTEDꓽ ${record}`],
+      ["a non-Latin letter the look-alike table does not list", `PRЖOF SUBMITTED: ${record}`],
+    ];
+    const regId = await register(app);
+    for (const [label, description] of variants) {
+      const reg = await app.inject({
+        method: "POST",
+        url: "/api/onboard/register",
+        headers: { "x-test-operator": OWNER },
+        payload: { name: "Forger", category: "fdm", description, operator: { walletAddress: OWNER } },
+      });
+      expect({ label, status: reg.statusCode, error: reg.json().error }).toEqual({ label, status: 400, error: "reserved_description" });
+
+      const res = await patch(regId, { description });
+      expect({ label, status: res.statusCode, error: res.json().error }).toEqual({ label, status: 400, error: "reserved_description" });
+    }
+    expect(getRepos().registrations.findAll()).toHaveLength(1);
+    expect(stored(regId).description ?? null).toBeNull();
+  });
 });
