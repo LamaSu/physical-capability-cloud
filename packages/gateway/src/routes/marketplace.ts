@@ -293,7 +293,10 @@ export async function marketplaceRoutes(app: FastifyInstance) {
   // are not in the table, so they always reach their own handler unchanged.
   app.addHook("onRequest", async (req, reply) => {
     if (isDemoRoutesOn()) return;
-    const refusal = REFUSED_ROUTE_KEYS[`${req.method} ${req.routeOptions.url ?? ""}`];
+    // HEAD answers as its GET (as in the orchestrator and protocols gates), so the gate refuses it
+    // too, not only the GET handler's own check.
+    const method = req.method === "HEAD" ? "GET" : req.method;
+    const refusal = REFUSED_ROUTE_KEYS[`${method} ${req.routeOptions.url ?? ""}`];
     if (!refusal) return;
     return notAvailable(reply, refusal.message, refusal.see);
   });

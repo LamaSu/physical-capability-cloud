@@ -192,6 +192,13 @@ describe("NEGATIVE: outside demo, a fixture route refuses with 501 not_available
     });
   }
 
+  it("HEAD on every gated GET is refused too (the gate answers HEAD as its GET)", async () => {
+    for (const c of GATED.filter((g) => g.method === "GET")) {
+      const res = await req("HEAD", c.url);
+      expect(res.statusCode, `HEAD ${c.url}`).toBe(501);
+    }
+  });
+
   it("a write is refused before its input is even checked (an empty body is 501, not 400)", async () => {
     expect((await req("POST", "/api/marketplace/listings", {})).statusCode).toBe(501);
     expect((await req("POST", "/api/marketplace/orders", {})).statusCode).toBe(501);
