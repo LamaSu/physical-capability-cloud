@@ -994,3 +994,32 @@ describe("E7 F4 — one session authorization has exactly one accepted spelling 
   // and that is covered by verifier/src/workflow/__tests__/ephemeral-identity.test.ts:1184-1232.
   it.todo("scope arrays strictly ascending and duplicate-free: blocked on a producer decision (E7 r2 triage, F4)");
 });
+
+// ── F5 (LOW): negative zero ──────────────────────────────────────────────────
+describe("E7 F5 — negative zero is not the pinned spelling of zero", () => {
+  it("refuses -0 for chainId and for milestoneIndex, naming the field", () => {
+    for (const field of ["chainId", "milestoneIndex"] as const) {
+      const err = refusalOf(() => computeSettlementUnitId({ ...unit, [field]: -0 }));
+      expect(err.field).toBe(field);
+      expect(err.message).toMatch(/negative zero/);
+    }
+  });
+
+  it("refuses -0 in the unit context as well", () => {
+    const settlementUnitId = computeSettlementUnitId(unit);
+    const err = refusalOf(() => computeUnitContextDigest({ ...unit, chainId: -0, settlementUnitId, challengeNonce }));
+    expect(err.field).toBe("chainId");
+    expect(err.message).toMatch(/negative zero/);
+  });
+
+  it("zero itself is still accepted in every pinned spelling and gives one word", () => {
+    const zero = computeSettlementUnitId({ ...unit, milestoneIndex: 0 });
+    expect(computeSettlementUnitId({ ...unit, milestoneIndex: 0n })).toBe(zero);
+    expect(computeSettlementUnitId({ ...unit, milestoneIndex: "0" })).toBe(zero);
+    expect(zero).not.toBe(computeSettlementUnitId({ ...unit, milestoneIndex: 1 }));
+  });
+
+  it("the string '-0' is refused as before", () => {
+    expect(refusalOf(() => computeSettlementUnitId({ ...unit, milestoneIndex: "-0" })).field).toBe("milestoneIndex");
+  });
+});

@@ -140,8 +140,14 @@ function addressWord(field: string, value: unknown): Uint8Array {
 function uintWord(field: string, value: unknown, bits: number): Uint8Array {
   let n: bigint;
   if (typeof value === "bigint") n = value;
-  else if (typeof value === "number" && Number.isSafeInteger(value)) n = BigInt(value);
-  else if (typeof value === "string" && DECIMAL.test(value)) n = BigInt(value);
+  else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    // Number.isSafeInteger(-0) is true and BigInt(-0) is 0n, so -0 would reach the same word
+    // as 0. It is not the pinned spelling of zero: refuse it.
+    if (Object.is(value, -0)) {
+      throw new EvidenceBlockInputError(field, "negative zero is not a pinned input form; pass 0");
+    }
+    n = BigInt(value);
+  } else if (typeof value === "string" && DECIMAL.test(value)) n = BigInt(value);
   else throw new EvidenceBlockInputError(field, "expected a non-negative integer");
   if (n < 0n || n >= 1n << BigInt(bits)) {
     throw new EvidenceBlockInputError(field, `out of range for uint${bits}`);
