@@ -155,8 +155,11 @@ SQL
 ```
 
 - **Never run `SELECT *` on `api_keys`.** Each row holds `key_hash` and, for
-  some rows, `operator_wallet_private_key`. Select named columns only, and do
-  not paste results with those columns anywhere.
+  some rows, a custodial wallet key: `operator_wallet_private_key` (plaintext;
+  legacy, no longer written since N1, sealed by
+  `packages/gateway/scripts/seal-custodial-keys.mjs`) or
+  `operator_wallet_key_sealed` (the sealed `pcc-seal:v1` blob). Select named
+  columns only, and do not paste results with those columns anywhere.
 - `LIKE '%"*"%'` matches the JSON token `"*"` in the `scopes` text column. It
   does not match scopes such as `operator.*`. It deliberately avoids
   `json_each`, which aborts the whole query on a malformed row. Malformed rows
