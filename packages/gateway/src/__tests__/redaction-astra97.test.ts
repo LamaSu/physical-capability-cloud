@@ -619,15 +619,23 @@ describe("the sink stays conservative where the deep redactor is not", () => {
     expect(redactSecrets('{"api_key": "k1", "n": 1}')).toBe('{"api_key": "[redacted]", "n": 1}');
   });
 
+  // 'x' and 'y' are not hex digits: a run made only of a-f and 0-9 is left alone however long it is (a 64-hex key
+  // is redacted as a key, a checksummed address is public), so these runs must hold a letter past f to be tested.
   it("a base64 run of 40 characters that mixes upper, lower and digits is key material; 39 is not", () => {
-    const thirtyNine = "aB3".repeat(13);
-    expect(redactSecrets(`x ${thirtyNine} y`)).toBe(`x ${thirtyNine} y`);
-    expect(redactSecrets(`x ${thirtyNine}Q y`)).toBe("x [redacted-b64] y");
+    const forty = "aBx3".repeat(10);
+    expect(redactSecrets(`y ${forty} z`)).toBe("y [redacted-b64] z");
+    const thirtyNine = forty.slice(0, 39);
+    expect(redactSecrets(`y ${thirtyNine} z`)).toBe(`y ${thirtyNine} z`);
   });
 
   it("a base64 run needs a digit as well: upper and lower case alone is a word, not a key", () => {
-    const noDigit = "aBcD".repeat(10); // 40 characters
-    expect(redactSecrets(`x ${noDigit} y`)).toBe(`x ${noDigit} y`);
+    const noDigit = "aBxY".repeat(10); // 40 characters, mixed case, no digit
+    expect(redactSecrets(`y ${noDigit} z`)).toBe(`y ${noDigit} z`);
+  });
+
+  it("a hex-only run is never base64 key material, whatever its case and length", () => {
+    const hexOnly = "aB3d".repeat(11); // 44 characters, mixed case, digits, all hex digits
+    expect(redactSecrets(`y ${hexOnly} z`)).toBe(`y ${hexOnly} z`);
   });
 
   it("decodes an escaped field name as the deep redactor does", () => {
