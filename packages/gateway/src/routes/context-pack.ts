@@ -205,7 +205,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | /api/rewards/claims | Claim DePIN rewards |
-| POST | /api/certificates/mint | Mint a soulbound capability certificate |
+| POST | /api/certificates/mint | Not implemented (501): no certificate is minted yet |
 | GET | /api/treasury/summary | Treasury balance and allocation |
 
 ### IP (Intellectual Property via Story Protocol)
