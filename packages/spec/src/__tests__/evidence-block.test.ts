@@ -1358,6 +1358,55 @@ describe("E7c — input that can run code is refused before it is read, and the 
     await expect(pending).rejects.toMatchObject({ name: "EvidenceBlockInputError", field: "events" });
     expect(traps, "no trap may run").toEqual([]);
   });
+
+  it("never asks a Proxy that sits in a prototype chain anything: not the bundle's, not the events array's, not an event's", async () => {
+    const b = await honest();
+    const traps: string[] = [];
+    const asProto = () => new Proxy({}, recordingHandler(traps));
+    const events = Object.setPrototypeOf([...b.events], asProto());
+    const withOwn = Object.setPrototypeOf({ events, bundleHash: b.bundleHash }, asProto());
+    const withoutOwn = Object.setPrototypeOf({}, asProto()); // every property would be found only through the Proxy
+    const inEvent = [Object.setPrototypeOf(structuredClone(b.events[0]!), asProto()), b.events[1]];
+    for (const bundle of [withOwn, withoutOwn, { events: inEvent, bundleHash: b.bundleHash }]) {
+      await computeKernelSignedEventsRoot(bundle as never).catch(() => undefined); // accepted or refused: either way, no trap
+    }
+    expect(traps, "no trap may run").toEqual([]);
+  });
+
+  it("judges a property by the fields its descriptor owns, so a polluted Object.prototype cannot turn an accessor into data", async () => {
+    // `"value" in descriptor` is also true for a `value` inherited from Object.prototype, so an accessor
+    // descriptor would be read as a data property holding the polluter's value. Found by the mutation run.
+    const b = await honest();
+    let runs = 0;
+    const getter = (value: unknown) => ({
+      enumerable: true,
+      get: () => {
+        runs++;
+        return value;
+      },
+    });
+    const onBundle = Object.defineProperty({ bundleHash: b.bundleHash }, "events", getter(b.events));
+    const payload = Object.defineProperty({}, "z", getter(1));
+    const inEvent = { events: [{ ...structuredClone(b.events[0]!), payload }, b.events[1]], bundleHash: b.bundleHash };
+    const polluter = Object.prototype as unknown as Record<string, unknown>;
+    const settled: Array<Promise<unknown>> = [];
+    try {
+      polluter.value = b.events; // a perfectly valid events array, from the wrong place
+      for (const bundle of [onBundle, inEvent]) {
+        const pending = computeKernelSignedEventsRoot(bundle as never); // refused in its synchronous part
+        settled.push(pending.then(() => undefined, (error: unknown) => error));
+      }
+    } finally {
+      delete polluter.value;
+    }
+    const [onBundleError, inEventError] = (await Promise.all(settled)) as [EvidenceBlockInputError, EvidenceBlockInputError];
+    expect(onBundleError, "an accessor on the bundle").toBeInstanceOf(EvidenceBlockInputError);
+    expect(onBundleError.message).toMatch(/a getter on the bundle runs code/);
+    expect(inEventError, "an accessor in an event").toBeInstanceOf(EvidenceBlockInputError);
+    expect(inEventError.field).toBe("events[0].payload.z");
+    expect(inEventError.message).toMatch(/accessor property: its getter runs code/);
+    expect(runs, "no getter may run").toBe(0);
+  });
 });
 
 // ── F2 (HIGH): invalid and duplicate quorums are refused ─────────────────────
