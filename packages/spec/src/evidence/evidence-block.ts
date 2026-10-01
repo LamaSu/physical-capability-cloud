@@ -81,12 +81,13 @@
  *     (`assertNoCodeRunningInput`: an iterative walk that touches only what cannot run code), and
  *     an object that `canonicalize` would refuse as non-plain, whose members are never enumerated.
  * What is left is `canonicalSnapshot` over a graph proven free of Proxies and accessors, so no code
- * of the input runs during the call. Everything this module calls on caller data is a reference
- * captured when it loads (`Object.freeze`, `Array.isArray`, `Reflect.ownKeys`,
- * `Reflect.getOwnPropertyDescriptor`, `Reflect.getPrototypeOf`, `Number.isSafeInteger`,
- * `util.types.isProxy`), as #359's canonical.ts does for the encoder, so a global replaced after
- * load cannot turn the freeze of the snapshot into a no-op. A caller that replaces globals itself
- * is outside the threat model: it already runs arbitrary code in this process.
+ * of the input runs during the call. What this module uses to inspect and freeze caller-supplied
+ * objects is a reference captured when it loads (`Object.freeze`, `Array.isArray`,
+ * `Reflect.ownKeys`, `Reflect.getOwnPropertyDescriptor`, `Reflect.getPrototypeOf`,
+ * `Number.isSafeInteger`, `util.types.isProxy`), as #359's canonical.ts does for the encoder, so a
+ * global replaced after load cannot turn the freeze of the snapshot into a no-op. A caller that
+ * replaces globals itself is outside the threat model: it already runs arbitrary code in this
+ * process.
  *
  * The session authorization is snapshotted before it is hashed (E7 F3, F4): a frozen
  * plain copy of exactly the declared fields, read once, with `publicKey` pinned to 64
@@ -129,14 +130,14 @@ import { keccak_256 } from "@noble/hashes/sha3";
 import { NonCanonicalValueError, canonicalSnapshot, canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
 
-// Everything this module calls on caller-supplied data is captured here, when the module loads, and
-// the code below calls only these references (#359's canonical.ts does the same for the encoder). A
-// global replaced AFTER this point (Object.freeze, Reflect.ownKeys, util.types.isProxy ...) cannot
-// change what the freezes, the key enumeration, the array and Proxy tests below do: in particular
-// the snapshot's freeze cannot be made a no-op. The traversal of the two walks below
-// (`assertNoCodeRunningInput` and `deepFreeze`) looks nothing up at call time: `set.has(v)` and
-// `arr.push(v)` would find a method on the object, so they use the bound captures and linked frames
-// instead. (Only the text of a refusal is built with ordinary calls.)
+// What this module uses to inspect and freeze caller-supplied objects is captured here, when the
+// module loads, and the code below calls only these references (#359's canonical.ts does the same
+// for the encoder). A global replaced AFTER this point (Object.freeze, Reflect.ownKeys,
+// util.types.isProxy ...) cannot change what the freezes, the key enumeration, the array and Proxy
+// tests below do: in particular the snapshot's freeze cannot be made a no-op. The traversal of the
+// two walks below (`assertNoCodeRunningInput` and `deepFreeze`) looks nothing up at call time:
+// `set.has(v)` and `arr.push(v)` would find a method on the object, so they use the bound captures
+// and linked frames instead. (Only the text of a refusal is built with ordinary calls.)
 const freeze = Object.freeze;
 const isArray = Array.isArray;
 const ownKeys = Reflect.ownKeys;

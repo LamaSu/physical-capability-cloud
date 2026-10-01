@@ -382,7 +382,7 @@ function isDeeplyFrozen(root: unknown): boolean {
 }
 
 /** A Proxy handler whose EVERY trap records its name (and calls `onTrap`), then forwards to the target. A refused Proxy must leave `log` empty. */
-function recordingHandler(log: string[], onTrap?: (name: string) => void): ProxyHandler<object> {
+function recordingHandler<T extends object = object>(log: string[], onTrap?: (name: string) => void): ProxyHandler<T> {
   const traps = [
     "get",
     "set",
@@ -406,7 +406,7 @@ function recordingHandler(log: string[], onTrap?: (name: string) => void): Proxy
       return (Reflect[name] as (...a: unknown[]) => unknown)(...args);
     };
   }
-  return handler as ProxyHandler<object>;
+  return handler as ProxyHandler<T>;
 }
 
 // ── F1 (HIGH): the events root is recomputed, not trusted ────────────────────
