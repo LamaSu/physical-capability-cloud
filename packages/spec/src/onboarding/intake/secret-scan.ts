@@ -172,8 +172,14 @@ function mnemonicSpans(text: string): SecretSpan[] {
   return spans;
 }
 
+/** No detector can match a string shorter than this (the shortest possible hit
+ *  is a street address such as "1 A St"), so shorter strings skip detection
+ *  altogether — it keeps scanning cheap and a deeply nested structure linear. */
+const MIN_DETECTABLE_LENGTH = 6;
+
 function findSecretSpans(text: string): SecretSpan[] {
   const spans: SecretSpan[] = [];
+  if (text.length < MIN_DETECTABLE_LENGTH) return spans;
 
   for (const match of text.matchAll(PEM_BEGIN)) {
     const start = match.index ?? 0;
@@ -227,16 +233,6 @@ export function secretKindsOf(text: string): IntakeSecretKind[] {
   return INTAKE_SECRET_KINDS.filter((kind) => found.has(kind));
 }
 
-/** No detector can match a string shorter than this (the shortest possible hit
- *  is a street address such as "1 A St"), so shorter object keys and path
- *  segments skip detection — it keeps a deeply nested structure linear. */
-const MIN_DETECTABLE_LENGTH = 6;
-
-/** `secretKindsOf` for an object key or path segment. */
-function keyKinds(key: string): IntakeSecretKind[] {
-  return key.length < MIN_DETECTABLE_LENGTH ? [] : secretKindsOf(key);
-}
-
 // ── Path formatting ──────────────────────────────────────────────────────
 
 const MAX_SEGMENT_LENGTH = 80;
@@ -249,7 +245,7 @@ const MAX_SEGMENT_LENGTH = 80;
  * long segment is cut. Internal: shared with validateIntake's reports.
  */
 export function pathSegment(raw: string): string {
-  const kinds = keyKinds(raw);
+  const kinds = secretKindsOf(raw);
   if (kinds.length > 0) return `[redacted:${kinds[0]}]`;
   const escaped = raw
     .replace(/~/g, "~0")
@@ -338,7 +334,7 @@ export function redactIntakeSecrets<T>(record: T): T {
     }
     // Keys that are kept as they are claim their names first, so a renamed key
     // can never take (and then be overwritten by) one of them.
-    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kinds: keyKinds(key) }));
+    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kinds: secretKindsOf(key) }));
     const usedKeys = new Set(entries.filter((e) => e.kinds.length === 0).map((e) => e.key));
     for (const { key, value, kinds } of entries) {
       let outKey = key;

@@ -2674,6 +2674,120 @@ describe("validateIntake — object keys come from a closed ASCII vocabulary (as
   });
 });
 
+// ── 16. Seeded hostile-input fuzz ─────────────────────────────────────────
+
+describe("validateIntake — seeded hostile-input fuzz", () => {
+  /** xorshift32 with a fixed seed: the same cases on every run. */
+  function prng(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state ^= state << 13;
+      state >>>= 0;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      state >>>= 0;
+      return state / 0xffffffff;
+    };
+  }
+
+  const cyrillicA = String.fromCodePoint(0x430);
+  const junk: unknown[] = [
+    null, undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "", " ", "x", true, false, [], {}, [1], { a: 1 },
+    { set: true }, { set: false }, ["a", "b"], cyrillicA, { [cyrillicA]: 1 }, { privateKey: 1 }, { hash: "x" },
+    FAKE.pem, FAKE.street, FAKE.hex64Prefixed,
+  ];
+
+  /** One to three random mutations of the full fixture, as a JSON round trip (so it is plain data). */
+  function mutated(next: () => number): Record<string, any> {
+    const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)]!;
+    const record = JSON.parse(JSON.stringify(buildFullValidRecord())) as { schema: unknown; answers: Record<string, any> };
+    const ids = Object.keys(record.answers);
+    for (let n = 1 + Math.floor(next() * 3); n > 0; n--) {
+      const id = pick(ids);
+      const answer = record.answers[id];
+      switch (Math.floor(next() * 11)) {
+        case 0: delete record.answers[id]; break;
+        case 1: if (answer) answer.value = pick(junk); break;
+        case 2: if (answer) answer.provenance = pick(["human", "probe", "research", "confirmed", "garbage", "", null]); break;
+        case 3: if (answer) answer.source = pick([undefined, { doc: "m" }, { doc: " " }, { doc: "m", url: "http://x.y" }, { doc: "m", url: "https://x.y" }, "str"]); break;
+        case 4: if (answer) answer.confirmation = pick([undefined, { eventId: "nope" }, { eventId: `evt-${id}` }, { eventId: "" }, {}]); break;
+        case 5: if (answer) answer.extra = 1; break;
+        case 6: record.answers[pick(["bogus.field", "__proto__", "constructor", "verificationResult", "café"])] = pick([human("x"), probed(1), "bad"]); break;
+        case 7: if (answer?.value && typeof answer.value === "object" && !Array.isArray(answer.value)) answer.value[pick(["hash", "digest", "privateKey", "Private_Key", `${cyrillicA}x`, "ok"])] = pick(junk); break;
+        case 8: if (typeof answer?.value === "string") answer.value = `${answer.value} ${pick([FAKE.pem, FAKE.address, FAKE.street, FAKE.hex64, "fine"])}`; break;
+        case 9: record.schema = pick(["pcc.device-intake.v1", "other", 1]); break;
+        default: if (Array.isArray(answer?.value)) answer.value.push(pick(junk)); break;
+      }
+    }
+    return record;
+  }
+
+  /** An authority that holds an honest event for every well-formed confirmation reference in `record`. */
+  function authorityFor(record: unknown, payout: boolean): IntakeAuthority {
+    const events = new Map<string, IntakeConfirmationEvent>();
+    const answers = (record as { answers?: Record<string, any> } | null)?.answers;
+    for (const [fieldId, answer] of Object.entries(answers && typeof answers === "object" ? answers : {})) {
+      const eventId = answer?.confirmation?.eventId;
+      if (typeof eventId !== "string" || eventId === "") continue;
+      events.set(eventId, {
+        ...confirmationEvent(fieldId, { ...answer, confirmation: { eventId } } as IntakeAnswer),
+        eventId,
+      });
+    }
+    return { resolveConfirmation: (id) => events.get(id) ?? null, payoutDestinationExists: () => payout };
+  }
+
+  it("never throws, and an ok report implies every component check is clean (2000 cases)", () => {
+    const next = prng(20260930);
+    const violations: string[] = [];
+    let okReports = 0;
+    for (let i = 0; i < 2000; i++) {
+      const record = next() < 0.05 ? junk[Math.floor(next() * junk.length)] : mutated(next);
+      const milestone = INTAKE_MILESTONES[Math.floor(next() * INTAKE_MILESTONES.length)]!;
+      const authority = next() < 0.8 ? authorityFor(record, next() < 0.9) : undefined;
+      const label = `#${i} ${milestone} ${authority ? "with" : "without"} authority`;
+
+      const report = validateIntake(record, milestone, authority); // must not throw
+      executionModeTierCap(record); // must not throw either
+      if (!report.ok) continue;
+      okReports += 1;
+
+      const parsed = IntakeRecordSchema.safeParse(record);
+      if (!parsed.success) {
+        violations.push(`${label}: ok, but the input does not parse`);
+        continue;
+      }
+      if (scanIntakeStrings(record).length > 0) violations.push(`${label}: ok, but a string matches a detector`);
+      if (scanIntakeStrings(redactIntakeSecrets(record)).length > 0) violations.push(`${label}: redaction left a hit`);
+      const implied = MILESTONE_IMPLIES[milestone];
+      for (const field of INTAKE_FIELDS) {
+        const answer = parsed.data.answers[field.id];
+        if (answer !== undefined && !field.valueSchema.safeParse(answer.value).success) {
+          violations.push(`${label}: ok, but ${field.id} does not satisfy its schema`);
+        }
+        if (!field.requiredFor.some((m) => implied.includes(m))) continue;
+        if (answer === undefined) {
+          violations.push(`${label}: ok, but ${field.id} is required and absent`);
+        } else if (CONFIRMATION_REQUIRED_FIELDS.includes(field.id)) {
+          if (!authority) violations.push(`${label}: ok without an authority, but ${field.id} needs one`);
+          if (answer.provenance !== "human" && answer.provenance !== "confirmed") {
+            violations.push(`${label}: ok, but ${field.id} has provenance ${answer.provenance}`);
+          }
+          if (!answer.confirmation) violations.push(`${label}: ok, but ${field.id} has no confirmation reference`);
+        }
+      }
+      if (implied.includes("tier1") || implied.includes("tier2")) violations.push(`${label}: ok for a tier on stub primitives`);
+      if (Object.keys(parsed.data.answers).some((k) => /[^\x00-\x7f]/.test(k))) {
+        violations.push(`${label}: ok with a non-ASCII field id`);
+      }
+    }
+    expect(violations).toEqual([]);
+    // the fuzz must exercise both outcomes, or it proves nothing
+    expect(okReports).toBeGreaterThan(100);
+    expect(okReports).toBeLessThan(1900);
+  }, 30_000);
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
     expect(ready(buildFullValidRecord(), "identify").ok).toBe(true);
