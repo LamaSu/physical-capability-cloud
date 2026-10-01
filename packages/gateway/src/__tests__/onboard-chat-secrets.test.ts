@@ -503,26 +503,42 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
   // string stored inside the message array's own JSON, so every quote and backslash in
   // it is escaped again (a quote in the page is `\"` in the content and `\\\"` in the
   // row). The ordinary-word page above does not expand, which is why the cap test missed it.
-  it.each([["quote_page"], ["backslash_page"]])(
-    "[neg] the stored history cap counts JSON escaping: several %s results in one turn stay under 256 KiB + 8 KiB (astra 91b F5)",
-    async (name) => {
-      const calls = Array.from({ length: 10 }, (_, i) => ({ type: "tool_use", id: `tu_esc_${i}`, name, input: {} }));
+  //
+  // The sequences matter. Ten pages of one kind land on the cap by luck of arithmetic, so a
+  // budget that is wrong in only its check, or only in its running total, still passes them.
+  // The mixed orders cannot: the check sees the running total of what came before.
+  const word = (n: number) => Array.from({ length: n }, () => "big_page");
+  const quote = (n: number) => Array.from({ length: n }, () => "quote_page");
+  const backslash = (n: number) => Array.from({ length: n }, () => "backslash_page");
+  it.each([
+    ["ten quote pages", quote(10), 1],
+    ["ten backslash pages", backslash(10), 1],
+    ["five word pages, then five quote pages", [...word(5), ...quote(5)], 5],
+    ["two quote pages, then eight word pages", [...quote(2), ...word(8)], 1],
+    ["five word pages, then five backslash pages", [...word(5), ...backslash(5)], 5],
+  ] as const)(
+    "[neg] the stored history cap counts JSON escaping: %s in one turn stay under 256 KiB + 8 KiB (astra 91b F5)",
+    async (_label, names, maxKept) => {
+      const calls = names.map((name, i) => ({ type: "tool_use", id: `tu_esc_${i}`, name, input: {} }));
       llm.responses.push({ content: calls, stop_reason: "tool_use" }, endTurn);
       const post = await chat({ message: "read everything" });
       expect(post.statusCode).toBe(200);
       const body = post.json();
-      expect(body.toolCalls).toHaveLength(10);
+      expect(body.toolCalls).toHaveLength(names.length);
       expect(body.doneReason).toBe("history_full");
       expect(llm.requests).toHaveLength(1); // no second model call over a full history
       const row = persistedMessages(body.conversationId);
       expect(row.length).toBeLessThan(256 * 1024 + 8 * 1024);
-      // The cap is not simply lower: the first result still fits and is kept whole; the rest become the notice.
+      // The cap is not simply lower: results fit and are kept whole until the budget is
+      // spent, and the rest become the notice.
       const results = (JSON.parse(row).messages as Array<{ role: string; content: unknown }>)
         .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
         .filter((b: { type?: string }) => b.type === "tool_result") as Array<{ content: string }>;
-      expect(results).toHaveLength(10);
+      expect(results).toHaveLength(names.length);
       expect(results[0].content).not.toContain("history_full");
-      expect(results.filter((r) => r.content.includes("history_full")).length).toBeGreaterThanOrEqual(8);
+      const kept = results.filter((r) => !r.content.includes("history_full")).length;
+      expect(kept).toBeGreaterThanOrEqual(1);
+      expect(kept).toBeLessThanOrEqual(maxKept);
 
       const next = await chat({ conversationId: body.conversationId, message: "and now?" });
       expect(next.statusCode).toBe(400);
