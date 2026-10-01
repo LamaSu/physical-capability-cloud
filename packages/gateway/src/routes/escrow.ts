@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getAddress, isAddress, type Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
@@ -22,6 +22,48 @@ import {
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
 import { getRepos } from "../db.js";
+import { adminOrCaller, mayAccess, type AdminOrCaller } from "../auth/admin-secret-gate.js";
+import { normalizeIdentity } from "../auth/identity-normalize.js";
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * N46 authority on POST /fund (operator item 57, option a): the route makes the
+ * gateway's OWN signer fund an escrow, so who may ask is decided here.
+ *
+ * Allowed: the admin (a presented secret that checks out: adminOrCaller never
+ * downgrades a wrong one), or the escrow's RECORDED payer. The payer is what the
+ * gateway wrote down when it created the escrow (escrows.payer, set from the
+ * negotiation session's buyer in paid-job-flow.createJobFromSession), never
+ * anything from this request. The caller is the payer when:
+ *   - their identity is the recorded payer (sameIdentity: Unicode-folded,
+ *     trimmed, case-insensitive), or
+ *   - the recorded payer is an address and is the caller's PROVEN wallet
+ *     (req.provenWallet: a SIWE session's address, or the address a key was
+ *     minted for through SIWE), compared case-insensitively.
+ * An escrow with no recorded payer (blank, or the zero-address placeholder, as
+ * mayReleaseJob treats an unowned kernel) is the admin's alone: fail closed.
+ *
+ * Note on the recorded payer: today it is the session's `userAgentId`, which the
+ * session's creator declares in the request body (negotiation.ts) and which is
+ * not yet bound to the authenticated key that created the session. This check
+ * is exactly as strong as that record. When the session buyer becomes
+ * server-set (N46 design), this check holds without a change.
+ */
+function mayFundEscrow(
+  req: FastifyRequest,
+  who: AdminOrCaller,
+  recordedPayer: string | null | undefined,
+): boolean {
+  if (who.admin) return true;
+  // The identity fold (trim, NFKC, case folding) on the record, so blank and
+  // the zero-address placeholder are caught in every spelling.
+  const payer = normalizeIdentity(recordedPayer);
+  if (payer === "" || payer === ZERO_ADDRESS) return false;
+  if (mayAccess(who, recordedPayer)) return true;
+  const wallet = req.provenWallet;
+  return typeof wallet === "string" && wallet !== "" && wallet.toLowerCase() === payer;
+}
 
 /**
  * Look up an escrow row by its on-chain contract address. The single DB query
@@ -261,6 +303,16 @@ export async function escrowRoutes(app: FastifyInstance) {
    * a 400 would mis-describe it as malformed. Registry unreadable -> 503
    * `escrow_lookup_unavailable`, failing closed: an unavailable registry must
    * not degrade into "unverified provenance is acceptable" on a money path.
+   *
+   * AUTHORITY (N46 pack 104 F1, operator item 57). Provenance says whose
+   * CONTRACT it is; it does not say who may spend the GATEWAY's money on it. The
+   * caller must be the escrow's recorded payer or present the admin secret
+   * (mayFundEscrow; a wrong secret is refused, never downgraded; an escrow with
+   * no recorded payer is the admin's alone). The spend guard (caps, kill switch)
+   * is a separate change (#453) and is not part of this route.
+   * Order: 400 malformed address; 401 no identity (or a refused admin secret);
+   * 503/404 the provenance gate; 403 not the payer. Nothing is funded on any
+   * refusal, and a refusal never says who the payer is.
    */
   app.post<{ Params: { address: string } }>(
     "/api/escrow/chain/:address/fund",
@@ -269,6 +321,8 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!isAddress(address)) {
         return reply.status(400).send({ error: "Invalid address" });
       }
+      const who = adminOrCaller(req, reply);
+      if (!who) return reply;
       let escrowRow: ReturnType<typeof findEscrowRow>;
       try {
         escrowRow = findEscrowRow(address);
@@ -285,6 +339,13 @@ export async function escrowRoutes(app: FastifyInstance) {
           message:
             "No escrow with this contract address is known to this gateway. " +
             "Funding is limited to protocol-created escrows.",
+        });
+      }
+      if (!mayFundEscrow(req, who, escrowRow.payer)) {
+        return reply.status(403).send({
+          error: "not_escrow_payer",
+          message:
+            "Only the escrow's recorded payer or the admin may make the gateway fund it.",
         });
       }
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
