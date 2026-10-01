@@ -72,12 +72,11 @@
  *    malformed. Only pass and fail prove a level (none and malformed prove NO
  *    level, not even device_reported). In contradictions a fail or a malformed
  *    verdict counts as a failed inspection (fail closed) and none does not.
- *    Pinned today: instrument_result `pass` (boolean) and batch_sample_result
- *    `status` ("PASS" or "FAIL"). photo_comparison_result has no producer, so no
- *    pinned field. cv_inspection_result is NOT pinned yet (OPEN, see
- *    PINNED_VERDICTS: the producers emit `passed`, types/dpp.ts reads `pass`), so
- *    it proves no level, and a cv payload carrying either spelling counts as a
- *    failed inspection.
+ *    Pinned: instrument_result `pass` (boolean), cv_inspection_result
+ *    `passed` (boolean) and batch_sample_result `status` ("PASS" or "FAIL").
+ *    photo_comparison_result has no producer, so no pinned field. A cv
+ *    payload with `pass` and no `passed` is malformed: `pass` is the types/dpp.ts
+ *    reader's spelling, not what any producer emits.
  *
  * 5. Fabrication is bundle-wide. One fabricated event (`isFabricated`) makes the
  *    whole bundle non-authentic (`bundleHasFabricatedEvents`): it proves no
@@ -427,30 +426,25 @@ function readPassFailVerdict(value: unknown): "pass" | "fail" | "malformed" {
 }
 
 /**
- * The pinned verdict field per inspection type, matching types/dpp.ts and
- * evidence-lane ruling E5/F2+F3:
- *   instrument_result    `pass`, a boolean
- *   batch_sample_result  `status`, exactly "PASS" or "FAIL"
+ * The pinned verdict field per inspection type (evidence-lane rulings E5/F2+F3
+ * and D1):
+ *   instrument_result     `pass`, a boolean
+ *   cv_inspection_result  `passed`, a boolean
+ *   batch_sample_result   `status`, exactly "PASS" or "FAIL"
+ *
+ * cv_inspection_result is `passed` because that is what every producer emits
+ * (kernel PhotoCameraAdapter, MockCameraAdapter, the onboard-kit camera
+ * templates) and what the oracle's J4 mirror reads. types/dpp.ts reads `pass`
+ * for this type, so its qualityRecords see real camera output as FAIL; that
+ * reader is wrong and is routed to its owner, not changed here.
  *
  * photo_comparison_result has NO pinned field: nothing in the repository
  * produces or reads it, so there is no verdict field to pin. Its verdict is
  * `none` (or `malformed` when the payload carries a verdict-looking key).
- *
- * cv_inspection_result is deliberately NOT pinned here. OPEN (E5 triage, F2/F3):
- * the ruling pins `pass`, "matching existing producers and types/dpp.ts", but
- * the producers do not emit `pass`. The real camera (kernel PhotoCameraAdapter
- * .runInspection in adapters/photo-camera-adapter.ts), the kernel mock camera,
- * the onboard-kit GenericCameraAdapter and the onboard-kit scaffolder's camera
- * template all emit `passed`. Only the types/dpp.ts reader (`p["pass"]`) and
- * some demo scripts use `pass`. Pinning either spelling is the contract owner's
- * call, so this module does not choose. Until that is ruled, a cv payload that
- * carries `pass` or `passed` is `malformed` (it proves no level and counts as
- * failed in contradictions: fail closed, so a legitimate real-camera job is
- * refused rather than a bad one accepted), and a cv payload with no verdict key
- * is `none`. Pinning it is one entry in this map.
  */
 const PINNED_VERDICTS: ReadonlyMap<string, PinnedVerdict> = new Map<string, PinnedVerdict>([
   ["instrument_result", { field: "pass", read: readBooleanVerdict }],
+  ["cv_inspection_result", { field: "passed", read: readBooleanVerdict }],
   ["batch_sample_result", { field: "status", read: readPassFailVerdict }],
 ]);
 

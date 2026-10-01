@@ -308,6 +308,7 @@ describe("evidence levels — F2: an inspection proves a level only with a valid
     const unreadable: unknown[] = [null, [], "pass", 7, { pass: "yes" }, { passed: true }, { verdict: "PASS" }];
     for (const type of INSPECTION_EVENT_TYPES) {
       for (const payload of [...noVerdict, ...unreadable]) {
+        if (type === "cv_inspection_result" && (payload as { passed?: unknown } | null)?.passed === true) continue; // valid for cv
         expect(level([bundle([ev(type, READER, payload)], OP_B)], ASSIGNED_A), `${type} ${JSON.stringify(payload)}`).toBeNull();
       }
     }
@@ -319,6 +320,8 @@ describe("evidence levels — F2: an inspection proves a level only with a valid
       [ev("instrument_result", READER, { pass: false })],
       [ev("batch_sample_result", READER, { status: "PASS" })],
       [ev("batch_sample_result", READER, { status: "FAIL" })],
+      [ev("cv_inspection_result", READER, { passed: true })],
+      [ev("cv_inspection_result", READER, { passed: false })],
     ]) {
       expect(level([bundle(events, OP_B)], ASSIGNED_A)).toBe("inspected_output");
       expect(level([bundle(events, OP_A)], ASSIGNED_A)).toBe("device_reported");
@@ -651,22 +654,34 @@ describe("inspectionVerdict — one closed verdict per inspection type", () => {
     ]);
   });
 
-  it("cv_inspection_result: no verdict key is none; a verdict-looking key is malformed while the field is OPEN", () => {
-    // OPEN (E5 triage, F2/F3): the producers emit `passed`, types/dpp.ts reads `pass`. The contract owner has not
-    // pinned one, so this module reads neither: either spelling is malformed (proves no level, fails closed in
-    // contradictions). When the field is pinned, move the pinned spelling to pass/fail and keep the other malformed.
+  it("cv_inspection_result: `passed`, a boolean (what every producer emits)", () => {
     check("cv_inspection_result", [
+      ["passed:true", { passed: true }, "pass"],
+      ["passed:false", { passed: false }, "fail"],
       ["empty", {}, "none"],
       ["measurement only", { confidence: 0.9, findings: [], imageHash: "sha256:00" }, "none"],
-      ["passed (what the kernel and onboard-kit cameras emit)", { passed: true }, "malformed"],
-      ["pass (what types/dpp.ts reads)", { pass: true }, "malformed"],
-      ["passed:false", { passed: false }, "malformed"],
+      ["passed:'true'", { passed: "true" }, "malformed"],
+      ["passed:'false'", { passed: "false" }, "malformed"],
+      ["passed:1", { passed: 1 }, "malformed"],
+      ["passed:0", { passed: 0 }, "malformed"],
+      ["passed:null", { passed: null }, "malformed"],
+      ["passed:undefined (own key)", { passed: undefined }, "malformed"],
+      ["passed:[true]", { passed: [true] }, "malformed"],
+      ["passed:{}", { passed: {} }, "malformed"],
+      ["pass:true (what types/dpp.ts reads)", { pass: true }, "malformed"],
       ["pass:false", { pass: false }, "malformed"],
+      ["status instead of passed", { status: "PASS" }, "malformed"],
+      ["a valid passed beside a stray pass still reads the pinned field", { passed: true, pass: false }, "pass"],
     ]);
   });
-  it.todo(
-    "cv_inspection_result: the evidence lane pins ONE verdict field (`pass` per types/dpp.ts:462, or `passed` per photo-camera-adapter.ts:178,188-190), then pass/fail/none/malformed are tested like instrument_result",
-  );
+
+  it("cv_inspection_result: a pinned passed proves a level, the pass spelling proves none", () => {
+    const independentCv = (payload: unknown) =>
+      level([executorBundle(), bundle([ev("cv_inspection_result", CAMERA, payload)], OP_B)], ASSIGNED_A);
+    expect(independentCv({ passed: true })).toBe("inspected_output");
+    expect(independentCv({ passed: false })).toBe("inspected_output");
+    expect(independentCv({ pass: true })).toBe("device_reported"); // the completion alone
+  });
 
   it("a payload that is not a plain, non-null, non-array object is malformed, for every inspection type", () => {
     class Shaped {
@@ -758,6 +773,7 @@ describe("deriveContradictions — the public contradiction rule the oracle sign
     const fails: EvidenceEvent[] = [
       ev("instrument_result", READER, { pass: false }),
       ev("batch_sample_result", READER, { status: "FAIL" }),
+      ev("cv_inspection_result", READER, { passed: false }),
     ];
     for (const fail of fails) {
       expect(deriveContradictions(unit(done(), fail)), fail.type).toEqual(["completion-and-failed-inspection"]);
@@ -773,8 +789,8 @@ describe("deriveContradictions — the public contradiction rule the oracle sign
       ev("batch_sample_result", READER, { status: "fail" }),
       ev("batch_sample_result", READER, { pass: false }),
       ev("photo_comparison_result", READER, { verdict: "mismatch" }),
-      ev("cv_inspection_result", READER, { passed: false }), // OPEN: cv spelling not pinned yet
-      ev("cv_inspection_result", READER, { pass: false }),
+      ev("cv_inspection_result", READER, { pass: false }), // the types/dpp.ts spelling is not the pinned field
+      ev("cv_inspection_result", READER, { passed: "false" }),
     ];
     for (const bad of unreadable) {
       expect(deriveContradictions(unit(done(), bad)), JSON.stringify([bad.type, bad.payload])).toEqual([
