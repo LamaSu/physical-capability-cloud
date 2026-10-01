@@ -307,7 +307,7 @@ describe("pack 103b F4: a preflight must not erase counted spending", () => {
     }).ok).toBe(true);
 
     t -= 86_400_000;
-    expect(spend("p", 1).ok).toBe(false); // Currently returns true.
+    expect(spend("p", 1).ok).toBe(false); // astra: "currently returns true" on ee6e36bc; now refused, D's $50 is still counted.
   });
 
   it("[neg] F4: a preflight at the PREVIOUS UTC day, then back to day D, must not replenish D's allowance (the backward counterpart)", () => {
@@ -319,10 +319,14 @@ describe("pack 103b F4: a preflight must not erase counted spending", () => {
     expect(spend("p", 1).ok).toBe(false);
 
     t -= 86_400_000;
-    // What the preflight answers at the wrong day is not under test here; what it leaves behind is.
-    checkGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(1) });
+    // A day BEFORE the furthest day an admission saw is a regressed clock: the preflight refuses it, read-only.
+    expect(checkGatewaySpend({ spender: { action: "commit", principal: "p" }, amountMicro: usd(1) })).toMatchObject({
+      status: 503,
+      error: "gateway_pays_clock_regressed",
+    });
 
     t += 86_400_000;
-    expect(spend("p", 1).ok).toBe(false);
+    // Refused for the right reason: D's $50 is still counted (the breaker), not a poisoned clock mark.
+    expect(spend("p", 1)).toMatchObject({ status: 503, error: "gateway_pays_daily_breaker" });
   });
 });

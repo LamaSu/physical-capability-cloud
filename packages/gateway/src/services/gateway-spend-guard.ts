@@ -176,8 +176,13 @@ function readConfig(): Config {
 
 const alerted = new Set<string>();
 
-function alertOnce(key: string, message: string): void {
-  const k = `${utcDay()}:${key}`;
+/**
+ * `day` is the UTC day the caller already captured for this call. An alert never
+ * reads the clock itself: a second read in the middle of a call could straddle a
+ * UTC midnight (rule 3 on the ledger below).
+ */
+function alertOnce(day: string, key: string, message: string): void {
+  const k = `${day}:${key}`;
   if (alerted.has(k)) return;
   alerted.add(k);
   console.error(`[gateway-spend-guard] ALERT: ${message}`);
@@ -200,13 +205,29 @@ interface SpendEntry {
 
 let now: () => number = () => Date.now();
 let entries: SpendEntry[] = [];
-// F4 (astra pack 103): the process-local ledger is pruned to the current UTC
-// day, so a backward clock step would silently drop a prior day's admissions and
-// replenish the allowance. Refuse any admission once the observed day has gone
-// backwards from the furthest day already seen in this process.
+// F4 (astra packs 103 and 103b): the process-local ledger holds only the current
+// UTC day, so a day that goes BACKWARD, or a prune that is not tied to this
+// high-water mark, would drop counted admissions and replenish the allowance.
+// Three rules keep it sound:
+//   1. Only an ADMISSION may change the ledger or the mark. It validates its day
+//      with dayRegressed() FIRST (which also advances the mark), and only then
+//      prunes. The mark is therefore at or past every day the ledger has held,
+//      so a prune removes only days that can never be counted again.
+//   2. A PREFLIGHT (checkGatewaySpend, gatewayPaymentsGate) is READ-ONLY. It may
+//      refuse a regressed day (peekDayRegressed) but never prunes and never moves
+//      the mark. A preflight at another day used to delete a day's spending
+//      without recording that the clock had moved (103b F4).
+//   3. Every entry point reads the clock ONCE and passes that one instant down to
+//      the checking, summing, pruning, recording and alerting. Nothing below it
+//      reads the clock again, so one admission cannot straddle a UTC midnight.
 let maxDaySeen = "";
+/** READ-ONLY: is `day` earlier than the furthest day an admission has seen? */
+function peekDayRegressed(day: string): boolean {
+  return day < maxDaySeen;
+}
+/** ADMISSIONS ONLY: true (refuse) when `day` has regressed; otherwise moves the mark up to `day`. */
 function dayRegressed(day: string): boolean {
-  if (day < maxDaySeen) return true;
+  if (peekDayRegressed(day)) return true;
   if (day > maxDaySeen) maxDaySeen = day;
   return false;
 }
@@ -217,7 +238,8 @@ const CLOCK_REGRESSED: GatewaySpendRefusal = {
   message: "Gateway-paid actions are paused: the server clock moved backward across a UTC day; the daily caps cannot be trusted.",
 };
 
-function utcDay(ms = now()): string {
+/** The UTC day of the instant `ms`. It takes the instant on purpose: see rule 3 above. */
+function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
@@ -226,15 +248,18 @@ function normalizePrincipal(p: string | undefined): string {
   return s || "unknown";
 }
 
-function sumToday(filter: (e: SpendEntry) => boolean): bigint {
-  const day = utcDay();
+function sumDay(day: string, filter: (e: SpendEntry) => boolean): bigint {
   let total = 0n;
   for (const e of entries) if (e.day === day && filter(e)) total += e.amountMicro;
   return total;
 }
 
-function pruneOldEntries(): void {
-  const day = utcDay();
+/**
+ * ADMISSIONS ONLY, and only AFTER dayRegressed(day) returned false (rule 1): keep
+ * `day`'s entries and drop the rest. The mark is already at `day`, so every entry
+ * dropped belongs to an earlier day that can no longer be counted.
+ */
+function pruneToDay(day: string): void {
   if (entries.some((e) => e.day !== day)) entries = entries.filter((e) => e.day === day);
 }
 
@@ -245,13 +270,14 @@ const usd = (micro: bigint): string => {
 };
 
 /**
- * Would the gateway pay `amountMicro` for this spender now? No side effects.
- * Routes call it BEFORE changing any state, so a refusal leaves nothing behind.
+ * The spend decision for `input` on the UTC `day` the caller captured. READ-ONLY:
+ * it never touches the ledger or the high-water mark (rules 1 and 2 above); the
+ * only state it can change is the once-per-day alert set.
  */
-export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecision {
+function evaluateSpend(input: GatewaySpendInput, day: string): GatewaySpendDecision {
   const cfg = readConfig();
   if (!cfg.ok) {
-    alertOnce(`misconfigured:${cfg.problem}`, `gateway-paid actions refused: ${cfg.problem}`);
+    alertOnce(day, `misconfigured:${cfg.problem}`, `gateway-paid actions refused: ${cfg.problem}`);
     return {
       ok: false,
       status: 503,
@@ -280,9 +306,8 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
       message: `The gateway pays at most ${usd(caps.perActionMicro)} per action; this one needs ${usd(amount)}. Fund it yourself.`,
     };
   }
-  pruneOldEntries();
   const principal = normalizePrincipal(input.spender.principal);
-  if (sumToday((e) => e.principal === principal) + amount > caps.perPrincipalDayMicro) {
+  if (sumDay(day, (e) => e.principal === principal) + amount > caps.perPrincipalDayMicro) {
     return {
       ok: false,
       status: 429,
@@ -291,7 +316,7 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
     };
   }
   const keyId = input.spender.apiKeyId ? `key:${input.spender.apiKeyId}` : `principal:${principal}`;
-  if (sumToday((e) => e.keyId === keyId) + amount > caps.perKeyDayMicro) {
+  if (sumDay(day, (e) => e.keyId === keyId) + amount > caps.perKeyDayMicro) {
     return {
       ok: false,
       status: 429,
@@ -299,8 +324,9 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
       message: `This API key's gateway-paid total for today would pass ${usd(caps.perKeyDayMicro)} (UTC day).`,
     };
   }
-  if (sumToday(() => true) + amount > caps.globalDayMicro) {
+  if (sumDay(day, () => true) + amount > caps.globalDayMicro) {
     alertOnce(
+      day,
       "breaker",
       `the global daily cap (${usd(caps.globalDayMicro)}) is reached; gateway-paid actions are refused until the next UTC day`,
     );
@@ -315,11 +341,19 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
 }
 
 /**
- * Admit a gateway-paid action: check it and, when allowed, count it at once.
- * Call it immediately BEFORE the first signer write. An admitted amount stays
- * counted even if the signer path later fails, because a failure can follow a
- * write that moved funds; the guard never under-counts.
+ * Would the gateway pay `amountMicro` for this spender now? READ-ONLY (rule 2):
+ * it counts nothing, prunes nothing and never moves the clock's high-water mark.
+ * It does refuse a day that has regressed from the furthest day an admission has
+ * seen, so a preflight never says yes to what the admission would refuse for that
+ * reason. Routes call it BEFORE changing any state, so a refusal leaves nothing
+ * behind.
  */
+export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecision {
+  const day = utcDay(now()); // the ONE clock read of this call (rule 3)
+  if (peekDayRegressed(day)) return CLOCK_REGRESSED;
+  return evaluateSpend(input, day);
+}
+
 /**
  * The "may the gateway pay at all right now?" gate: the kill switch, a valid
  * config, and a non-regressed clock — WITHOUT counting anything against the
@@ -327,28 +361,41 @@ export function checkGatewaySpend(input: GatewaySpendInput): GatewaySpendDecisio
  * crank) use this so a disabled or misconfigured gateway never signs a funding,
  * without double-counting an amount already admitted at escrow creation. The
  * per-amount daily debit for deferred funding needs the reservation ledger
- * (parked for the operator's schema approval).
+ * (parked for the operator's schema approval). Like checkGatewaySpend it is
+ * READ-ONLY (rule 2): it refuses a regressed day but never moves the mark.
  */
 export function gatewayPaymentsGate(): GatewaySpendDecision {
+  const day = utcDay(now()); // the ONE clock read of this call (rule 3)
   const cfg = readConfig();
   if (!cfg.ok) {
-    alertOnce(`misconfigured:${cfg.problem}`, `gateway-paid actions refused: ${cfg.problem}`);
+    alertOnce(day, `misconfigured:${cfg.problem}`, `gateway-paid actions refused: ${cfg.problem}`);
     return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." };
   }
   if (!cfg.enabled) {
     return { ok: false, status: 503, error: "gateway_pays_disabled", message: "The gateway does not pay on callers' behalf here (PCC_GATEWAY_PAYS_ENABLED is off)." };
   }
-  if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
+  if (peekDayRegressed(day)) return CLOCK_REGRESSED;
   return { ok: true };
 }
 
+/**
+ * Admit a gateway-paid action: check it and, when allowed, count it at once.
+ * Call it immediately BEFORE the first signer write. An admitted amount stays
+ * counted even if the signer path later fails, because a failure can follow a
+ * write that moved funds; the guard never under-counts.
+ *
+ * The only function that changes the ledger (rule 1): validate the day, then
+ * prune, then check and record, all on the ONE day read at the top (rule 3).
+ */
 export function admitGatewaySpend(input: GatewaySpendInput): GatewaySpendDecision {
-  if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
-  const decision = checkGatewaySpend(input);
+  const day = utcDay(now()); // the ONE clock read of this admission (rule 3)
+  if (dayRegressed(day)) return CLOCK_REGRESSED; // validate FIRST; this also moves the mark (rule 1)
+  pruneToDay(day); // only now: the mark is at `day`, so only earlier days are dropped
+  const decision = evaluateSpend(input, day);
   if (!decision.ok) return decision;
   const principal = normalizePrincipal(input.spender.principal);
   entries.push({
-    day: utcDay(),
+    day,
     principal,
     keyId: input.spender.apiKeyId ? `key:${input.spender.apiKeyId}` : `principal:${principal}`,
     action: input.spender.action,
@@ -392,28 +439,30 @@ export function admitFaucetDrip(input: {
   amount: number;
   spender: { principal?: string; apiKeyId?: string };
 }): GatewaySpendDecision {
+  // The ONE clock read of this admission (rule 3): the clock check, the prune, the
+  // sums, the hourly window, the alerts and the record all use this `t` and `day`.
+  const t = now();
+  const day = utcDay(t);
   if (!isTestnetNetwork()) {
     return { ok: false, status: 503, error: "faucet_disabled", message: "The faucet runs only on a testnet deployment." };
   }
   // F1 (astra pack 103): the faucet signs with the gateway/deployer key, so the
   // payment kill switch and a malformed config must stop it too.
   const cfg = readConfig();
-  if (!cfg.ok) { alertOnce(`misconfigured:${cfg.problem}`, `faucet refused: ${cfg.problem}`); return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." }; }
+  if (!cfg.ok) { alertOnce(day, `misconfigured:${cfg.problem}`, `faucet refused: ${cfg.problem}`); return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." }; }
   if (!cfg.enabled) return { ok: false, status: 503, error: "gateway_pays_disabled", message: "The gateway does not pay on callers' behalf here (PCC_GATEWAY_PAYS_ENABLED is off)." };
-  if (dayRegressed(utcDay(now()))) return CLOCK_REGRESSED;
+  if (dayRegressed(day)) return CLOCK_REGRESSED; // validate FIRST; this also moves the mark (rule 1)
   const maxPerCall = faucetMaxPerCall();
   const perWalletDay = intEnv("PCC_FAUCET_MAX_PER_WALLET_DAY", FAUCET_DEFAULTS.perWalletDay);
   const perKeyHour = intEnv("PCC_FAUCET_MAX_CALLS_PER_KEY_HOUR", FAUCET_DEFAULTS.perKeyHour);
   if (maxPerCall === null || perWalletDay === null || perKeyHour === null) {
-    alertOnce("faucet-misconfigured", "faucet refused: a PCC_FAUCET_* cap is not a whole number");
+    alertOnce(day, "faucet-misconfigured", "faucet refused: a PCC_FAUCET_* cap is not a whole number");
     return { ok: false, status: 503, error: "faucet_misconfigured", message: "The faucet's configuration is invalid." };
   }
   if (!Number.isInteger(input.amount) || input.amount < 1 || input.amount > maxPerCall) {
     return { ok: false, status: 400, error: "faucet_amount_out_of_range", message: `Amount must be a whole number from 1 to ${maxPerCall} mUSDC.` };
   }
-  const t = now();
-  const day = utcDay(t);
-  faucetDrips = faucetDrips.filter((d) => d.day === day || t - d.at < HOUR_MS);
+  faucetDrips = faucetDrips.filter((d) => d.day === day || t - d.at < HOUR_MS); // only after the clock check, on the captured t/day
   const wallet = input.wallet.trim().toLowerCase();
   const walletToday = faucetDrips.filter((d) => d.day === day && d.wallet === wallet).reduce((s, d) => s + d.amount, 0);
   if (walletToday + input.amount > perWalletDay) {
@@ -437,23 +486,25 @@ export function admitFaucetDrip(input: {
  * per-caller hourly count and the global daily count. Counted at once.
  */
 export function admitRelay(spender: { principal?: string; apiKeyId?: string }): GatewaySpendDecision {
+  // The ONE clock read of this admission (rule 3): the clock check, the prune, the
+  // counts, the hourly window, the alerts and the record all use this `t` and `day`.
+  const t = now();
+  const day = utcDay(t);
   // F1 (astra pack 103): the relayer key signs, so the payment kill switch and a
   // malformed config must stop it too.
   const cfg = readConfig();
-  if (!cfg.ok) { alertOnce(`misconfigured:${cfg.problem}`, `relay refused: ${cfg.problem}`); return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." }; }
+  if (!cfg.ok) { alertOnce(day, `misconfigured:${cfg.problem}`, `relay refused: ${cfg.problem}`); return { ok: false, status: 503, error: "gateway_pays_misconfigured", message: "Gateway-paid actions are unavailable: the spend guard's configuration is invalid." }; }
   if (!cfg.enabled) return { ok: false, status: 503, error: "gateway_pays_disabled", message: "The gateway does not pay on callers' behalf here (PCC_GATEWAY_PAYS_ENABLED is off)." };
   const perKeyHour = intEnv("PCC_RELAY_MAX_PER_KEY_HOUR", RELAY_DEFAULTS.perKeyHour);
   const globalDay = intEnv("PCC_RELAY_MAX_GLOBAL_DAY", RELAY_DEFAULTS.globalDay);
   if (perKeyHour === null || globalDay === null) {
-    alertOnce("relay-misconfigured", "relay refused: a PCC_RELAY_* cap is not a whole number");
+    alertOnce(day, "relay-misconfigured", "relay refused: a PCC_RELAY_* cap is not a whole number");
     return { ok: false, status: 503, error: "relay_misconfigured", message: "The relay's configuration is invalid." };
   }
-  const t = now();
-  const day = utcDay(t);
-  if (dayRegressed(day)) return CLOCK_REGRESSED;
-  relays = relays.filter((r) => r.day === day || t - r.at < HOUR_MS);
+  if (dayRegressed(day)) return CLOCK_REGRESSED; // validate FIRST; this also moves the mark (rule 1)
+  relays = relays.filter((r) => r.day === day || t - r.at < HOUR_MS); // only after the clock check, on the captured t/day
   if (relays.filter((r) => r.day === day).length >= globalDay) {
-    alertOnce("relay-breaker", `the relay's global daily count (${globalDay}) is reached`);
+    alertOnce(day, "relay-breaker", `the relay's global daily count (${globalDay}) is reached`);
     return { ok: false, status: 503, error: "relay_daily_breaker", message: "Relaying is paused for today: the global daily count is reached." };
   }
   const keyId = callerKey(spender);
