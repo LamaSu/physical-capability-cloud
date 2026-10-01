@@ -41,7 +41,7 @@
  * Input forms are pinned so the digests cannot depend on spelling: every hex
  * value is 0x + lowercase hex of its exact width (an EIP-55 checksummed address
  * must be lowercased by the caller), and integers are non-negative bigints,
- * safe integers or decimal strings.
+ * safe integers or decimal strings (negative zero is refused: pass 0).
  *
  * The attestation set is validated before it is hashed (E7 F2): the job id and
  * every roleId are 1-128 printable ASCII characters with no whitespace; a set has
@@ -322,7 +322,11 @@ const SESSION_KEY_AUTH_FIELDS = [
   "parentSignature",
   "derivationPath",
 ] as const satisfies readonly (keyof SessionKeyAuthorization)[];
-const SESSION_SCOPE_FIELDS = ["allowedActions", "contractIds", "maxSignatures"] as const satisfies readonly (keyof SessionKeyAuthorization["scope"])[];
+const SESSION_SCOPE_FIELDS = [
+  "allowedActions",
+  "contractIds",
+  "maxSignatures",
+] as const satisfies readonly (keyof SessionKeyAuthorization["scope"])[];
 
 // Compile-time guard: a field added to SessionKeyAuthorization must be listed above (and
 // given a rule below) before this module compiles. At runtime an unlisted field is refused.
