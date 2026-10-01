@@ -673,14 +673,18 @@ class TestKeyLocationIsBoundToTheDirectoryOpened:
 
     @pytest.mark.parametrize(
         "missing",
-        ["dir_fd:open", "dir_fd:stat", "dir_fd:mkdir", "dir_fd:unlink", "follow_symlinks:stat", "O_DIRECTORY", "O_NOFOLLOW"],
+        [
+            "dir_fd:open", "dir_fd:stat", "dir_fd:mkdir", "dir_fd:unlink",
+            "follow_symlinks:stat", "O_DIRECTORY", "O_NOFOLLOW",
+        ],
     )
     def test_a_platform_that_cannot_bind_to_a_directory_descriptor_fails_closed(self, monkeypatch, tmp_path, missing):
         kind, _, name = missing.partition(":")
         if kind == "dir_fd":
             monkeypatch.setattr(os, "supports_dir_fd", frozenset(os.supports_dir_fd) - {getattr(os, name)})
         elif kind == "follow_symlinks":
-            monkeypatch.setattr(os, "supports_follow_symlinks", frozenset(os.supports_follow_symlinks) - {getattr(os, name)})
+            without = frozenset(os.supports_follow_symlinks) - {getattr(os, name)}
+            monkeypatch.setattr(os, "supports_follow_symlinks", without)
         else:
             monkeypatch.delattr(os, kind)
         with pytest.raises(crypto_module.KeyFileError, match="relative to a verified directory"):
