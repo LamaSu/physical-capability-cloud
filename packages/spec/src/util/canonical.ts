@@ -189,7 +189,7 @@ function canonicalArray(arr: unknown[], path: string, ancestors: WeakSet<object>
   if (getPrototypeOf(arr) !== ARRAY_PROTOTYPE) {
     throw new NonCanonicalValueError(path, "an array with a substituted prototype or an Array subclass");
   }
-  const length = arr.length; // read once
+  const length = arrayLength(arr, path); // read once
   let out = "[";
   for (let i = 0; i < length; i++) {
     const at = `${path}[${i}]`;
@@ -212,6 +212,25 @@ function canonicalArray(arr: unknown[], path: string, ancestors: WeakSet<object>
     }
   }
   return out + "]";
+}
+
+/**
+ * An array's length, read from its OWN `length` data descriptor through the
+ * captured reflection. `arr.length` is a [[Get]]: on a Proxy it runs the `get`
+ * trap, which is input code outside the reflection traps. A Proxy's
+ * getOwnPropertyDescriptor trap is a reflection trap, but the engine only
+ * insists that `length` stays a compatible non-configurable data property, so the
+ * reported value can be anything: it must be a non-negative safe integer, or the
+ * array is refused. (The element loop and the own-key check in canonicalArray
+ * then refuse a length that disagrees with the elements the array really has.)
+ */
+function arrayLength(arr: unknown[], path: string): number {
+  const descriptor = getOwnPropertyDescriptor(arr, "length");
+  const length = descriptor === undefined ? NOT_DATA : dataValueOf(descriptor);
+  if (typeof length !== "number" || !isSafeIntegerNumber(length) || length < 0) {
+    throw new NonCanonicalValueError(path, "an array whose length is not an own data property holding a non-negative safe integer");
+  }
+  return length;
 }
 
 function canonicalObject(obj: object, path: string, ancestors: WeakSet<object>): string {
