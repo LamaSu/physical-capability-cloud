@@ -397,7 +397,8 @@ describe("PlanPresentation live terms: the acceptance-time terms shown beside a 
       for (const p of [sealedOf(outcome), compiledOf(outcome)]) {
         const print = p.nodes.find((n) => n.nodeId === "print")!;
         expect([p.state === "sealed" ? "B" : "C", p.invalid ?? null]).toEqual([p.layer, null]);
-        expect([print.live?.priceDecimal, print.money?.gross.baseUnits]).toEqual(["6.5", "7000000"]);
+        // A compiled (unsealed) agreement deal shows the live quote; a sealed one shows only committed terms.
+        expect([print.live?.priceDecimal, print.money?.gross.baseUnits]).toEqual([p.state === "sealed" ? undefined : "6.5", "7000000"]);
       }
       expect(shape(sealedOf(outcome))).toEqual(["B", "sealed", null, 2]);
     });
@@ -406,6 +407,16 @@ describe("PlanPresentation live terms: the acceptance-time terms shown beside a 
       mismatch(withResolved(agreed(), "print", (r) => ({ ...r, priceDecimal: "7.000001", grossBaseUnits: 7_000_001n })), "quote above the gross");
       mismatch(withResolved(agreed(), "print", (r) => ({ ...r, priceDecimal: "0.01" })), "shown decimal edited alone");
       mismatch(withResolved(agreed(), "print", (r) => ({ ...r, grossBaseUnits: 6_000_000n })), "resolved amount edited alone");
+    });
+
+    it("a sealed agreement-backed deal never presents the uncommitted quote as a deal term (astra, #434 confirmation)", () => {
+      // An agreement grosses the unit up, and the deal does not commit the operator's quote, so a verdict's quote
+      // cannot be checked against it. A consistent downward rewrite must not appear beside the sealed deal.
+      const bad = withResolved(agreed(), "print", (r) => ({ ...r, priceDecimal: "0.01", grossBaseUnits: 10_000n }));
+      const sealed = sealedOf(bad);
+      expect(shape(sealed)).toEqual(["B", "sealed", null, 2]);
+      for (const n of sealed.nodes) expect(n.live, `node ${n.nodeId} shows no live terms beside a sealed agreement deal`).toBeUndefined();
+      expect(sealed.nodes.find((n) => n.nodeId === "print")!.money?.gross.baseUnits).toBe("7000000");
     });
 
     it("without an agreement the same gap is a mismatch: a quote below the gross is not the deal", () => {

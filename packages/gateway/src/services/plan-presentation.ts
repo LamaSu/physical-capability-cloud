@@ -583,7 +583,8 @@ function baseUnitsOf(price: string, decimals: number): bigint | null {
  * live view shown beside a deal cannot contradict it (astra, #434). The shown price is exactly the
  * resolved amount in base units, and that amount is the unit's gross, or, when an economics agreement
  * grossed the unit up (royalties on top), no more than it: the seam refuses a gross below the quote,
- * and the plan does not record the quote. Currency, operator, tier (resolved, and among the tiers
+ * and the plan does not record the quote. That bound only REFUSES a verdict that cannot be the accepted
+ * one; it proves nothing about a lower quote, so a sealed agreement-backed deal never presents the quote. Currency, operator, tier (resolved, and among the tiers
  * shown as offered) and the capability's type, csd and matched digest equal the deal's contract.
  * Addresses and hashes compare lowercased: the compiler lowercases the contract, and hex case carries
  * no meaning. Every accepted node needs a current verdict; `verdictOf` is already an exact cover.
@@ -696,7 +697,10 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
         const v = verdictOf.get(id);
         if (v) {
           out.state = v.status;
-          if (v.status === "current") out.live = v.live;
+          // A sealed deal shows only terms it commits. An agreement-backed deal does not commit the operator's
+          // quote (royalties go on top, and the plan keeps only the gross), so the live view, quote included,
+          // is not shown beside one: nothing can check it against the deal (astra, #434 confirmation).
+          if (v.status === "current" && !(sealed && plan?.agreementHash != null)) out.live = v.live;
           else if (v.status === "stale") {
             out.live = v.live;
             out.diffs = v.diffs;
