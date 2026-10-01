@@ -165,6 +165,13 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
     expect(collisionAuditExit({ newMerges: 2, ...out, allowedAbsent: [] } as never).code).toBe(4);
   });
 
+  it("[neg] only a missing TABLE or COLUMN is absence: 'no such file or directory' on an allowlisted source is exit 4", () => {
+    const enoent = () => Object.assign(new Error("ENOENT: no such file or directory, open '/data/pcc.sqlite'"), { code: "ENOENT" });
+    const out = findIdentityCollisions(readerFailing("ui_artifacts", enoent));
+    expect(out.failed).toContain("ui_artifacts.owner");
+    expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(4);
+  });
+
   it("an EMPTY table counts as read", () => {
     const out = findIdentityCollisions({ prepare: () => ({ all: () => [] as unknown[] }) });
     expect(out.read.length).toBe(7);
