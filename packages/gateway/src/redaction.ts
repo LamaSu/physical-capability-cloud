@@ -20,6 +20,7 @@
  * already proven to fail.
  */
 
+import { createHash } from "node:crypto";
 import { english as BIP39_ENGLISH } from "viem/accounts";
 
 const REDACTED = "[redacted]";
@@ -254,7 +255,10 @@ function isSecretField(key: string, value: unknown, parentKey: string | null): b
 //      the enclosing format (see addSecretLabelSpans); an `Authorization` label keeps
 //      its scheme word, such as `Basic`;
 //   4. URL userinfo: the `user:password` in `scheme://user:password@host`;
-//   5. PEM private-key blocks, BEGIN to END (or to the end of the text).
+//   5. PEM private-key blocks, BEGIN to END (or to the end of the text);
+//   6. BIP-39 mnemonics: a window of 12/15/18/21/24 wordlist words whose checksum
+//      holds, however few distinct words it has, and a run of 12+ words with 10+
+//      distinct ones that fails it (a mistyped phrase is still a phrase).
 
 /** Self-identifying shapes. Each is anchored where it is tried and ends in one greedy class (or a fixed width). */
 const PCC_KEY_Y = /pcc_(?:live|test|oracle)_[A-Za-z0-9_-]{6,}/iy;
@@ -792,46 +796,122 @@ function addSecretLabelSpans(s: string, spans: Span[], jsonStringsOnly = false):
   }
 }
 
-/** BIP-39 English words (viem's list; no new dependency), for the mnemonic detector (L5). */
-const BIP39_WORDS: ReadonlySet<string> = new Set(BIP39_ENGLISH);
-const MNEMONIC_MIN_WORDS = 12;
-/** A seed phrase is random: a run that repeats a few words ("word word word ...") is prose, not a mnemonic. */
-const MNEMONIC_MIN_DISTINCT = 10;
-const WORD_RE = /[A-Za-z]+/g;
-const MNEMONIC_GAP_RE = /^[ \t\r\n,]+$/;
+// ── BIP-39 mnemonics: the checksum decides, not the number of distinct words ──────
+//
+// A BIP-39 phrase of 12, 15, 18, 21 or 24 words carries a checksum: the first
+// words-per-3 bits of the SHA-256 of its entropy are its last bits. A window of
+// wordlist words that passes it IS a mnemonic, whatever its words are: `abandon` x11
+// + `about` is the published all-zero vector, and a phrase of few distinct words is
+// no less a key (astra pack 97, F3). Repetition does not make it prose.
 
 /**
- * A run of 12 or more BIP-39 words, at least 10 of them distinct, separated only by
- * whitespace or commas: a seed phrase (L5). Linear.
+ * BIP-39 English words, each with the 11-bit value it stands for. This is viem's
+ * list (no new dependency): all 2048 words, `abandon` to `zoo`, whose SHA-256 as the
+ * published english.txt is 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda.
+ */
+const BIP39_INDEX: ReadonlyMap<string, number> = new Map(BIP39_ENGLISH.map((w, i): [string, number] => [w, i]));
+const MNEMONIC_MIN_WORDS = 12;
+/** The lengths a phrase can have, longest first so a 24-word phrase is not split at a 12-word prefix that happens to pass. */
+const MNEMONIC_LENGTHS: readonly number[] = [24, 21, 18, 15, 12];
+/**
+ * What is left for runs the checksum rejects: a run of 12+ wordlist words with 10+
+ * distinct ones is still taken for a phrase, because a seed phrase with one word
+ * mistyped or swapped fails the checksum (15 times in 16) and is still the secret.
+ * Distinct words are what separates it from prose: a sentence repeats its words.
+ */
+const MNEMONIC_MIN_DISTINCT = 10;
+/**
+ * Checksums per string. Each is one SHA-256 over at most 32 bytes. A run so long it
+ * is not decided within this budget FAILS CLOSED: the whole run is redacted, since
+ * real prose does not hold hundreds of consecutive wordlist words.
+ */
+const MNEMONIC_CHECKSUM_BUDGET = 8192;
+const WORD_RE = /[A-Za-z]+/g;
+const MNEMONIC_GAP_RE = /^[ \t\r\n,]+$/;
+const ENTROPY = Buffer.alloc(32);
+
+/** True when the `len` words idx[from, from + len) (11-bit values) pass the BIP-39 checksum. */
+function mnemonicChecksumOk(idx: number[], from: number, len: number): boolean {
+  const checksumBits = len / 3;
+  const entropyBytes = (len * 11 - checksumBits) / 8;
+  let acc = 0;
+  let accBits = 0;
+  let out = 0;
+  for (let j = 0; j < len; j += 1) {
+    acc = (acc << 11) | idx[from + j];
+    accBits += 11;
+    while (accBits >= 8 && out < entropyBytes) {
+      accBits -= 8;
+      ENTROPY[out] = (acc >> accBits) & 0xff;
+      out += 1;
+      acc &= (1 << accBits) - 1;
+    }
+  }
+  // What is left in acc is exactly the checksum: accBits === checksumBits.
+  const digest = createHash("sha256").update(ENTROPY.subarray(0, entropyBytes)).digest();
+  return digest[0] >> (8 - checksumBits) === acc;
+}
+
+/**
+ * Seed phrases in `s`: runs of wordlist words separated only by whitespace or
+ * commas. In each run, every window of 12/15/18/21/24 words that passes the
+ * checksum (leftmost, then longest) is redacted; and, when 10+ of the run's words are
+ * distinct, so is the whole run. Linear: at most MNEMONIC_CHECKSUM_BUDGET checksums.
  */
 function addMnemonicSpans(s: string, spans: Span[]): void {
-  let runStart = -1;
-  let runEnd = -1;
-  let runLen = 0;
-  let distinct = new Set<string>();
+  let idx: number[] = [];
+  let starts: number[] = [];
+  let ends: number[] = [];
+  let distinct = new Set<number>();
+  let budget = MNEMONIC_CHECKSUM_BUDGET;
   const close = () => {
-    if (runLen >= MNEMONIC_MIN_WORDS && distinct.size >= MNEMONIC_MIN_DISTINCT) spans.push({ start: runStart, end: runEnd });
-    runLen = 0;
-    distinct = new Set<string>();
+    const n = idx.length;
+    if (n >= MNEMONIC_MIN_WORDS) {
+      let exhausted = false;
+      let i = 0;
+      while (i + MNEMONIC_MIN_WORDS <= n && !exhausted) {
+        let hit = 0;
+        for (const len of MNEMONIC_LENGTHS) {
+          if (i + len > n) continue;
+          if (budget === 0) {
+            exhausted = true;
+            break;
+          }
+          budget -= 1;
+          if (mnemonicChecksumOk(idx, i, len)) {
+            hit = len;
+            break;
+          }
+        }
+        if (hit > 0) {
+          spans.push({ start: starts[i], end: ends[i + hit - 1] });
+          i += hit;
+        } else {
+          i += 1;
+        }
+      }
+      if (exhausted || distinct.size >= MNEMONIC_MIN_DISTINCT) spans.push({ start: starts[0], end: ends[n - 1] });
+    }
+    idx = [];
+    starts = [];
+    ends = [];
+    distinct = new Set<number>();
   };
+  let runEnd = -1;
   WORD_RE.lastIndex = 0;
   for (let m = WORD_RE.exec(s); m !== null; m = WORD_RE.exec(s)) {
     const a = m.index;
     const b = a + m[0].length;
-    if (m[0].length < 3 || m[0].length > 8 || !BIP39_WORDS.has(m[0].toLowerCase())) {
+    const word = m[0].length >= 3 && m[0].length <= 8 ? BIP39_INDEX.get(m[0].toLowerCase()) : undefined;
+    if (word === undefined) {
       close();
       continue;
     }
-    const word = m[0].toLowerCase();
-    if (runLen > 0 && MNEMONIC_GAP_RE.test(s.slice(runEnd, a))) {
-      runEnd = b;
-      runLen += 1;
-    } else {
-      close();
-      runStart = a;
-      runEnd = b;
-      runLen = 1;
-    }
+    if (idx.length > 0 && !MNEMONIC_GAP_RE.test(s.slice(runEnd, a))) close();
+    idx.push(word);
+    starts.push(a);
+    ends.push(b);
+    runEnd = b;
     if (distinct.size < MNEMONIC_MIN_DISTINCT) distinct.add(word);
   }
   close();

@@ -355,8 +355,15 @@ describe("redactSecretsDeep closes the round-3 coverage gaps (WP-D round 4, L5)"
     expect(redactSecretsDeep(`zzqx ${eleven}.`)).toContain(eleven);
     const prose = "The operator ships the order today and the buyer confirms the delivery at the dock.";
     expect(redactSecretsDeep(prose)).toBe(prose);
-    const repeated = "word ".repeat(40);
+    // A repeated word is prose only while no window of it passes the BIP-39 checksum:
+    // 'abandon' x12 does not, so 40 of them stay.
+    const repeated = "abandon ".repeat(40);
     expect(redactSecretsDeep(repeated)).toBe(repeated);
+    // The fixture here used to be 'word ' x40, kept because it has one distinct word.
+    // But 'word' x12 passes the checksum: it IS a valid mnemonic, whatever its words
+    // (astra pack 97, F3). The old expectation encoded the leak. Now each valid
+    // 12-word window goes, and what is left of the run (4 words) stays.
+    expect(redactSecretsDeep("word ".repeat(40))).toBe(`${REDACTED_VALUE} ${REDACTED_VALUE} ${REDACTED_VALUE} word word word word `);
   });
 
   it("stays linear on adversarial label and word input", () => {

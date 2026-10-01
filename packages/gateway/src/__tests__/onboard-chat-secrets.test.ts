@@ -137,7 +137,9 @@ async function buildApp(): Promise<FastifyInstance> {
     seller: { api_key: "opaque-field-in-a-listing" },
   }));
   app.get("/api/marketplace/test-huge", async () => ({ id: "lst-huge", description: "-eyJ".repeat(50_000) }));
-  app.get("/api/marketplace/test-big", async () => ({ page: "word ".repeat(12_000) }));
+  // Filler for the history cap. It is NOT 'word': a run of 12 'word's is a valid BIP-39 mnemonic (the checksum
+  // passes), so the redactor now removes it, which would shrink these pages below the cap this test fills.
+  app.get("/api/marketplace/test-big", async () => ({ page: "lorem ".repeat(12_000) }));
   // Round-3 probe P1: ~600 KB of tiny items, each one a node for the redaction walk.
   app.get("/api/marketplace/test-many", async () => ({ items: Array.from({ length: 200_000 }, () => []) }));
   await app.register(onboardChatRoutes);

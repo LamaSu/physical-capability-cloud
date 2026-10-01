@@ -178,7 +178,8 @@ describe("F3: a valid BIP-39 mnemonic is redacted whatever its distinct words (c
     for (const strength of [128, 160, 192, 224, 256]) {
       for (let i = 0; i < 25; i += 1) {
         const phrase = generateMnemonic(english, strength);
-        expect(sanitize(`seed words follow ${phrase} end`), phrase).toBe(`seed words follow ${R} end`);
+        // 'zzqx' frames the phrase: ordinary words around it, such as follow and end, are wordlist words too.
+        expect(sanitize(`zzqx ${phrase} zzqx`), phrase).toBe(`zzqx ${R} zzqx`);
       }
     }
   });
