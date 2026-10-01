@@ -364,7 +364,11 @@ export type AcceptedProgramGateResult =
         | "registry-not-named"
         | "invalid-input";
       violations?: TierAssuranceViolation[];
-      /** tier-not-eligible: why tiers 0..T cannot be verified end to end. registry-not-named: which primitives name no pinnable registry. */
+      /**
+       * tier-not-in-csd: which of tiers 0..T the CSD does not declare. tier-not-eligible: why
+       * tiers 0..T cannot be verified end to end. registry-not-named: which primitives name no
+       * pinnable registry.
+       */
       reasons?: string[];
     };
 
@@ -395,6 +399,11 @@ export interface AcceptedProgramGateInput {
  * primitive index is the built-in vocabulary, so what counts as a live verifier
  * is the evidence lane's data, never the caller's (E8 F4). A second or third
  * argument is a type error, and is ignored at runtime.
+ *
+ * A non-zero tier k also needs tiers 0..k all declared in `evidence`, each an own
+ * key holding a plain object, before eligibility is consulted (`tier-not-in-csd`
+ * names the missing ones). Tier 0 itself needs no declaration to be funded: it is
+ * the permissionless floor, and a CSD with no evidence block is tier-0 only.
  *
  * It reads each field of `input` exactly once, at entry, and materializes
  * `evidence` as a plain-data JSON snapshot. Tier lookup, eligibility, the
@@ -439,16 +448,33 @@ export function assertAcceptedProgramForTierWith(
   if (typeof committedProgramHash !== "string" || committedProgramHash.toLowerCase() !== resolved.programHash) {
     return { ok: false, code: "program-hash-mismatch" };
   }
-  const tier = evidence[tierKey];
   const k = tierNumber(tierKey);
-  if (tier === undefined || k === null) return { ok: false, code: "tier-not-in-csd" };
+  if (k === null || tierKey !== `tier${k}`) {
+    return { ok: false, code: "tier-not-in-csd", reasons: [`"${tierKey}" is not an exact tierN key`] };
+  }
+  // Tiers 0..k must each be declared: an own key holding a plain object. The eligibility
+  // lint counts tier 0 as the always-listable floor even when it is absent, so on its own
+  // it would let a CSD with no tier0 ascend to tier1 and tier2 (E8 F2).
+  const undeclared: string[] = [];
+  for (let t = 0; t <= k; t++) {
+    const key = `tier${t}`;
+    if (!Object.hasOwn(evidence, key) || !isPlainObject(evidence[key])) undeclared.push(key);
+  }
+  if (undeclared.length > 0) {
+    return {
+      ok: false,
+      code: "tier-not-in-csd",
+      reasons: undeclared.map((key) => `${key} is not declared in the CSD being funded, and funding ${tierKey} needs tiers 0..${k}`),
+    };
+  }
+  const tier = evidence[tierKey]!;
   const eligibility = computeCsdEligibility(
     { url: csd, evidence },
     { requireImplementedVerifier: true, index: options.primitiveIndex },
   );
   if (eligibility.eligibleTier < k) {
     const reasons = eligibility.perTier.filter((t) => t.tier <= k).flatMap((t) => t.reasons);
-    if (reasons.length === 0) reasons.push(`tiers 0..${k} are not all declared`);
+    if (reasons.length === 0) reasons.push(`tiers 0..${k} are not all eligible`);
     return { ok: false, code: "tier-not-eligible", reasons };
   }
   const check = checkCommittedProgramForTier(resolved.program, tier);

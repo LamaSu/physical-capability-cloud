@@ -20,6 +20,7 @@ import {
 import * as committedProgramModule from "../evidence/committed-program.js";
 import * as evidenceIndex from "../evidence/index.js";
 import * as packageRoot from "../index.js";
+import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 import type { CsdEvidenceTier } from "../csd/schema.js";
 
@@ -325,20 +326,24 @@ describe("assertAcceptedProgramForTier — the funded tier must be verifiable en
     expect((r as { reasons: string[] }).reasons).toEqual(["tier2: no human-attestation (Family-G) primitive — the tier≥2 human floor"]);
   });
 
-  it("a missing lower tier blocks the funded tier", () => {
+  it("a missing lower tier blocks the funded tier, and the refusal names it", () => {
     const t = fixedTiers();
     delete t.tier1;
-    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE)).toMatchObject({
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE)).toEqual({
       ok: false,
-      code: "tier-not-eligible",
-      reasons: ["tiers 0..2 are not all declared"],
+      code: "tier-not-in-csd",
+      reasons: ["tier1 is not declared in the CSD being funded, and funding tier2 needs tiers 0..2"],
     });
   });
 
   it("the funded tier must be in the CSD being funded", () => {
     const t = fixedTiers();
     delete t.tier2;
-    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE)).toEqual({ ok: false, code: "tier-not-in-csd" });
+    expect(gate("tier2", PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH, t, LIVE)).toEqual({
+      ok: false,
+      code: "tier-not-in-csd",
+      reasons: ["tier2 is not declared in the CSD being funded, and funding tier2 needs tiers 0..2"],
+    });
   });
 
   it("tier0 stays fundable with no program", () => {
@@ -685,5 +690,91 @@ describe("assertAcceptedProgramForTier — one snapshot of the input (E8 F3)", (
     for (const evidence of [nullProto, new Holder()]) {
       expect(gate(plain(evidence))).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
     }
+  });
+});
+
+describe("assertAcceptedProgramForTier — tiers 0..k must all be declared (E8 F2)", () => {
+  const HASH = PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH;
+  const gate = (tierKey: string, committedProgramHash: string | null, evidence: unknown, registry: readonly CommittedProgramEntry[] = COMMITTED_PROGRAM_REGISTRY) =>
+    assertAcceptedProgramForTierWith({ csd: CSD, tierKey, evidence, committedProgramHash } as AcceptedProgramGateInput, registry, {
+      primitiveIndex: LIVE,
+    });
+  const undeclared = (key: string, funded: string, k: number) =>
+    `${key} is not declared in the CSD being funded, and funding ${funded} needs tiers 0..${k}`;
+
+  it("a CSD with no tier0 cannot be funded at tier2, though the eligibility lint alone would let it ascend", () => {
+    const t = fixedTiers();
+    delete t.tier0;
+    // The root cause, as a positive control: with tier0 absent the lint still counts the tier-0 floor.
+    expect(computeCsdEligibility({ url: CSD, evidence: t }, { requireImplementedVerifier: true, index: LIVE }).eligibleTier).toBeGreaterThanOrEqual(2);
+    expect(gate("tier2", HASH, t)).toEqual({ ok: false, code: "tier-not-in-csd", reasons: [undeclared("tier0", "tier2", 2)] });
+  });
+
+  it("every missing tier among 0..k is named, in order", () => {
+    const t = fixedTiers();
+    delete t.tier0;
+    delete t.tier1;
+    expect(gate("tier2", HASH, t)).toEqual({
+      ok: false,
+      code: "tier-not-in-csd",
+      reasons: [undeclared("tier0", "tier2", 2), undeclared("tier1", "tier2", 2)],
+    });
+  });
+
+  it("a tier that is not a plain object is not declared: null, an array, a string, a number", () => {
+    for (const key of ["tier0", "tier1"]) {
+      for (const bad of [null, [], "tier", 0]) {
+        const t = fixedTiers() as Record<string, unknown>;
+        t[key] = bad;
+        expect(gate("tier2", HASH, t), `${key} = ${JSON.stringify(bad)}`).toEqual({
+          ok: false,
+          code: "tier-not-in-csd",
+          reasons: [undeclared(key, "tier2", 2)],
+        });
+      }
+    }
+  });
+
+  it("only own keys count: a tier0 inherited through Object.prototype is not declared", () => {
+    const t = fixedTiers();
+    const inherited = t.tier0!;
+    delete t.tier0;
+    Object.defineProperty(Object.prototype, "tier0", { value: inherited, configurable: true, enumerable: false, writable: true });
+    try {
+      expect(({} as Record<string, unknown>)["tier0"]).toBeDefined(); // the pollution is live
+      expect(gate("tier2", HASH, t)).toMatchObject({ ok: false, code: "tier-not-in-csd", reasons: [undeclared("tier0", "tier2", 2)] });
+    } finally {
+      delete (Object.prototype as unknown as Record<string, unknown>)["tier0"];
+    }
+    expect(({} as Record<string, unknown>)["tier0"]).toBeUndefined();
+  });
+
+  it("the funded key must be exactly tierN, even when the registry has an entry for it and the CSD declares it", () => {
+    for (const key of ["tier02", "gold"]) {
+      const registry = [{ csd: CSD, tier: key, program: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM, programHash: HASH }];
+      const t = fixedTiers();
+      t[key] = t.tier2!;
+      expect(gate(key, HASH, t, registry), key).toEqual({
+        ok: false,
+        code: "tier-not-in-csd",
+        reasons: [`"${key}" is not an exact tierN key`],
+      });
+    }
+  });
+
+  it("only tiers 0..k are required: a CSD that declares tiers 0..2 funds tier2 with tier3 absent or malformed", () => {
+    const absent = fixedTiers();
+    delete absent.tier3;
+    expect(gate("tier2", HASH, absent)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+    const malformed = fixedTiers() as Record<string, unknown>;
+    malformed["tier3"] = null;
+    expect(gate("tier2", HASH, malformed)).toEqual({ ok: true, registryPins: KERNEL_KEY_PIN });
+  });
+
+  it("tier 0 itself needs no declaration to be funded: it is the permissionless floor", () => {
+    expect(gate("tier0", null, {})).toEqual({ ok: true, registryPins: [] });
+    const noTier0 = fixedTiers();
+    delete noTier0.tier0;
+    expect(gate("tier0", null, noTier0)).toEqual({ ok: true, registryPins: [] });
   });
 });
