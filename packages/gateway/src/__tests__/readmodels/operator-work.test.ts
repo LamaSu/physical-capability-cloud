@@ -13,6 +13,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { classifyMoneyStatus, type SettlementAxis } from "@pcc/spec";
 import {
   FUNDING_WORDS,
+  UPDATE_STATUS_UNRECOGNIZED,
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
   INCOME_HISTORY_REASON,
@@ -179,7 +180,7 @@ describe("kernel jobs", () => {
     expect(item.actions.map((a) => [a.op, a.allowed, a.route.path])).toEqual([
       ["approve", true, "/api/operator/approvals/appr-1/approve"],
       ["reject", true, "/api/operator/approvals/appr-1/reject"],
-      ["update_status", true, "/api/jobs/job-x/status"],
+      ["update_status", false, "/api/jobs/job-x/status"],
     ]);
   });
 
@@ -189,6 +190,15 @@ describe("kernel jobs", () => {
     expect(dto.items[0]).toMatchObject({ source: "approval", phase: "awaiting_me", capabilityType: "fdm", payout: null });
     expect(dto.items[0]!.pay.funding).toBe("unknown");
     expect(dto.items[0]!.refs).toEqual({ approvalId: "appr-1" });
+  });
+
+  it("NEGATIVE (r1 MEDIUM): a status update the route would refuse is not offered as allowed, and says why", () => {
+    // PATCH /api/jobs/:jobId/status recognizes the submitter or a kernel `operatorId` that kernels
+    // do not record, never the kernel operator's proven wallet: an open job's update is not allowed.
+    const [item] = work({ kernelJobs: { ok: true, value: [kj(job({ status: "executing" }))] } }).items;
+    expect(item!.actions).toEqual([
+      { op: "update_status", allowed: false, reasonIfNot: UPDATE_STATUS_UNRECOGNIZED, route: { method: "PATCH", path: "/api/jobs/job-x/status" } },
+    ]);
   });
 
   it("NEGATIVE: a finished job offers no status update, and says why", () => {
@@ -263,6 +273,14 @@ describe("job offers", () => {
     const dto = work({ claimedOffers: { ok: true, value: [{ offer: claimed, events: [] }] }, openOffers: { ok: false } });
     expect(dto.items.filter((i) => i.source === "job_offer")).toEqual([]);
     expect(dto.sources.job_offer).toMatchObject({ state: "unavailable", count: 0, durability: "memory" });
+  });
+
+  it("NEGATIVE (r1 MEDIUM): a failed capability read is not 'no matching offers': the offer source is unavailable", () => {
+    // Open offers are matched to the caller's capability types; without them no match can be made.
+    const dto = work({ capabilities: { ok: false }, openOffers: { ok: true, value: [offer()] } });
+    expect(dto.items.filter((i) => i.source === "job_offer")).toEqual([]);
+    expect(dto.sources.job_offer).toMatchObject({ state: "unavailable", count: 0 });
+    expect(dto.sources.job_offer.reason).toMatch(/capabilit/);
   });
 });
 

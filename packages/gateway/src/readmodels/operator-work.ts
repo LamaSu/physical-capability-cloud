@@ -258,6 +258,15 @@ function recordFunding(s: SettlementAxis): OperatorWorkPay["funding"] {
   return ESCROW_HOLDS.has(e) && MILESTONE_HOLDS.has(m) ? "escrowed" : "unknown";
 }
 
+/**
+ * Why an open kernel job's status update is not offered (astra r1 on #389, MEDIUM). PATCH
+ * /api/jobs/:jobId/status recognizes the job's submitter, or a kernel `operatorId`, which kernels
+ * do not record (they record operatorAddress), so it never recognizes the kernel operator's proven
+ * wallet, the identity this read model uses. That route's authorization is gateway's to fix.
+ */
+export const UPDATE_STATUS_UNRECOGNIZED =
+  "The status route cannot recognize a kernel's operator yet: it checks an operator id that kernels do not record.";
+
 /** Pay for a kernel job: only from this job's own milestone in its linked escrow record. */
 export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
   if (s.link !== "linked" || !s.record) return { ...NO_PAY };
@@ -372,8 +381,8 @@ function kernelJobItem(
   const actions: OperatorWorkAction[] = approval ? approveActions(approval.id) : [];
   actions.push({
     op: "update_status",
-    allowed: !terminal,
-    reasonIfNot: terminal ? "The job is finished." : null,
+    allowed: false,
+    reasonIfNot: terminal ? "The job is finished." : UPDATE_STATUS_UNRECOGNIZED,
     route: { method: "PATCH", path: `/api/jobs/${job.id}/status` },
   });
   const tier = tierOf(job.assuranceTier);
@@ -537,8 +546,10 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
   }
 
   // Offers: the caller's claimed offers, then open offers for the caller's capability types.
-  // One source: if either read failed, no offer is listed (a partial list would look complete).
-  const offersOk = src.claimedOffers.ok && src.openOffers.ok;
+  // One source: if any read it needs failed (the claimed offers, the open offers, or the
+  // capabilities open offers are matched against), no offer is listed: a partial list, or an
+  // empty match, would look complete (astra r1 on #389, MEDIUM).
+  const offersOk = src.claimedOffers.ok && src.openOffers.ok && src.capabilities.ok;
   const claimedIds = new Set<string>();
   if (offersOk && src.claimedOffers.ok) {
     for (const { offer, events } of src.claimedOffers.value) {
@@ -581,7 +592,7 @@ export function buildOperatorWorkDTO(src: OperatorWorkSources, asOf: string, opt
     sources: {
       kernel_job: sourceState(src.kernelJobs, "durable", "The gateway's job records could not be read.", kernelJobCount),
       approval: sourceState(src.approvals, "durable", "The gateway's approval records could not be read.", approvalOnlyCount),
-      job_offer: sourceState(offersRead, "memory", "The job-offers store could not be read.", offersCount),
+      job_offer: sourceState(offersRead, "memory", "The job-offers store, or the capabilities offers are matched against, could not be read.", offersCount),
       skill_job: { state: "not_attributable", durability: "durable", count: 0, reason: SKILL_JOBS_NOT_ATTRIBUTABLE },
     } satisfies Record<OperatorWorkSource, OperatorWorkSourceState>,
   };
