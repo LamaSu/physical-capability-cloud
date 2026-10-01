@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { apiGate } from "../middleware/api-gate.js";
-import { batchRoutes, _clearSharedBatchesForTests } from "../routes/batches.js";
+import { batchRoutes, _clearSharedBatchesForTests, _setSharedBatchLimitsForTests } from "../routes/batches.js";
 import { batchTracker } from "../services.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
@@ -538,5 +538,108 @@ describe("N49 F6: a six-decimal price yields an honest display amount, never 0.0
     const c = await claim(id, bob, { slotCount: 3 });
     expect(c.statusCode).toBe(200);
     expect(c.json().claim.amount).toBe("0.000003");
+  });
+});
+
+// ── N49 round 5, F2: a terminal batch must not hold the store until closesAt ──
+// Retention used to be measured from closesAt (up to 30 days away), and the
+// per-creator limit counted only batches still open for claims. So one principal
+// could create one-slot batches closing in 30 days, fill each, and keep the
+// store at its global cap (batch_store_full, 503) for about 30 days.
+
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+describe("N49 r5 F2: terminal batches stop holding the store", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A one-slot batch that closes far in the future and is filled at once by bob. */
+  async function fillOneSlotBatch(closesAt: string, creator = alice): Promise<string> {
+    const created = await createWith({ ...GOOD, totalSlots: 1, closesAt }, creator);
+    expect(created.statusCode).toBe(200);
+    const id = created.json().batch.id;
+    const claimed = await claim(id, bob, { slotCount: 1 });
+    expect(claimed.statusCode).toBe(200);
+    expect(claimed.json().batchStatus).toBe("full");
+    return id;
+  }
+
+  it("a full batch leaves the global cap an hour after it filled, however far off its closesAt is", async () => {
+    _setSharedBatchLimitsForTests({ maxSharedBatches: 4, maxBatchesPerCreator: 100 });
+    vi.useFakeTimers({ toFake: ["Date"] }); // move the clock without waiting
+    const start = Date.now();
+    const closesAt = new Date(start + 29 * DAY).toISOString();
+    for (let i = 0; i < 4; i++) await fillOneSlotBatch(closesAt);
+
+    // The global cap holds while the filled batches are inside their retention hour.
+    const full = await createWith({ ...GOOD, closesAt });
+    expect(full.statusCode).toBe(503);
+    expect(full.json().error).toBe("batch_store_full");
+    vi.setSystemTime(start + 30 * MIN);
+    expect((await createWith({ ...GOOD, closesAt })).statusCode).toBe(503);
+
+    // An hour after they filled they may be pruned, though closesAt is still 29 days away.
+    vi.setSystemTime(start + 2 * HOUR);
+    const later = await createWith({ ...GOOD, closesAt });
+    expect(later.statusCode).toBe(200);
+  });
+
+  it("one creator's limit counts every batch of theirs that is still retained, filled ones too", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.now();
+    const closesAt = new Date(start + 29 * DAY).toISOString();
+    for (let i = 0; i < 20; i++) await fillOneSlotBatch(closesAt, alice);
+
+    const over = await createWith({ ...GOOD, closesAt }, alice);
+    expect(over.statusCode).toBe(409);
+    expect(over.json()).toEqual({ error: "too_many_open_batches", limit: 20 });
+    expect((await createWith(GOOD, carol)).statusCode).toBe(200); // another creator is unaffected
+
+    // An hour after they filled, they no longer count.
+    vi.setSystemTime(start + HOUR + MIN);
+    expect((await createWith({ ...GOOD, closesAt }, alice)).statusCode).toBe(200);
+  });
+
+  it("a batch whose only claim is released is claimable again, so it is not pruned as closed", async () => {
+    _setSharedBatchLimitsForTests({ maxSharedBatches: 1 });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.now();
+    const id = (await createWith({ ...GOOD, totalSlots: 1 })).json().batch.id; // closes in 24 h
+    const claimed = (await claim(id, bob, { slotCount: 1 })).json();
+    expect(claimed.batchStatus).toBe("full");
+    const released = await app.inject({ method: "DELETE", url: `/api/batches/shared/${id}/claim/${claimed.claim.id}`, headers: auth(bob) });
+    expect(released.json().batchStatus).toBe("open");
+
+    vi.setSystemTime(start + 2 * HOUR); // it filled over an hour ago, but it is open now
+    expect((await createWith(GOOD)).statusCode).toBe(503); // not prunable: still open and unexpired
+    expect((await claim(id, bob, { slotCount: 1 })).statusCode).toBe(200);
+  });
+
+  it("keeps the retention bookkeeping out of the public batch view (viewBatch spreads the batch)", async () => {
+    const id = await fillOneSlotBatch(new Date(Date.now() + 5 * DAY).toISOString());
+    const view = (await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(alice) })).json().batch;
+    expect(Object.keys(view).sort()).toEqual([
+      "capabilityType", "claimedSlots", "closesAt", "createdAt", "createdBy", "currency", "id", "kernelId",
+      "minSlotsToRun", "pricePerSlot", "protocolType", "status", "totalSlots",
+    ]);
+    expect(view.status).toBe("full");
+  });
+
+  it("an open batch nobody filled is still kept for an hour after its closesAt and pruned after that", async () => {
+    _setSharedBatchLimitsForTests({ maxSharedBatches: 1 });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.now();
+    const id = (await createWith({ ...GOOD, closesAt: new Date(start + 2 * HOUR).toISOString() })).json().batch.id;
+
+    vi.setSystemTime(start + 2 * HOUR + 30 * MIN); // closed half an hour ago
+    expect((await claim(id, bob, { slotCount: 1 })).json().error).toBe("batch_closed");
+    expect((await createWith(GOOD)).statusCode).toBe(503);
+
+    vi.setSystemTime(start + 3 * HOUR + MIN); // closed over an hour ago
+    expect((await createWith(GOOD)).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(bob) })).statusCode).toBe(404);
   });
 });

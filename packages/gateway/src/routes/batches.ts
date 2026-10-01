@@ -40,10 +40,18 @@ const ISO_UTC_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{
 /** A shared batch may stay open for at most 30 days. */
 const MAX_OPEN_MS = 30 * 24 * 60 * 60_000;
 /** The in-memory store is bounded: per creator, and in total (N49 round 3). */
-const MAX_OPEN_BATCHES_PER_CREATOR = 20;
-const MAX_SHARED_BATCHES = 10_000;
-/** N49 F5: how long a no-longer-claimable batch is retained before it may be pruned to free store space. */
-const RETAINED_CLOSED_MS = 60 * 60_000;
+const DEFAULT_STORE_LIMITS = {
+  /** Batches one creator may hold that are still retained (see isPastRetention), claimable or not. */
+  maxBatchesPerCreator: 20,
+  maxSharedBatches: 10_000,
+  /**
+   * N49 F5/round 5: how long a batch is retained after it stopped taking claims
+   * (it expired, filled, completed or was cancelled) before it may be pruned.
+   */
+  retainedClosedMs: 60 * 60_000,
+};
+/** Production never changes these; _setSharedBatchLimitsForTests lets a test lower them. */
+const limits = { ...DEFAULT_STORE_LIMITS };
 
 /** N49 F6: an honest display amount = pricePerSlot (up to 6 decimals) * count,
  * computed in integer micro-units so 0.000001 * n is exact. Display only —
@@ -100,6 +108,51 @@ function parseClosesAt(raw: unknown): number | null {
 
 function isOpenForClaims(batch: SharedBatch, now = Date.now()): boolean {
   return (batch.status === "open" || batch.status === "filling") && now < Date.parse(batch.closesAt);
+}
+
+function isClaimableStatus(status: SharedBatch["status"]): boolean {
+  return status === "open" || status === "filling";
+}
+
+/**
+ * When each batch last stopped being claimable because of its status (it filled,
+ * completed or was cancelled). Kept beside the batch, not on it: viewBatch spreads
+ * a batch into the response, and this is retention bookkeeping, not part of the
+ * public shape. An entry dies with its batch.
+ */
+const stoppedClaimableAt = new WeakMap<SharedBatch, number>();
+
+/**
+ * The only way a batch's status changes: it keeps stoppedClaimableAt in step, so
+ * a batch that leaves the claimable states is stamped and one that reopens (a
+ * claim was released) is not treated as closed.
+ */
+function setStatus(batch: SharedBatch, status: SharedBatch["status"], now: number): void {
+  const wasClaimable = isClaimableStatus(batch.status);
+  batch.status = status;
+  if (isClaimableStatus(status)) stoppedClaimableAt.delete(batch);
+  else if (wasClaimable || !stoppedClaimableAt.has(batch)) stoppedClaimableAt.set(batch, now);
+}
+
+/**
+ * When a batch stopped taking claims, or will: the earlier of its closesAt and
+ * the moment its status made it unclaimable. A batch that filled an hour after
+ * creation stopped taking claims then, not at a closesAt that may be 30 days off.
+ */
+function claimsEndedAt(batch: SharedBatch): number {
+  const closes = Date.parse(batch.closesAt);
+  const stopped = stoppedClaimableAt.get(batch);
+  return stopped === undefined ? closes : Math.min(closes, stopped);
+}
+
+/**
+ * N49 round 5: a batch is retained until it has been unable to take claims for
+ * longer than the retention window. Until then it counts against its creator's
+ * limit and cannot be pruned; after that it counts for nothing and the global-cap
+ * sweep may drop it. A batch still open and unexpired has not stopped yet.
+ */
+function isPastRetention(batch: SharedBatch, now: number): boolean {
+  return now - claimsEndedAt(batch) > limits.retainedClosedMs;
 }
 
 /** True only when `principal` is the recorded operator of `kernelId` (N55 swaps in requireKernelOperator). */
@@ -190,9 +243,15 @@ function viewEvents(batch: BatchManifest, events: BatchEvent[], viewer: string |
   return visible;
 }
 
-/** Test-only: reset the in-memory shared-batch store. */
+/** Test-only: reset the in-memory shared-batch store and its bounds. */
 export function _clearSharedBatchesForTests(): void {
   sharedBatches.clear();
+  Object.assign(limits, DEFAULT_STORE_LIMITS);
+}
+
+/** Test-only: lower the store bounds (an omitted bound keeps its default) so a cap can be hit without creating 10,000 batches. */
+export function _setSharedBatchLimitsForTests(override: Partial<typeof DEFAULT_STORE_LIMITS>): void {
+  Object.assign(limits, override);
 }
 
 export async function batchRoutes(app: FastifyInstance) {
@@ -346,21 +405,28 @@ export async function batchRoutes(app: FastifyInstance) {
       }
       closesAt = new Date(t).toISOString();
     }
-    const creatorsOpen = [...sharedBatches.values()].filter((b) => b.createdBy === creator && isOpenForClaims(b, now));
-    if (creatorsOpen.length >= MAX_OPEN_BATCHES_PER_CREATOR) {
-      return reply.status(409).send({ error: "too_many_open_batches", limit: MAX_OPEN_BATCHES_PER_CREATOR });
+    // N49 round 5: the per-creator limit counts every batch of the creator's that
+    // is still retained, not only the claimable ones. A batch that filled (or
+    // completed, or was cancelled) no longer takes claims but still occupies the
+    // store, so it must still count, or one principal could fill batch after
+    // batch and exhaust the global cap. (The error code keeps its round-3 name,
+    // which clients may match, though it now counts retained batches.)
+    const creatorsRetained = [...sharedBatches.values()].filter((b) => b.createdBy === creator && !isPastRetention(b, now));
+    if (creatorsRetained.length >= limits.maxBatchesPerCreator) {
+      return reply.status(409).send({ error: "too_many_open_batches", limit: limits.maxBatchesPerCreator });
     }
-    // N49 F5: the store is bounded, so prune batches that can no longer be
-    // claimed and are past a short retention window before counting against the
-    // cap. Without this, short-lived batches accumulate and creation is
-    // permanently unavailable (batch_store_full) until a process restart.
-    if (sharedBatches.size >= MAX_SHARED_BATCHES) {
-      const cutoff = now - RETAINED_CLOSED_MS;
+    // N49 F5: the store is bounded, so prune batches past their retention window
+    // before counting against the cap. Without this, short-lived batches
+    // accumulate and creation is permanently unavailable (batch_store_full)
+    // until a process restart. Round 5: retention runs from when a batch stopped
+    // taking claims (it filled, or closesAt passed, whichever came first), so a
+    // batch filled today does not hold its place until a far-off closesAt.
+    if (sharedBatches.size >= limits.maxSharedBatches) {
       for (const [id, b] of sharedBatches) {
-        if (!isOpenForClaims(b, now) && Date.parse(b.closesAt) < cutoff) sharedBatches.delete(id);
+        if (isPastRetention(b, now)) sharedBatches.delete(id);
       }
     }
-    if (sharedBatches.size >= MAX_SHARED_BATCHES) {
+    if (sharedBatches.size >= limits.maxSharedBatches) {
       return reply.status(503).send({ error: "batch_store_full" });
     }
 
@@ -520,12 +586,13 @@ export async function batchRoutes(app: FastifyInstance) {
 
       batch.claimedSlots.push(claim);
 
-      // Update batch status
+      // Update batch status. A batch that fills stops taking claims now, which
+      // starts its retention clock (N49 round 5), whatever its closesAt is.
       const totalClaimed = claimedCount + slotCount;
       if (totalClaimed >= batch.totalSlots) {
-        batch.status = "full";
+        setStatus(batch, "full", Date.now());
       } else if (batch.status === "open") {
-        batch.status = "filling";
+        setStatus(batch, "filling", Date.now());
       }
 
       return { claim, batchStatus: batch.status, slotsRemaining: batch.totalSlots - totalClaimed };
@@ -555,9 +622,9 @@ export async function batchRoutes(app: FastifyInstance) {
 
       const removed = batch.claimedSlots.splice(claimIdx, 1)[0];
 
-      // Revert status if needed
-      if (batch.status === "full") batch.status = "filling";
-      if (batch.claimedSlots.length === 0) batch.status = "open";
+      // Revert status if needed. Reopening a full batch clears its retention stamp.
+      if (batch.status === "full") setStatus(batch, "filling", Date.now());
+      if (batch.claimedSlots.length === 0) setStatus(batch, "open", Date.now());
 
       return { released: true, claim: removed, batchStatus: batch.status };
     },
