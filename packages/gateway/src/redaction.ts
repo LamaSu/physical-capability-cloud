@@ -18,6 +18,13 @@
  * whose regex form restarted at every `-eyJ` and rescanned to the end of the run
  * (quadratic), is matched by jwtAt() instead, which skips every start it has
  * already proven to fail.
+ *
+ * Budgets are explicit (astra pack 97): a label name is read at most MAX_LABEL_RAW
+ * characters long and decoded to at most MAX_LABEL_NAME; a connection-string or
+ * form separator is looked for FIELD_SEP_WINDOW characters ahead; a mnemonic is
+ * checksummed at most MNEMONIC_CHECKSUM_BUDGET times per string; a wrapped hex key
+ * is joined over at most WRAPPED_HEX_MAX_LINES lines. Past a budget the scan fails
+ * CLOSED (redacts) and never open.
  */
 
 import { createHash } from "node:crypto";
@@ -49,12 +56,16 @@ const VENDOR_KEY_RE = new RegExp(
 
 /** Replace secret-shaped substrings with a marker. Idempotent on already-clean text. */
 export function redactSecrets(s: string): string {
-  let out = s.replace(BEARER_RE, "Bearer " + REDACTED);
+  // A PEM private-key block goes first, so its body is not half-matched by the shapes below (N89).
+  let out = replacePrivateKeyBlocks(s);
+  out = out.replace(BEARER_RE, "Bearer " + REDACTED);
   out = out.replace(PCC_KEY_RE, "pcc_$1_redacted");
   // JSON Web Tokens (header.payload.signature; header is base64 of `{"…`)
   out = replaceJwts(out, "[redacted-jwt]");
   out = out.replace(HEX_SECRET_RE, "[redacted-hex]");
-  return out.replace(VENDOR_KEY_RE, "[redacted-key]");
+  out = out.replace(VENDOR_KEY_RE, "[redacted-key]");
+  // Then the value of a secret-named JSON string field, and key-like base64 runs (N89).
+  return replaceBase64Runs(replaceSecretJsonStrings(out));
 }
 
 /** redactSecrets that passes null through (for optional fields). */
@@ -163,6 +174,50 @@ function replaceJwts(s: string, marker: string): string {
     }
   }
   return last === 0 ? s : out + s.slice(last);
+}
+
+// ── What master's N89 fix adds to the sink (PR #478), in WP-D's linear-time style ──
+//
+// /api/auth/provision returns an agent's Ed25519 key as base64 PKCS#8 and as PEM, and
+// the operator wallet's key as a field. Each of the three helpers below reuses a
+// scanner the deep redactor already has, so the sink and the chat redactor cannot
+// drift apart, and each leaves the text around what it removes untouched.
+
+/** A PEM private-key block of any type, whole or cut off before its END line, becomes this. */
+const PRIVATE_KEY_MARKER = "[redacted-private-key]";
+
+function replacePrivateKeyBlocks(s: string): string {
+  const spans: Span[] = [];
+  addPemSpans(s, spans);
+  return spans.length === 0 ? s : applySpans(s, spans, PRIVATE_KEY_MARKER);
+}
+
+/**
+ * The value of a secret-named JSON string field, `"name":"value"`, becomes
+ * `"name":"[redacted]"`; the name, the separator and the quotes stay. Only a
+ * double-quoted name with a double-quoted value counts here: the sink stays
+ * conservative, and the deep redactor's other label forms are the chat's concern.
+ */
+function replaceSecretJsonStrings(s: string): string {
+  const spans: Span[] = [];
+  addSecretLabelSpans(s, spans, true);
+  return spans.length === 0 ? s : applySpans(s, spans, REDACTED);
+}
+
+/**
+ * Base64 key material has no fixed prefix (a PKCS#8 key, for one). A run of 40 or
+ * more base64 characters is one when it mixes upper case, lower case and digits,
+ * which a path, an id or a sentence almost never does. A hex run is left alone: a
+ * 64-hex key is already redacted above, and a checksummed 40-hex wallet address is
+ * public. The lookbehind keeps the match to whole runs, so the scan is linear.
+ */
+const BASE64_RUN_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}/g;
+const HEX_ONLY_RE = /^(?:0[xX])?[0-9a-fA-F]+$/;
+
+function replaceBase64Runs(s: string): string {
+  return s.replace(BASE64_RUN_RE, (run) =>
+    !HEX_ONLY_RE.test(run) && /[a-z]/.test(run) && /[A-Z]/.test(run) && /[0-9]/.test(run) ? "[redacted-b64]" : run,
+  );
 }
 
 // ── Structured redaction for the onboarding chat (WP-D D1; bus #2288, board N9) ──
