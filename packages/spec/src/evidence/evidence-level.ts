@@ -72,6 +72,12 @@
  *    malformed. Only pass and fail prove a level (none and malformed prove NO
  *    level, not even device_reported). In contradictions a fail or a malformed
  *    verdict counts as a failed inspection (fail closed) and none does not.
+ *    Pinned today: instrument_result `pass` (boolean) and batch_sample_result
+ *    `status` ("PASS" or "FAIL"). photo_comparison_result has no producer, so no
+ *    pinned field. cv_inspection_result is NOT pinned yet (OPEN, see
+ *    PINNED_VERDICTS: the producers emit `passed`, types/dpp.ts reads `pass`), so
+ *    it proves no level, and a cv payload carrying either spelling counts as a
+ *    failed inspection.
  *
  * 5. Fabrication is bundle-wide. One fabricated event (`isFabricated`) makes the
  *    whole bundle non-authentic (`bundleHasFabricatedEvents`): it proves no
