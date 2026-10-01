@@ -110,7 +110,7 @@ class TestStartCommand:
              mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
              mock.patch("pcc_node.cli.announce_capabilities"), \
              mock.patch("pcc_node.cli.run_daemon") as mock_daemon:
-            result = runner.invoke(main, ["start", "-c", config_path, "--api-key", "k"])
+            result = runner.invoke(main, ["start", "--yes", "-c", config_path, "--api-key", "k"])
         assert result.exit_code == 0
         assert "Detecting hardware" in result.output
         assert "Node running" in result.output
