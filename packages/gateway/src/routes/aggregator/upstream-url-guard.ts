@@ -39,7 +39,9 @@ export function upstreamUrlRefusal(upstreamUrl: unknown): string | null {
 /**
  * runPipeline(), except a tool whose upstreamUrl fails the outbound URL check is
  * never written to the registry. Refused tools are reported per tool id under the
- * "publish" stage's errors and are absent from `published`.
+ * "publish" stage's errors and are absent from `published`. A dry run
+ * (`publishToRegistry: false`) is vetted the same way and only skips the write, so
+ * a preview reports what a real run would do.
  */
 export async function runPipelineVetted(
   adapter: SourceAdapter,
@@ -47,13 +49,12 @@ export async function runPipelineVetted(
   registry: IndexedToolRegistry,
   options: PipelineRunOptions = {},
 ): Promise<PipelineRunResult> {
-  // A dry run writes nothing, so there is nothing to vet.
-  if (options.publishToRegistry === false) return runPipeline(adapter, input, registry, options);
+  const dryRun = options.publishToRegistry === false;
 
   // The pipeline decides what would be published; the gateway decides what is written.
   const result = await runPipeline(adapter, input, registry, { ...options, publishToRegistry: false });
 
-  const written: IndexedTool[] = [];
+  const accepted: IndexedTool[] = [];
   const refused: Record<string, string> = {};
   for (const tool of result.published) {
     const refusal = upstreamUrlRefusal(tool.upstreamUrl);
@@ -61,19 +62,22 @@ export async function runPipelineVetted(
       refused[tool.id] = refusal;
       continue;
     }
-    try {
-      registry.upsert(tool);
-      written.push(tool);
-    } catch (err) {
-      refused[tool.id] = err instanceof Error ? err.message : String(err);
+    if (!dryRun) {
+      try {
+        registry.upsert(tool);
+      } catch (err) {
+        refused[tool.id] = err instanceof Error ? err.message : String(err);
+        continue;
+      }
     }
+    accepted.push(tool);
   }
 
   return {
     ...result,
-    published: written,
+    published: accepted,
     stages: result.stages.map((s) =>
-      s.stage === "publish" ? { ...s, succeeded: written.length, errors: { ...s.errors, ...refused } } : s,
+      s.stage === "publish" ? { ...s, succeeded: accepted.length, errors: { ...s.errors, ...refused } } : s,
     ),
   };
 }
