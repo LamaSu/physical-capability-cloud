@@ -64,6 +64,11 @@
  *     revoke is a safety action and a result is a device's report of what ran.
  * POST /api/operator/emergency-stop (routes/operator.ts) also rejects the calls
  * still queued at the stop, so a resume cannot restart them.
+ *
+ * Delivery is at-most-once (N4b-gw r6, F2): a call is claimed once, and a claim
+ * the executor does not report within 120 s is closed by the next pending poll
+ * as failed (claim_timeout), never handed out again. The caller resubmits. A
+ * late report for such a call is still recorded, once.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -88,6 +93,16 @@ const {
 function generateId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
+
+/**
+ * Delivery is at-most-once (N4b-gw r6, F2). A call the executor claimed and
+ * never reported within CLAIM_TIMEOUT_MS is closed by the next pending poll as
+ * `failed` with the error CLAIM_TIMEOUT_ERROR. It is not requeued: the executor
+ * may still be running the command, and handing a physical command out twice is
+ * worse than failing it once. The caller resubmits if it still wants the work.
+ */
+const CLAIM_TIMEOUT_MS = 120_000;
+const CLAIM_TIMEOUT_ERROR = "claim_timeout";
 
 /** Resolve the device type for a kernel. Falls back to "generic". */
 function resolveDeviceType(kernelId: string): string {
@@ -782,9 +797,16 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return { calls: [], count: 0, emergencyStop: true };
     }
 
-    // Reclaim stale claimed calls (claimed >120s ago without completion).
-    // This prevents calls from being stuck forever if the executor crashes.
-    const CLAIM_TIMEOUT_MS = 120_000;
+    // At-most-once delivery (N4b-gw r6, F2). A claim the executor has not
+    // reported within CLAIM_TIMEOUT_MS is CLOSED as failed, never put back in
+    // the queue: the executor may still be running the command, and handing a
+    // physical command out twice is worse than failing it once. The row keeps
+    // counting against its scope's command budget (dispatchRefusal counts failed
+    // rows), no poll returns it again, and the caller resubmits if it still wants
+    // the work. The update is a compare-and-set on `claimed`, so a result
+    // reported in the same instant wins. An executor that reports late is still
+    // recorded, once (POST /tool-result).
+    const now = new Date().toISOString();
     const staleThreshold = new Date(Date.now() - CLAIM_TIMEOUT_MS).toISOString();
     const staleClaimed = db
       .select()
@@ -800,8 +822,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     for (const stale of staleClaimed) {
       db.update(toolCallRelay)
-        .set({ status: "pending", claimedAt: null })
-        .where(eq(toolCallRelay.id, stale.id))
+        .set({ status: "failed", error: CLAIM_TIMEOUT_ERROR, completedAt: now })
+        .where(and(eq(toolCallRelay.id, stale.id), eq(toolCallRelay.status, "claimed")))
         .run();
     }
 
@@ -822,7 +844,6 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // so no later poll can claim it and it does not hold back the calls behind
     // it. A call whose escrow lookup fails stays queued for the next poll.
     const deviceType = resolveDeviceType(kernelId);
-    const now = new Date().toISOString();
     const pending: Array<typeof toolCallRelay.$inferSelect> = [];
     for (const call of queued) {
       if (pending.length === 5) break;
@@ -992,10 +1013,20 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // no-op ack: a poll-based executor retrying its POST after a dropped 200 —
     // or a replayed callId — must neither double-count a breaker trip nor
     // spuriously reset a tripped breaker.
+    //
+    // One exception (N4b-gw r6, F2): a call the pending poll closed as
+    // failed/claim_timeout, because the executor never reported within the
+    // claim timeout, is still the device's call. If the executor was running
+    // it, its report is the first and only outcome the device gives, so it is
+    // recorded, once: the row goes from one terminal status to another and is
+    // never returned to the queue. A report that only echoes the timeout says
+    // nothing new, and a replay of a recorded late report finds a row that no
+    // longer says claim_timeout, so both stay idempotent acks.
+    const lateReport =
+      call.status === "failed" && call.error === CLAIM_TIMEOUT_ERROR && error !== CLAIM_TIMEOUT_ERROR;
     if (
-      call.status === "completed" ||
-      call.status === "failed" ||
-      call.status === "rejected"
+      !lateReport &&
+      (call.status === "completed" || call.status === "failed" || call.status === "rejected")
     ) {
       return reply.status(200).send({
         callId,
@@ -1016,9 +1047,11 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // the relay row carries no finer deviceId.) Non-fatal if gateway is absent.
     //
     // Guarded on 'claimed': only a call that was admitted AND picked up by an
-    // executor carries a real device outcome. The terminal-state guard above
-    // already excluded replays, so this is the single first-transition record.
-    if (call.status === "claimed") {
+    // executor carries a real device outcome, and so does a late report for a
+    // claim the poll timed out (it was picked up too). The terminal-state guard
+    // above already excluded replays, so this is the single first-transition
+    // record.
+    if (call.status === "claimed" || lateReport) {
       try {
         const gateway = getSafetyGateway();
         if (error) {

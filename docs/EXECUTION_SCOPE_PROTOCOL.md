@@ -120,7 +120,9 @@ When a tool call fails within a scope:
 ### Level 1: Auto-Retry (no escalation)
 - **Trigger**: Tool call returns error
 - **Budget**: `maxRetries` (default 3)
-- **Allowed**: Retry same tool call, or use Class 1/2 operations to diagnose
+- **Allowed**: Retry same tool call, or use Class 1/2 operations to diagnose.
+  A retry is a new call with a new id, submitted by the brain: the relay never
+  redelivers a call (see "Delivery is at-most-once")
 - **Example**: Tip pickup fails → home → retry tip pickup
 
 ### Level 2: Brain Recovery (Claude decides)
@@ -198,11 +200,10 @@ only on its own kernel.
   `safety_denied`/`circuit_open`. A call whose escrow lookup fails, or which
   cannot be cleared because the safety gateway is unavailable, stays queued, as
   does every call from the point where the kernel's emergency-stop policy cannot
-  be read (see Emergency Stop Integration); a claim that times out is
-  re-checked the same way. So a
-  call recorded on one kernel under another kernel's scope (rows the retired
-  writer could leave) never reaches a device and grants that scope's holder
-  nothing, and a revoke or audit of the scope never reaches it.
+  be read (see Emergency Stop Integration). So a call recorded on one kernel
+  under another kernel's scope (rows the retired writer could leave) never
+  reaches a device and grants that scope's holder nothing, and a revoke or
+  audit of the scope never reaches it.
 - **Camera stream.** Before every frame and every 15-second heartbeat the
   stream checks two things again:
   - its credential still stands: the API key is neither revoked nor expired,
@@ -228,6 +229,34 @@ queued. A job with no session, CWM or escrow record, or a `completed` escrow,
 does not stop the call.
 Binding every actuation to an accepted, funded job and its committed protocol is
 item 5 of board row N4b-gw (R30), not this table.
+
+## Delivery is at-most-once
+
+A queued call is handed to the executor once. `GET /tool-call/pending` claims a
+row with a compare-and-set on `pending`, so two polls cannot both take it, and
+nothing puts a claimed row back in the queue:
+
+- **A claim that is never reported fails; it is not redelivered.** A claim the
+  executor has not reported within 120 seconds is closed by the next poll as
+  `failed` with the error `claim_timeout` (and `completedAt` set; `claimedAt` is
+  kept for the audit). The executor may still be running the command, and a
+  physical command handed out twice is worse than one that failed. The call
+  keeps counting against its scope's `maxCommands`, like any other non-safe
+  call that was dispatched. `GET /tool-result/:id` shows `failed` with
+  `claim_timeout`, and the caller resubmits if it still wants the work: a retry
+  is a new call with a new id.
+- **A late report is still recorded, once.** If the executor reports a call the
+  poll has already timed out, its outcome replaces `claim_timeout` (`completed`,
+  or `failed` with the executor's error): the breaker hears it, a failure
+  charges the scope's `retryCount`, and the call is never queued again. A replay
+  of that report, or a report that only echoes `claim_timeout`, changes nothing.
+- **A rejected call is never delivered either.** Whatever closed a call as
+  `rejected` (a refusal at dispatch, a revoke, an emergency stop), no later poll
+  claims it.
+
+While a kernel is under an emergency stop, or its stop policy cannot be read,
+the poll does not run this timeout step: the first poll after the resume does,
+and the timed-out claim is closed then, not delivered.
 
 ## Validation Flow
 
@@ -265,6 +294,8 @@ Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     │      200 with calls [] and emergencyStop true
     ├── emergency-stop policy unreadable → 503; nothing claimed, nothing changed
     │
+    ├── a claim unreported for 120 s → closed FAILED (claim_timeout), not requeued
+    │
     │  each queued call, oldest first, until 5 are handed out:
     ├── names a scope that is missing or on another kernel? → REJECTED
     ├── no scope, and not a safe tool? → REJECTED
@@ -282,7 +313,12 @@ Executor polls GET /api/relay/:kernelId/tool-call/pending (operator only)
     ├── circuit breaker open now (a read that moves nothing)? → REJECTED
     │
     ▼
-CLAIMED → handed to the executor
+CLAIMED → handed to the executor, once
+    │
+    ├── the executor reports → COMPLETED, or FAILED with its error
+    ├── no report within 120 s → the next poll closes it FAILED (claim_timeout);
+    │      it is never handed out again, and the caller resubmits
+    │      (a late report is still recorded, once)
 ```
 
 ## Protocol Hash Enforcement (planned — not yet enforced)
@@ -358,13 +394,13 @@ kernel's stop as one of three states, and fails closed:
   `{"calls": [], "count": 0, "emergencyStop": true}`, and every call still
   `pending` for the kernel is rejected (`emergency_stopped`). A poller that
   predates the flag reads this as "nothing to do". `unavailable` answers 503
-  `{"error": "policy_unavailable"}` and nothing is claimed, reclaimed or
-  changed. Within a poll the stop is read again for each queued call, after the
-  call's safety check and in the same synchronous step as its claim (see
-  Dispatch): a stop that lands during the poll rejects the call being checked
-  and every call behind it, and a policy that turns unreadable mid-poll claims
-  no further call (the rest stay queued). Calls claimed earlier in the same
-  poll are returned.
+  `{"error": "policy_unavailable"}` and nothing is claimed, closed or changed
+  (the claim-timeout step of "Delivery is at-most-once" does not run either).
+  Within a poll the stop is read again for each queued call, after the call's
+  safety check and in the same synchronous step as its claim (see Dispatch): a
+  stop that lands during the poll rejects the call being checked and every call
+  behind it, and a policy that turns unreadable mid-poll claims no further call
+  (the rest stay queued). Calls claimed earlier in the same poll are returned.
 - **Scope mint (`POST /scope`).** `stopped` answers 409
   `kernel_emergency_stopped`, `unavailable` answers 503 `policy_unavailable`,
   and no scope is written. A scope minted before the stop cannot queue a call
@@ -379,10 +415,12 @@ execution scopes, does not send a "stop" to an in-flight run, and does not
 change the kernel's status. Resume is by clearing the flag
 (`POST /api/operator/emergency-resume`); a scope that was active stays active
 and works again once the stop clears, until it expires or is revoked. A call the
-node had already claimed is not recalled by the stop, and a claim the node never
-reports is requeued by the 120-second claim timeout, which can fall after a
-resume; the operator node is the authority there (below). Stopping an in-flight
-run and revoking scopes on e-stop is tracked follow-up.
+node had already claimed is not recalled by the stop: stopping it is the
+operator node's job (below). It is not redelivered after a resume either: a
+claim the node never reports is closed as `failed` (`claim_timeout`) by the
+first poll after the resume, never handed out again (see "Delivery is
+at-most-once"). Stopping an in-flight run and revoking scopes on e-stop is
+tracked follow-up.
 
 ### The authoritative physical-safety boundary is the operator node
 

@@ -955,8 +955,14 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
   });
 });
 
-describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
-  it("reclaims stale claimed calls after timeout", async () => {
+// At-most-once delivery (N4b-gw r6, F2). A claim the executor never reported
+// used to go back to `pending` after 120 s and be handed out again, so one
+// physical command could reach the device twice while the first executor was
+// still running it. The claim now times out into a terminal failure: it is
+// closed as `failed` with the error `claim_timeout`, and it is never delivered
+// again. The caller resubmits if it still wants the work.
+describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout (at-most-once)", () => {
+  it("closes a claim that was never reported as failed/claim_timeout, and never redelivers it", async () => {
     // Create a tool call
     const createRes = await app.inject({
       method: "POST",
@@ -990,14 +996,38 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
       .where(eq(toolCallRelay.id, callId))
       .run();
 
-    // Third poll should reclaim the stale call
+    // Third poll must NOT hand the same command out again: the first executor
+    // may still be running it.
     const poll3 = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/tool-call/pending",
       headers: op,
     });
-    expect(poll3.json().count).toBe(1);
-    expect(poll3.json().calls[0].id).toBe(callId);
+    expect(poll3.statusCode).toBe(200);
+    expect(poll3.json().count).toBe(0);
+    expect(poll3.json().calls).toEqual([]);
+
+    // The call is closed: terminal, with the reason, and its claim kept for the audit.
+    const row = db.select().from(toolCallRelay).where(eq(toolCallRelay.id, callId)).get()!;
+    expect(row).toMatchObject({ status: "failed", error: "claim_timeout", claimedAt: staleTime, result: null });
+    expect(row.completedAt).toEqual(expect.any(String));
+
+    // The brain sees the failure and can resubmit.
+    const seen = await app.inject({
+      method: "GET",
+      url: `/api/relay/kernel-test-1/tool-result/${callId}`,
+      headers: op,
+    });
+    expect(seen.json()).toMatchObject({ id: callId, status: "failed", error: "claim_timeout" });
+
+    // And no later poll brings it back.
+    const poll4 = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/tool-call/pending",
+      headers: op,
+    });
+    expect(poll4.json().calls).toEqual([]);
+    expect(db.select().from(toolCallRelay).where(eq(toolCallRelay.id, callId)).get()!.status).toBe("failed");
   });
 });
 
@@ -1493,7 +1523,7 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
     for (let i = 0; i < 6; i++) expect(row(`tc-bad-${i}`).status).toBe("rejected");
   });
 
-  it("re-checks a timed-out claim before handing it out again", async () => {
+  it("closes a timed-out claim as claim_timeout, never handing it out again, whatever its scope became (at-most-once)", async () => {
     const scope = await mintScope("agent-q", ["run_create"]);
     const id = await admit("agent-q", scope);
     expect((await poll()).count).toBe(1);
@@ -1503,7 +1533,9 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
       .run();
     setScope(scope, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
     expect((await poll()).count).toBe(0);
-    expect(row(id)).toMatchObject({ status: "rejected", error: "scope_expired" });
+    // The call was dispatched once, so it failed for want of a report; it was
+    // not "rejected", which would say it never reached the device.
+    expect(row(id)).toMatchObject({ status: "failed", error: "claim_timeout" });
   });
 
   describe("escrow parity at dispatch", () => {
@@ -2091,6 +2123,125 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       } finally {
         clock.mockRestore();
       }
+    });
+  });
+
+  // ── F2: at-most-once, a claim nobody reported fails and is never redelivered ─
+  describe("claim timeout: a claim nobody reported is closed, never redelivered (F2)", () => {
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+    const report = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: op, payload });
+
+    it("control: a claim still inside the timeout is left alone", async () => {
+      seedCall("tc-fresh", { status: "claimed", claimedAt: ago(60_000) });
+      const res = await poll();
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-fresh")).toMatchObject({ status: "claimed", error: null, completedAt: null });
+    });
+
+    it("serves the queue behind a timed-out claim without handing the timed-out call out again", async () => {
+      seedCall("tc-stale", { status: "claimed", claimedAt: ago(130_000) });
+      seedCall("tc-next");
+      const res = await poll();
+      expect(idsOf(res)).toEqual(["tc-next"]);
+      expect(rowOf("tc-stale")).toMatchObject({ status: "failed", error: "claim_timeout" });
+      expect(rowOf("tc-next").status).toBe("claimed");
+    });
+
+    it("a timed-out call keeps counting against the scope's command budget", async () => {
+      const scope = await mint({ createdBy: HOLDER, allowedTools: ["run_create"], maxCommands: 1 });
+      const scopeId = scope.json().id as string;
+      seedCall("tc-ran", { toolName: "run_create", scopeId, status: "claimed", claimedAt: ago(130_000) });
+      seedCall("tc-again", { toolName: "run_create", scopeId });
+
+      const res = await poll();
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-ran")).toMatchObject({ status: "failed", error: "claim_timeout" });
+      expect(rowOf("tc-again")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
+    });
+
+    it("a claim that timed out during an emergency stop is not redelivered after the resume", async () => {
+      seedCall("tc-stale", { status: "claimed", claimedAt: ago(130_000) });
+      engageStop();
+      expect((await poll()).json().emergencyStop).toBe(true);
+
+      getStore().db.run(sql`DELETE FROM operator_policies`); // the resume
+      const res = await poll();
+      expect(res.json().calls).toEqual([]);
+      expect(rowOf("tc-stale")).toMatchObject({ status: "failed", error: "claim_timeout" });
+    });
+
+    describe("a late report for a timed-out call", () => {
+      it("records the outcome once and never returns the call to the queue", async () => {
+        seedCall("tc-late", { status: "claimed", claimedAt: ago(130_000) });
+        await poll(); // closes the claim
+        expect(rowOf("tc-late")).toMatchObject({ status: "failed", error: "claim_timeout" });
+
+        const success = vi.spyOn(getSafetyGateway(), "recordDeviceSuccess");
+        try {
+          const res = await report({ callId: "tc-late", result: { ok: true } });
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toMatchObject({ callId: "tc-late", status: "completed" });
+          expect(rowOf("tc-late")).toMatchObject({
+            status: "completed",
+            error: null,
+            result: JSON.stringify({ ok: true }),
+          });
+          expect(success).toHaveBeenCalledTimes(1);
+          expect(success).toHaveBeenCalledWith(KERNEL);
+
+          // A replay is an idempotent ack: the breaker hears nothing more.
+          const replay = await report({ callId: "tc-late", result: { ok: true } });
+          expect(replay.json()).toMatchObject({ status: "completed", idempotent: true });
+          expect(success).toHaveBeenCalledTimes(1);
+
+          // The call never went back to the queue.
+          expect((await poll()).json().calls).toEqual([]);
+          expect(rowOf("tc-late").status).toBe("completed");
+        } finally {
+          success.mockRestore();
+        }
+      });
+
+      it("records a late failure once: the breaker hears it and the scope's retry budget is charged", async () => {
+        const scopeId = await mintScope(HOLDER, ["run_create"]);
+        seedCall("tc-late", { toolName: "run_create", scopeId, status: "claimed", claimedAt: ago(130_000) });
+        await poll(); // closes the claim
+        expect(rowOf("tc-late")).toMatchObject({ status: "failed", error: "claim_timeout" });
+
+        const failure = vi.spyOn(getSafetyGateway(), "recordDeviceFailure");
+        try {
+          const res = await report({ callId: "tc-late", error: "device_unreachable" });
+          expect(res.json()).toMatchObject({ callId: "tc-late", status: "failed" });
+          expect(rowOf("tc-late")).toMatchObject({ status: "failed", error: "device_unreachable" });
+          expect(failure).toHaveBeenCalledTimes(1);
+          const scope = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!;
+          expect(scope.retryCount).toBe(1);
+
+          const replay = await report({ callId: "tc-late", error: "device_unreachable" });
+          expect(replay.json().idempotent).toBe(true);
+          expect(failure).toHaveBeenCalledTimes(1);
+          expect(rowOf("tc-late").status).toBe("failed");
+        } finally {
+          failure.mockRestore();
+        }
+      });
+
+      it("a report that only echoes the timeout says nothing new and changes nothing", async () => {
+        seedCall("tc-late", { status: "claimed", claimedAt: ago(130_000) });
+        await poll(); // closes the claim
+
+        const failure = vi.spyOn(getSafetyGateway(), "recordDeviceFailure");
+        try {
+          const res = await report({ callId: "tc-late", error: "claim_timeout" });
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toMatchObject({ status: "failed", idempotent: true });
+          expect(rowOf("tc-late")).toMatchObject({ status: "failed", error: "claim_timeout" });
+          expect(failure).not.toHaveBeenCalled();
+        } finally {
+          failure.mockRestore();
+        }
+      });
     });
   });
 
