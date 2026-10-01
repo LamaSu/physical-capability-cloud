@@ -491,6 +491,18 @@ describe("N85 b: edge cases (after authentication)", () => {
     expect(statusOf(jobId)).toBe("in_progress");
   });
 
+  it("[neg] an INHERITED property name as the status (constructor, toString, __proto__) is 400 invalid_status for the owner and the admin, never a 500, and the job is unchanged", async () => {
+    const jobId = newJob(OWNER_KERNEL, "in_progress");
+    for (const headers of [asOwner(), asAdmin()]) {
+      for (const status of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+        const res = await postStatus(app, headers, { jobId, status });
+        expect(res.statusCode, `${status}: ${res.body}`).toBe(400);
+        expect(res.json().error).toBe("invalid_status");
+      }
+    }
+    expect(statusOf(jobId)).toBe("in_progress");
+  });
+
   it("GET for an UNKNOWN kernel is 404 kernel_not_found for a caller with an identity, and an empty list for the admin", async () => {
     const kernelId = uid("kernel-n85b-ghost");
     const owner = await getJobs(app, asOwner(), `?kernelId=${kernelId}`);
