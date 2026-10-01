@@ -910,3 +910,23 @@ describe("F1: every decision comes from one snapshot of the presentation, taken 
     }
   });
 });
+
+describe("F2: a plan-wide note and a note on a node with the empty id are different notes", () => {
+  const withEmptyNode = () => presentPlan({ submission: agentDag({ nodes: [...agentDag().nodes, { ...agentDag().nodes[0]!, nodeId: "" }] }), asOf: ASOF });
+  const global = { op: "note", text: "same" };
+  const onEmpty = { op: "note", nodeId: "", text: "same" };
+  const note = (nodeId: string | null) => ({ kind: "note", nodeId, text: "same", authority: "none" });
+
+  it("both survive, in input order, whichever came first (the reviewer's case)", () => {
+    const p = withEmptyNode();
+    expect(p.nodes.map((n) => n.nodeId)).toContain("");
+    expect(planEditsToIntent(p, [global, onEmpty]).constraints).toEqual([note(null), note("")]);
+    expect(planEditsToIntent(p, [onEmpty, global]).constraints).toEqual([note(""), note(null)]);
+  });
+
+  it("exact duplicates are still one note each: two plan-wide, two on the empty id, two on a named node", () => {
+    const p = withEmptyNode();
+    const out = planEditsToIntent(p, [global, { ...global, nodeId: null }, onEmpty, { ...onEmpty }, { op: "note", nodeId: "print", text: "same" }, { op: "note", nodeId: "print", text: "same" }]);
+    expect(out.constraints).toEqual([note(null), note(""), note("print")]);
+  });
+});

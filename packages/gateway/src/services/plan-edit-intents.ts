@@ -372,7 +372,8 @@ export function planEditsToIntent(presentation: PlanPresentation, edits: unknown
         removeNode.add(c.nodeId);
         break;
       case "note": {
-        const key = `${c.nodeId ?? ""}\u0000${c.text}`;
+        // null (plan-wide) and "" (a node whose id is empty) are different scopes: the key is a tuple.
+        const key = JSON.stringify([c.nodeId, c.text]);
         if (!noteSeen.has(key)) {
           noteSeen.add(key);
           notesInOrder.push({ nodeId: c.nodeId, text: c.text });
