@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
+import { runInNewContext } from "node:vm";
 import { keccak_256 } from "@noble/hashes/sha3";
 import {
   EVIDENCE_BLOCK_DOMAIN_V2,
@@ -13,6 +14,7 @@ import {
   computeSessionKeyAuthDigest,
   computeSettlementUnitId,
   computeUnitContextDigest,
+  sessionKeyAuthSnapshot,
   taggedDigestToBytes32,
   type AttestationQuorumRole,
 } from "../evidence/evidence-block.js";
@@ -625,5 +627,308 @@ describe("E7 F2 — the attestation set is validated before it is hashed", () =>
   it("the golden attestation set is still valid and its root is unchanged by validation", () => {
     const direct = sha(canonicalize([computeAttestationRoleDigest(attJob, roles[0]!)]));
     expect(computeAttestationSetRoot(attJob, roles)).toBe(direct);
+  });
+});
+
+// ── F3 (HIGH): live-object reads ─────────────────────────────────────────────
+describe("E7 F3 — roles are read once and the session authorization is a frozen snapshot", () => {
+  const H1 = sha("f3-attestation-1");
+  const H2 = sha("f3-attestation-2");
+  const plainRole = (over: Record<string, unknown> = {}) =>
+    ({ roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: [H1], ...over }) as AttestationQuorumRole;
+  const digestOf = (role: AttestationQuorumRole) => computeAttestationRoleDigest(attJob, role);
+
+  describe("attestation roles", () => {
+    it("a role whose attestationHashes getter changes its answer commits to the first, validated, answer", () => {
+      let reads = 0;
+      const role = {
+        roleId: "inspector",
+        minPositive: 1,
+        total: 2,
+        minScore: 50,
+        get attestationHashes() {
+          reads++;
+          return reads === 1 ? [H1] : ["not-a-hash"];
+        },
+      } as unknown as AttestationQuorumRole;
+      expect(digestOf(role)).toBe(digestOf(plainRole()));
+      expect(reads).toBe(1);
+    });
+
+    it("a second answer that is itself valid is not committed either", () => {
+      let reads = 0;
+      const role = {
+        roleId: "inspector",
+        minPositive: 1,
+        total: 2,
+        minScore: 50,
+        get attestationHashes() {
+          reads++;
+          return reads === 1 ? [H1] : [H2];
+        },
+      } as unknown as AttestationQuorumRole;
+      const committed = digestOf(role);
+      expect(committed).toBe(digestOf(plainRole({ attestationHashes: [H1] })));
+      expect(committed).not.toBe(digestOf(plainRole({ attestationHashes: [H2] })));
+    });
+
+    it("each element of attestationHashes is read once", () => {
+      let reads = 0;
+      const hashes: string[] = [];
+      Object.defineProperty(hashes, 0, {
+        enumerable: true,
+        get() {
+          return ++reads === 1 ? H1 : "not-a-hash";
+        },
+      });
+      expect(digestOf(plainRole({ attestationHashes: hashes }))).toBe(digestOf(plainRole()));
+      expect(reads).toBe(1);
+    });
+
+    it("every scalar field of a role is read once, so a later invalid answer is never seen", () => {
+      const reads = { roleId: 0, minPositive: 0, total: 0, minScore: 0 };
+      const role = {
+        get roleId() {
+          return ++reads.roleId === 1 ? "inspector" : "";
+        },
+        get minPositive() {
+          return ++reads.minPositive === 1 ? 1 : 0;
+        },
+        get total() {
+          return ++reads.total === 1 ? 2 : 0;
+        },
+        get minScore() {
+          return ++reads.minScore === 1 ? 50 : 999;
+        },
+        attestationHashes: [H1],
+      } as unknown as AttestationQuorumRole;
+      expect(digestOf(role)).toBe(digestOf(plainRole()));
+      expect(reads).toEqual({ roleId: 1, minPositive: 1, total: 1, minScore: 1 });
+    });
+
+    it("the roles array and every role in it are read once", () => {
+      const reads: Record<string, number> = {};
+      const counted = new Proxy([plainRole(), plainRole({ roleId: "buyer" })], {
+        get(target, key, receiver) {
+          if (typeof key === "string" && /^\d+$/.test(key)) reads[key] = (reads[key] ?? 0) + 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      computeAttestationSetRoot(attJob, counted as AttestationQuorumRole[]);
+      expect(reads).toEqual({ "0": 1, "1": 1 });
+    });
+  });
+
+  describe("session authorization", () => {
+    const freshAuth = (): SessionKeyAuthorization => structuredClone(sessionKeyAuth);
+    const refuseAuth = (auth: unknown) =>
+      refusalOf(() => computeSessionKeyAuthDigest(auth as SessionKeyAuthorization));
+    const P = "sessionKeyAuthorization";
+
+    it("the digest is sha256 of the canonical authorization, as the mirror defines it", () => {
+      expect(computeSessionKeyAuthDigest(sessionKeyAuth)).toBe(sha(canonicalize(sessionKeyAuth)));
+      expect(sessionKeyAuthSnapshot(sessionKeyAuth).digest).toBe(computeSessionKeyAuthDigest(sessionKeyAuth));
+    });
+
+    it("returns a deep-frozen plain copy that is not the object passed in", () => {
+      const auth = freshAuth();
+      const snap = sessionKeyAuthSnapshot(auth);
+      expect(snap.value).toEqual(auth);
+      expect(snap.value).not.toBe(auth);
+      expect(snap.value.scope).not.toBe(auth.scope);
+      expect(snap.value.scope.allowedActions).not.toBe(auth.scope.allowedActions);
+      expect(snap.value.scope.contractIds).not.toBe(auth.scope.contractIds);
+      for (const frozen of [snap, snap.value, snap.value.scope, snap.value.scope.allowedActions, snap.value.scope.contractIds]) {
+        expect(Object.isFrozen(frozen)).toBe(true);
+      }
+      expect(() => {
+        (snap.value as { sessionId: string }).sessionId = "x";
+      }).toThrow(TypeError);
+      expect(() => {
+        (snap.value.scope.contractIds as string[]).push("x");
+      }).toThrow(TypeError);
+    });
+
+    it("the digest is computed over the returned value, and later changes to the original do not reach either", () => {
+      const auth = freshAuth();
+      const snap = sessionKeyAuthSnapshot(auth);
+      expect(sha(canonicalize(snap.value))).toBe(snap.digest);
+      auth.sessionId = "changed-after-hashing";
+      auth.scope.contractIds.push("added-after-hashing");
+      expect(snap.value.sessionId).toBe("sess-golden");
+      expect(snap.value.scope.contractIds).toEqual(["unit-golden"]);
+      expect(sha(canonicalize(snap.value))).toBe(snap.digest);
+      expect(computeSessionKeyAuthDigest(auth)).not.toBe(snap.digest);
+    });
+
+    it("snapshotting a snapshot is idempotent", () => {
+      const snap = sessionKeyAuthSnapshot(freshAuth());
+      expect(sessionKeyAuthSnapshot(snap.value as SessionKeyAuthorization).digest).toBe(snap.digest);
+    });
+
+    it("refuses an accessor property without invoking it, at every depth", () => {
+      let reads = 0;
+      const withGetter = (target: object, key: string) =>
+        Object.defineProperty(target, key, {
+          enumerable: true,
+          configurable: true,
+          get() {
+            reads++;
+            return "x";
+          },
+        });
+      const top = withGetter(freshAuth(), "sessionId");
+      expect(refuseAuth(top).field).toBe(`${P}.sessionId`);
+
+      const nested = freshAuth();
+      withGetter(nested.scope, "maxSignatures");
+      expect(refuseAuth(nested).field).toBe(`${P}.scope.maxSignatures`);
+
+      const element = freshAuth();
+      withGetter(element.scope.contractIds, "0");
+      expect(refuseAuth(element).field).toBe(`${P}.scope.contractIds[0]`);
+
+      const scopeGetter = freshAuth();
+      const realScope = scopeGetter.scope;
+      Object.defineProperty(scopeGetter, "scope", {
+        enumerable: true,
+        get() {
+          reads++;
+          return realScope;
+        },
+      });
+      expect(refuseAuth(scopeGetter).field).toBe(`${P}.scope`);
+      expect(reads).toBe(0);
+    });
+
+    it("refuses a Proxy, including one that changes its answers, without running any trap", () => {
+      const trapped = () =>
+        new Proxy(
+          {},
+          {
+            get(_t, trap) {
+              throw new Error(`proxy trap looked up: ${String(trap)}`);
+            },
+          },
+        );
+      const proxied = new Proxy(freshAuth(), trapped());
+      expect(refuseAuth(proxied).field).toBe(P);
+      const scopeProxy = freshAuth();
+      (scopeProxy as { scope: unknown }).scope = new Proxy(scopeProxy.scope, trapped());
+      expect(refuseAuth(scopeProxy).field).toBe(`${P}.scope`);
+      const arrayProxy = freshAuth();
+      arrayProxy.scope.allowedActions = new Proxy(arrayProxy.scope.allowedActions, trapped());
+      expect(refuseAuth(arrayProxy).field).toBe(`${P}.scope.allowedActions`);
+      // The reviewer's shape: a first read that validates and a second that differs.
+      let reads = 0;
+      const shifting = new Proxy(freshAuth(), {
+        get(target, key, receiver) {
+          if (key === "publicKey") return ++reads === 1 ? "aa".repeat(32) : "cc".repeat(32);
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      expect(refuseAuth(shifting).field).toBe(P);
+      expect(reads).toBe(0);
+    });
+
+    it("refuses an unknown own key, a symbol key and a non-enumerable field", () => {
+      const extra = refuseAuth({ ...freshAuth(), extra: 1 });
+      expect(extra.field).toBe(P);
+      expect(extra.message).toMatch(/unknown own key "extra"/);
+      const scoped = freshAuth();
+      (scoped.scope as unknown as Record<string, unknown>).extra = 1;
+      expect(refuseAuth(scoped).field).toBe(`${P}.scope`);
+      const symbolic = { ...freshAuth(), [Symbol("s")]: 1 };
+      expect(refuseAuth(symbolic).message).toMatch(/unknown own key/);
+      const hidden = freshAuth();
+      Object.defineProperty(hidden, "sessionId", { enumerable: false, value: "sess-golden" });
+      const err = refuseAuth(hidden);
+      expect(err.field).toBe(`${P}.sessionId`);
+      expect(err.message).toMatch(/enumerable/);
+    });
+
+    it("refuses anything that is not a plain object, and accepts plain objects from another realm or without a prototype", () => {
+      class Klass {
+        constructor(init: object) {
+          Object.assign(this, init);
+        }
+      }
+      expect(refuseAuth(new Klass(freshAuth())).field).toBe(P);
+      for (const bad of [null, undefined, 7, "auth", [], new Map()]) {
+        expect(refuseAuth(bad).field, String(bad)).toBe(P);
+      }
+      const bare = Object.assign(Object.create(null), freshAuth());
+      expect(computeSessionKeyAuthDigest(bare)).toBe(computeSessionKeyAuthDigest(sessionKeyAuth));
+      const foreign = runInNewContext(`({
+        sessionId: "sess-golden", parentAgentId: "kernel-golden-01", publicKey: "${"aa".repeat(32)}",
+        issuedAt: 1699999000, expiresAt: 1700003600,
+        scope: { allowedActions: ["sign-evidence"], contractIds: ["unit-golden"], maxSignatures: 8 },
+        parentSignature: "${"bb".repeat(64)}"
+      })`);
+      expect(computeSessionKeyAuthDigest(foreign)).toBe(computeSessionKeyAuthDigest(sessionKeyAuth));
+    });
+
+    it("refuses a missing required field and names it", () => {
+      for (const key of ["sessionId", "parentAgentId", "publicKey", "issuedAt", "expiresAt", "scope", "parentSignature"]) {
+        const auth = freshAuth() as unknown as Record<string, unknown>;
+        delete auth[key];
+        expect(refuseAuth(auth).field, key).toBe(`${P}.${key}`);
+      }
+      for (const key of ["allowedActions", "contractIds", "maxSignatures"]) {
+        const auth = freshAuth();
+        delete (auth.scope as unknown as Record<string, unknown>)[key];
+        expect(refuseAuth(auth).field, key).toBe(`${P}.scope.${key}`);
+      }
+    });
+
+    it("refuses wrong types and numbers that are not safe non-negative integers", () => {
+      for (const key of ["sessionId", "parentAgentId", "publicKey", "parentSignature"]) {
+        for (const bad of ["", 5, null, undefined]) {
+          expect(refuseAuth({ ...freshAuth(), [key]: bad }).field, `${key}=${String(bad)}`).toBe(`${P}.${key}`);
+        }
+      }
+      for (const key of ["issuedAt", "expiresAt"]) {
+        for (const bad of [-1, 1.5, NaN, Infinity, "1", null, -0, 2 ** 53]) {
+          expect(refuseAuth({ ...freshAuth(), [key]: bad }).field, `${key}=${String(bad)}`).toBe(`${P}.${key}`);
+        }
+      }
+      for (const bad of [-1, 1.5, NaN, Infinity, "8", null, -0, 2 ** 53]) {
+        const auth = freshAuth();
+        (auth.scope as unknown as Record<string, unknown>).maxSignatures = bad;
+        expect(refuseAuth(auth).field, `maxSignatures=${String(bad)}`).toBe(`${P}.scope.maxSignatures`);
+      }
+    });
+
+    it("refuses scope arrays that are not dense plain arrays of strings", () => {
+      for (const key of ["allowedActions", "contractIds"] as const) {
+        const field = `${P}.scope.${key}`;
+        const set = (value: unknown) => {
+          const auth = freshAuth();
+          (auth.scope as unknown as Record<string, unknown>)[key] = value;
+          return refuseAuth(auth);
+        };
+        for (const bad of ["sign-evidence", null, undefined, {}, { length: 0 }]) {
+          expect(set(bad).field, `${key}=${String(bad)}`).toBe(field);
+        }
+        expect(set([1]).field).toBe(`${field}[0]`);
+        expect(set(["a", null]).field).toBe(`${field}[1]`);
+        expect(set([, "a"]).message).toMatch(/dense/); // a hole
+        const withExtra = ["a"] as string[] & { extra?: number };
+        withExtra.extra = 1;
+        expect(set(withExtra).message).toMatch(/dense/);
+      }
+    });
+
+    it("an undefined derivationPath is the same authorization as an absent one; a present one is committed", () => {
+      const absent = computeSessionKeyAuthDigest(freshAuth());
+      expect(computeSessionKeyAuthDigest({ ...freshAuth(), derivationPath: undefined })).toBe(absent);
+      const withPath = sessionKeyAuthSnapshot({ ...freshAuth(), derivationPath: "m/8004'/84532'/1'/0'" });
+      expect(withPath.value.derivationPath).toBe("m/8004'/84532'/1'/0'");
+      expect(withPath.digest).not.toBe(absent);
+      expect(withPath.digest).toBe(sha(canonicalize({ ...sessionKeyAuth, derivationPath: "m/8004'/84532'/1'/0'" })));
+      for (const bad of [5, "", null]) {
+        expect(refuseAuth({ ...freshAuth(), derivationPath: bad }).field, String(bad)).toBe(`${P}.derivationPath`);
+      }
+    });
   });
 });

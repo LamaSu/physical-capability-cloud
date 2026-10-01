@@ -74,6 +74,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
@@ -279,8 +280,168 @@ export async function computeKernelSignedEventsRoot(
   return taggedDigestToBytes32(bundleHash);
 }
 
+// ── The session authorization ────────────────────────────────────────────────
+
+/** Exactly the fields `SessionKeyAuthorization` declares in types/evidence.ts. */
+const SESSION_KEY_AUTH_FIELDS = [
+  "sessionId",
+  "parentAgentId",
+  "publicKey",
+  "issuedAt",
+  "expiresAt",
+  "scope",
+  "parentSignature",
+  "derivationPath",
+] as const satisfies readonly (keyof SessionKeyAuthorization)[];
+const SESSION_SCOPE_FIELDS = ["allowedActions", "contractIds", "maxSignatures"] as const satisfies readonly (keyof SessionKeyAuthorization["scope"])[];
+
+// Compile-time guard: a field added to SessionKeyAuthorization must be listed above (and
+// given a rule below) before this module compiles. At runtime an unlisted field is refused.
+type AssertNever<T extends never> = T;
+type SessionFieldsMissingFromSnapshot = AssertNever<
+  | Exclude<keyof SessionKeyAuthorization, (typeof SESSION_KEY_AUTH_FIELDS)[number]>
+  | Exclude<keyof SessionKeyAuthorization["scope"], (typeof SESSION_SCOPE_FIELDS)[number]>
+>;
+
+/** A deep-frozen plain copy of a SessionKeyAuthorization. */
+export type FrozenSessionKeyAuthorization = Readonly<Omit<SessionKeyAuthorization, "scope">> & {
+  readonly scope: Readonly<{
+    allowedActions: readonly string[];
+    contractIds: readonly string[];
+    maxSignatures: number;
+  }>;
+};
+
+export interface SessionKeyAuthSnapshot {
+  /**
+   * The frozen plain copy of exactly the fields SessionKeyAuthorization declares. Consumers
+   * evaluate THIS value, never the object they passed in: it is the value that was hashed.
+   */
+  readonly value: FrozenSessionKeyAuthorization;
+  /** 0x + sha256(canonicalize(value)), computed over `value` itself. */
+  readonly digest: Bytes32Hex;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || utilTypes.isProxy(value)) {
+    return false;
+  }
+  // The Object.prototype of any realm has a null prototype itself; class instances, Map and Date do not.
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || Object.getPrototypeOf(proto) === null;
+}
+
+/**
+ * The own properties of a plain object, each read once through its descriptor so an accessor
+ * is never invoked. Refuses a Proxy, a non-plain object, a symbol or unlisted key, an accessor
+ * and a non-enumerable property.
+ */
+function readPlainFields(path: string, input: unknown, allowed: readonly string[]): Map<string, unknown> {
+  if (!isPlainObject(input)) {
+    throw new EvidenceBlockInputError(path, "expected a plain object (not null, an array, a Proxy or a class instance)");
+  }
+  const fields = new Map<string, unknown>();
+  for (const key of Reflect.ownKeys(input)) {
+    if (typeof key === "symbol" || !allowed.includes(key)) {
+      throw new EvidenceBlockInputError(path, `unknown own key ${JSON.stringify(String(key).slice(0, 64))}`);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new EvidenceBlockInputError(`${path}.${key}`, "accessor properties are not accepted; pass plain data");
+    }
+    if (descriptor.enumerable !== true) {
+      throw new EvidenceBlockInputError(`${path}.${key}`, "expected an enumerable data property");
+    }
+    fields.set(key, descriptor.value);
+  }
+  return fields;
+}
+
+function requiredField(path: string, fields: Map<string, unknown>, key: string): unknown {
+  if (!fields.has(key)) {
+    throw new EvidenceBlockInputError(`${path}.${key}`, "is required");
+  }
+  return fields.get(key);
+}
+
+function requireNonEmptyString(field: string, value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new EvidenceBlockInputError(field, "expected a non-empty string");
+  }
+  return value;
+}
+
+/** A frozen copy of a dense, plain array of strings; elements are read through descriptors. */
+function readStringArray(path: string, input: unknown): readonly string[] {
+  if (!Array.isArray(input) || utilTypes.isProxy(input)) {
+    throw new EvidenceBlockInputError(path, "expected a plain array of strings");
+  }
+  const length = input.length;
+  if (Reflect.ownKeys(input).length !== length + 1) {
+    throw new EvidenceBlockInputError(path, "expected a dense array with no extra properties");
+  }
+  const out: string[] = [];
+  for (let i = 0; i < length; i++) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, i);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw new EvidenceBlockInputError(`${path}[${i}]`, "expected an enumerable data element");
+    }
+    if (typeof descriptor.value !== "string") {
+      throw new EvidenceBlockInputError(`${path}[${i}]`, "expected a string");
+    }
+    out.push(descriptor.value);
+  }
+  return Object.freeze(out);
+}
+
+/**
+ * Snapshot a session-key authorization: validate it and copy it into a deep-frozen plain
+ * value, reading every property exactly once. An unknown own key, an accessor property, a
+ * non-plain object or a Proxy is refused, so validation and the digest cannot observe
+ * different values. `digest` is computed over the frozen copy. Consumers must evaluate
+ * `value`, never the original object: it is the exact value that was hashed.
+ */
+export function sessionKeyAuthSnapshot(auth: SessionKeyAuthorization): SessionKeyAuthSnapshot {
+  const path = "sessionKeyAuthorization";
+  const top = readPlainFields(path, auth, SESSION_KEY_AUTH_FIELDS);
+  const sessionId = requireNonEmptyString(`${path}.sessionId`, requiredField(path, top, "sessionId"));
+  const parentAgentId = requireNonEmptyString(`${path}.parentAgentId`, requiredField(path, top, "parentAgentId"));
+  const publicKey = requireNonEmptyString(`${path}.publicKey`, requiredField(path, top, "publicKey"));
+  const issuedAt = boundedInt(`${path}.issuedAt`, requiredField(path, top, "issuedAt"), 0, Number.MAX_SAFE_INTEGER);
+  const expiresAt = boundedInt(`${path}.expiresAt`, requiredField(path, top, "expiresAt"), 0, Number.MAX_SAFE_INTEGER);
+  const parentSignature = requireNonEmptyString(`${path}.parentSignature`, requiredField(path, top, "parentSignature"));
+  // An optional field that is absent or undefined is the same value: canonicalize omits undefined.
+  const derivationRaw = top.get("derivationPath");
+  const derivationPath =
+    derivationRaw === undefined ? undefined : requireNonEmptyString(`${path}.derivationPath`, derivationRaw);
+
+  const scopePath = `${path}.scope`;
+  const scopeFields = readPlainFields(scopePath, requiredField(path, top, "scope"), SESSION_SCOPE_FIELDS);
+  const allowedActions = readStringArray(`${scopePath}.allowedActions`, requiredField(scopePath, scopeFields, "allowedActions"));
+  const contractIds = readStringArray(`${scopePath}.contractIds`, requiredField(scopePath, scopeFields, "contractIds"));
+  const maxSignatures = boundedInt(
+    `${scopePath}.maxSignatures`,
+    requiredField(scopePath, scopeFields, "maxSignatures"),
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+
+  const value: FrozenSessionKeyAuthorization = Object.freeze({
+    sessionId,
+    parentAgentId,
+    publicKey,
+    issuedAt,
+    expiresAt,
+    scope: Object.freeze({ allowedActions, contractIds, maxSignatures }),
+    parentSignature,
+    ...(derivationPath === undefined ? {} : { derivationPath }),
+  });
+  return Object.freeze({ value, digest: sha256Canonical(value) });
+}
+
+/** The sessionKeyAuthDigest: 0x + sha256(canonicalize(frozen snapshot of the authorization)). */
 export function computeSessionKeyAuthDigest(auth: SessionKeyAuthorization): Bytes32Hex {
-  return sha256Canonical(auth);
+  return sessionKeyAuthSnapshot(auth).digest;
 }
 
 export interface AttestationQuorumRole {
