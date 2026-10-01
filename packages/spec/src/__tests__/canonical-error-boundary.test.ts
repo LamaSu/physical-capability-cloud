@@ -145,3 +145,108 @@ describe("canonicalize — round 4 (cross-family A05b #5): errors are classified
     expectRefusal(attempt(deep));
   });
 });
+
+// ---------------------------------------------------------------------------
+// N15 round 5 (cross-family review A05c, finding F3)
+// ---------------------------------------------------------------------------
+
+/**
+ * NonCanonicalValueError's constructor assigned `this.name` with an ordinary [[Set]].
+ * An instance does not own `name`, so the assignment walks the prototype chain, and a
+ * setter installed on Error.prototype after the module loaded ran inside the
+ * constructor. The constructor then threw a plain Error before the new error could be
+ * registered, the boundary's own catch tried to build another one, which threw the
+ * same way, and a plain Error escaped canonicalize. Both `name` and `path` are now
+ * DEFINED as own data properties with a Reflect.defineProperty captured at load, so no
+ * inherited setter is consulted.
+ */
+
+/**
+ * Install a setter on Error.prototype[key] that throws, with a getter that still answers what
+ * the property held, while `fn` runs; always put the original back. Only `fn` runs inside the
+ * window; assertions run after it closes.
+ */
+function withThrowingErrorPrototypeSetter<T>(key: string, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(Error.prototype, key);
+  Object.defineProperty(Error.prototype, key, {
+    configurable: true,
+    get() {
+      return original ? original.value : undefined;
+    },
+    set() {
+      throw new Error("escaped: the Error.prototype." + key + " setter ran");
+    },
+  });
+  try {
+    return fn();
+  } finally {
+    if (original) Object.defineProperty(Error.prototype, key, original);
+    else delete (Error.prototype as unknown as Record<string, unknown>)[key];
+  }
+}
+
+describe("canonicalize -- round 5 (cross-family A05c F3): the refusal is built without consulting Error.prototype", () => {
+  const refused: Array<[string, () => unknown, string]> = [
+    ["a NaN member", () => ({ n: Number.NaN }), "$.n"],
+    ["an undefined element", () => [1, undefined], "$[1]"],
+    ["a Proxy trap that throws (the boundary builds the error itself)", () => new Proxy({}, { ownKeys() { throw new Error("trap"); } }), "$"],
+    ["a value nested too deeply to walk", () => { let deep: unknown = 0; for (let i = 0; i < 100_000; i++) deep = [deep]; return deep; }, "$"],
+  ];
+
+  for (const key of ["name", "path"]) {
+    for (const [what, make, path] of refused) {
+      it(`A05c F3: a throwing Error.prototype.${key} setter installed after load cannot let a plain Error out: ${what}`, () => {
+        const input = make();
+        const out = withThrowingErrorPrototypeSetter(key, () => attempt(input));
+        expect(out.threw).toBe(true);
+        if (out.threw) {
+          expect(out.error).toBeInstanceOf(NonCanonicalValueError); // faac0003 let the plain Error("escaped...") out
+          expect((out.error as Error).message).not.toContain("escaped");
+          expect((out.error as NonCanonicalValueError).path).toBe(path);
+          expect((out.error as NonCanonicalValueError).name).toBe("NonCanonicalValueError");
+        }
+      });
+    }
+  }
+
+  it("a refusal built under such a setter is still the module's own: it passes through the boundary unchanged", () => {
+    const real = withThrowingErrorPrototypeSetter("name", () => attempt({ a: [{ n: Number.NaN }] }));
+    expect(real.threw).toBe(true);
+    if (real.threw) {
+      expect(real.error).toBeInstanceOf(NonCanonicalValueError);
+      expect((real.error as NonCanonicalValueError).path).toBe("$.a[0].n");
+    }
+  });
+
+  it("name and path are own data properties, as they were when they were assigned (writable, enumerable, configurable)", () => {
+    const out = attempt({ n: Number.NaN });
+    expect(out.threw).toBe(true);
+    if (out.threw) {
+      const error = out.error as object;
+      expect(Object.getOwnPropertyDescriptor(error, "name")).toEqual({
+        value: "NonCanonicalValueError",
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+      expect(Object.getOwnPropertyDescriptor(error, "path")).toEqual({
+        value: "$.n",
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+      expect(Object.getPrototypeOf(error)).toBe(NonCanonicalValueError.prototype);
+      expect((error as Error).message).toBe("canonicalize: NaN at $.n has no JSON form; refusing to hash it");
+    }
+  });
+
+  it("leaves Error.prototype exactly as it found it (no test above leaks a setter)", () => {
+    expect(Object.getOwnPropertyDescriptor(Error.prototype, "name")).toEqual({
+      value: "Error",
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    expect(Object.getOwnPropertyDescriptor(Error.prototype, "path")).toBeUndefined();
+  });
+});

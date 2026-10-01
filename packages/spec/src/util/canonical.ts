@@ -120,11 +120,17 @@ const CANONICAL_ERRORS = new WeakSetConstructor<object>();
  * it could never be verified anywhere else.
  */
 export class NonCanonicalValueError extends Error {
-  readonly path: string;
+  // Type-only: no class field is emitted, so the property exists only because the constructor DEFINES it.
+  declare readonly path: string;
   constructor(path: string, what: string) {
     super(`canonicalize: ${what} at ${path} has no JSON form; refusing to hash it`);
-    this.name = "NonCanonicalValueError";
-    this.path = path;
+    // `name` and `path` are DEFINED as own data properties with the Reflect.defineProperty captured at
+    // load, never assigned. An assignment to a property the instance does not own (`name`: it lives on
+    // Error.prototype) walks the prototype chain, so a setter installed on Error.prototype after this
+    // module loaded would run here and throw before the error is registered below, and the boundary in
+    // canonicalize, which builds another one, would throw the same way: a plain Error would escape.
+    defineProperty(this, "name", dataDescriptor("NonCanonicalValueError"));
+    defineProperty(this, "path", dataDescriptor(path));
     weakSetAdd(CANONICAL_ERRORS, this);
   }
 }
