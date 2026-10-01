@@ -320,6 +320,9 @@ const BLOCKED_ADDRESSES: ReadonlyArray<readonly [string, string]> = [
   ["IPv6 6to4 (embeds IPv4)", "2002:7f00:1::"],
   ["IPv6 Teredo / IETF assignments 2001::/23", "2001::1"],
   ["IPv6 discard-only", "100::1"],
+  ["IPv6 reserved ::/8 (low)", "1::"],
+  ["IPv6 reserved ::/8 (not IPv4-compatible)", "0:1::1"],
+  ["IPv6 reserved ::/8 (top)", "ff::1"],
 ];
 
 /** Public addresses: must NOT be blocked (controls against an over-broad guard). */
@@ -348,6 +351,7 @@ const PUBLIC_ADDRESSES: ReadonlyArray<string> = [
   "::ffff:808:808",
   "64:ff9b::808:808",
   "64:ff9b::8.8.8.8",
+  "::ffff:0:808:808",
 ];
 
 /** Anything that is not a canonical IP must fail closed (be reported blocked). */
@@ -374,6 +378,21 @@ const UNPARSEABLE: ReadonlyArray<readonly [string, unknown]> = [
   ["non-hex group", "g::1"],
   ["mapped with short dotted quad", "::ffff:1.2.3"],
   ["mapped with bad octet", "::ffff:256.1.1.1"],
+  ["leading zero that reads as a public decimal address", "0177.0.0.1"],
+  ["leading zero in a small octet", "08.8.8.8"],
+  ["octet 257 wraps to a public address", "257.8.8.8"],
+  ["junk before a public address", "x8.8.8.8"],
+  ["newline before a public address", "\n8.8.8.8"],
+  ["space before a public address", " 8.8.8.8"],
+  ["newline after a public address", "8.8.8.8\n"],
+  ["newline after a mapped dotted quad", "::ffff:8.8.8.8\n"],
+  ["eight groups then ::", "1:2:3:4:5:6:7:8::"],
+  ["eight groups after ::", "::1:2:3:4:5:6:7:8"],
+  ["eight groups then a second compression", "1:2:3:4:5:6:7:8::9::"],
+  ["seven groups without ::", "1:2:3:4:5:6:7"],
+  ["nine groups", "1:2:3:4:5:6:7:8:9"],
+  ["dotted quad not at the end", "1.2.3.4::"],
+  ["dotted quad followed by a group", "::1.2.3.4:5"],
   ["undefined", undefined],
   ["null", null],
   ["number", 2130706433],
@@ -413,6 +432,7 @@ const RANGES: ReadonlyArray<RangeCase> = [
   { name: "IPv6 6to4 2002::/16", first: "2002::", last: "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", before: "2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff", after: "2003::" },
   { name: "IPv6 documentation 3fff::/20", first: "3fff::", last: "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff", before: "3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", after: "3fff:1000::" },
   { name: "NAT64 local-use 64:ff9b:1::/48", first: "64:ff9b:1::", last: "64:ff9b:1:ffff:ffff:ffff:ffff:ffff" },
+  { name: "IPv6 reserved ::/8", first: "::", last: "ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" },
   { name: "ULA fc00::/7", first: "fc00::", last: "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", before: "fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" },
   { name: "link-local fe80::/10", first: "fe80::", last: "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff", before: "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff" },
   { name: "site-local fec0::/10", first: "fec0::", last: "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" },
@@ -484,15 +504,29 @@ const REFUSED_URLS: ReadonlyArray<readonly [string, string, string | undefined]>
   ["short IPv4 spelling", "http://127.1/", "blocked_address"],
   ["metadata decimal spelling", "http://2852039166/latest/meta-data/", "blocked_address"],
   ["percent-encoded dot", "http://127.0.0.1%2e/", undefined],
+  ["fullwidth digits and full stops (IDNA folds them to 127.0.0.1)", "http://１２７．０．０．１/", undefined],
+  ["fullwidth localhost", "https://ＬＯＣＡＬＨＯＳＴ/hook", "internal_hostname"],
+  ["bare zero host", "http://0/", "blocked_address"],
+  ["IPv6 unspecified literal", "https://[::]/hook", "blocked_address"],
+  ["IPv6 unspecified literal, long form", "https://[0:0:0:0:0:0:0:0]/hook", "blocked_address"],
   ["localhost", "https://localhost/hook", "internal_hostname"],
   ["LOCALHOST with trailing dot", "https://LocalHost./hook", "internal_hostname"],
   ["*.localhost", "https://foo.localhost/hook", "internal_hostname"],
   ["metadata.google.internal", "http://metadata.google.internal/computeMetadata/v1/", "internal_hostname"],
   ["*.internal", "https://svc.internal/hook", "internal_hostname"],
   ["*.local", "https://printer.local/hook", "internal_hostname"],
+  ["*.localdomain", "https://host.localdomain/hook", "internal_hostname"],
+  ["*.intranet", "https://wiki.intranet/hook", "internal_hostname"],
+  ["*.lan", "https://printer.lan/hook", "internal_hostname"],
+  ["*.corp", "https://svc.corp/hook", "internal_hostname"],
+  ["*.home", "https://nas.home/hook", "internal_hostname"],
+  ["*.private", "https://svc.private/hook", "internal_hostname"],
+  ["*.home.arpa", "https://router.home.arpa/hook", "internal_hostname"],
+  ["localhost.localdomain", "https://localhost.localdomain/hook", "internal_hostname"],
   ["single-label host", "https://redis/hook", "internal_hostname"],
   ["userinfo (user and password)", "https://user:pass@hooks.example.com/hook", "userinfo_not_allowed"],
   ["userinfo (user only)", "https://user@hooks.example.com/hook", "userinfo_not_allowed"],
+  ["userinfo (password only)", "https://:pass@hooks.example.com/hook", "userinfo_not_allowed"],
   ["userinfo used to disguise the host", "https://hooks.example.com@127.0.0.1/hook", undefined],
   ["ftp scheme", "ftp://hooks.example.com/hook", "scheme_not_allowed"],
   ["file scheme", "file:///etc/passwd", "scheme_not_allowed"],
@@ -824,7 +858,7 @@ describe("guarded send: injected resolver + transport (no real DNS, no sockets)"
     expect(res.ok).toBe(false);
   });
 
-  it.each([300, 301, 302, 303, 304, 307, 308])(
+  it.each([300, 301, 302, 303, 304, 307, 308, 399])(
     "[neg] a %i answer is a failure and its Location (a private address) is never requested",
     async (status) => {
       const g = await loadGuard();
@@ -939,6 +973,67 @@ describe("guarded send: injected resolver + transport (no real DNS, no sockets)"
     expect(calls).toHaveLength(0);
   });
 
+  it("createPinnedLookup: the single form returns the FIRST pinned address, the array form all of them in order, and the family selects", async () => {
+    const g = await loadGuard();
+    const pins: Array<{ address: string; family: 4 | 6 }> = [
+      { address: PUBLIC_V4, family: 4 },
+      { address: "2606:4700:4700::1111", family: 6 },
+      { address: "8.8.8.8", family: 4 },
+    ];
+    const ask = (options: object) =>
+      new Promise<{ err: unknown; args: unknown[] }>((resolve) => {
+        g.createPinnedLookup(pins)("x.test", options as never, ((err: unknown, ...args: unknown[]) =>
+          resolve({ err, args })) as never);
+      });
+    expect((await ask({})).args).toEqual([PUBLIC_V4, 4]);
+    expect((await ask({ all: true })).args[0]).toEqual(pins);
+    expect((await ask({ family: 6 })).args).toEqual(["2606:4700:4700::1111", 6]);
+    expect((await ask({ family: "IPv6" })).args).toEqual(["2606:4700:4700::1111", 6]);
+    expect((await ask({ family: 4, all: true })).args[0]).toEqual([pins[0], pins[2]]);
+    expect((await ask({ family: "IPv4", all: true })).args[0]).toEqual([pins[0], pins[2]]);
+    expect((await ask({ family: 0 })).args).toEqual([PUBLIC_V4, 4]);
+  });
+
+  it("[neg] createPinnedLookup with no pinned address (null or empty) refuses", async () => {
+    const g = await loadGuard();
+    for (const pins of [null, []]) {
+      const r = await new Promise<{ err: unknown }>((resolve) => {
+        g.createPinnedLookup(pins)("x.test", { all: true } as never, ((err: unknown) => resolve({ err })) as never);
+      });
+      expect(r.err, `pins=${JSON.stringify(pins)}`).toBeTruthy();
+    }
+  });
+
+  it("createPinnedLookup also serves the two-argument calling convention (hostname, callback)", async () => {
+    const g = await loadGuard();
+    const r = await new Promise<unknown[]>((resolve) => {
+      (g.createPinnedLookup([{ address: PUBLIC_V4, family: 4 }]) as unknown as (h: string, cb: (...a: unknown[]) => void) => void)(
+        "x.test",
+        (...a) => resolve(a),
+      );
+    });
+    expect(r).toEqual([null, PUBLIC_V4, 4]);
+  });
+
+  it("answers are pinned with their real family: 6 for an IPv6 address, 4 for an IPv4 address", async () => {
+    const g = await loadGuard();
+    const { resolve } = fakeResolver({ [HOST]: ["2606:4700:4700::1111", PUBLIC_V4] });
+    const { transport, calls } = fakeTransport(() => ({ status: 200 }));
+    await g.guardedFetch(URL_, POST_INIT, { resolve, transport });
+    expect(calls[0]!.addresses).toEqual([
+      { address: "2606:4700:4700::1111", family: 6 },
+      { address: PUBLIC_V4, family: 4 },
+    ]);
+  });
+
+  it("a final answer below 200 is not ok", async () => {
+    const g = await loadGuard();
+    const { resolve } = fakeResolver({ [HOST]: [PUBLIC_V4] });
+    const { transport } = fakeTransport(() => ({ status: 199 }));
+    const res = await g.guardedFetch(URL_, POST_INIT, { resolve, transport });
+    expect(res.ok).toBe(false);
+  });
+
   describe("through dispatchToChannels (the production call path, injected deps)", () => {
     beforeEach(async () => {
       // nothing in this block may reach real DNS or a real socket
@@ -969,6 +1064,7 @@ describe("guarded send: injected resolver + transport (no real DNS, no sockets)"
       expect(res).toHaveLength(1);
       expect(res[0]!.delivered).toBe(false);
       expect(res[0]!.error).toBe("send_failed");
+      expect(res[0]!.warning).toBe("webhook destination is not reachable or not permitted");
     });
 
     it("[neg] a webhook that answers with a redirect to a private address reports a failure and the target is never requested", async () => {
@@ -989,6 +1085,79 @@ describe("guarded send: injected resolver + transport (no real DNS, no sockets)"
       expect(calls).toHaveLength(1);
       expect(res[0]!.delivered).toBe(false);
       expect(JSON.stringify(res)).not.toContain("169.254.169.254");
+      expect(res[0]!.warning).toBe("HTTP 302 (redirects are not followed; configure the final URL)");
+    });
+
+    it("[neg] a blocked name, an unresolvable name and a refused connection all read the same (no probing of internal names or ports)", async () => {
+      const g = await loadGuard();
+      const generic = "webhook destination is not reachable or not permitted";
+      const refused = async () => {
+        throw Object.assign(new Error("connect ECONNREFUSED 93.184.216.34:5432"), { code: "ECONNREFUSED" });
+      };
+      const cases: Array<[string, Parameters<typeof g._setOutboundDepsForTests>[0]]> = [
+        ["resolves to a private address", { resolve: fakeResolver({ "probe.n84.test": ["10.0.0.5"] }).resolve, transport: fakeTransport(() => ({ status: 200 })).transport }],
+        ["does not resolve", { resolve: fakeResolver({}).resolve, transport: fakeTransport(() => ({ status: 200 })).transport }],
+        ["connection refused", { resolve: fakeResolver({ "probe.n84.test": [PUBLIC_V4] }).resolve, transport: refused as never }],
+      ];
+      for (const [why, deps] of cases) {
+        _clearOperatorChannelsForTests();
+        g._setOutboundDepsForTests(deps);
+        attachChannel("n84-uniform", {
+          label: "probe",
+          transport: "webhook",
+          describe: "uniform refusal probe",
+          endpoint: { url: "https://probe.n84.test/hook" },
+        });
+        const res = await dispatchToChannels("n84-uniform", { jobId: "j", contextRef: "c", summary: "s" });
+        expect(res[0], why).toMatchObject({ delivered: false, error: "send_failed", warning: generic });
+        expect(JSON.stringify(res), why).not.toMatch(/ECONNREFUSED|ENOTFOUND|10\.0\.0\.5|93\.184\.216\.34|5432/);
+      }
+    });
+
+    it("a timeout is reported as a timeout, with no address", async () => {
+      const g = await loadGuard();
+      const { resolve } = fakeResolver({ "hooks.n84.test": [PUBLIC_V4] });
+      g._setOutboundDepsForTests({
+        resolve,
+        transport: (async () => {
+          throw new g.OutboundError("timeout", "request timed out after 5000ms");
+        }) as never,
+      });
+      attachChannel("n84-timeout", {
+        label: "slow",
+        transport: "webhook",
+        describe: "never answers",
+        endpoint: { url: "https://hooks.n84.test/hook" },
+      });
+      const res = await dispatchToChannels("n84-timeout", { jobId: "j", contextRef: "c", summary: "s" });
+      expect(res[0]).toMatchObject({ delivered: false, error: "send_failed", warning: "webhook request timed out" });
+    });
+
+    it.each([
+      ["metadata address", "http://169.254.169.254/latest/meta-data/"],
+      ["IPv6 loopback", "https://[::1]/hook"],
+      ["localhost", "https://localhost/hook"],
+      ["ftp scheme", "ftp://hooks.n84.test/hook"],
+      ["userinfo", "https://user:pass@hooks.n84.test/hook"],
+      ["not a URL", "not a url"],
+    ])("[neg] a stored webhook URL that is %s is not sent and reads invalid_endpoint", async (_why, url) => {
+      const g = await loadGuard();
+      const { transport, calls } = fakeTransport(() => ({ status: 200 }));
+      g._setOutboundDepsForTests({ resolve: fakeResolver({ "hooks.n84.test": [PUBLIC_V4] }).resolve, transport });
+      const ch = attachChannel("n84-stored-bad", {
+        label: "stored",
+        transport: "webhook",
+        describe: "stored with a URL the attach rule would refuse",
+        endpoint: { url: "https://hooks.n84.test/hook" },
+      });
+      ch.endpoint = { url }; // pre-fix data
+      const res = await dispatchToChannels("n84-stored-bad", { jobId: "j", contextRef: "c", summary: "s" });
+      expect(calls).toHaveLength(0);
+      expect(res[0]).toMatchObject({
+        delivered: false,
+        error: "invalid_endpoint",
+        warning: "webhook endpoint.url is not an allowed destination; use a public https URL",
+      });
     });
 
     it("control: a webhook whose host resolves to a public address IS sent with the signed-less JSON envelope", async () => {
@@ -1311,7 +1480,7 @@ describe("nodeTransport (production mechanism) on loopback sockets", () => {
       res.writeHead(202, { "x-request-id": "slow-1" });
       res.write("partial");
     });
-    const res = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { timeoutMs: 150 }) as never);
+    const res = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`, { timeoutMs: 500 }) as never);
     expect(res.status).toBe(202);
     expect(res.headers["x-request-id"]).toBe("slow-1");
     expect(res.truncated).toBe(true);
@@ -1351,6 +1520,47 @@ describe("nodeTransport (production mechanism) on loopback sockets", () => {
     const res = await g.nodeTransport(request(`http://127.0.0.1:${srv.port}/lit`, { lookup }) as never);
     expect(res.status).toBe(200);
     expect(lookups).toBe(0);
+  });
+
+  it("opens a fresh connection per request: no pooled socket outlives its validation", async () => {
+    const g = await loadGuard();
+    let connections = 0;
+    const srv = await startServer((_req, res) => res.end("ok"));
+    srv.server.on("connection", () => connections++);
+    await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/1`) as never);
+    await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/2`) as never);
+    expect(connections).toBe(2);
+  });
+
+  it("the connection is cut mid-body: the status is still reported, as truncated", async () => {
+    const g = await loadGuard();
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { "content-length": "1000", "x-request-id": "cut-1" });
+      res.write("partial");
+      setTimeout(() => req.socket.destroy(), 20);
+    });
+    const res = await g.nodeTransport(request(`http://pinned.n84.test:${srv.port}/`) as never);
+    expect(res.status).toBe(200);
+    expect(res.headers["x-request-id"]).toBe("cut-1");
+    expect(res.truncated).toBe(true);
+  });
+
+  it("dials an IPv6 literal without brackets", async (ctx) => {
+    const g = await loadGuard();
+    const server = http.createServer((_req, res) => res.end("v6"));
+    const listening = await new Promise<boolean>((resolve) => {
+      server.once("error", () => resolve(false));
+      server.listen(0, "::1", () => resolve(true));
+    });
+    if (!listening) return ctx.skip(); // host without an IPv6 loopback
+    try {
+      const port6 = (server.address() as AddressInfo).port;
+      const res = await g.nodeTransport(request(`http://[::1]:${port6}/`) as never);
+      expect(res.status).toBe(200);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
@@ -1447,6 +1657,24 @@ describe("credentialRef allowlist (PCC_CHANNEL_CREDENTIALS)", () => {
     expect(getChannelsByOperator(SLUG)).toHaveLength(0);
   });
 
+  it("[neg] an entry without a colon matches nothing, even when a prefix of it reads as a slug and the rest as a ref", async () => {
+    allow("ab");
+    expect(await isAllowed("a", "ab")).toBe(false);
+    allow("n84-credn84_sentinel");
+    expect(await isAllowed(SLUG, "n84_sentinel")).toBe(false);
+    expect(await isAllowed("n84-cre", "n84-credn84_sentinel")).toBe(false);
+  });
+
+  it("[neg] an empty slug or an empty ref never matches an entry that has an empty part", async () => {
+    allow(" :n84_sentinel,n84-cred:,   :   ");
+    expect(await isAllowed("", "n84_sentinel")).toBe(false);
+    expect(await isAllowed("   ", "n84_sentinel")).toBe(false);
+    expect(await isAllowed(SLUG, "")).toBe(false);
+    expect(await isAllowed(SLUG, "   ")).toBe(false);
+    expect(await isAllowed("", "")).toBe(false);
+    expect(await isAllowed(" ", " ")).toBe(false);
+  });
+
   it("[neg] an unset allowlist (variable absent) allows nothing", async () => {
     delete process.env.PCC_CHANNEL_CREDENTIALS;
     expect(await isAllowed(SLUG, "n84_sentinel")).toBe(false);
@@ -1467,6 +1695,7 @@ describe("credentialRef allowlist (PCC_CHANNEL_CREDENTIALS)", () => {
     ["whitespace around entry parts", "  n84-cred : n84_sentinel  ", SLUG, "n84_sentinel"],
     ["upper-case slug in the allowlist", "N84-CRED:n84_sentinel", SLUG, "n84_sentinel"],
     ["upper-case slug from the caller", "n84-cred:n84_sentinel", "N84-Cred", "n84_sentinel"],
+    ["whitespace around the caller's slug", "n84-cred:n84_sentinel", "  n84-cred  ", "n84_sentinel"],
     ["upper-case ref in the allowlist", "n84-cred:N84_SENTINEL", SLUG, "n84_sentinel"],
     ["hyphen in the caller's ref normalises to underscore", "n84-cred:n84_sentinel", SLUG, "n84-sentinel"],
     ["dot in the caller's ref normalises to underscore", "n84-cred:n84_sentinel", SLUG, "N84.SENTINEL"],
@@ -1648,6 +1877,15 @@ describe("credentialRef allowlist (PCC_CHANNEL_CREDENTIALS)", () => {
     process.env[SENTINEL_ENV] = SENTINEL_VALUE;
     expect((await attachVia(SLUG, { credentialRef: "n84-sentinel" })).statusCode).toBe(201);
     await sendTest(SLUG);
+    expect(calls[0]!.headers["x-pcc-signature"]).toBe(hmacHeader(calls[0]!.body!));
+  });
+
+  it("control: a padded ref is accepted and resolves the same secret as the trimmed one", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    expect((await attachVia(SLUG, { credentialRef: "  n84_sentinel  " })).statusCode).toBe(201);
+    await sendTest(SLUG);
+    expect(calls).toHaveLength(1);
     expect(calls[0]!.headers["x-pcc-signature"]).toBe(hmacHeader(calls[0]!.body!));
   });
 
