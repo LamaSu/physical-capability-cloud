@@ -402,7 +402,7 @@ A provider that is not **fully** configured on the gateway answers **503 `not_co
 |--------|----------|-------------|
 | GET | `/api/rewards/*` | DePIN epochs, kernel rewards and claims, with `/api/certificates*` and `/api/treasury/summary`. **501 `not_available` outside demo mode**: their data was fixtures (N34). |
 | GET/POST | `/api/ip/*` | Story Protocol IP registration, royalties, lineage, revenue splits. |
-| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. Epoch distribution (`POST /api/swf/epochs/:epochId/distribute`) always answers 501 `not_available`, with no demo path: per-epoch contribution scores are not computed, so a distribution would share the fund out on random numbers, and the SWF's money routes stay disabled (operator item 69). |
+| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. **501 `not_available` outside demo mode**: the fund is an in-memory simulation that nothing persists or funds (N34). Epoch distribution (`POST /api/swf/epochs/:epochId/distribute`) answers 501 `not_available` in every mode, demo included: per-epoch contribution scores are not computed, so a distribution would share the fund out on random numbers, and the SWF's money routes stay disabled (operator item 69). A released milestone accrues nothing into the SWF. |
 | GET/POST | `/api/csd/*` | Capability StructureDefinition CRUD (FHIR-inspired schemas). |
 | GET/POST | `/api/bounty/*` | Demand signals, bounties, leaderboard. |
 | GET/POST | `/api/pool/*` | Investment pools, staking, earnings. |
@@ -932,9 +932,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 | 37 | `pcc_ip_claim` | Claim accumulated royalties |
 | 38 | `pcc_ip_lineage` | IP provenance graph |
 | 39 | `pcc_ip_set_splits` | Configure revenue splits |
-| 40 | `pcc_swf_summary` | Sovereign Wealth Fund overview |
-| 41 | `pcc_swf_participant_dashboard` | SWF participant earnings |
-| 42 | `pcc_swf_list_proposals` | List governance proposals |
+| 40 | `pcc_swf_summary` | Sovereign Wealth Fund overview (501 `not_available` outside demo mode) |
+| 41 | `pcc_swf_participant_dashboard` | SWF participant earnings (501 `not_available` outside demo mode) |
+| 42 | `pcc_swf_list_proposals` | List governance proposals (501 `not_available` outside demo mode) |
 | 43 | `pcc_get_wallet_balance` | USDC balance + pending + credits |
 | 44 | `pcc_get_funding_options` | Fiat-to-crypto options |
 | 45 | `pcc_create_onramp_session` | Create fiat funding session |

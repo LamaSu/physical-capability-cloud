@@ -195,18 +195,6 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/ip/capability/:capabilityId | Get IP for a capability |
 | POST | /api/ip/:ipId/dispute | File an IP dispute |
 
-### SWF (Sovereign Wealth Fund)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/swf/summary | Fund balance, strategy, proposals |
-| POST | /api/swf/participants | Register as SWF participant |
-| POST | /api/swf/epochs | Trigger epoch processing |
-| POST | /api/swf/claims | Claim SWF dividends |
-| POST | /api/swf/proposals | Create governance proposal |
-| GET | /api/swf/equity/portfolio | Equity portfolio overview |
-| POST | /api/swf/equity/record-revenue | Record revenue for equity |
-| POST | /api/swf/terms/propose | Propose new fund terms |
-
 ### Fiat On/Off Ramp
 | Method | Path | Description |
 |--------|------|-------------|
@@ -510,10 +498,36 @@ const DEMO_ONLY_ENDPOINTS: EndpointDef[] = [
   { method: "GET", path: "/api/orchestrator/workflows/:workflowId", description: "Get workflow details" },
   { method: "GET", path: "/api/agents/conversations", description: "List agent conversations" },
   { method: "GET", path: "/api/agents/conversations/:convId", description: "Get conversation details" },
+  { method: "GET", path: "/api/swf/summary", description: "SWF (sovereign wealth fund) summary" },
+  { method: "POST", path: "/api/swf/participants", description: "Register an SWF participant" },
+  { method: "GET", path: "/api/swf/participants", description: "List SWF participants" },
+  { method: "GET", path: "/api/swf/participants/:participantId", description: "SWF participant dashboard" },
+  { method: "GET", path: "/api/swf/epochs", description: "List SWF epochs" },
+  { method: "GET", path: "/api/swf/epochs/:epochId", description: "Get an SWF epoch" },
+  { method: "POST", path: "/api/swf/epochs", description: "Open an SWF epoch" },
+  { method: "POST", path: "/api/swf/epochs/:epochId/forecast-allocate", description: "Forecast an SWF epoch's allocation" },
+  { method: "GET", path: "/api/swf/accruals", description: "List SWF accruals" },
+  { method: "POST", path: "/api/swf/claims", description: "Claim SWF dividends" },
+  { method: "GET", path: "/api/swf/claims/:claimId", description: "Get an SWF dividend claim" },
+  { method: "GET", path: "/api/swf/proposals", description: "List SWF governance proposals" },
+  { method: "POST", path: "/api/swf/proposals", description: "Create an SWF governance proposal" },
+  { method: "GET", path: "/api/swf/proposals/:proposalId", description: "Get an SWF governance proposal" },
+  { method: "POST", path: "/api/swf/proposals/:proposalId/vote", description: "Vote on an SWF governance proposal" },
+  { method: "POST", path: "/api/swf/proposals/:proposalId/execute", description: "Execute an SWF governance proposal" },
+  { method: "GET", path: "/api/swf/equity/portfolio", description: "SWF equity portfolio" },
+  { method: "GET", path: "/api/swf/equity/:positionId", description: "Get an SWF equity position" },
+  { method: "POST", path: "/api/swf/equity/:positionId/activate", description: "Activate an SWF equity position" },
+  { method: "POST", path: "/api/swf/equity/record-revenue", description: "Record revenue for an SWF equity position" },
+  { method: "POST", path: "/api/swf/terms/propose", description: "Propose an SWF term sheet" },
+  { method: "GET", path: "/api/swf/terms", description: "List SWF term sheets" },
+  { method: "GET", path: "/api/swf/terms/:termSheetId", description: "Get an SWF term sheet" },
+  { method: "POST", path: "/api/swf/terms/:termSheetId/counter", description: "Counter an SWF term sheet" },
+  { method: "POST", path: "/api/swf/terms/:termSheetId/accept", description: "Accept an SWF term sheet" },
+  { method: "POST", path: "/api/swf/terms/:termSheetId/reject", description: "Reject an SWF term sheet" },
   {
     method: "POST",
     path: "/api/swf/epochs/:epochId/distribute",
-    description: "Distribute an SWF epoch's dividend pool (always refuses — no demo path; per-epoch contribution scores are not computed on this gateway)",
+    description: "Distribute an SWF epoch's dividend pool (always refuses, demo mode included: per-epoch contribution scores are not computed on this gateway)",
   },
 ];
 
@@ -617,14 +631,6 @@ function buildStructuredPack(baseUrl: string): {
           { method: "POST", path: "/api/ip/:ipId/claim", description: "Claim royalty revenue" },
           { method: "GET", path: "/api/ip/:ipId/revenue", description: "Revenue snapshot" },
           { method: "GET", path: "/api/ip/:ipId/lineage", description: "IP provenance graph" },
-        ],
-      },
-      {
-        name: "SWF Governance",
-        endpoints: [
-          { method: "GET", path: "/api/swf/summary", description: "Fund summary" },
-          { method: "POST", path: "/api/swf/proposals", description: "Create governance proposal" },
-          { method: "POST", path: "/api/swf/claims", description: "Claim dividends" },
         ],
       },
       {

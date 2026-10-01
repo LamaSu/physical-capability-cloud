@@ -74,7 +74,8 @@ describe("agent context pack: routes that refuse are never listed as available",
   it("the N34 families refuse routes with demo off (the probe works)", () => {
     expect(refused.size).toBeGreaterThan(50);
     expect(refused.has("GET /api/logistics/shipments")).toBe(true);
-    expect(refused.has("GET /api/swf/summary")).toBe(false);
+    // The SWF is demo-only too (astra round 1 on #421, r1a HIGH): its in-memory service is a simulation.
+    expect(refused.has("GET /api/swf/summary")).toBe(true);
   });
 
   it("NEGATIVE: no markdown row above the demo-only list refuses", () => {
