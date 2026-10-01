@@ -145,9 +145,13 @@ const DECL_RE = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;\n]*
 const JSON_IMPORT_RE = /\bimport\s+[^;\n]*?from\s*["']([^"']+\.json)["']/g;
 /** An initializer that is ITSELF just a string/template literal is a DERIVED value (an id,
  * an address, a note) — not fixture data — even when the name matches (`mockAddress`,
- * `MOCK_NOTE`). This is the only initializer shape excluded; arrays, objects, `new X()`,
- * and any function call all count once the name matches. */
+ * `MOCK_NOTE`). An initializer that is exactly one regular-expression literal is a pattern
+ * that checks input (fiat-ramp.ts's `DEMO_WALLET_REF_RE`, #373), not data either; a regex
+ * that is called (`/x/.exec(rows)`) still counts. These are the only initializer shapes
+ * excluded; arrays, objects, `new X()`, and any function call all count once the name
+ * matches. */
 const STRING_INITIALIZER_RE = /^["'`]/;
+const REGEX_LITERAL_INITIALIZER_RE = /^\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+\/[a-z]*\s*(?:;|\n|$)/;
 
 /** True if the match at `index` sits on a line with zero leading whitespace — a fixture is
  * a top-level (module-scope) declaration, not a handler-local variable derived from one
@@ -175,7 +179,7 @@ function declaredFixtureNames(code: string): string[] {
     const name = m[1]!;
     if (!isFixtureName(name)) continue;
     const rest = code.slice(m.index! + m[0].length, m.index! + m[0].length + 4000);
-    if (STRING_INITIALIZER_RE.test(rest)) continue;
+    if (STRING_INITIALIZER_RE.test(rest) || REGEX_LITERAL_INITIALIZER_RE.test(rest)) continue;
     names.push(name);
   }
   for (const m of code.matchAll(JSON_IMPORT_RE)) {
@@ -280,6 +284,12 @@ describe("the ratchet's detector", () => {
     expect(countFabrication("const mockAddress = `0x${hex}`;")).toEqual({ mockData: 0, random: 0 });
     expect(countFabrication("// const mockThings = [1];\n/* Math.random() */")).toEqual({ mockData: 0, random: 0 });
     expect(countFabrication('const url = "ipp://printer/ipp"; const mockX = [];')).toEqual({ mockData: 1, random: 0 });
+    // A bare regex literal is a pattern, not data (fiat-ramp.ts, #373)...
+    expect(countFabrication("const DEMO_WALLET_REF_RE = /^demo-wallet-([0-9a-f]{16})$/;")).toEqual({ mockData: 0, random: 0 });
+    expect(countFabrication("const MOCK_ID_RE = /^mock-[a-z/]+$/i\nconst x = 1;")).toEqual({ mockData: 0, random: 0 });
+    // ...but a regex that is CALLED can produce data, so it still counts.
+    expect(countFabrication("const mockMatch = /^(.*)$/.exec(rowsText);")).toEqual({ mockData: 1, random: 0 });
+    expect(countFabrication("const demoRows = /,/[Symbol.split](text);")).toEqual({ mockData: 1, random: 0 });
   });
 
   it("NEGATIVE (F-B, reviewer r1a): catches the three forms that evaded the old narrow regex", () => {
