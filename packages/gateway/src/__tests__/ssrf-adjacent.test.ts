@@ -48,6 +48,9 @@ import {
 } from "../services/courier-jobs-store.js";
 import {
   _setOutboundDepsForTests,
+  createPinnedLookup,
+  guardedFetch,
+  nodeTransport,
   type OutboundTransportRequest,
   type OutboundTransportResponse,
 } from "../services/outbound-url-guard.js";
@@ -120,6 +123,12 @@ let catalog: Listener;
 
 beforeAll(async () => {
   victim = await listen((req, res) => {
+    if ((req.url ?? "") === "/bytes") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/octet-stream");
+      res.end("0123456789abcdefghij");
+      return;
+    }
     if ((req.url ?? "").startsWith("/internal")) {
       res.statusCode = 200;
       res.setHeader("content-type", "application/json");
@@ -813,7 +822,7 @@ describe("site 2: courier-jobs sourceVerifyUrl (shim over the generic store)", (
 // Site 3: aggregator invoke, fetch(tool.upstreamUrl)
 // ═════════════════════════════════════════════════════════════════════════════
 
-const SHA = "sha256:" + "a".repeat(64);
+const SHA = `sha256:${"a".repeat(64)}` as const;
 
 function makeTool(overrides: Partial<IndexedTool> = {}): IndexedTool {
   return {
@@ -1232,5 +1241,71 @@ describe("site 4: MCP proxy URL construction (controls: not reproduced)", () => 
     });
     expect(landed).toBe(proxied.length);
     expect(victim.hits).toHaveLength(0);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The guard's opt-in body capture (what lets source-verify read a verdict, and
+// invoke relay a result, without the default of "status and headers only" moving)
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("outbound guard: opt-in, capped body capture", () => {
+  const URL_ = "https://capture.example.com/x";
+
+  it("[neg] without captureBody the guarded response has no body, whatever a transport hands back", async () => {
+    injectOutbound({ respond: answer(200, `secret ${MARKER}`) });
+    const res = await guardedFetch(URL_, { method: "GET" });
+    expect(Object.keys(res).sort()).toEqual(["headers", "ok", "status", "truncated"]);
+    expect(JSON.stringify(res)).not.toContain(MARKER);
+  });
+
+  it("[neg] the transport request carries captureBody only when the caller set it", async () => {
+    const off = injectOutbound({ respond: answer(200, "x") });
+    await guardedFetch(URL_, { method: "GET" });
+    expect("captureBody" in off.calls[0]!).toBe(false);
+    const on = injectOutbound({ respond: answer(200, "x") });
+    await guardedFetch(URL_, { method: "GET", captureBody: true });
+    expect(on.calls[0]!.captureBody).toBe(true);
+  });
+
+  it("with captureBody the body comes back, and never longer than maxResponseBytes", async () => {
+    injectOutbound({ respond: answer(200, "0123456789abcdefghij") });
+    const full = await guardedFetch(URL_, { method: "GET", captureBody: true, maxResponseBytes: 100 });
+    expect(full.body?.toString("utf8")).toBe("0123456789abcdefghij");
+    // A transport that hands back more than the cap is clipped by the guard itself.
+    const clipped = await guardedFetch(URL_, { method: "GET", captureBody: true, maxResponseBytes: 8 });
+    expect(clipped.body?.toString("utf8")).toBe("01234567");
+  });
+
+  it("with captureBody and a transport that returns no body, the body is empty (never undefined)", async () => {
+    injectOutbound({ respond: answer(204) });
+    const res = await guardedFetch(URL_, { method: "GET", captureBody: true });
+    expect(res.body).toBeInstanceOf(Buffer);
+    expect(res.body?.length).toBe(0);
+  });
+
+  it("nodeTransport on a real loopback socket: captured bytes are capped and the answer is flagged truncated", async () => {
+    const base: OutboundTransportRequest = {
+      url: new URL(`http://127.0.0.1:${victim.port}/bytes`),
+      addresses: null,
+      lookup: createPinnedLookup(null),
+      method: "GET",
+      headers: {},
+      timeoutMs: 3000,
+      maxResponseBytes: 10,
+      signal: new AbortController().signal,
+    };
+    const capped = await nodeTransport({ ...base, captureBody: true });
+    expect(capped.status).toBe(200);
+    expect(capped.truncated).toBe(true);
+    expect(capped.body?.toString("utf8")).toBe("0123456789");
+
+    const roomy = await nodeTransport({ ...base, maxResponseBytes: 100, captureBody: true });
+    expect(roomy.truncated).toBe(false);
+    expect(roomy.body?.toString("utf8")).toBe("0123456789abcdefghij");
+
+    const none = await nodeTransport({ ...base, maxResponseBytes: 100 });
+    expect(none.status).toBe(200);
+    expect("body" in none).toBe(false);
   });
 });
