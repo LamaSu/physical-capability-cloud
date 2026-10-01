@@ -152,3 +152,54 @@ describe("redactDiagnostic", () => {
     expect(redactDiagnostic("device_not_found")).toBe("device_not_found");
   });
 });
+
+/**
+ * N71 round 3 (astra's verdict on pack 83b at b7106adc). The URL scrubber was a regex that treated
+ * an apostrophe as a delimiter. An apostrophe is legal in URI userinfo, query and fragment, so a
+ * password, token or fragment containing one came back unchanged or with its tail intact:
+ *
+ *   http://u:pa'ss@host.invalid/x              -> returned unchanged
+ *   https://host.invalid/?token=abc'SECRET     -> https://host.invalid/'SECRET
+ *   https://host.invalid/#abc'SECRET           -> https://host.invalid/'SECRET
+ *
+ * The same holds for a double quote, `<`, `>`, a backtick and a backslash: the regex listed them as
+ * delimiters, the WHATWG URL parser (which is what fetch uses) accepts them. Every case below embeds a
+ * synthetic sentinel, and none may come back out.
+ */
+describe("redactUrlCredentials: characters that are valid inside a credential (astra pack 83b)", () => {
+  const SENTINEL = "N71-SENTINEL";
+
+  /** [what is in the URL, the URL]. */
+  const BYPASSES: Array<[string, string]> = [
+    ["an apostrophe in the password", `http://u:pa'${SENTINEL}@host.invalid/x`],
+    ["an apostrophe in the username", `http://us'er${SENTINEL}:pw@host.invalid/x`],
+    ["an apostrophe in a query value", `https://host.invalid/?token=abc'${SENTINEL}`],
+    ["an apostrophe in the fragment", `https://host.invalid/#abc'${SENTINEL}`],
+    ["a double quote in the password", `http://u:pa"${SENTINEL}@host.invalid/x`],
+    ["a double quote in a query value", `https://host.invalid/?token=ab"${SENTINEL}`],
+    ["a double quote in the fragment", `https://host.invalid/#ab"${SENTINEL}`],
+    ["an angle bracket in the password", `http://u:pa<${SENTINEL}@host.invalid/x`],
+    ["an angle bracket in a query value", `https://host.invalid/?token=ab<${SENTINEL}>`],
+    ["a backtick in the password", `http://u:pa\`${SENTINEL}@host.invalid/x`],
+    ["a backslash in the password", `http://u:pa\\${SENTINEL}@host.invalid/x`],
+  ];
+
+  it.each(BYPASSES)("drops %s, bare and inside text", (_what, url) => {
+    for (const text of [url, `connect failed for ${url} (retrying)`, `url='${url}'`, `url="${url}"`, `<${url}>`]) {
+      expect(redactUrlCredentials(text), text).not.toContain(SENTINEL);
+      expect(redactDiagnostic(text), text).not.toContain(SENTINEL);
+    }
+  });
+
+  it("returns astra's three V8 rows without the secret (verbatim inputs)", () => {
+    // The verdict's table: the second and third came back as `https://host.invalid/'SECRET`, the first unchanged.
+    expect(redactUrlCredentials("http://u:pa'ss@host.invalid/x")).not.toContain("pa'ss");
+    expect(redactUrlCredentials("https://host.invalid/?token=abc'SECRET")).not.toContain("SECRET");
+    expect(redactUrlCredentials("https://host.invalid/#abc'SECRET")).not.toContain("SECRET");
+  });
+
+  it("control: the rows astra found sound still hold (encoded @ and :, IPv6, a non-HTTP scheme)", () => {
+    expect(redactUrlCredentials(`http://u%40name:p%3Ass@[::1]:80/a?x=${SENTINEL}#${SENTINEL}`)).not.toContain(SENTINEL);
+    expect(redactUrlCredentials(`opc.tcp://u:pw${SENTINEL}@[::1]:4840/x#${SENTINEL}`)).not.toContain(SENTINEL);
+  });
+});
