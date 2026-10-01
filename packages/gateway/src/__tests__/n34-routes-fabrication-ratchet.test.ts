@@ -152,14 +152,21 @@ const DECL_RE = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;\n]*
 const JSON_IMPORT_RE = /\bimport\s+[^;\n]*?from\s*["']([^"']+\.json)["']/g;
 /** An initializer that is ITSELF just a string/template literal is a DERIVED value (an id,
  * an address, a note) — not fixture data — even when the name matches (`mockAddress`,
- * `MOCK_NOTE`). An initializer that is exactly one regular-expression literal is a pattern
+ * `MOCK_NOTE`; literals joined by `+` count as one), but only when they end the statement:
+ * `"a,b".split(",")` is a call and still counts. An initializer that is exactly one regular-expression literal is a pattern
  * that checks input (fiat-ramp.ts's `DEMO_WALLET_REF_RE`, #373), not data either. The literal
  * must end the statement: a regex that is called or combined, on the same line or a later one
  * (`/x/` then `.exec(rows)`), still counts. These are the only initializer shapes excluded;
  * arrays, objects, `new X()`, and any function call all count once the name matches. */
-const STRING_INITIALIZER_RE = /^["'`]/;
-const REGEX_LITERAL_INITIALIZER_RE =
-  /^\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+\/[a-z]*[ \t]*(?:;|$|\r?\n(?![ \t\r\n]*(?:[.[(`?+\-*\/%&|^<>=!,:]|in\b|instanceof\b)))/;
+/** After a literal: spaces or tabs, then `;`, the end, or a newline whose next token does not continue
+ * the expression (. [ ( ` ? a binary operator, in, instanceof). */
+const STATEMENT_END = String.raw`[ \t]*(?:;|$|\r?\n(?![ \t\r\n]*(?:[.[(\x60?+\-*/%&|^<>=!,:]|in\b|instanceof\b)))`;
+/** One string or template literal (a template may hold ${...}). */
+const STRING_LITERAL = String.raw`(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\x60(?:\\.|[^\x60\\])*\x60)`;
+/** String literals only, joined by `+` (a note split over lines), ending the statement. */
+const STRING_INITIALIZER_RE = new RegExp(String.raw`^${STRING_LITERAL}(?:\s*\+\s*${STRING_LITERAL})*` + STATEMENT_END);
+/** Exactly one regular-expression literal, ending the statement. */
+const REGEX_LITERAL_INITIALIZER_RE = new RegExp(String.raw`^\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+\/[a-z]*` + STATEMENT_END);
 
 /** True if the match at `index` sits on a line with zero leading whitespace — a fixture is
  * a top-level (module-scope) declaration, not a handler-local variable derived from one
@@ -298,6 +305,14 @@ describe("the ratchet's detector", () => {
     // ...but a regex that is CALLED can produce data, so it still counts.
     expect(countFabrication("const mockMatch = /^(.*)$/.exec(rowsText);")).toEqual({ mockData: 1, random: 0 });
     expect(countFabrication("const demoRows = /,/[Symbol.split](text);")).toEqual({ mockData: 1, random: 0 });
+    // A string that is called or combined is not a derived value either (packer review of 32f663cd).
+    expect(countFabrication('const mockRows = "a,b".split(",");')).toEqual({ mockData: 1, random: 0 });
+    expect(countFabrication("const demoCsv = `x,y`\n  .split(',');")).toEqual({ mockData: 1, random: 0 });
+    expect(countFabrication("const MOCK_LABEL = 'pre' + suffix;")).toEqual({ mockData: 1, random: 0 });
+    expect(countFabrication("const MOCK_ID = 'x';\nconst y = 1;")).toEqual({ mockData: 0, random: 0 });
+    // String literals joined by + are one note (DEMO_ONLY_NOTE, MOCK_WALLET_NOTE); anything else joined in counts.
+    expect(countFabrication('const MOCK_NOTE =\n  "a " +\n  "b";')).toEqual({ mockData: 0, random: 0 });
+    expect(countFabrication('const MOCK_NOTE = "a " + rows.join(",");')).toEqual({ mockData: 1, random: 0 });
     // ...on a later line too: JavaScript continues the expression (packer review of afeda4b8).
     expect(countFabrication("const mockMatch = /^(.*)$/\n  .exec(rowsText);")).toEqual({ mockData: 1, random: 0 });
     expect(countFabrication("const demoRows = /,/\n\n  [Symbol.split](text);")).toEqual({ mockData: 1, random: 0 });
