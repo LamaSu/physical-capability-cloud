@@ -427,7 +427,16 @@ a family existed: its zero counts proved nothing.
   holds credential minting. The reply carries each held call in `pendingActions`
   (`[{ actionId, tool, method, target, args, summary, bindsTo?, expiresAt }]`).
   `bindsTo` is the email or wallet a new credential would be bound to; show it
-  before the confirm button. The owner view keeps digests (a 64-hex hash) so the
+  before the confirm button. It is the identity `POST /api/auth/provision` itself
+  will use, so with a signed-in wallet and nothing named it is that wallet, and
+  `summary` says why. A credential-minting call that cannot mint, or that names both
+  an email and a wallet, is not held at all: its tool result carries the refusal
+  (`ambiguous_identity`, `identifier_required`, `wallet_not_verified`,
+  `invalid_email`, `email_required`). A confirmation whose identity has changed since
+  the hold mints nothing and answers `confirmedAction.status` 409 with
+  `identity_changed`. `target` and `summary` show a secret argument (a password, a
+  token, an API key) as `[REDACTED]` in the path or query, and the call still runs with
+  the real value. The owner view keeps digests (a 64-hex hash) so the
   person can check them, and removes secrets. `GET /api/onboard/chat/:id` lists
   the open ones to their owner, or for an anonymous conversation, to whoever
   holds its id. The owner is the principal, not a browser session (by design):
