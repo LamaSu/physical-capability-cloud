@@ -1043,6 +1043,34 @@ describe("astra, round 3 of #356: no caller code runs inside the seam", () => {
     expect(counts.loadCapabilities).toBe(0);
   });
 
+  it("a symbol-keyed property in caller data is refused: JSON never produces one, and a skipped key goes uncounted (astra, round 4 of #356)", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    (dag.nodes[1] as { inputs?: unknown }).inputs = { pages: 1, [Symbol("extra")]: 2 };
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("a plain object wider than the copy's bound in symbol keys is refused (astra, round 4 of #356)", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    const wide: Record<symbol, number> = {};
+    for (let i = 0; i <= 1_000_000; i++) wide[Symbol()] = 0;
+    (dag.nodes[1] as { inputs?: unknown }).inputs = wide;
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  }, 120_000);
+
+  it("a plain object wider than the copy's bound in string keys is refused (astra, round 4 of #356)", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    const wide: Record<string, number> = {};
+    for (let i = 0; i <= 1_000_000; i++) wide[`k${i}`] = 0;
+    (dag.nodes[1] as { inputs?: unknown }).inputs = wide;
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  }, 120_000);
+
   it("a getter on a node field is refused and never runs", () => {
     const { deps, counts } = methodStyleWorld();
     let runs = 0;

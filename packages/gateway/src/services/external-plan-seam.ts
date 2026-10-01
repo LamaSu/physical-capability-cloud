@@ -27,9 +27,14 @@
  * The trust boundary (astra, round 3 of #356):
  *   - The CALLER's inputs (the submission and the authenticated context) are read WITHOUT running any
  *     caller code: only plain objects and real arrays, through their own data properties. A Proxy, an
- *     accessor property or any other prototype refuses the submission, and no getter, setter or proxy
- *     trap is ever invoked. So nothing a caller supplies can run while the seam works, and nothing can
- *     change what a dependency sees.
+ *     accessor property, a symbol key or any other prototype refuses the submission, and no getter,
+ *     setter or proxy trap is ever invoked. So nothing a caller supplies can run while the seam works,
+ *     and nothing can change what a dependency sees.
+ *   - PRECONDITION: those inputs are bounded in size before they reach the seam. The submission is
+ *     parsed from an HTTP body the gateway caps at 1 MiB (`bodyLimit`, server.ts), so no object in it
+ *     is wider than that body allows. The copy bounds its own walk, but it cannot bound an object's
+ *     width before enumerating it: JavaScript cannot count an object's own keys without materializing
+ *     them (astra, round 4 of #356).
  *   - The DEPENDENCIES are server wiring and are trusted. The seam pins WHICH function it calls and
  *     WITH WHICH receiver, and reads each answer once. A dependency's own state belongs to its
  *     implementation: a dependency that alters another one's state is server code misbehaving,
@@ -199,7 +204,11 @@ function leaf(v: unknown): unknown {
 
 // ── Caller data, read without running caller code ─────────────────────────────────────────────────
 
-/** Bounds on the no-code copy. The HTTP body limit keeps real requests far below them. */
+/**
+ * Bounds on the no-code copy: its depth, the values it walks, and a list's length (read from the list's
+ * own descriptor before the walk). An object's width is bounded by the seam's size precondition (the
+ * header), not here, because enumerating an object's keys is what would have to be bounded.
+ */
 const MAX_COPY_DEPTH = 16;
 const MAX_COPY_VALUES = 1_000_000;
 const REFUSED: unique symbol = Symbol("refused");
@@ -211,8 +220,9 @@ const NON_PLAIN: object = Object.freeze(Object.create(Object.freeze(Object.creat
  * An owned copy of caller data, read WITHOUT running any caller code (astra, round 3 of #356). Only
  * plain objects (prototype Object.prototype or null) and real arrays are walked, through their own
  * DATA properties, with `util.types.isProxy` (which invokes no trap) checked first. A Proxy or an
- * accessor property anywhere refuses the whole value. An object with another prototype (a Date, a
- * class instance) is never read: it becomes NON_PLAIN. Symbol keys are never read.
+ * accessor property anywhere refuses the whole value, and so does a symbol key: JSON cannot produce one,
+ * and a skipped key would go uncounted (astra, round 4 of #356). An object with another prototype (a
+ * Date, a class instance) is never read: it becomes NON_PLAIN.
  */
 function plainCopy(root: unknown): unknown {
   let values = 0;
@@ -240,7 +250,7 @@ function plainCopy(root: unknown): unknown {
     if (proto !== Object.prototype && proto !== null) return NON_PLAIN;
     const out: Record<string, unknown> = Object.create(null);
     for (const k of Reflect.ownKeys(v)) {
-      if (typeof k === "symbol") continue;
+      if (typeof k === "symbol") throw REFUSED;
       const d = Object.getOwnPropertyDescriptor(v, k) as PropertyDescriptor;
       if (!("value" in d)) throw REFUSED;
       Object.defineProperty(out, k, { value: walk(d.value, depth + 1), enumerable: true, writable: false, configurable: false });
