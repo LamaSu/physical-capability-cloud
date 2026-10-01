@@ -377,7 +377,7 @@ describe("onboard-chat principal forwarding (WP-D D6)", () => {
     expect((await resume(id, asAlice)).statusCode).toBe(200);
   });
 
-  it("a session's conversation belongs to that wallet session, not to an API key", async () => {
+  it("a SIWE session's conversation belongs to its WALLET (any session of it), not to an API key of the same operator", async () => {
     const token = randomUUID();
     const now = Date.now();
     getRepos().sessions.insert({

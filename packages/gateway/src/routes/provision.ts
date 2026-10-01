@@ -12,14 +12,8 @@ import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
-import { resolveSession } from "../auth/siwe-auth.js";
-import {
-  decideUnverifiedIdentity,
-  IDENTITY_CLAIMED_RESPONSE,
-  callerMayDelegate,
-  parseStoredScopes,
-  NOTHING_TO_DELEGATE_RESPONSE,
-} from "../auth/reserved-identities.js";
+import { identityTypeRefusal, resolveProvisionIdentity } from "../auth/provision-identity.js";
+import { callerMayDelegate, NOTHING_TO_DELEGATE_RESPONSE } from "../auth/reserved-identities.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -81,31 +75,10 @@ export async function provisionRoutes(app: FastifyInstance) {
       publicKey?: string;
     };
 
-    let operatorId: string;
-    /**
-     * True only when this identity was proven by an EIP-4361 signature, never
-     * when it was merely asserted (an email is a claim, not a proof). Gates the
-     * `settlement` grant below: an unproven identity can never move funds, no
-     * matter what the allowlist says.
-     */
-    let siweVerified = false;
-    /**
-     * Set when the caller is authenticated AS the requested email identity
-     * (F3): the scopes of the caller's own key, which bound what may be minted.
-     */
-    let delegatingScopes: string[] | null = null;
-    /**
-     * On that same path, the caller key's own expiry: the new key expires no
-     * later (R4). null = the caller's key does not expire.
-     */
-    let delegatingNotAfter: string | null = null;
-
     // Type guards — prevent object/array/number injection (red team #14, #15)
-    if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
-      return reply.status(400).send({ error: "invalid_type", message: "walletAddress must be a string" });
-    }
-    if (body.email !== undefined && typeof body.email !== "string") {
-      return reply.status(400).send({ error: "invalid_type", message: "email must be a string" });
+    const identityTypeError = identityTypeRefusal(body);
+    if (identityTypeError) {
+      return reply.status(identityTypeError.status).send(identityTypeError.body);
     }
     if (body.name !== undefined && typeof body.name !== "string") {
       return reply.status(400).send({ error: "invalid_type", message: "name must be a string" });
@@ -117,114 +90,19 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "invalid_type", message: "publicKey must be a string" });
     }
 
-    // Wallet identity must be proven with SIWE (EIP-4361) before it can mint a
-    // key (retire-the-wildcard #1099). A bare walletAddress string used to be
-    // trusted with zero proof of control — anyone could provision a live key
-    // against an address they don't own. auth/siwe-auth.ts already implements
-    // nonce + verify; this wires it into provisioning for wallet-bearing
-    // (machine) operators. The email path is unaffected.
-    const session = resolveSession(req);
-
-    if (body.walletAddress) {
-      // Wallet address path — format check also implicitly caps length at 42
-      if (!/^0x[0-9a-fA-F]{40}$/.test(body.walletAddress)) {
-        return reply.status(400).send({
-          error: "invalid_wallet_address",
-          message: "walletAddress must be a valid EVM address (0x + 40 hex chars)",
-        });
-      }
-      if (!session || session.address.toLowerCase() !== body.walletAddress.toLowerCase()) {
-        return reply.status(401).send({
-          error: "wallet_not_verified",
-          message:
-            "walletAddress must be proven with a SIWE (EIP-4361) session before it can " +
-            "provision a key: 1) GET /api/auth/nonce  2) sign the returned SIWE message " +
-            "with this wallet  3) POST /api/auth/verify {message, signature} and capture " +
-            "the returned token  4) retry this request with Authorization: Bearer <token> " +
-            "(or the pcc_session cookie).",
-          siwe: { nonce_url: "/api/auth/nonce", verify_url: "/api/auth/verify" },
-        });
-      }
-      operatorId = session.address;
-      siweVerified = true;
-    } else if (body.email !== undefined) {
-      // Explicit email path WINS over an ambient SIWE session (finding H4). A
-      // caller who put `email` in the body chose the email identity; an ambient
-      // pcc_session cookie must not silently override it. The old order (session
-      // before email) let a wallet-A session + {email} mint a wallet-A key —
-      // carrying A's `settlement` scope — on the UNVERIFIED email path, skipping
-      // email validation and misattributing telemetry to the email while the key
-      // belonged to the wallet. Checking body.email first makes explicit win.
-      //
-      // Gate on `!== undefined`, NOT truthiness (astra #326 re-review, finding 5):
-      // an EXPLICIT but empty/non-string email ({email:""}, {email:null},
-      // {email:1}) is still a chosen-email intent — it must be VALIDATED and
-      // rejected here, never allowed to fall through to the ambient SIWE session
-      // below (which would mint that session's key, settlement scope and all).
-      if (typeof body.email !== "string" || body.email.trim().length === 0) {
-        return reply.status(400).send({
-          error: "invalid_email",
-          message: "email must be a non-empty string",
-        });
-      }
-      // Trim FIRST (F3): " victim@x.test " names the same identity as
-      // "victim@x.test", so it must reach the same identity checks rather than
-      // bounce off the format check while the bare form is claimable.
-      const email = body.email.trim();
-      // Email path — RFC 5321 max total length is 254
-      if (email.length > 254) {
-        return reply.status(400).send({
-          error: "invalid_email",
-          message: "Email exceeds 254 character limit",
-        });
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        return reply.status(400).send({
-          error: "invalid_email",
-          message: "Please provide a valid email address",
-        });
-      }
-      // The email is ASSERTED, not proven, so before anything is minted:
-      //   - an email on an operatorId allowlist (AUDIT_ADMINS, PCC_DEMAND_ADMINS,
-      //     ...) is refused, or anyone who can type it would hold that admin
-      //     identity (WP-A A7);
-      //   - IDENTITY BINDING (F3, board N2): ownership checks compare a key's
-      //     operatorId with a resource's recorded owner, and owner ids are
-      //     public, so an email that already names an identity (a key ever
-      //     issued, a kernel, a registration, a job offer, an artifact) is
-      //     refused unless the caller is authenticated AS it — a valid Bearer
-      //     API key whose operatorId matches. The new key then carries the SAME
-      //     operatorId string and scopes no wider than the caller's own.
-      // Both refusals are the same 409 (R5), which never says what matched.
-      // The wallet paths above/below are SIWE-proven and not restricted by this.
-      const decision = decideUnverifiedIdentity(req, email);
-      if (decision.kind === "refuse") {
-        return reply.status(409).send(IDENTITY_CLAIMED_RESPONSE);
-      }
-      if (decision.kind === "self") {
-        operatorId = decision.caller.operatorId;
-        delegatingScopes = parseStoredScopes(decision.caller.scopes);
-        // Never outlive the delegating key (R4): a short-lived key must not
-        // mint a permanent one. "" counts as no expiry, as in the auth check.
-        delegatingNotAfter = decision.caller.expiresAt || null;
-      } else {
-        operatorId = email;
-      }
-    } else if (session) {
-      // A verified SIWE session with NO explicit identity in the body — use the
-      // cryptographically-proven address directly (the documented SIWE provision
-      // flow: POST /api/auth/provision {name} with the session token, walletAddress
-      // omitted). siweVerified is what gates the settlement scope below.
-      operatorId = session.address;
-      siweVerified = true;
-    } else {
-      return reply.status(400).send({
-        error: "identifier_required",
-        message:
-          "Either email, or a verified SIWE session (see /api/auth/nonce + " +
-          "/api/auth/verify), is required to provision an API key",
-      });
+    // WHICH identity this key is minted for (a SIWE-proven wallet, an asserted email, or
+    // the signed-in session) is decided in ONE place, auth/provision-identity.ts, which
+    // the onboarding chat also calls to show a person whose credential a held call would
+    // mint (astra pack 91b F2). Do not restate its precedence here.
+    //   siweVerified: true only when the identity was proven by an EIP-4361 signature,
+    //     never when merely asserted; it gates the `settlement` grant below.
+    //   delegatingScopes / delegatingNotAfter: set when the caller is authenticated AS the
+    //     requested email identity (F3); they bound what may be minted and for how long (R4).
+    const identity = resolveProvisionIdentity(req, body);
+    if (!identity.ok) {
+      return reply.status(identity.status).send(identity.body);
     }
+    const { operatorId, siweVerified, delegatingScopes, delegatingNotAfter } = identity;
 
     // ── What this key is allowed to do ────────────────────────────
     //

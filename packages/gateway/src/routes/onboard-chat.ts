@@ -46,7 +46,13 @@
  *    above all a credential-minting call, waits for a confirmation sent on the
  *    same conversation, because its id is the only credential it has. Planted
  *    text can therefore no longer mint a key bound to an identity it chose; the
- *    held action shows the identity (`bindsTo`) before the person confirms.
+ *    held action shows the identity (`bindsTo`) before the person confirms. That
+ *    identity is the one POST /api/auth/provision itself will use: both call
+ *    auth/provision-identity.ts (the wallet before the email, then the signed-in
+ *    session). A call naming both an email and a wallet, or naming nobody under a
+ *    credential the route would not treat as signed in, is refused rather than
+ *    guessed, and a confirmation that no longer resolves to the identity shown
+ *    mints nothing (astra pack 91b, F2).
  * 4. Conversations are persisted in a small `onboard_chat_conversations`
  *    table (created idempotently on first request, no schema migration
  *    needed). The `messages` column holds a JSON envelope: the history, the
@@ -77,10 +83,25 @@
  *     caller exactly once, in that reply's `revealedSecrets`. They are never
  *     persisted, never sent to the model and never replayed by GET (D2). A
  *     secret-looking value anywhere else is redacted and never revealed;
+ *   - a held call's TARGET (path and query) that a person reads, and that is stored,
+ *     is built from the call's REDACTED arguments before any URL encoding, never by
+ *     scrubbing the encoded text (`password=%40Tricky%21Pwd` is a reversible form that
+ *     no text scan sees). The executable target lives only in memory, for the dispatch
+ *     (astra pack 91b, F1);
  *   - conversation ids carry 128 bits of crypto randomness and ids in the old
  *     guessable format are refused (404) (D3). A signed-in caller's
  *     conversation is bound to that principal: GET and resume from anyone
  *     else is 404 (R5). An anonymous conversation's id is its only credential.
+ *
+ * Whose conversation and holds these are (astra pack 91b, F3; by design)
+ * -----------------------------------------------------------------------
+ * The owner is a PRINCIPAL, not one session. A SIWE caller's principal is its
+ * WALLET: every session of that wallet is the same principal, so a second
+ * session (another browser, a new login) reads the conversation and confirms its
+ * holds, running the call as itself. An API key is a principal of its own, by
+ * the key's id: another key, even of the same operator, is not. A session of
+ * another wallet, or anonymous, is none of them (404). Nothing below promises
+ * per-session isolation, and nothing should be read as doing so.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -90,10 +111,12 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getStore } from "../db.js";
 import { sql } from "@pcc/store";
-import { redactSecretsDeep, isTokenChar, REDACTED_VALUE } from "../redaction.js";
+import { redactSecretsDeep, isTokenChar, REDACTED_VALUE, type RedactOptions } from "../redaction.js";
 import { isPublicRoute } from "../middleware/api-gate.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { selectProvisionIdentity } from "../auth/provision-identity.js";
+import { sameIdentity } from "../auth/identity-normalize.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -168,7 +191,10 @@ interface PendingActionRecord {
   method: string;
   /** The endpoint template the action was planned against; a confirm re-checks it. */
   endpoint: string;
-  /** The resolved path and query, redacted, for the human to read. */
+  /**
+   * The path and query for the human to read, built from the REDACTED arguments
+   * before any URL encoding (astra 91b F1). The executable target is never stored.
+   */
   target: string;
   /** The arguments, redacted. */
   args: Record<string, unknown>;
@@ -176,7 +202,11 @@ interface PendingActionRecord {
   summary: string;
   /** For a credential-minting call: the email or wallet the credential will be bound to. */
   bindsTo?: string;
-  /** Fingerprint of the principal whose chat held it (or of an anonymous conversation): only they can confirm. */
+  /**
+   * Fingerprint of the principal whose chat held it (or of an anonymous conversation):
+   * only they can confirm. For a SIWE caller that principal is the wallet, so any
+   * session of the same wallet can (by design, astra 91b F3), and no other can.
+   */
   owner: string;
   createdAt: string;
   expiresAt: string;
@@ -248,9 +278,11 @@ const MAX_TOOL_STRING_CHARS = 32 * 1024;
 const MAX_TOOL_BODY_CHARS = 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 64 * 1024;
 /**
- * The stored history cap. It is checked before EACH tool result is kept (WP-D
- * round 4, L1), so a conversation's stored history exceeds it by at most one
- * turn's own assistant output plus short notices, never by a turn of results.
+ * The stored history cap, in characters of the SERIALIZED history (blockChars counts
+ * the escaping a tool result's content gets inside the message array's own JSON; astra
+ * pack 91b F5). It is checked before EACH tool result is kept (WP-D round 4, L1), so a
+ * conversation's stored history exceeds it by at most one turn's own assistant output
+ * plus short notices, never by a turn of results.
  */
 const MAX_HISTORY_CHARS = 256 * 1024;
 /**
@@ -518,9 +550,26 @@ function historyChars(record: ConversationRecord): number {
   return JSON.stringify(record.messages).length;
 }
 
+/**
+ * What one content block adds to historyChars(): its size AS THE HISTORY STORES IT
+ * (astra pack 91b F5). A tool result's `content` is itself a JSON string, and it sits
+ * inside the message array's own JSON, so every quote and backslash in it is escaped a
+ * second time (a quote in the page is two characters in the content and four in the
+ * row), and the block adds its own keys. `content.length` counted none of that, so a
+ * page of quotation marks took the history to about 1.5 times its cap. The +1 is the
+ * comma that separates the block from the next one.
+ */
+function blockChars(block: AnthropicMessageContent): number {
+  return JSON.stringify(block).length + 1;
+}
+
 // ── Caller principal (WP-D D6, R5) ──────────────────────────────────
 
-/** sha256 of the principal's identity: the API key's id, or the session's wallet address. */
+/**
+ * sha256 of the principal's identity: the API key's id, or the session's wallet
+ * address (lower-cased). Deliberately NOT the session's id or token: the principal is
+ * the wallet, so every session of one wallet is the same principal (astra 91b F3).
+ */
 function principalFingerprint(kind: "api_key" | "session", id: string): string {
   return createHash("sha256").update(`pcc-onboard-chat/${kind}/${id}`).digest("hex");
 }
@@ -697,12 +746,92 @@ const refusal = (status: number, error: string, message: string): Refusal => ({ 
 
 // ── Tool execution (self-injection) ─────────────────────────────────
 
-/** A tool call, checked and resolved, ready to dispatch. */
+/**
+ * A tool call, checked and resolved, ready to dispatch. `target` is the EXECUTABLE
+ * path and query, URL-encoded, and may carry a secret (a password argument): it is
+ * used to dispatch and nowhere else. It is never stored, and never shown to anyone;
+ * what a person reads and what is persisted is displayTarget() (astra 91b F1).
+ */
 interface ToolPlan {
   method: string;
   /** Path and query, as the router will see them. */
   target: string;
   payload?: Record<string, unknown>;
+}
+
+/** A tool's request built from one set of arguments (see buildRequest). */
+interface BuiltRequest {
+  /** The first path parameter that is missing, empty or a dot segment, or null. */
+  badParam: string | null;
+  /** Path and query, URL-encoded, as the router will see them. */
+  url: string;
+  /** The JSON body, for the methods that take one. */
+  payload?: Record<string, unknown>;
+}
+
+/**
+ * Build a tool's request from `input`: `{param}`s of the endpoint template filled in
+ * (percent-encoded), the remaining arguments as the query string (GET, DELETE) or the
+ * JSON body (the rest). ONE function builds both the request that runs and the text a
+ * person reads, so the two cannot drift: the display is this function applied to the
+ * REDACTED arguments (displayTarget), never a scrub of the encoded result.
+ */
+function buildRequest(templatePath: string, method: string, input: Record<string, unknown>): BuiltRequest {
+  // Interpolate {param} -> input[param] and remember which keys went into the path
+  const pathParams = new Set<string>();
+  let badParam: string | null = null;
+  const path = templatePath.replace(/\{([^}]+)\}/g, (_, key: string) => {
+    pathParams.add(key);
+    const v = input[key];
+    const s = v == null ? "" : String(v);
+    if (s === "" || s === "." || s === "..") {
+      badParam ??= key;
+      return "_";
+    }
+    return encodeURIComponent(s);
+  });
+
+  let url = path;
+  let payload: Record<string, unknown> | undefined;
+  if (method === "GET" || method === "DELETE") {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(input)) {
+      if (pathParams.has(key)) continue;
+      if (value === undefined || value === null) continue;
+      params.set(key, typeof value === "string" ? value : JSON.stringify(value));
+    }
+    const qs = params.toString();
+    if (qs) url = `${path}?${qs}`;
+  } else {
+    payload = {};
+    for (const [key, value] of Object.entries(input)) {
+      if (pathParams.has(key)) continue;
+      payload[key] = value;
+    }
+  }
+  return { badParam, url, payload };
+}
+
+/** What a redacted argument becomes once it is percent-encoded into a URL. */
+const ENCODED_REDACTED_VALUE = encodeURIComponent(REDACTED_VALUE);
+
+/**
+ * The target a PERSON reads, and the only form of it that is ever stored (astra 91b
+ * F1). It is built from the arguments AFTER redaction and BEFORE any URL encoding:
+ * a secret-named argument (password, token, api_key, ...) or a secret-shaped value
+ * becomes [REDACTED] as structured data, then the same buildRequest() as the real call
+ * encodes what is left. Redacting the ENCODED text instead cannot work: `%40Tricky%21Pwd`
+ * is a reversible form of a password that no text scan recognises, and a secret-named
+ * PATH parameter has no `name=` label for a scan to find at all.
+ */
+function displayTarget(tool: AgentPackageTool, method: string, input: Record<string, unknown>, opts?: RedactOptions): string {
+  const safe = redactSecretsDeep(input, undefined, opts);
+  const { url } = buildRequest(tool.endpoint?.path ?? "", method, safe);
+  // The marker reads better as itself than percent-encoded; it carries nothing to hide.
+  // Nothing is scrubbed after encoding: a scan of the encoded text can only be weaker than
+  // the scan of the structured values above (it cannot even see a `Bearer ` scheme once the
+  // space is a `+`), and the envelope is scanned again when it is saved.
+  return url.split(ENCODED_REDACTED_VALUE).join(REDACTED_VALUE);
 }
 
 /**
@@ -734,44 +863,11 @@ function planToolCall(
   if (refused) return { refusal: refusal(403, "tool_not_callable_from_chat", refused) };
 
   const method = tool.endpoint.method.toUpperCase();
-  let path = tool.endpoint.path;
-
-  // Interpolate {param} -> input[param] and remember which keys went into the path
-  const pathParams = new Set<string>();
-  let badParam: string | null = null;
-  path = path.replace(/\{([^}]+)\}/g, (_, key: string) => {
-    pathParams.add(key);
-    const v = input[key];
-    const s = v == null ? "" : String(v);
-    if (s === "" || s === "." || s === "..") {
-      badParam ??= key;
-      return "_";
-    }
-    return encodeURIComponent(s);
-  });
+  const { badParam, url, payload } = buildRequest(tool.endpoint.path, method, input);
   if (badParam !== null) {
     return {
       refusal: refusal(400, "invalid_path_param", `Path parameter "${badParam}" must be a non-empty value other than "." or "..".`),
     };
-  }
-
-  let url = path;
-  let payload: Record<string, unknown> | undefined;
-  if (method === "GET" || method === "DELETE") {
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(input)) {
-      if (pathParams.has(key)) continue;
-      if (value === undefined || value === null) continue;
-      params.set(key, typeof value === "string" ? value : JSON.stringify(value));
-    }
-    const qs = params.toString();
-    if (qs) url = `${path}?${qs}`;
-  } else {
-    payload = {};
-    for (const [key, value] of Object.entries(input)) {
-      if (pathParams.has(key)) continue;
-      payload[key] = value;
-    }
   }
 
   // Decide on the URL the router will see: inject resolves dot segments the same way.
@@ -893,8 +989,13 @@ async function dispatchToolCall(
  * of a field name matches every field with that prefix. Anything else that looks
  * like a secret (a key planted in a listing, a hash, a token address) is redacted
  * and never revealed.
+ *
+ * Exported for one reader: the purge runbook's test (docs/security/ONBOARD_CHAT_SECRET_PURGE.md).
+ * Every field named here is a credential the chat can mint, so a legacy transcript
+ * holding it must be reported by the runbook's inventory; a new entry that the
+ * inventory does not know fails that test (astra pack 91b F4).
  */
-const REVEAL_RULES: Array<{ tool: string; method: string; path: string; fields: string[][] }> = [
+export const REVEAL_RULES: ReadonlyArray<{ tool: string; method: string; path: string; fields: string[][] }> = [
   {
     tool: "provision_api_key",
     method: "POST",
@@ -915,17 +1016,111 @@ function revealRuleFor(tool: AgentPackageTool) {
 }
 
 /**
- * For a credential-minting call: the identity the credential will be bound to,
- * as the call names it (the email or wallet in its arguments), for the person to
- * check before confirming (WP-D round 4, M1).
+ * What a dispatched tool call presents to its route: this caller's own credential and
+ * nothing else (dispatchToolCall replays no cookie jar). The route resolves who is
+ * calling from exactly this, so the binding shown to a person must be resolved from
+ * exactly this too, not from the chat request that may carry more (an API key AND a
+ * session cookie, of which only the key is forwarded).
  */
-function credentialBinding(tool: AgentPackageTool, input: Record<string, unknown>): string | undefined {
-  if (!revealRuleFor(tool)) return undefined;
-  for (const field of ["email", "walletAddress"]) {
-    const v = input?.[field];
-    if (typeof v === "string" && v.trim() !== "") return redactSecretsDeep(v.trim());
+function dispatchedRequest(principal: ChatPrincipal): FastifyRequest {
+  const headers: Record<string, string> = {};
+  if (principal.kind !== "anonymous") headers.authorization = principal.authorization;
+  return { headers } as unknown as FastifyRequest;
+}
+
+/** An identity field the call actually names: a non-blank string, trimmed. */
+function namedIdentity(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+/** Whose credential a credential-minting call would create, as resolved for the person to check. */
+interface CredentialBinding {
+  /** The identity the credential is keyed to (its operator_id): what the confirmation must still resolve to. */
+  operatorId: string;
+  /** The same, redacted, for a person to read (bindsTo). */
+  shown: string;
+  /** Why it is this identity, when the call did not simply name it. */
+  how: string;
+}
+
+type BindingOutcome = { ok: true; binding: CredentialBinding } | { ok: false; refusal: Refusal };
+
+/**
+ * For a credential-minting call: whose credential it WOULD create, for the person to
+ * check before confirming (WP-D round 4, M1), or why it cannot create one. Undefined
+ * for any other tool. Astra pack 91b F2: the answer is the identity the ROUTE will use.
+ *
+ * provision_api_key: resolved by selectProvisionIdentity(), the very function
+ * POST /api/auth/provision runs (wallet before email, then the signed-in session), over
+ * the credentials the dispatched call will carry. Naming both an email and a wallet is
+ * refused rather than guessed: they are two different identities, and the route would
+ * use the wallet and ignore the email. It stops short of the reserved / claimed lookup,
+ * which the route meters per IP; a claimed email is refused by the route at confirm.
+ *
+ * redeem_invite: the account is the email (the route ignores any wallet).
+ */
+function resolveCredentialBinding(
+  tool: AgentPackageTool,
+  input: Record<string, unknown>,
+  principal: ChatPrincipal,
+): BindingOutcome | undefined {
+  const rule = revealRuleFor(tool);
+  if (!rule) return undefined;
+  const email = namedIdentity(input?.email);
+  if (rule.tool === "redeem_invite") {
+    if (email === undefined) {
+      return { ok: false, refusal: refusal(400, "email_required", `${tool.name} needs the email of the account the invite is for. Ask the user for it.`) };
+    }
+    return { ok: true, binding: { operatorId: email, shown: redactSecretsDeep(email), how: "" } };
   }
-  return "(no email or wallet named: the gateway refuses to mint without one)";
+  if (email !== undefined && namedIdentity(input?.walletAddress) !== undefined) {
+    return {
+      ok: false,
+      refusal: refusal(
+        400,
+        "ambiguous_identity",
+        `${tool.name} names both an email and a wallet address. They are two different identities, and the gateway would use only the wallet. ` +
+          "Ask the user which ONE the new credential is for, then call it again with just that.",
+      ),
+    };
+  }
+  const selected = selectProvisionIdentity(dispatchedRequest(principal), input ?? {});
+  if (!selected.ok) {
+    return { ok: false, refusal: refusal(selected.status, String(selected.body.error), String(selected.body.message)) };
+  }
+  const how =
+    selected.source === "wallet"
+      ? "the wallet your signed-in session proves"
+      : selected.source === "session"
+        ? "you named no email or wallet, so it is the wallet your signed-in session proves"
+        : "";
+  return { ok: true, binding: { operatorId: selected.operatorId, shown: redactSecretsDeep(selected.operatorId), how } };
+}
+
+/**
+ * At confirmation: the credential must still resolve to the identity the person was
+ * shown. A refusal here means nothing is minted (astra 91b F2). The route resolves the
+ * identity again itself; this is the check that the answer has not moved since the hold.
+ */
+function bindingRefusalAtConfirm(
+  tool: AgentPackageTool,
+  args: Record<string, unknown>,
+  principal: ChatPrincipal,
+  held: HeldBinding | undefined,
+): Refusal | null {
+  const now = resolveCredentialBinding(tool, args, principal);
+  if (now === undefined) return null; // not a credential-minting call
+  if (!now.ok) return now.refusal;
+  if (held === undefined || !sameIdentity(now.binding.operatorId, held.operatorId)) {
+    return refusal(
+      409,
+      "identity_changed",
+      `This credential would now be bound to ${now.binding.shown}` +
+        (held !== undefined ? `, not ${held.shown} as you were shown` : "") +
+        ". Nothing was minted. Ask again to prepare it anew.",
+    );
+  }
+  return null;
 }
 
 /** The allowlisted credentials in one live tool result. */
@@ -991,6 +1186,12 @@ function processToolResult(
 
 // ── Held actions (WP-D R2) ──────────────────────────────────────────
 
+/** The identity a held credential-minting call was shown binding to (astra 91b F2). */
+interface HeldBinding {
+  operatorId: string;
+  shown: string;
+}
+
 /**
  * The real arguments of held actions, in this process's memory only, keyed by
  * action id. They may carry a secret (a password argument), so they are never
@@ -1005,6 +1206,11 @@ interface HeldArgsEntry {
   address: string;
   args: Record<string, unknown>;
   expiresAtMs: number;
+  /**
+   * For a credential-minting call: the identity the person was shown it would be bound
+   * to. The confirmation re-resolves it and refuses on any difference (astra 91b F2).
+   */
+  binding?: HeldBinding;
   /**
    * What the OWNER is shown while the action is open (L3): the real target, args
    * and summary with secrets removed but digests kept, so a substituted hash is
@@ -1053,11 +1259,12 @@ export function _forgetHeldActionsForTests(): void {
   heldArgs.clear();
 }
 
-function describeAction(tool: AgentPackageTool, plan: ToolPlan): string {
+/** One line for a person: the method, the DISPLAY target (never the executable one) and the tool's first sentence. */
+function describeAction(tool: AgentPackageTool, method: string, shownTarget: string): string {
   const description = tool.description ?? "";
   const end = description.search(/[.!?](?:\s|$)/);
   const first = (end >= 0 ? description.slice(0, end + 1) : description).slice(0, 160);
-  return `${plan.method} ${plan.target}${first ? ` (${first})` : ""}`;
+  return `${method} ${shownTarget}${first ? ` (${first})` : ""}`;
 }
 
 function viewAction(a: PendingActionRecord): PendingActionView {
@@ -1095,27 +1302,43 @@ function holdAction(
   input: Record<string, unknown>,
   owner: string,
   address: string,
+  binding: CredentialBinding | undefined,
 ): PendingActionRecord | Exclude<HoldOutcome, "held"> {
   const id = `act_${randomBytes(16).toString("base64url")}`;
   const now = Date.now();
   const expiresAtMs = now + PENDING_ACTION_TTL_MS;
   const args = JSON.parse(JSON.stringify(input ?? {})) as Record<string, unknown>;
-  const bindsTo = credentialBinding(tool, args);
-  const bindLine = bindsTo !== undefined ? `Creates a new PCC credential bound to ${bindsTo}. ` : "";
+  const bindsTo = binding?.shown;
+  const bindLine =
+    binding !== undefined
+      ? `Creates a new PCC credential bound to ${binding.shown}${binding.how ? ` (${binding.how})` : ""}. `
+      : "";
+  // Both readable targets are built from the redacted ARGUMENTS (astra 91b F1); the
+  // executable plan.target is not shown, stored or described anywhere.
+  const ownerTarget = displayTarget(tool, plan.method, args, OWNER_VIEW);
+  const storedTarget = displayTarget(tool, plan.method, args);
   const view = {
-    target: redactSecretsDeep(plan.target, undefined, OWNER_VIEW),
+    target: ownerTarget,
     args: redactSecretsDeep(args, undefined, OWNER_VIEW),
-    summary: bindLine + redactSecretsDeep(describeAction(tool, plan), undefined, OWNER_VIEW),
+    summary: bindLine + redactSecretsDeep(describeAction(tool, plan.method, ownerTarget), undefined, OWNER_VIEW),
   };
-  const outcome = holdArgs(id, { conversationId: record.id, owner, address, args, expiresAtMs, view });
+  const outcome = holdArgs(id, {
+    conversationId: record.id,
+    owner,
+    address,
+    args,
+    expiresAtMs,
+    ...(binding !== undefined ? { binding: { operatorId: binding.operatorId, shown: binding.shown } } : {}),
+    view,
+  });
   if (outcome !== "held") return outcome;
-  const summary = redactSecretsDeep(describeAction(tool, plan));
+  const summary = redactSecretsDeep(describeAction(tool, plan.method, storedTarget));
   const action: PendingActionRecord = {
     id,
     tool: tool.name,
     method: plan.method,
     endpoint: tool.endpoint?.path ?? "",
-    target: redactSecretsDeep(plan.target),
+    target: storedTarget,
     args: redactSecretsDeep(args),
     summary: bindLine + summary,
     ...(bindsTo !== undefined ? { bindsTo } : {}),
@@ -1139,7 +1362,7 @@ function consumeHeldAction(
   record: ConversationRecord,
   actionId: string,
   principal: ChatPrincipal,
-): { refusal: Refusal } | { action: PendingActionRecord; args: Record<string, unknown> } {
+): { refusal: Refusal } | { action: PendingActionRecord; args: Record<string, unknown>; binding?: HeldBinding } {
   const notFound = refusal(404, "action_not_found", "There is no held action with that id on this conversation for you.");
   // A signed-in caller claims only its own holds. An anonymous caller claims only
   // the holds of this still-anonymous conversation (M1).
@@ -1168,7 +1391,7 @@ function consumeHeldAction(
       ),
     };
   }
-  return { action, args: held.args };
+  return { action, args: held.args, ...(held.binding !== undefined ? { binding: held.binding } : {}) };
 }
 
 // ── Route handler ───────────────────────────────────────────────────
@@ -1355,8 +1578,15 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
       // WP-D R2 and round 4 M1: reads run. A signed-in chat holds every other call.
       // An anonymous chat holds every other call except the pure computations.
       if (!runsWithoutConfirmation(principal, planned.plan)) {
+        // A credential-minting call is held only with the identity the ROUTE will bind it
+        // to (astra 91b F2); one that cannot mint, or whose identity is ambiguous, is refused here.
+        const bound = resolveCredentialBinding(tool, input, principal);
+        if (bound !== undefined && !bound.ok) {
+          const result = bound.refusal.result;
+          return { trace: { name, args: safeInput, status: bound.refusal.status, result, durationMs: 0 }, content: JSON.stringify(result) };
+        }
         const owner = principal.kind === "anonymous" ? anonymousOwner(record.id) : principal.fingerprint;
-        const action = holdAction(record, tool, planned.plan, input, owner, toolCtx.remoteAddress);
+        const action = holdAction(record, tool, planned.plan, input, owner, toolCtx.remoteAddress, bound?.binding);
         if (typeof action === "string") {
           // A per-holder quota is the caller's own limit (429); only a full process is 503.
           const result =
@@ -1387,7 +1617,7 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
 
     const userText: string[] = [];
     if (confirmation) {
-      const { action, args } = confirmation;
+      const { action, args, binding } = confirmation;
       const tool = toolByName.get(action.tool);
       let trace: ToolCallTrace;
       let content: string;
@@ -1397,9 +1627,15 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
         content = JSON.stringify(result);
       } else {
         const planned = planToolCall(tool, args, principal);
+        // Whose credential this mints is re-resolved by the route's own rules, and must
+        // still be the identity the person was shown (astra 91b F2).
+        const identityRefusal = "refusal" in planned ? null : bindingRefusalAtConfirm(tool, args, principal, binding);
         if ("refusal" in planned) {
           trace = { name: tool.name, args: action.args, status: planned.refusal.status, result: planned.refusal.result, durationMs: 0, confirmedActionId: action.id };
           content = JSON.stringify(planned.refusal.result);
+        } else if (identityRefusal) {
+          trace = { name: tool.name, args: action.args, status: identityRefusal.status, result: identityRefusal.result, durationMs: 0, confirmedActionId: action.id };
+          content = JSON.stringify(identityRefusal.result);
         } else {
           const start = Date.now();
           const exec = await dispatchToolCall(app, planned.plan, toolCtx);
@@ -1523,13 +1759,13 @@ export async function onboardChatRoutes(app: FastifyInstance): Promise<void> {
           }
           const outcome = await runToolUse(block.name, block.input ?? {});
           toolCalls.push(outcome.trace);
-          let content = outcome.content;
-          if (historyFull || historyUsed + content.length > MAX_HISTORY_CHARS) {
-            content = JSON.stringify(HISTORY_FULL_RESULT);
+          let kept: AnthropicMessageContent = { type: "tool_result", tool_use_id: block.id, content: outcome.content };
+          if (historyFull || historyUsed + blockChars(kept) > MAX_HISTORY_CHARS) {
+            kept = { type: "tool_result", tool_use_id: block.id, content: JSON.stringify(HISTORY_FULL_RESULT) };
             historyFull = true;
           }
-          historyUsed += content.length;
-          toolResultsForNextTurn.push({ type: "tool_result", tool_use_id: block.id, content });
+          historyUsed += blockChars(kept);
+          toolResultsForNextTurn.push(kept);
         }
       }
 
