@@ -308,6 +308,19 @@ describe("onboard-chat credential binding (astra pack 91b F2)", () => {
     expect(provisionCalls()).toEqual([]);
   });
 
+  it("another session of the same wallet confirms a held credential: the identity is the same wallet however it is cased, so nothing is refused (F3 by design)", async () => {
+    const first = siwe(WALLET);
+    const second = siwe(WALLET.toUpperCase().replace("0X", "0x")); // the same wallet, stored in another letter case
+    llm.responses.push(calls(["provision_api_key", {}]), endTurn);
+    const held = (await chat({ message: "sign me up" }, first.bearer)).json();
+    expect(held.pendingActions[0]).toMatchObject({ bindsTo: WALLET });
+    llm.responses.push(endTurn);
+    const confirm = (await chat({ conversationId: held.conversationId, confirmActionId: held.pendingActions[0].actionId }, second.bearer)).json();
+    expect(confirm.confirmedAction).toMatchObject({ tool: "provision_api_key", status: 201 });
+    const reveal = (confirm.revealedSecrets as Array<{ path: string; value: string }>).find((r) => r.path === "$.api_key");
+    expect(resolveApiKeyFromToken(reveal!.value)?.operatorId.toLowerCase()).toBe(WALLET);
+  });
+
   it("[neg] confirming refuses with the route's own answer when the identity can no longer be resolved at all", async () => {
     const session = siwe(WALLET);
     llm.responses.push(calls(["provision_api_key", {}]), endTurn);
