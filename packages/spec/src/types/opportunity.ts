@@ -29,7 +29,10 @@
  *
  * `asOf` is the READ time for every kind (an ISO timestamp); it never says when
  * an intent happened (#365 F4). A demand_aggregate's release period must have
- * closed before its asOf.
+ * closed before its asOf, and no asOf may run more than MAX_AS_OF_SKEW_MS ahead
+ * of the clock that parses it (astra pack 112b). That bounds a forged future
+ * asOf; it cannot prove the time is true, so the trusted producer assigns asOf
+ * from its own clock. `deadline` is not restricted.
  *
  * Versioning: pre-release until first merge. These shapes have no deployed
  * producer or consumer yet, so amendment 1 and the pack-112 fixes land under the
@@ -63,6 +66,18 @@ const Sha256Schema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const IsoTimestamp = z.string().datetime({ offset: true });
 const Title = z.string().min(1).max(160).regex(/^[^\n\r]*$/, "single line");
 const DemandBandSchema = z.enum(["5-9", "10-24", "25-99", "100+"]);
+
+/** The most a read time (`asOf`, a binding's `lastSeenAt`) may run ahead of the clock that parses it. */
+export const MAX_AS_OF_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * False when `timestamp` is later than now plus MAX_AS_OF_SKEW_MS, or is not a
+ * parseable instant. Shared by OpportunityDTO.asOf and OperatorBindingDTO's
+ * asOf and lastSeenAt.
+ */
+export function readTimeIsNotInFuture(timestamp: string): boolean {
+  return Date.parse(timestamp) <= Date.now() + MAX_AS_OF_SKEW_MS;
+}
 
 // ── Evidence primitives ─────────────────────────────────────────────
 
@@ -497,6 +512,9 @@ export function opportunityDTOSchemaFor(publicUrls: Iterable<string>) {
     .discriminatedUnion("kind", [FundedOfferSchema, KitBuildRequestSchema, DemandAggregateSchema])
     .superRefine((o, ctx) => {
       const fail = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+      if (!readTimeIsNotInFuture(o.asOf)) {
+        fail("asOf is a read time: it may not run more than MAX_AS_OF_SKEW_MS ahead of the clock");
+      }
       if (o.kind === "funded_offer") {
         if (o.evidence && !o.evidence.executable) {
           fail("a funded_offer's evidence must be executable (see evidenceIsExecutable)");

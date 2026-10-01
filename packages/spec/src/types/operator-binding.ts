@@ -15,6 +15,11 @@
  * resolves from its own payout-destination store (N21). A binding never sets,
  * changes or authorizes a payout, and grants no spend authority (R41).
  *
+ * Read times: `asOf` and every binding's `lastSeenAt` may not run more than
+ * MAX_AS_OF_SKEW_MS (opportunity.ts) ahead of the clock that parses them (astra
+ * pack 112b). That bounds a forged future time; it cannot prove the time is true,
+ * so the server assigns both from its own clock.
+ *
  * Capability types are CSD urls (amendment A1). A binding, a kit and an
  * opportunity compare capability types directly, so a legacy type string such
  * as "3d-printing" can never silently fail to match. Capacity whose legacy type
@@ -35,6 +40,7 @@ import { z } from "zod";
 
 import type { SHA256, Timestamp } from "./common.js";
 import { CSD_CAPABILITY_URL_PATTERN } from "./capability-kit.js";
+import { readTimeIsNotInFuture } from "./opportunity.js";
 
 export const OPERATOR_BINDING_SCHEMA = "pcc.operator-binding.v0" as const;
 
@@ -53,6 +59,7 @@ export interface OperatorBindingEntry {
   availability: AvailabilitySummary | null;
   /** Capped by the server from proven evidence; never the self-declared tier. */
   assuranceTierCap: 0 | 1 | 2 | 3;
+  /** A read time: never more than MAX_AS_OF_SKEW_MS ahead of the clock that parses it. */
   lastSeenAt: Timestamp | null;
 }
 
@@ -109,7 +116,7 @@ export interface OperatorBindingDTO {
     /** CSD urls the principal may claim work for, derived from bindings. */
     canClaimCapabilityTypes: string[];
   };
-  /** READ time of this projection. */
+  /** READ time of this projection: never more than MAX_AS_OF_SKEW_MS ahead of the clock that parses it. */
   asOf: Timestamp;
 }
 
@@ -156,6 +163,12 @@ export const OperatorPayeeViewSchema = z
 
 const IsoTimestamp = z.string().datetime({ offset: true });
 
+/** A read time: an ISO timestamp no more than MAX_AS_OF_SKEW_MS ahead of the clock that parses it (shared with OpportunityDTO). */
+const ReadTimestamp = IsoTimestamp.refine(
+  readTimeIsNotInFuture,
+  "a read time may not run more than MAX_AS_OF_SKEW_MS ahead of the clock",
+);
+
 export const AvailabilitySummarySchema = z
   .object({
     mode: z.enum(["always", "windows", "cron", "manual-claim", "delegate-to-agent"]),
@@ -191,7 +204,7 @@ export const OperatorBindingEntrySchema = z
     presence: z.enum(["online", "offline", "unknown"]),
     availability: AvailabilitySummarySchema.nullable(),
     assuranceTierCap: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
-    lastSeenAt: IsoTimestamp.nullable(),
+    lastSeenAt: ReadTimestamp.nullable(),
   })
   .strict();
 
@@ -220,7 +233,7 @@ export const OperatorBindingDTOSchema = z
     executionAuthority: z
       .object({ canClaimCapabilityTypes: z.array(z.string().regex(CSD_CAPABILITY_URL_PATTERN, "Must be a CSD url")) })
       .strict(),
-    asOf: IsoTimestamp,
+    asOf: ReadTimestamp,
   })
   .strict()
   .superRefine((dto, ctx) => {

@@ -25,6 +25,7 @@ import {
 } from "../types/operator-binding.js";
 import {
   BUILTIN_PUBLIC_CAPABILITY_URLS,
+  MAX_AS_OF_SKEW_MS,
   OPPORTUNITY_SCHEMA,
   OpportunityDTOSchema,
   PRIMITIVE_PARAMS_ANNOTATIONS,
@@ -38,6 +39,7 @@ import {
   opportunityDTOSchemaFor,
   primitivesAreExecutable,
   publicCapabilityUrls,
+  readTimeIsNotInFuture,
   validatePrimitiveParams,
   type DemandAggregateDTO,
   type FundedOfferDTO,
@@ -1276,6 +1278,82 @@ describe("astra pack 112b", () => {
   it("control for 5b: the same binding without describe parses (else the fixture is wrong)", () => {
     const r = OperatorBindingDTOSchema.safeParse(withDescribe());
     expect(r.success ? "ok" : JSON.stringify(r.error.issues)).toBe("ok");
+  });
+
+  // ── E. MEDIUM 7: a read time is never in the future ──
+
+  /** An ISO instant `ms` from now, computed inside the test (no fake timers). */
+  const fromNow = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const futureAsOf = "asOf is a read time: it may not run more than MAX_AS_OF_SKEW_MS ahead of the clock";
+  const futureBinding = "a read time may not run more than MAX_AS_OF_SKEW_MS ahead of the clock";
+  const bindingMessages = (v: unknown) => {
+    const r = OperatorBindingDTOSchema.safeParse(v);
+    return r.success ? [] : r.error.issues.map((i) => i.message);
+  };
+
+  it("MEDIUM 7: a future period with a forged future asOf is refused", () => {
+    const forged = aggregate({ capabilityType: "pcc://capabilities/fdm/v2", releasePeriod: "2099-12", asOf: "2100-01-01T00:00:00Z" });
+    expect(parses(forged)).toBe(false);
+    // The period really did close before this asOf, so the future asOf is the only reason.
+    expect(messagesOf(forged)).toEqual([futureAsOf]);
+  });
+
+  it("MAX_AS_OF_SKEW_MS is 5 minutes, and the shared helper refuses anything beyond it or unparseable", () => {
+    expect(MAX_AS_OF_SKEW_MS).toBe(5 * 60 * 1000);
+    expect(readTimeIsNotInFuture("2026-09-24T12:00:00Z")).toBe(true);
+    expect(readTimeIsNotInFuture(fromNow(60_000))).toBe(true);
+    expect(readTimeIsNotInFuture(fromNow(10 * 60_000))).toBe(false);
+    expect(readTimeIsNotInFuture("2100-01-01T00:00:00Z")).toBe(false);
+    // An instant it cannot read is refused, never waved through.
+    for (const garbage of ["", "yesterday", "NaN", "2026-13-45T99:99:99Z"]) expect(readTimeIsNotInFuture(garbage), garbage).toBe(false);
+    // Offsets compare as absolute instants: ten minutes ahead is ahead in any zone.
+    const ahead = new Date(Date.now() + 10 * 60_000);
+    const tenAhead = `${new Date(ahead.getTime() + 2 * 3600_000).toISOString().slice(0, 19)}+02:00`;
+    expect(readTimeIsNotInFuture(tenAhead)).toBe(false);
+  });
+
+  it("every OpportunityDTO kind accepts an asOf up to the skew ahead (60 s, and the skew itself) and refuses one beyond it (10 min)", () => {
+    const kinds: Array<[string, (asOf: string) => unknown]> = [
+      ["funded_offer", (asOf) => fundedOffer({ asOf })],
+      ["kit_build_request", (asOf) => kitRequest({ asOf })],
+      ["demand_aggregate", (asOf) => aggregate({ asOf })],
+    ];
+    for (const [kind, make] of kinds) {
+      expect(parses(make(fromNow(60_000))), `${kind} +60 s`).toBe(true);
+      expect(parses(make(fromNow(MAX_AS_OF_SKEW_MS))), `${kind} +skew`).toBe(true);
+      expect(parses(make(fromNow(MAX_AS_OF_SKEW_MS + 60_000))), `${kind} +skew+1 min`).toBe(false);
+      expect(messagesOf(make(fromNow(10 * 60_000))), `${kind} +10 min`).toEqual([futureAsOf]);
+      expect(parses(make(fromNow(-60_000))), `${kind} -60 s`).toBe(true);
+      expect(parses(make("2100-01-01T00:00:00Z")), `${kind} year 2100`).toBe(false);
+    }
+  });
+
+  it("a deadline is NOT restricted: it is a future promise, not a read time", () => {
+    expect(parses(kitRequest({ deadline: "2100-01-01T00:00:00Z" }))).toBe(true);
+    expect(parses(fundedOffer({ deadline: fromNow(30 * 24 * 3600_000) }))).toBe(true);
+  });
+
+  it("an OperatorBindingDTO's asOf and every binding's lastSeenAt are read times too", () => {
+    const withSeen = (lastSeenAt: string | null) => {
+      const b = binding();
+      b.bindings = [{ ...b.bindings[0]!, lastSeenAt }];
+      return b;
+    };
+    // asOf
+    expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: fromNow(60_000) })).success).toBe(true);
+    expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: fromNow(MAX_AS_OF_SKEW_MS) })).success).toBe(true);
+    expect(bindingMessages(binding({ asOf: fromNow(10 * 60_000) }))).toEqual([futureBinding]);
+    expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: "2100-01-01T00:00:00Z" })).success).toBe(false);
+    // lastSeenAt: null is "never seen", and a recent time is fine
+    expect(OperatorBindingDTOSchema.safeParse(withSeen(null)).success).toBe(true);
+    expect(OperatorBindingDTOSchema.safeParse(withSeen(fromNow(60_000))).success).toBe(true);
+    expect(OperatorBindingDTOSchema.safeParse(withSeen(fromNow(-3600_000))).success).toBe(true);
+    expect(bindingMessages(withSeen(fromNow(10 * 60_000)))).toEqual([futureBinding]);
+    expect(OperatorBindingDTOSchema.safeParse(withSeen("2100-01-01T00:00:00Z")).success).toBe(false);
+    // Any one binding in the list is enough to refuse it.
+    const two = binding();
+    two.bindings = [two.bindings[0]!, { ...two.bindings[0]!, id: "kernel-ot2-b", lastSeenAt: fromNow(10 * 60_000) }];
+    expect(OperatorBindingDTOSchema.safeParse(two).success).toBe(false);
   });
 });
 
