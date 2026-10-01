@@ -506,6 +506,69 @@ describe("A2A skills: pcc-attach-channel + author-integration extension", () => 
     expect(body.result.state).toBe("COMPLETED");
     expect(body.result.artifacts[0].data.operatorSlug).toBe("my-opentrons-ot-2");
   });
+
+  // N84: a channel belongs to the identity that attaches it, so the skill needs a caller. Here
+  // PCC_A2A_AUTH_DISABLED turns the route's own bearer gate off, so an anonymous call reaches the skill itself.
+  it("pcc-attach-channel with no credentials is refused (-32600) and attaches nothing", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tasks/send",
+        params: {
+          skill: "pcc-attach-channel",
+          params: {
+            operatorSlug: "anon-shop",
+            label: "Anonymous",
+            transport: "manual",
+            describe: "Dashboard only, from nobody",
+          },
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.error?.code).toBe(-32600);
+    expect(body.result).toBeUndefined();
+    expect(getChannelsByOperator("anon-shop")).toHaveLength(0);
+  });
+
+  it("pcc-attach-channel records the caller as the creator, and its reply counts only the caller's channels", async () => {
+    attachChannel(
+      "shared-shop",
+      { label: "Theirs", transport: "manual", describe: "Dashboard only, theirs" },
+      "someone-else@a2a.test",
+    );
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tasks/send",
+        params: {
+          skill: "pcc-attach-channel",
+          params: {
+            operatorSlug: "shared-shop",
+            label: "Mine",
+            transport: "manual",
+            describe: "Dashboard only, mine",
+          },
+        },
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorKey}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.result.state).toBe("COMPLETED");
+    expect(body.result.artifacts[0].data.totalChannelsNow).toBe(1); // "Theirs" is not this caller's to count
+    const mine = getChannelsByOperator("shared-shop").find((c) => c.label === "Mine");
+    expect(mine?.creatorId).toBe("a2a-channels-operator");
+    expect(JSON.stringify(body)).not.toContain("Theirs");
+  });
 });
 
 // ── N84: the handlers' own guard (a bare app: no apiGate in front) ───────────

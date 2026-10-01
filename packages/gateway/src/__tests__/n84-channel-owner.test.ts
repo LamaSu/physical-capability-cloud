@@ -2,8 +2,8 @@
  * N84, the WP-A part: an operator channel belongs to the identity that attached it.
  *
  * PR #483 (from master) guards the channel SEND path (a URL guard, a credential allowlist). It does not
- * decide WHO may touch a channel; per steward rule 6 that rides WP-A (#326, this branch). Here the channel
- * routes are the old unguarded ones, so ANY authenticated key can, for any slug it names:
+ * decide WHO may touch a channel; per steward rule 6 that rides WP-A (#326, this branch). Before this fix
+ * the channel routes were the old unguarded ones, so ANY authenticated key could, for any slug it named:
  *
  *   - GET    /api/operators/:slug/channels        list every channel: endpoint.url, credentialRef, address;
  *   - PATCH  /api/operators/channels/:id          retarget (or disable) a channel found by id;
@@ -413,6 +413,27 @@ describe("N84 creator binding: anyone may attach under any slug, but the channel
     for (const res of [list, test, status]) {
       for (const detail of detailsOfA(ids)) expect(res.body, detail).not.toContain(detail);
     }
+  });
+
+  it("[neg] A cannot change or delete B's channel under the same slug: ownership is the channel's own, not the slug's", async () => {
+    await seedOwnerChannels();
+    const theirs = await strangerAttach();
+    const patch = await call("PATCH", `/api/operators/channels/${theirs.id}`, keyA, {}, {
+      label: "N84-A-relabelled",
+      endpoint: { address: ATTACKER_ADDRESS },
+    });
+    const del = await call("DELETE", `/api/operators/channels/${theirs.id}`, keyA);
+    const stored = chans(SLUG).find((c) => c.id === theirs.id);
+    note("owner-vs-stranger-channel", {
+      patch: patch.statusCode,
+      delete: del.statusCode,
+      storedLabel: stored?.label,
+      storedEndpoint: stored?.endpoint,
+    });
+    expect([403, 404], patch.body).toContain(patch.statusCode);
+    expect([403, 404], del.body).toContain(del.statusCode);
+    expect(stored?.label).toBe("N84-B-email");
+    expect(stored?.endpoint).toEqual({ address: STRANGER_ADDRESS });
   });
 
   it("[neg] the creator cannot be changed through PATCH: a creatorId in the body is ignored, for the creator and for the admin", async () => {
