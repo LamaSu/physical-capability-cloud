@@ -11,15 +11,18 @@ import {
   deriveContradictions,
   evidenceLevelOfBundles,
   evidenceLevelRank,
+  evidenceLevelsOfEvents,
   inspectionFailed,
   inspectionVerdict,
   meetsEvidenceLevel,
   type AuthenticatedBundle,
   type EvidenceLevel,
   type EvidenceLevelContext,
+  type EventLevel,
   type InspectionVerdict,
 } from "../evidence/evidence-level.js";
 import { bundleHasFabricatedEvents, isFabricated } from "../evidence/is-fabricated.js";
+import * as evidenceBarrel from "../evidence/index.js";
 import { EVIDENCE_EVENT_TYPES, type EvidenceEvent, type EvidenceEventType } from "../types/evidence.js";
 
 const KERNEL = "kernel-print-1";
@@ -800,6 +803,141 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
       expect(provesALevel, label).toBe(!isFabricated(variant));
       expect(bundleHasFabricatedEvents({ events: [variant] }), label).toBe(isFabricated(variant));
     }
+  });
+});
+
+describe("evidenceLevelsOfEvents — the per-event level, from the same facts and rules (D3)", () => {
+  const levelsOf = (bundles: AuthenticatedBundle[], context?: EvidenceLevelContext) =>
+    evidenceLevelsOfEvents(bundles, context).map((entry) => entry.level);
+
+  it("returns one frozen record per event, in input order, with the bundle and event indices", () => {
+    const inspector = bundle([inspectPass(), ev("camera_snapshot", CAMERA)], OP_B);
+    const result = evidenceLevelsOfEvents([executorBundle(), inspector], ASSIGNED_A);
+    expect(result).toEqual([
+      { bundleIndex: 0, eventIndex: 0, level: null }, // execution_started proves no level
+      { bundleIndex: 0, eventIndex: 1, level: "device_reported" }, // execution_completed
+      { bundleIndex: 1, eventIndex: 0, level: "inspected_output" }, // the independent inspection
+      { bundleIndex: 1, eventIndex: 1, level: null }, // camera_snapshot
+    ] satisfies EventLevel[]);
+    expect(Object.isFrozen(result)).toBe(true);
+    for (const entry of result) expect(Object.isFrozen(entry)).toBe(true);
+  });
+
+  it("gives each class of event its level", () => {
+    const events = [
+      ev("method_loaded", PRINTER), // submitted
+      done(), // device_reported
+      ev("instrument_result", READER, { pass: true }), // valid verdict, same trust domain: device_reported
+      ev("instrument_result", READER, {}), // none: no level
+      ev("instrument_result", READER, { pass: "x" }), // malformed: no level
+      failed(), // no outcome
+      ev("execution_completed", undefined), // no device attribution
+      ev("execution_completed", GATEWAY_STAMPED_DEVICE_ID), // the gateway's own stamp
+      ev("temperature_log", PRINTER), // telemetry
+    ];
+    expect(levelsOf([bundle(events, OP_A)], ASSIGNED_A)).toEqual([
+      "submitted",
+      "device_reported",
+      "device_reported",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    // The valid inspection in its own bundle, in an independent trust domain. (In a bundle that also held an
+    // execution event its domain would be an executor itself.)
+    const executing = bundle(events.slice(0, 2), OP_A);
+    const independentInspection = bundle(events.slice(2, 3), OP_B);
+    expect(levelsOf([executing, independentInspection], ASSIGNED_A)).toEqual([
+      "submitted",
+      "device_reported",
+      "inspected_output",
+    ]);
+  });
+
+  it("every event of a fabricated bundle is null, even one that would prove a level; a genuine bundle beside it is unaffected", () => {
+    const fabricated = bundle([done(), inspectPass(), ev("camera_snapshot", CAMERA, { mock: true })], OP_B);
+    expect(levelsOf([fabricated, executorBundle()], ASSIGNED_A)).toEqual([null, null, null, null, "device_reported"]);
+  });
+
+  it("independence applies per bundle", () => {
+    const bundles = [executorBundle(), bundle([inspectPass()], OP_A), bundle([inspectPass()], OP_B)];
+    expect(levelsOf(bundles, ASSIGNED_A)).toEqual([null, "device_reported", "device_reported", "inspected_output"]);
+    // No assignment: nobody is provably independent.
+    expect(levelsOf(bundles)).toEqual([null, "device_reported", "device_reported", "device_reported"]);
+  });
+
+  it("no bundles, or bundles with no events, give a frozen empty array", () => {
+    for (const bundles of [[], [bundle([], OP_A), bundle([])]]) {
+      const result = evidenceLevelsOfEvents(bundles);
+      expect(result).toEqual([]);
+      expect(Object.isFrozen(result)).toBe(true);
+    }
+  });
+
+  it("refuses the same input the other functions refuse, and reads its input once", () => {
+    expect(() => evidenceLevelsOfEvents(undefined as unknown as AuthenticatedBundle[])).toThrow(EvidenceLevelInputError);
+    expect(() => evidenceLevelsOfEvents([{ events: [], trustDomain: "nope" }])).toThrow(EvidenceLevelInputError);
+    expect(() => evidenceLevelsOfEvents([], { executorTrustDomains: ["nope"] })).toThrow(EvidenceLevelInputError);
+    const event = ev("execution_completed", PRINTER);
+    let reads = 0;
+    Object.defineProperty(event, "type", {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads === 1 ? "execution_completed" : "execution_failed";
+      },
+    });
+    expect(levelsOf([bundle([event], OP_A)])).toEqual(["device_reported"]);
+    expect(reads).toBe(1);
+  });
+
+  it("evidenceLevelOfBundles is the maximum over evidenceLevelsOfEvents, on every combination", () => {
+    const domains: Array<string | undefined> = [undefined, OP_A, OP_B, OP_C];
+    const contexts: Array<EvidenceLevelContext | undefined> = [
+      undefined,
+      {},
+      { executorTrustDomains: [] },
+      ASSIGNED_A,
+      { executorTrustDomains: [OP_B] },
+      { executorTrustDomains: [OP_A, OP_C] },
+    ];
+    const payloads: unknown[] = [{ pass: true }, { pass: false }, {}, { pass: "x" }];
+    let cases = 0;
+    for (const executorDomain of domains) {
+      for (const inspectorDomain of domains) {
+        for (const context of contexts) {
+          for (const payload of payloads) {
+            for (const fakeExecutor of [false, true]) {
+              for (const fakeInspector of [false, true]) {
+                const mock = () => ev("camera_snapshot", CAMERA, { mock: true });
+                const executor = bundle([started(), done(), ...(fakeExecutor ? [mock()] : [])], executorDomain);
+                const inspector = bundle(
+                  [ev("instrument_result", READER, payload), ...(fakeInspector ? [mock()] : [])],
+                  inspectorDomain,
+                );
+                let best: EvidenceLevel | null = null;
+                for (const { level: reached } of evidenceLevelsOfEvents([executor, inspector], context)) {
+                  if (reached !== null && (best === null || evidenceLevelRank(reached) > evidenceLevelRank(best))) {
+                    best = reached;
+                  }
+                }
+                expect(evidenceLevelOfBundles([executor, inspector], context)).toBe(best);
+                cases += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(cases).toBe(4 * 4 * 6 * 4 * 2 * 2);
+  });
+
+  it("is exported from the evidence barrel", () => {
+    expect(evidenceBarrel.evidenceLevelsOfEvents).toBe(evidenceLevelsOfEvents);
+    expect(evidenceBarrel.evidenceLevelOfBundles).toBe(evidenceLevelOfBundles);
   });
 });
 

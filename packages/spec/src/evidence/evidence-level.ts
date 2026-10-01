@@ -65,6 +65,10 @@
  *    ALL of these hold: `executorTrustDomains` is non-empty; E is not unknown;
  *    the inspection's bundle has a trust domain; that domain is not in E.
  *    Otherwise an inspection with a valid verdict is `device_reported`.
+ *    `evidenceLevelsOfEvents` returns the level each event proves (bundle index,
+ *    event index, level; null for a fabricated bundle's events and for events
+ *    that prove nothing) by these same rules, and `evidenceLevelOfBundles` is
+ *    the maximum over it.
  *
  * 4. Verdict pinning. An inspection proves a level only if its payload carries
  *    a valid verdict. `inspectionVerdict` reads ONE pinned field per inspection
@@ -592,21 +596,38 @@ function eventLevel(facts: EventFacts, inspectorIndependent: boolean): EvidenceL
   return null;
 }
 
+/** The level one event proves, with where it sits in the input. */
+export interface EventLevel {
+  /** Index into the `bundles` passed in. */
+  readonly bundleIndex: number;
+  /** Index into that bundle's `events`. */
+  readonly eventIndex: number;
+  /**
+   * The level this event proves, or null: every event of a fabricated bundle,
+   * an event with no device attribution (or the gateway's stamp), a type that
+   * proves no outcome, an inspection whose verdict is none or malformed.
+   */
+  readonly level: EvidenceLevel | null;
+}
+
 /**
- * The strongest level the bundles of one settlement unit prove, or null. Pass
- * every authenticated bundle of the unit (see the contract in the header).
- * Throws `EvidenceLevelInputError` for input it cannot classify.
+ * The level each event proves, in input order (bundle by bundle, event by
+ * event), as a frozen array of frozen records. This is the one implementation of
+ * the level rules; `evidenceLevelOfBundles` is the maximum over it.
  *
- * Bundles with any fabricated event prove nothing. An inspection is
- * inspected_output only when `context.executorTrustDomains` is non-empty, no
- * bundle holding an execution event lacks a trust domain, the inspection's
- * bundle has a trust domain, and that domain is not an executor (assigned, or
- * the domain of any bundle holding an execution event, fabricated or not).
+ * Bundles with any fabricated event prove nothing: level null for every one of
+ * their events. An inspection is inspected_output only when
+ * `context.executorTrustDomains` is non-empty, no bundle holding an execution
+ * event lacks a trust domain, the inspection's bundle has a trust domain, and
+ * that domain is not an executor (assigned, or the domain of any bundle holding
+ * an execution event, fabricated or not); otherwise an inspection with a valid
+ * verdict is device_reported. Throws `EvidenceLevelInputError` for input it
+ * cannot classify.
  */
-export function evidenceLevelOfBundles(
+export function evidenceLevelsOfEvents(
   bundles: readonly AuthenticatedBundle[],
   context?: EvidenceLevelContext,
-): EvidenceLevel | null {
+): readonly EventLevel[] {
   const assigned = assignedExecutorDomains(context);
   const prepared = prepareBundles(bundles);
 
@@ -619,16 +640,33 @@ export function evidenceLevelOfBundles(
   }
   const independenceProvable = assigned.length > 0 && !executorsUnknown;
 
-  let best: EvidenceLevel | null = null;
-  for (const bundle of prepared) {
-    if (bundle.fabricated) continue;
+  const levels: EventLevel[] = [];
+  for (let bundleIndex = 0; bundleIndex < prepared.length; bundleIndex += 1) {
+    const bundle = prepared[bundleIndex]!;
     const inspectorIndependent =
       independenceProvable && bundle.trustDomain !== null && !executors.has(bundle.trustDomain);
-    for (const facts of bundle.events) {
-      const level = eventLevel(facts, inspectorIndependent);
-      if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
-        best = level;
-      }
+    for (let eventIndex = 0; eventIndex < bundle.events.length; eventIndex += 1) {
+      const level = bundle.fabricated ? null : eventLevel(bundle.events[eventIndex]!, inspectorIndependent);
+      levels.push(Object.freeze({ bundleIndex, eventIndex, level }));
+    }
+  }
+  return Object.freeze(levels);
+}
+
+/**
+ * The strongest level the bundles of one settlement unit prove, or null: the
+ * maximum over `evidenceLevelsOfEvents`, so the two cannot disagree. Pass every
+ * authenticated bundle of the unit (see the contract in the header). Throws
+ * `EvidenceLevelInputError` for input it cannot classify.
+ */
+export function evidenceLevelOfBundles(
+  bundles: readonly AuthenticatedBundle[],
+  context?: EvidenceLevelContext,
+): EvidenceLevel | null {
+  let best: EvidenceLevel | null = null;
+  for (const { level } of evidenceLevelsOfEvents(bundles, context)) {
+    if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
+      best = level;
     }
   }
   return best;

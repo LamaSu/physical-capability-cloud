@@ -22,11 +22,13 @@ export * from "./primitives.js";
 // isFabricated / bundleHasFabricatedEvents — the ONE canonical fabricated-evidence
 // predicate, read by every detector site (ALCOA, settlement, tier gate, oracle).
 export * from "./is-fabricated.js";
-// evidenceLevelOfBundles / deriveContradictions / inspectionVerdict — submitted /
-// device_reported / inspected_output, the one classification of how strongly
-// evidence shows the work was done (must-close 5). Takes authenticated bundles
-// of ONE settlement unit and judges independence between authenticated trust
-// domains, never declared device ids.
+// evidenceLevelOfBundles / evidenceLevelsOfEvents / deriveContradictions /
+// inspectionVerdict — submitted / device_reported / inspected_output, the one
+// classification of how strongly evidence shows the work was done (must-close 5).
+// Takes authenticated bundles of ONE settlement unit and judges independence
+// between authenticated trust domains, never declared device ids.
+// evidenceLevelsOfEvents is the per-event level (bundle index, event index,
+// level); evidenceLevelOfBundles is the maximum over it.
 export * from "./evidence-level.js";
 export * from "./eligibility.js";
 export * from "./verifier-interface.js";
