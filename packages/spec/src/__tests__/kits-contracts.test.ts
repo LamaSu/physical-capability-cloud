@@ -673,8 +673,10 @@ describe("astra pack 112b", () => {
   });
 
   it("the built-in public set is exactly the CSDs compiled into @pcc/spec, sorted by code unit and frozen", () => {
-    // Pinned. document-print-and-mail/v1 is not in it: that is a draft workflow CSD which
-    // loadBuiltinCsds does not register and the package build does not ship (only its own test imports it).
+    // Pinned: the 8 CSDs this branch's loadBuiltinCsds registers. Master's registers a 9th,
+    // pcc://capabilities/document-print-and-mail/v1 (2d808180, board N64), which this branch lacks. The set
+    // follows the registry, so when this branch merges master this pin fails by design: add that url here, in
+    // sorted position, in the same commit.
     expect([...BUILTIN_PUBLIC_CAPABILITY_URLS]).toEqual([
       "pcc://capabilities/2d-print/v1",
       "pcc://capabilities/cnc-3axis/v2",
