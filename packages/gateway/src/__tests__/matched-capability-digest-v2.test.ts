@@ -178,6 +178,17 @@ describe("matched-capability digest v2 (board N20)", () => {
     expect(() => v2({ assuranceTiers: fakeIterator })).toThrow(TypeError);
   });
 
+  it("a tier list whose length reads as zero or negative never commits an empty tier set (astra, #440 follow-up confirmation)", () => {
+    for (const length of [-1, -16, 0]) {
+      const tiers = new Proxy([0], {
+        get(target, key, receiver) {
+          return key === "length" ? length : Reflect.get(target, key, receiver);
+        },
+      });
+      expect(() => v2({ assuranceTiers: tiers }), `length ${length}`).toThrow(TypeError);
+    }
+  });
+
   it("pins existing behavior: an ordinary sparse tier array throws (a hole, not skipped)", () => {
     const sparse: number[] = [0, , 2];
     expect(() => v2({ assuranceTiers: sparse })).toThrow(TypeError);

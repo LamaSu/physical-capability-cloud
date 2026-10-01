@@ -244,8 +244,10 @@ export function matchedCapabilityDigestV2PreImage(snap: MatchedCapabilitySnapsho
   // this check, another during iteration) cannot smuggle a different
   // element count past this check, because there is no separate iteration
   // step left for it to diverge on.
+  // At least one entry, so the loop below either pushes or throws at least once and the
+  // committed set is never empty (a Proxy can report a negative length; astra, #440 follow-up).
   const tierCount = assuranceTiers.length;
-  if (!Number.isInteger(tierCount) || tierCount === 0 || tierCount > MAX_TIER_ENTRIES) {
+  if (!Number.isInteger(tierCount) || tierCount < 1 || tierCount > MAX_TIER_ENTRIES) {
     refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
   }
   const tiers: number[] = [];
