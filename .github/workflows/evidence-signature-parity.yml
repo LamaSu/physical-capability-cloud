@@ -1,8 +1,13 @@
-# LO-EV-1 signature parity (board row R20; cross-family review A01). The Python
-# mirror's signature half must never pass by skipping. This job runs the parity
-# suite with PyNaCl installed and PCC_REQUIRE_PYNACL=1, so nothing may skip.
-# First, a negative control proves the same run FAILS, on the PyNaCl
-# requirement itself, when PyNaCl is missing.
+# LO-EV-1 signature parity (board row R20; cross-family reviews A01 and A01c-q2).
+# The Python mirror's signature half must never pass by skipping, deselecting,
+# xfailing or dropping a test. tests/signature_manifest_check.py derives the
+# manifest of PyNaCl tests (every test taking the `nacl` fixture, times its
+# golden vectors), runs exactly that manifest with external pytest options
+# neutralized and --runxfail, and reads the outcome of every test from JUnit XML.
+# The negative control runs the SAME manifest without PyNaCl, and every test must
+# fail on the PyNaCl requirement itself. Then the whole parity file runs with the
+# same neutralization, and any skipped, deselected, xfailed, xpassed or errored
+# test fails the job.
 name: evidence-signature-parity
 
 on:
@@ -39,33 +44,26 @@ jobs:
             echo "invalid control: PyNaCl is importable in the venv without it"
             exit 1
           fi
-          set +e
-          out=$(PCC_REQUIRE_PYNACL=1 PYTHONPATH=. "$RUNNER_TEMP/no-nacl/bin/python" -m pytest -q -p no:cacheprovider tests/test_signing_preimage_parity.py 2>&1)
-          rc=$?
-          set -e
-          echo "$out" | tail -5
-          if [ "$rc" -eq 0 ]; then
-            echo "PCC_REQUIRE_PYNACL=1 passed without PyNaCl: the signature half can hide behind a skip"
-            exit 1
-          fi
-          if ! echo "$out" | grep -q "PCC_REQUIRE_PYNACL=1 but PyNaCl is not importable"; then
-            echo "the run failed, but not on the PyNaCl requirement"
-            exit 1
-          fi
-          echo "ok: without PyNaCl the required run fails on the PyNaCl check"
+          # Every manifest test must be collected and fail on the PyNaCl requirement.
+          "$RUNNER_TEMP/no-nacl/bin/python" tests/signature_manifest_check.py negative
 
       - name: Signature parity (PyNaCl required, nothing may skip)
         env:
           PCC_REQUIRE_PYNACL: "1"
         run: |
           python -m pip install --quiet "pynacl==1.5.0" "pytest==8.3.5"
+          # Every manifest test must be collected and pass (JUnit XML, not the text summary).
+          python tests/signature_manifest_check.py positive
+          # The whole parity file, with external options neutralized: nothing may be
+          # skipped, deselected, xfailed, xpassed or errored.
           set +e
-          out=$(PYTHONPATH=. python -m pytest -q -p no:cacheprovider -rs tests/test_signing_preimage_parity.py 2>&1)
+          out=$(env -u PYTEST_ADDOPTS -u PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=. \
+            python -m pytest -q -p no:cacheprovider --runxfail -o addopts= -rs tests/test_signing_preimage_parity.py 2>&1)
           rc=$?
           set -e
           echo "$out"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
-          if echo "$out" | grep -q "skipped"; then
-            echo "a test skipped in the required run"
+          if echo "$out" | grep -Eq "[0-9]+ (skipped|deselected|xfailed|xpassed|error)"; then
+            echo "a test was skipped, deselected, xfailed, xpassed or errored in the required run"
             exit 1
           fi
