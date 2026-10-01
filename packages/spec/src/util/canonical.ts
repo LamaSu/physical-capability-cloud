@@ -44,7 +44,6 @@ import type { SHA256 } from "../types/common.js";
 const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
 const getPrototypeOf = Reflect.getPrototypeOf;
 const ownKeys = Reflect.ownKeys;
-const apply = Reflect.apply;
 const isArray = Array.isArray;
 const isFiniteNumber = Number.isFinite;
 const isIntegerNumber = Number.isInteger;
@@ -52,7 +51,6 @@ const isSafeIntegerNumber = Number.isSafeInteger;
 const toNumber = Number;
 const toText = String;
 const quote = JSON.stringify; // string escaping, byte-for-byte what JSON transport writes
-const hasOwnProperty = Object.prototype.hasOwnProperty;
 const OBJECT_PROTOTYPE = Object.prototype;
 const ARRAY_PROTOTYPE = Array.prototype;
 const WeakSetConstructor = WeakSet;
@@ -61,15 +59,33 @@ const call = Function.prototype.call;
 const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
 const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
 const weakSetDelete = call.bind(WeakSet.prototype.delete) as unknown as (set: WeakSet<object>, value: object) => void;
-const hasOwn = (o: object, key: PropertyKey): boolean => apply(hasOwnProperty, o, [key]) as boolean;
+
+/** What dataValueOf returns for a descriptor that does not describe a data property. Module-private, so it never equals a value read from input. */
+const NOT_DATA = Symbol("canonicalize: not a data property");
 
 /**
  * A descriptor describes a data property only when it OWNS `value` and has no
- * own `get` or `set`. `"value" in d` would also find an inherited `value` (a
- * polluted Object.prototype) and let an accessor pass as data.
+ * own `get` or `set`. Ownership is judged by asking the captured reflection for
+ * the descriptor's OWN property, never with `in` (which also finds an inherited
+ * `value`, `get`, `set` or `enumerable` on a polluted Object.prototype) and never
+ * with a method taken from Object.prototype (hasOwnProperty captured before a
+ * pre-load pollution is the polluter's function, not the engine's). A field is
+ * read only from the own descriptor that proved it exists.
+ *
+ * Returns the property's value, or NOT_DATA for an accessor.
  */
-function isDataDescriptor(d: PropertyDescriptor): boolean {
-  return hasOwn(d, "value") && !hasOwn(d, "get") && !hasOwn(d, "set");
+function dataValueOf(descriptor: object): unknown {
+  const value = getOwnPropertyDescriptor(descriptor, "value");
+  if (value === undefined) return NOT_DATA;
+  if (getOwnPropertyDescriptor(descriptor, "get") !== undefined) return NOT_DATA;
+  if (getOwnPropertyDescriptor(descriptor, "set") !== undefined) return NOT_DATA;
+  return value.value;
+}
+
+/** Whether a descriptor OWNS `enumerable: true` (a complete descriptor always owns it). */
+function isEnumerable(descriptor: object): boolean {
+  const enumerable = getOwnPropertyDescriptor(descriptor, "enumerable");
+  return enumerable !== undefined && enumerable.value === true;
 }
 
 /**
@@ -179,9 +195,10 @@ function canonicalArray(arr: unknown[], path: string, ancestors: WeakSet<object>
     const at = `${path}[${i}]`;
     const d = getOwnPropertyDescriptor(arr, i);
     if (d === undefined) throw new NonCanonicalValueError(at, "a hole in a sparse array (or an inherited index)");
-    if (!isDataDescriptor(d)) throw new NonCanonicalValueError(at, "an accessor element");
+    const element = dataValueOf(d);
+    if (element === NOT_DATA) throw new NonCanonicalValueError(at, "an accessor element");
     if (i !== 0) out += ",";
-    out += canonicalizeAt(d.value, at, ancestors);
+    out += canonicalizeAt(element, at, ancestors);
   }
   const keys = ownKeys(arr);
   const count = keys.length;
@@ -217,12 +234,13 @@ function canonicalObject(obj: object, path: string, ancestors: WeakSet<object>):
     const at = `${path}.${key}`;
     const d = getOwnPropertyDescriptor(obj, key);
     if (d === undefined) throw new NonCanonicalValueError(at, "a property that vanished while it was read");
-    if (!isDataDescriptor(d)) throw new NonCanonicalValueError(at, "an accessor property");
-    if (!d.enumerable) throw new NonCanonicalValueError(at, "a non-enumerable property");
-    if (d.value === undefined) continue; // omitted, as JSON.stringify omits it
+    const member = dataValueOf(d);
+    if (member === NOT_DATA) throw new NonCanonicalValueError(at, "an accessor property");
+    if (!isEnumerable(d)) throw new NonCanonicalValueError(at, "a non-enumerable property");
+    if (member === undefined) continue; // omitted, as JSON.stringify omits it
     if (first) first = false;
     else out += ",";
-    out += quote(key) + ":" + canonicalizeAt(d.value, at, ancestors);
+    out += quote(key) + ":" + canonicalizeAt(member, at, ancestors);
   }
   return out + "}";
 }
