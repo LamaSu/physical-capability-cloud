@@ -595,7 +595,7 @@ describe("GET /api/operator/jobs: a stopped kernel's queue hands out no work", (
     expect(res.json().emergencyStop).toBe(true);
   });
 
-  it("control: a repeated status parameter cannot get around the stop", async () => {
+  it("[repro] a repeated status parameter cannot get around the stop: held back and says so", async () => {
     const { kernelId } = await ownedKernel("queue-array");
     insertQueuedJob(kernelId);
     await stop(kernelId);
@@ -606,6 +606,7 @@ describe("GET /api/operator/jobs: a stopped kernel's queue hands out no work", (
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().jobs).toEqual([]);
+    expect(res.json().emergencyStop).toBe(true);
   });
 
   it.each(["in_progress", "completed"])("control: status=%s is not new work and is still listed while stopped", async (status) => {
@@ -708,6 +709,29 @@ describe("GET /api/operator/approvals?status=approved: the queue the OT-2 daemon
     const res = await approved();
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().approvals.map((a: { id: string }) => a.id)).not.toContain(id);
+  });
+
+  it("[repro] the unfiltered-by-kernel form also leaves out a kernel whose policy cannot be read", async () => {
+    const { kernelId } = await ownedKernel("appr-unreadable-all");
+    const id = await approvedApproval(kernelId);
+    makeUnreadable(kernelId);
+    const res = await approved();
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().approvals.map((a: { id: string }) => a.id)).not.toContain(id);
+  });
+
+  it("[repro] a repeated status parameter cannot get around the stop: held back and says so", async () => {
+    const { kernelId } = await ownedKernel("appr-array");
+    await approvedApproval(kernelId);
+    await stop(kernelId);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/operator/approvals?status=approved&status=approved&kernelId=${kernelId}`,
+      headers: asOwner(),
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().approvals).toEqual([]);
+    expect(res.json().emergencyStop).toBe(true);
   });
 
   it("control: the history view (no status filter) still lists the approval while stopped", async () => {
