@@ -810,7 +810,42 @@ export function authorizeJobRead(
     .from(negotiationSessions)
     .where(eq(negotiationSessions.jobId, job.id))
     .all() as Array<{ userAgentId: string | null }>;
-  if (sessions.length === 1 && sameWallet(sessions[0]!.userAgentId, wallet)) return { allow: true, as: "buyer" };
+  if (isRecordedBuyer(sessions, wallet)) return { allow: true, as: "buyer" };
 
   return { allow: false, reason: "not_a_party" };
+}
+
+/** The buyer rule: the job has exactly one negotiation session, and it names this wallet. */
+const isRecordedBuyer = (sessions: ReadonlyArray<{ userAgentId: string | null }>, wallet: string) =>
+  sessions.length === 1 && sameWallet(sessions[0]!.userAgentId, wallet);
+
+/**
+ * The ids, among `jobs`, of the jobs this PROVEN wallet may read: authorizeJobRead's rule
+ * applied to every job at once, for the routes that list or enumerate jobs (F3 round 2). It
+ * reads every kernel and every negotiation session once, not once per job.
+ */
+export function jobsReadableBy(
+  jobs: ReadonlyArray<Pick<JobRow, "id" | "kernelId">>,
+  wallet: string,
+  repos: { kernels: { findAll(): unknown[] } },
+  db: JobExecutionDb,
+): Set<string> {
+  const operated = new Set(
+    (repos.kernels.findAll() as Array<{ id: string; operatorAddress?: string }>)
+      .filter((kernel) => sameWallet(kernel.operatorAddress, wallet))
+      .map((kernel) => kernel.id),
+  );
+  const { negotiationSessions } = schema;
+  const sessionsByJob = new Map<string, Array<{ userAgentId: string | null }>>();
+  for (const session of db.select().from(negotiationSessions).all() as Array<{ jobId: string | null; userAgentId: string | null }>) {
+    if (!session.jobId) continue;
+    const sessions = sessionsByJob.get(session.jobId) ?? [];
+    sessions.push(session);
+    sessionsByJob.set(session.jobId, sessions);
+  }
+  const readable = new Set<string>();
+  for (const job of jobs) {
+    if (operated.has(job.kernelId) || isRecordedBuyer(sessionsByJob.get(job.id) ?? [], wallet)) readable.add(job.id);
+  }
+  return readable;
 }

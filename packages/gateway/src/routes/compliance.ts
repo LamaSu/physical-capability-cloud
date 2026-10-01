@@ -15,12 +15,12 @@
 // Public endpoints — compliance data is transparency.
 // No auth gate — the apiGate middleware handles global auth; these are read-only.
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import type { VerificationAttestation } from "@pcc/spec";
 import { getComplianceFacade } from "../facades/index.js";
 import { getRepos } from "../db.js";
-import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
+import { gateJobRead, gateJobRecordRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 //
@@ -36,6 +36,16 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
     ...(result.error.details ? { details: result.error.details } : {}),
   });
 }
+
+/** The job read gate on an evidence bundle's job. */
+const gateBundleRead = (req: FastifyRequest, bundleId: string) =>
+  gateJobRecordRead(req, () => (getRepos().evidence.findById(bundleId) as { jobId?: string } | undefined)?.jobId);
+
+/** The compliance facade's body for a bundle that does not exist (NotFoundError, base.facade.ts). */
+const bundleNotFound = (bundleId: string) => ({
+  error: "COMPLIANCE_NOT_FOUND",
+  message: `evidence bundle '${bundleId}' not found`,
+});
 
 export async function complianceRoutes(app: FastifyInstance) {
   // Acquire singleton once per plugin registration — safe because the DB is
@@ -87,9 +97,15 @@ export async function complianceRoutes(app: FastifyInstance) {
   // ── SECONDARY: Single evidence bundle (via compliance facade) ─────────────
   // Moved to /api/compliance/evidence/ to avoid collision with evidence-encrypted.ts
   // which owns GET /api/evidence/:bundleId
+  //
+  // A bundle is its job's record: the job read gate runs on the bundle's job (F3 round 2),
+  // and a bundle whose job the caller may not read gets the facade's own 404 for a bundle
+  // that does not exist.
   app.get<{ Params: { bundleId: string } }>(
     "/api/compliance/evidence/:bundleId",
     async (req, reply) => {
+      const gate = gateBundleRead(req, req.params.bundleId);
+      if (!gate.ok) return refuseJobRead(reply, gate, bundleNotFound(req.params.bundleId));
       const result = await facade.getBundle(req.params.bundleId);
       return sendResult(reply, result);
     },
@@ -99,6 +115,8 @@ export async function complianceRoutes(app: FastifyInstance) {
   app.get<{ Params: { bundleId: string } }>(
     "/api/compliance/evidence/:bundleId/tier-compliance",
     async (req, reply) => {
+      const gate = gateBundleRead(req, req.params.bundleId);
+      if (!gate.ok) return refuseJobRead(reply, gate, bundleNotFound(req.params.bundleId));
       const result = await facade.checkTierCompliance(req.params.bundleId);
       return sendResult(reply, result);
     },

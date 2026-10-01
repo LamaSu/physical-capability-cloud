@@ -16,6 +16,7 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
@@ -40,9 +41,12 @@ export async function batchRoutes(app: FastifyInstance) {
     return { batch, events: batchTracker.getEvents(req.params.batchId) };
   });
 
-  // Batches containing a specific job's samples
-  app.get<{ Params: { jobId: string } }>("/api/batches/by-job/:jobId", async (req) => {
-    const batches = batchTracker.getBatchesForJob(req.params.jobId);
+  // Batches containing a specific job's samples. They are that job's records, so the job
+  // read gate runs first (F3 round 2); a job the caller may not read has no batches.
+  app.get<{ Params: { jobId: string } }>("/api/batches/by-job/:jobId", async (req, reply) => {
+    const gate = gateJobRead(req, req.params.jobId);
+    if (!gate.ok && gate.kind !== "not_found") return refuseJobRead(reply, gate);
+    const batches = gate.ok ? batchTracker.getBatchesForJob(req.params.jobId) : [];
     return { batches };
   });
 

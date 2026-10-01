@@ -11,7 +11,6 @@
  *   - `settledAt` = the job's completion time
  *   - the escrow read through the first negotiation session only
  */
-import { provenWalletFor } from "../helpers/job-read-party.js";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
@@ -266,6 +265,22 @@ describe("GET /api/jobs/:jobId/settlement projection", () => {
     expect(r.milestones.map((m) => [m.id, m.forThisJob])).toEqual([["ms-x", true], ["ms-y", false]]);
   });
 
+  it("NEGATIVE (astra r1 on #382, MEDIUM): a milestone another job could claim is never marked this job's", () => {
+    // Two jobs on the escrow's CWM and this step: the settlement axis attributes no milestone.
+    const shared = { ...linked(escrow(), [milestone({ status: "released" }), milestone({ id: "ms-y", stepId: "other" })]), stepClaimants: 2 };
+    const r = jobRead({ settlement: ok(shared as SettlementSource) });
+    expect(r.payoutUnknownReason).toBe("milestone_shared");
+    expect(r.milestones.map((m) => [m.id, m.forThisJob, m.association])).toEqual([
+      ["ms-x", false, "same_step_unattributed"],
+      ["ms-y", false, "other_step"],
+    ]);
+  });
+
+  it("an exactly attributed milestone is this job's; another step's is not", () => {
+    const r = jobRead({ settlement: ok(linked(escrow(), [milestone(), milestone({ id: "ms-y", stepId: "other" })])) });
+    expect(r.milestones.map((m) => [m.id, m.association])).toEqual([["ms-x", "this_job"], ["ms-y", "other_step"]]);
+  });
+
   it("NEGATIVE: settledAt is never the job's completion time", () => {
     const r = jobRead({ job: job({ status: "completed", completedAt: "2026-09-21T10:00:00.000Z" }), settlement: ok(linked(escrow(), [milestone({ status: "released" })])) });
     expect(r.status).toBe("reported_released");
@@ -330,11 +345,12 @@ describe("the legacy settlement routes on a real store", () => {
     app.addHook("onRequest", async (req) => {
       const t = req.headers["x-test-tenant"];
       if (typeof t === "string") (req as any).tenantId = t;
-      // Job reads are object-authorized (F3): read as the seeded kernel-nyc operator.
-      const p = req.headers["x-test-principal"];
-      (req as any).operatorId = typeof p === "string" ? p : "0x1111111111111111111111111111111111111111";
-      // WP-A's gate proves a wallet by SIWE (#353 r3): this caller reads as that proven wallet.
-      (req as any).provenWallet = provenWalletFor(req.headers["x-test-proven-wallet"], (req as any).operatorId);
+      // A stand-in API gate: a claimed principal (an API key's operatorId), and a wallet proven
+      // by SIWE as WP-A's gate sets it (req.provenWallet).
+      const principal = req.headers["x-test-principal"];
+      if (typeof principal === "string") (req as any).operatorId = principal;
+      const proven = req.headers["x-test-proven-wallet"];
+      if (typeof proven === "string") (req as any).provenWallet = proven;
     });
     await app.register(paidJobFlowRoutes);
     await app.register(negotiationRoutes);
@@ -349,9 +365,57 @@ describe("the legacy settlement routes on a real store", () => {
     delete process.env.TENANT_ENFORCE;
   });
 
-  const both = async (jobId: string, headers: Record<string, string> = {}) => ({
+  // The seeded kernel-nyc's operator: a party to its jobs, reading with a proven wallet.
+  const OPERATOR_NYC = "0x1111111111111111111111111111111111111111";
+  const PARTY = { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": OPERATOR_NYC };
+  const both = async (jobId: string, headers: Record<string, string> = PARTY) => ({
     jobs: await app.inject({ method: "GET", url: `/api/jobs/${jobId}/settlement`, headers }),
     settlement: await app.inject({ method: "GET", url: `/api/settlement/${jobId}`, headers }),
+  });
+
+  describe("NEGATIVE (astra r1 on #382, CRITICAL): both routes use #353's identity-first object authorization", () => {
+    const STRANGER = "0x2222222222222222222222222222222222222222";
+    const ADMIN = "f1-admin-key";
+
+    it("anonymous is 401 on both routes, for an existing and a missing job alike", async () => {
+      for (const jobId of ["job-004", "no-such-job-f1"]) {
+        const { jobs, settlement } = await both(jobId, {});
+        expect([jobs.statusCode, settlement.statusCode], jobId).toEqual([401, 401]);
+        expect(jobs.json().error).toBe("unauthenticated");
+      }
+    });
+
+    it("a credential without a proven wallet (a claimed id, even the operator's address) is 403 before any lookup", async () => {
+      for (const jobId of ["job-004", "no-such-job-f1"]) {
+        const { jobs, settlement } = await both(jobId, { "x-test-principal": OPERATOR_NYC });
+        expect([jobs.statusCode, settlement.statusCode], jobId).toEqual([403, 403]);
+        expect(settlement.json().error).toBe("identity_unverified");
+      }
+    });
+
+    it("a proven wallet that is neither the kernel operator nor the buyer gets each route's own 404, the same as a missing job", async () => {
+      const stranger = await both("job-004", { "x-test-principal": STRANGER, "x-test-proven-wallet": STRANGER });
+      const missing = await both("no-such-job-f1", { "x-test-principal": STRANGER, "x-test-proven-wallet": STRANGER });
+      expect([stranger.jobs.statusCode, stranger.settlement.statusCode]).toEqual([404, 404]);
+      expect(stranger.jobs.body).toBe(missing.jobs.body);
+      expect(stranger.settlement.body.replace("job-004", "X")).toBe(missing.settlement.body.replace("no-such-job-f1", "X"));
+      expect(stranger.jobs.body).not.toMatch(/escrow|quoted|evidence/i);
+    });
+
+    it("the kernel operator's proven wallet (any letter case) and a valid X-Admin-Key read both routes", async () => {
+      const upper = OPERATOR_NYC.toUpperCase().replace("0X", "0x");
+      const operator = await both("job-004", { "x-test-principal": upper, "x-test-proven-wallet": upper });
+      expect([operator.jobs.statusCode, operator.settlement.statusCode]).toEqual([200, 200]);
+      process.env.PCC_ADMIN_KEY = ADMIN;
+      try {
+        const admin = await both("job-004", { "x-admin-key": ADMIN });
+        expect([admin.jobs.statusCode, admin.settlement.statusCode]).toEqual([200, 200]);
+        const wrong = await both("job-004", { "x-admin-key": ADMIN + "x" });
+        expect([wrong.jobs.statusCode, wrong.settlement.statusCode]).toEqual([401, 401]);
+      } finally {
+        delete process.env.PCC_ADMIN_KEY;
+      }
+    });
   });
 
   it("NEGATIVE (F1, the reproduced lie): a mock-settled job is simulated on both routes, never settled or paid", async () => {
@@ -439,10 +503,10 @@ describe("the legacy settlement routes on a real store", () => {
     } as any);
     process.env.TENANT_ENFORCE = "true";
     try {
-      const other = await both("job-f1-tenant", { "x-test-tenant": "tenant-b" });
+      const other = await both("job-f1-tenant", { ...PARTY, "x-test-tenant": "tenant-b" });
       expect(other.jobs.statusCode).toBe(404);
       expect(other.settlement.statusCode).toBe(404);
-      const own = await both("job-f1-tenant", { "x-test-tenant": "tenant-a" });
+      const own = await both("job-f1-tenant", { ...PARTY, "x-test-tenant": "tenant-a" });
       expect(own.jobs.statusCode).toBe(200);
       expect(own.settlement.statusCode).toBe(200);
     } finally {
