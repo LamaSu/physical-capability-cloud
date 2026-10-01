@@ -832,9 +832,30 @@ export function isReservedDescription(description: unknown): boolean {
  * visible under its CID until commit(), which /prove calls inside its
  * transition's transaction. So a /prove that fails before that point (a lost
  * CAS, a failed audit write, the proof cap) leaves nothing new in the shared,
- * content-addressed blob store, and nothing ever has to delete a blob there
- * that another request, or an /api/storage upload of the same bytes, may
- * already reference.
+ * content-addressed blob store.
+ *
+ * What is left is the database COMMIT itself. It can fail (disk full, I/O
+ * error) after commit() placed the photo, which rolls the proof back but not
+ * the blob (astra pack 88, Q3). The store is shared and content-addressed, so
+ * discard() removes that blob only when all of these hold:
+ *   - this request's commit() created it. A blob that was already stored is
+ *     never touched: it may be another registration's photo, or an
+ *     /api/storage upload of the same bytes;
+ *   - its transition did not commit;
+ *   - no other /prove in this process holds the same bytes. Such a request may
+ *     have found the blob already there and be about to record a reference to
+ *     it, so the last holder to finish decides, and two failing requests do
+ *     not leak it between them;
+ *   - the caller finds no committed record that refers to it, and removes it
+ *     in the same step (PhotoFinish.removeIfUnreferenced).
+ * If any of that cannot be established the blob stays: a leaked blob is
+ * harmless, a record that points at a missing blob is not.
+ *
+ * Not covered: a crash between commit() and the database COMMIT (there is no
+ * startup sweep), and a writer the database cannot see, such as an
+ * /api/storage upload of the same bytes that has written the file but not yet
+ * its storage_blobs row, landing inside the few microseconds between this
+ * request's existence check and its placement or removal.
  */
 export interface StagedPhoto {
   /** CIDv1 (sha-256, raw codec) of the bytes: where commit() places them. */
@@ -846,8 +867,26 @@ export interface StagedPhoto {
    * then rolls its transition back.
    */
   commit(): boolean;
-  /** Drop the staged bytes without placing them. Best effort; never throws. */
-  discard(): void;
+  /**
+   * Finish with the photo; /prove calls this once, in a `finally`, whatever
+   * happened. Drops the staged copy, lets go of the CID and, under the rules
+   * above, removes the blob this request created when its transition did not
+   * commit. Best effort; never throws. Without `finish` nothing is removed.
+   */
+  discard(finish?: PhotoFinish): void;
+}
+
+/** What /prove tells a StagedPhoto when it is finished with it. */
+export interface PhotoFinish {
+  /** True when the transition that records the photo committed. */
+  committed: boolean;
+  /**
+   * Call `remove()` for the blob under `cid`, but only if no committed record
+   * refers to it, and so that none can start to between the check and the
+   * removal. The caller supplies this because only it can see the database.
+   * It reports its own failures; the blob then stays.
+   */
+  removeIfUnreferenced(cid: string, remove: () => void): void;
 }
 
 export interface EvidencePhotoStore {
@@ -857,6 +896,21 @@ export interface EvidencePhotoStore {
 
 /** Staging directory under the blob root. CID shards are 2 characters, so it never collides with one. */
 export const EVIDENCE_STAGING_DIR = ".staging";
+
+/**
+ * The /prove requests of this process that hold staged bytes, by blob path:
+ * how many are still working with them, and whether one that is finished
+ * created the blob in a transition that then did not commit (so the blob may
+ * be unreferenced, and the last holder to finish decides what happens to it).
+ */
+const heldBlobs = new Map<string, { holders: number; orphaned: boolean }>();
+
+/** Test hook: how many staged photos are still held (staged, not yet discarded). */
+export function heldEvidencePhotos(): number {
+  let n = 0;
+  for (const entry of heldBlobs.values()) n += entry.holders;
+  return n;
+}
 
 /**
  * Staging + placement on the local backend of the gateway's CID blob store
@@ -885,6 +939,12 @@ function localEvidencePhotoStore(blobs: LocalBlobBackend): EvidencePhotoStore {
         drop();
         throw err;
       }
+      // From here on this request holds the bytes, until discard().
+      const held = heldBlobs.get(finalPath) ?? { holders: 0, orphaned: false };
+      held.holders++;
+      heldBlobs.set(finalPath, held);
+      let created = false;
+      let finished = false;
       return {
         cid,
         commit() {
@@ -894,9 +954,25 @@ function localEvidencePhotoStore(blobs: LocalBlobBackend): EvidencePhotoStore {
           }
           mkdirSync(path.dirname(finalPath), { recursive: true });
           renameSync(stagingPath, finalPath);
+          created = true;
           return true;
         },
-        discard: drop,
+        discard(finish) {
+          if (finished) return;
+          finished = true;
+          drop();
+          if (created && finish && !finish.committed) held.orphaned = true;
+          held.holders--;
+          // Another request holds the same bytes: the last one out decides.
+          if (held.holders > 0) return;
+          heldBlobs.delete(finalPath);
+          if (!held.orphaned || !finish) return;
+          try {
+            finish.removeIfUnreferenced(cid, () => rmSync(finalPath, { force: true }));
+          } catch {
+            // The caller reports its own failures. The blob stays.
+          }
+        },
       };
     },
   };

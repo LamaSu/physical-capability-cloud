@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { MachineRegistration } from "@pcc/spec";
-import type { RegistrationRow } from "@pcc/store";
+import { sql, type RegistrationRow } from "@pcc/store";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
 import { auditService, type AuditEntry } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
@@ -202,6 +202,23 @@ function recentProofs(repos: Repos, registrationId: string, nowMs: number): { co
   const oldest = rows[rows.length - 1]; // newest first
   const leavesWindowAt = oldest ? Date.parse(oldest.timestamp) + PROOF_RATE_WINDOW_MS : nowMs;
   return { count: rows.length, retryAfterSeconds: Math.max(1, Math.ceil((leavesWindowAt - nowMs) / 1000)) };
+}
+
+/**
+ * True when a committed record refers to the retained evidence photo `cid`:
+ * a proof the audit log recorded for it, or a row of the storage index (an
+ * /api/storage upload of the same bytes; a soft-deleted row counts too,
+ * because uploading again revives it). The audit log is the evidence of
+ * record, so the registration's description, which an operator can write
+ * before review, does not count.
+ */
+function photoCidIsReferenced(cid: string): boolean {
+  const db = getStore().db;
+  const proofs = db.all(
+    sql`SELECT 1 AS hit FROM audit_log WHERE event_type = ${PROOF_SUBMITTED_EVENT} AND instr(metadata, ${cid}) > 0 LIMIT 1`,
+  );
+  if (proofs.length > 0) return true;
+  return db.all(sql`SELECT 1 AS hit FROM storage_blobs WHERE cid = ${cid} LIMIT 1`).length > 0;
 }
 
 /** What a transition's guard and audit record see, all read in its transaction. */
@@ -972,7 +989,10 @@ export async function onboardRoutes(app: FastifyInstance) {
           // M4 — stage the decoded photo privately. It is placed under its CID
           // inside the transition's transaction (beforeCommit below), so the
           // record never references a photo that was not stored, and a
-          // transition that fails leaves no new blob in the shared store.
+          // transition that fails leaves no new blob in the shared store. The
+          // one failure after the placement is the database COMMIT itself;
+          // the finally block below then takes out the blob this request
+          // created (astra pack 88, Q3), if nothing refers to it.
           let staged: StagedPhoto | null = null;
           if (photo) {
             try {
@@ -987,7 +1007,31 @@ export async function onboardRoutes(app: FastifyInstance) {
           }
           const stagedPhoto = staged;
           const photoCid = stagedPhoto?.cid ?? null;
-          let photoPlacedNew = false;
+          let committed = false;
+
+          // Reference-aware removal of a photo that this request placed and
+          // that no committed proof refers to (see StagedPhoto). The check and
+          // the removal share one immediate transaction, so no other writer
+          // of this database (another gateway process included) can commit a
+          // reference between them: one that committed before is seen, and
+          // one that commits after finds the file gone and places its own
+          // copy. Whatever goes wrong, the blob stays: a leaked blob is
+          // harmless, a proof that points at a missing blob is not.
+          const removeIfUnreferenced = (cid: string, remove: () => void): void => {
+            try {
+              getStore().db.transaction(
+                () => {
+                  if (photoCidIsReferenced(cid)) return;
+                  remove();
+                  req.log.warn({ cid, registrationId: reg.id }, "[onboard] removed the evidence photo of a proof that did not commit");
+                },
+                { behavior: "immediate" },
+              );
+            } catch (err) {
+              req.log.error({ err, cid, registrationId: reg.id }, "[onboard] could not remove the evidence photo of a proof that did not commit (unreferenced blob left in place)");
+              Sentry.captureException(err, { extra: { action: "reclaim_evidence_photo", cid, registrationId: reg.id } });
+            }
+          };
 
           try {
             // B4 — the canonical evidence record, kept in the description column.
@@ -1032,7 +1076,7 @@ export async function onboardRoutes(app: FastifyInstance) {
               // transition and its audit record roll back.
               beforeCommit: stagedPhoto
                 ? () => {
-                    photoPlacedNew = stagedPhoto.commit();
+                    stagedPhoto.commit();
                   }
                 : undefined,
               audit: (ctx) => ({
@@ -1057,16 +1101,8 @@ export async function onboardRoutes(app: FastifyInstance) {
                 userAgent: req.headers["user-agent"],
               }),
             });
-            if (!outcome.ok) {
-              // Nothing was placed unless the database failed after the photo
-              // was (the commit itself): that blob is left in place, since the
-              // shared store is never deleted from, and reported.
-              if (photoPlacedNew) {
-                req.log.error({ cid: photoCid, registrationId: reg.id }, "[onboard] evidence photo placed but the proof did not commit (unreferenced blob)");
-                Sentry.captureMessage("onboard.prove: unreferenced evidence blob after a failed commit", { extra: { cid: photoCid, registrationId: reg.id } });
-              }
-              return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
-            }
+            if (!outcome.ok) return sendTransitionFailure(req, reply, outcome, PROVE_LABEL);
+            committed = true;
 
             pipelineTelemetry.emit(reg.id, "operator_verify", "started", {
               metadata: { proofCount: summary.proofs.length, autoApproved: false, pendingReview: true, evidenceTierClaim: summary.evidenceTierClaim },
@@ -1090,8 +1126,10 @@ export async function onboardRoutes(app: FastifyInstance) {
           } finally {
             // The staging file is private and uniquely named, so dropping it is
             // always safe: after a placement it is already gone, and on any
-            // failure (or an unexpected throw) nothing is left behind.
-            stagedPhoto?.discard();
+            // failure (or an unexpected throw) nothing is left behind. A blob
+            // this request placed in a transition that did not commit is
+            // removed here if nothing refers to it (see StagedPhoto).
+            stagedPhoto?.discard({ committed, removeIfUnreferenced });
           }
         },
       );
