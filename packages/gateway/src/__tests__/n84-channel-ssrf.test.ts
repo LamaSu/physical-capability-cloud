@@ -1353,3 +1353,364 @@ describe("nodeTransport (production mechanism) on loopback sockets", () => {
     expect(lookups).toBe(0);
   });
 });
+
+// ── Group F: the credentialRef allowlist (PCC_CHANNEL_CREDENTIALS) ───────────
+//
+// Every test here uses a PUBLIC-resolving host with an injected resolver and
+// transport, so the URL guard passes and a credential-gate regression cannot
+// hide behind a URL refusal. Nothing opens a socket.
+
+describe("credentialRef allowlist (PCC_CHANNEL_CREDENTIALS)", () => {
+  const SLUG = "n84-cred";
+  const HOST_URL = "https://hooks.n84.test/hook";
+  let app: FastifyInstance;
+  let calls: TransportCall[];
+
+  beforeEach(async () => {
+    const g = await loadGuard();
+    const t = fakeTransport(() => ({ status: 200 }));
+    calls = t.calls;
+    g._setOutboundDepsForTests({
+      resolve: fakeResolver({ "hooks.n84.test": [PUBLIC_V4] }).resolve,
+      transport: t.transport,
+    });
+    app = Fastify({ logger: false });
+    await app.register(operatorChannelsRoutes);
+    await app.ready();
+  });
+  afterEach(async () => {
+    await app.close();
+    (await loadGuard())._setOutboundDepsForTests(null);
+  });
+
+  const attachVia = (slug: string, extra: Record<string, unknown>) =>
+    app.inject({
+      method: "POST",
+      url: `/api/operators/${slug}/channels`,
+      payload: {
+        label: "cred probe",
+        transport: "webhook",
+        describe: "credentialRef allowlist probe",
+        endpoint: { url: HOST_URL },
+        ...extra,
+      },
+    });
+  const sendTest = (slug: string) =>
+    app.inject({ method: "POST", url: `/api/operators/${slug}/channels/test`, payload: {} });
+  const allow = (value: string) => {
+    process.env.PCC_CHANNEL_CREDENTIALS = value;
+  };
+  const isAllowed = async (slug: unknown, ref: unknown) => {
+    const { isChannelCredentialAllowed } = await import("../routes/operator-channels.js");
+    return isChannelCredentialAllowed(slug, ref);
+  };
+
+  it.each(["n84_sentinel", "N84_SENTINEL", "n84-sentinel", "treasury_hmac", "x"])(
+    "[neg] with the allowlist unset, credentialRef %s is refused at attach (400) and nothing is written",
+    async (ref) => {
+      process.env[SENTINEL_ENV] = SENTINEL_VALUE; // even for a ref that names a real variable
+      const res = await attachVia(SLUG, { credentialRef: ref });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("credential_ref_not_allowed");
+      expect(getChannelsByOperator(SLUG)).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+      expect(JSON.stringify(res.json())).not.toContain(SENTINEL_VALUE);
+    },
+  );
+
+  it.each([
+    ["empty", ""],
+    ["spaces", "   "],
+    ["lone comma", ","],
+    ["empty entries", " , , "],
+    ["slug only", "n84-cred"],
+    ["no slug", ":n84_sentinel"],
+    ["no ref", "n84-cred:"],
+    ["space separator", "n84-cred n84_sentinel"],
+    ["semicolon separator", "n84-cred;n84_sentinel"],
+    ["equals separator", "n84-cred=n84_sentinel"],
+    ["star", "*"],
+    ["star pair", "*:*"],
+    ["star ref", "n84-cred:*"],
+    ["star slug", "*:n84_sentinel"],
+    ["slug is only a prefix of the caller's", "n84:n84_sentinel"],
+    ["caller's slug is only a prefix of the entry's", "n84-cred-extra:n84_sentinel"],
+    ["entry slug has a leading extra char", "xn84-cred:n84_sentinel"],
+    ["ref is only a prefix", "n84-cred:n84_sentinel_extra"],
+    ["ref is only a suffix", "n84-cred:x_n84_sentinel"],
+  ])("[neg] an unset, blank or malformed allowlist allows nothing (%s)", async (_why, value) => {
+    allow(value);
+    expect(await isAllowed(SLUG, "n84_sentinel")).toBe(false);
+    const res = await attachVia(SLUG, { credentialRef: "n84_sentinel" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("credential_ref_not_allowed");
+    expect(getChannelsByOperator(SLUG)).toHaveLength(0);
+  });
+
+  it("[neg] an unset allowlist (variable absent) allows nothing", async () => {
+    delete process.env.PCC_CHANNEL_CREDENTIALS;
+    expect(await isAllowed(SLUG, "n84_sentinel")).toBe(false);
+  });
+
+  it("[neg] the allowlist is per slug AND per ref", async () => {
+    allow("other-slug:n84_sentinel,n84-cred:other_ref");
+    expect(await isAllowed(SLUG, "n84_sentinel")).toBe(false); // right ref, wrong slug
+    expect(await isAllowed("other-slug", "other_ref")).toBe(false); // right slug, wrong ref
+    expect(await isAllowed("other-slug", "n84_sentinel")).toBe(true);
+    expect(await isAllowed(SLUG, "other_ref")).toBe(true);
+    const res = await attachVia(SLUG, { credentialRef: "n84_sentinel" });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it.each([
+    ["exact", "n84-cred:n84_sentinel", SLUG, "n84_sentinel"],
+    ["whitespace around entry parts", "  n84-cred : n84_sentinel  ", SLUG, "n84_sentinel"],
+    ["upper-case slug in the allowlist", "N84-CRED:n84_sentinel", SLUG, "n84_sentinel"],
+    ["upper-case slug from the caller", "n84-cred:n84_sentinel", "N84-Cred", "n84_sentinel"],
+    ["upper-case ref in the allowlist", "n84-cred:N84_SENTINEL", SLUG, "n84_sentinel"],
+    ["hyphen in the caller's ref normalises to underscore", "n84-cred:n84_sentinel", SLUG, "n84-sentinel"],
+    ["dot in the caller's ref normalises to underscore", "n84-cred:n84_sentinel", SLUG, "N84.SENTINEL"],
+    ["hyphen in the allowlisted ref", "n84-cred:n84-sentinel", SLUG, "n84_sentinel"],
+    ["whitespace around the caller's ref", "n84-cred:n84_sentinel", SLUG, "  n84_sentinel  "],
+    ["among several entries", "a:b, n84-cred:n84_sentinel ,c:d", SLUG, "n84_sentinel"],
+    ["empty entries around it", ",,n84-cred:n84_sentinel,,", SLUG, "n84_sentinel"],
+    ["repeated entry", "n84-cred:n84_sentinel,n84-cred:n84_sentinel", SLUG, "n84_sentinel"],
+    ["malformed entry before it", "garbage,n84-cred:n84_sentinel", SLUG, "n84_sentinel"],
+  ])("control: an allowlisted pair is accepted (%s)", async (_why, value, slug, ref) => {
+    allow(value);
+    expect(await isAllowed(slug, ref)).toBe(true);
+  });
+
+  it("control: an allowlisted pair is accepted through the route and stored", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    const res = await attachVia(SLUG, { credentialRef: "n84_sentinel" });
+    expect(res.statusCode).toBe(201);
+    expect(getChannelsByOperator(SLUG)).toHaveLength(1);
+    expect(getChannelsByOperator(SLUG)[0]!.credentialRef).toBe("n84_sentinel");
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["a number", 123],
+    ["an object", {}],
+    ["an array", ["n84_sentinel"]],
+    ["a boolean", true],
+  ])("[neg] a non-string slug or ref is never allowed (%s)", async (_why, value) => {
+    allow(`${SLUG}:n84_sentinel`);
+    expect(await isAllowed(SLUG, value)).toBe(false);
+    expect(await isAllowed(value, "n84_sentinel")).toBe(false);
+  });
+
+  it("[neg] an empty slug or an empty ref is never allowed", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    expect(await isAllowed("", "n84_sentinel")).toBe(false);
+    expect(await isAllowed("   ", "n84_sentinel")).toBe(false);
+    expect(await isAllowed(SLUG, "")).toBe(false);
+    expect(await isAllowed(SLUG, "   ")).toBe(false);
+  });
+
+  it.each([
+    ["a number", 123],
+    ["an object", {}],
+    ["an array", ["n84_sentinel"]],
+    ["true", true],
+  ])("[neg] a non-string credentialRef (%s) is refused at attach even when something is allowlisted", async (_why, value) => {
+    allow(`${SLUG}:n84_sentinel`);
+    const res = await attachVia(SLUG, { credentialRef: value });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("credential_ref_not_allowed");
+    expect(getChannelsByOperator(SLUG)).toHaveLength(0);
+  });
+
+  it("control: no credentialRef, an empty one and a null one mean 'no credential' and are accepted unsigned", async () => {
+    for (const [i, extra] of [{}, { credentialRef: "" }, { credentialRef: null }].entries()) {
+      const res = await attachVia(`${SLUG}-nocred-${i}`, extra);
+      expect(res.statusCode, `case ${i}`).toBe(201);
+    }
+    const sent = await sendTest(`${SLUG}-nocred-0`);
+    expect(sent.json().results[0].delivered).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers["x-pcc-signature"]).toBeUndefined();
+  });
+
+  it("[neg] a ref allowlisted for another slug cannot be used here (the pair is bound to its slug)", async () => {
+    allow("n84-someone-else:n84_sentinel");
+    const res = await attachVia(SLUG, { credentialRef: "n84_sentinel" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("credential_ref_not_allowed");
+  });
+
+  it("[neg] the refusal is byte-identical for a ref whose variable exists and one that does not (no existence oracle)", async () => {
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    const exists = await attachVia("n84-oracle-a", { credentialRef: "n84_sentinel" });
+    const missing = await attachVia("n84-oracle-a", { credentialRef: "n84_missing_ref" });
+    expect(exists.statusCode).toBe(400);
+    expect(missing.statusCode).toBe(exists.statusCode);
+    expect(missing.json()).toEqual(exists.json());
+    const text = JSON.stringify([exists.json(), missing.json()]);
+    expect(text).not.toContain("n84_sentinel");
+    expect(text).not.toContain("n84_missing_ref");
+    expect(text).not.toContain(SENTINEL_VALUE);
+    expect(text).not.toMatch(/PCC_VAULT/);
+  });
+
+  it("[neg] the PUBLIC signing oracle is closed: a URL that passes the guard plus a vault ref is refused and nothing is signed or sent", async () => {
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    const marker = `ATTACKER-CHOSEN-${randomBytes(4).toString("hex")}`;
+    const res = await attachVia("n84-oracle-public", {
+      label: marker,
+      describe: `oracle probe ${marker}`,
+      credentialRef: "n84_sentinel",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("credential_ref_not_allowed");
+    const sent = await sendTest("n84-oracle-public");
+    expect(sent.json().results).toEqual([
+      { channelId: "", transport: "manual", delivered: true, ref: "no-channels-attached" },
+    ]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("[neg] programmatic attachChannel (A2A path) throws credential_ref_not_allowed and writes nothing", () => {
+    let thrown: unknown;
+    try {
+      attachChannel(SLUG, {
+        label: "probe",
+        transport: "webhook",
+        describe: "credentialRef probe",
+        endpoint: { url: HOST_URL },
+        credentialRef: "n84_sentinel",
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown, "attachChannel must throw").toBeDefined();
+    expect(thrown).toMatchObject({ code: "credential_ref_not_allowed" });
+    expect(getChannelsByOperator(SLUG)).toHaveLength(0);
+  });
+
+  it("[neg] PATCH cannot add a credentialRef that is not allowlisted; nothing is written", async () => {
+    const created = await attachVia(SLUG, {});
+    const id = created.json().channel.id as string;
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/operators/channels/${id}`,
+      payload: { credentialRef: "n84_sentinel" },
+    });
+    expect(patched.statusCode).toBe(400);
+    expect(patched.json().error).toBe("credential_ref_not_allowed");
+    expect(getChannelsByOperator(SLUG)[0]!.credentialRef).toBeUndefined();
+  });
+
+  it("control: PATCH accepts an allowlisted ref, a clear, and an unrelated edit", async () => {
+    const created = await attachVia(SLUG, {});
+    const id = created.json().channel.id as string;
+    allow(`${SLUG}:n84_sentinel`);
+    const set = await app.inject({ method: "PATCH", url: `/api/operators/channels/${id}`, payload: { credentialRef: "n84_sentinel" } });
+    expect(set.statusCode).toBe(200);
+    expect(getChannelsByOperator(SLUG)[0]!.credentialRef).toBe("n84_sentinel");
+    const clear = await app.inject({ method: "PATCH", url: `/api/operators/channels/${id}`, payload: { credentialRef: "" } });
+    expect(clear.statusCode).toBe(200);
+    const rename = await app.inject({ method: "PATCH", url: `/api/operators/channels/${id}`, payload: { label: "renamed" } });
+    expect(rename.statusCode).toBe(200);
+    expect(getChannelsByOperator(SLUG)[0]!.label).toBe("renamed");
+  });
+
+  it("an operator can still switch off a legacy channel whose ref is no longer allowlisted", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    const created = await attachVia(SLUG, { credentialRef: "n84_sentinel" });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().channel.id as string;
+    delete process.env.PCC_CHANNEL_CREDENTIALS; // allowlist tightened afterwards
+    const off = await app.inject({ method: "PATCH", url: `/api/operators/channels/${id}`, payload: { enabled: false } });
+    expect(off.statusCode).toBe(200);
+    expect(getChannelsByOperator(SLUG)[0]!.enabled).toBe(false);
+  });
+
+  it("control: an allowlisted ref with a configured secret is signed with exactly HMAC-SHA256(secret, body) over the bytes sent", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    const created = await attachVia(SLUG, { credentialRef: "n84_sentinel" });
+    expect(created.statusCode).toBe(201);
+    const sent = await sendTest(SLUG);
+    expect(sent.json().results[0].delivered).toBe(true);
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.headers["x-pcc-signature"]).toBe(hmacHeader(call.body!));
+    expect(JSON.parse(call.body!).operator).toBe(SLUG);
+    expect(JSON.stringify(sent.json())).not.toContain(SENTINEL_VALUE);
+  });
+
+  it("control: the signature follows the ref's normalised spelling (n84-sentinel resolves the same variable)", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    expect((await attachVia(SLUG, { credentialRef: "n84-sentinel" })).statusCode).toBe(201);
+    await sendTest(SLUG);
+    expect(calls[0]!.headers["x-pcc-signature"]).toBe(hmacHeader(calls[0]!.body!));
+  });
+
+  it("[neg] send time: a stored channel whose ref is no longer allowlisted is neither signed nor sent", async () => {
+    allow(`${SLUG}:n84_sentinel`);
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    expect((await attachVia(SLUG, { credentialRef: "n84_sentinel" })).statusCode).toBe(201);
+    delete process.env.PCC_CHANNEL_CREDENTIALS; // the operator removes the entry
+    const sent = await sendTest(SLUG);
+    const r = sent.json().results[0];
+    expect(r.delivered).toBe(false);
+    expect(r.error).toBe("credential_ref_not_allowed");
+    expect(calls, "nothing may be sent, signed or not").toHaveLength(0);
+    expect(JSON.stringify(sent.json())).not.toContain(SENTINEL_VALUE);
+  });
+
+  it("[neg] send time: a channel stored with a ref outside the allowlist (legacy data) is neither signed nor sent", async () => {
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    // attachChannel now refuses this, so plant the record the way pre-fix data would look
+    const ch = attachChannel(SLUG, {
+      label: "legacy",
+      transport: "webhook",
+      describe: "stored before the allowlist existed",
+      endpoint: { url: HOST_URL },
+    });
+    ch.credentialRef = "n84_sentinel";
+    const res = await dispatchToChannels(SLUG, { jobId: "j", contextRef: "c", summary: "s" });
+    expect(res[0]!.delivered).toBe(false);
+    expect(res[0]!.error).toBe("credential_ref_not_allowed");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("[neg] send time: an allowlisted pair whose secret is not configured fails closed (nothing sent) with the SAME result as a disallowed ref", async () => {
+    // (a) allowlisted, secret variable absent
+    allow(`${SLUG}:n84_sentinel`);
+    delete process.env[SENTINEL_ENV];
+    attachChannel(SLUG, { label: "a", transport: "webhook", describe: "allowlisted but unconfigured", endpoint: { url: HOST_URL }, credentialRef: "n84_sentinel" });
+    // (b) not allowlisted, secret variable present
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    delete process.env.PCC_CHANNEL_CREDENTIALS;
+    const b = attachChannel("n84-cred-b", { label: "b", transport: "webhook", describe: "disallowed ref, secret present", endpoint: { url: HOST_URL } });
+    b.credentialRef = "n84_sentinel"; // planted: attachChannel would refuse it now
+    // (c) allowlisted, secret variable present but EMPTY
+    allow(`${SLUG}-c:n84_sentinel`);
+    process.env[SENTINEL_ENV] = "";
+    attachChannel(`${SLUG}-c`, { label: "c", transport: "webhook", describe: "allowlisted, secret empty", endpoint: { url: HOST_URL }, credentialRef: "n84_sentinel" });
+
+    // dispatch (a) and (c) with their allowlist entries, (b) without
+    allow(`${SLUG}:n84_sentinel,${SLUG}-c:n84_sentinel`);
+    delete process.env[SENTINEL_ENV];
+    const ra = (await dispatchToChannels(SLUG, { jobId: "j", contextRef: "c", summary: "s" }))[0]!;
+    process.env[SENTINEL_ENV] = "";
+    const rc = (await dispatchToChannels(`${SLUG}-c`, { jobId: "j", contextRef: "c", summary: "s" }))[0]!;
+    process.env[SENTINEL_ENV] = SENTINEL_VALUE;
+    delete process.env.PCC_CHANNEL_CREDENTIALS;
+    const rb = (await dispatchToChannels("n84-cred-b", { jobId: "j", contextRef: "c", summary: "s" }))[0]!;
+
+    for (const r of [ra, rb, rc]) {
+      expect(r.delivered).toBe(false);
+      expect(r.error).toBe("credential_ref_not_allowed");
+    }
+    expect({ ...ra, channelId: "" }).toEqual({ ...rb, channelId: "" });
+    expect({ ...rc, channelId: "" }).toEqual({ ...rb, channelId: "" });
+    expect(calls).toHaveLength(0);
+  });
+});
