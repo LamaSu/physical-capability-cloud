@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
@@ -553,19 +554,51 @@ export async function setupRoutes(app: FastifyInstance) {
   });
 
   // ── POST /api/setup/register-device ──────────────────────────────────────
+  //
+  // OWNER-ONLY (WP-C R3; review round 2, probes P4 + P8). Registering a device
+  // writes a device row AND `cap-<kernelId>-<type>` capability rows under the
+  // kernel, so it is a catalog mutation of that kernel, the same class as
+  // heartbeat and POST /api/capabilities. Before, only the kernel's existence
+  // was checked: any key could add devices and priced capability rows to
+  // another operator's kernel, and could move another operator's existing
+  // device onto its own kernel with a rewritten adapterConfig.
+  //   - the shared ownership check (requireKernelOwner over
+  //     auth/kernel-operator.ts) runs before any write: 401 without an actor,
+  //     404 unknown kernel, 403 not_kernel_owner;
+  //   - an EXISTING device also requires ownership of the kernel it is on now
+  //     (403 otherwise, including an orphan device whose kernel row is gone),
+  //     and is never re-parented across kernels (409 device_kernel_mismatch,
+  //     even when the actor owns both);
+  //   - the audit actor is the authenticated principal.
 
   app.post<{ Body: RegisterDeviceBody }>(
     "/api/setup/register-device",
     async (req, reply) => {
+      // Imported here (not in the file header) to keep this work package's
+      // change inside the register-device handler.
+      const { checkKernelOwner, requireActor, requireOwnerOf } = await import(
+        "../auth/kernel-owner-guard.js"
+      );
+      // Steward rule 7: a PRESENT actor first (401), before body validation
+      // or any lookup.
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
+
       // An absent or null body still gets the missing-fields 400 (astra pack 111 MEDIUM 5).
       const body = (req.body ?? {}) as RegisterDeviceBody;
       const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits, firmware } =
         body;
 
-      if (!kernelId || !deviceId || !type || !adapterType) {
+      // WP-C: kernelId and deviceId must be non-empty STRINGS (a non-string
+      // never reaches an ownership lookup). N83: name every missing field.
+      if (
+        typeof kernelId !== "string" || !kernelId ||
+        typeof deviceId !== "string" || !deviceId ||
+        !type || !adapterType
+      ) {
         const missing: string[] = [];
-        if (!kernelId) missing.push("kernelId");
-        if (!deviceId) missing.push("deviceId");
+        if (typeof kernelId !== "string" || !kernelId) missing.push("kernelId");
+        if (typeof deviceId !== "string" || !deviceId) missing.push("deviceId");
         if (!type) missing.push("type");
         if (!adapterType) missing.push("adapterType");
         return reply.code(400).send({
@@ -600,6 +633,9 @@ export async function setupRoutes(app: FastifyInstance) {
         validatedEmits = parsed.data;
       }
 
+      // Ownership BEFORE any write (404 / 403 / 502 are sent by the guard).
+      if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
+
       try {
         const repos = getRepos();
 
@@ -609,9 +645,29 @@ export async function setupRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: "kernel_not_found" });
         }
 
-        // Idempotent upsert — never 409 a re-registration. If the device
-        // exists, update its mutable fields; otherwise insert.
+        // Idempotent upsert — never 409 a re-registration of the SAME device
+        // on the SAME kernel. If the device exists, update its mutable fields;
+        // otherwise insert.
         const existing = repos.kernels.findDeviceById(deviceId);
+        if (existing && existing.kernelId !== kernelId) {
+          // The device is on another kernel. Its current kernel must be the
+          // actor's too (a device whose kernel row is gone has no owner)...
+          const current = await checkKernelOwner(actor, existing.kernelId);
+          if (!current.ok) {
+            return reply.code(403).send({
+              error: "not_kernel_owner",
+              message: `Device '${deviceId}' belongs to a kernel you do not own`,
+              deviceId,
+            });
+          }
+          // ...and even then it is never moved across kernels.
+          return reply.code(409).send({
+            error: "device_kernel_mismatch",
+            message: `Device '${deviceId}' is registered on kernel '${existing.kernelId}'; it cannot be re-parented to '${kernelId}'`,
+            deviceId,
+            kernelId: existing.kernelId,
+          });
+        }
         const now = new Date().toISOString();
         let device: any;
         let action: "created" | "updated";
@@ -701,10 +757,10 @@ export async function setupRoutes(app: FastifyInstance) {
           model,
           action,
           capabilitiesRegistered: capabilities?.length ?? 0,
-        }, (req as any).operatorId ?? (req as any).apiKeyId);
+        }, actor);
         auditService.log({
           eventType: action === "created" ? "device.registered" : "device.updated",
-          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          actor,
           resourceType: "device",
           resourceId: deviceId,
           action: action === "created" ? "create" : "update",
@@ -712,8 +768,11 @@ export async function setupRoutes(app: FastifyInstance) {
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
+        // Never echo the stored adapterConfig (N71, operator item 86): the device's
+        // connection config stays in the row, for dispatch.
+        const { adapterConfig: _storedConfig, ...echoed } = (device ?? {}) as Record<string, unknown>;
         return reply.code(action === "created" ? 201 : 200).send({
-          device,
+          device: device ? echoed : device,
           registered: true,
           action,
         });
@@ -743,6 +802,18 @@ export async function setupRoutes(app: FastifyInstance) {
     const stepId = `setup-test-${Date.now()}`;
     const resolvedKernelId = kernelId ?? "kernel_dev_001";
     const startTime = Date.now();
+
+    // A kernel in emergency stop takes no job, test jobs included: 409
+    // kernel_emergency_stopped (503 policy_unavailable when its policy cannot be
+    // read), before any row is written. Two kernels are involved: the one the job
+    // row is recorded under, and the gateway's own kernel service, which is what
+    // actually runs it. Both are asked.
+    const localKernelId = (svc as unknown as { config?: { kernelId?: string } }).config?.kernelId;
+    for (const target of new Set([resolvedKernelId, localKernelId])) {
+      if (!target) continue;
+      const accepts = checkKernelAcceptsJobs(target);
+      if (!accepts.ok) return replyKernelNotAccepting(reply, accepts);
+    }
 
     // Insert a job record into the DB so status polling works
     try {

@@ -5,7 +5,24 @@ import { buildEd25519RegistrationProof } from "@pcc/kernel-sdk";
 import { apiGate } from "../middleware/api-gate.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
-import { closeStore, initStore } from "../db.js";
+import { closeStore, getRepos, initStore } from "../db.js";
+
+/**
+ * A fresh Ed25519 proof-of-possession for `kernelId`. WP-C: the owner in the
+ * last test registers WITH a proven signer, so the kernel's authorized ceiling
+ * is 1 (fresh reputation). The tier assertion there can then tell the two
+ * outcomes apart: the owner's omitted claim (0) serves 0, while an applied
+ * attacker claim of 3 would serve min(3, 1) = 1. Without a signer the ceiling
+ * is 0 and both outcomes would read 0.
+ */
+function ownerSigningProof(kernelId: string) {
+  const kp = nacl.sign.keyPair();
+  return buildEd25519RegistrationProof(kernelId, {
+    algorithm: "ed25519",
+    privateKey: kp.secretKey,
+    expectedPublicKey: Buffer.from(kp.publicKey).toString("hex"),
+  });
+}
 
 describe("POST /api/kernels authentication and ownership", () => {
   let app: FastifyInstance;
@@ -42,8 +59,8 @@ describe("POST /api/kernels authentication and ownership", () => {
   });
 
   it("does not let one authenticated actor bind a kernel owned by another", async () => {
-    const owner = provisionApiKey({ operatorId: "operator-owner" }).rawKey;
-    const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
+    const owner = provisionApiKey({ operatorId: "operator-owner", scopes: ["operator"] }).rawKey;
+    const attacker = provisionApiKey({ operatorId: "operator-attacker", scopes: ["operator"] }).rawKey;
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
@@ -68,15 +85,16 @@ describe("POST /api/kernels authentication and ownership", () => {
   });
 
   it("rejects an authenticated non-owner mutation without a signing proof", async () => {
-    const owner = provisionApiKey({ operatorId: "operator-owner" }).rawKey;
-    const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
+    const owner = provisionApiKey({ operatorId: "operator-owner", scopes: ["operator"] }).rawKey;
+    const attacker = provisionApiKey({ operatorId: "operator-attacker", scopes: ["operator"] }).rawKey;
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
       headers: { authorization: `Bearer ${owner}` },
-      payload: { id: "owned-profile", name: "Owner profile" },
+      payload: { id: "owned-profile", name: "Owner profile", ...ownerSigningProof("owned-profile") },
     });
     expect(first.statusCode).toBe(201);
+    expect(first.json().kernel.signingKey?.algorithm).toBe("ed25519");
 
     const response = await app.inject({
       method: "POST",
@@ -92,6 +110,10 @@ describe("POST /api/kernels authentication and ownership", () => {
       headers: { authorization: `Bearer ${owner}` },
     });
     expect(stored.json().kernel.name).toBe("Owner profile");
-    expect(stored.json().kernel.maxAssuranceTier).toBe(2);
+    // Old assertion: maxAssuranceTier === 2 (the unsafe default claim, served
+    // raw). WP-C: the omitted claim defaults to 0 and the DTO serves
+    // min(claim, ceiling=1) = 0. The attacker's claim of 3 was never stored.
+    expect(stored.json().kernel.maxAssuranceTier).toBe(0);
+    expect(getRepos().kernels.findById("owned-profile")?.maxAssuranceTier).toBe(0);
   });
 });

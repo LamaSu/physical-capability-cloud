@@ -218,13 +218,16 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
             }
           }
         } catch (err) {
-          // Fail-open — a policy read failure should not block jobs that
-          // don't actually require CVP. The facade and subsequent gates
-          // will still run. Log for observability.
-          req.log.warn(
+          // Fail closed. When the policy cannot be read, whether this kernel
+          // requires a capture verdict is unknown, so the job is not
+          // dispatched on the assumption that it does not. (No stored row is
+          // not an error: it passes above, with nothing to enforce.) Same
+          // answer as the other readers of the operator policy.
+          req.log.error(
             { err, kernelId },
-            "capture policy gate read failed; proceeding without CVP check",
+            "capture policy gate read failed; refusing the job (503 policy_unavailable)",
           );
+          return reply.status(503).send({ error: "policy_unavailable" });
         }
       }
 
@@ -254,6 +257,37 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
    * Register a device for a kernel. Returns 409 on duplicate, 400 on missing fields.
    */
   app.post<{ Body: RegisterDeviceInput }>("/api/devices/register", async (req, reply) => {
+    // OWNER-ONLY (N71, operator item 86). Registering a device writes a device row,
+    // with its connection config, under the kernel: the same class as
+    // POST /api/setup/register-device (WP-C R3). This route used to check only
+    // that the kernel exists, so any key could register devices on another
+    // operator's kernel. A present actor comes first (401, rule 7). Then the body:
+    // a kernelId that is present must be a STRING (400 invalid_kernel_id). That
+    // check precedes the owner check on purpose (astra pack 83 HIGH 3): the guard
+    // below is only entered for a string, and the facade looks the kernel up with
+    // whatever the body holds, so an array naming another operator's kernel
+    // skipped the guard and was still found (better-sqlite3 flattens an array
+    // parameter). When the body names a kernel, the actor must own it (403
+    // not_kernel_owner), and all of this happens before any write. A missing
+    // kernelId stays the facade's 400 missing_required_fields. An unknown kernel
+    // keeps its 400 kernel_not_found, answered here: it is not left to the
+    // facade, because a kernel created in between would then skip this check.
+    const { requireActor, checkKernelOwner } = await import("../auth/kernel-owner-guard.js");
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
+    const namedKernel = (req.body as { kernelId?: unknown } | undefined)?.kernelId;
+    if (namedKernel !== undefined && namedKernel !== null && typeof namedKernel !== "string") {
+      return reply.code(400).send({ error: "invalid_kernel_id", message: "kernelId must be a string" });
+    }
+    if (typeof namedKernel === "string" && namedKernel !== "") {
+      const verdict = await checkKernelOwner(actor, namedKernel);
+      if (!verdict.ok) {
+        if (verdict.status === 404) {
+          return reply.code(400).send({ error: "kernel_not_found", message: `Kernel '${namedKernel}' not found` });
+        }
+        return reply.code(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId: namedKernel });
+      }
+    }
     const result = await facade.registerDevice(req.body);
     if (!result.success) {
       // Map duplicate error to 409

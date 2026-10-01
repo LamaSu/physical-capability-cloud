@@ -23,6 +23,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { kernelSigningProofMessage } from "@pcc/kernel";
 import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 
 // Anvil/hardhat well-known test keys (public, throwaway). Two distinct signers.
 const PK_A = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -36,10 +37,16 @@ interface KernelBody {
 
 describe("POST /api/kernels — signing-address proof-of-possession (primitive #52)", () => {
   let app: FastifyInstance;
+  /** Key of the operator the set-once kernel is registered to (WP-C rule 7). */
+  let operatorKey: string;
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
+    operatorKey = provisionApiKey({
+      operatorId: "0xOperatorWallet12345678901234567890123456",
+      scopes: ["operator"],
+    }).rawKey;
     app = Fastify({ logger: false });
     await app.register(kernelRoutes);
     await app.ready();
@@ -217,15 +224,29 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
     const proofB = await accountB.signMessage({
       message: kernelSigningProofMessage(id),
     });
+    const hijack = {
+      id,
+      name: "Hijack Attempt",
+      signingAddress: accountB.address,
+      signingProof: proofB,
+    };
+    // WP-C steward rule 7: with NO authenticated actor the upsert of an
+    // existing kernel is refused (403) before any write. (Old: it reached the
+    // SET-ONCE CAS and got 409, but only after the name had been overwritten.)
+    const anonymous = await app.inject({ method: "POST", url: "/api/kernels", payload: hijack });
+    expect(anonymous.statusCode).toBe(403);
+    const afterAnon = JSON.parse((await app.inject({ method: "GET", url: `/api/kernels/${id}` })).body) as {
+      kernel: { name: string };
+    };
+    expect(afterAnon.kernel.name).toBe("Set-Once Kernel");
+
+    // The SET-ONCE CAS still stops even the kernel's OWN operator from
+    // swapping in a different proven signer.
     const second = await app.inject({
       method: "POST",
       url: "/api/kernels",
-      payload: {
-        id,
-        name: "Hijack Attempt",
-        signingAddress: accountB.address,
-        signingProof: proofB,
-      },
+      headers: { authorization: `Bearer ${operatorKey}` },
+      payload: hijack,
     });
     expect(second.statusCode).toBe(409);
 

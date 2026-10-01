@@ -13,6 +13,8 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import nacl from "tweetnacl";
+import { buildEd25519RegistrationProof } from "@pcc/kernel-sdk";
 import {
   composeRoutes,
   executeComposition,
@@ -28,6 +30,18 @@ import {
 import { reputationRoutes, _clearReputationForTests } from "../routes/reputation.js";
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import type { CompositionCandidate, RegisterGraphNodeInput } from "@pcc/spec";
+import { initStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { ensureTrustedKernel } from "./fixtures/authorized-kernels.js";
+
+// WP-C R1 fixture: the in-memory provider and graph-search now serve each
+// candidate / node at min(claimed tier, its kernel's authorized ceiling), and a
+// kernel with no row counts as ceiling 0. makeCandidate() and gnode() below
+// therefore put every candidate on a real kernel row with the maximum ceiling
+// (3), so the served tier equals the claimed tier and every assertion in this
+// file keeps its meaning. (Before R1 the claimed tier was used verbatim and the
+// kernels did not need to exist.) The clamp itself is tested in
+// assurance-ceiling-search.test.ts.
 
 function makeApp() {
   const app = Fastify({ logger: false });
@@ -48,6 +62,7 @@ function makeAppWithReputation(): FastifyInstance {
 function makeCandidate(
   partial: Partial<CompositionCandidate> & { capabilityId: string },
 ): CompositionCandidate {
+  ensureTrustedKernel(partial.kernelId ?? `k_${partial.capabilityId}`);
   return {
     capabilityId: partial.capabilityId,
     kernelId: partial.kernelId ?? `k_${partial.capabilityId}`,
@@ -67,6 +82,7 @@ function makeCandidate(
 function gnode(
   over: Partial<RegisterGraphNodeInput> & { capabilityId: string },
 ): RegisterGraphNodeInput {
+  ensureTrustedKernel(over.kernelId ?? `k_${over.capabilityId}`);
   return {
     capabilityId: over.capabilityId,
     capabilityType: over.capabilityType ?? over.capabilityId,
@@ -457,14 +473,22 @@ describe("POST /api/compose/:id/execute", () => {
 describe("POST /api/compose/_dev/register-candidate", () => {
   beforeEach(() => _clearComposeForTests());
 
+  // WP-C R1: the endpoint now requires the actor to own the candidate's kernel,
+  // so the request carries the key of k1's owner (old: anonymous, and k1 did
+  // not need to exist). Refusals are tested in assurance-ceiling-search.test.ts.
   it("registers a candidate via the dev endpoint", async () => {
+    initStore({ seed: false });
+    const owner = "compose-dev-endpoint-owner";
+    const key = provisionApiKey({ operatorId: owner, scopes: ["operator"] }).rawKey;
+    ensureTrustedKernel("k-compose-dev-endpoint", owner);
     const app = makeApp();
     const res = await app.inject({
       method: "POST",
       url: "/api/compose/_dev/register-candidate",
+      headers: { authorization: `Bearer ${key}` },
       payload: {
         capabilityId: "viaApi",
-        kernelId: "k1",
+        kernelId: "k-compose-dev-endpoint",
         operatorAddress: "op@example.com",
         capabilityType: "3d-printing",
         estimatedPriceUSD: 12,
@@ -963,7 +987,14 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
   });
 
   /** Register a kernel + a capability through the REAL facade write path so the
-   *  facade-backed provider can read them back via CapabilityFacade.listByType. */
+   *  facade-backed provider can read them back via CapabilityFacade.listByType.
+   *
+   *  WP-C: the kernel registers WITH a proven ed25519 signing key, as a real
+   *  operator does through kernel-sdk. Its authorized ceiling is then 1 (fresh
+   *  reputation), so the capability's [0,1,2] claim is served as [0,1] and
+   *  meets these tests' minAssuranceTier of 1. (Old: registered with no
+   *  signer, and the raw claim of 2 was selectable. An unsigned kernel now has
+   *  ceiling 0 and is served [0].) */
   async function registerRealCapability(opts: {
     kernelId: string;
     operatorAddress: string;
@@ -971,14 +1002,22 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     type: string;
     baseCostUSD: number;
   }): Promise<void> {
+    const kp = nacl.sign.keyPair();
+    const proof = buildEd25519RegistrationProof(opts.kernelId, {
+      algorithm: "ed25519",
+      privateKey: kp.secretKey,
+      expectedPublicKey: Buffer.from(kp.publicKey).toString("hex"),
+    });
     const kernel = await getKernelFacade().register({
       id: opts.kernelId,
       name: `Kernel ${opts.kernelId}`,
       operatorAddress: opts.operatorAddress,
       location: { lat: 37.77, lng: -122.42 },
       maxAssuranceTier: 2,
+      ...proof,
     });
     expect(kernel.success).toBe(true);
+    expect(kernel.success && kernel.data.kernel.signingKey?.algorithm).toBe("ed25519");
 
     const cap = await getCapabilityFacade().create({
       id: opts.capabilityId,
@@ -1000,7 +1039,9 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     await registerRealCapability({
       kernelId: "kernel-facade-1",
       operatorAddress: "op-facade-1@example.com",
-      capabilityId: "cap-facade-print",
+      // WP-C R5: capability ids are derived, cap-<kernelId>-<type> (old: the
+      // caller-chosen "cap-facade-print", which the facade now refuses).
+      capabilityId: "cap-kernel-facade-1-facade-3d-printing",
       type: "facade-3d-printing",
       baseCostUSD: 18,
     });
@@ -1016,7 +1057,7 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     const body = res.json();
     expect(body.status).toBe("proposed");
     expect(body.steps).toHaveLength(1);
-    expect(body.steps[0].capabilityId).toBe("cap-facade-print");
+    expect(body.steps[0].capabilityId).toBe("cap-kernel-facade-1-facade-3d-printing");
     // operatorAddress resolved via KernelFacade, not present on CapabilityDTO.
     expect(body.steps[0].operatorAddress).toBe("op-facade-1@example.com");
     expect(body.steps[0].estimatedPriceUSD).toBe(18);
@@ -1027,14 +1068,15 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     await registerRealCapability({
       kernelId: "kernel-pizzeria",
       operatorAddress: "op-pizzeria@example.com",
-      capabilityId: "cap-make-pizza",
+      // WP-C R5: derived ids (old: "cap-make-pizza" / "cap-deliver-pizza").
+      capabilityId: "cap-kernel-pizzeria-make-pizza",
       type: "make-pizza",
       baseCostUSD: 12,
     });
     await registerRealCapability({
       kernelId: "kernel-courier",
       operatorAddress: "op-courier@example.com",
-      capabilityId: "cap-deliver-pizza",
+      capabilityId: "cap-kernel-courier-deliver-pizza",
       type: "deliver-pizza",
       baseCostUSD: 7,
     });
@@ -1056,8 +1098,8 @@ describe("POST /api/compose — CapabilityFacade-backed provider (production wir
     expect(body.status).toBe("proposed");
     expect(body.steps).toHaveLength(2);
     expect(body.steps.map((s: { capabilityId: string }) => s.capabilityId)).toEqual([
-      "cap-make-pizza",
-      "cap-deliver-pizza",
+      "cap-kernel-pizzeria-make-pizza",
+      "cap-kernel-courier-deliver-pizza",
     ]);
     expect(body.steps.map((s: { capabilityType: string }) => s.capabilityType)).toEqual([
       "make-pizza",

@@ -27,6 +27,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { sameIdentity } from "../auth/identity-normalize.js";
 import { createHash } from "node:crypto";
 import type {
   CapabilityRequest,
@@ -50,6 +51,11 @@ import {
 } from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  buildAssuranceCeilingMap,
+  ceilingFor,
+  clampAssuranceTiers,
+} from "../services/assurance-ceiling.js";
 import { schema } from "@pcc/store";
 
 // ---------------------------------------------------------------------------
@@ -108,10 +114,20 @@ function agenticEnabled(): boolean {
 /**
  * Build CapabilityLite candidates for the matcher from the live registry.
  * Returns [] if the repo is unreachable — the caller falls back to templates.
+ *
+ * WP-C: `assuranceTiers` are the SERVED tiers, meaning each row's claim clamped
+ * to its kernel's served ceiling, min(the kernel's claim, its authorized
+ * assurance ceiling) (same clamp as the capability DTO). They drive the matched node's evidence depth (`deriveEvidence`) and
+ * the `matchedCapabilityDigest`, so a raw self-declared tier must never reach
+ * them. Kernels are loaded with one batched query. An unknown kernel is ceiling 0.
  */
 function loadCapabilityCandidates(): CapabilityLite[] {
   try {
-    const rows = getRepos().capabilities.findAll();
+    const repos = getRepos();
+    const rows = repos.capabilities.findAll();
+    const ceilings = buildAssuranceCeilingMap(
+      repos.kernels.findByIds([...new Set(rows.map((r) => r.kernelId))]),
+    );
     return rows.map<CapabilityLite>((r) => ({
       id: r.id,
       type: r.type,
@@ -127,7 +143,7 @@ function loadCapabilityCandidates(): CapabilityLite[] {
             minimum: r.pricing.minimum,
           }
         : undefined,
-      assuranceTiers: r.assuranceTiers,
+      assuranceTiers: clampAssuranceTiers(r.assuranceTiers, ceilingFor(ceilings, r.kernelId)),
     }));
   } catch {
     return [];
@@ -811,6 +827,17 @@ export async function requestRoutes(app: FastifyInstance) {
         targetOperator = callerId;
       }
 
+      // A node another operator holds is theirs: only a broker moves it (WP-A; astra
+      // pack 47, "broader ownership gaps"). It used to be reassigned unconditionally,
+      // so any key could take over a claimed node and then complete it. Claiming an
+      // OPEN node for yourself, or again one you hold, is unchanged.
+      if (node.assignedOperator && !sameIdentity(node.assignedOperator, targetOperator) && !isBrokerOperator(callerId)) {
+        return reply.status(409).send({
+          error: "node_already_assigned",
+          message: "This node is assigned to another operator; only a broker can reassign it",
+        });
+      }
+
       node.assignedOperator = targetOperator;
       node.status = "assigned";
 
@@ -858,11 +885,15 @@ export async function requestRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "node_not_found" });
       }
 
+      // The assigned operator sets its node's status, and a broker may set any. An
+      // UNASSIGNED node has no operator to match, so only a broker may (rule 7: this
+      // check used to be skipped whenever the node had no assigned operator).
       const { isBrokerOperator } = await import("../middleware/security-hardening.js");
-      if (node.assignedOperator && node.assignedOperator !== callerId && !isBrokerOperator(callerId)) {
+      const holds = typeof node.assignedOperator === "string" && sameIdentity(node.assignedOperator, callerId);
+      if (!holds && !isBrokerOperator(callerId)) {
         return reply.status(403).send({
           error: "forbidden",
-          message: "Only the assigned operator can update this node's status",
+          message: "Only the assigned operator (or a broker) can update this node's status",
         });
       }
 

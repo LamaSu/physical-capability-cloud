@@ -181,7 +181,7 @@ describe("GET /api/tools/status", () => {
       indexed: number;
       providers: { embedding: string; dim: number };
       lastReload: string;
-      loadedFromPath: string | null;
+      loadedFrom: string;
     }>();
     // The fixture has 4 tools (see fixtures/agent-package-fixture.json).
     expect(body.indexed).toBe(4);
@@ -192,7 +192,9 @@ describe("GET /api/tools/status", () => {
     expect(body.providers.dim).toBe(256);
     // lastReload is an ISO timestamp.
     expect(() => new Date(body.lastReload).toISOString()).not.toThrow();
-    expect(body.loadedFromPath).toBe(FIXTURE_PATH);
+    // Public status says where the index came from, never the filesystem path (#2883).
+    expect(body.loadedFrom).toBe("file");
+    expect(res.body).not.toContain(FIXTURE_PATH);
   });
 
   it("reports empty index when the manifest is missing", async () => {
@@ -206,19 +208,23 @@ describe("GET /api/tools/status", () => {
     app = await buildApp();
     const res = await app.inject({ method: "GET", url: "/api/tools/status" });
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ indexed: number; loadedFromPath: string | null }>();
-    // Note: the resolver may fall through to the canonical
-    // apps/dashboard/public/agent-package.json if it exists in the worktree.
-    // We only assert that loadedFromPath is NOT the (missing) override.
-    expect(body.loadedFromPath).not.toBe(process.env.PCC_AGENT_PACKAGE_PATH);
+    // The resolver may fall through to the canonical apps/dashboard/public/agent-package.json
+    // if it exists in the worktree; either way no filesystem path is published.
+    expect(res.body).not.toContain("does-not-exist.json");
+    expect(res.body).not.toContain("agent-package");
   });
 });
 
 describe("POST /api/tools/reload", () => {
   let app: FastifyInstance;
 
+  // WP-A round 5 (#2883): reload needs the admin SECRET; the operatorId allowlist grants nothing.
+  const ADMIN_SECRET = "tool-index-test-admin-secret";
+  const asAdmin = { "x-admin-key": ADMIN_SECRET };
+
   beforeEach(() => {
     process.env.PCC_AGENT_PACKAGE_PATH = FIXTURE_PATH;
+    process.env.PCC_ADMIN_KEY = ADMIN_SECRET;
     delete process.env.PCC_EMBEDDING_PROVIDER;
     _testResetToolIndex();
   });
@@ -227,6 +233,7 @@ describe("POST /api/tools/reload", () => {
     await app.close();
     delete process.env.PCC_AGENT_PACKAGE_PATH;
     delete process.env.PCC_TOOL_INDEX_ADMINS;
+    delete process.env.PCC_ADMIN_KEY;
     _testResetToolIndex();
   });
 
@@ -241,32 +248,32 @@ describe("POST /api/tools/reload", () => {
     expect(res.json<{ error: string }>().error).toBe("authentication_required");
   });
 
-  it("403s when authenticated but not on the admin allowlist", async () => {
+  it("[neg] an allowlisted operatorId without the admin secret is refused (401), a wrong secret is 403", async () => {
     process.env.PCC_TOOL_INDEX_ADMINS = ADMIN_OPERATOR;
-    app = await buildApp({ operatorId: NON_ADMIN_OPERATOR });
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/tools/reload",
-    });
-    expect(res.statusCode).toBe(403);
-    const body = res.json<{ error: string; message: string }>();
-    expect(body.error).toBe("forbidden");
-    expect(body.message).toContain("PCC_TOOL_INDEX_ADMINS");
+    app = await buildApp({ operatorId: ADMIN_OPERATOR });
+    const none = await app.inject({ method: "POST", url: "/api/tools/reload" });
+    expect(none.statusCode).toBe(401);
+    expect(none.json<{ error: string }>().error).toBe("admin_key_required");
+    const wrong = await app.inject({ method: "POST", url: "/api/tools/reload", headers: { "x-admin-key": "wrong" } });
+    expect(wrong.statusCode).toBe(403);
+    expect(wrong.json<{ error: string }>().error).toBe("admin_key_invalid");
   });
 
-  it("403s when allowlist is empty (closed by default)", async () => {
-    delete process.env.PCC_TOOL_INDEX_ADMINS;
-    app = await buildApp({ operatorId: ADMIN_OPERATOR });
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/tools/reload",
-    });
-    expect(res.statusCode).toBe(403);
+  it("[neg] with no PCC_ADMIN_KEY configured outside test/development it fails closed (503)", async () => {
+    const savedEnv = process.env.NODE_ENV;
+    delete process.env.PCC_ADMIN_KEY;
+    process.env.NODE_ENV = "production";
+    try {
+      app = await buildApp({ operatorId: ADMIN_OPERATOR });
+      const res = await app.inject({ method: "POST", url: "/api/tools/reload", headers: asAdmin });
+      expect(res.statusCode).toBe(503);
+    } finally {
+      process.env.NODE_ENV = savedEnv;
+    }
   });
 
   it("reloads and returns updated metadata when admin calls it", async () => {
-    process.env.PCC_TOOL_INDEX_ADMINS = ADMIN_OPERATOR;
-    app = await buildApp({ operatorId: ADMIN_OPERATOR });
+    app = await buildApp({ operatorId: NON_ADMIN_OPERATOR }); // any identity: the secret is what counts
 
     // Touch status first so we know what lastReload was at construction.
     const before = await app.inject({
@@ -283,6 +290,7 @@ describe("POST /api/tools/reload", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/tools/reload",
+      headers: asAdmin,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json<{

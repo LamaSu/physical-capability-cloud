@@ -295,12 +295,18 @@ describe("CapabilityFacade", () => {
 
   // ── create() ───────────────────────────────────────────────────────────
 
+  // WP-C R5: a capability id is DERIVED, cap-<kernelId>-<type>; a body id that
+  // disagrees is refused (400 capability_id_mismatch). These tests used
+  // caller-chosen ids ("cap-test-laser-new", "cap-idempotent-test", ...) that
+  // are now refused; they send the derived id instead. Two of them only
+  // asserted inside `if (result.success)` and would have passed vacuously, so
+  // they now also assert success.
   describe("create()", () => {
     it("creates a new capability and returns created=true", async () => {
       const result = await facade.create({
         kernelId: "kernel-nyc",
         type: "laser_cut",
-        id: "cap-test-laser-new",
+        id: "cap-kernel-nyc-laser_cut",
         name: "Test Laser",
       });
       expect(result.success).toBe(true);
@@ -313,9 +319,10 @@ describe("CapabilityFacade", () => {
       const result = await facade.create({
         kernelId: "kernel-nyc",
         type: "fdm_test",
-        id: "cap-test-fdm-unique",
+        id: "cap-kernel-nyc-fdm_test",
         name: "Test FDM",
       });
+      expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.capability.type).toBe("fdm_test");
         expect(result.data.capability.kernelId).toBe("kernel-nyc");
@@ -326,13 +333,14 @@ describe("CapabilityFacade", () => {
       const first = await facade.create({
         kernelId: "kernel-nyc",
         type: "some_type",
-        id: "cap-idempotent-test",
+        id: "cap-kernel-nyc-some_type",
       });
       const second = await facade.create({
         kernelId: "kernel-nyc",
         type: "some_type",
-        id: "cap-idempotent-test",
+        id: "cap-kernel-nyc-some_type",
       });
+      expect(first.success && second.success).toBe(true);
       if (first.success && second.success) {
         expect(first.data.created).toBe(true);
         expect(second.data.created).toBe(false);
@@ -389,7 +397,7 @@ describe("CapabilityFacade", () => {
       const result = await facade.create({
         kernelId: "kernel-nyc",
         type: "availability_regression",
-        id: "cap-availability-regression",
+        id: "cap-kernel-nyc-availability_regression",
         name: "Availability regression",
         availability,
       });
@@ -403,7 +411,7 @@ describe("CapabilityFacade", () => {
       const row = db
         .select()
         .from(schema.capabilities)
-        .where(eq(schema.capabilities.id, "cap-availability-regression"))
+        .where(eq(schema.capabilities.id, "cap-kernel-nyc-availability_regression"))
         .get();
       expect(row).toBeDefined();
       expect(row?.availability).toEqual(availability);
@@ -413,7 +421,7 @@ describe("CapabilityFacade", () => {
       const result = await facade.create({
         kernelId: "kernel-nyc",
         type: "availability_default",
-        id: "cap-availability-default",
+        id: "cap-kernel-nyc-availability_default",
       });
       expect(result.success).toBe(true);
       const { getStore } = await import("../db.js");
@@ -422,7 +430,7 @@ describe("CapabilityFacade", () => {
       const row = db
         .select()
         .from(schema.capabilities)
-        .where(eq(schema.capabilities.id, "cap-availability-default"))
+        .where(eq(schema.capabilities.id, "cap-kernel-nyc-availability_default"))
         .get();
       expect(row?.availability).toEqual({});
     });

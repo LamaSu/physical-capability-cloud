@@ -2,8 +2,18 @@ import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
-import { getStore } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  checkKernelOwner,
+  ownsKernel,
+  requireActor,
+  requireKernelOwner,
+  requireOwnerOf,
+} from "../auth/kernel-owner-guard.js";
+import { presentsAdminSecret, requireAdminSecret } from "../auth/admin-secret-gate.js";
+import { checkKernelAcceptsJobs, replyKernelNotAccepting } from "../services/kernel-emergency-stop.js";
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -65,34 +75,80 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Operator Policy — guardrails for job execution
   // ═════════════════════════════════════════════════════════════════
 
-  /** GET /api/operator/policy/:kernelId — Get operator policy */
+  /**
+   * GET /api/operator/policy/:kernelId — Get operator policy.
+   *
+   * OWNER-OR-ADMIN (WP-C, N31; adk #3972). The policy carries the approval mode,
+   * spend/rate limits and `emergencyStop`, so a kernel's guardrail posture is not
+   * public: any key could read any kernel's e-stop state and limits. Only the
+   * kernel's owner (sameIdentity) or the admin may read it now. A kernel with no
+   * recorded owner (missing, or the zero-address placeholder) is the admin's
+   * alone (fail closed), matching the write path. No identity -> 401; a
+   * non-owner -> 403 not_kernel_owner. The default-policy fallback for an
+   * unknown kernel is unchanged, but only for an authorized caller.
+   *
+   * Three outcomes, and only two of them produce a policy. A stored row is
+   * returned as stored. No row is DEFAULT_OPERATOR_POLICY, marked
+   * `source: "default"`. A read that FAILS (the store cannot be opened, the
+   * query throws, the stored row cannot be parsed) is not "no row": it answers
+   * 503 `policy_unavailable` and never a policy, because the default carries
+   * `emergencyStop: false` and a caller (a node, a runtime) would read the
+   * failure as "no emergency stop".
+   */
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
-    async (req) => {
+    async (req, reply) => {
+      // OWNER-OR-ADMIN, mirroring the PUT/PATCH writes below (same requireActor
+      // + requireOwnerOf), plus an admin read for observability. An admin secret
+      // presented (valid) reads any kernel; otherwise the actor must own the
+      // kernel. requireOwnerOf fails closed on an unowned/placeholder kernel and
+      // on an unknown one (404), via the hardened ownsKernel.
+      if (presentsAdminSecret(req)) {
+        if (!requireAdminSecret(req, reply)) return reply;
+      } else {
+        const actor = requireActor(req, reply);
+        if (!actor) return reply;
+        if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
+      }
+      let row: typeof operatorPolicies.$inferSelect | undefined;
       try {
         const { db } = getStore();
-        const row = db.select().from(operatorPolicies)
+        row = db.select().from(operatorPolicies)
           .where(eq(operatorPolicies.kernelId, req.params.kernelId))
           .get();
+      } catch (err) {
+        req.log.error(
+          { err, kernelId: req.params.kernelId },
+          "operator policy read failed; answering 503 policy_unavailable",
+        );
+        return reply.status(503).send({ error: "policy_unavailable" });
+      }
 
-        if (!row) {
-          return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
-        }
-        return { policy: row.policy, updatedAt: row.updatedAt };
-      } catch {
+      if (!row) {
         return { policy: DEFAULT_OPERATOR_POLICY, source: "default" };
       }
+      return { policy: row.policy, updatedAt: row.updatedAt };
     },
   );
 
-  /** PUT /api/operator/policy/:kernelId — Update full policy */
+  /**
+   * PUT /api/operator/policy/:kernelId — Update full policy
+   *
+   * OWNER-ONLY (WP-C, N31): the policy carries `emergencyStop`, so writing it
+   * is the same authority as the e-stop routes below. The owner check runs
+   * before any write (401 / 404 / 403 not_kernel_owner); a missing actor is a
+   * 401 before the body is validated (steward rule 7).
+   */
   app.put<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
       const policy = req.body as OperatorPolicy;
       if (!policy || policy.version !== 1) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
+      if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
 
       try {
         const { db } = getStore();
@@ -118,11 +174,17 @@ export async function operatorRoutes(app: FastifyInstance) {
     },
   );
 
-  /** PATCH /api/operator/policy/:kernelId — Partial update */
+  /**
+   * PATCH /api/operator/policy/:kernelId — Partial update
+   *
+   * OWNER-ONLY (WP-C, N31), same as PUT: a patch can set or clear
+   * `emergencyStop`, so it must not be a side door around the e-stop check.
+   */
   app.patch<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
       const patch = req.body as Partial<OperatorPolicy>;
+      if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
 
       try {
         const { db } = getStore();
@@ -158,10 +220,25 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Emergency Stop / Resume
   // ═════════════════════════════════════════════════════════════════
 
+  // OWNER-ONLY (WP-C; N31 from operator-ux #2348, steward #2450). Setting or
+  // clearing a kernel's e-stop, and deciding its pending approvals, are the
+  // kernel operator's calls. Each route requires a PRESENT actor who is the
+  // kernel's recorded operator (requireKernelOwner / checkKernelOwner, over the
+  // shared auth/kernel-operator.ts predicate): 401 without an actor, 404 for an
+  // unknown kernel, 403 not_kernel_owner for anyone else. The check runs BEFORE
+  // any write, so a refusal leaves the e-stop state and the approvals untouched.
+  // (Before: kernelId came from the body with no identity or ownership check, so
+  // any key could stop or resume any kernel.) Steward rule 7: the actor is
+  // resolved first, so a request without one is 401 even before its body is
+  // validated.
+
   /** POST /api/operator/emergency-stop — Activate emergency stop */
   app.post("/api/operator/emergency-stop", async (req, reply) => {
-    const { kernelId, reason } = req.body as { kernelId: string; reason?: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
+    const { kernelId, reason } = (req.body ?? {}) as { kernelId?: unknown; reason?: string };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
     try {
       const { db } = getStore();
@@ -181,7 +258,11 @@ export async function operatorRoutes(app: FastifyInstance) {
         })
         .run();
 
-      // Cancel all pending approvals for this kernel
+      // Cancel all pending approvals for this kernel. Only PENDING ones: an
+      // approval already granted, and the kernel's queued jobs, are not touched
+      // here. While the stop lasts they are held back at the queues a node polls
+      // (GET /api/operator/approvals?status=approved and GET /api/operator/jobs),
+      // and they are handed out again on resume.
       db.update(pendingApprovals)
         .set({
           status: "rejected",
@@ -202,8 +283,11 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-resume — Deactivate emergency stop */
   app.post("/api/operator/emergency-resume", async (req, reply) => {
-    const { kernelId } = req.body as { kernelId: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
+    const { kernelId } = (req.body ?? {}) as { kernelId?: unknown };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
 
     try {
       const { db } = getStore();
@@ -232,17 +316,53 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Pending Approvals
   // ═════════════════════════════════════════════════════════════════
 
-  /** POST /api/operator/approvals — Submit a job for approval */
+  /**
+   * POST /api/operator/approvals — Submit a job for the kernel operator's approval.
+   *
+   * WP-C R2 (review round 2, HIGH; probe P2). This route used to take
+   * `autoApprove: true` from the body and store the job as ALREADY APPROVED
+   * for any kernel, from any key, with `submittedBy` copied from the body. The
+   * in-repo OT-2 daemon (scripts/ot2-agent.py) polls `status=approved` for its
+   * kernel and runs those jobs on the robot, so this bypassed the owner-only
+   * approve route (N31) and ignored the e-stop. Now:
+   *   - a PRESENT actor is required (401), and an unknown kernel is 404;
+   *   - body `autoApprove` is ignored. A job is created 'approved' only when
+   *     the actor OWNS the kernel and the kernel's policy says
+   *     `approvalMode: "auto"`. Everyone else creates 'pending', which only
+   *     the owner can approve;
+   *   - `submittedBy` is the authenticated actor, never a body field;
+   *   - a kernel whose policy has `emergencyStop` set refuses new approvals
+   *     (503, the same answer the job and negotiation routes give).
+   * Any key may still SUBMIT a job for a kernel's approval; that is the
+   * purpose of the queue.
+   */
   app.post("/api/operator/approvals", async (req, reply) => {
-    const { kernelId, agentId, capabilityType, parameters, autoApprove } = (req.body ?? {}) as {
-      kernelId?: string; agentId?: string; capabilityType?: string;
-      parameters?: Record<string, unknown>; autoApprove?: boolean;
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
+    const { kernelId, capabilityType, parameters } = (req.body ?? {}) as {
+      kernelId?: unknown; capabilityType?: string; parameters?: Record<string, unknown>;
     };
-    if (!kernelId || !agentId) {
-      return reply.status(400).send({ error: "kernelId and agentId required" });
+    if (typeof kernelId !== "string" || !kernelId) {
+      return reply.status(400).send({ error: "kernelId required" });
     }
+    // Owner check WITHOUT refusing non-owners: 404 / 502 refuse, 403 means
+    // "may submit, but only as pending".
+    const verdict = await checkKernelOwner(actor, kernelId);
+    if (!verdict.ok && verdict.status !== 403) {
+      return reply.status(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId });
+    }
+    const isOwner = verdict.ok;
     try {
       const { db } = getStore();
+      const policyRow = db.select().from(operatorPolicies)
+        .where(eq(operatorPolicies.kernelId, kernelId))
+        .get();
+      const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
+      if (policy.emergencyStop) {
+        return reply.status(503).send({ error: "Operator has activated emergency stop", kernelId });
+      }
+      const approved = isOwner && policy.approvalMode === "auto";
+
       const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const now = new Date().toISOString();
@@ -252,11 +372,11 @@ export async function operatorRoutes(app: FastifyInstance) {
         id,
         kernelId,
         jobId,
-        submittedBy: agentId,
+        submittedBy: actor,
         jobSummary: { capabilityType: capabilityType ?? "liquid-handler", parameters: parameters ?? {} },
-        status: autoApprove ? "approved" : "pending",
+        status: approved ? "approved" : "pending",
         createdAt: now,
-        decidedAt: autoApprove ? now : null,
+        decidedAt: approved ? now : null,
         expiresAt: expires,
       }).run();
 
@@ -267,9 +387,48 @@ export async function operatorRoutes(app: FastifyInstance) {
     }
   });
 
-  /** GET /api/operator/approvals — List pending approvals */
-  app.get("/api/operator/approvals", async (req) => {
+  /**
+   * GET /api/operator/approvals — List approvals.
+   *
+   * OWNER-SCOPED (WP-C R2). A present actor is required (401). With
+   * `?kernelId=` the actor must own that kernel (404 unknown, 403
+   * not_kernel_owner). Without it, only approvals for kernels the actor owns
+   * are listed, resolved with one batched kernel lookup. (Before: any key
+   * could read every kernel's queue, including the job parameters.)
+   *
+   * EMERGENCY STOP. `?status=approved` is the queue the OT-2 daemon polls for
+   * work to run, so a kernel in emergency stop hands out none of it. The stop
+   * itself only rejects PENDING approvals (POST /emergency-stop below), so an
+   * approval granted before the stop was still handed out. With `?kernelId=` the
+   * answer is 200 `{ approvals: [], emergencyStop: true }` (a 200 for the reason
+   * given at GET /api/operator/jobs), or 503 `policy_unavailable` when the
+   * kernel's policy cannot be read. Without `?kernelId=` the rows of a kernel
+   * that is stopped, or whose policy cannot be read, are left out. Any other
+   * status filter, and the unfiltered history view, are unchanged.
+   */
+  app.get("/api/operator/approvals", async (req, reply) => {
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { kernelId, status } = req.query as { kernelId?: string; status?: string };
+    if (kernelId) {
+      // String(): a repeated ?kernelId= arrives as an array and names no kernel (404).
+      const verdict = await checkKernelOwner(actor, String(kernelId));
+      if (!verdict.ok) {
+        return reply.status(verdict.status).send({ error: verdict.error, message: verdict.message, kernelId });
+      }
+    }
+
+    // Asking for the approved queue: ?status=approved, or a repeated ?status=
+    // (an array, which is held back like any other work).
+    const asksForApproved =
+      status !== undefined && (typeof status !== "string" || status === "approved");
+    if (kernelId && asksForApproved) {
+      const accepts = checkKernelAcceptsJobs(String(kernelId));
+      if (!accepts.ok) {
+        if (accepts.status === 503) return replyKernelNotAccepting(reply, accepts);
+        return { approvals: [], emergencyStop: true };
+      }
+    }
 
     try {
       const { db } = getStore();
@@ -291,16 +450,71 @@ export async function operatorRoutes(app: FastifyInstance) {
         rows = db.select().from(pendingApprovals).all();
       }
 
+      if (!kernelId) {
+        const kernelIds = [...new Set(rows.map((r) => r.kernelId))];
+        const owned = new Set(
+          getRepos().kernels.findByIds(kernelIds)
+            .filter((k) => ownsKernel(k.operatorAddress, actor))
+            .map((k) => k.id),
+        );
+        rows = rows.filter((r) => owned.has(r.kernelId));
+        if (asksForApproved) {
+          // A kernel that is stopped, or whose policy cannot be read, hands out no work.
+          const heldBack = new Set(
+            [...new Set(rows.map((r) => r.kernelId))].filter((id) => !checkKernelAcceptsJobs(id).ok),
+          );
+          rows = rows.filter((r) => !heldBack.has(r.kernelId));
+        }
+      }
+
       return { approvals: rows };
     } catch {
       return { approvals: [] };
     }
   });
 
+  /**
+   * The approval's kernel must be owned by the request's actor (owner-only, see
+   * the e-stop note above). Returns true when authorized; otherwise the refusal
+   * (401 / 404 / 403 / 500) has been sent and nothing was written.
+   */
+  async function requireApprovalOwner(
+    req: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+    failure: string,
+  ): Promise<boolean> {
+    const actor = requireActor(req, reply);
+    if (!actor) return false;
+    let approval: { kernelId: string } | undefined;
+    try {
+      approval = getStore().db.select().from(pendingApprovals)
+        .where(eq(pendingApprovals.id, req.params.id))
+        .get();
+    } catch {
+      void reply.status(500).send({ error: failure });
+      return false;
+    }
+    if (!approval) {
+      void reply.status(404).send({ error: "Approval not found or already decided" });
+      return false;
+    }
+    const verdict = await checkKernelOwner(actor, approval.kernelId);
+    if (!verdict.ok) {
+      void reply.status(verdict.status).send({
+        error: verdict.error,
+        message: verdict.message,
+        kernelId: approval.kernelId,
+      });
+      return false;
+    }
+    return true;
+  }
+
   /** POST /api/operator/approvals/:id/approve — Approve a pending job */
   app.post<{ Params: { id: string } }>(
     "/api/operator/approvals/:id/approve",
     async (req, reply) => {
+      if (!(await requireApprovalOwner(req, reply, "Failed to approve"))) return reply;
       try {
         const { db } = getStore();
         const now = new Date().toISOString();
@@ -330,6 +544,7 @@ export async function operatorRoutes(app: FastifyInstance) {
     "/api/operator/approvals/:id/reject",
     async (req, reply) => {
       const { reason } = (req.body ?? {}) as { reason?: string };
+      if (!(await requireApprovalOwner(req, reply, "Failed to reject"))) return reply;
 
       try {
         const { db } = getStore();

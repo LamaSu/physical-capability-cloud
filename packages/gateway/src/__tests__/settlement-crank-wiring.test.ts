@@ -14,7 +14,7 @@
  * before the settle call.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 // Controllable mocks must be hoisted (vi.mock factories are hoisted above imports).
@@ -80,6 +80,21 @@ import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { verifyWithOracle } from "../services/oracle-client.js";
+
+// N46 authority (WP-A): completing a job or resuming its settlement is the job's
+// operator's or the admin's. These fixtures act as the admin, presenting the
+// admin secret on those calls.
+const RELEASE_ADMIN_SECRET = "release-fixture-admin-secret";
+const RELEASE_ADMIN_HEADERS = { "x-admin-key": RELEASE_ADMIN_SECRET };
+const savedReleaseAdminKey = process.env.PCC_ADMIN_KEY;
+beforeAll(() => {
+  process.env.PCC_ADMIN_KEY = RELEASE_ADMIN_SECRET;
+});
+afterAll(() => {
+  if (savedReleaseAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = savedReleaseAdminKey;
+});
+
 
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
@@ -192,7 +207,7 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
         ],
       });
 
-    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: RELEASE_ADMIN_HEADERS, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(2);
@@ -228,7 +243,7 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
         steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
       });
 
-    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: RELEASE_ADMIN_HEADERS, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(2);
@@ -253,7 +268,7 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
       steps: [{ action: "release", result: "already_done", revert: "Not attested" }],
       stepId: "0x" + "11".repeat(32),
     });
-    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, headers: RELEASE_ADMIN_HEADERS, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("settled");
@@ -290,7 +305,7 @@ describe("/complete routes the on-chain settle through driveSettlement", () => {
         steps: [{ action: "submitAttestation", result: "landed", txHash: "0xat" }],
       });
 
-    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, headers: RELEASE_ADMIN_HEADERS, payload: {} });
 
     expect(res.statusCode).toBe(200);
     expect(h.driveSettlement).toHaveBeenCalledTimes(2);

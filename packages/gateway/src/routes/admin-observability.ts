@@ -16,9 +16,9 @@
  * Gating (HALT-safe + least-privilege):
  *   • Inert unless PCC_FUNNEL_ENABLED==="true"  → 404 not_enabled.
  *   • Registered AFTER apiGate, so the caller is authenticated.
- *   • Admin-only: operatorId must be in PCC_OBSERVABILITY_ADMINS (comma-sep).
- *     When that var is unset, access is allowed ONLY in non-production
- *     (NODE_ENV !== "production") to keep local dev frictionless.
+ *   • Admin-only: the admin SECRET (X-Admin-Key = PCC_ADMIN_KEY, via
+ *     requireAdminSecret). There is no allowlist and no environment exception: an
+ *     unset key refuses (503) in every environment (N2).
  *
  * NOTE: for interactive, span-level trace replay use Sentry's Trace Explorer
  * (already wired) — paste the trace_id. These endpoints give the aggregate /
@@ -29,6 +29,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { auditService } from "../services/audit-service.js";
+import { requireAdminSecret } from "../auth/admin-secret-gate.js";
 import { analyzeAttempts, weeklyDigest, type AttemptSession } from "../services/attempt-analysis.js";
 import {
   funnelEnabled,
@@ -40,20 +41,6 @@ import {
 const REPORT_EVENT = "agent.report";
 const TRACE_ID_RE = /^tr_[0-9a-f]{16,32}$/;
 
-function isObservabilityAdmin(req: FastifyRequest): boolean {
-  const operatorId = (req as unknown as { operatorId?: string | null }).operatorId ?? undefined;
-  const allow = (process.env.PCC_OBSERVABILITY_ADMINS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (allow.length > 0) return !!operatorId && allow.includes(operatorId);
-  // No allowlist → FAIL CLOSED. The dev bypass requires BOTH an explicit development
-  // environment AND an explicit opt-in — so a leaked PCC_OBSERVABILITY_DEV_OPEN alone
-  // can't expose data in prod, and a missing/misspelled NODE_ENV (not "development")
-  // denies by default (review r-obs #1 + confirm).
-  return process.env.NODE_ENV === "development" && process.env.PCC_OBSERVABILITY_DEV_OPEN === "true";
-}
-
 /**
  * Common guard. Returns true if the request may proceed; else sends the error.
  *
@@ -62,9 +49,9 @@ function isObservabilityAdmin(req: FastifyRequest): boolean {
  * ERRORS views read the `agent.report` audit event that POST /api/feedback emits
  * regardless of that flag, so they are enabled by DEFAULT (requireFunnel=false) and
  * protected by the admin gate alone — no need to turn on journey recording just to
- * read agent feedback. SECURITY: the admin gate fails closed in production (no
- * PCC_OBSERVABILITY_ADMINS ⇒ 403); ensure NODE_ENV=production in prod so the
- * no-allowlist path denies. Set PCC_OBSERVABILITY_ADMINS to grant specific operators.
+ * read agent feedback. SECURITY: the admin gate is the admin secret, in every
+ * environment (N2). PCC_OBSERVABILITY_ADMINS grants nothing; it stays reserved from
+ * self-service claims (auth/reserved-identities.ts).
  */
 function guard(
   req: FastifyRequest,
@@ -78,14 +65,10 @@ function guard(
     });
     return false;
   }
-  if (!isObservabilityAdmin(req)) {
-    reply.status(403).send({
-      error: "forbidden",
-      message: "Observability views require an operator listed in PCC_OBSERVABILITY_ADMINS.",
-    });
-    return false;
-  }
-  return true;
+  // WP-A round 5 (coord-watch #2883): the admin SECRET, not an asserted operatorId on
+  // PCC_OBSERVABILITY_ADMINS. checkAdminKey fails closed in every environment (N2); the
+  // old PCC_OBSERVABILITY_DEV_OPEN opt-in is gone with the allowlist.
+  return requireAdminSecret(req, reply);
 }
 
 // ── Attempt analysis source (ADK track item 10a) ──────────────────────────────
@@ -168,7 +151,7 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { since?: string } }>(
     "/api/admin/observability/funnel",
     async (req, reply) => {
-      if (!guard(req, reply)) return;
+      if (!guard(req, reply)) return reply;
       const funnel = getCohortFunnel({ since: req.query.since });
       return {
         since: req.query.since ?? null,
@@ -183,7 +166,7 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
   app.get<{ Params: { traceId: string } }>(
     "/api/admin/observability/journey/:traceId",
     async (req, reply) => {
-      if (!guard(req, reply)) return;
+      if (!guard(req, reply)) return reply;
       const traceId = req.params.traceId;
       if (!TRACE_ID_RE.test(traceId)) {
         return reply.status(400).send({
@@ -213,7 +196,7 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { since?: string } }>(
     "/api/admin/observability/errors",
     async (req, reply) => {
-      if (!guard(req, reply, false)) return; // reads agent.report → no funnel flag needed
+      if (!guard(req, reply, false)) return reply; // reads agent.report → no funnel flag needed
       // Histogram of last_error_code surfaced in agent reports (what actually
       // tripped agents up). Complement with auditService.stats() (24h event mix).
       const reports = auditService.query({
@@ -243,7 +226,7 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { since?: string; limit?: string } }>(
     "/api/admin/observability/feedback",
     async (req, reply) => {
-      if (!guard(req, reply, false)) return; // reads agent.report → no funnel flag needed
+      if (!guard(req, reply, false)) return reply; // reads agent.report → no funnel flag needed
       const limit = Math.min(Number.parseInt(req.query.limit ?? "100", 10) || 100, 1000);
       const rows = auditService
         .query({ eventType: REPORT_EVENT, since: req.query.since, limit })

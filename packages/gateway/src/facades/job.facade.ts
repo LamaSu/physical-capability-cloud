@@ -26,6 +26,12 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import {
+  effectiveMaxAssuranceTier,
+  isAssuranceTier,
+  type AssuranceClaimKernel,
+} from "../services/assurance-ceiling.js";
+import { assertKernelAcceptsJobs } from "../services/kernel-emergency-stop.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -205,6 +211,26 @@ export class JobFacade extends BaseFacade {
    * Handles capability fuzzy matching, DB persistence, external kernel routing,
    * and local KernelService dispatch.
    * Replaces: POST /api/jobs/submit
+   *
+   * ASSURANCE CEILING (WP-C R7; review round 2, LOW). A job names ONE kernel,
+   * and the tier it is submitted at is persisted as the job's contracted tier.
+   * Before, any tier up to 3 was persisted for any kernel, whatever that
+   * kernel was authorized for: the ceiling governed discovery and selection
+   * but not contracting. Now, before anything is written:
+   *   - `assuranceTier`, when present (not undefined/null), must be an integer
+   *     in 0..3; anything else is 400 `invalid_assurance_tier` (it used to be
+   *     stored verbatim, or silently read as 0 when not a number);
+   *   - a tier T > 0 needs T <= the SERVED tier of the kernel,
+   *     effectiveMaxAssuranceTier(kernel row) = min(claimed tier, authorized
+   *     ceiling) (services/assurance-ceiling.ts). Otherwise 400
+   *     `assurance_tier_not_authorized`. A kernel with no row is served at 0.
+   *   - tier 0 needs no authorization, so external kernels with no row keep
+   *     working at tier 0.
+   *
+   * EMERGENCY STOP. A kernel whose stored policy has `emergencyStop` takes no
+   * new job: 409 `kernel_emergency_stopped`, before the job row is written. A
+   * policy that cannot be read is 503 `policy_unavailable`. No policy row means
+   * not stopped.
    */
   async submit(
     body: SubmitJobInput,
@@ -221,6 +247,35 @@ export class JobFacade extends BaseFacade {
       if (!kernelId) {
         return this.badRequest("missing_kernel_id", "kernelId is required");
       }
+
+      // WP-C R7: validate the requested tier, then hold it to the kernel's
+      // served tier, before any read-for-write or insert.
+      let requestedTier = 0;
+      if (assuranceTier !== undefined && assuranceTier !== null) {
+        if (!isAssuranceTier(assuranceTier)) {
+          return this.badRequest("invalid_assurance_tier", "assuranceTier must be an integer in 0..3");
+        }
+        requestedTier = assuranceTier;
+      }
+      if (requestedTier > 0) {
+        const servedTier = effectiveMaxAssuranceTier(
+          this.repos.kernels.findById(kernelId) as AssuranceClaimKernel | undefined,
+        );
+        if (requestedTier > servedTier) {
+          return this.badRequest(
+            "assurance_tier_not_authorized",
+            `Kernel '${kernelId}' is served at assurance tier ${servedTier} (its claimed tier capped at ` +
+              `its authorized ceiling); a job cannot be contracted with it at tier ${requestedTier}`,
+          );
+        }
+      }
+
+      // A kernel in emergency stop takes no new job: 409 kernel_emergency_stopped,
+      // or 503 policy_unavailable when its policy cannot be read (never "not
+      // stopped"). After the input checks above, so bad input is still a 400, and
+      // before the first write. The one rule is services/kernel-emergency-stop.ts;
+      // POST /api/jobs/submit and the composition executor both come through here.
+      assertKernelAcceptsJobs(kernelId);
 
       const jobId = body.jobId ?? `job-${uuidv4()}`;
 
@@ -252,7 +307,8 @@ export class JobFacade extends BaseFacade {
         parameters: parameters ?? null,
         // F8 — persist the tier the job was submitted at (default 0 =
         // self-attested) so JobDTOs report the real value, not a hardcoded 0.
-        assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
+        // WP-C R7: validated above and within the kernel's served tier.
+        assuranceTier: requestedTier,
       });
 
       // Determine if this is an external kernel (daemon will pick up the job)

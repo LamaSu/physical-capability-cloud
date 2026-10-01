@@ -2,6 +2,12 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
+import {
+  checkKernelOwner,
+  requireActor,
+  requireKernelOwner,
+  resolveRequestActor,
+} from "../auth/kernel-owner-guard.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -130,7 +136,13 @@ export async function kernelRoutes(app: FastifyInstance) {
   app.post<{ Body: CreateKernelInput }>("/api/kernels", async (req, reply) => {
     // apiGate authenticates this mutation. Ownership is the stable operator
     // identity, never the replaceable API-key record id.
-    const actorId = (req as any).operatorId ?? (req as any).userId;
+    //
+    // Steward rule 7 (WP-C): the handler does not rely on apiGate having run.
+    // The actor is apiGate's identity (operatorId ?? userId), else the same
+    // resolvers apiGate uses (resolveRequestActor). Without an actor,
+    // KernelFacade.register refuses to touch an EXISTING kernel (403): an
+    // owner check fails closed, never "no actor, so skip it".
+    const actorId = resolveRequestActor(req);
     const result = await facade.register(
       req.body,
       actorId,
@@ -154,13 +166,31 @@ export async function kernelRoutes(app: FastifyInstance) {
   /**
    * Per-kernel heartbeat — pcc-node daemons call this path.
    * Updates status + upserts any announced capabilities.
-   * Returns { acknowledged, kernelId, status, capabilitiesReceived, timestamp }.
+   * Returns { acknowledged, kernelId, status, capabilitiesReceived, timestamp }
+   * (plus `acceptingJobs: false` when the heartbeat carried it).
+   *
+   * Owner-only (WP-C): the authenticated actor (apiGate `operatorId ?? userId`)
+   * must be the kernel's recorded owner, meaning the identity that registered it
+   * (requireKernelOwner, over the shared auth/kernel-operator.ts predicate).
+   * 401 without an actor, 404 for an unknown kernel, 403 `not_kernel_owner`
+   * otherwise, and nothing is written on a refusal. Inserted capability tiers
+   * are clamped to the kernel's authorized ceiling.
+   *
+   * Optional boolean `acceptingJobs`: `false` marks a node that takes no jobs
+   * (the heartbeat-only pcc-node daemon). Liveness is recorded, but no
+   * capability's validUntil is refreshed, no announced list is applied and
+   * nothing is withdrawn, so the kernel's listings age out. `true` or absent is
+   * the ordinary heartbeat. Any other type is a 400 `invalid_accepting_jobs`,
+   * answered by the facade after the owner check above and before any write.
    */
   app.post<{
     Params: { kernelId: string };
     Body: HeartbeatInput;
   }>("/api/kernels/:kernelId/heartbeat", async (req, reply) => {
-    const result = await facade.heartbeat(req.params.kernelId, req.body ?? {});
+    const actor = await requireKernelOwner(req, reply, req.params.kernelId);
+    if (!actor) return reply;
+    // The facade re-checks ownership against the row it loads (defence in depth).
+    const result = await facade.heartbeat(req.params.kernelId, req.body ?? {}, actor);
     return sendResult(reply, result);
   });
 
@@ -168,11 +198,16 @@ export async function kernelRoutes(app: FastifyInstance) {
    * Capability announcement from pcc-node daemons.
    * Acknowledges receipt; signature verification is a TODO.
    * Returns { acknowledged, kernelId, capabilitiesReceived, devicesReceived, timestamp }.
+   *
+   * Owner-only (WP-C), same rule as heartbeat. It remains a stub that never
+   * writes tiers or capabilities (see the guard on
+   * KernelFacade.announceCapabilities).
    */
   app.post<{
     Params: { kernelId: string };
     Body: CapabilityAnnouncementInput;
   }>("/api/kernels/:kernelId/capabilities", async (req, reply) => {
+    if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
     const result = await facade.announceCapabilities(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
   });
@@ -186,13 +221,23 @@ export async function kernelRoutes(app: FastifyInstance) {
    * other write routes — the gateway middleware gate ensures the caller
    * has a valid API key before the handler runs.
    *
+   * Owner-only (WP-C): the authenticated actor must be the recorded owner of
+   * the capability's kernel (capability.kernelId -> kernel.operatorAddress,
+   * decided by the shared auth/kernel-operator.ts predicate). A capability
+   * whose kernel row is gone, or whose kernel has only a legacy placeholder
+   * owner, has no owner: 403. Nothing is written on a refusal.
+   *
    * Returns 200 with { acknowledged, capabilityId, kernelId, validUntil,
-   *   timestamp, resurrected }, or 404 if the capability id is unknown.
+   *   timestamp, resurrected }, 404 if the capability id is unknown, 401
+   *   without an actor, or 403 `not_kernel_owner`.
    */
   app.post<{
     Params: { capId: string };
     Body: { signature?: string };
   }>("/api/capabilities/:capId/heartbeat", async (req, reply) => {
+    // Steward rule 7: a PRESENT actor first (401), before any lookup.
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
     const { getRepos } = await import("../db.js");
     const { computeValidUntilIso, emitKernelLifecycleEvent } = await import(
       "../facades/kernel.facade.js"
@@ -201,6 +246,21 @@ export async function kernelRoutes(app: FastifyInstance) {
     const cap = (repos.capabilities as any).findById(req.params.capId);
     if (!cap) {
       return reply.status(404).send({ error: "capability_not_found" });
+    }
+    // A row that names no kernel has no owner: refuse without a lookup.
+    const verdict =
+      typeof cap.kernelId === "string" && cap.kernelId.length > 0
+        ? await checkKernelOwner(actor, cap.kernelId)
+        : ({ ok: false, status: 404, error: "kernel_not_found", message: "" } as const);
+    if (!verdict.ok) {
+      // The capability exists, so a missing kernel row is "nobody owns it": 403.
+      const orphan = verdict.status === 404;
+      return reply.status(orphan ? 403 : verdict.status).send({
+        error: orphan ? "not_kernel_owner" : verdict.error,
+        message: orphan
+          ? `The kernel of capability '${cap.id}' no longer exists; nobody owns this listing`
+          : verdict.message,
+      });
     }
     const nowDate = new Date();
     const nowIso = nowDate.toISOString();

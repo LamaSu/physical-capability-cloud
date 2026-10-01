@@ -21,10 +21,14 @@
  * just expose actions, it exposes its own REFUSALS. Telling an agent "no" by
  * failing a request is not an interface. `needs_scope:operator.write` is.
  *
- * These endpoints are also the honest precondition for narrowing API-key scopes.
- * Today `provisionApiKey` hands out `scopes: ["*"]` (routes/provision.ts) and
- * nothing enforces it, so a narrow key would simply break callers with no way to
- * discover why. Once a key can ask what it may do, it can safely be given less.
+ * These endpoints are also the honest precondition for narrowing API-key scopes:
+ * once a key can ask what it may do, it can safely be given less. Self-service
+ * keys are now minted narrow (never `"*"` — auth/api-key-auth.ts refuses it), and
+ * the enforced scope layer (middleware/scope-checker.ts) treats a legacy `"*"` as
+ * NEITHER money, NOR admin, NOR operator-control authority. This endpoint must
+ * report exactly that, so reachability for money writes, the admin namespace and
+ * /api/operator/** writes is computed with the SAME predicates the scope-checker
+ * enforces (see operationReachable).
  *
  * Read-only. No settlement path. No writes.
  */
@@ -33,6 +37,14 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
+import {
+  isAdminScopedRoute,
+  isMoneyWriteRequest,
+  isOperatorWriteRequest,
+  moneyWriteScopes,
+  operatorWriteScopes,
+  parseScopeColumn,
+} from "../middleware/scope-checker.js";
 
 // ── Scope registry ──────────────────────────────────────────────────
 //
@@ -80,9 +92,16 @@ export const AGENT_OPERATIONS: AgentOperation[] = [
   { id: "operator.maintenance", method: "GET", path: "/api/operator/maintenance", summary: "Maintenance windows", scope: "operator.read" },
   { id: "operator.emergencyStop", method: "POST", path: "/api/operator/emergency-stop", summary: "Halt this operator's machines", scope: "operator.write", consequential: true },
 
-  // Settlement — money. Always consequential, always separately scoped.
-  { id: "settlement.escrow.read", method: "GET", path: "/api/escrow/{unitId}", summary: "Read an escrow unit", scope: "settlement.read" },
-  { id: "settlement.quote", method: "POST", path: "/api/quotes", summary: "Price a capability contract", scope: "settlement.read" },
+  // Settlement domain. NOTE (finding M6): the enforced money gate
+  // (middleware/scope-checker.ts) applies only to MUTATING methods under the money
+  // prefixes — escrow READS and /api/quotes carry NO scope requirement and are
+  // reachable by any authenticated key. Advertising `settlement.read` here told an
+  // [operator] key it could NOT reach reads/quotes that in fact succeed, so these
+  // report `null` (any authenticated key), matching what the checker actually
+  // enforces. Money MOVEMENT (fund/release/dispute, settlement writes) is where
+  // `settlement` is genuinely required.
+  { id: "settlement.escrow.read", method: "GET", path: "/api/escrow/{unitId}", summary: "Read an escrow unit", scope: null },
+  { id: "settlement.quote", method: "POST", path: "/api/quotes", summary: "Price a capability contract", scope: null },
 
   // Evidence.
   { id: "evidence.verify", method: "POST", path: "/a2a/tasks/send", summary: "Verify execution evidence (A2A skill verify_evidence)", scope: "evidence.read" },
@@ -93,29 +112,87 @@ export const AGENT_OPERATIONS: AgentOperation[] = [
 ];
 
 /**
- * Does `held` satisfy `required`?
+ * Does `held` satisfy `required`, for an operation that is NEITHER a money
+ * write, NOR in the admin namespace, NOR a write under /api/operator/**? (Those
+ * three are decided by operationReachable with the enforcement predicates —
+ * `"*"` does not count there.)
  *
- * `*` is the wildcard every key currently carries. It is honoured here so this
- * endpoint reports the truth about today's keys rather than an aspiration —
- * but `wildcard: true` is reported alongside, because a key that can do
- * everything is a finding, not a feature.
+ * `*` is the legacy wildcard older keys carry. For everything else it is still
+ * honoured by the scope-checker, so it is honoured here too: this endpoint
+ * reports the truth about those keys rather than an aspiration — with
+ * `wildcard: true` alongside, because such a key is a finding, not a feature.
  */
 export function scopeSatisfied(held: string[], required: string | null): boolean {
   if (required === null) return true;
   if (held.includes("*")) return true;
   if (held.includes(required)) return true;
-  // `operator.*` satisfies `operator.read`.
+  // `admin` is the superuser scope in middleware/scope-checker.ts — it appears
+  // in every rule there, so it satisfies everything here too.
+  if (held.includes("admin")) return true;
   const family = required.split(".")[0];
-  return held.includes(`${family}.*`);
+  // `operator.*` satisfies `operator.read`.
+  if (held.includes(`${family}.*`)) return true;
+  // A FLAT enforced scope satisfies any dotted requirement in its family:
+  // holding `operator` satisfies `operator.read` and `operator.write`.
+  //
+  // This endpoint advertises a dotted vocabulary (operator.write, jobs.read,
+  // settlement.read) while middleware/scope-checker.ts enforces a flat one
+  // (operator, settlement, admin, ...). The two sets are DISJOINT, which did
+  // not show while every key carried "*" — the docstring above says as much.
+  // Once self-service keys are minted `["operator"]` instead (PR #309), a brand
+  // new key satisfied NOTHING here and this endpoint told every fresh agent it
+  // could reach nothing — while the requests themselves would have succeeded.
+  // For an endpoint whose whole purpose is "failing a request is not an
+  // interface, needs_scope:<name> is", reporting an unreachable-everything is
+  // worse than saying nothing.
+  //
+  // The two vocabularies should be reconciled properly (one set of names, in
+  // one place); this bridges them truthfully in the meantime.
+  return held.includes(family);
 }
 
-function heldScopes(record: { scopes?: string | null }): string[] {
-  try {
-    const parsed = JSON.parse(record.scopes ?? "[]");
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
+/**
+ * Can a key holding `held` reach `op`, as middleware/scope-checker.ts ENFORCES it?
+ *
+ * Money writes, the admin namespace and /api/operator/** writes are decided by
+ * the same predicates the scope-checker uses, and there only an EXPLICIT scope
+ * counts — a legacy `"*"` is not money, admin or operator-control authority
+ * (and a dotted `operator.write` is not the flat `operator` the floor demands).
+ * Everything else falls back to the advertised scope via scopeSatisfied.
+ * Returns the scope to ask for when unreachable.
+ */
+export function operationReachable(
+  held: string[],
+  op: Pick<AgentOperation, "method" | "path" | "scope">,
+): { reachable: true } | { reachable: false; needs: string } {
+  if (isAdminScopedRoute(op.method, op.path)) {
+    return held.includes("admin") ? { reachable: true } : { reachable: false, needs: "admin" };
   }
+  if (isMoneyWriteRequest(op.method, op.path)) {
+    const need = moneyWriteScopes(op.method);
+    return need.some((s) => held.includes(s))
+      ? { reachable: true }
+      : { reachable: false, needs: need[0] };
+  }
+  if (isOperatorWriteRequest(op.method, op.path)) {
+    const need = operatorWriteScopes();
+    return need.some((s) => held.includes(s))
+      ? { reachable: true }
+      : { reachable: false, needs: need[0] };
+  }
+  return scopeSatisfied(held, op.scope)
+    ? { reachable: true }
+    : { reachable: false, needs: op.scope ?? "unknown" };
+}
+
+/**
+ * What a key holds, read with the scope-checker's own parser (R6 parity). The
+ * old local parse stringified a mixed array — [42,"operator"] became
+ * ["42","operator"] — and reported reachability the enforced layer (which
+ * grants such a key NOTHING) then refused.
+ */
+function heldScopes(record: { scopes?: string | null }): string[] {
+  return parseScopeColumn(record.scopes);
 }
 
 function unauthenticated(reply: import("fastify").FastifyReply) {
@@ -164,18 +241,19 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
     const held = heldScopes(key);
     const wildcard = held.includes("*");
 
-    const tools = AGENT_OPERATIONS.map((op) => ({
-      id: op.id,
-      method: op.method,
-      path: op.path,
-      summary: op.summary,
-      required_scope: op.scope,
-      consequential: op.consequential === true,
-      // The whole point of the endpoint: never just "no".
-      reachability: scopeSatisfied(held, op.scope)
-        ? "reachable"
-        : `needs_scope:${op.scope}`,
-    }));
+    const tools = AGENT_OPERATIONS.map((op) => {
+      const r = operationReachable(held, op);
+      return {
+        id: op.id,
+        method: op.method,
+        path: op.path,
+        summary: op.summary,
+        required_scope: op.scope,
+        consequential: op.consequential === true,
+        // The whole point of the endpoint: never just "no".
+        reachability: r.reachable ? "reachable" : `needs_scope:${r.needs}`,
+      };
+    });
 
     return reply.send({
       ok: true,
@@ -187,7 +265,15 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
         // Say the quiet part in the response rather than in a changelog.
         wildcard,
         wildcard_note: wildcard
-          ? "This key holds ['*'] and can reach every operation. Scopes are recorded but not yet enforced; narrow keys become meaningful once they are."
+          ? "This key holds the legacy wildcard ['*']. It still reaches most " +
+            "operations, but it is NOT money or admin authority, and NOT " +
+            "operator-control authority: a money write needs an explicit " +
+            "`settlement` scope (DELETE: `admin`), /api/admin/** needs an explicit " +
+            "`admin` scope, and a write under /api/operator/** (emergency stop and " +
+            "resume, approvals, policy, diagnostics, the pcc-node relay) needs an " +
+            "explicit `operator` scope. A wildcard key cannot mint those for itself. " +
+            "Ask the operator for a re-issued, explicitly-scoped key; wildcard keys " +
+            "are being retired (docs/security/WILDCARD_KEY_ROTATION.md)."
           : undefined,
       },
       tools,

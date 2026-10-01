@@ -50,15 +50,18 @@ export class AuditLogRepository implements IAuditLogRepository {
   }
 
   /** Aggregate counts by eventType for the last 24 hours. */
-  stats(): { eventType: string; count: number }[] {
+  stats(actor?: string): { eventType: string; count: number }[] {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // With an actor, the COUNT covers every one of that actor's entries in the window
+    // (the gateway's scoped stats used to count a 1000-row query and call it 24h).
+    const window = actor !== undefined ? and(gte(auditLog.timestamp, since), eq(auditLog.actor, actor)) : gte(auditLog.timestamp, since);
     const rows = this.db
       .select({
         eventType: auditLog.eventType,
         count: sql<number>`count(*)`,
       })
       .from(auditLog)
-      .where(gte(auditLog.timestamp, since))
+      .where(window)
       .groupBy(auditLog.eventType)
       .all();
     return rows.map((r) => ({ eventType: r.eventType, count: Number(r.count) }));

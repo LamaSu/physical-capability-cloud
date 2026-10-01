@@ -49,6 +49,13 @@ import type { WorkflowContext } from "@pcc/workflow";
 import { getJobFacade, getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import type { SubmitJobInput, JobSubmitResult, CapabilityDTO } from "../facades/index.js";
 import type { Result } from "@pcc/spec";
+import {
+  ceilingFor,
+  loadAssuranceCeilingMap,
+  servedAssuranceTier,
+} from "../services/assurance-ceiling.js";
+import { requireDevOrAdmin } from "../auth/dev-endpoint-gate.js";
+import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 
 // ---------------------------------------------------------------------------
 // Store access — getStore() is booted by server.ts in production; tests lazily
@@ -185,11 +192,24 @@ export interface CapabilityProvider {
   ): CompositionCandidate[] | Promise<CompositionCandidate[]>;
 }
 
+/**
+ * Dev-pool provider. A candidate's `assuranceTier` is a CLAIM made by whoever
+ * registered it (WP-C R1). Each candidate is served at
+ * min(claim, effectiveMaxAssuranceTier(kernel row of candidate.kernelId)), the
+ * kernel's served ceiling (its own claim capped at its authorized ceiling, the
+ * bound contracting holds a job to; astra pack 90 F1), with ONE batched kernel
+ * lookup per call; a candidate whose kernel has no row is served at 0. Eligibility, `quality` ranking and the planned step all see
+ * that served tier (the returned candidates carry it), never the raw claim.
+ */
 const inMemoryProvider: CapabilityProvider = {
   findByType: (capabilityType, constraints) => {
-    const all = listCandidates();
-    return all.filter((c) => {
-      if (c.capabilityType !== capabilityType) return false;
+    const ofType = listCandidates().filter((c) => c.capabilityType === capabilityType);
+    const ceilings = loadAssuranceCeilingMap(ofType.map((c) => c.kernelId));
+    const served = ofType.map((c) => {
+      const tier = servedAssuranceTier(c.assuranceTier, ceilingFor(ceilings, c.kernelId));
+      return tier === c.assuranceTier ? c : { ...c, assuranceTier: tier };
+    });
+    return served.filter((c) => {
       if (!c.available) return false;
       if (c.assuranceTier < constraints.minAssuranceTier) return false;
       if (constraints.location && c.location) {
@@ -232,7 +252,14 @@ function haversineKm(
  */
 const FACADE_DEFAULT_DURATION_MS = 60 * 60 * 1000; // 1h placeholder
 
-/** Highest assurance tier a capability advertises (0 when none declared). */
+/**
+ * Highest assurance tier a capability advertises (0 when none declared).
+ *
+ * WP-C: on the facade path `tiers` is `CapabilityDTO.assuranceTiers`, which
+ * the capability populator already clamped to the owning kernel's served
+ * ceiling, effectiveMaxAssuranceTier (services/assurance-ceiling.ts). Eligibility (`minAssuranceTier`)
+ * and `quality` ranking therefore see the SERVED tier, never the raw claim.
+ */
 function maxAssuranceTier(tiers: readonly number[] | undefined): AssuranceTier {
   if (!tiers || tiers.length === 0) return 0;
   const max = Math.max(...tiers);
@@ -908,9 +935,24 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
   //
   // Production draws candidates from CapabilityFacade (PCC_COMPOSE_USE_FACADE=true);
   // this endpoint + the in-memory pool are retained for dev/test, which rely on them.
+  //
+  // WP-C R1: the in-memory pool is the DEFAULT provider when the flag is unset,
+  // and apiGate only requires SOME key, so any key could publish a candidate
+  // for any kernel at a self-declared tier. Now:
+  //   - open only in NODE_ENV test/development, else the admin secret
+  //     (requireDevOrAdmin: 503 / 401 / 403);
+  //   - the authenticated actor must own `kernelId` (requireKernelOwner:
+  //     401 / 404 / 403 not_kernel_owner), checked before anything is written;
+  //   - the stored `operatorAddress` (credited or debited by reputation on
+  //     execute) is that actor, never the body value.
+  // The claimed tier is stored as given; the provider serves it clamped.
   app.post(
     "/api/compose/_dev/register-candidate",
     async (req, reply) => {
+      if (!requireDevOrAdmin(req, reply)) return reply;
+      // Steward rule 7: a PRESENT actor before body validation or any lookup.
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
       const parsed = RegisterCandidateRequestSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({
@@ -919,9 +961,10 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
           details: parsed.error.format(),
         });
       }
-      const cap = parsed.data;
+      if (!(await requireOwnerOf(actor, reply, parsed.data.kernelId))) return reply;
+      const cap = { ...parsed.data, operatorAddress: actor };
       saveCandidate(cap);
-      return reply.code(201).send({ ok: true, capabilityId: cap.capabilityId });
+      return reply.code(201).send({ ok: true, capabilityId: cap.capabilityId, operatorAddress: actor });
     },
   );
 }

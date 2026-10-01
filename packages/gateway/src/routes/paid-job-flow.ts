@@ -40,6 +40,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { assertKernelAcceptsJobs } from "../services/kernel-emergency-stop.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -64,6 +65,7 @@ import {
   type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
+import { adminOrCaller, mayAccess } from "../auth/admin-secret-gate.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -242,6 +244,19 @@ function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
   }
 }
 
+/**
+ * Create the escrow, the job and its execution scope for a committed session.
+ *
+ * EMERGENCY STOP. This is the one place every paid path creates its job (the
+ * negotiation /commit and /retry-settlement, the fast-track flow, the A2A
+ * commit), so a kernel in emergency stop is refused here, FIRST: before any
+ * escrow is created or any row is written. It throws a
+ * KernelNotAcceptingJobsError (409 kernel_emergency_stopped, or 503
+ * policy_unavailable when the policy cannot be read; no policy row means not
+ * stopped). The callers that commit a session ask earlier still, before they
+ * mark it committed, so the session is left as it was (see
+ * services/kernel-emergency-stop.ts).
+ */
 export async function createJobFromSession(
   session: typeof negotiationSessions.$inferSelect,
 ): Promise<{
@@ -251,6 +266,7 @@ export async function createJobFromSession(
   escrowAddress: string;
   escrowStatus: string;
 }> {
+  assertKernelAcceptsJobs(session.kernelId);
   const repos = getRepos();
   const { db } = getStore();
   const now = new Date().toISOString();
@@ -701,6 +717,30 @@ export async function createJobFromSession(
 // Routes
 // ---------------------------------------------------------------------------
 
+/**
+ * N46 authority (operator item 57): completing a job, or resuming its
+ * settlement, releases escrow. Only the job's operator (the owner of the job's
+ * kernel) or the admin may do either. A job on an unowned kernel (no owner, or
+ * the zero-address placeholder) is the admin's alone. Sends the refusal (401
+ * with no identity, 403 not_job_operator) and returns false.
+ */
+function mayReleaseJob(
+  req: Parameters<typeof adminOrCaller>[0],
+  reply: Parameters<typeof adminOrCaller>[1],
+  job: { kernelId?: string | null },
+): boolean {
+  const who = adminOrCaller(req, reply);
+  if (!who) return false;
+  const owner = job.kernelId ? getRepos().kernels.findById(job.kernelId)?.operatorAddress : undefined;
+  const ownedBy = owner && owner !== "0x0000000000000000000000000000000000000000" ? owner : null;
+  if (mayAccess(who, ownedBy)) return true;
+  void reply.status(403).send({
+    error: "not_job_operator",
+    message: "Only the job's operator (the owner of its kernel) or the admin may complete it or resume its settlement.",
+  });
+  return false;
+}
+
 export async function paidJobFlowRoutes(app: FastifyInstance) {
   const settlementFacade = getSettlementFacade();
   // ═════════════════════════════════════════════════════════════════════
@@ -914,6 +954,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (!job) {
         return reply.status(404).send({ error: "Job not found" });
       }
+      // N46 authority: before the completion claim, so a refusal changes nothing.
+      if (!mayReleaseJob(req, reply, job)) return reply;
 
       // Atomic completion claim (P1). better-sqlite3 is synchronous, so this
       // UPDATE ... WHERE ... RETURNING runs to completion without yielding the
@@ -1548,6 +1590,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       if (!job) {
         return reply.status(404).send({ error: "Job not found" });
       }
+      // N46 authority: before the reclaim, so a refusal changes nothing.
+      if (!mayReleaseJob(req, reply, job)) return reply;
 
       // Single-winner reclaim: flip ONLY an 'evidence_submitted' job into
       // 'completing'. Excludes settled/completed/failed/cancelled/completing, so a

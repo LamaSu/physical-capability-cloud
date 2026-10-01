@@ -29,6 +29,14 @@ declare module "fastify" {
     apiKeyId: string | null;
     /** Operator identifier — email or wallet address (set by apiGate middleware) */
     operatorId: string | null;
+    /**
+     * The caller's wallet (lowercase 0x address) when it is PROVEN, not merely
+     * asserted: the address of a SIWE (EIP-4361) session, or the address an API
+     * key was minted for through the SIWE path of /api/auth/provision. null for
+     * an email key, a legacy key, a custodial-quickstart key or no auth. Set by
+     * apiGate on every /api request; see auth/api-key-auth.ts provenWalletOfKey.
+     */
+    provenWallet: string | null;
   }
 }
 

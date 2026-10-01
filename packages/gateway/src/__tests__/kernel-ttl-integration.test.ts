@@ -11,6 +11,12 @@
  *   6. List shows it again.
  *
  * Uses :memory: SQLite (same pattern as kernel-register-data-bugs.test.ts).
+ *
+ * WP-C: heartbeats are OWNER-ONLY. In production apiGate attaches the
+ * caller's identity (`operatorId ?? userId`). This suite mounts no apiGate,
+ * so an `x-test-operator` header stands in for it (the carrier.test.ts
+ * pattern) and every heartbeat is sent as the kernel's registered owner.
+ * (Old: the heartbeats carried no identity at all and were accepted.)
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
@@ -26,6 +32,9 @@ vi.mock("../telemetry.js", () => ({
   pipelineTelemetry: { emit: vi.fn() },
 }));
 
+/** The kernel's registered owner (operatorAddress) — heartbeats are sent as it. */
+const OWNER = "0x" + "a".repeat(40);
+
 describe("kernel + capability TTL — end-to-end", () => {
   let app: FastifyInstance;
   let kernelId: string;
@@ -36,6 +45,11 @@ describe("kernel + capability TTL — end-to-end", () => {
     delete process.env.KERNEL_TTL_HOURS;
     initStore({ seed: false });
     app = Fastify({ logger: false });
+    // Identity shim standing in for apiGate (see header comment).
+    app.addHook("onRequest", async (req) => {
+      const h = req.headers["x-test-operator"];
+      if (typeof h === "string" && h) (req as unknown as { operatorId?: string }).operatorId = h;
+    });
     await app.register(kernelRoutes);
     await app.register(capabilityRoutes);
     await app.ready();
@@ -54,7 +68,7 @@ describe("kernel + capability TTL — end-to-end", () => {
       payload: {
         id: kernelId,
         name: "TTL-test kernel",
-        operatorAddress: "0x" + "a".repeat(40),
+        operatorAddress: OWNER,
         location: { lat: 40.71, lng: -74.0 },
       },
     });
@@ -69,6 +83,7 @@ describe("kernel + capability TTL — end-to-end", () => {
     const hb = await app.inject({
       method: "POST",
       url: `/api/kernels/${kernelId}/heartbeat`,
+      headers: { "x-test-operator": OWNER },
       payload: {
         status: "online",
         capabilities: [
@@ -129,6 +144,7 @@ describe("kernel + capability TTL — end-to-end", () => {
     const hb = await app.inject({
       method: "POST",
       url: `/api/kernels/${kernelId}/heartbeat`,
+      headers: { "x-test-operator": OWNER },
       payload: {
         status: "online",
         capabilities: [

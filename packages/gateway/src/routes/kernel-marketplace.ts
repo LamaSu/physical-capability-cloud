@@ -11,7 +11,20 @@
  * This is intentional: persisting to the store is tracked as future work
  * once the manifest schema is locked. Admin-facing endpoints (verify,
  * suspend) are gated by the PCC_ADMIN_KEY env var + a matching
- * X-Admin-Key header.
+ * X-Admin-Key header, through the shared constant-time checkAdminKey
+ * (auth/admin-key.ts). There is no builder self-verification: neither an
+ * `X-Agent-Id` header nor the builder's own agent id authorizes anything (WP-C).
+ *
+ * Assurance tier (WP-C): a manifest's `maxAssuranceTier` is the builder's
+ * CLAIM, and a verify smoke test (HTTP 2xx) certifies nothing about it. The
+ * marketplace serves and filters on min(claim, the kernel row's served tier),
+ * the row's served tier being min(its own claim, its authorized ceiling): the
+ * bound contracting holds a job on that kernel to (services/assurance-ceiling.ts;
+ * astra pack 90 F1). That row only counts
+ * when it is owned by the same authenticated actor that registered the
+ * manifest, which is exactly the kernel-sdk flow: one key registers the
+ * manifest and then POST /api/kernels with the signing proof. Otherwise the
+ * served tier is 0. A manifest cannot borrow another operator's kernel.
  *
  * Naming note: this file uses `sessionKey`/`principalKey`/`touchstone`
  * exclusively. No canary/hotkey terminology.
@@ -19,17 +32,34 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
+  AssuranceTier,
   DigitalKernelManifest,
   KernelManifestStatus,
   KernelMarketplaceEntry,
   MarketplaceFilters,
 } from "@pcc/spec";
+import { getRepos } from "../db.js";
+import {
+  effectiveMaxAssuranceTier,
+  normalizeClaim,
+  type AssuranceClaimKernel,
+} from "../services/assurance-ceiling.js";
+import { checkAdminKey } from "../auth/admin-key.js";
+import { ownsKernel, resolveRequestActor } from "../auth/kernel-owner-guard.js";
 
 // ---------------------------------------------------------------------------
 // In-memory registry (production: swap for facade-backed storage)
 // ---------------------------------------------------------------------------
 
 const manifestRegistry = new Map<string, DigitalKernelManifest>();
+
+/**
+ * kernelId → the authenticated actor (apiGate `operatorId ?? userId`) that
+ * registered the manifest. Kept beside the registry, not inside the manifest,
+ * so the served manifest shape is unchanged. No entry means an unauthenticated
+ * registration, which never borrows a kernel row's ceiling.
+ */
+const manifestRegistrants = new Map<string, string>();
 
 // Dependency-injectable fetch so tests can mock the smoke-test network call
 // without monkey-patching globalThis. Defaults to the runtime's fetch.
@@ -44,6 +74,7 @@ export function _setSmokeTestFetch(impl: FetchImpl | null) {
 /** Test-only helper: wipe the registry between tests. */
 export function _clearKernelRegistry() {
   manifestRegistry.clear();
+  manifestRegistrants.clear();
 }
 
 /** Test-only helper: count registered kernels. */
@@ -160,43 +191,64 @@ function validateManifest(body: unknown): {
 }
 
 // ---------------------------------------------------------------------------
-// Admin gate — simple shared-secret auth for verify + suspend
+// Admin gate — shared-secret auth for verify + suspend
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if the request carries a matching admin key. In dev (no
- * PCC_ADMIN_KEY env var set), self-verification is allowed — the builder
- * may verify their own kernel via the builder.agentId. In production,
- * PCC_ADMIN_KEY MUST be set.
+ * Admin authorization for verify / suspend: the shared WP-A helper
+ * (auth/admin-key.ts, copied verbatim). `X-Admin-Key` must equal
+ * `PCC_ADMIN_KEY`, compared in constant time; a missing or repeated header is
+ * 401 and a wrong one 403. An unset or blank PCC_ADMIN_KEY is open ONLY when
+ * NODE_ENV is exactly "test" or "development". Any other value, including an
+ * UNSET NODE_ENV, is 503 (fail closed). The old rule, `NODE_ENV !==
+ * "production"`, opened the gate on a deploy that simply forgot NODE_ENV.
+ *
+ * There is deliberately NO self-verification path. The old code accepted an
+ * attacker-settable `X-Agent-Id` header (or the builder's own `callerAgentId`)
+ * that matched `builder.agentId`, so a builder could "verify" their own
+ * manifest and have it listed. Removed entirely (WP-C).
+ *
+ * Returns true when authorized; otherwise it has already sent the refusal.
  */
-function isAdminAuthorized(
-  req: FastifyRequest,
-  manifest?: DigitalKernelManifest,
-): boolean {
-  const expected = process.env.PCC_ADMIN_KEY;
-
-  // In test + dev, allow the request if either:
-  //   - no admin key is configured (open mode — test-only)
-  //   - the provided X-Admin-Key matches
-  //   - the caller's agentId matches the manifest's builder.agentId
-  const provided = (req.headers["x-admin-key"] as string | undefined) ?? undefined;
-
-  if (expected && provided === expected) return true;
-
-  // Self-verification: builder can verify their own kernel
-  if (manifest) {
-    const callerAgentId =
-      (req as unknown as { callerAgentId?: string }).callerAgentId ??
-      (req.headers["x-agent-id"] as string | undefined);
-    if (callerAgentId && callerAgentId === manifest.builder.agentId) {
-      return true;
-    }
-  }
-
-  // No admin key configured AND no builder self-auth — allow in test/dev only
-  if (!expected && process.env.NODE_ENV !== "production") return true;
-
+function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
+  const check = checkAdminKey(req);
+  if (check.ok) return true;
+  void reply.status(check.status).send({ error: check.error, message: check.message });
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Assurance ceiling for manifests (WP-C)
+// ---------------------------------------------------------------------------
+
+/**
+ * Served tier for each manifest: min(normalizeClaim(manifest claim),
+ * effectiveMaxAssuranceTier(kernel row)), the bound contracting holds a job on
+ * that kernel to (min of the row's own claim and its authorized ceiling; astra
+ * pack 90 F1). The kernel row counts only when it exists AND is owned by the
+ * manifest's registrant. Otherwise the tier is 0. Kernel rows are loaded with
+ * one batched query. A store that is unavailable also means 0 (fail closed).
+ */
+function servedManifestTiers(
+  manifests: DigitalKernelManifest[],
+): Map<string, AssuranceTier> {
+  const out = new Map<string, AssuranceTier>();
+  let rows: Array<AssuranceClaimKernel & { id: string; operatorAddress?: string | null }> = [];
+  try {
+    const ids = [...new Set(manifests.map((m) => m.kernelId))];
+    rows = ids.length > 0 ? getRepos().kernels.findByIds(ids) : [];
+  } catch {
+    rows = [];
+  }
+  const rowById = new Map(rows.map((r) => [r.id, r]));
+  for (const m of manifests) {
+    const row = rowById.get(m.kernelId);
+    const registrant = manifestRegistrants.get(m.kernelId);
+    const ceiling =
+      row && ownsKernel(row.operatorAddress, registrant) ? effectiveMaxAssuranceTier(row) : 0;
+    out.set(m.kernelId, Math.min(normalizeClaim(m.maxAssuranceTier), ceiling) as AssuranceTier);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +298,10 @@ async function runSmokeTest(
 // Entry -> summary view
 // ---------------------------------------------------------------------------
 
-function manifestToEntry(m: DigitalKernelManifest): KernelMarketplaceEntry {
+function manifestToEntry(
+  m: DigitalKernelManifest,
+  servedTier: AssuranceTier,
+): KernelMarketplaceEntry {
   return {
     kernelId: m.kernelId,
     name: m.name,
@@ -254,7 +309,9 @@ function manifestToEntry(m: DigitalKernelManifest): KernelMarketplaceEntry {
     capabilityType: m.capabilityType,
     builder: m.builder,
     pricing: m.pricing,
-    maxAssuranceTier: m.maxAssuranceTier,
+    // WP-C: the served tier (claim capped at the authorized ceiling), not the
+    // builder's raw claim.
+    maxAssuranceTier: servedTier,
     endpointURL: m.endpointURL,
     status: m.status,
     verifiedAt: m.verifiedAt,
@@ -292,6 +349,11 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
     manifest.registeredAt = new Date().toISOString();
     manifest.status = "pending";
     manifestRegistry.set(manifest.kernelId, manifest);
+    // Record WHO registered it: the manifest may only ever borrow the
+    // assurance ceiling of a kernel row this same actor owns.
+    const registrant = resolveRequestActor(req);
+    if (registrant) manifestRegistrants.set(manifest.kernelId, registrant);
+    else manifestRegistrants.delete(manifest.kernelId);
 
     return reply.status(201).send({
       kernelId: manifest.kernelId,
@@ -312,14 +374,17 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
       } = req.query;
 
       // Only verified, non-suspended kernels appear in the marketplace.
-      let entries = [...manifestRegistry.values()]
-        .filter((m) => m.status === "verified")
-        .map(manifestToEntry);
+      const verified = [...manifestRegistry.values()].filter((m) => m.status === "verified");
+      const served = servedManifestTiers(verified);
+      let entries = verified.map((m) => manifestToEntry(m, served.get(m.kernelId) ?? 0));
 
       if (capabilityType) {
         entries = entries.filter((e) => e.capabilityType === capabilityType);
       }
 
+      // WP-C: filter on the SERVED tier (claim capped at the authorized
+      // ceiling). A self-declared tier-3 manifest does not match
+      // minAssuranceTier=2 unless its kernel is authorized for it.
       if (minAssuranceTier !== undefined) {
         const min = Number(minAssuranceTier);
         if (!Number.isNaN(min)) {
@@ -356,7 +421,9 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
           kernelId: manifest.kernelId,
         });
       }
-      return { kernel: manifest };
+      // WP-C: serve the capped tier here too, never the raw claim.
+      const servedTier = servedManifestTiers([manifest]).get(manifest.kernelId) ?? 0;
+      return { kernel: { ...manifest, maxAssuranceTier: servedTier } };
     },
   );
 
@@ -369,12 +436,8 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "kernel_not_found" });
       }
 
-      if (!isAdminAuthorized(req, manifest)) {
-        return reply.status(401).send({
-          error: "unauthorized",
-          message: "admin key or builder self-auth required",
-        });
-      }
+      // Admin-only. There is no builder self-verification (see requireAdmin).
+      if (!requireAdmin(req, reply)) return reply;
 
       const smoke = await runSmokeTest(manifest);
       if (!smoke.ok) {
@@ -407,17 +470,9 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "kernel_not_found" });
     }
 
-    // Suspension requires admin authorization regardless of builder identity.
-    // The builder.agentId self-bypass is reserved for verify only.
-    const expected = process.env.PCC_ADMIN_KEY;
-    const provided = req.headers["x-admin-key"] as string | undefined;
-    const devMode = !expected && process.env.NODE_ENV !== "production";
-    if (!devMode && provided !== expected) {
-      return reply.status(401).send({
-        error: "unauthorized",
-        message: "admin key required to suspend kernels",
-      });
-    }
+    // Suspension requires admin authorization: the same shared constant-time
+    // check and unset-key rule as verify.
+    if (!requireAdmin(req, reply)) return reply;
 
     manifest.status = "suspended";
     manifestRegistry.set(manifest.kernelId, manifest);

@@ -30,6 +30,7 @@ import type {
   CompositionCandidate,
   OutboundDemandResponse,
 } from "@pcc/spec";
+import { ensureTrustedKernel } from "./fixtures/authorized-kernels.js";
 
 // -----------------------------------------------------------------------------
 // Fixtures
@@ -95,10 +96,17 @@ function demandReq(overrides: Record<string, unknown> = {}) {
  * outbound-demand `proposed` path now calls the real planner, so any test that
  * expects a composed solution must register at least one matching candidate.
  * Defaults line up with `demandReq()` (type "3d-printing", tier 1).
+ *
+ * WP-C R1 fixture: the provider serves a candidate at min(claimed tier, its
+ * kernel's authorized ceiling), and a kernel with no row counts as ceiling 0.
+ * The candidate's kernel is therefore created as a real row with the maximum
+ * ceiling (3), so the served tier equals the claimed tier (old: the claimed
+ * tier was used verbatim and the kernel did not need to exist).
  */
 function makeComposeCandidate(
   partial: Partial<CompositionCandidate> & { capabilityId: string },
 ): CompositionCandidate {
+  ensureTrustedKernel(partial.kernelId ?? `k_${partial.capabilityId}`);
   return {
     capabilityId: partial.capabilityId,
     kernelId: partial.kernelId ?? `k_${partial.capabilityId}`,

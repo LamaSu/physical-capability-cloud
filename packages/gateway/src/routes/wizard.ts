@@ -23,6 +23,7 @@ import type {
   WizardCompletionResult,
 } from "@pcc/spec";
 import type { IRepositories } from "@pcc/store";
+import { lookupKernelOwnerRow, ownsKernel } from "../auth/kernel-owner-guard.js";
 import { getRepos } from "../db.js";
 
 /**
@@ -363,6 +364,21 @@ export async function wizardRoutes(app: FastifyInstance) {
             "Completion is already running for this session — poll GET /api/wizard/sessions/:id",
         });
       }
+
+      // device-builder: devices go only on a kernel the caller operates
+      // (astra pack 83 HIGH 3). Checked HERE, before the claim, rather than in
+      // orchestrateDeviceBuilder: a refusal then leaves the session exactly as
+      // it was (not claimed, no completionResult, still completable once the
+      // step data is corrected) and is a 403, where an orchestration failure
+      // is always a 500. It is synchronous on purpose: no await between the
+      // status checks above, this check and the claim (Z1), nor between it and
+      // the registration's own lookup, so the row checked is the row written.
+      const kernelRefusal =
+        session.track === "device-builder" ? deviceBuilderKernelRefusal(session, callerId) : null;
+      if (kernelRefusal) {
+        return reply.code(kernelRefusal.status).send(kernelRefusal.body);
+      }
+
       completingSessions.add(session.id);
 
       try {
@@ -635,6 +651,72 @@ async function orchestrateMachineOnboarding(
   };
 }
 
+/**
+ * The kernel a device-builder session names in its merged step data, or null
+ * when it names none (the registration then invents a fresh id, which cannot
+ * exist yet). ONE definition for the owner check and the registration: the
+ * registration looks the kernel up with String(kernelId), so an array-valued id
+ * ["K"] IS kernel K, and a check that read it differently would guard another
+ * kernel than the one written to (the n71 type-confusion class).
+ */
+function namedKernelId(allData: Record<string, unknown>): string | null {
+  return allData.kernelId === undefined || allData.kernelId === null ? null : String(allData.kernelId);
+}
+
+/**
+ * Owner check for the device-builder track, run by /complete before the
+ * session is claimed. A session may name only a kernel its caller operates
+ * (ownsKernel: a placeholder owner owns nothing, and no identity owns nothing)
+ * or one that does not exist yet (the honest "not registered yet" skip). The
+ * caller is the session's owner for an owned session (isOwnerOrUnbound has
+ * already matched them), and for a legacy unbound session it is the only
+ * identity there is. The rule is about the kernel the session targets, not
+ * about this particular write, so it also covers a session that carries no
+ * device. Fail closed: a failed lookup refuses (502) instead of falling
+ * through to a registration that would look the kernel up again.
+ */
+function deviceBuilderKernelRefusal(
+  session: WizardSession,
+  actor: unknown,
+): { status: 403 | 502; body: { error: string; message: string; kernelId: string } } | null {
+  // No store (tests / dev): the registration writes nothing, so nothing to guard.
+  if (!tryGetRepos()) return null;
+
+  const allData: Record<string, unknown> = {};
+  for (const step of session.steps) {
+    Object.assign(allData, step.data);
+  }
+  const kernelId = namedKernelId(allData);
+  if (kernelId === null) return null;
+
+  const lookup = lookupKernelOwnerRow(kernelId);
+  if (!lookup.found) {
+    if (lookup.reason === "not_found") return null;
+    return {
+      status: 502,
+      body: {
+        error: "kernel_lookup_failed",
+        message: `Cannot verify operator ownership of kernel '${kernelId}'`,
+        kernelId,
+      },
+    };
+  }
+  if (!ownsKernel(lookup.owner, actor)) {
+    return {
+      status: 403,
+      body: {
+        error: "not_kernel_owner",
+        message:
+          `Kernel '${kernelId}' is not operated by this session's owner. A device-builder session registers ` +
+          "devices only on a kernel its owner operates (a kernel with no recorded operator is claimed " +
+          "first with an authenticated POST /api/kernels).",
+        kernelId,
+      },
+    };
+  }
+  return null;
+}
+
 async function orchestrateDeviceBuilder(
   session: WizardSession,
   executedSteps: WizardCompletionResult["executedSteps"],
@@ -655,7 +737,7 @@ async function orchestrateDeviceBuilder(
   }
 
   const kernelConfig = {
-    kernelId: String(allData.kernelId ?? `kernel_wizard_${Date.now()}`),
+    kernelId: namedKernelId(allData) ?? `kernel_wizard_${Date.now()}`,
     devices,
     mockMode: allData.mockMode ?? false,
   };

@@ -21,6 +21,11 @@ import {
   populateCapabilityDTO,
   populateCapabilityList,
 } from "./populators/capability.populator.js";
+import {
+  buildAssuranceCeilingMap,
+  ceilingFor,
+  clampAssuranceTiers,
+} from "../services/assurance-ceiling.js";
 
 /**
  * Filter expired rows out of a capability list (feat/ed25519-keys-and-kernel-ttl).
@@ -44,8 +49,28 @@ export function filterCapabilitiesByTtl<
   });
 }
 
+/**
+ * The id of a kernel's capability of `type`: `cap-<kernelId>-<type>`.
+ *
+ * WP-C R5 (capability-id squat). Capability ids are global, and the heartbeat
+ * (KernelFacade.heartbeat) and setup/register-device derive this same id for a
+ * kernel's own listing. When POST /api/capabilities accepted a caller-chosen
+ * id, one operator could pre-take `cap-<victimKernel>-<type>` on its own
+ * kernel; the victim's heartbeat then left the foreign row alone and never
+ * created its own. So an id is always DERIVED, never chosen: a body id that
+ * disagrees with the derived one is refused (400 capability_id_mismatch).
+ */
+export function capabilityIdFor(kernelId: string, type: string): string {
+  return `cap-${kernelId}-${type}`;
+}
+
 /** Input shape for creating a new capability instance */
 export interface CreateCapabilityInput {
+  /**
+   * Optional, and only accepted when it equals the derived id
+   * `cap-<kernelId>-<type>` (see {@link capabilityIdFor}). Anything else is a
+   * 400 `capability_id_mismatch`.
+   */
   id?: string;
   kernelId: string;
   type: string;
@@ -203,11 +228,6 @@ export class CapabilityFacade extends BaseFacade {
           criteria.materials!.some((m) => c.materials.includes(m)),
         );
       }
-      if (criteria.assuranceTier !== undefined) {
-        candidates = candidates.filter((c) =>
-          c.assuranceTiers.includes(criteria.assuranceTier!),
-        );
-      }
       if (criteria.query) {
         const q = criteria.query.toLowerCase();
         candidates = candidates.filter(
@@ -218,9 +238,24 @@ export class CapabilityFacade extends BaseFacade {
         );
       }
 
-      // Load kernels for enrichment
+      // Load kernels (one batched query) for the tier filter and enrichment.
+      const kernelMap = this.loadKernelMap([...new Set(candidates.map((c) => c.kernelId))]);
+
+      // WP-C: filter on the SERVED tiers, meaning the claim clamped to the owning
+      // kernel's served ceiling, effectiveMaxAssuranceTier = min(the kernel's
+      // claimed tier, its authorized ceiling), the bound contracting applies. A
+      // row claiming [0,1,2] on a kernel served at 1 does not match
+      // assuranceTier=2. The ceiling is evaluated once per kernel.
+      if (criteria.assuranceTier !== undefined) {
+        const ceilings = buildAssuranceCeilingMap(kernelMap.values());
+        candidates = candidates.filter((c) =>
+          clampAssuranceTiers(c.assuranceTiers, ceilingFor(ceilings, c.kernelId)).includes(
+            criteria.assuranceTier!,
+          ),
+        );
+      }
+
       const kernelIds = [...new Set(candidates.map((c) => c.kernelId))];
-      const kernelMap = this.loadKernelMap(kernelIds);
       context.reputationCache = await this.preloadReputations(kernelIds);
 
       // Filter by reputation if requested
@@ -302,19 +337,45 @@ export class CapabilityFacade extends BaseFacade {
   /**
    * Create a new capability instance (upsert-style: returns existing if already present).
    * Replaces: POST /api/capabilities (inline DB access)
+   *
+   * WP-C R5: the id is derived, `cap-<kernelId>-<type>` ({@link capabilityIdFor}).
+   *   - a body `id` that disagrees with it is refused: 400 `capability_id_mismatch`;
+   *   - when the derived id already belongs to a DIFFERENT kernel's row, the
+   *     create is refused with `capability_id_taken` (the route answers 409).
+   *     It never hands back another kernel's row as if it were the caller's
+   *     ("created: false"). Kernel ids and types may both contain "-", so two
+   *     (kernelId, type) pairs can derive the same id; see the open issue in
+   *     the WP-C report.
+   * Ownership of `kernelId` is the CALLER's check (POST /api/capabilities runs
+   * requireKernelOwner first).
    */
   async create(
     body: CreateCapabilityInput,
   ): Promise<Result<{ capability: CapabilityDTO; created: boolean }>> {
     return this.execute("create", async () => {
-      const { kernelId, type } = body;
-      if (!kernelId || !type) {
+      const { kernelId, type } = body ?? ({} as Partial<CreateCapabilityInput>);
+      if (typeof kernelId !== "string" || !kernelId || typeof type !== "string" || !type) {
         throw Object.assign(new Error("kernelId and type required"), { name: "BadRequestError" });
       }
-      const id = body.id || `cap-${kernelId}-${type}`;
+      const id = capabilityIdFor(kernelId, type);
+      const requestedId = body.id as unknown;
+      if (requestedId !== undefined && requestedId !== null && requestedId !== "" && requestedId !== id) {
+        throw Object.assign(
+          new Error(
+            `A capability id is derived as '${id}' (cap-<kernelId>-<type>); the body id disagrees`,
+          ),
+          { name: "BadRequestError", code: "capability_id_mismatch" },
+        );
+      }
       const context = this.defaultContext();
 
       const existing = this.repos.capabilities.findById(id);
+      if (existing && existing.kernelId !== kernelId) {
+        throw Object.assign(
+          new Error(`Capability id '${id}' already belongs to another kernel`),
+          { name: "BadRequestError", code: "capability_id_taken" },
+        );
+      }
       if (existing) {
         const kernel = this.repos.kernels.findById(existing.kernelId);
         const dto = populateCapabilityDTO(existing as any, kernel as any ?? undefined, context);
@@ -350,15 +411,22 @@ export class CapabilityFacade extends BaseFacade {
 
   // ── Private Helpers ────────────────────────────────────────────────────
 
+  /**
+   * Batch-load kernels by id with ONE IN-list query (chunked inside the repo),
+   * not one findById per kernel. A kernel missing from the map is treated
+   * downstream as unknown: no enrichment, and an assurance ceiling of 0.
+   */
   private loadKernelMap(kernelIds: string[]): Map<string, any> {
     const map = new Map<string, any>();
-    for (const id of kernelIds) {
-      try {
-        const kernel = this.repos.kernels.findById(id);
-        if (kernel) map.set(id, kernel);
-      } catch {
-        // Non-fatal: capability exists but kernel may have been removed
+    const unique = [...new Set(kernelIds)];
+    if (unique.length === 0) return map;
+    try {
+      for (const kernel of this.repos.kernels.findByIds(unique)) {
+        if (kernel) map.set(kernel.id, kernel);
       }
+    } catch {
+      // Non-fatal: capabilities still render; their kernels count as unknown
+      // (unavailable, assurance ceiling 0 — fail closed).
     }
     return map;
   }

@@ -3,7 +3,10 @@
  *
  * Handles enrichment: capabilityCount, capabilityTypes, isStale, activeJobCount, devices.
  * Encapsulates the 5-minute staleness detection logic so it never leaks into routes.
- * Applies reputation decay (exponential half-life) and cold-start tier gating at read time.
+ * Applies reputation decay (exponential half-life) at read time, and ALWAYS
+ * serves `maxAssuranceTier` capped at the kernel's independently authorized
+ * assurance ceiling (services/assurance-ceiling.ts). The stored column is only
+ * the operator's claim.
  */
 
 import type { RegisteredSigner } from "@pcc/spec";
@@ -15,6 +18,7 @@ import type {
   PopulationContext,
 } from "../types.js";
 import { getReputationService } from "../../services/reputation-service.js";
+import { effectiveMaxAssuranceTier } from "../../services/assurance-ceiling.js";
 import { isKernelStale } from "./staleness.js";
 import { normalizeAssuranceTier } from "./job.populator.js";
 
@@ -118,22 +122,13 @@ export function populateKernelDTO(
         ))
     : model.reputation;
 
-  // Cold-start tier gate: cap maxAssuranceTier to what the operator has earned.
-  // Only applies when ctx.applyColdStartGate is true (opt-in per call site).
-  const effectiveReputation = ctx.applyColdStartGate
-    ? reputationService.computeEffectiveReputation(
-        model.reputation,
-        model.reputationUpdatedAt ?? null,
-        totalJobsCompleted,
-      )
-    : reputation;
-
-  const maxAssuranceTier: KernelDTO["maxAssuranceTier"] = ctx.applyColdStartGate
-    ? (Math.min(
-        model.maxAssuranceTier ?? 2,
-        reputationService.getMaxAllowedTier(effectiveReputation, totalJobsCompleted),
-      ) as KernelDTO["maxAssuranceTier"])
-    : ((model.maxAssuranceTier ?? 2) as KernelDTO["maxAssuranceTier"]);
+  // Assurance ceiling (WP-C). The DTO serves min(claim, authorized ceiling),
+  // ALWAYS, with no opt-in and no caller-supplied context: 0 without a proven
+  // signing key, else what decayed reputation + completed jobs allow. The
+  // computation reads the raw row (never ctx.reputationCache, which is display
+  // enrichment with a 500 default). The old opt-in `applyColdStartGate` branch
+  // is gone; that flag is now ignored.
+  const maxAssuranceTier: KernelDTO["maxAssuranceTier"] = effectiveMaxAssuranceTier(model);
 
   // Option C — the algorithm-tagged registered signing key. ed25519 kernels
   // carry the raw pubkey; secp256k1 kernels (incl. legacy #230 rows that have

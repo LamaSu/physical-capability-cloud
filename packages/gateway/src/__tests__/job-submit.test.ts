@@ -12,7 +12,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { jobRoutes } from "../routes/jobs.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -58,6 +58,11 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
+  // POST /api/devices/register is owner-only (N71): act as the seeded owner of
+  // kernel-nyc, the kernel these tests register devices on.
+  app.addHook("onRequest", async (req) => {
+    (req as unknown as { operatorId: string }).operatorId = "0x1111111111111111111111111111111111111111";
+  });
   await app.register(jobSubmitRoutes);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
@@ -122,6 +127,14 @@ describe("Job Submission API", () => {
     });
 
     it("accepts optional assuranceTier and gcodeHash", async () => {
+      // WP-C R7: a job at tier T > 0 needs T <= the kernel's served tier. The
+      // seeded kernel-nyc has no proven signing key (ceiling 0, served 0), so
+      // this test binds one (a proven signer's ceiling is at least 1).
+      // (Old: tier 1 was accepted on a kernel served at tier 0.)
+      getRepos().kernels.update("kernel-nyc", {
+        signingKeyAlgorithm: "secp256k1",
+        signingAddress: "0x1234567890abcdef1234567890abcdef12345678",
+      } as never);
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit",

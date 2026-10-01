@@ -26,6 +26,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
 if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
@@ -33,7 +34,22 @@ if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY");
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
 const ORACLE_ADDRESS = "0x3850F24ACd88F6729692e2d05F75d499F0a661f5" as Address;
-const ORACLE_KEY = "pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa";
+/**
+ * Read a required secret from the environment and exit with a clear message
+ * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
+ * the literal that used to sit here was exposed and is listed for revocation
+ * in docs/security/WILDCARD_KEY_ROTATION.md).
+ */
+function requireEnv(name: string, what: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+    process.exit(1);
+  }
+  return value;
+}
+
+const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
 const KERNEL = "kernel-nanoclaw";
 let USDC: Address; // Will be deployed fresh
 
@@ -314,7 +330,7 @@ async function main() {
   });
   const oracleResult = await oracleReq.json() as any;
   log(`    Status:  ${oracleReq.status}`);
-  log(`    Result:  ${JSON.stringify(oracleResult)}`);
+  log(`    Result:  ${safeLogJson(oracleResult)}`);
 
   // Build the on-chain Attestation struct. The escrow stores
   // keccak256(abi.encode(attestation)) so the SAME struct must be passed

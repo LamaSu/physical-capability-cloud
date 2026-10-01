@@ -45,5 +45,9 @@ export function isJobStatus(s: string): s is JobStatus {
  */
 export function normalizeJobStatus(s: string): JobStatus | null {
   if (JOB_STATUS_SET.has(s)) return s as JobStatus;
-  return JOB_STATUS_ALIASES[s] ?? null;
+  // OWN keys only. A plain-object index also reads INHERITED properties:
+  // "constructor", "toString" or "__proto__" came back as a function or an
+  // object, which is truthy, so the name passed validation and then failed at
+  // the database bind (a 500) instead of being refused (a 400).
+  return Object.hasOwn(JOB_STATUS_ALIASES, s) ? JOB_STATUS_ALIASES[s] : null;
 }

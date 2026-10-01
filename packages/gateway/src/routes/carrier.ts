@@ -71,6 +71,7 @@ import {
 import { gatewayCommitmentKeyResolver, verifyCommitmentSignature } from "../services/commitment-signer.js";
 import { getActiveSigningKey } from "../signing-key.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import { checkAdminKey } from "../auth/admin-key.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -421,7 +422,11 @@ export async function carrierRoutes(app: FastifyInstance) {
     // (a signing key that vanished after boot shows up here, and in the 503s).
     const missingConfig = computeMissingConfig();
     const carrierConfigured = missingConfig.length === 0;
-    if (isCarrierProductionEnv() && !callerId(req)) {
+    // Production: the detailed posture (missing config, client state, shipment /
+    // letter / ledger COUNTS) is cross-tenant operational data, so it needs the
+    // admin secret, not just any authenticated key (WP-A round 5, #2883). Everyone
+    // else gets the redacted summary.
+    if (isCarrierProductionEnv() && !checkAdminKey(req).ok) {
       return {
         ok: carrierConfigured,
         service: "carrier (EasyPost)",

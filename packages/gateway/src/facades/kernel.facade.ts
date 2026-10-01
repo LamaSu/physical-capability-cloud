@@ -28,6 +28,12 @@ import {
 } from "./populators/kernel.populator.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import {
+  authorizedAssuranceCeiling,
+  clampAssuranceTiers,
+  isAssuranceTier,
+} from "../services/assurance-ceiling.js";
+import { capabilityIdFor } from "./capability.facade.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -50,9 +56,12 @@ export interface CreateKernelInput {
   location?: string | { lat: number; lng: number };
   physicalAddress?: string;
   /**
-   * Maximum assurance tier the operator claims they can sustain (0-3).
-   * Submitted value is persisted as-is — no silent override. Defaults to 2
-   * when omitted (most operators support tier 0/1/2 evidence by default).
+   * Maximum assurance tier the operator CLAIMS they can sustain (integer 0-3).
+   * Validated when present (anything else -> 400) and stored as-is, but only
+   * as a CLAIM: every read path serves `effectiveMaxAssuranceTier()`, the
+   * claim capped at the kernel's independently authorized ceiling (see
+   * services/assurance-ceiling.ts). Defaults to 0 when omitted. It no longer
+   * defaults to 2: an unstated claim grants nothing.
    */
   maxAssuranceTier?: 0 | 1 | 2 | 3;
   /**
@@ -99,13 +108,47 @@ export interface HeartbeatInput {
   status?: string;
   capabilities?: Array<Record<string, unknown>>;
   timestamp?: number;
+  /**
+   * Optional. `false` marks a node that takes no jobs (a heartbeat-only
+   * daemon). The heartbeat then records liveness as usual (the kernel's status,
+   * last heartbeat and its own validUntil) but refreshes NO capability's
+   * validUntil or lastHeartbeatAt, applies no announced `capabilities` list, and
+   * withdraws nothing: the kernel's existing listings age out on their own TTL.
+   * `true` or absent is the ordinary heartbeat. Any other type is a 400
+   * (`invalid_accepting_jobs`).
+   */
+  acceptingJobs?: boolean;
 }
+
+/** `acceptingJobs` is optional; when present it must be a boolean (not null, "false", 0 or 1). */
+export function isValidAcceptingJobs(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
+}
+export const INVALID_ACCEPTING_JOBS_CODE = "invalid_accepting_jobs";
+export const INVALID_ACCEPTING_JOBS_MESSAGE = "acceptingJobs must be a boolean when present";
 
 export interface HeartbeatResult {
   acknowledged: true;
   kernelId: string;
   status: string;
+  /**
+   * Capability entries inserted or refreshed for THIS kernel. An entry whose
+   * derived id another kernel's row already holds is not counted; it is listed
+   * in `capabilitiesSkipped` instead (WP-C R5).
+   */
   capabilitiesReceived: number;
+  /**
+   * Present, as `false`, only when the heartbeat carried `acceptingJobs: false`:
+   * liveness was recorded and no listing was refreshed or changed.
+   */
+  acceptingJobs?: false;
+  /**
+   * Present only when non-empty: announced capabilities that were NOT listed
+   * because their derived id `cap-<kernelId>-<type>` already belongs to a
+   * different kernel's row (WP-C R5). The operator must resolve the conflict;
+   * the heartbeat never touches the other kernel's row.
+   */
+  capabilitiesSkipped?: Array<{ type: string; capabilityId: string; reason: "capability_id_taken" }>;
   timestamp: string;
   /** ISO timestamp the kernel + its capabilities are valid until. */
   validUntil: string;
@@ -297,6 +340,17 @@ export class KernelFacade extends BaseFacade {
       const id = body.id || `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const context = this.defaultContext();
 
+      // WP-C: the tier is a CLAIM. When present (on create OR update) it must
+      // be an integer 0..3. A string "3", 2.5, 5, null, etc. is a 400, never a
+      // silent drop and never a stored out-of-range value. Validated before
+      // any read or write.
+      if (body.maxAssuranceTier !== undefined && !isAssuranceTier(body.maxAssuranceTier)) {
+        throw Object.assign(
+          new Error("maxAssuranceTier must be an integer in 0..3"),
+          { name: "BadRequestError", code: "invalid_max_assurance_tier" },
+        );
+      }
+
       const existing = repos.kernels.findById(id);
       if (existing) {
         const unownedOperatorAddresses = new Set([
@@ -307,14 +361,47 @@ export class KernelFacade extends BaseFacade {
         // Authorization only — authentication is apiGate's job (POST /api/kernels
         // is Bearer-gated → 401 without a key), so a real request always carries
         // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
-        // not mutate someone else's kernel. When actorId is absent (a facade-level
-        // unit test with no apiGate wired) there is no owner to check against; the
-        // SET-ONCE signer bind still fail-closes via the CAS below.
+        // not mutate someone else's kernel.
+        // Steward rule 7 (WP-C): an owner check fails CLOSED when the actor is
+        // missing. With no actorId there is nobody to authorize, so an EXISTING
+        // kernel is not touched at all (403, before any write). Before, a
+        // missing actor skipped both owner checks below: the profile, claimed
+        // tier and status were written, and only a signer swap was then stopped
+        // (409) by the SET-ONCE CAS, after those writes.
+        if (!actorId) {
+          throw Object.assign(
+            new Error(`Updating kernel '${id}' requires an authenticated actor`),
+            { name: "ForbiddenError" },
+          );
+        }
         if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
           );
+        }
+        // WP-C R4 (review round 2, probe P3). Claiming a placeholder-owned row
+        // hands the claimant that row's authorized assurance ceiling, which
+        // rests on its bound signing key and its track record. So when the row
+        // ALREADY has a bound signer, only a party that proves THAT signer
+        // (verifySigningProof over the kernelId-bound challenge, then
+        // sameSigner) may claim it. No proof, or a proof of a different key:
+        // 403, checked before anything is written. A placeholder row with no
+        // bound signer is claimed as before (its ceiling is 0).
+        if (actorId && !hasRecordedOwner) {
+          const boundSigner = this.signerFromRow(existing);
+          if (boundSigner) {
+            const claimed = await this.verifySigningProof(id, body);
+            if (!claimed || !this.sameSigner(boundSigner, claimed)) {
+              throw Object.assign(
+                new Error(
+                  `Kernel '${id}' has no recorded owner but has a bound signing key; ` +
+                    "claiming it requires a signing proof from that same key",
+                ),
+                { name: "ForbiddenError" },
+              );
+            }
+          }
         }
         // Upsert: update heartbeat + optional fields
         const updates: Record<string, unknown> = {
@@ -339,7 +426,9 @@ export class KernelFacade extends BaseFacade {
             updates.location = { lat: loc.lat, lng: loc.lng };
           }
         }
-        if (typeof body.maxAssuranceTier === "number") {
+        // Validated above: when present it is an integer 0..3. Stored as the
+        // CLAIM only; reads cap it at the authorized ceiling.
+        if (body.maxAssuranceTier !== undefined) {
           updates.maxAssuranceTier = body.maxAssuranceTier;
         }
         // Heartbeat/profile fields are a normal update. The signing identity is
@@ -420,10 +509,11 @@ export class KernelFacade extends BaseFacade {
         version: "0.1.0",
         reputation: 0,
         totalJobsCompleted: 0,
-        // Fix for coord task c6b48ca1: respect the operator's submitted tier
-        // instead of hardcoding 2. Default to 2 when omitted (most operators
-        // sustain tier 0/1/2 evidence by default).
-        maxAssuranceTier: body.maxAssuranceTier ?? 2,
+        // The operator's submitted tier is stored as a CLAIM (coord c6b48ca1:
+        // never silently overridden). WP-C: an omitted claim defaults to 0,
+        // not 2. What the kernel is SERVED at is
+        // min(claim, authorizedAssuranceCeiling) — see assurance-ceiling.ts.
+        maxAssuranceTier: body.maxAssuranceTier ?? 0,
         // feat/ed25519-keys-and-kernel-ttl — set initial soft expiry.
         // Without this, a registered-but-never-heartbeated kernel would
         // never appear in default listings (sweeper would mark expired
@@ -460,67 +550,139 @@ export class KernelFacade extends BaseFacade {
   /**
    * Handle a heartbeat from a kernel daemon.
    * Updates status, upserts capabilities announced in the heartbeat.
-   * Replaces: POST /api/kernels/:kernelId/heartbeat
+   * Replaces: POST /api/kernels/:kernelId/heartbeat (and backs
+   * POST /api/operator/heartbeat).
+   *
+   * OWNER-ONLY (WP-C). A heartbeat marks a kernel online and can insert
+   * catalog rows, so it is authorized like any other mutation of the kernel.
+   * The CALLER authorizes: both routes (POST /api/kernels/:kernelId/heartbeat
+   * and POST /api/operator/heartbeat) run the owner check
+   * (auth/kernel-owner-guard.ts, over the shared auth/kernel-operator.ts
+   * predicate) before calling this, so only the kernel's recorded operator gets
+   * here. A legacy placeholder owner ("" / zero address) must first be claimed
+   * through an authenticated register. Any new caller MUST do the same.
+   *
+   * Here, fail closed regardless of the caller:
+   *   - the kernel must exist (404 otherwise); a heartbeat never creates
+   *     capability rows for an unknown kernel id;
+   *   - `actorId` must own the row loaded here (defence in depth; WP-C C1 says
+   *     the facade itself requires actor === operatorAddress). It is the same
+   *     comparison as the route check (ownsKernel: a placeholder owns nothing,
+   *     then isSamePrincipal). A missing actor or a different principal is 403
+   *     before anything is written;
+   *   - inserted capability `assuranceTiers` are CLAMPED to the kernel's
+   *     authorized ceiling: each value must be an integer 0..3 and <= the
+   *     ceiling, others are dropped, and an empty result becomes [0];
+   *   - a row whose derived id `cap-<kernelId>-<type>` already belongs to a
+   *     DIFFERENT kernel is left untouched (a heartbeat for one kernel never
+   *     refreshes another kernel's listing), and is reported in
+   *     `capabilitiesSkipped` rather than counted as received (WP-C R5);
+   *   - `acceptingJobs`, when present, must be a boolean (400
+   *     `invalid_accepting_jobs`, before anything is written). With `false` the
+   *     kernel's liveness is recorded as usual but no capability is refreshed,
+   *     inserted or withdrawn (see HeartbeatInput): a heartbeat-only node's
+   *     listings age out instead of being kept alive by its heartbeats.
    */
   async heartbeat(
     kernelId: string,
     body: HeartbeatInput,
+    actorId: string | undefined,
   ): Promise<Result<HeartbeatResult>> {
     return this.execute("heartbeat", async () => {
-      const { status = "online", capabilities } = body ?? {};
+      const { status = "online", capabilities, acceptingJobs } = body ?? {};
       const nowDate = new Date();
       const now = nowDate.toISOString();
       const validUntil = computeValidUntilIso(nowDate);
       const repos = this.repos;
 
+      const kernel = repos.kernels.findById(kernelId) as any;
+      if (!kernel) {
+        throw new NotFoundError("kernel", kernelId);
+      }
+      // Defence in depth: the caller's owner check is repeated against the
+      // row just loaded. Imported lazily: auth/ imports the facades, so a
+      // static import here would be a module cycle.
+      const { ownsKernel } = await import("../auth/kernel-owner-guard.js");
+      if (!ownsKernel(kernel.operatorAddress, actorId)) {
+        throw Object.assign(
+          new Error(`Only the recorded operator of kernel '${kernelId}' may heartbeat it`),
+          { name: "ForbiddenError" },
+        );
+      }
+      // Validated after the caller is known to own the kernel and before the
+      // first write, so a refusal leaves the kernel and its listings untouched.
+      if (!isValidAcceptingJobs(acceptingJobs)) {
+        throw Object.assign(new Error(INVALID_ACCEPTING_JOBS_MESSAGE), {
+          name: "BadRequestError",
+          code: INVALID_ACCEPTING_JOBS_CODE,
+        });
+      }
+      const acceptsJobs = acceptingJobs !== false;
+      // The authorized ceiling bounds every tier this heartbeat may insert.
+      const ceiling = authorizedAssuranceCeiling(kernel);
+
       // Resurrection detection: compare prior validUntil to "now" — if it
       // had already passed, this heartbeat brings the kernel back from
       // expired status. Emit telemetry so the dashboard can show it.
-      const kernel = repos.kernels.findById(kernelId) as any;
       let resurrected = false;
       let sinceLastHeartbeatSec: number | null = null;
       let wasExpiredForMinutes: number | null = null;
 
-      if (kernel) {
-        const priorHeartbeat = kernel.lastHeartbeat
-          ? Date.parse(kernel.lastHeartbeat as string)
-          : NaN;
-        if (Number.isFinite(priorHeartbeat)) {
-          sinceLastHeartbeatSec = Math.floor((nowDate.getTime() - priorHeartbeat) / 1000);
-        }
-        const priorValidUntil = kernel.validUntil
-          ? Date.parse(kernel.validUntil as string)
-          : NaN;
-        if (Number.isFinite(priorValidUntil) && priorValidUntil < nowDate.getTime()) {
-          resurrected = true;
-          wasExpiredForMinutes = Math.floor(
-            (nowDate.getTime() - priorValidUntil) / 60000,
-          );
-        }
+      const priorHeartbeat = kernel.lastHeartbeat
+        ? Date.parse(kernel.lastHeartbeat as string)
+        : NaN;
+      if (Number.isFinite(priorHeartbeat)) {
+        sinceLastHeartbeatSec = Math.floor((nowDate.getTime() - priorHeartbeat) / 1000);
+      }
+      const priorValidUntil = kernel.validUntil
+        ? Date.parse(kernel.validUntil as string)
+        : NaN;
+      if (Number.isFinite(priorValidUntil) && priorValidUntil < nowDate.getTime()) {
+        resurrected = true;
+        wasExpiredForMinutes = Math.floor(
+          (nowDate.getTime() - priorValidUntil) / 60000,
+        );
+      }
 
-        try {
-          repos.kernels.update(kernelId, {
-            // The sweeper marks expired kernels status=expired; an
-            // incoming heartbeat brings them back online unless the
-            // operator explicitly sent status=offline.
-            status: status === "offline" ? "offline" : "online",
-            lastHeartbeat: now,
-            validUntil,
-          } as any);
-        } catch {
-          // soft fail
-        }
+      try {
+        repos.kernels.update(kernelId, {
+          // The sweeper marks expired kernels status=expired; an
+          // incoming heartbeat brings them back online unless the
+          // operator explicitly sent status=offline.
+          status: status === "offline" ? "offline" : "online",
+          lastHeartbeat: now,
+          validUntil,
+        } as any);
+      } catch {
+        // soft fail
       }
 
       // Upsert capability announcements
       let capabilitiesReceived = 0;
-      if (capabilities && capabilities.length > 0) {
+      const capabilitiesSkipped: NonNullable<HeartbeatResult["capabilitiesSkipped"]> = [];
+      if (!acceptsJobs) {
+        // acceptingJobs: false. This node takes no jobs, so its heartbeat is a
+        // liveness signal only. The kernel row was updated above; no listing is
+        // refreshed, inserted or withdrawn, and an announced list is not
+        // applied. The existing listings age out on their own validUntil.
+      } else if (Array.isArray(capabilities) && capabilities.length > 0) {
         for (const cap of capabilities) {
-          const capType = (cap.type as string) ?? (cap.capability_type as string);
-          if (!capType) continue;
-          const capId = `cap-${kernelId}-${capType}`;
+          if (!cap || typeof cap !== "object") continue;
+          const capType = cap.type ?? cap.capability_type;
+          // A type is part of the derived id, so it must be a non-empty string.
+          if (typeof capType !== "string" || !capType) continue;
+          const capId = capabilityIdFor(kernelId, capType);
           try {
             const existing = repos.capabilities.findById(capId);
+            if (existing && existing.kernelId !== kernelId) {
+              // The derived id is already taken by ANOTHER kernel's row
+              // (capability ids are global). Leave that row untouched: this
+              // owner's heartbeat must not keep a different kernel's listing
+              // alive. Report it instead of counting it as received (WP-C R5),
+              // so the operator learns its own listing does not exist.
+              capabilitiesSkipped.push({ type: capType, capabilityId: capId, reason: "capability_id_taken" });
+              continue;
+            }
             if (!existing) {
               repos.capabilities.insert({
                 id: capId,
@@ -529,7 +691,9 @@ export class KernelFacade extends BaseFacade {
                 name: (cap.name as string) ?? `${capType} — ${kernelId}`,
                 description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
                 materials: (cap.materials as string[]) ?? [],
-                assuranceTiers: (cap.assuranceTiers as number[]) ?? [0, 1],
+                // Claimed tiers are clamped to the kernel's authorized ceiling
+                // (invalid values dropped; nothing left -> [0]).
+                assuranceTiers: clampAssuranceTiers(cap.assuranceTiers ?? [0, 1], ceiling),
                 pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
                 availability: (cap.availability as any) ?? {},
                 location: (cap.location as any) ?? { lat: 0, lng: 0 },
@@ -537,7 +701,7 @@ export class KernelFacade extends BaseFacade {
                 validUntil,
               } as any);
             } else {
-              // Existing capability — refresh its TTL.
+              // Existing capability of THIS kernel — refresh its TTL.
               try {
                 repos.capabilities.update(capId, {
                   lastHeartbeatAt: now,
@@ -599,6 +763,8 @@ export class KernelFacade extends BaseFacade {
         kernelId,
         status,
         capabilitiesReceived,
+        ...(acceptsJobs ? {} : { acceptingJobs: false as const }),
+        ...(capabilitiesSkipped.length > 0 ? { capabilitiesSkipped } : {}),
         timestamp: now,
         validUntil,
         resurrected,
@@ -612,6 +778,19 @@ export class KernelFacade extends BaseFacade {
    * Currently a stub — returns acknowledged without upsert (unlike heartbeat).
    * Replaces: POST /api/kernels/:kernelId/capabilities
    *
+   * OWNER-ONLY (WP-C): the route runs `requireKernelOwner`
+   * (auth/kernel-owner-guard.ts) first, the same rule as heartbeat: 404 for an
+   * unknown kernel, 403 `not_kernel_owner` for anyone but its recorded operator.
+   *
+   * GUARD: this stub must NEVER write tiers, capabilities or devices. The
+   * announced `assuranceTiers` / `maxAssuranceTier` are unverified CLAIMS and
+   * nothing here stores or acts on them. A future implementation must first
+   * verify the announcement signature against the kernel's proven signing key,
+   * and must route every tier it stores through
+   * services/assurance-ceiling.ts (clampAssuranceTiers /
+   * authorizedAssuranceCeiling). It must never persist a claimed tier
+   * directly.
+   *
    * TODO: Implement full announcement verification (Ed25519 signature check
    * on the announcement payload, then upsert capabilities and devices).
    */
@@ -621,8 +800,8 @@ export class KernelFacade extends BaseFacade {
   ): Promise<Result<AnnouncementResult>> {
     return this.execute("announceCapabilities", async () => {
       const now = new Date().toISOString();
-      const capabilities = body.capabilities ?? [];
-      const devices = body.devices ?? [];
+      const capabilities = Array.isArray(body?.capabilities) ? body.capabilities : [];
+      const devices = Array.isArray(body?.devices) ? body.devices : [];
 
       return {
         acknowledged: true as const,

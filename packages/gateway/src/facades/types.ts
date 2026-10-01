@@ -46,9 +46,11 @@ export interface PopulationContext {
   /** Pre-loaded queue depths (capabilityId → depth) */
   queueDepthCache?: Map<string, number>;
   /**
-   * When true, the populator will cap maxAssuranceTier using the cold-start gate
-   * (job count + effective reputation thresholds). Defaults to false to preserve
-   * existing behavior for internal/admin reads.
+   * @deprecated IGNORED. The kernel populator now ALWAYS caps
+   * `maxAssuranceTier` at the authorized assurance ceiling (WP-C,
+   * services/assurance-ceiling.ts), so there is nothing to opt into. Kept only
+   * so existing call sites still compile. Setting it to false does NOT
+   * disable the ceiling.
    */
   applyColdStartGate?: boolean;
 }

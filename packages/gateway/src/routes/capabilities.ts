@@ -4,6 +4,7 @@ import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
+import { requireActor, requireOwnerOf } from "../auth/kernel-owner-guard.js";
 
 // ── POST /api/capabilities — accepted top-level body fields ─────────────────
 //
@@ -695,7 +696,10 @@ export async function capabilityRoutes(app: FastifyInstance) {
 
         "pcc:capabilityType": cap.type,
         "pcc:kernelId": cap.kernelId,
-        "pcc:assuranceTiers": cap.assuranceTiers ?? [0, 1, 2, 3],
+        // The DTO already serves tiers clamped to the kernel's authorized
+        // ceiling (WP-C). If they were ever absent, advertise the floor [0],
+        // never all four tiers.
+        "pcc:assuranceTiers": cap.assuranceTiers ?? [0],
         "pcc:pricing": cap.pricing,
       };
 
@@ -720,16 +724,43 @@ export async function capabilityRoutes(app: FastifyInstance) {
    * dedicated availability-update endpoint.
    * Returns 400 when kernelId or type is missing.
    * Returns 500 on DB failure with { error, message }.
+   *
+   * OWNER-ONLY (WP-C; refvertical #2586, coord-watch #2608). Listing a
+   * capability on a kernel is a catalog mutation of that kernel, authorized
+   * the same way as its heartbeat (requireKernelOwner, over the shared
+   * auth/kernel-operator.ts predicate):
+   *   - 401 `api_key_required` without an authenticated actor. This matters:
+   *     apiGate's PUBLIC_EXACT entry for "/api/capabilities" has no method
+   *     guard, so a POST reaches this handler without apiGate resolving any
+   *     identity. The guard resolves it itself and never relies on apiGate;
+   *   - 404 `kernel_not_found` for an unknown kernel id, so no orphan listings;
+   *   - 403 `not_kernel_owner` unless the actor is the kernel's recorded owner
+   *     (a legacy placeholder owner must first be claimed through register).
+   * Otherwise anyone could list priced capabilities under another operator's
+   * kernel and inherit its assurance ceiling, which is the same cross-tenant
+   * catalog injection the heartbeat fix closes.
+   *
+   * The id is DERIVED (WP-C R5, CapabilityFacade.create): a body `id` other
+   * than `cap-<kernelId>-<type>` is 400 `capability_id_mismatch`, and a derived
+   * id that another kernel's row already holds is 409 `capability_id_taken`.
    */
   app.post<{ Body: CreateCapabilityInput }>("/api/capabilities", async (req, reply) => {
-    const { kernelId, type } = req.body;
-    if (!kernelId || !type) {
+    // Steward rule 7: a PRESENT actor first (401), before body validation or
+    // any lookup.
+    const actor = requireActor(req, reply);
+    if (!actor) return reply;
+    const { kernelId, type } = req.body ?? ({} as Partial<CreateCapabilityInput>);
+    if (typeof kernelId !== "string" || !kernelId || !type) {
       return reply.code(400).send({ error: "kernelId and type required" });
     }
+    // Ownership BEFORE any write (WP-C): 404 / 403 / 502 are sent by the guard.
+    if (!(await requireOwnerOf(actor, reply, kernelId))) return reply;
+    // N83 (R0 G12): the body's own keys, to report the ones that are not persisted.
     const bodyKeys = Object.keys(req.body ?? {});
     const result = await facade.create(req.body);
     if (!result.success) {
-      return reply.code(result.error.httpStatus).send({
+      const status = result.error.code === "capability_id_taken" ? 409 : result.error.httpStatus;
+      return reply.code(status).send({
         error: result.error.code,
         message: result.error.message,
         ...(result.error.details ? { details: result.error.details } : {}),
