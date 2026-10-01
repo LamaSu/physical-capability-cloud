@@ -421,9 +421,16 @@ export class CourierJobsStore {
   cancel(id: string, poster: string):
     | { ok: true; status: CourierJobStatus }
     | { ok: false; reason: "not_found" }
-    | { ok: false; reason: "forbidden" } {
+    | { ok: false; reason: "forbidden" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: CourierJobStatus } {
     const result = getJobOffersStore().cancel(id, poster);
-    if (!result.ok) return result;
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        // The refusal names the status in the shim's vocabulary (completed shows as delivered, lapsed as expired).
+        return { ok: false, reason: "invalid_transition", currentStatus: genericStatusToCourier(result.currentStatus) };
+      }
+      return result;
+    }
     const o = getJobOffersStore().get(id)!;
     return { ok: true, status: offerToCourierJob(o).status };
   }

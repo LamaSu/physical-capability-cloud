@@ -88,17 +88,21 @@ export interface EvidenceRequirements {
   [k: string]: unknown;
 }
 
-export type JobOfferStatus =
-  | "open"
-  | "claimed"
-  | "in_progress"
-  | "delivered"
-  | "completed"
-  | "settled"
-  | "cancelled"
-  | "expired"
-  | "lapsed"
-  | "disputed";
+/** Every status an offer can have: the one list the type below is made from. */
+export const JOB_OFFER_STATUSES = [
+  "open",
+  "claimed",
+  "in_progress",
+  "delivered",
+  "completed",
+  "settled",
+  "cancelled",
+  "expired",
+  "lapsed",
+  "disputed",
+] as const;
+
+export type JobOfferStatus = (typeof JOB_OFFER_STATUSES)[number];
 
 /** After 'delivered', the poster has this long to dispute; with no confirm or
  * dispute by then, the sweeper lapses the offer (kits #3989). */
@@ -113,17 +117,22 @@ export const RECLAIM_BLOCK_MS = 60 * 60 * 1000;
  *   - confirmed (poster) ends it in 'completed' (success; no money moves);
  *   - disputed (poster, within REVIEW_WINDOW_MS of delivery) ends it in 'disputed';
  *   - release (claimant, before delivery) puts the offer back to 'open';
- *   - settled comes only from the server (a linked job's settlement): posted, it is refused. */
-const EVENT_ALLOWED_FROM: Readonly<Record<string, ReadonlySet<JobOfferStatus>>> = {
-  in_progress: new Set<JobOfferStatus>(["claimed", "in_progress"]),
-  pickup: new Set<JobOfferStatus>(["claimed", "in_progress"]),
-  delivered: new Set<JobOfferStatus>(["claimed", "in_progress", "delivered"]),
-  release: new Set<JobOfferStatus>(["claimed", "in_progress"]),
-  cancelled: new Set<JobOfferStatus>(["open", "claimed", "in_progress", "cancelled"]),
-  confirmed: new Set<JobOfferStatus>(["delivered", "completed"]),
-  disputed: new Set<JobOfferStatus>(["delivered", "disputed"]),
-  settled: new Set<JobOfferStatus>(),
-};
+ *   - settled comes only from the server (a linked job's settlement): posted, it is refused.
+ * A Map, not an object: an event name is caller data, and a plain object also
+ * answers for the names it inherits (toString, constructor, __proto__, ...). */
+export const EVENT_ALLOWED_FROM: ReadonlyMap<string, ReadonlySet<JobOfferStatus>> = new Map<
+  string,
+  ReadonlySet<JobOfferStatus>
+>([
+  ["in_progress", new Set<JobOfferStatus>(["claimed", "in_progress"])],
+  ["pickup", new Set<JobOfferStatus>(["claimed", "in_progress"])],
+  ["delivered", new Set<JobOfferStatus>(["claimed", "in_progress", "delivered"])],
+  ["release", new Set<JobOfferStatus>(["claimed", "in_progress"])],
+  ["cancelled", new Set<JobOfferStatus>(["open", "claimed", "in_progress", "cancelled"])],
+  ["confirmed", new Set<JobOfferStatus>(["delivered", "completed"])],
+  ["disputed", new Set<JobOfferStatus>(["delivered", "disputed"])],
+  ["settled", new Set<JobOfferStatus>()],
+]);
 
 export interface JobOffer {
   id: string;
@@ -719,7 +728,7 @@ export class JobOffersStore {
     | { ok: false; reason: "review_window_closed"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
-    const allowedFrom = EVENT_ALLOWED_FROM[event];
+    const allowedFrom = EVENT_ALLOWED_FROM.get(event);
     if (allowedFrom && !allowedFrom.has(o.status)) {
       return { ok: false, reason: "invalid_transition", currentStatus: o.status };
     }
@@ -818,18 +827,34 @@ export class JobOffersStore {
     return { ok: true, offer: o };
   }
 
+  /**
+   * The poster's DELETE. It is a 'cancelled' event, so it follows the same
+   * rule: an open, claimed or in-progress offer is cancelled; one already
+   * cancelled stays as it is and keeps its first cancellation time (the repeat
+   * is logged, like a repeated 'cancelled' event); any other status is refused
+   * and nothing is recorded. Who may cancel is checked first, so a refusal
+   * never tells a stranger what state the offer is in.
+   */
   cancel(id: string, poster: string):
     | { ok: true; status: JobOfferStatus }
     | { ok: false; reason: "not_found" }
-    | { ok: false; reason: "forbidden" } {
+    | { ok: false; reason: "forbidden" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
     if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
-    o.status = "cancelled";
-    o.cancelledAt = this.nowIso();
-    this.persistOffer(o);
+    // The 'cancelled' rule; with no such rule, nothing may be cancelled.
+    if (!(EVENT_ALLOWED_FROM.get("cancelled")?.has(o.status) ?? false)) {
+      return { ok: false, reason: "invalid_transition", currentStatus: o.status };
+    }
+    const at = this.nowIso();
+    if (o.status !== "cancelled") {
+      o.status = "cancelled";
+      o.cancelledAt = at;
+      this.persistOffer(o);
+    }
     this.appendEvent(o.id, {
-      at: o.cancelledAt,
+      at,
       event: "deleted_by_poster",
       by: poster,
     });
@@ -851,6 +876,26 @@ export class JobOffersStore {
       by: poster,
     });
     return { ok: true, lastHeartbeatAt: o.lastHeartbeatAt };
+  }
+
+  /**
+   * True while `o` is still the offer a source check was started for: the same
+   * record, still open, with the claim it had then (none) and the same source
+   * address. Deliberately not a version of every field: a poster's heartbeat or
+   * edit does not make a source's answer stale, and must not be a way to keep
+   * a failed check from ever applying.
+   */
+  private stillAsked(
+    o: JobOffer,
+    asked: { url: string; claimedBy: string | null; claimedAt: string | null },
+  ): boolean {
+    return (
+      this.offers.get(o.id) === o &&
+      o.status === "open" &&
+      o.claimedByKernelId === asked.claimedBy &&
+      o.claimedAt === asked.claimedAt &&
+      o.sourceVerifyUrl === asked.url
+    );
   }
 
   /**
@@ -918,7 +963,12 @@ export class JobOffersStore {
         const inEarlyWindow = now - postedMs < REVERIFY_EARLY_WINDOW_MS;
         const interval = inEarlyWindow ? REVERIFY_EARLY_INTERVAL_MS : REVERIFY_LATE_INTERVAL_MS;
         if (now - lastVMs >= interval) {
-          const v = await this.verify(o.sourceVerifyUrl);
+          const asked = { url: o.sourceVerifyUrl, claimedBy: o.claimedByKernelId, claimedAt: o.claimedAt };
+          const v = await this.verify(asked.url);
+          // The await let other writers act: a claim, a delivery, the poster's
+          // cancel, another sweep. The answer applies only to the offer it was
+          // asked about; if that offer has moved on, the answer is discarded.
+          if (!this.stillAsked(o, asked)) continue;
           o.lastVerifyAt = this.nowIso();
           if (!v.ok) {
             o.status = "cancelled";

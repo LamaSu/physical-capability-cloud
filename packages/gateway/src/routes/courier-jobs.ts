@@ -305,8 +305,14 @@ export async function courierJobsRoutes(app: FastifyInstance) {
           message: "You can only cancel jobs you posted",
         });
       }
+      // DELETE is a 'cancelled' event: refused the same way, from the same statuses.
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: "cancelled", currentStatus: result.currentStatus });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "cancel_refused" });
     }
-    return { ok: true, status: (result as { ok: true; status: string }).status };
+    return { ok: true, status: result.status };
   });
 
   // ── POST /api/courier-jobs/:id/heartbeat ────────────────────────────────

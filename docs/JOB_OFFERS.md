@@ -180,7 +180,9 @@ callers continue to work.
 
 - `PATCH /api/job-offers/:id` — update `pricing`, `deadline`, `validUntil`,
   or shallow-merge `requirements`. Ownership check via `posterDid`.
-- `DELETE /api/job-offers/:id` — set status to `cancelled`.
+- `DELETE /api/job-offers/:id` — cancel an `open`, `claimed` or `in_progress`
+  offer (a repeat on a cancelled offer keeps its first `cancelledAt`). Any other
+  status answers 409 `invalid_transition` with `currentStatus`, and nothing changes.
 - `POST /api/job-offers/:id/heartbeat` — refresh `lastHeartbeatAt`.
   Required if `requireHeartbeat: true` on create (5min grace).
 
