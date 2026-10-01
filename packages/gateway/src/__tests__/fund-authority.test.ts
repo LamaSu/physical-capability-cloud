@@ -77,6 +77,9 @@ function seedEscrow(payer: string): { stored: string; lower: string } {
   return { stored, lower };
 }
 
+/** ASCII to its fullwidth compatibility form (U+FF01..U+FF5E): NFKC folds it back, so it names the same identity. */
+const fullwidth = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join("");
+
 const asKey = (key: string, extra: Record<string, string> = {}) => ({ authorization: `Bearer ${key}`, ...extra });
 const fund = (address: string, headers: Record<string, string> = {}) =>
   app.inject({ method: "POST", url: `/api/escrow/chain/${address}/fund`, headers });
@@ -197,7 +200,7 @@ describe("N46 /fund authority: only the recorded payer or the admin makes the ga
   });
 
   it("[neg] the zero-address placeholder is no payer either, in any spelling: a key carrying that very identity is refused", async () => {
-    for (const placeholder of [ZERO, "0X0000000000000000000000000000000000000000", `０x${"0".repeat(39)}0`, ` ${ZERO} `]) {
+    for (const placeholder of [ZERO, "0X0000000000000000000000000000000000000000", fullwidth(`0x${"0".repeat(40)}`), ` ${ZERO} `]) {
       const e = seedEscrow(placeholder);
       const res = await fund(e.stored, asKey(zeroKey));
       expect(res.statusCode, `${JSON.stringify(placeholder)}: ${res.body}`).toBe(403);
@@ -226,7 +229,7 @@ describe("N46 /fund authority: only the recorded payer or the admin makes the ga
     for (const recorded of [
       "Fund.Payer@X.TEST",
       "  fund.payer@x.test  ",
-      "ｆｕｎｄ.ｐａｙｅｒ@ｘ.ｔｅｓｔ",
+      fullwidth("fund.payer@x.test"),
     ]) {
       fundSpy.mockClear();
       const e = seedEscrow(recorded);
