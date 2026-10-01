@@ -7,7 +7,7 @@
 
 import { createHash, sign as cryptoSign, verify as cryptoVerify, createPrivateKey, createPublicKey } from "node:crypto";
 import type { DIDString, CapabilityCredential, CredentialProof, IssueCredentialOptions } from "./types.js";
-import { canonicalize } from "../util/canonical.js";
+import { canonicalize, canonicalSnapshot } from "../util/canonical.js";
 
 // ---------------------------------------------------------------------------
 // Credential Issuance (Node.js only)
@@ -111,26 +111,34 @@ export function signCredential(
  * 1. The credential has a proof
  * 2. The proof signature is valid for the credential body
  * 3. The credential has not expired
+ *
+ * The credential is snapshotted FIRST (canonicalized, then the canonical text
+ * parsed once) and all three checks run on that snapshot, never on the object
+ * that was passed in: a Proxy or any mutable object could otherwise show the
+ * expiry check a future date and the signature check the signed, expired one.
+ * A credential that is not a plain JSON tree fails closed.
  */
 export function verifyCredential(
   credential: CapabilityCredential,
   issuerPublicKeyHex: string,
 ): boolean {
-  // Must have a proof
-  if (!credential.proof) {
-    return false;
-  }
+  try {
+    const snapshot = canonicalSnapshot<CapabilityCredential>(credential).value;
+    const { proof, ...credentialBody } = snapshot;
 
-  // Check expiration
-  if (credential.expirationDate) {
-    const expiry = new Date(credential.expirationDate);
-    if (expiry < new Date()) {
+    // Must have a proof
+    if (!proof) {
       return false;
     }
-  }
 
-  try {
-    const { proof, ...credentialBody } = credential;
+    // Check expiration
+    if (credentialBody.expirationDate) {
+      const expiry = new Date(credentialBody.expirationDate);
+      if (expiry < new Date()) {
+        return false;
+      }
+    }
+
     const message = canonicalize(credentialBody);
 
     const pubKeyDer = buildEd25519PublicKeyDer(issuerPublicKeyHex);
