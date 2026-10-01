@@ -796,3 +796,117 @@ describe("schema", () => {
     expect(out).toMatchObject({ constraints: [], layout: [], refused: [] });
   });
 });
+
+// ── astra review of #432 (round 1) ───────────────────────────────────────────────────────────────
+
+describe("F1: every decision comes from one snapshot of the presentation, taken before any edit is touched", () => {
+  /** An edits array whose `length` getter runs `during`: the caller's code, running while its edits are read. */
+  const editsRunning = (list: unknown[], during: () => void) =>
+    new Proxy(list, {
+      get: (target, key, receiver) => {
+        if (key === "length") during();
+        return Reflect.get(target, key, receiver);
+      },
+    });
+  const asNodes = (p: PlanPresentation, nodes: unknown) => {
+    (p as unknown as { nodes: unknown }).nodes = nodes;
+  };
+
+  it("a length getter that flips layer and state cannot unseal the plan (the reviewer's reproduction)", () => {
+    const p = sealedPresentation();
+    const out = planEditsToIntent(
+      p,
+      editsRunning([{ op: "remove-node", nodeId: "mail" }], () => {
+        p.layer = "C";
+        p.state = "compiled";
+      }),
+    );
+    expect(out.basis).toMatchObject({ layer: "B", state: "sealed" });
+    expect(out.constraints).toEqual([]);
+    expect(out.refused).toEqual([{ index: 0, op: "remove-node", reason: "plan-sealed" }]);
+  });
+
+  it("nor can it revive an invalid presentation that still lists nodes", () => {
+    const p = invalidWithNodesPresentation();
+    const out = planEditsToIntent(
+      p,
+      editsRunning([{ op: "note", text: "x" }, { op: "remove-node", nodeId: "n1" }], () => {
+        p.state = "proposed";
+      }),
+    );
+    expect(out.constraints).toEqual([]);
+    expect(out.refused.map((r) => r.reason)).toEqual(["presentation-invalid", "presentation-invalid"]);
+  });
+
+  it("nor can it add a node the presentation did not list, or move the money context", () => {
+    const p = compiledPresentation();
+    const out = planEditsToIntent(
+      p,
+      editsRunning([{ op: "remove-node", nodeId: "ghost" }, { op: "max-total", maxBaseUnits: "500" }], () => {
+        p.nodes = [...p.nodes, minimalProposed("ghost")];
+        p.preview!.gross.currency = "EUR";
+      }),
+    );
+    expect(out.refused).toEqual([{ index: 0, op: "remove-node", reason: "unknown-node" }]);
+    expect(out.constraints).toEqual([{ kind: "max-total", max: { baseUnits: "500", currency: "USDC", decimals: 6 } }]);
+  });
+
+  it("totality: a length getter that nulls the node list neither throws nor changes the answer", () => {
+    const list = [{ op: "remove-node", nodeId: "mail" }, { op: "move-node", nodeId: "mail", x: 1, y: 2 }, { op: "max-total", maxBaseUnits: "9" }];
+    const control = planEditsToIntent(compiledPresentation(), list);
+    const p = compiledPresentation();
+    let out: ReturnType<typeof planEditsToIntent> | undefined;
+    expect(() => {
+      out = planEditsToIntent(p, editsRunning(list, () => asNodes(p, null)));
+    }).not.toThrow();
+    expect(out).toEqual(control);
+  });
+
+  it("totality: a node list that is not an array, or holds anything but nodes, makes the presentation invalid and never throws", () => {
+    const list = [{ op: "remove-node", nodeId: "mail" }, { op: "move-node", nodeId: "mail", x: 1, y: 1 }, { op: "note", text: "x" }];
+    // [node list, whether node "mail" is still a known node in it]
+    const cases: Array<[unknown, boolean]> = [
+      [null, false],
+      [undefined, false],
+      ["x", false],
+      [5, false],
+      [{}, false],
+      [[null], false],
+      [[7], false],
+      [[{ nodeId: 5 }], false],
+      [[{ ...minimalProposed("mail") }, null], true],
+    ];
+    for (const [nodes, mailKnown] of cases) {
+      const p = compiledPresentation();
+      asNodes(p, nodes);
+      let out: ReturnType<typeof planEditsToIntent> | undefined;
+      expect(() => {
+        out = planEditsToIntent(p, list);
+      }).not.toThrow();
+      expect(out!.constraints, JSON.stringify(nodes)).toEqual([]);
+      // Every semantic edit is refused; the layout edit stands only for a node that is really listed.
+      expect(out!.refused.map((r) => r.reason), JSON.stringify(nodes)).toEqual(mailKnown ? ["presentation-invalid", "presentation-invalid"] : ["presentation-invalid", "unknown-node", "presentation-invalid"]);
+      expect(out!.layout, JSON.stringify(nodes)).toEqual(mailKnown ? [{ kind: "position", nodeId: "mail", x: 1, y: 1 }] : []);
+      // The basis is still the presentation's own: a bad node list does not make the rest unreadable.
+      expect(out!.basis, JSON.stringify(nodes)).toEqual({ requestId: p.requestId, reservationId: p.reservationId, planId: p.planId, asOf: p.asOf, layer: p.layer, state: p.state });
+    }
+  });
+
+  it("totality: a presentation that cannot be read at all is invalid, and never throws", () => {
+    const unreadable = new Proxy({}, { get: () => { throw new Error("boom"); } }) as unknown as PlanPresentation;
+    const throwingState = compiledPresentation();
+    Object.defineProperty(throwingState, "state", { get: () => { throw new Error("boom"); } });
+    const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+    revoke();
+    for (const p of [unreadable, throwingState, revoked as unknown as PlanPresentation, null as unknown as PlanPresentation, undefined as unknown as PlanPresentation]) {
+      let out: ReturnType<typeof planEditsToIntent> | undefined;
+      expect(() => {
+        out = planEditsToIntent(p, [{ op: "remove-node", nodeId: "mail" }, { op: "move-node", nodeId: "mail", x: 1, y: 1 }]);
+      }).not.toThrow();
+      expect(out!.constraints).toEqual([]);
+      expect(out!.layout).toEqual([]);
+      expect(out!.refused.map((r) => r.reason)).toEqual(["presentation-invalid", "unknown-node"]);
+      expect(out!.basis).toEqual({ requestId: null, reservationId: null, planId: null, asOf: "", layer: "C", state: "invalid" });
+    }
+  });
+});

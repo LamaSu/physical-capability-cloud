@@ -106,23 +106,88 @@ const LAYOUT_OPS = new Set(["move-node", "collapse"]);
  * preview that disagrees with the table is not trusted. So price edits work before compilation too,
  * which is when a user most needs them.
  */
-function moneyContext(presentation: PlanPresentation): { currency: string; decimals: number } | null {
-  const preview = presentation.preview;
+type MoneyContext = { currency: string; decimals: number };
+
+function moneyContext(hasPreview: boolean, gross: unknown, liveCurrencies: ReadonlySet<string>): MoneyContext | null {
+  const g = typeof gross === "object" && gross !== null ? (gross as { currency?: unknown; decimals?: unknown }) : null;
   let currency: string;
-  if (preview) {
-    const c = preview.gross?.currency;
+  if (hasPreview) {
+    const c: unknown = g?.currency;
     if (!isNonEmptyStr(c)) return null;
     currency = c;
   } else {
-    const live = new Set<string>();
-    for (const n of presentation.nodes) if (n.live && isNonEmptyStr(n.live.currency)) live.add(n.live.currency);
-    if (live.size !== 1) return null;
-    currency = [...live][0]!;
+    if (liveCurrencies.size !== 1) return null;
+    currency = [...liveCurrencies][0]!;
   }
   if (!Object.prototype.hasOwnProperty.call(SETTLEMENT_TOKEN_DECIMALS, currency)) return null;
   const decimals = SETTLEMENT_TOKEN_DECIMALS[currency]!;
-  if (preview && preview.gross?.decimals !== decimals) return null;
+  if (hasPreview && g?.decimals !== decimals) return null;
   return { currency, decimals };
+}
+
+/**
+ * Everything the edits are judged against, read from the presentation ONCE, into owned data, before
+ * the untrusted edits are touched. Nothing after this reads the presentation again, so code that runs
+ * while the edits are read (a getter on the array or on an edit) cannot change what was decided: the
+ * gates (sealed, invalid), the node list, the money context and the basis all come from this one read.
+ *
+ * A node list that is not an array, or that holds anything but nodes with a string id, is not a
+ * presentation to act on: it is invalid, so no semantic edit passes and no node is known. A
+ * presentation that cannot be read at all is the same, and never throws.
+ */
+interface Facts {
+  basis: PlanEditIntent["basis"];
+  /** Layer B or state "sealed": the accepted deal, which no semantic edit may touch. */
+  sealed: boolean;
+  invalid: boolean;
+  knownNodeIds: ReadonlySet<string>;
+  money: MoneyContext | null;
+}
+
+function readFacts(presentation: PlanPresentation): Facts {
+  try {
+    const state = presentation.state;
+    const layer = presentation.layer;
+    const basis = {
+      requestId: presentation.requestId,
+      reservationId: presentation.reservationId,
+      planId: presentation.planId ?? null,
+      asOf: presentation.asOf,
+      layer,
+      state,
+    };
+    const preview = presentation.preview;
+    const gross: unknown = preview ? preview.gross : undefined;
+    const nodesRaw: unknown = presentation.nodes;
+    const knownNodeIds = new Set<string>();
+    const liveCurrencies = new Set<string>();
+    let nodesReadable = Array.isArray(nodesRaw);
+    if (Array.isArray(nodesRaw)) {
+      for (const node of nodesRaw) {
+        if (typeof node !== "object" || node === null) {
+          nodesReadable = false;
+          continue;
+        }
+        const id: unknown = (node as { nodeId?: unknown }).nodeId;
+        if (isStr(id)) knownNodeIds.add(id);
+        else nodesReadable = false;
+        const live: unknown = (node as { live?: unknown }).live;
+        if (typeof live === "object" && live !== null) {
+          const currency: unknown = (live as { currency?: unknown }).currency;
+          if (isNonEmptyStr(currency)) liveCurrencies.add(currency);
+        }
+      }
+    }
+    return {
+      basis,
+      sealed: state === "sealed" || layer === "B",
+      invalid: state === "invalid" || !nodesReadable,
+      knownNodeIds,
+      money: moneyContext(Boolean(preview), gross, liveCurrencies),
+    };
+  } catch {
+    return { basis: { requestId: null, reservationId: null, planId: null, asOf: "", layer: "C", state: "invalid" }, sealed: false, invalid: true, knownNodeIds: new Set(), money: null };
+  }
 }
 
 type EditOutcome = { kind: "constraint"; constraint: PlanConstraint } | { kind: "layout"; pref: LayoutPreference } | { kind: "refused"; op: string | null; reason: EditRefusal };
@@ -132,7 +197,7 @@ type EditOutcome = { kind: "constraint"; constraint: PlanConstraint } | { kind: 
  * inspects the thrown value: any getter that throws, anywhere in the edit, makes it "unreadable". Once
  * a field is safely in hand, every further check below is a pure, non-throwing predicate.
  */
-function processEdit(editsArr: unknown[], index: number, knownNodeIds: ReadonlySet<string>, sealed: boolean, invalidPresentation: boolean, money: { currency: string; decimals: number } | null): EditOutcome {
+function processEdit(editsArr: unknown[], index: number, knownNodeIds: ReadonlySet<string>, sealed: boolean, invalidPresentation: boolean, money: MoneyContext | null): EditOutcome {
   let rawOp: unknown;
   try {
     const raw = editsArr[index] as Record<string, unknown>;
@@ -236,14 +301,8 @@ const KIND_RANK: Record<PlanConstraint["kind"], number> = {
  * only; layout is never a constraint.
  */
 export function planEditsToIntent(presentation: PlanPresentation, edits: unknown): PlanEditIntent {
-  const basis = {
-    requestId: presentation.requestId,
-    reservationId: presentation.reservationId,
-    planId: presentation.planId ?? null,
-    asOf: presentation.asOf,
-    layer: presentation.layer,
-    state: presentation.state,
-  };
+  // The presentation is read once, here, before the untrusted `edits` are touched (see `Facts`).
+  const { basis, sealed, invalid: invalidPresentation, knownNodeIds, money } = readFacts(presentation);
   const schema = "pcc.plan-edit-intent.v1" as const;
 
   // `edits` may be a Proxy: Array.isArray throws on a revoked one, and a proxied `length` can throw or
@@ -261,11 +320,6 @@ export function planEditsToIntent(presentation: PlanPresentation, edits: unknown
   // Over the limit, the batch is refused as a whole with ONE entry (at the first position past the
   // limit): the work never grows with a caller-chosen length (a sparse array can claim 2^32 - 1).
   if (n > MAX_EDITS) return { schema, basis, constraints: [], layout: [], refused: [{ index: MAX_EDITS, op: null, reason: "too-many-edits" }] };
-
-  const knownNodeIds = new Set(presentation.nodes.map((node) => node.nodeId));
-  const sealed = presentation.state === "sealed" || presentation.layer === "B";
-  const invalidPresentation = presentation.state === "invalid";
-  const money = moneyContext(presentation);
 
   const refused: PlanEditIntent["refused"] = [];
   const excludeCapability = new Map<string, { nodeId: string; capabilityId: string }>();
