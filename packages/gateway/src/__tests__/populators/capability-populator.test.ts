@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   populateCapabilityDTO,
   populateCapabilityList,
+  servedAssuranceTiers,
 } from "../../facades/populators/capability.populator.js";
 import type { Capability, ShopKernel } from "@pcc/spec";
 import type { PopulationContext } from "../../facades/types.js";
@@ -95,7 +96,9 @@ describe("populateCapabilityDTO()", () => {
   });
 
   it("serves the full claim when the kernel's ceiling allows it", () => {
-    const kernel = makeKernel({ ...PROVEN, reputation: 900, totalJobsCompleted: 50 } as never);
+    // maxAssuranceTier 3: the kernel's own claim (the fixture default is 2) must
+    // not bound it, so this isolates the authorized ceiling (pack 90 F1).
+    const kernel = makeKernel({ ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: 3 } as never);
     const dto = populateCapabilityDTO(makeCapability({ assuranceTiers: [0, 1, 2, 3] }), kernel, makeCtx());
     expect(dto.assuranceTiers).toEqual([0, 1, 2, 3]);
   });
@@ -110,8 +113,61 @@ describe("populateCapabilityDTO()", () => {
     expect(dto.assuranceTiers).toEqual([2]);
   });
 
+  it("[neg] a proven kernel that CLAIMS less than its ceiling is served at its claim (pack 90 F1): claim 1 -> [0,1], 2 -> [0,1,2], 0 -> [0]", () => {
+    for (const [claim, expected] of [
+      [1, [0, 1]],
+      [2, [0, 1, 2]],
+      [3, [0, 1, 2, 3]],
+      [0, [0]],
+    ] as const) {
+      const kernel = makeKernel({ ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: claim } as never);
+      const dto = populateCapabilityDTO(makeCapability({ assuranceTiers: [0, 1, 2, 3] }), kernel, makeCtx());
+      expect(dto.assuranceTiers, `claim ${claim}`).toEqual(expected);
+    }
+  });
+
+  it("[neg] a malformed claim (7, a string) is a claim of 0: only tier 0 is served, even for a proven kernel", () => {
+    for (const claim of [7, "3", 2.5, null]) {
+      const kernel = makeKernel({ ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: claim } as never);
+      const dto = populateCapabilityDTO(makeCapability({ assuranceTiers: [0, 1, 2, 3] }), kernel, makeCtx());
+      expect(dto.assuranceTiers, String(claim)).toEqual([0]);
+    }
+  });
+
+  it("the authorized ceiling still binds a kernel that claims more (signed but fresh, claims 3 -> [0,1])", () => {
+    const kernel = makeKernel({ ...PROVEN, reputation: 0, totalJobsCompleted: 0, maxAssuranceTier: 3 } as never);
+    const dto = populateCapabilityDTO(makeCapability({ assuranceTiers: [0, 1, 2, 3] }), kernel, makeCtx());
+    expect(dto.assuranceTiers).toEqual([0, 1]);
+  });
+
+  it("[neg] populateCapabilityList memoizes per kernel the EFFECTIVE max: two kernels with the same record but different claims are served differently", () => {
+    const low = makeKernel({ id: "kernel-L", ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: 1 } as never);
+    const high = makeKernel({ id: "kernel-H", ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: 3 } as never);
+    const dtos = populateCapabilityList(
+      [
+        makeCapability({ kernelId: "kernel-L", assuranceTiers: [0, 1, 2, 3] }),
+        makeCapability({ kernelId: "kernel-H", assuranceTiers: [0, 1, 2, 3] }),
+        makeCapability({ kernelId: "kernel-L", assuranceTiers: [1, 2] }),
+      ],
+      new Map([
+        ["kernel-L", low],
+        ["kernel-H", high],
+      ]),
+      makeCtx(),
+    );
+    expect(dtos.map((d) => d.assuranceTiers)).toEqual([[0, 1], [0, 1, 2, 3], [1]]);
+  });
+
+  it("servedAssuranceTiers is clampAssuranceTiers(declared, effectiveMaxAssuranceTier(kernel)); a missing kernel serves [0]", () => {
+    const kernel = makeKernel({ ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: 2 } as never);
+    expect(servedAssuranceTiers([0, 1, 2, 3], kernel)).toEqual([0, 1, 2]);
+    expect(servedAssuranceTiers([3], kernel)).toEqual([0]);
+    expect(servedAssuranceTiers([0, 1, 2, 3], undefined)).toEqual([0]);
+  });
+
   it("populateCapabilityList clamps each capability by its OWN kernel", () => {
-    const trusted = makeKernel({ id: "kernel-T", ...PROVEN, reputation: 900, totalJobsCompleted: 50 } as never);
+    // The trusted kernel claims 3, so only its authorized ceiling is under test.
+    const trusted = makeKernel({ id: "kernel-T", ...PROVEN, reputation: 900, totalJobsCompleted: 50, maxAssuranceTier: 3 } as never);
     const unsigned = makeKernel({ id: "kernel-U", reputation: 900, totalJobsCompleted: 50 });
     const dtos = populateCapabilityList(
       [
