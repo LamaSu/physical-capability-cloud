@@ -1272,6 +1272,14 @@ describe("redactIntakeSecrets — for logs only", () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
+  it("a renamed secret key never collides with a literal key of the same text", () => {
+    const literal = "[redacted:vendor-key]";
+    const out = redactIntakeSecrets({ [FAKE.stripeLive]: 1, [literal]: 2 }) as Record<string, unknown>;
+    expect(Object.keys(out).sort()).toEqual([literal, `${literal}-2`].sort());
+    expect(out[literal]).toBe(2);
+    expect(out[`${literal}-2`]).toBe(1);
+  });
+
   it("copies primitives, null and shared/cyclic references without looping", () => {
     expect(redactIntakeSecrets(5)).toBe(5);
     expect(redactIntakeSecrets(null)).toBeNull();

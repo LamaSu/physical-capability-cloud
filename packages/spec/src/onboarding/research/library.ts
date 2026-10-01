@@ -350,10 +350,10 @@ function touchesSafetyIoOrMoney(entry: ResearchLibraryEntry): boolean {
 
 // ── The no-execution policy ──────────────────────────────────────────────
 //
-// The library is PASSIVE: an entry may tell the agent to search, read and quote,
-// never to run, install, contact or actuate anything. `entryInstructsExecution`
-// enforces that as a closed policy over ALL of an entry's instruction-bearing
-// text, not just its `prompt`.
+// The library is meant to be PASSIVE: an entry tells the agent to search, read
+// and quote, not to run, install, contact or actuate anything.
+// `entryInstructsExecution` enforces that as a closed list of verbs (below) over
+// ALL of an entry's instruction-bearing text, not just its `prompt`.
 
 /** The closed set of execution verbs, word-boundaried and case-insensitive. Base
  *  forms only: "installing" or "executed" are not matched, so wording that

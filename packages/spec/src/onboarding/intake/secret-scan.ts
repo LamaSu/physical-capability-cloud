@@ -333,14 +333,17 @@ export function redactIntakeSecrets<T>(record: T): T {
       for (let i = 0; i < source.length; i++) (target as unknown[])[i] = copyOf(source[i]);
       continue;
     }
-    const usedKeys = new Set<string>();
-    for (const [key, value] of Object.entries(source)) {
-      const kinds = keyKinds(key);
-      let outKey = kinds.length > 0 ? `[redacted:${kinds[0]}]` : key;
+    // Keys that are kept as they are claim their names first, so a renamed key
+    // can never take (and then be overwritten by) one of them.
+    const entries = Object.entries(source).map(([key, value]) => ({ key, value, kinds: keyKinds(key) }));
+    const usedKeys = new Set(entries.filter((e) => e.kinds.length === 0).map((e) => e.key));
+    for (const { key, value, kinds } of entries) {
+      let outKey = key;
       if (kinds.length > 0) {
+        outKey = `[redacted:${kinds[0]}]`;
         for (let n = 2; usedKeys.has(outKey); n++) outKey = `[redacted:${kinds[0]}]-${n}`;
+        usedKeys.add(outKey);
       }
-      usedKeys.add(outKey);
       setOwn(target, outKey, copyOf(value));
     }
   }

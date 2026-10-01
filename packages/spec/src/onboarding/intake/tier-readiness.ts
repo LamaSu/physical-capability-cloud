@@ -11,8 +11,7 @@
  *     `verifierStatus: "live"` in EVIDENCE_PRIMITIVES (the registry itself, not
  *     the status the field declared). Anything else — a stub, a planned
  *     verifier, a reserved/deprecated primitive, an id the registry does not
- *     know — is reported in `stubPrimitives`. Today most tier primitives are
- *     stubs, so with the shipped registry the tiers are not ready.
+ *     know — is reported in `stubPrimitives`.
  *   - Facts that prove nothing. An answer can satisfy its field's schema and
  *     still be useless to the verifier its primitive feeds (a camera that
  *     sees neither the work area nor the output, a controller that does not

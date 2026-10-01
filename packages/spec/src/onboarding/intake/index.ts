@@ -1,11 +1,19 @@
 /**
  * Device intake — records, validation, and JSON Schema export.
  *
- * - fields.ts       — INTAKE_FIELDS (the single source of truth) + forbidden keys.
- * - json-schema.ts  — buildIntakeJsonSchema() (JSON Schema 2020-12 + x-pcc-* annotations).
- * - form-html.ts    — buildFormHtml() (the printable HTML form).
- * - this file       — IntakeAnswer/IntakeRecord + validateIntake() (R2 rules 4-6)
- *                      + intakeFieldArtifactMap() + the execution-mode tier cap.
+ * - fields.ts         — INTAKE_FIELDS (the single source of truth) + forbidden keys.
+ * - json-schema.ts    — buildIntakeJsonSchema() (JSON Schema 2020-12 + x-pcc-* annotations;
+ *                       documentation only, never validation).
+ * - form-html.ts      — buildFormHtml() (the printable HTML form).
+ * - secret-scan.ts    — scanIntakeStrings() / redactIntakeSecrets(): secrets and sensitive
+ *                       values in any string.
+ * - confirmation.ts   — CONFIRMATION_REQUIRED_FIELDS + intakeValueHash().
+ * - safety-policy.ts  — safety.limits bound to the selected CSD; estop "none" policy.
+ * - tier-readiness.ts — what tier1/tier2 readiness requires (live primitives, substantive answers).
+ * - walk.ts           — the shared iterative walk (internal).
+ * - this file         — IntakeAnswer/IntakeRecord, the IntakeAuthority/IntakeConfirmationEvent
+ *                       contract, validateIntake() (the runtime boundary: R2 rules 4-6 plus the
+ *                       checks above), intakeFieldArtifactMap() and the execution-mode tier cap.
  *
  * Source spec: returns/pcc-kits-work/intake-spec-item6-20260929.md, R2 rules 1-6
  * and the "Addendum, 16:40 PDT".
@@ -125,6 +133,12 @@ export type IntakeRecord = z.infer<typeof IntakeRecordSchema>;
  * source (`intakeValueHash(answer.source)`), the device/project it is about,
  * a sequence and timestamp, the session challenge, and its own supersession
  * and revocation state.
+ *
+ * `validateIntake` requires every member to be present and well-formed, and
+ * compares `eventId`, `fieldId`, `valueHash`, `sourceHash`, `revoked` and
+ * `supersededBy` with the answer; the identity, subject, sequence, timestamp and
+ * challenge are the store's own record of who confirmed what, where and when,
+ * and are not interpreted further here.
  */
 export interface IntakeConfirmationEvent {
   schema: "pcc.intake-confirmation.v1";
@@ -167,19 +181,20 @@ export const IntakeConfirmationEventSchema = z.object({
  * The authenticated sources `validateIntake` re-reads instead of trusting the
  * record. The caller supplies it; the record cannot. Subject binding is the
  * authority's job: `resolveConfirmation` must only return events for the
- * device/project being validated, and `payoutDestinationExists` must answer for
- * that same operator. An authority method that throws is treated as "not
- * confirmed" / "no payout destination" (fail-closed).
+ * device/project being validated (its `eventId` argument comes from the record
+ * and is untrusted), and `payoutDestinationExists` must answer for that same
+ * operator. An authority method that throws, or returns something that is not
+ * a well-formed answer, counts as "not confirmed" / "no payout destination"
+ * (fail-closed).
  */
 export interface IntakeAuthority {
   /** The authenticated confirmation store (e.g. the ADK trace store). Returns null when unknown. */
   resolveConfirmation(eventId: string): IntakeConfirmationEvent | null;
   /** Re-reads the authoritative payout store (N21); never the record's {set:true}. */
   payoutDestinationExists(): boolean;
-  /** CSD lookup for limit binding (section 4); defaults to loadBuiltinCsds(). */
+  /** CSD lookup for the safety.limits binding; defaults to the built-in CSDs (loadBuiltinCsds()). */
   csdRegistry?: CsdRegistry;
 }
-
 
 // ── validateIntake — the runtime boundary ───────────────────────────────
 
@@ -211,10 +226,10 @@ export interface IntakeValidationReport {
   secretsInText: IntakeSecretHit[];
   /** The input does not parse as an IntakeRecord (strict, provenance + source
    *  rules included), or `milestone` is not a known milestone: zod issue
-   *  paths and messages, never values. When this is non-empty the milestone
-   *  checks were not run, so `missing`, `neverDefaultViolations`,
-   *  `sensitiveViolations` and `invalidFields` are empty; `forbiddenKeys`,
-   *  `unknownFields` and `secretsInText` are still reported from the raw input. */
+   *  paths and descriptions, never values. When this is non-empty the
+   *  per-field and milestone checks were not run, so every list except
+   *  `structuralErrors` and the raw-input checks (`forbiddenKeys`,
+   *  `unknownFields`, `secretsInText`, `nonAsciiKeys`) is empty. */
   structuralErrors: string[];
   /** Field ids that are present (whether or not `milestone` requires them) and
    *  whose value does not satisfy the field's own `valueSchema`. */
@@ -585,8 +600,7 @@ function checkParsedRecord(
  *      EVIDENCE_PRIMITIVES, else it is listed in `stubPrimitives`; and a
  *      shape-valid answer that proves nothing for its primitive (e.g. a camera
  *      that sees neither the work area nor the output) is listed in
- *      `insubstantial`. With the shipped registry (stub primitives) the tiers
- *      are not ready.
+ *      `insubstantial`.
  * Milestone matching is CUMULATIVE (review fix): a field is required for
  * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
  * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
