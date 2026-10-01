@@ -1,40 +1,43 @@
 /**
- * N84, the WP-A part: every operator-channel route is the slug owner's, or the admin's.
+ * N84, the WP-A part: an operator channel belongs to the identity that attached it.
  *
- * PR #483 (from master) guards the channel SEND path: a URL guard and a credential
- * allowlist. It does not decide WHO may touch a slug's channels; per steward rule 6
- * that binding rides WP-A (#326, this branch). Here the channel routes are the old
- * unguarded ones, so ANY authenticated key can, for ANY slug it names:
+ * PR #483 (from master) guards the channel SEND path (a URL guard, a credential allowlist). It does not
+ * decide WHO may touch a channel; per steward rule 6 that rides WP-A (#326, this branch). Here the channel
+ * routes are the old unguarded ones, so ANY authenticated key can, for any slug it names:
  *
- *   - POST   /api/operators/:slug/channels        attach a channel to someone else's slug;
- *   - GET    /api/operators/:slug/channels        list them, endpoint.url and credentialRef included;
+ *   - GET    /api/operators/:slug/channels        list every channel: endpoint.url, credentialRef, address;
  *   - PATCH  /api/operators/channels/:id          retarget (or disable) a channel found by id;
  *   - DELETE /api/operators/channels/:id          delete a channel found by id;
  *   - POST   /api/operators/:slug/channels/test   make the gateway send to every enabled channel;
- *   - A2A tasks/send, pcc-attach-channel          attach under a slug the caller names;
- *   - A2A tasks/send, pcc-author-integration      attach under a slug the caller names, or under
- *                                                 one derived from a kernel NAME the caller picks;
- *   - GET    /api/operators/:slug/status          returns every channel record, whole. Found while
- *                                                 tracing; it is not in the brief (see the last block).
+ *   - GET    /api/operators/:slug/status          the same records, whole, and counts that include them;
+ *   - A2A tasks/send, pcc-attach-channel and pcc-author-integration: attach under any slug, and the reply
+ *                                                 (totalChannelsNow) counts everyone's channels.
  *
- * Runs on the real server (createGateway: apiGate, scopeChecker, every route).
- * Nothing here touches the network: sends go to a recording email transport, and the one
- * webhook channel used to prove disclosure is DISABLED, so no dispatch ever reaches it.
+ * THE RULING (orchestrator, gateway lane). A slug is a free-form string and nothing records who owns one;
+ * nothing durable is added for now (no DDL). So the binding is PER CHANNEL, in memory beside the channels:
+ * a channel records `creatorId`, the normalized authenticated actor at attach, never a body field.
+ *   - Anyone authenticated may attach under any slug, but the channel is THEIRS: only its creator (or the
+ *     admin secret) lists, patches, deletes or test-sends it.
+ *   - Everyone else's channels are OMITTED from lists and from status, with no count and no kind. A test
+ *     send reaches only the caller's own channels. A by-id write on a channel that is not yours answers as
+ *     for an unknown id.
+ *   - A channel with no creator (legacy) is the admin's alone. A presented admin secret is never downgraded:
+ *     a wrong one is 403 even with the creator's own key. No identity is 401.
  *
- * HOW "A OWNS S" IS STAGED. No record binds a channel slug to an owner on this branch
- * (the channel store is in memory and ChannelRecord carries no owner), so this file makes
- * every record a fix could read agree: A's identity IS the slug (S === A), A registers a
- * kernel NAMED S through the real facade (shop_kernels.operator_address = A), and A makes
- * the first attach through its own key. The one place the file depends on the ownership
- * record is establishOwners() plus ownerAttach(): if the record is created somewhere else,
- * change those two helpers and nothing else.
+ * Runs on the real server (createGateway: apiGate, scopeChecker, every route). Nothing here touches the
+ * network: sends go to a recording email transport, and the one webhook channel that carries a URL and a
+ * credentialRef is DISABLED, so no dispatch ever reaches it.
  *
- * Reading the failing run: every "[neg]" test fails today and every "control:" test
- * passes. The "[N84-OWNER-REPRO]" lines print what each stranger's call actually did.
+ * Reading the failing run: every "[neg]" test fails before the fix and every "control:" test passes. The
+ * "[N84-OWNER-REPRO]" lines print what each call actually did.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
-import { getChannelsByOperator, _clearOperatorChannelsForTests } from "../routes/operator-channels.js";
+import {
+  attachChannel,
+  getChannelsByOperator,
+  _clearOperatorChannelsForTests,
+} from "../routes/operator-channels.js";
 import {
   __setEmailTransportForTests,
   type EmailMessage,
@@ -49,15 +52,18 @@ process.env.PCC_ADMIN_KEY = ADMIN_SECRET;
 delete process.env.BROKER_OPERATORS;
 delete process.env.PCC_A2A_AUTH_DISABLED;
 
-// A owns SLUG_A. B is an ordinary key that owns only SLUG_B. C owns SLUG_C (derived-slug case).
+// A is the creator of the channels under test. B is an ordinary key. C is a second creator (derived-slug case).
+// The slugs are free-form on purpose: none of them is an identity, and none names an owner.
 const A = "n84-owner-a";
 const B = "n84-stranger-b";
 const C = "n84-owner-c";
-const SLUG_A = A;
-const SLUG_B = B;
-const SLUG_C = C;
+const SLUG = "n84-pizza-shop";
+const SLUG_B = "n84-b-own-shop";
+const SLUG_C = "n84-owner-c-shop";
+const NAME_C = "N84 Owner C Shop"; // slugifies to SLUG_C
 
 const OWNER_ADDRESS = "orders-a@n84.test";
+const STRANGER_ADDRESS = "orders-b@n84.test";
 const ATTACKER_ADDRESS = "attacker-b@n84.test";
 const WEBHOOK_URL = "https://hooks.n84.test/owner-a/orders";
 const VAULT_REF = "N84_OWNER_A_VAULT_REF";
@@ -82,6 +88,13 @@ const recorder: EmailTransport = {
 
 type Res = LightMyRequestResponse;
 type Headers = Record<string, string>;
+interface ChannelJson {
+  id: string;
+  label: string;
+  operatorSlug?: string;
+  creatorId?: string;
+  endpoint?: Record<string, unknown>;
+}
 
 function call(method: string, url: string, key: string | null, extra: Headers = {}, payload?: unknown): Promise<Res> {
   return app.inject({
@@ -109,14 +122,18 @@ async function rpc(key: string | null, skill: string, params: Record<string, unk
   );
   return { res, body: res.json() as RpcBody };
 }
+const rpcData = (body: RpcBody) => body.result?.artifacts?.[0]?.data;
 /** Channels an A2A reply says it attached (pcc-attach-channel: attached; pcc-author-integration: channels). */
 function reportedAttached(body: RpcBody): number {
-  const d = body.result?.artifacts?.[0]?.data;
+  const d = rpcData(body);
   const list = (d?.attached ?? d?.channels) as unknown[] | undefined;
   return Array.isArray(list) ? list.length : 0;
 }
 
-const chans = (slug: string) => getChannelsByOperator(slug);
+/** The store as the admin sees it (the unfiltered accessor), to prove what was and was not written. */
+const chans = (slug: string) => getChannelsByOperator(slug) as ChannelJson[];
+const listed = (res: Res): ChannelJson[] => (res.json() as { channels?: ChannelJson[] }).channels ?? [];
+const sendResults = (res: Res): unknown[] => (res.json() as { results?: unknown[] }).results ?? [];
 const note = (tag: string, facts: Record<string, unknown>) =>
   console.log(`[N84-OWNER-REPRO] ${tag} ${JSON.stringify(facts)}`);
 
@@ -137,68 +154,85 @@ const webhookBody = (label: string) => ({
 });
 const a2aChannel = (label: string, address = ATTACKER_ADDRESS) => emailBody(label, address);
 
-/** The owner makes the first attach through its own key. */
-async function ownerAttach(key: string, slug: string, body: Record<string, unknown>) {
+/** Attach through the HTTP route as `key`. Anyone authenticated may attach under any slug. */
+async function attachAs(key: string, slug: string, body: Record<string, unknown>): Promise<ChannelJson> {
   const res = await call("POST", `/api/operators/${slug}/channels`, key, {}, body);
-  expect(res.statusCode, `precondition: the owner could not attach to its own slug: ${res.body}`).toBe(201);
-  return (res.json() as { channel: { id: string; label: string } }).channel;
-}
-
-/** A, B and C each register a kernel NAMED for their slug, owned by their identity. */
-async function establishOwners(): Promise<void> {
-  const { getKernelFacade } = await import("../facades/index.js");
-  for (const id of [A, B, C]) {
-    const reg = await getKernelFacade().register({ id: `kernel-n84-${id}`, name: id }, id);
-    expect(reg.success, JSON.stringify(reg)).toBe(true);
-  }
+  expect(res.statusCode, `precondition: an authenticated key attaches under any slug: ${res.body}`).toBe(201);
+  return (res.json() as { channel: ChannelJson }).channel;
 }
 
 interface Ids {
   email: string;
   webhook: string;
 }
-/** A's slug as the owner leaves it: one live email channel, one disabled webhook with a URL and a credentialRef. */
+/** A's channels under SLUG: one live email channel, one disabled webhook with a URL and a credentialRef. */
 async function seedOwnerChannels(): Promise<Ids> {
-  const email = await ownerAttach(keyA, SLUG_A, emailBody("N84-A-email"));
-  const webhook = await ownerAttach(keyA, SLUG_A, webhookBody("N84-A-webhook"));
+  const email = await attachAs(keyA, SLUG, emailBody("N84-A-email"));
+  const webhook = await attachAs(keyA, SLUG, webhookBody("N84-A-webhook"));
   return { email: email.id, webhook: webhook.id };
+}
+/** B attaches a live email channel of its own under the SAME slug. */
+const strangerAttach = (label = "N84-B-email") => attachAs(keyB, SLUG, emailBody(label, STRANGER_ADDRESS));
+
+/** A key for the SAME identity as `operatorId`, spelled differently (inserted directly, as the N46 tests do). */
+async function respelledKey(operatorId: string): Promise<string> {
+  const { generateApiKey } = await import("../auth/api-key-auth.js");
+  const { getRepos } = await import("../db.js");
+  const { rawKey, keyHash, keyPrefix } = generateApiKey();
+  getRepos().apiKeys.insert({
+    id: `n84-respelled-key-${++seq}`,
+    keyHash,
+    keyPrefix,
+    operatorId,
+    scopes: JSON.stringify(["operator"]),
+    rateLimit: "1000/hour",
+    usageCount: "0",
+    createdAt: new Date().toISOString(),
+  } as never);
+  return rawKey;
 }
 
 /**
- * One probe per channel route. send() makes the call; tookEffect() reads the world and says whether
- * the call DID what it asked: attached, disclosed the URL and credentialRef, retargeted, deleted, sent.
+ * One probe per route that touches a channel. send() makes the call; tookEffect() reads the world and says
+ * whether the call DID what it asked: attached, disclosed the URL and credentialRef, retargeted, deleted, sent.
  */
 interface Probe {
   name: string;
   send(key: string | null, headers: Headers, ids: Ids): Promise<Res>;
   tookEffect(res: Res, ids: Ids): boolean;
 }
+const discloses = (res: Res) => res.body.includes(WEBHOOK_URL) || res.body.includes(VAULT_REF);
 const PROBES: Probe[] = [
   {
     name: "attach (POST /api/operators/:slug/channels)",
-    send: (k, h) => call("POST", `/api/operators/${SLUG_A}/channels`, k, h, emailBody(PROBE_LABEL, ATTACKER_ADDRESS)),
-    tookEffect: () => chans(SLUG_A).some((c) => c.label === PROBE_LABEL),
+    send: (k, h) => call("POST", `/api/operators/${SLUG}/channels`, k, h, emailBody(PROBE_LABEL, ATTACKER_ADDRESS)),
+    tookEffect: () => chans(SLUG).some((c) => c.label === PROBE_LABEL),
   },
   {
     name: "list (GET /api/operators/:slug/channels)",
-    send: (k, h) => call("GET", `/api/operators/${SLUG_A}/channels`, k, h),
-    tookEffect: (res) => res.body.includes(WEBHOOK_URL) || res.body.includes(VAULT_REF),
+    send: (k, h) => call("GET", `/api/operators/${SLUG}/channels`, k, h),
+    tookEffect: (res) => discloses(res),
   },
   {
     name: "patch (PATCH /api/operators/channels/:id)",
     send: (k, h, ids) => call("PATCH", `/api/operators/channels/${ids.email}`, k, h, { endpoint: { address: ATTACKER_ADDRESS } }),
     tookEffect: (_res, ids) =>
-      (chans(SLUG_A).find((c) => c.id === ids.email)?.endpoint as { address?: string } | undefined)?.address === ATTACKER_ADDRESS,
+      (chans(SLUG).find((c) => c.id === ids.email)?.endpoint as { address?: string } | undefined)?.address === ATTACKER_ADDRESS,
   },
   {
     name: "delete (DELETE /api/operators/channels/:id)",
     send: (k, h, ids) => call("DELETE", `/api/operators/channels/${ids.email}`, k, h),
-    tookEffect: (_res, ids) => !chans(SLUG_A).some((c) => c.id === ids.email),
+    tookEffect: (_res, ids) => !chans(SLUG).some((c) => c.id === ids.email),
   },
   {
     name: "test send (POST /api/operators/:slug/channels/test)",
-    send: (k, h) => call("POST", `/api/operators/${SLUG_A}/channels/test`, k, h, {}),
+    send: (k, h) => call("POST", `/api/operators/${SLUG}/channels/test`, k, h, {}),
     tookEffect: () => sent.length > 0,
+  },
+  {
+    name: "status (GET /api/operators/:slug/status)",
+    send: (k, h) => call("GET", `/api/operators/${SLUG}/status`, k, h),
+    tookEffect: (res) => discloses(res),
   },
 ];
 
@@ -211,7 +245,6 @@ beforeAll(async () => {
   keyA = provisionApiKey({ operatorId: A, scopes: ["operator"] }).rawKey;
   keyB = provisionApiKey({ operatorId: B, scopes: ["operator"] }).rawKey;
   keyC = provisionApiKey({ operatorId: C, scopes: ["operator"] }).rawKey;
-  await establishOwners();
 });
 
 beforeEach(() => {
@@ -225,162 +258,277 @@ afterAll(async () => {
   await app?.close();
 });
 
-// ── Strangers ───────────────────────────────────────────────────────────────
+/** A detail of A's channels that must not appear anywhere in what B is told. */
+const detailsOfA = (ids: Ids) => [WEBHOOK_URL, VAULT_REF, OWNER_ADDRESS, "N84-A-email", "N84-A-webhook", ids.email, ids.webhook];
 
-describe("N84 owner binding, HTTP: an ordinary key does nothing to another operator's slug", () => {
-  it("[neg] attach: refused (403), nothing written, even when the body names the key's own slug as the owner", async () => {
-    const res = await call("POST", `/api/operators/${SLUG_A}/channels`, keyB, {}, {
-      ...emailBody("N84-B-attach", ATTACKER_ADDRESS),
-      // A slug or owner named in the body is never the record.
-      operatorSlug: SLUG_B,
-      operatorId: B,
-      owner: B,
-    });
-    const labelsUnderA = chans(SLUG_A).map((c) => c.label);
-    const labelsUnderB = chans(SLUG_B).map((c) => c.label);
-    note("attach", { status: res.statusCode, labelsUnderOwnerSlug: labelsUnderA, labelsUnderStrangerSlug: labelsUnderB });
-    expect(res.statusCode, res.body).toBe(403);
-    expect(labelsUnderA).not.toContain("N84-B-attach");
-    expect(labelsUnderB).not.toContain("N84-B-attach");
-  });
+// ── Strangers: not yours to read, change, delete or test-send ───────────────
 
-  it("[neg] list: refused (403); the body carries neither endpoint.url nor credentialRef", async () => {
-    await seedOwnerChannels();
-    const res = await call("GET", `/api/operators/${SLUG_A}/channels`, keyB);
+describe("N84 creator binding, HTTP: another identity's channels are not yours to read, change, delete or test-send", () => {
+  it("[neg] list: A's channels are omitted entirely (200, an empty list), not a byte of their details", async () => {
+    const ids = await seedOwnerChannels();
+    const res = await call("GET", `/api/operators/${SLUG}/channels`, keyB);
+    const shown = listed(res);
     note("list", {
       status: res.statusCode,
+      channelsShown: shown.length,
       bodyHasEndpointUrl: res.body.includes(WEBHOOK_URL),
       bodyHasCredentialRef: res.body.includes(VAULT_REF),
       bodyHasAddress: res.body.includes(OWNER_ADDRESS),
     });
-    expect(res.statusCode, res.body).toBe(403);
-    expect(res.body).not.toContain(WEBHOOK_URL);
-    expect(res.body).not.toContain(VAULT_REF);
-    expect(res.body).not.toContain(OWNER_ADDRESS);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(shown).toEqual([]);
+    for (const detail of detailsOfA(ids)) expect(res.body, detail).not.toContain(detail);
   });
 
-  it("[neg] patch: refused (403); the channel keeps its endpoint, and the owner's next send still goes to the owner", async () => {
+  it("[neg] patch: refused; the channel keeps its endpoint, and the owner's next send still goes to the owner", async () => {
     const ids = await seedOwnerChannels();
     const res = await call("PATCH", `/api/operators/channels/${ids.email}`, keyB, {}, {
       endpoint: { address: ATTACKER_ADDRESS },
       enabled: true,
     });
-    const stored = chans(SLUG_A).find((c) => c.id === ids.email);
+    const stored = chans(SLUG).find((c) => c.id === ids.email);
     // What the retarget buys: the owner's own test send, then, goes to whoever PATCHed.
-    await call("POST", `/api/operators/${SLUG_A}/channels/test`, keyA, {}, {});
+    await call("POST", `/api/operators/${SLUG}/channels/test`, keyA, {}, {});
     note("patch", { status: res.statusCode, storedEndpoint: stored?.endpoint, ownerNextSendGoesTo: sent.map((m) => m.to) });
-    expect(res.statusCode, res.body).toBe(403);
+    expect([403, 404], res.body).toContain(res.statusCode);
     expect(stored?.endpoint).toEqual({ address: OWNER_ADDRESS });
     expect(sent.map((m) => m.to)).toEqual([OWNER_ADDRESS]);
   });
 
-  it("[neg] patch: a slug or owner named in the BODY does not stand in for the channel's stored slug", async () => {
+  it("[neg] patch: a slug, owner or creatorId named in the BODY does not stand in for the channel's stored creator", async () => {
     const ids = await seedOwnerChannels();
     const res = await call("PATCH", `/api/operators/channels/${ids.email}`, keyB, {}, {
       operatorSlug: SLUG_B,
       operatorId: B,
       owner: B,
+      creatorId: B,
       label: "N84-B-relabelled",
     });
-    const stored = chans(SLUG_A).find((c) => c.id === ids.email);
-    note("patch-body-slug", {
+    const stored = chans(SLUG).find((c) => c.id === ids.email);
+    note("patch-body-owner", {
       status: res.statusCode,
       storedLabel: stored?.label,
       storedSlug: stored?.operatorSlug,
+      storedCreator: stored?.creatorId,
       strangerSlugNowHas: chans(SLUG_B).map((c) => c.label),
     });
-    expect(res.statusCode, res.body).toBe(403);
+    expect([403, 404], res.body).toContain(res.statusCode);
     expect(stored?.label).toBe("N84-A-email");
-    expect(stored?.operatorSlug).toBe(SLUG_A);
+    expect(stored?.operatorSlug).toBe(SLUG);
+    expect(stored?.creatorId).toBe(A);
     expect(chans(SLUG_B)).toHaveLength(0);
   });
 
-  it("[neg] delete: refused (403); the channel is still there", async () => {
+  it("[neg] delete: refused; the channel is still there", async () => {
     const ids = await seedOwnerChannels();
     const res = await call("DELETE", `/api/operators/channels/${ids.email}`, keyB);
-    const stillThere = chans(SLUG_A).some((c) => c.id === ids.email);
+    const stillThere = chans(SLUG).some((c) => c.id === ids.email);
     note("delete", { status: res.statusCode, channelStillThere: stillThere });
-    expect(res.statusCode, res.body).toBe(403);
+    expect([403, 404], res.body).toContain(res.statusCode);
     expect(stillThere).toBe(true);
   });
 
-  it("[neg] test send: refused (403); the gateway sends nothing", async () => {
+  it("[neg] test send: B has no channel under the slug, so nothing is sent (404, or an empty result)", async () => {
     await seedOwnerChannels();
-    const res = await call("POST", `/api/operators/${SLUG_A}/channels/test`, keyB, {}, {});
-    note("test-send", { status: res.statusCode, sends: sent.length, sentTo: sent.map((m) => m.to) });
-    expect(res.statusCode, res.body).toBe(403);
+    const res = await call("POST", `/api/operators/${SLUG}/channels/test`, keyB, {}, {});
+    note("test-send", { status: res.statusCode, results: sendResults(res).length, sends: sent.length, sentTo: sent.map((m) => m.to) });
     expect(sent).toHaveLength(0);
+    expect(res.statusCode === 404 || (res.statusCode === 200 && sendResults(res).length === 0), res.body).toBe(true);
   });
 });
 
-describe("N84 owner binding, A2A: an ordinary key attaches nothing under another operator's slug", () => {
-  it("[neg] pcc-attach-channel naming the owner's slug", async () => {
+// ── Isolation: anyone may attach under any slug, but the channel is its creator's alone ──
+
+describe("N84 creator binding: anyone may attach under any slug, but the channel is its creator's alone", () => {
+  it("[neg] attach: allowed under any slug, and recorded as the CALLER's, never the body's", async () => {
+    const res = await call("POST", `/api/operators/${SLUG}/channels`, keyB, {}, {
+      ...emailBody("N84-B-attach", STRANGER_ADDRESS),
+      creatorId: A,
+      owner: A,
+      operatorId: A,
+      operatorSlug: SLUG_B,
+    });
+    const stored = chans(SLUG).find((c) => c.label === "N84-B-attach");
+    note("attach", {
+      status: res.statusCode,
+      storedCreator: stored?.creatorId,
+      storedSlug: stored?.operatorSlug,
+      underBodySlug: chans(SLUG_B).length,
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(stored?.operatorSlug).toBe(SLUG);
+    expect(stored?.creatorId).toBe(B);
+    expect(chans(SLUG_B)).toHaveLength(0);
+  });
+
+  it("[neg] A's list omits B's channel: omitted, not redacted, with no trace of it", async () => {
+    const ids = await seedOwnerChannels();
+    const theirs = await strangerAttach();
+    const res = await call("GET", `/api/operators/${SLUG}/channels`, keyA);
+    const shown = listed(res);
+    note("owner-list-with-stranger-channel", { status: res.statusCode, ids: shown.map((c) => c.id), count: shown.length });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(shown.map((c) => c.id).sort()).toEqual([ids.email, ids.webhook].sort());
+    for (const trace of [theirs.id, theirs.label, STRANGER_ADDRESS]) expect(res.body, trace).not.toContain(trace);
+  });
+
+  it("[neg] A's test send never reaches B's channel", async () => {
     await seedOwnerChannels();
-    const before = chans(SLUG_A).length;
-    const { body } = await rpc(keyB, "pcc-attach-channel", { operatorSlug: SLUG_A, ...a2aChannel("N84-B-a2a-attach") });
-    const labels = chans(SLUG_A).map((c) => c.label);
+    await strangerAttach();
+    const res = await call("POST", `/api/operators/${SLUG}/channels/test`, keyA, {}, {});
+    note("owner-test-send-with-stranger-channel", { status: res.statusCode, sentTo: sent.map((m) => m.to), results: sendResults(res).length });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(sent.map((m) => m.to)).toEqual([OWNER_ADDRESS]);
+    expect(sendResults(res)).toHaveLength(1);
+  });
+
+  it("[neg] B, with a channel of its own under the same slug, sees none of A's channels or details: list, test send, status", async () => {
+    const ids = await seedOwnerChannels();
+    const mine = await strangerAttach();
+    const list = await call("GET", `/api/operators/${SLUG}/channels`, keyB);
+    const test = await call("POST", `/api/operators/${SLUG}/channels/test`, keyB, {}, {});
+    const status = await call("GET", `/api/operators/${SLUG}/status`, keyB);
+    const sBody = status.json() as { channels?: ChannelJson[]; totals?: { channelCount?: number; enabledChannelCount?: number } };
+    note("stranger-sees", {
+      listIds: listed(list).map((c) => c.id),
+      sentTo: sent.map((m) => m.to),
+      statusChannelIds: (sBody.channels ?? []).map((c) => c.id),
+      statusTotals: sBody.totals,
+    });
+    expect(listed(list).map((c) => c.id)).toEqual([mine.id]);
+    expect(sent.map((m) => m.to)).toEqual([STRANGER_ADDRESS]);
+    expect((sBody.channels ?? []).map((c) => c.id)).toEqual([mine.id]);
+    expect(sBody.totals?.channelCount).toBe(1);
+    expect(sBody.totals?.enabledChannelCount).toBe(1);
+    for (const res of [list, test, status]) {
+      for (const detail of detailsOfA(ids)) expect(res.body, detail).not.toContain(detail);
+    }
+  });
+
+  it("[neg] the creator cannot be changed through PATCH: a creatorId in the body is ignored, for the creator and for the admin", async () => {
+    const ids = await seedOwnerChannels();
+    const byOwner = await call("PATCH", `/api/operators/channels/${ids.email}`, keyA, {}, { creatorId: B, label: "N84-A-renamed" });
+    const afterOwner = chans(SLUG).find((c) => c.id === ids.email);
+    const byAdmin = await call("PATCH", `/api/operators/channels/${ids.email}`, keyB, adminHeaders, { creatorId: B, owner: B });
+    const afterAdmin = chans(SLUG).find((c) => c.id === ids.email);
+    const bList = await call("GET", `/api/operators/${SLUG}/channels`, keyB);
+    note("patch-creator", {
+      ownerStatus: byOwner.statusCode,
+      creatorAfterOwnerPatch: afterOwner?.creatorId,
+      adminStatus: byAdmin.statusCode,
+      creatorAfterAdminPatch: afterAdmin?.creatorId,
+      strangerListNow: listed(bList).length,
+    });
+    expect(byOwner.statusCode, byOwner.body).toBe(200);
+    expect(afterOwner?.label).toBe("N84-A-renamed");
+    expect(afterOwner?.creatorId).toBe(A);
+    expect(byAdmin.statusCode, byAdmin.body).toBe(200);
+    expect(afterAdmin?.creatorId).toBe(A);
+    expect(listed(bList)).toEqual([]);
+  });
+
+  it("control: the admin secret (on any ordinary key) lists and test-sends every creator's channels", async () => {
+    const ids = await seedOwnerChannels();
+    const theirs = await strangerAttach();
+    const list = await call("GET", `/api/operators/${SLUG}/channels`, keyB, adminHeaders);
+    const test = await call("POST", `/api/operators/${SLUG}/channels/test`, keyB, adminHeaders, {});
+    expect(list.statusCode, list.body).toBe(200);
+    expect(listed(list).map((c) => c.id).sort()).toEqual([ids.email, ids.webhook, theirs.id].sort());
+    expect(test.statusCode, test.body).toBe(200);
+    expect(sent.map((m) => m.to).sort()).toEqual([OWNER_ADDRESS, STRANGER_ADDRESS].sort());
+  });
+
+  it("control: the creator is known under a respelled identity too (trimmed, case-folded)", async () => {
+    const ids = await seedOwnerChannels();
+    const respelled = await respelledKey(` ${A.toUpperCase()} `);
+    const list = await call("GET", `/api/operators/${SLUG}/channels`, respelled);
+    expect(list.statusCode, list.body).toBe(200);
+    expect(listed(list).map((c) => c.id).sort()).toEqual([ids.email, ids.webhook].sort());
+    const patch = await call("PATCH", `/api/operators/channels/${ids.email}`, respelled, {}, { label: "N84-A-by-respelled" });
+    expect(patch.statusCode, patch.body).toBe(200);
+    const test = await call("POST", `/api/operators/${SLUG}/channels/test`, respelled, {}, {});
+    expect(test.statusCode, test.body).toBe(200);
+    expect(sent.map((m) => m.to)).toEqual([OWNER_ADDRESS]);
+  });
+});
+
+// ── A2A ─────────────────────────────────────────────────────────────────────
+
+describe("N84 creator binding, A2A: a channel attached through a skill is the caller's alone, and counts only the caller's", () => {
+  it("[neg] pcc-attach-channel under another identity's slug: B's channel, B's count, absent from A's list", async () => {
+    await seedOwnerChannels();
+    const { body } = await rpc(keyB, "pcc-attach-channel", { operatorSlug: SLUG, ...a2aChannel("N84-B-a2a-attach", STRANGER_ADDRESS) });
+    const mine = chans(SLUG).find((c) => c.label === "N84-B-a2a-attach");
+    const aList = await call("GET", `/api/operators/${SLUG}/channels`, keyA);
     note("a2a-attach-channel", {
       state: body.result?.state,
       error: body.error?.message,
       reportedAttached: reportedAttached(body),
-      channelsUnderOwnerSlug: `${before} -> ${labels.length}`,
+      totalChannelsNow: rpcData(body)?.totalChannelsNow,
+      storedCreator: mine?.creatorId,
+      ownerListLabels: listed(aList).map((c) => c.label),
     });
-    expect(labels).not.toContain("N84-B-a2a-attach");
-    expect(chans(SLUG_A)).toHaveLength(before);
-    expect(reportedAttached(body)).toBe(0);
+    expect(body.result?.state, JSON.stringify(body)).toBe("COMPLETED");
+    expect(reportedAttached(body)).toBe(1);
+    expect(rpcData(body)?.totalChannelsNow).toBe(1); // A's two channels are not B's to count
+    expect(mine?.creatorId).toBe(B);
+    expect(listed(aList).map((c) => c.label)).not.toContain("N84-B-a2a-attach");
   });
 
-  it("[neg] pcc-author-integration with operatorSlug naming the owner's slug", async () => {
+  it("[neg] pcc-author-integration with operatorSlug naming another identity's slug: the same", async () => {
     await seedOwnerChannels();
-    const before = chans(SLUG_A).length;
     const { body } = await rpc(keyB, "pcc-author-integration", {
       lane: "machine",
       name: "N84 B integration",
       type: "liquid-handling",
       location: { lat: 0, lng: 0 },
-      operatorSlug: SLUG_A,
-      channels: [a2aChannel("N84-B-author-explicit")],
+      operatorSlug: SLUG,
+      channels: [a2aChannel("N84-B-author-explicit", STRANGER_ADDRESS)],
     });
-    const labels = chans(SLUG_A).map((c) => c.label);
+    const mine = chans(SLUG).find((c) => c.label === "N84-B-author-explicit");
+    const aList = await call("GET", `/api/operators/${SLUG}/channels`, keyA);
     note("a2a-author-integration-explicit-slug", {
       state: body.result?.state,
       error: body.error?.message,
       reportedAttached: reportedAttached(body),
-      channelsUnderOwnerSlug: `${before} -> ${labels.length}`,
+      storedCreator: mine?.creatorId,
+      ownerListLabels: listed(aList).map((c) => c.label),
     });
-    expect(labels).not.toContain("N84-B-author-explicit");
-    expect(chans(SLUG_A)).toHaveLength(before);
+    expect(body.result?.state, JSON.stringify(body)).toBe("COMPLETED");
+    expect(reportedAttached(body)).toBe(1);
+    expect(mine?.creatorId).toBe(B);
+    expect(listed(aList).map((c) => c.label)).not.toContain("N84-B-author-explicit");
   });
 
-  it("[neg] pcc-author-integration whose kernel NAME derives the owner's slug", async () => {
-    // Naming a kernel for someone else's slug (C's) is not owning that slug.
-    await ownerAttach(keyC, SLUG_C, emailBody("N84-C-email", "orders-c@n84.test"));
-    const before = chans(SLUG_C).length;
+  it("[neg] pcc-author-integration whose kernel NAME derives another identity's slug: the same", async () => {
+    const theirs = await attachAs(keyC, SLUG_C, emailBody("N84-C-email", "orders-c@n84.test"));
     const { body } = await rpc(keyB, "pcc-author-integration", {
       lane: "machine",
-      name: C,
+      name: NAME_C,
       type: "liquid-handling",
       location: { lat: 0, lng: 0 },
-      channels: [a2aChannel("N84-B-author-derived")],
+      channels: [a2aChannel("N84-B-author-derived", STRANGER_ADDRESS)],
     });
-    const labels = chans(SLUG_C).map((c) => c.label);
+    const mine = chans(SLUG_C).find((c) => c.label === "N84-B-author-derived");
+    const cList = await call("GET", `/api/operators/${SLUG_C}/channels`, keyC);
     note("a2a-author-integration-derived-slug", {
       state: body.result?.state,
       error: body.error?.message,
-      reportedAttached: reportedAttached(body),
-      derivedSlug: (body.result?.artifacts?.[0]?.data as { operatorSlug?: string } | undefined)?.operatorSlug,
-      channelsUnderOwnerSlug: `${before} -> ${labels.length}`,
+      derivedSlug: (rpcData(body) as { operatorSlug?: string } | undefined)?.operatorSlug,
+      storedCreator: mine?.creatorId,
+      ownerListIds: listed(cList).map((c) => c.id),
     });
-    expect(labels).not.toContain("N84-B-author-derived");
-    expect(chans(SLUG_C)).toHaveLength(before);
+    expect((rpcData(body) as { operatorSlug?: string } | undefined)?.operatorSlug).toBe(SLUG_C);
+    expect(mine?.creatorId).toBe(B);
+    expect(listed(cList).map((c) => c.id)).toEqual([theirs.id]);
   });
 });
 
 // ── Wrong admin secret, no identity ─────────────────────────────────────────
 
-describe("N84 owner binding: a WRONG admin secret is refused (403), never downgraded to the key's own rights", () => {
+describe("N84 creator binding: a WRONG admin secret is refused (403), never downgraded to the key's own rights", () => {
   for (const probe of PROBES) {
-    it(`[neg] ${probe.name}, with the OWNER's own key`, async () => {
+    it(`[neg] ${probe.name}, with the creator's own key`, async () => {
       const ids = await seedOwnerChannels();
       sent.length = 0;
       const res = await probe.send(keyA, wrongAdminHeaders, ids);
@@ -391,17 +539,32 @@ describe("N84 owner binding: a WRONG admin secret is refused (403), never downgr
     });
   }
 
-  it("[neg] A2A pcc-attach-channel, with the OWNER's own key", async () => {
+  it("[neg] A2A pcc-attach-channel, with the creator's own key", async () => {
     await seedOwnerChannels();
-    const before = chans(SLUG_A).length;
-    const { body } = await rpc(keyA, "pcc-attach-channel", { operatorSlug: SLUG_A, ...a2aChannel("N84-A-wrong-secret") }, wrongAdminHeaders);
-    note("wrong-secret a2a", { state: body.result?.state, error: body.error?.message, channelsUnderOwnerSlug: `${before} -> ${chans(SLUG_A).length}` });
-    expect(chans(SLUG_A).map((c) => c.label)).not.toContain("N84-A-wrong-secret");
+    const before = chans(SLUG).length;
+    const { body } = await rpc(keyA, "pcc-attach-channel", { operatorSlug: SLUG, ...a2aChannel("N84-A-wrong-secret") }, wrongAdminHeaders);
+    note("wrong-secret a2a-attach", { state: body.result?.state, error: body.error?.message, channels: `${before} -> ${chans(SLUG).length}` });
+    expect(body.error, JSON.stringify(body)).toBeDefined();
+    expect(chans(SLUG).map((c) => c.label)).not.toContain("N84-A-wrong-secret");
     expect(reportedAttached(body)).toBe(0);
+  });
+
+  it("[neg] A2A pcc-author-integration, with the creator's own key: nothing is registered or attached", async () => {
+    const { body } = await rpc(keyA, "pcc-author-integration", {
+      lane: "machine",
+      name: "N84 wrong-secret integration",
+      type: "liquid-handling",
+      location: { lat: 0, lng: 0 },
+      operatorSlug: SLUG,
+      channels: [a2aChannel("N84-A-author-wrong-secret")],
+    }, wrongAdminHeaders);
+    note("wrong-secret a2a-author-integration", { state: body.result?.state, error: body.error?.message, attached: chans(SLUG).length });
+    expect(body.error, JSON.stringify(body)).toBeDefined();
+    expect(chans(SLUG)).toHaveLength(0);
   });
 });
 
-describe("N84 owner binding: no identity is 401 on every channel route, whatever else the request carries", () => {
+describe("N84 creator binding: no identity is 401 on every channel route, whatever else the request carries", () => {
   for (const probe of PROBES) {
     it(`control: ${probe.name}`, async () => {
       const ids = await seedOwnerChannels();
@@ -417,18 +580,60 @@ describe("N84 owner binding: no identity is 401 on every channel route, whatever
 
   it("control: A2A pcc-attach-channel with no credentials is refused and attaches nothing", async () => {
     await seedOwnerChannels();
-    const before = chans(SLUG_A).length;
-    const { body } = await rpc(null, "pcc-attach-channel", { operatorSlug: SLUG_A, ...a2aChannel("N84-anon") });
+    const before = chans(SLUG).length;
+    const { body } = await rpc(null, "pcc-attach-channel", { operatorSlug: SLUG, ...a2aChannel("N84-anon") });
     expect(body.error).toBeDefined();
-    expect(chans(SLUG_A)).toHaveLength(before);
+    expect(chans(SLUG)).toHaveLength(before);
   });
 });
 
-// ── Controls: the owner and the admin ───────────────────────────────────────
+// ── Legacy: a channel with no creator is the admin's alone ──────────────────
 
-describe("N84 owner binding, controls: the owner and the admin keep every route", () => {
+describe("N84 creator binding: a channel with no creator (legacy) is the admin's alone", () => {
+  it("[neg] an ordinary key neither lists, patches, deletes nor test-sends it", async () => {
+    const legacy = attachChannel(SLUG, emailBody("N84-legacy", "legacy@n84.test"), null);
+    const list = await call("GET", `/api/operators/${SLUG}/channels`, keyA);
+    // The send is tried first, so it is judged while the channel still exists.
+    const test = await call("POST", `/api/operators/${SLUG}/channels/test`, keyA, {}, {});
+    const patch = await call("PATCH", `/api/operators/channels/${legacy.id}`, keyA, {}, { label: "N84-legacy-renamed" });
+    const del = await call("DELETE", `/api/operators/channels/${legacy.id}`, keyA);
+    const stored = chans(SLUG).find((c) => c.id === legacy.id);
+    note("legacy", {
+      listed: listed(list).length,
+      patch: patch.statusCode,
+      delete: del.statusCode,
+      test: test.statusCode,
+      sentTo: sent.map((m) => m.to),
+      storedLabel: stored?.label,
+    });
+    expect(listed(list)).toEqual([]);
+    expect([403, 404], patch.body).toContain(patch.statusCode);
+    expect([403, 404], del.body).toContain(del.statusCode);
+    expect(test.statusCode === 404 || (test.statusCode === 200 && sendResults(test).length === 0), test.body).toBe(true);
+    expect(sent).toHaveLength(0);
+    expect(stored?.label).toBe("N84-legacy");
+  });
+
+  it("control: the admin secret lists, patches, test-sends and deletes it", async () => {
+    const legacy = attachChannel(SLUG, emailBody("N84-legacy", "legacy@n84.test"), null);
+    const list = await call("GET", `/api/operators/${SLUG}/channels`, keyA, adminHeaders);
+    expect(listed(list).map((c) => c.id)).toEqual([legacy.id]);
+    const patch = await call("PATCH", `/api/operators/channels/${legacy.id}`, keyA, adminHeaders, { label: "N84-legacy-renamed" });
+    expect(patch.statusCode, patch.body).toBe(200);
+    const test = await call("POST", `/api/operators/${SLUG}/channels/test`, keyA, adminHeaders, {});
+    expect(test.statusCode, test.body).toBe(200);
+    expect(sent.map((m) => m.to)).toEqual(["legacy@n84.test"]);
+    const del = await call("DELETE", `/api/operators/channels/${legacy.id}`, keyA, adminHeaders);
+    expect(del.statusCode, del.body).toBe(200);
+    expect(chans(SLUG)).toHaveLength(0);
+  });
+});
+
+// ── Controls: the creator and the admin keep every route ────────────────────
+
+describe("N84 creator binding, controls: the creator and the admin keep every route", () => {
   for (const probe of PROBES) {
-    it(`control: the owner, ${probe.name}`, async () => {
+    it(`control: the creator, ${probe.name}`, async () => {
       const ids = await seedOwnerChannels();
       sent.length = 0;
       const res = await probe.send(keyA, {}, ids);
@@ -447,60 +652,103 @@ describe("N84 owner binding, controls: the owner and the admin keep every route"
     });
   }
 
-  it("control: the owner attaches through both A2A paths that name its slug", async () => {
-    const one = await rpc(keyA, "pcc-attach-channel", { operatorSlug: SLUG_A, ...a2aChannel("N84-A-a2a-attach", OWNER_ADDRESS) });
+  it("control: the creator attaches through both A2A paths, and each reply counts the creator's own channels", async () => {
+    const one = await rpc(keyA, "pcc-attach-channel", { operatorSlug: SLUG, ...a2aChannel("N84-A-a2a-attach", OWNER_ADDRESS) });
     expect(one.body.result?.state, JSON.stringify(one.body)).toBe("COMPLETED");
     expect(reportedAttached(one.body)).toBe(1);
+    expect(rpcData(one.body)?.totalChannelsNow).toBe(1);
     const two = await rpc(keyA, "pcc-author-integration", {
       lane: "machine",
       name: "N84 A integration",
       type: "liquid-handling",
       location: { lat: 0, lng: 0 },
-      operatorSlug: SLUG_A,
+      operatorSlug: SLUG,
       channels: [a2aChannel("N84-A-author", OWNER_ADDRESS)],
     });
     expect(two.body.result?.state, JSON.stringify(two.body)).toBe("COMPLETED");
     expect(reportedAttached(two.body)).toBe(1);
-    expect(chans(SLUG_A).map((c) => c.label).sort()).toEqual(["N84-A-a2a-attach", "N84-A-author"]);
+    expect(chans(SLUG).map((c) => c.label).sort()).toEqual(["N84-A-a2a-attach", "N84-A-author"]);
   });
 
   it("control: the admin secret reaches the A2A attach for any slug", async () => {
     await seedOwnerChannels();
-    const { body } = await rpc(keyB, "pcc-attach-channel", { operatorSlug: SLUG_A, ...a2aChannel("N84-admin-a2a", OWNER_ADDRESS) }, adminHeaders);
+    const { body } = await rpc(keyB, "pcc-attach-channel", { operatorSlug: SLUG, ...a2aChannel("N84-admin-a2a", OWNER_ADDRESS) }, adminHeaders);
     expect(body.result?.state, JSON.stringify(body)).toBe("COMPLETED");
-    expect(chans(SLUG_A).map((c) => c.label)).toContain("N84-admin-a2a");
+    expect(chans(SLUG).map((c) => c.label)).toContain("N84-admin-a2a");
   });
 
-  it("control: an ordinary key still manages ITS OWN slug on every route (the guard is per slug, not admin-only)", async () => {
-    const own = await ownerAttach(keyB, SLUG_B, emailBody("N84-B-own", "orders-b@n84.test"));
+  it("control: an ordinary key still manages ITS OWN channels on every route (the binding is per channel, not admin-only)", async () => {
+    const own = await attachAs(keyB, SLUG_B, emailBody("N84-B-own", STRANGER_ADDRESS));
     const list = await call("GET", `/api/operators/${SLUG_B}/channels`, keyB);
     expect(list.statusCode, list.body).toBe(200);
-    expect(list.body).toContain("N84-B-own");
+    expect(listed(list).map((c) => c.id)).toEqual([own.id]);
     const patch = await call("PATCH", `/api/operators/channels/${own.id}`, keyB, {}, { label: "N84-B-own-2" });
     expect(patch.statusCode, patch.body).toBe(200);
     const test = await call("POST", `/api/operators/${SLUG_B}/channels/test`, keyB, {}, {});
     expect(test.statusCode, test.body).toBe(200);
-    expect(sent.map((m) => m.to)).toEqual(["orders-b@n84.test"]);
+    expect(sent.map((m) => m.to)).toEqual([STRANGER_ADDRESS]);
     const del = await call("DELETE", `/api/operators/channels/${own.id}`, keyB);
     expect(del.statusCode, del.body).toBe(200);
     expect(chans(SLUG_B)).toHaveLength(0);
   });
 });
 
-// ── Found while tracing; not in the brief ───────────────────────────────────
+// ── Status: the same records, whole (the adk lane's R3 reworks this route) ──
 
-describe("N84 owner binding, extra finding: the status view is a second way to read the channel records", () => {
-  it("[neg] GET /api/operators/:slug/status gives an ordinary key neither endpoint.url nor credentialRef", async () => {
-    await seedOwnerChannels();
-    const res = await call("GET", `/api/operators/${SLUG_A}/status`, keyB);
-    note("status", {
+describe("N84 creator binding, status route: only the caller's own channels, and counts and readiness computed from them", () => {
+  it("[neg] B's status of a slug that holds only A's channels shows none of them, and reports no channel at all", async () => {
+    const ids = await seedOwnerChannels();
+    const res = await call("GET", `/api/operators/${SLUG}/status`, keyB);
+    const s = res.json() as {
+      channels?: ChannelJson[];
+      totals?: { channelCount?: number; enabledChannelCount?: number };
+      missing?: string[];
+    };
+    note("status-stranger", {
       status: res.statusCode,
-      bodyHasEndpointUrl: res.body.includes(WEBHOOK_URL),
-      bodyHasCredentialRef: res.body.includes(VAULT_REF),
-      bodyHasAddress: res.body.includes(OWNER_ADDRESS),
+      channels: (s.channels ?? []).length,
+      totals: s.totals,
+      missingChannelSlot: (s.missing ?? []).some((m) => /channel \(slot 3\)/.test(m)),
     });
-    expect(res.body).not.toContain(WEBHOOK_URL);
-    expect(res.body).not.toContain(VAULT_REF);
-    expect(res.body).not.toContain(OWNER_ADDRESS);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(s.channels).toEqual([]);
+    expect(s.totals?.channelCount).toBe(0);
+    expect(s.totals?.enabledChannelCount).toBe(0);
+    // Readiness is computed from B's own channels: B has none, so the channel slot is reported missing.
+    expect((s.missing ?? []).some((m) => /channel \(slot 3\)/.test(m))).toBe(true);
+    for (const detail of detailsOfA(ids)) expect(res.body, detail).not.toContain(detail);
+  });
+
+  it("[neg] A's status counts only A's channels, however many B has attached under the slug", async () => {
+    await seedOwnerChannels();
+    await strangerAttach("N84-B-one");
+    await strangerAttach("N84-B-two");
+    const res = await call("GET", `/api/operators/${SLUG}/status`, keyA);
+    const s = res.json() as { channels?: ChannelJson[]; totals?: { channelCount?: number; enabledChannelCount?: number } };
+    note("status-owner-with-stranger-channels", { channels: (s.channels ?? []).map((c) => c.label), totals: s.totals });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((s.channels ?? []).map((c) => c.label).sort()).toEqual(["N84-A-email", "N84-A-webhook"]);
+    expect(s.totals?.channelCount).toBe(2);
+    expect(s.totals?.enabledChannelCount).toBe(1);
+    expect(res.body).not.toContain(STRANGER_ADDRESS);
+  });
+
+  it("control: A's status carries A's channels in full", async () => {
+    await seedOwnerChannels();
+    const res = await call("GET", `/api/operators/${SLUG}/status`, keyA);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.body).toContain(WEBHOOK_URL);
+    expect(res.body).toContain(VAULT_REF);
+    expect(res.body).toContain(OWNER_ADDRESS);
+  });
+
+  it("control: the admin secret's status counts every creator's channels", async () => {
+    await seedOwnerChannels();
+    await strangerAttach();
+    const res = await call("GET", `/api/operators/${SLUG}/status`, keyB, adminHeaders);
+    const s = res.json() as { totals?: { channelCount?: number; enabledChannelCount?: number } };
+    expect(res.statusCode, res.body).toBe(200);
+    expect(s.totals?.channelCount).toBe(3);
+    expect(s.totals?.enabledChannelCount).toBe(2);
   });
 });
