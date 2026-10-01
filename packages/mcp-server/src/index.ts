@@ -295,7 +295,7 @@ server.tool(
 
 server.tool(
   "pcc_list_protocols",
-  "List protocol templates (multi-step manufacturing workflows). Optionally filter by tags, required capabilities, search term, or status.",
+  "List protocol templates (multi-step manufacturing workflows). Optionally filter by tags, required capabilities, search term, or status. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {
     tags: z.string().optional().describe("Comma-separated tags to filter by (e.g. 'biotech,protein')"),
     capabilities: z
@@ -322,7 +322,7 @@ server.tool(
 
 server.tool(
   "pcc_depin_stats",
-  "Get DePIN (Decentralized Physical Infrastructure Network) reward statistics: epochs, kernel scores, certificates, and treasury balance.",
+  "Get DePIN (Decentralized Physical Infrastructure Network) reward statistics: epochs, kernel scores, certificates, and treasury balance. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {},
   async () => {
     // Fetch multiple reward-related endpoints in parallel
@@ -876,7 +876,7 @@ server.tool(
 
 server.tool(
   "pcc_discover_scan",
-  "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. Falls back to mock devices in dev mode.",
+  "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. Falls back to mock devices in dev mode. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {
     protocols: z
       .array(z.string())
@@ -902,7 +902,7 @@ server.tool(
 
 server.tool(
   "pcc_discover_onboard",
-  "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation.",
+  "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {
     deviceUri: z
       .string()
@@ -1156,7 +1156,7 @@ server.tool(
 
 server.tool(
   "pcc_swf_summary",
-  "Get the Sovereign Wealth Fund summary: total balance, accrued/distributed amounts, current allocation strategy, participant count, and active proposals.",
+  "Get the Sovereign Wealth Fund summary: total balance, accrued/distributed amounts, current allocation strategy, participant count, and active proposals. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {},
   async () => {
     const data = await pccFetch("/api/swf/summary");
@@ -1170,7 +1170,7 @@ server.tool(
 
 server.tool(
   "pcc_swf_participant_dashboard",
-  "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history.",
+  "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history. Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {
     participantId: z.string().describe("SWF participant ID (swf_part_XXXX)"),
   },
@@ -1186,7 +1186,7 @@ server.tool(
 
 server.tool(
   "pcc_swf_list_proposals",
-  "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed).",
+  "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed). Outside demo mode (PCC_DEMO_ROUTES) the gateway answers 501 not_available: it records none of this data.",
   {
     status: z.string().optional().describe("Filter by proposal status: active, passed, rejected, executed"),
   },
