@@ -233,7 +233,10 @@ export const RESEARCH_LIBRARY: readonly ResearchLibraryEntry[] = [
     mustReturn: ["matches (url, similarity)", "citation"],
     acceptance: "An explicit registry search result (a match or a confirmed empty result), never skipped.",
     fills: ["capability.type"],
-    humanConfirmRequired: false,
+    // capability.type selects the CSD that safety.limits bind to and that the
+    // estop-"none" exemption is keyed by, so a human confirms the match (astra 120b
+    // round): an agent-asserted type must not unlock either.
+    humanConfirmRequired: true,
     coaching: {
       ask: "Ask me: search the CSD registry for an existing capability like this one before you write a new one.",
       why: "Reusing an existing contract is faster and more trusted than authoring a new one from scratch.",

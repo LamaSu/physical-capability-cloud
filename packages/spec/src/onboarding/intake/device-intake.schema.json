@@ -3386,7 +3386,7 @@
             "publish"
           ],
           "x-pcc-neverDefault": false,
-          "x-pcc-confirmationRequired": false,
+          "x-pcc-confirmationRequired": true,
           "x-pcc-sensitive": false,
           "x-pcc-why": "We search the registry before authoring anything new — reuse comes first.",
           "x-pcc-ifUnknown": {

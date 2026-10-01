@@ -46,7 +46,7 @@ export * from "./fields.js";
 export * from "./json-schema.js";
 export * from "./form-html.js";
 export { CONFIRMATION_REQUIRED_FIELDS, intakeValueHash } from "./confirmation.js";
-export { ESTOP_NONE_APPROVED_CAPABILITIES } from "./safety-policy.js";
+export { ESTOP_NONE_APPROVED_CAPABILITIES, UNITLESS_LIMIT_UNIT } from "./safety-policy.js";
 export {
   INTAKE_SECRET_KINDS,
   redactIntakeSecrets,
@@ -584,7 +584,9 @@ function checkParsedRecord(
  *      `safety.limits` is present and well-formed, each entry's quantity must
  *      be a NUMBER parameter of the CSD that `capability.type` names (looked
  *      up in `authority.csdRegistry`, else the built-in CSDs), its unit must
- *      convert to that parameter's declared unit through a small closed table,
+ *      convert to that parameter's declared unit through a small closed table
+ *      (for a parameter that declares no unit, exactly UNITLESS_LIMIT_UNIT,
+ *      "count"),
  *      it must lie within the parameter's own [min, max], and a quantity may
  *      appear once; problems go to `limitErrors` and make the report not ok
  *      for any milestone. When `capability.type` is absent or does not

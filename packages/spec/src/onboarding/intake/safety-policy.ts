@@ -5,7 +5,9 @@
  *   1. `safety.limits` entries are bound to the CSD named by `capability.type`
  *      (`checkSafetyLimits`): the quantity must be a NUMBER parameter of that
  *      CSD, the unit must be convertible to the parameter's declared unit
- *      through a small closed table, the limit must lie inside the parameter's
+ *      through a small closed table (a parameter that declares no unit is a
+ *      dimensionless count, and its limit names the unit "count"), the limit
+ *      must lie inside the parameter's
  *      own [min, max] (a limit only NARROWS the CSD's range), and each
  *      quantity may appear once (duplicates are refused, never intersected).
  *   2. `safety.estop` `{mechanism: "none"}` is an honest observation, but it
@@ -104,6 +106,14 @@ function convert(value: number, from: UnitDef, to: UnitDef): number {
   return ((value * from.scale + from.offset) - to.offset) / to.scale;
 }
 
+/**
+ * The unit a limit names for a CSD number parameter that declares NO unit (a
+ * dimensionless count such as copies, wallCount, quantity or portions). It is
+ * matched exactly (after NFKC and trim), only against a unitless parameter, and
+ * it is not in the unit table, so a unit-bearing parameter refuses it.
+ */
+export const UNITLESS_LIMIT_UNIT = "count";
+
 // ── CSD binding ──────────────────────────────────────────────────────────
 
 /** The NUMBER parameters of a CSD, as `key -> {unit, min, max}`. */
@@ -157,8 +167,9 @@ const CONVERSION_SLACK = 1e-9;
  *
  * With a CSD, each entry must: name (exactly) a NUMBER parameter's key; use a
  * unit in the closed table whose dimension matches the parameter's declared
- * unit (a parameter that declares no unit, or one outside the table, cannot
- * carry a limit); and, converted to the parameter's unit, lie within the
+ * unit, or, for a parameter that declares no unit, exactly UNITLESS_LIMIT_UNIT
+ * (a parameter whose declared unit is outside the table cannot carry a limit);
+ * and, converted to the parameter's unit, lie within the
  * parameter's [min, max]. Every entry for an already-seen quantity (compared
  * after NFKC, trim and lower-casing) is refused — never intersected.
  */
@@ -181,13 +192,19 @@ export function checkSafetyLimits(limits: readonly SafetyLimit[], parameters: Nu
       errors.push(`${where}: quantity is not a number parameter of the selected CSD`);
       return;
     }
+    if (parameter.unit === undefined) {
+      if (limit.unit.normalize("NFKC").trim() !== UNITLESS_LIMIT_UNIT) {
+        errors.push(`${where}: the CSD parameter declares no unit; its limit uses the unit "${UNITLESS_LIMIT_UNIT}"`);
+        return;
+      }
+      if (!(limit.min >= parameter.min && limit.max <= parameter.max)) {
+        errors.push(`${where}: limit lies outside the CSD parameter's range`);
+      }
+      return;
+    }
     const limitUnit = tableUnit(limit.unit);
     if (!limitUnit) {
       errors.push(`${where}: unit is not in the closed unit table`);
-      return;
-    }
-    if (parameter.unit === undefined) {
-      errors.push(`${where}: the CSD parameter declares no unit`);
       return;
     }
     const parameterUnit = tableUnit(parameter.unit);

@@ -28,6 +28,7 @@ import {
   INTAKE_SECRET_KINDS,
   CONFIRMATION_REQUIRED_FIELDS,
   ESTOP_NONE_APPROVED_CAPABILITIES,
+  UNITLESS_LIMIT_UNIT,
   intakeValueHash,
   type IntakeAnswer,
   type IntakeAuthority,
@@ -386,7 +387,7 @@ function buildFullValidRecord(): IntakeRecord {
     "evidence.controllerRunLog": human({ exportsOwnLogPerJob: true, access: "api" }),
     "evidence.instrumentSignsOutput": human(true),
     "evidence.referenceSample": human({ available: true, expectedResultRef: "cube-20mm" }),
-    "capability.type": probed("pcc://capabilities/fdm/v2"),
+    "capability.type": human("pcc://capabilities/fdm/v2"),
     "capability.parameters": confirmed([{ key: "infill", min: 0, max: 100, unit: "%" }]),
     "pricing.unitPrice": human("5.00"),
     "pricing.minimum": human("2.00"),
@@ -401,6 +402,11 @@ function buildFullValidRecord(): IntakeRecord {
     answers[fieldId] = { ...answers[fieldId]!, confirmation: { eventId: `evt-${fieldId}` } };
   }
   return { schema: "pcc.device-intake.v1", answers };
+}
+
+/** A human-confirmed capability.type answer, pointing at its confirmation event (it is confirmation-required). */
+function typeAnswer(type: string): IntakeAnswer {
+  return { ...human(type), confirmation: { eventId: "evt-capability.type" } };
 }
 
 function cloneRecord(record: IntakeRecord): IntakeRecord {
@@ -1514,6 +1520,7 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
     expect(new Set(CONFIRMATION_REQUIRED_FIELDS)).toEqual(new Set([...fromNeverDefault, ...fromResearch]));
     expect([...CONFIRMATION_REQUIRED_FIELDS]).toEqual([
       "capability.parameters",
+      "capability.type",
       "operator.authority",
       "payout.destination",
       "pricing.currency",
@@ -1558,6 +1565,7 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
       "operator.authority",
       "safety.supervision",
       "safety.estop",
+      "capability.type",
       "capability.parameters",
       "pricing.unitPrice",
       "pricing.minimum",
@@ -1911,7 +1919,7 @@ function labReport(limits: unknown, options: LabOptions = {}) {
   const record = cloneRecord(buildFullValidRecord());
   record.answers["safety.limits"] = limitsAnswer(limits);
   if (type === null) delete record.answers["capability.type"];
-  else record.answers["capability.type"] = probed(type);
+  else record.answers["capability.type"] = typeAnswer(type);
   const authority = { ...makeAuthority(record), ...(registry ? { csdRegistry: registry } : {}) };
   return validateIntake(record, milestone, authority);
 }
@@ -2004,13 +2012,11 @@ describe("validateIntake — safety limits bind to the selected CSD (astra 120b,
     ]);
   });
 
-  it("refuses a limit on a parameter that declares no unit", () => {
-    const report = labReport([limit("plain", "count", 1, 5)]);
-    expect(report.ok).toBe(false);
-    expect(report.limitErrors).toEqual(["safety.limits[0]: unit is not in the closed unit table"]);
-    // even with a table unit there is nothing for it to equal
+  it("a parameter that declares no unit takes only the dimensionless unit \"count\" (120b round)", () => {
+    expect(labReport([limit("plain", "count", 1, 5)]).limitErrors).toEqual([]);
+    // a table unit has nothing to equal on a unitless parameter
     expect(labReport([limit("plain", "%", 1, 5)]).limitErrors).toEqual([
-      "safety.limits[0]: the CSD parameter declares no unit",
+      'safety.limits[0]: the CSD parameter declares no unit; its limit uses the unit "count"',
     ]);
   });
 
@@ -2018,24 +2024,52 @@ describe("validateIntake — safety limits bind to the selected CSD (astra 120b,
     const registry = loadBuiltinCsds();
     registry.register(CsdSchema.parse(printAndMailCsd));
     let checked = 0;
+    let unitless = 0;
     for (const csd of registry.list()) {
       for (const p of csd.parameters) {
         if (p.type !== "number") continue;
-        const full = limit(p.key, p.unit ?? "?", p.min, p.max);
+        const full = limit(p.key, p.unit ?? UNITLESS_LIMIT_UNIT, p.min, p.max);
         const record = cloneRecord(buildFullValidRecord());
         record.answers["safety.limits"] = limitsAnswer([full]);
-        record.answers["capability.type"] = probed(csd.url);
+        record.answers["capability.type"] = typeAnswer(csd.url);
         const report = validateIntake(record, "accept-jobs", { ...makeAuthority(record), csdRegistry: registry });
-        if (p.unit === undefined) {
-          expect(report.limitErrors, `${csd.url}#${p.key}`).toEqual(["safety.limits[0]: unit is not in the closed unit table"]);
-        } else {
-          expect(report.limitErrors, `${csd.url}#${p.key} (${p.unit})`).toEqual([]);
-          checked += 1;
-        }
+        expect(report.limitErrors, `${csd.url}#${p.key} (${p.unit ?? "unitless"})`).toEqual([]);
+        if (p.unit === undefined) unitless += 1;
+        else checked += 1;
       }
     }
     // %, degrees, km, min, kg, pages: infill, 4 lat/lng, distanceKm, deadlineMinutes, weightKg, pageCount, prepTimeMinutes
     expect(checked).toBe(10);
+    // copies, wallCount, quantity, portions: a dimensionless count takes the unit "count"
+    expect(unitless).toBeGreaterThan(0);
+  });
+
+  it("a parameter that declares no unit takes exactly the unit \"count\", and a unit-bearing one refuses it (120b round)", () => {
+    expect(UNITLESS_LIMIT_UNIT).toBe("count");
+    const copies = loadBuiltinCsds().resolve("pcc://capabilities/2d-print/v1").parameters.find((p) => p.key === "copies");
+    expect(copies).toMatchObject({ type: "number" });
+    expect((copies as { unit?: string }).unit).toBeUndefined();
+    const at2d = (lims: unknown) => {
+      const record = cloneRecord(buildFullValidRecord());
+      record.answers["safety.limits"] = limitsAnswer(lims);
+      record.answers["capability.type"] = typeAnswer("pcc://capabilities/2d-print/v1");
+      return ready(record, "accept-jobs");
+    };
+    const { min, max } = copies as { min: number; max: number };
+    expect(at2d([limit("copies", "count", min, max)]).limitErrors).toEqual([]);
+    expect(at2d([limit("copies", " count ", min, max)]).limitErrors).toEqual([]);
+    for (const wrong of ["pages", "%", "Count", "1"]) {
+      expect(at2d([limit("copies", wrong, min, max)]).limitErrors, wrong).toEqual([
+        'safety.limits[0]: the CSD parameter declares no unit; its limit uses the unit "count"',
+      ]);
+    }
+    expect(at2d([limit("copies", "count", min, max + 1)]).limitErrors).toEqual([
+      "safety.limits[0]: limit lies outside the CSD parameter's range",
+    ]);
+    // "count" on fdm/v2's infill (unit %) is refused: it is not in the unit table.
+    const fdm = cloneRecord(buildFullValidRecord());
+    fdm.answers["safety.limits"] = limitsAnswer([limit("infill", "count", 10, 90)]);
+    expect(ready(fdm, "accept-jobs").limitErrors).toEqual(["safety.limits[0]: unit is not in the closed unit table"]);
   });
 
   it("refuses duplicate quantities and never intersects them", () => {
@@ -2159,13 +2193,24 @@ describe("validateIntake — estop none is not runnable by default (astra 120b, 
       confirmation: { eventId: "evt-safety.estop" },
     };
     if (type === null) delete record.answers["capability.type"];
-    else record.answers["capability.type"] = probed(type);
+    else record.answers["capability.type"] = typeAnswer(type);
     // The fixture's limit is fdm/v2's infill; limits are checked against whatever CSD is selected,
     // so a record retargeted at another capability drops them (publish does not require them).
     if (type !== "pcc://capabilities/fdm/v2") delete record.answers["safety.limits"];
     return record;
   };
   const none = { mechanism: "none" };
+
+  it("an agent-asserted capability.type cannot unlock estop none: capability.type is confirmation-required (120b round)", () => {
+    const record = withEstop(none, "pcc://capabilities/2d-print/v1");
+    record.answers["capability.type"] = probed("pcc://capabilities/2d-print/v1");
+    const report = ready(record, "publish");
+    expect(report.ok).toBe(false);
+    expect(report.unconfirmed).toContain("capability.type");
+    expect(report.neverDefaultViolations).toContain("capability.type");
+    // The same type, human-confirmed, is the approved exemption.
+    expect(ready(withEstop(none, "pcc://capabilities/2d-print/v1"), "publish").safetyBlocks).toEqual([]);
+  });
 
   it("the approved list is exactly the two office-printing capabilities, and frozen", () => {
     expect([...ESTOP_NONE_APPROVED_CAPABILITIES]).toEqual([
