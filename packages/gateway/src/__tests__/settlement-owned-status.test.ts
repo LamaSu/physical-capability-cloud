@@ -297,11 +297,18 @@ describe("astra, round 1 of #475: jobs settled without a session or escrow link,
     expect(job.completedAt).toBe("2026-09-29T00:00:00.000Z");
   });
 
-  it("an unlinked job in failed or cancelled can still be re-queued by a generic write (only a paid job is closed in them)", async () => {
+  it("F5 (round 3): an unlinked job in failed or cancelled is terminal: no generic write re-opens it", async () => {
+    // A re-queued job is polled and run again by a remote node (paid-job-flow.ts), so re-opening a failed
+    // or cancelled job is the same duplicate-execution class as F4. Both are terminal in the canonical lifecycle.
     for (const state of ["failed", "cancelled"]) {
-      getRepos().jobs.updateStatus("job-bio-42", state);
-      expect((await patch("job-bio-42", "queued")).statusCode, `queued from ${state}`).toBe(200);
-      expect(statusOf("job-bio-42"), `status after queued from ${state}`).toBe("queued");
+      getRepos().jobs.update("job-bio-42", { status: state, progress: 40 });
+      for (const [via, target] of [["patch", "queued"], ["relay", "in_progress"], ["patch", "completed"], ["relay", "failed"], ["patch", "cancelled"]] as const) {
+        const res = via === "patch" ? await patch("job-bio-42", target) : await relay("job-bio-42", target);
+        expect(res.statusCode, `${via} ${target} from ${state}`).toBe(409);
+      }
+      const job = getRepos().jobs.findById("job-bio-42")!;
+      expect(job.status, `status stays ${state}`).toBe(state);
+      expect(job.progress, `progress stays 40 in ${state}`).toBe(40);
     }
   });
 

@@ -14,18 +14,19 @@
  * The CLOSED statuses belong to the gateway on EVERY job, paid or not, and a
  * generic writer never moves any job out of them: the statuses only its own
  * writers set (executing, completing, evidence_stored, evidence_submitted,
- * settled; none is in the vocabulary a generic writer may set), and completed,
- * which the local kernel writes before its settlement pipeline runs. A job can
- * be settled without a session or escrow link, through a configured escrow
- * contract (astra, rounds 1 and 2 of #475), so the link cannot decide. The
- * guard reads the CURRENT status, not the target: a node still finishes its
- * own job (in_progress to completed). A paid job is also closed in failed and
- * cancelled.
+ * settled; none is in the vocabulary a generic writer may set), and the
+ * lifecycle's terminal statuses (completed, failed, cancelled; job-lifecycle.ts),
+ * which the local kernel also writes. A re-opened job is queued again, and a
+ * remote node can run the same physical job a second time (astra, round 3 of
+ * #475). A job can be settled without a session or escrow link, through a
+ * configured escrow contract (astra, rounds 1 and 2 of #475), so the link
+ * cannot decide. The guard reads the CURRENT status, not the target: a node
+ * still finishes its own job (in_progress to completed or failed).
  * Every write is ONE conditional UPDATE, as /complete's claim is, so a status
  * the system sets in between is never overwritten.
  *
  * A job without a settlement record is otherwise unchanged: its node finishes
- * it (adk #452), and its failed or cancelled job can still be re-opened. The
+ * it (adk #452). The
  * system's own writers (the kernel service, the settlement path) write through
  * the repository and are not guarded here. WHO may write a job's status is
  * N85(b), gateway's owner checks in WP-C.
@@ -39,14 +40,13 @@ const TERMINAL = ["completed", "failed", "cancelled"] as const;
  * Statuses a generic writer never moves ANY job out of:
  *  - those only the gateway's own writers set: executing (the local kernel), and
  *    completing, evidence_stored, evidence_submitted and settled (the settlement paths);
- *  - completed, which the local kernel writes before its settlement pipeline
- *    runs (kernel-service.ts, routes/setup.ts).
+ *  - the lifecycle's terminal statuses, completed, failed and cancelled (job-lifecycle.ts),
+ *    which the local kernel also writes (kernel-service.ts, routes/setup.ts). Re-opening one
+ *    re-queues a job a remote node can run again.
  * The guard reads the CURRENT status, not the target, so a node can still
- * finish its own job (in_progress to completed).
+ * finish its own job (in_progress to completed or failed).
  */
-const CLOSED = ["executing", "completing", "evidence_stored", "evidence_submitted", "settled", "completed"] as const;
-/** A paid job is also never moved out of failed or cancelled; on an unlinked job they stay re-openable. */
-const PAID_CLOSED = [...CLOSED, "failed", "cancelled"] as const;
+const CLOSED = ["executing", "completing", "evidence_stored", "evidence_submitted", "settled", "completed", "failed", "cancelled"] as const;
 
 type JobRow = NonNullable<ReturnType<ReturnType<typeof getRepos>["jobs"]["findById"]>>;
 
@@ -77,7 +77,7 @@ export function writeJobStatusGuarded(jobId: string, status: string, progress?: 
   if (!job) return { kind: "not_found" };
   const paid = hasSettlementRecord(job);
   if (paid && (TERMINAL as readonly string[]).includes(status)) return { kind: "refused", currentStatus: job.status };
-  const owned: readonly string[] = paid ? PAID_CLOSED : CLOSED;
+  const owned: readonly string[] = CLOSED;
   const { db } = getStore();
   // The same fields the repository's updateStatus writes.
   const data: { status: string; progress?: number; completedAt?: string } = { status };
