@@ -491,18 +491,14 @@ export const nodeTransport: OutboundTransport = (req) =>
     clientReq.on("error", fail);
     clientReq.on("response", (res) => {
       received = { status: res.statusCode ?? 0, headers: res.headers };
-      let ended = false;
       res.on("data", (chunk: Buffer) => {
         bytes += chunk.length;
         if (bytes > req.maxResponseBytes) succeed(true);
       });
-      res.on("end", () => {
-        ended = true;
-        succeed(false);
-      });
+      res.on("end", () => succeed(false));
+      // Node reports a connection cut mid-body as an error on the response. The
+      // status line already arrived, so that is a truncated answer, not a failure.
       res.on("error", () => succeed(true));
-      // a connection that closes before the body ended was cut short
-      res.on("close", () => succeed(!ended));
     });
     if (payload) clientReq.write(payload);
     clientReq.end();
