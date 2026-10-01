@@ -19,9 +19,10 @@
  *                           unit and one challenge, so evidence for unit A cannot be
  *                           replayed onto unit B
  *   kernelSignedEventsRoot  the bundle's `hashBundle` digest, as 0x + hex, derived by
- *                           `computeKernelSignedEventsRoot(bundle)`, which recomputes every
- *                           event hash and the bundleHash instead of trusting the carried
- *                           ones. ONE bundle: a settlement unit's evidence is one
+ *                           `computeKernelSignedEventsRoot(bundle).root`, which recomputes
+ *                           every event hash and the bundleHash instead of trusting the
+ *                           carried ones, and returns the verified `events` it hashed.
+ *                           ONE bundle: a settlement unit's evidence is one
  *                           kernel-signed bundle holding every outcome-bearing event
  *                           (terminal events and inspections), so nothing can be left out
  *                           by choosing which bundle to commit (LO-EV-9 header; bus #3543)
@@ -50,6 +51,19 @@
  * is a safe integer in [0, 100]; attestation hashes are distinct and no more than
  * `total`. Duplicates are refused, never silently de-duplicated. The #270 mirror
  * pins no empty set, so an empty set is refused.
+ *
+ * The bundle's events are snapshotted before they are hashed (E7b): each event goes through
+ * `canonicalSnapshot` (#359), which reads own property descriptors only, so no getter and no
+ * `toJSON` of the input ever runs, and which refuses what JSON cannot carry exactly: an accessor,
+ * a non-enumerable or symbol-keyed property, NaN and Infinity, a bigint, a function, an
+ * `undefined` array element or hole, a cycle, a class instance or other non-plain object. A
+ * JSON.stringify/parse round trip accepted all of those and committed a projection (NaN became
+ * null) instead of the submitted evidence. Every hash is recomputed over the snapshot and
+ * `computeKernelSignedEventsRoot` returns the snapshot with the root: consumers evaluate the
+ * returned `events`, never the object they passed in. An `undefined` OBJECT member is omitted,
+ * exactly as `canonicalize` omits it from every hash in the repo (producers such as the
+ * gateway's carrier events leave optional fields undefined), so it is absent from the hashed
+ * text and from the returned events alike; it is not refused.
  *
  * The session authorization is snapshotted before it is hashed (E7 F3, F4): a frozen
  * plain copy of exactly the declared fields, read once, with `publicKey` pinned to 64
@@ -87,7 +101,7 @@
 import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
 import { keccak_256 } from "@noble/hashes/sha3";
-import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
+import { NonCanonicalValueError, canonicalSnapshot, canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import type { EvidenceBundle, EvidenceEvent, SessionKeyAuthorization } from "../types/evidence.js";
 
 export type Bytes32Hex = `0x${string}`;
@@ -243,19 +257,74 @@ export function taggedDigestToBytes32(digest: string): Bytes32Hex {
   return `0x${digest.slice("sha256:".length)}`;
 }
 
-/** One event as plain data: a JSON round trip reads every property exactly once. */
-function snapshotEvent(field: string, event: unknown): EvidenceEvent {
-  let text: string | undefined;
-  try {
-    text = JSON.stringify(event);
-  } catch {
-    throw new EvidenceBlockInputError(field, "is not JSON-serializable plain data");
+/**
+ * Text taken from a refusal can carry an attacker's key names: replace control characters and
+ * bound the length, so an error field or message cannot inject log lines or grow without limit.
+ */
+function printable(text: string, max: number): string {
+  const clean = text.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, "?");
+  return clean.length > max ? `${clean.slice(0, max)}...` : clean;
+}
+
+/**
+ * Freeze `root` and every object and array reachable from it. The tree is a fresh JSON parse, so it
+ * is acyclic and holds only own data properties; the walk is iterative, so depth cannot overflow the
+ * stack.
+ */
+function deepFreeze<T>(root: T): T {
+  const pending: unknown[] = [root];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node === null || typeof node !== "object") continue;
+    Object.freeze(node);
+    const keys = Reflect.ownKeys(node);
+    for (let i = 0; i < keys.length; i++) pending.push(Reflect.get(node, keys[i]));
   }
-  const parsed: unknown = text === undefined ? undefined : JSON.parse(text);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  return root;
+}
+
+/**
+ * One event as deep-frozen plain data (E7b). The raw value is taken through `canonicalSnapshot`
+ * (#359): canonicalize it from its own property descriptors, then parse the canonical text once.
+ * No getter and no `toJSON` of the input runs, a Proxy is read once through its reflection traps,
+ * and what cannot be written as JSON exactly (an accessor, NaN, a bigint, a class instance, a hole,
+ * ...) is refused rather than normalised, as the JSON.stringify/parse round trip this replaces
+ * normalised NaN to null. The event is the snapshot's own value, so nothing but the snapshot
+ * is ever hashed, returned or evaluated. A refusal names the event and the member that caused it.
+ */
+function snapshotEvent(field: string, event: unknown): EvidenceEvent {
+  let value: unknown;
+  try {
+    value = canonicalSnapshot(event).value;
+  } catch (err) {
+    if (err instanceof NonCanonicalValueError) {
+      // `path` is rooted at "$" (the event itself); re-root it at the event's place in the bundle.
+      const member = err.path.startsWith("$") ? err.path.slice(1) : `.${err.path}`;
+      throw new EvidenceBlockInputError(
+        printable(`${field}${member}`, 200),
+        `is not plain JSON evidence data (${printable(err.message, 300)})`,
+      );
+    }
+    throw new EvidenceBlockInputError(field, "could not be read as plain JSON evidence data");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new EvidenceBlockInputError(field, "expected an event object");
   }
-  return parsed as EvidenceEvent;
+  return deepFreeze(value as EvidenceEvent);
+}
+
+/** What `computeKernelSignedEventsRoot` returns: the root and the exact events it was derived from. */
+export interface KernelSignedEventsSnapshot {
+  /** The bundleHash as a bytes32 root. */
+  readonly root: Bytes32Hex;
+  /**
+   * The events whose hashes were recomputed and checked, in the order given: deep-frozen plain
+   * JSON, the snapshot that was hashed. Consumers evaluate THIS value, never the object they passed
+   * in. Every plain object in it has no prototype (see `canonicalSnapshot`), so do not call
+   * Object.prototype methods on one (obj.hasOwnProperty(k), String(obj)): use Object.keys, `in` or
+   * Object.hasOwn.
+   */
+  readonly events: readonly EvidenceEvent[];
 }
 
 /**
@@ -264,20 +333,24 @@ function snapshotEvent(field: string, event: unknown): EvidenceEvent {
  * `event.hash`, so on its own two bundles with different payloads and the same
  * carried hashes share a root.
  *
- * The events are snapshotted once (a JSON round trip of each event: one read, then
- * plain data). Every event hash is recomputed with `hashEvent` and must equal the
- * carried `event.hash`; `hashBundle` is recomputed over that snapshot and must equal
- * `bundle.bundleHash`; an empty event list is refused. Throws `EvidenceBlockInputError`
- * on any failure. Returns the bundleHash as a bytes32 root.
+ * Each event is snapshotted once with `canonicalSnapshot` (see `snapshotEvent`): it is read
+ * through own property descriptors only, so no getter and no `toJSON` of the input runs, and a Proxy
+ * is read once, through its reflection traps. Anything JSON cannot carry exactly is refused rather
+ * than normalised. Every event hash is recomputed with `hashEvent` over that snapshot and must equal
+ * the carried `event.hash`; `hashBundle` is recomputed over the snapshot and must equal
+ * `bundle.bundleHash`; an empty event list is refused. Throws `EvidenceBlockInputError` on any
+ * failure, naming the event and the member that caused it.
  *
- * Only the root is returned: a consumer that evaluates events afterwards must evaluate
- * plain data it holds, not a live object it passed here. This does not verify the kernel
- * signature, the session-key delegation, or that this is the one finalized bundle for the
- * settlement unit; see BOUNDARY in the module header.
+ * Returns `{ root, events }`. `events` is exactly the data whose hashes were recomputed and
+ * checked, so what is hashed is what is returned and what a consumer must evaluate: a consumer
+ * evaluates `events`, never the object it passed in, which a caller can mutate after this returns
+ * and a Proxy can answer differently on a later read. The result and every event in it are
+ * deep-frozen. This does not verify the kernel signature, the session-key delegation, or that this
+ * is the one finalized bundle for the settlement unit; see BOUNDARY in the module header.
  */
 export async function computeKernelSignedEventsRoot(
   bundle: Pick<EvidenceBundle, "events" | "bundleHash">,
-): Promise<Bytes32Hex> {
+): Promise<KernelSignedEventsSnapshot> {
   if (bundle === null || typeof bundle !== "object") {
     throw new EvidenceBlockInputError("bundle", "expected an evidence bundle object");
   }
@@ -306,7 +379,7 @@ export async function computeKernelSignedEventsRoot(
   if (bundleHash !== carriedBundleHash) {
     throw new EvidenceBlockInputError("bundleHash", "does not match the hash recomputed from the bundle's event hashes");
   }
-  return taggedDigestToBytes32(bundleHash);
+  return Object.freeze({ root: taggedDigestToBytes32(bundleHash), events: Object.freeze(events) });
 }
 
 // ── The session authorization ────────────────────────────────────────────────

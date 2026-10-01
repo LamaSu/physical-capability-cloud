@@ -353,13 +353,13 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
 
   it("an honest bundle yields the pinned production-form root, identical to taggedDigestToBytes32(hashBundle)", async () => {
     const b = await honest();
-    expect(await computeKernelSignedEventsRoot(b)).toBe(PINNED_ROOT);
-    expect(await computeKernelSignedEventsRoot(b)).toBe(taggedDigestToBytes32(b.bundleHash));
+    expect((await computeKernelSignedEventsRoot(b)).root).toBe(PINNED_ROOT);
+    expect((await computeKernelSignedEventsRoot(b)).root).toBe(taggedDigestToBytes32(b.bundleHash));
   });
 
   it("an honest bundle over the v2 mirror inputs reproduces the block golden 0x854079f7…", async () => {
     const r = await goldenRoots();
-    const root = await computeKernelSignedEventsRoot(await honest(rawEvents));
+    const { root } = await computeKernelSignedEventsRoot(await honest(rawEvents));
     expect(root).toBe(r.kernelSignedEventsRoot);
     expect(computeEvidenceBlockHash({ ...r, kernelSignedEventsRoot: root })).toBe(
       "0x854079f7d819e2fba76b259a8c61f6ef842b7472088fd5c4948c3c76974b4450",
@@ -434,22 +434,30 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
     }
   });
 
-  it("refuses an event that is not plain JSON data (cycle, bigint, non-object)", async () => {
+  it("refuses an event that is not plain JSON data (cycle, bigint, non-object), naming the member", async () => {
     const b = await honest();
     const cyclic: Record<string, unknown> = { ...b.events[0]! };
     cyclic.self = cyclic;
     const withBigInt = { ...b.events[0]!, payload: { n: 1n } };
-    for (const bad of [cyclic, withBigInt, null, 42, "event", () => 1]) {
+    const cases: Array<[unknown, string]> = [
+      [cyclic, "events[0].self"],
+      [withBigInt, "events[0].payload.n"],
+      [null, "events[0]"],
+      [42, "events[0]"],
+      ["event", "events[0]"],
+      [() => 1, "events[0]"],
+    ];
+    for (const [bad, field] of cases) {
       const err = await refusalOfAsync(() => computeKernelSignedEventsRoot({ events: [bad as never], bundleHash: b.bundleHash }));
-      expect(err.field, String(bad)).toBe("events[0]");
+      expect(err.field, String(bad)).toBe(field);
     }
   });
 
   it("does not depend on event order or on the transport id (neither is in the preimage)", async () => {
     const b = await honest();
-    expect(await computeKernelSignedEventsRoot({ events: [...b.events].reverse(), bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
+    expect((await computeKernelSignedEventsRoot({ events: [...b.events].reverse(), bundleHash: b.bundleHash })).root).toBe(PINNED_ROOT);
     const renamed = b.events.map((e, i) => ({ ...e, id: `transport-${i}` }));
-    expect(await computeKernelSignedEventsRoot({ events: renamed, bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
+    expect((await computeKernelSignedEventsRoot({ events: renamed, bundleHash: b.bundleHash })).root).toBe(PINNED_ROOT);
   });
 
   it("reads the bundle's events and bundleHash exactly once each", async () => {
@@ -465,11 +473,11 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
         return b.bundleHash;
       },
     };
-    expect(await computeKernelSignedEventsRoot(live)).toBe(PINNED_ROOT);
+    expect((await computeKernelSignedEventsRoot(live)).root).toBe(PINNED_ROOT);
     expect(reads).toEqual({ events: 1, bundleHash: 1 });
   });
 
-  it("reads each event once: a hash getter that changes its answer cannot split verification from hashing", async () => {
+  it("an accessor on an event is refused without being invoked: a hash getter that changes its answer cannot split verification from hashing", async () => {
     const b = await honest();
     const fake = `sha256:${"fa".repeat(32)}` as typeof b.events[0]["hash"];
     let reads = 0;
@@ -482,13 +490,15 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
     };
     // The attacker commits bundleHash over the SECOND answer. A live-object implementation
     // verifies the first answer, then hashBundle reads the second, and roots a hash the event
-    // does not have. One snapshot read closes that.
+    // does not have. The snapshot never runs the getter at all: it refuses the accessor where it
+    // stands (it was refused only after one read when the snapshot was a JSON round trip).
     const bundleHash = await hashBundle([{ ...b.events[0]!, hash: fake }, b.events[1]!]);
     const err = await refusalOfAsync(() =>
       computeKernelSignedEventsRoot({ events: [shifty as typeof b.events[0], b.events[1]!], bundleHash }),
     );
-    expect(err.field).toBe("bundleHash");
-    expect(reads).toBe(1);
+    expect(err.field).toBe("events[0].hash");
+    expect(err.message).toMatch(/accessor property/);
+    expect(reads).toBe(0);
   });
 
   it("reads each element of the events array once", async () => {
@@ -500,7 +510,7 @@ describe("E7 F1 — computeKernelSignedEventsRoot recomputes the bundle instead 
         return Reflect.get(target, key, receiver);
       },
     });
-    expect(await computeKernelSignedEventsRoot({ events: counted, bundleHash: b.bundleHash })).toBe(PINNED_ROOT);
+    expect((await computeKernelSignedEventsRoot({ events: counted, bundleHash: b.bundleHash })).root).toBe(PINNED_ROOT);
     expect(reads).toEqual({ "0": 1, "1": 1 });
   });
 });
