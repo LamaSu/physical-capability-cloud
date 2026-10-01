@@ -9,6 +9,8 @@ Regenerate goldens after any canonical.ts change:
     node packages/pcc-node/tests/gen_goldens.mjs
 """
 
+import datetime
+import decimal
 import hashlib
 import json
 from pathlib import Path
@@ -95,6 +97,36 @@ def test_canonicalize_string_parity(g):
     )
 
 
+@pytest.mark.parametrize(
+    "g", _GOLDENS_DATA["numbers"], ids=lambda g: repr(g["value"])
+)
+def test_number_parity_with_js_string(g):
+    """Every double in the generator's sweep canonicalizes as JS String() does
+    (sensors #3458: Python repr wrote 5e-05 and 1e-07 where JS writes 0.00005
+    and 1e-7)."""
+    assert canonicalize(g["value"]) == g["expected"]
+
+
+@pytest.mark.parametrize("value,expected", [
+    pytest.param(-0.0, "0", id="negative-zero"),
+    pytest.param(0.0, "0", id="positive-zero"),
+    # JS has one numeric type: an integer is a double once parsed.
+    pytest.param(2 ** 53 + 1, "9007199254740992", id="int-above-2^53-rounds-like-js"),
+    pytest.param(10 ** 21, "1e+21", id="int-1e21-is-exponent-form"),
+    pytest.param(10 ** 20, "100000000000000000000", id="int-1e20-is-decimal"),
+    pytest.param(-(10 ** 22), "-1e+22", id="negative-big-int"),
+    pytest.param(10 ** 400, "Infinity", id="int-beyond-double-is-infinity-like-js"),
+    pytest.param(-(10 ** 400), "-Infinity", id="negative-int-beyond-double"),
+    pytest.param(float("nan"), "NaN", id="nan"),
+    pytest.param(float("inf"), "Infinity", id="inf"),
+    pytest.param(5.0, "5", id="integral-float"),
+])
+def test_number_edges_python_cannot_round_trip_through_json(value, expected):
+    """Values a JSON golden cannot carry from JS to Python (-0 serializes as 0,
+    big integers arrive already rounded), checked directly against JS rules."""
+    assert canonicalize(value) == expected
+
+
 def test_oracle_shared_vector_triple_lock():
     """oracle test == gen_goldens.mjs == Python, all on one vector."""
     # 1) Python reproduces the oracle's hardcoded golden directly.
@@ -117,6 +149,62 @@ def test_genesis_hash():
 def test_forward_slash_not_escaped():
     # Guards the most common divergence source: a URL-ish string must NOT escape /.
     assert canonicalize("cups://job/1") == '"cups://job/1"'
+
+
+# N60 K1: JS sorts keys by UTF-16 code unit and holds strings as code units.
+# The goldens above prove the JS side; these pin what only Python can express.
+
+# Built with chr() on purpose: an escaped pair in a literal is easy to lose to
+# an editor or a transport that decodes it into the one character.
+PAIR = chr(0xD83D) + chr(0xDE00)   # two code points, one UTF-16 pair
+ASTRAL = chr(0x1F600)              # the one character that pair encodes
+
+
+def test_a_surrogate_pair_written_as_two_code_points_is_its_character():
+    # One JS string, two Python spellings: they must canonicalize (and hash) alike.
+    assert len(PAIR) == 2 and len(ASTRAL) == 1
+    assert canonicalize({"k": PAIR}) == canonicalize({"k": ASTRAL})
+    assert canonicalize({PAIR: 1}) == canonicalize({ASTRAL: 1})
+    assert compute_entry_hash(PAIR, "s", "t") == compute_entry_hash(ASTRAL, "s", "t")
+
+
+def test_a_lone_surrogate_is_escaped_and_hashable():
+    assert canonicalize("a\ud800b") == '"a\\ud800b"'
+    assert canonicalize("\udfff") == '"\\udfff"'
+    # json.dumps alone emits it raw, which UTF-8 cannot encode; the hash must not raise.
+    assert compute_entry_hash("x\udc00", "s", "t").startswith("sha256:")
+
+
+def test_keys_sort_by_utf16_code_unit_not_code_point():
+    bmp_top, astral = chr(0xFFFF), chr(0x10000)  # code units FFFF and D800 DC00
+    value = {bmp_top: 1, astral: 2}
+    assert sorted(value) == [bmp_top, astral]  # Python's own order (code point)
+    assert canonicalize(value) == '{"' + astral + '":2,"' + bmp_top + '":1}'  # JS's order
+
+
+def test_a_non_string_key_is_refused():
+    # A JS object key is always a string; json.dumps(1) would write the key unquoted.
+    with pytest.raises(TypeError):
+        canonicalize({1: "a"})
+    with pytest.raises(TypeError):
+        canonicalize({"ok": {None: 1}})
+
+
+@pytest.mark.parametrize("value", [
+    decimal.Decimal("1.5"), b"raw", {1, 2}, object(),
+    {"nested": datetime.date(2026, 9, 29)},
+])
+def test_a_value_with_no_json_form_is_refused(value):
+    # TS only ever sees the JSON on the wire, so it could never rebuild these bytes.
+    with pytest.raises(TypeError):
+        canonicalize(value)
+
+
+def test_two_keys_that_are_one_js_string_are_refused():
+    value = {PAIR: 1, ASTRAL: 2}
+    assert len(value) == 2  # two Python keys ...
+    with pytest.raises(ValueError):  # ... but one JS key
+        canonicalize(value)
 
 
 # ---------------------------------------------------------------------------

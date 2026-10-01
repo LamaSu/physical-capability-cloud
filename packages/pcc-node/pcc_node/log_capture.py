@@ -27,6 +27,7 @@ key), signing raises :class:`LogSigningRefused` -- fail CLOSED.
 import hashlib
 import json
 import logging
+import re
 
 log = logging.getLogger("pcc-node.log_capture")
 
@@ -57,6 +58,20 @@ class LogSigningRefused(RuntimeError):
 # Canonicalization  (faithful Python mirror of spec/src/util/canonical.ts)
 # ---------------------------------------------------------------------------
 
+def _js_string(s):
+    """``s`` as the string JS would hold (N60 K1).
+
+    A JS string is a sequence of UTF-16 code units, so a surrogate PAIR that a
+    Python str carries as two code points is, in JS, the one character above
+    U+FFFF it encodes; it is joined here.  A lone surrogate stays lone.
+    """
+    return s.encode("utf-16-be", "surrogatepass").decode("utf-16-be", "surrogatepass")
+
+
+# Code points left in a str after _js_string that are surrogates are lone ones.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def _json_string(s):
     """JS ``JSON.stringify(<string>)`` equivalent.
 
@@ -65,29 +80,80 @@ def _json_string(s):
     \\r`` shortcuts, else ``\\u00xx`` lowercase). Non-ASCII is emitted raw
     (UTF-8); ``/`` is NOT escaped. ``separators`` are irrelevant for a bare
     string but passed for intent-parity with the binding wire contract.
+
+    Surrogates follow JS too (N60 K1): a pair becomes its character
+    (:func:`_js_string`), and a lone surrogate is written as a lowercase
+    ``\\udxxx`` escape, as ES2019's well-formed ``JSON.stringify`` writes it.
+    ``json.dumps`` would emit it raw, which is not even encodable as UTF-8.
     """
-    return json.dumps(s, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(_js_string(s), ensure_ascii=False, separators=(",", ":"))
+    return _LONE_SURROGATE.sub(lambda m: "\\u%04x" % ord(m.group()), text)
+
+
+def _utf16_order(key):
+    """Sort key giving JS ``Array.prototype.sort`` order: strings compared by
+    UTF-16 code unit.  Big-endian UTF-16 bytes compare the same way.  Python's
+    own str order (by code point) differs for a key above U+FFFF (code units
+    D800-DBFF first) against one in U+E000-U+FFFF (N60 K1, sensors #3496)."""
+    return key.encode("utf-16-be", "surrogatepass")
+
+
+def _es_number_to_string(x):
+    """ECMAScript ``Number::toString(x)`` (ES2023 sec 6.1.6.1.20) for a float.
+
+    Python ``repr`` already picks the shortest digit string that round-trips
+    to ``x`` -- the digits JS picks -- so only the LAYOUT differs: ``repr``
+    switches to exponent form below 1e-4 and zero-pads the exponent
+    (``5e-05``), while JS writes decimal for decimal exponents -7..20 and an
+    unpadded exponent otherwise (``0.00005``, ``1e-7``, ``1e+21``). The
+    digits ``s`` (``k`` of them) and the decimal exponent ``n`` (``x = s *
+    10**(n-k)``) are read from ``repr`` and laid out by the spec's steps.
+    """
+    if x != x:
+        return "NaN"
+    if x == 0:
+        return "0"  # +0 and -0 alike
+    if x < 0:
+        return "-" + _es_number_to_string(-x)
+    if x == float("inf"):
+        return "Infinity"
+    mantissa, _, exponent = repr(x).partition("e")
+    int_part, _, frac_part = mantissa.partition(".")
+    digits = int_part + frac_part
+    n = len(int_part) + (int(exponent) if exponent else 0)
+    significant = digits.lstrip("0")
+    n -= len(digits) - len(significant)
+    s = significant.rstrip("0")
+    k = len(s)
+    if k <= n <= 21:
+        return s + "0" * (n - k)
+    if 0 < n <= 21:
+        return s[:n] + "." + s[n:]
+    if -6 < n <= 0:
+        return "0." + "0" * (-n) + s
+    e = n - 1
+    sign = "+" if e >= 0 else "-"
+    head = s if k == 1 else s[0] + "." + s[1:]
+    return head + "e" + sign + str(abs(e))
 
 
 def _number_string(n):
-    """JS ``String(<number>)`` equivalent for the values this producer emits.
+    """JS ``String(<number>)`` equivalent.
 
-    Only strings are hashed in the #52 entry payload, so the number path is not
-    parity-critical for the money seam; it is provided for a faithful mirror.
-    JS has one numeric type: an integer-valued float renders without a
-    fractional part (``String(5.0) === "5"``), unlike Python ``str(5.0) ==
-    "5.0"`` -- normalized here. NaN/Infinity follow ``String()`` (raw JSON has
-    no such literals, but canonicalize predates JSON.stringify here, matching TS).
+    JS has one numeric type: every number, integer or not, is a double, and
+    ``String()`` lays it out by Number::toString (see _es_number_to_string).
+    So a Python ``int`` is first rounded to the double JS would hold (an
+    integer above 2**53 loses its low digits; one beyond the double range
+    becomes Infinity, as ``JSON.parse`` gives), and ``String(5.0) === "5"``.
+    Byte parity matters wherever a hashed payload carries a number (sensors
+    #3458: ``5e-05`` against JS ``0.00005`` changes the hash).
     """
-    if n != n:  # NaN
-        return "NaN"
-    if n == float("inf"):
-        return "Infinity"
-    if n == float("-inf"):
-        return "-Infinity"
-    if isinstance(n, float) and n.is_integer():
-        return str(int(n))
-    return repr(n) if isinstance(n, float) else str(n)
+    if isinstance(n, int):  # bool never reaches here (canonicalize tests it first)
+        try:
+            n = float(n)
+        except OverflowError:
+            return "Infinity" if n > 0 else "-Infinity"
+    return _es_number_to_string(n)
 
 
 def canonicalize(value):
@@ -103,6 +169,9 @@ def canonicalize(value):
       5. object -> keys sorted, ``JSON.stringify(k)+":"+canonicalize(v)`` joined
          by ``,``, wrapped in ``{}``. (JS omits ``undefined`` values; Python has
          no ``undefined`` so ``None`` maps to JSON ``null`` and is INCLUDED.)
+         Keys sort by UTF-16 code unit, as JS ``.sort()`` does
+         (:func:`_utf16_order`).  A key must be a str (a JS key always is), and
+         two keys that are the same JS string are refused.
     """
     if value is None:
         return "null"
@@ -116,13 +185,23 @@ def canonicalize(value):
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(canonicalize(v) for v in value) + "]"
     if isinstance(value, dict):
-        keys = sorted(value.keys())
+        entries = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"canonical JSON object keys are strings, not {type(key).__name__}")
+            js_key = _js_string(key)
+            if js_key in entries:
+                raise ValueError(f"two keys are the same JS string {_json_string(js_key)}")
+            entries[js_key] = item
         pairs = [
-            _json_string(k) + ":" + canonicalize(value[k])
-            for k in keys
+            _json_string(k) + ":" + canonicalize(entries[k])
+            for k in sorted(entries, key=_utf16_order)
         ]
         return "{" + ",".join(pairs) + "}"
-    return str(value)
+    # Anything else (Decimal, datetime, bytes, set, ...) has no JSON form, so
+    # the TS verifier, which only ever sees the JSON on the wire, could never
+    # rebuild these bytes.  str(value) used to hash it anyway.
+    raise TypeError(f"not a JSON value: {type(value).__name__}")
 
 
 def sha256_hex(canonical):
