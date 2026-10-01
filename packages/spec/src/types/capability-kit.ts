@@ -44,10 +44,13 @@
  * pattern with the binding and opportunity contracts.
  *
  * Versioning: pre-release until first merge (no deployed producer or consumer
- * yet), so amendment 1 and the pack-112 fixes land under the same literal. After
- * the first merge, EVERY shape or enum change bumps KIT_MANIFEST_SCHEMA; the
- * pinned shape fingerprint in kits-contracts.test.ts fails until that is done
- * deliberately (astra pack 112 MEDIUM 8).
+ * yet), so amendment 1 and the pack-112 and 112b fixes land under the same
+ * literal. After the first merge, EVERY shape, enum or accepted-value change
+ * bumps KIT_MANIFEST_SCHEMA. kits-contracts.test.ts pins two things for it: the
+ * structural fingerprint of the schema, and a semantic corpus of accept and
+ * reject cases (__tests__/kits-corpus/pcc.capability-kit-v1.json) with a case for
+ * each refinement rule. The fingerprint cannot see a refinement; the corpus can.
+ * Both fail until the bump is done deliberately (astra pack 112 MEDIUM 8, 112b).
  */
 
 import { z } from "zod";

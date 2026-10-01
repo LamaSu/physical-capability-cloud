@@ -18,7 +18,7 @@
  * Read times: `asOf` and every binding's `lastSeenAt` may not run more than
  * MAX_AS_OF_SKEW_MS (opportunity.ts) ahead of the clock that parses them (astra
  * pack 112b). That bounds a forged future time; it cannot prove the time is true,
- * so the server assigns both from its own clock.
+ * so the server must assign both from its own clock.
  *
  * Capability types are CSD urls (amendment A1). A binding, a kit and an
  * opportunity compare capability types directly, so a legacy type string such
@@ -31,9 +31,13 @@
  * their ack on the bus first; a breaking change is a new version. adk (#3785)
  * and operator-ux (#3997) acked amendment A1.
  *
- * Versioning: pre-release until first merge; afterwards EVERY shape or enum
- * change bumps OPERATOR_BINDING_SCHEMA, enforced by the pinned shape
- * fingerprint in kits-contracts.test.ts (astra pack 112 MEDIUM 8).
+ * Versioning: pre-release until first merge; afterwards EVERY shape, enum or
+ * accepted-value change bumps OPERATOR_BINDING_SCHEMA. kits-contracts.test.ts
+ * pins two things for it: the structural fingerprint of the schema, and a
+ * semantic corpus of accept and reject cases
+ * (__tests__/kits-corpus/pcc.operator-binding.v0.json) with a case for each
+ * refinement rule. The fingerprint cannot see a refinement; the corpus can
+ * (astra pack 112 MEDIUM 8, 112b).
  */
 
 import { z } from "zod";

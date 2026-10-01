@@ -31,14 +31,18 @@
  * an intent happened (#365 F4). A demand_aggregate's release period must have
  * closed before its asOf, and no asOf may run more than MAX_AS_OF_SKEW_MS ahead
  * of the clock that parses it (astra pack 112b). That bounds a forged future
- * asOf; it cannot prove the time is true, so the trusted producer assigns asOf
- * from its own clock. `deadline` is not restricted.
+ * asOf; it cannot prove the time is true, so the trusted producer must assign
+ * asOf from its own clock. `deadline` is not restricted.
  *
  * Versioning: pre-release until first merge. These shapes have no deployed
- * producer or consumer yet, so amendment 1 and the pack-112 fixes land under the
- * same literal. After the first merge, EVERY shape or enum change bumps
- * OPPORTUNITY_SCHEMA; the pinned shape fingerprint in kits-contracts.test.ts
- * fails until that is done deliberately (pack 112 MEDIUM 8).
+ * producer or consumer yet, so amendment 1 and the pack-112 and 112b fixes land
+ * under the same literal. After the first merge, EVERY shape, enum or
+ * accepted-value change bumps OPPORTUNITY_SCHEMA. kits-contracts.test.ts pins two
+ * things for it: the structural fingerprint of the schema, and a semantic corpus
+ * of accept and reject cases (__tests__/kits-corpus/pcc.opportunity.v0.json) with
+ * a case for each refinement rule. The fingerprint cannot see a refinement; the
+ * corpus can. Both fail until the bump is done deliberately (pack 112 MEDIUM 8,
+ * 112b).
  */
 
 import { z } from "zod";
@@ -525,7 +529,9 @@ export function opportunityDTOSchemaFor(publicUrls: Iterable<string>) {
         if (o.reward?.fundingStatus === "funded") {
           if (o.authority !== "authoritative") fail("'funded' needs a server-verified (authoritative) source");
           if (!o.fundingRef) fail("a funded kit_build_request must name its funding record");
-          if (o.evidence && !o.evidence.executable) fail("a funded kit_build_request's evidence must be executable (see evidenceIsExecutable)");
+          if (o.evidence && !o.evidence.executable) {
+            fail("a funded kit_build_request's evidence must be executable (see evidenceIsExecutable)");
+          }
         } else if (o.fundingRef) {
           fail("only a funded opportunity carries a fundingRef");
         }

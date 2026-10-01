@@ -5,6 +5,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import * as kit from "../types/capability-kit.js";
@@ -51,6 +52,7 @@ import type { SHA256 } from "../types/common.js";
 import type { CsdEvidencePrimitiveRef } from "../csd/schema.js";
 import { loadBuiltinCsds } from "../csd/registry.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
+import { canonicalize } from "../util/canonical.js";
 
 const H = (c: string) => `sha256:${c.repeat(64)}` as const;
 const T = (c: string) => `0x${c.repeat(64)}`;
@@ -1355,9 +1357,21 @@ describe("astra pack 112b", () => {
     two.bindings = [two.bindings[0]!, { ...two.bindings[0]!, id: "kernel-ot2-b", lastSeenAt: fromNow(10 * 60_000) }];
     expect(OperatorBindingDTOSchema.safeParse(two).success).toBe(false);
   });
+
+  // ── F. MEDIUM 8: a semantic corpus pinned per literal, refinements included ──
+
+  it("MEDIUM 8: a superRefine-only behaviour change moves a pinned corpus verdict (the fingerprint alone cannot see it)", () => {
+    const refusesEverything = OpportunityDTOSchema.superRefine((_o, ctx) => ctx.addIssue({ code: "custom", message: "x" }));
+    // The structural fingerprint is blind to the added refinement...
+    expect(fingerprint(refusesEverything)).toBe(fingerprint(OpportunityDTOSchema));
+    // ...the corpus is not: every accept case now fails, so the verdict test in the MEDIUM 8 block fails.
+    const accepts = loadCorpus("pcc.opportunity.v0.json").cases.filter((k) => k.expect === "accept");
+    expect(accepts.length).toBeGreaterThan(0);
+    for (const k of accepts) expect(refusesEverything.safeParse(k.value).success, k.name).toBe(false);
+  });
 });
 
-// ── pack 112 MEDIUM 8: a shape or enum change must bump the schema literal ──
+// ── pack 112 MEDIUM 8: a structural fingerprint of each contract ──
 
 /** A structural fingerprint of a zod schema: keys, strictness, types, enums, literals and checks (not messages). */
 function shapeOf(schema: unknown): unknown {
@@ -1401,25 +1415,170 @@ function shapeOf(schema: unknown): unknown {
 const fingerprint = (schema: unknown) =>
   createHash("sha256").update(JSON.stringify(shapeOf(schema))).digest("hex").slice(0, 16);
 
-describe("pack 112 MEDIUM 8: every shape or enum change bumps the schema literal", () => {
-  // Consumers parse strictly, so an added optional field or enum value breaks an
-  // old reader. When this fails, bump the literal (a new version) and re-pin BOTH
-  // values in the same commit. Re-pinning a fingerprint under an unchanged literal
-  // is the defect this test exists to catch; the one exception is the pre-release
-  // window before the first merge, when no producer or consumer is deployed.
-  it("each contract literal is pinned to its exact shape", () => {
-    expect({ literal: OPPORTUNITY_SCHEMA, shape: fingerprint(OpportunityDTOSchema) }).toEqual({
-      literal: "pcc.opportunity.v0",
-      shape: "91d25641c69b4970",
-    });
-    expect({ literal: OPERATOR_BINDING_SCHEMA, shape: fingerprint(OperatorBindingDTOSchema) }).toEqual({
-      literal: "pcc.operator-binding.v0",
-      shape: "ca2f94ba7aa72ade",
-    });
-    expect({ literal: KIT_MANIFEST_SCHEMA, shape: fingerprint(CapabilityKitManifestV1Schema) }).toEqual({
-      literal: "pcc.capability-kit/v1",
-      shape: "0ade760b67d57c08",
-    });
+// ── the semantic corpus: what each literal accepts and refuses, refinements included (astra 112b) ──
+
+type CorpusCase = { name: string; expect: "accept" | "reject"; value: unknown };
+type Corpus = { literal: string; cases: CorpusCase[] };
+
+const loadCorpus = (file: string): Corpus =>
+  JSON.parse(readFileSync(new URL(`./kits-corpus/${file}`, import.meta.url), "utf8")) as Corpus;
+
+/** First 16 hex of sha256 over the parsed corpus file, re-serialised: blind to whitespace, not to order or content. */
+const corpusDigest = (file: string) => createHash("sha256").update(JSON.stringify(loadCorpus(file))).digest("hex").slice(0, 16);
+
+const CONTRACTS: Array<{ literal: string; file: string; schema: z.ZodTypeAny }> = [
+  { literal: OPPORTUNITY_SCHEMA, file: "pcc.opportunity.v0.json", schema: OpportunityDTOSchema },
+  { literal: OPERATOR_BINDING_SCHEMA, file: "pcc.operator-binding.v0.json", schema: OperatorBindingDTOSchema },
+  { literal: KIT_MANIFEST_SCHEMA, file: "pcc.capability-kit-v1.json", schema: CapabilityKitManifestV1Schema },
+];
+
+const verdictOf = (schema: z.ZodTypeAny, value: unknown) => (schema.safeParse(value).success ? "accept" : "reject");
+
+describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change bumps the schema literal", () => {
+  // The lock table pins, per literal, the schema's structural fingerprint AND its semantic corpus (the accept and
+  // reject cases in kits-corpus/, which cover every refinement rule). The fingerprint cannot see a refinement
+  // (ZodEffects is unwrapped); the corpus can. Consumers parse strictly, so any change to what a literal accepts
+  // breaks an old reader: when this fails, bump the literal (a new version) and re-pin ALL of its values in the
+  // same commit. Changing a pinned entry under an UNCHANGED literal is the review-blocking act. No in-repo test can
+  // stop a PR from rewriting its own pins; the merge-gate review is the control. The one exception is the
+  // pre-release window before the first merge, when no producer or consumer is deployed.
+  const LOCK: Record<string, { literal: string; shape: string; corpus: string }> = {
+    "pcc.opportunity.v0": { literal: "pcc.opportunity.v0", shape: "91d25641c69b4970", corpus: "18fb5161dae6817a" },
+    "pcc.operator-binding.v0": { literal: "pcc.operator-binding.v0", shape: "ca2f94ba7aa72ade", corpus: "8e2aa2dd88af2f74" },
+    "pcc.capability-kit/v1": { literal: "pcc.capability-kit/v1", shape: "0ade760b67d57c08", corpus: "99a0669d56f0e163" },
+  };
+
+  it("each contract literal is pinned to its exact shape and its exact corpus", () => {
+    const actual = Object.fromEntries(
+      CONTRACTS.map((c) => [c.literal, { literal: c.literal, shape: fingerprint(c.schema), corpus: corpusDigest(c.file) }]),
+    );
+    expect(actual).toEqual(LOCK);
+  });
+
+  it("every corpus case gets the verdict it expects", () => {
+    for (const c of CONTRACTS) {
+      for (const k of loadCorpus(c.file).cases) {
+        expect(verdictOf(c.schema, k.value), `${c.literal}: ${k.name}`).toBe(k.expect);
+      }
+    }
+  });
+
+  it("each corpus names its schema's literal, is well formed, and its accept cases carry that literal", () => {
+    for (const c of CONTRACTS) {
+      const corpus = loadCorpus(c.file);
+      expect(Object.keys(corpus).sort(), c.file).toEqual(["cases", "literal"]);
+      expect(corpus.literal, c.file).toBe(c.literal);
+      const names = new Set<string>();
+      for (const k of corpus.cases) {
+        expect(Object.keys(k).sort(), k.name).toEqual(["expect", "name", "value"]);
+        expect(["accept", "reject"], k.name).toContain(k.expect);
+        expect(names.has(k.name), `duplicate case name: ${k.name}`).toBe(false);
+        names.add(k.name);
+        if (k.expect === "accept") expect((c.schema.parse(k.value) as { schema: string }).schema, k.name).toBe(c.literal);
+      }
+      expect(corpus.cases.some((k) => k.expect === "accept"), `${c.file} has accept cases`).toBe(true);
+      expect(corpus.cases.some((k) => k.expect === "reject"), `${c.file} has reject cases`).toBe(true);
+    }
+  });
+
+  it("wrapping a schema in an extra superRefine that refuses its first accept case flips a corpus verdict", () => {
+    // This is what the structural fingerprint cannot do: it unwraps refinements, so it sees no difference at all.
+    for (const c of CONTRACTS) {
+      const corpus = loadCorpus(c.file);
+      const first = corpus.cases.find((k) => k.expect === "accept")!;
+      const firstKey = canonicalize(first.value);
+      const wrapped = c.schema.superRefine((v, ctx) => {
+        if (canonicalize(v) === firstKey) ctx.addIssue({ code: "custom", message: "refuses the first accept case" });
+      });
+      expect(fingerprint(wrapped), `${c.literal}: the fingerprint is blind to it`).toBe(fingerprint(c.schema));
+      const flipped = corpus.cases.filter((k) => verdictOf(wrapped, k.value) !== k.expect).map((k) => k.name);
+      expect(flipped.length, c.literal).toBeGreaterThanOrEqual(1);
+      expect(flipped, c.literal).toContain(first.name);
+    }
+  });
+
+  // For each refinement message a schema can emit, the corpus case that fails ONLY because of it (exactly one
+  // issue, this message), so each rule is covered on its own, not hidden behind another failure.
+  const FUTURE_AS_OF = "asOf is a read time: it may not run more than MAX_AS_OF_SKEW_MS ahead of the clock";
+  const EXECUTABLE =
+    "executable must be true exactly when requiredPrimitives is a complete tier-eligible set with live verifiers (evidenceIsExecutable)";
+  const READ_TIME = "a read time may not run more than MAX_AS_OF_SKEW_MS ahead of the clock";
+  const ISOLATING: Record<string, Array<[caseName: string, message: string]>> = {
+    "pcc.opportunity.v0": [
+      ["reject: an unknown evidence primitive", "evidence primitive made.up_primitive is unknown or not active"],
+      ["reject: primitive params outside the descriptor's enum", "params do not match capture.photo_nonced's paramsSchema"],
+      [
+        "reject: primitive params that reach a schema node the validator does not support fail closed",
+        "params do not match telemetry.envelope_conformance's paramsSchema",
+      ],
+      ["reject: executable claimed for an empty tier 3 set", EXECUTABLE],
+      ["reject: executable denied for an executable tier 2 set", EXECUTABLE],
+      ["reject: asOf in the future on a funded_offer", FUTURE_AS_OF],
+      ["reject: asOf in the future on a kit_build_request", FUTURE_AS_OF],
+      ["reject: asOf in the future on a demand_aggregate", FUTURE_AS_OF],
+      ["reject: the verdict case: a future period with a forged future asOf", FUTURE_AS_OF],
+      ["reject: a funded_offer whose evidence is truthfully not executable", "a funded_offer's evidence must be executable (see evidenceIsExecutable)"],
+      ["reject: a funded kit_build_request that is not authoritative", "'funded' needs a server-verified (authoritative) source"],
+      ["reject: a funded kit_build_request without its funding record", "a funded kit_build_request must name its funding record"],
+      [
+        "reject: a funded kit_build_request whose evidence is truthfully not executable",
+        "a funded kit_build_request's evidence must be executable (see evidenceIsExecutable)",
+      ],
+      ["reject: an unfunded kit_build_request naming a funding record", "only a funded opportunity carries a fundingRef"],
+      [
+        "reject: a demand_aggregate for a private slug that is not an approved capability",
+        "a demand_aggregate's capabilityType must be in the approved public capability set",
+      ],
+      ["reject: a demand_aggregate whose id is not derived", "a demand_aggregate's id is derived: demandAggregateId(releasePeriod, capabilityType)"],
+      [
+        "reject: a demand_aggregate whose title is not derived",
+        "a demand_aggregate's title is derived: demandAggregateTitle(capabilityType, demandBand, releasePeriod)",
+      ],
+      ["reject: a demand_aggregate read in the last second of its period", "a demand_aggregate's release period must have closed before its asOf"],
+    ],
+    "pcc.operator-binding.v0": [
+      ["reject: a claim right for a type with no binding", "claim right for unbound type pcc://capabilities/hplc/v1"],
+      ["reject: asOf in the future", READ_TIME],
+      ["reject: lastSeenAt in the future", READ_TIME],
+      ["reject: a describe carrying endpoint text", "describe is display text: it may not contain URL-scheme text such as https://"],
+    ],
+    "pcc.capability-kit/v1": [
+      ["reject: a duplicate artifact (same role and name)", "duplicate artifact method/m.py"],
+      ["reject: a duplicate capability", "duplicate capability pcc://capabilities/liquid-handling/v1"],
+      ["reject: a duplicate compatibility.deviceFamilies entry", "duplicate entry in compatibility.deviceFamilies"],
+      ["reject: a duplicate compatibility.models entry", "duplicate entry in compatibility.models"],
+      ["reject: a duplicate compatibility.interfaces entry", "duplicate entry in compatibility.interfaces"],
+      ["reject: a duplicate compatibility.platforms entry", "duplicate entry in compatibility.platforms"],
+      ["reject: a duplicate declaredAssuranceTiers entry", "duplicate entry in declaredAssuranceTiers"],
+      ["reject: a name in NFD (e + combining acute)", "name must be Unicode NFC"],
+      ["reject: a description in NFD", "description must be Unicode NFC"],
+      ["reject: a compatibility model in NFD", "compatibility.models[0] must be Unicode NFC"],
+      ["reject: an artifact media type in NFD", "artifacts[1].mediaType must be Unicode NFC"],
+    ],
+  };
+  /** A message that interpolates a type names its rule by the text before it. */
+  const ruleOf = (message: string) => message.replace(/^(claim right for unbound type) .+$/, "$1");
+
+  it("every refinement rule the corpus reaches has a case that fails only because of that rule", () => {
+    for (const c of CONTRACTS) {
+      const corpus = loadCorpus(c.file);
+      const byName = new Map(corpus.cases.map((k) => [k.name, k]));
+      const table = ISOLATING[c.literal]!;
+      for (const [name, message] of table) {
+        const k = byName.get(name);
+        expect(k, `${c.literal}: no case named "${name}"`).toBeDefined();
+        expect(k!.expect, name).toBe("reject");
+        const r = c.schema.safeParse(k!.value);
+        expect(r.success ? [] : r.error.issues.map((i) => i.message), name).toEqual([message]);
+      }
+      // And no case reaches a refinement message that the table does not account for.
+      const reached = new Set<string>();
+      for (const k of corpus.cases) {
+        const r = c.schema.safeParse(k.value);
+        if (!r.success) for (const i of r.error.issues) if (i.code === "custom") reached.add(ruleOf(i.message));
+      }
+      expect([...reached].sort(), c.literal).toEqual([...new Set(table.map(([, m]) => ruleOf(m)))].sort());
+    }
   });
 
   it("the fingerprint moves on an added optional field, an added enum value, a changed check or loosened strictness", () => {
