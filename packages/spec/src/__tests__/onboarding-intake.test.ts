@@ -298,8 +298,8 @@ function confirmed(value: unknown): IntakeAnswer {
 /** One legitimately-answered value per field, matching its valueSchema exactly. */
 function buildFullValidRecord(): IntakeRecord {
   const answers: Record<string, IntakeAnswer> = {
-    "operator.displayName": human("Ryan's Print Shop"),
-    "operator.contactEmail": human("ryan@example.com"),
+    "operator.displayName": human("Acme Print Shop"),
+    "operator.contactEmail": human("ops@example.com"),
     "operator.authority": human(true),
     "device.description": human("A desktop FDM 3D printer for PLA/PETG prototypes."),
     "device.vendor": probed("Prusa"),
@@ -327,7 +327,7 @@ function buildFullValidRecord(): IntakeRecord {
     "evidence.executionMode": probed("real"),
     "evidence.camera": human({ seesWorkArea: true, seesOutput: true, mount: "fixed", captureDeviceId: "cam-1" }),
     "evidence.operatorPresence": human("sometimes"),
-    "evidence.approver": human({ name: "Ryan George" }),
+    "evidence.approver": human({ name: "A. Approver" }),
     "evidence.controllerRunLog": human({ exportsOwnLogPerJob: true, access: "api" }),
     "evidence.instrumentSignsOutput": human(false),
     "evidence.referenceSample": human({ available: true, expectedResultRef: "cube-20mm" }),
