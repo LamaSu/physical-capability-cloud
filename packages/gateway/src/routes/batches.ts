@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { BatchEvent, BatchManifest, SampleSlot } from "@pcc/spec";
+import type { BatchEvent, BatchManifest, BatchSlotClaim, SampleSlot } from "@pcc/spec";
 
-// SharedBatch + BatchSlotClaim types inlined until spec rebuilds
+// SharedBatch is inlined (the spec's has a closed Currency union and no createdBy).
+// Its claims are the public spec type, so the claim in a response cannot drift from
+// the contract: a claim's only price field is the display-only `displayAmount`.
 interface SharedBatch {
   id: string; kernelId: string; capabilityType: string; totalSlots: number;
   claimedSlots: BatchSlotClaim[]; protocolType: string;
@@ -11,11 +13,6 @@ interface SharedBatch {
   pricePerSlot: string; currency: string; evidenceBundleId?: string;
   /** The authenticated principal that created the batch (N49). */
   createdBy: string;
-}
-interface BatchSlotClaim {
-  id: string; agentId: string; slotIndices: number[]; sampleLabels: string[];
-  status: "claimed" | "paid" | "completed" | "refunded";
-  amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
 import { requireAuth } from "../auth/require-auth.js";
@@ -171,7 +168,7 @@ function findJob(jobId: string) {
 // body can never name a different claimant. Only the claimant sees the claim
 // itself. Everyone else sees which slots are taken and their status: no
 // claimant, sample labels, claim id (so a future claimId-keyed route cannot
-// become an IDOR), amount, escrow or time. These fields are omitted, not made
+// become an IDOR), display amount, escrow or time. These fields are omitted, not made
 // unknowable: the public price times the visible slot count gives a claim's
 // display amount, and polling occupancy shows roughly when slots were taken.
 function viewClaim(claim: BatchSlotClaim, viewer: string | null) {
@@ -569,10 +566,11 @@ export async function batchRoutes(app: FastifyInstance) {
         }
       }
 
-      // N49 F6: an honest, full-precision DISPLAY amount (pricePerSlot has up to
-      // 6 decimals). It is display only — the accepted price and settlement come
-      // from the money path (D6), never from this in-memory store. `displayAmount`
-      // is named so no caller mistakes it for settlement.
+      // N49 F6 + round 5: an honest, full-precision DISPLAY estimate (pricePerSlot
+      // has up to 6 decimals). It is NOT an amount owed: the accepted price and
+      // settlement come from the money path (D6), never from this in-memory store.
+      // The public BatchSlotClaim type names it `displayAmount`, and has no
+      // `amount`, so no consumer mistakes the estimate for settlement.
       const claim: BatchSlotClaim = {
         id: `claim-${crypto.randomUUID().slice(0, 12)}`,
         agentId: claimant,
@@ -580,7 +578,7 @@ export async function batchRoutes(app: FastifyInstance) {
         sampleLabels: indices.map((slot, n) => labels?.[n] ?? `sample-${slot}`),
         status: "claimed",
         // Display only (see displayAmountMicros): full-precision, never settlement.
-        amount: displayAmountMicros(batch.pricePerSlot, slotCount),
+        displayAmount: displayAmountMicros(batch.pricePerSlot, slotCount),
         claimedAt: new Date().toISOString(),
       };
 

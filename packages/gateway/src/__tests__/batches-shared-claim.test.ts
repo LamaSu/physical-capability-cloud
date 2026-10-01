@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { apiGate } from "../middleware/api-gate.js";
 import { batchRoutes, _clearSharedBatchesForTests, _setSharedBatchLimitsForTests } from "../routes/batches.js";
@@ -6,6 +6,7 @@ import { batchTracker } from "../services.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { schema } from "@pcc/store";
+import type { BatchSlotClaim } from "@pcc/spec";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Board row N49: a shared-batch slot claim belongs to the authenticated caller.
@@ -115,7 +116,7 @@ describe("N49: the claimant is the authenticated caller", () => {
     const body = res.json();
     expect(body.claim.agentId).toBe(ALICE);
     expect(body.claim.slotIndices).toEqual([0, 1]);
-    expect(body.claim.amount).toBe("3"); // N49 F6: honest full-precision display amount
+    expect(body.claim.displayAmount).toBe("3"); // N49 F6: honest full-precision display amount
     expect(body.batchStatus).toBe("filling");
   });
 
@@ -360,7 +361,7 @@ describe("N49 round 2: what someone else's claim shows", () => {
     expect(JSON.stringify(asBob)).not.toContain(mine.id);
 
     const asAlice = (await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(alice) })).json();
-    expect(asAlice.batch.claimedSlots[0]).toMatchObject({ id: mine.id, amount: "3", own: true });
+    expect(asAlice.batch.claimedSlots[0]).toMatchObject({ id: mine.id, displayAmount: "3", own: true });
   });
 });
 
@@ -537,7 +538,7 @@ describe("N49 F6: a six-decimal price yields an honest display amount, never 0.0
     const id = res.json().batch.id;
     const c = await claim(id, bob, { slotCount: 3 });
     expect(c.statusCode).toBe(200);
-    expect(c.json().claim.amount).toBe("0.000003");
+    expect(c.json().claim.displayAmount).toBe("0.000003");
   });
 });
 
@@ -641,5 +642,42 @@ describe("N49 r5 F2: terminal batches stop holding the store", () => {
     vi.setSystemTime(start + 3 * HOUR + MIN); // closed over an hour ago
     expect((await createWith(GOOD)).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(bob) })).statusCode).toBe(404);
+  });
+});
+
+// ── N49 round 5, F3: the claim's price figure is a display estimate, not money owed ──
+// The claim response field was `amount`, documented in the public spec as "Amount
+// owed for this claim", while the gateway filled it with a non-authoritative
+// display calculation from the posted price. A typed `amount` invites a consumer
+// to treat the estimate as accepted economics, so the field is `displayAmount`.
+
+describe("N49 r5 F3: a claim carries a display-only estimate, never an amount owed", () => {
+  it("the public BatchSlotClaim type has displayAmount and no amount", () => {
+    expectTypeOf<BatchSlotClaim>().toHaveProperty("displayAmount");
+    expectTypeOf<BatchSlotClaim["displayAmount"]>().toEqualTypeOf<string>();
+    expectTypeOf<BatchSlotClaim>().not.toHaveProperty("amount");
+  });
+
+  it("the claim, the claimant's own read and the release response carry displayAmount and no amount", async () => {
+    const id = await createBatch();
+    const claimed = (await claim(id, alice, { slotCount: 2 })).json();
+    expect(claimed.claim.displayAmount).toBe("3"); // 1.50 x 2, from the posted price
+    expect(claimed.claim).not.toHaveProperty("amount");
+
+    const own = (await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(alice) })).json().batch.claimedSlots[0];
+    expect(own).toMatchObject({ own: true, displayAmount: "3" });
+    expect(own).not.toHaveProperty("amount");
+
+    const released = (await app.inject({ method: "DELETE", url: `/api/batches/shared/${id}/claim/${claimed.claim.id}`, headers: auth(alice) })).json();
+    expect(released.claim.displayAmount).toBe("3");
+    expect(released.claim).not.toHaveProperty("amount");
+  });
+
+  it("someone else's claim shows neither field", async () => {
+    const id = await createBatch();
+    await claim(id, alice, { slotCount: 1 });
+    const other = (await app.inject({ method: "GET", url: `/api/batches/shared/${id}`, headers: auth(bob) })).json().batch.claimedSlots[0];
+    expect(other).not.toHaveProperty("amount");
+    expect(other).not.toHaveProperty("displayAmount");
   });
 });
