@@ -17,6 +17,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import { redactUrlCredentials } from "../redaction.js";
+import { populateDeviceRegistrationDTO } from "../facades/populators/device.populator.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
@@ -368,6 +369,10 @@ export async function setupRoutes(app: FastifyInstance) {
   });
 
   // ── POST /api/setup/generate-config ──────────────────────────────────────
+  //
+  // Returns the caller's OWN input assembled into a config (config, configJson, envLine),
+  // including any apiKey the caller sent. That is not a stored or server-held credential, so it
+  // is not what the N71 redaction in detect, validate and register-device is about.
 
   app.post<{ Body: GenerateConfigBody }>(
     "/api/setup/generate-config",
@@ -691,8 +696,10 @@ export async function setupRoutes(app: FastifyInstance) {
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
+        // The device, not its row. The row holds adapterConfig, and an update that omitted it
+        // keeps the PRESERVED stored config: returning the row would hand that to the caller (N71).
         return reply.code(action === "created" ? 201 : 200).send({
-          device,
+          device: populateDeviceRegistrationDTO(device),
           registered: true,
           action,
         });
