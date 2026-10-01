@@ -32,8 +32,16 @@ function comparedIdentity(id: unknown): string {
 /**
  * Identity comparison: ASCII case-insensitive (emails and hex addresses), never
  * Unicode-folded or trimmed, and never true for a blank or whitespace-only id,
- * so a blank owner can't match a blank actor. Do not swap to WP-A's (#326)
- * `sameIdentity` while it folds with trim().toLowerCase().
+ * so a blank owner can't match a blank actor.
+ *
+ * It folds no more than ASCII case because master binds no identity at
+ * provisioning, so nothing stops a lookalike from holding a key. When this
+ * merges after #326 (rule 6), replace it with WP-A's `sameIdentity`
+ * (auth/identity-normalize.ts). WP-A binds identities at provisioning with that
+ * same NFKC and full case fold, so a lookalike cannot hold a key, and the
+ * gateway keeps one comparison. The lookalike tests in auth-actor.test.ts and
+ * templates-ownership.test.ts then follow WP-A: provisioning refuses the
+ * lookalike, with a 409.
  */
 export function sameIdentity(a: string | null | undefined, b: string | null | undefined): boolean {
   const x = comparedIdentity(a);
