@@ -110,3 +110,65 @@ describe("collisionAuditExit — the pre-deploy audit fails closed (AZ-9)", () =
     expect(collisionAuditExit({ newMerges: 0, read: ["api_keys.operator_id"], skipped: ["shop_kernels.operator_address"], allowedAbsent: [] }).code).toBe(4);
   });
 });
+
+// astra pack 95b, AZ-9 (HIGH): an allowlisted OPTIONAL source must fail open only on
+// a CONFIRMED absence ("no such table" / "no such column"), never on any other read
+// error. A corrupt or I/O-failing table is unread data, not a missing table.
+describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95b)", () => {
+  const CORRUPT = () => Object.assign(new Error("database disk image is malformed"), { code: "SQLITE_CORRUPT" });
+  function readerFailing(sourceTable: string, err: () => Error) {
+    return {
+      prepare(sql: string) {
+        if (sql.includes(`FROM ${sourceTable}`)) throw err();
+        return { all: () => [] as unknown[] };
+      },
+    };
+  }
+
+  it("[neg] astra's reproduction: an allowlisted source whose query fails with SQLITE_CORRUPT is exit 4, not 0", () => {
+    const out = findIdentityCollisions(readerFailing("ui_artifacts", CORRUPT));
+    const verdict = collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never);
+    expect(verdict.code).toBe(4);
+  });
+
+  it("[neg] an I/O error on an allowlisted source is exit 4", () => {
+    const io = () => Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+    const out = findIdentityCollisions(readerFailing("job_offers", io));
+    expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["job_offers.poster_did"] } as never).code).toBe(4);
+  });
+
+  it("control: a CONFIRMED missing table on an allowlisted source is still exit 0", () => {
+    const missing = () => Object.assign(new Error("no such table: ui_artifacts"), { code: "SQLITE_ERROR" });
+    const out = findIdentityCollisions(readerFailing("ui_artifacts", missing));
+    expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(0);
+  });
+
+  it("control: a CONFIRMED missing column on an allowlisted source is exit 0", () => {
+    const missing = () => Object.assign(new Error("no such column: owner"), { code: "SQLITE_ERROR" });
+    const out = findIdentityCollisions(readerFailing("ui_artifacts", missing));
+    expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(0);
+  });
+
+  it("[neg] a query that fails part-way through .all() is a FAILED read (exit 4), even when allowlisted", () => {
+    const reader = {
+      prepare(sql: string) {
+        if (sql.includes("FROM ui_artifacts")) return { all: () => { throw CORRUPT(); } };
+        return { all: () => [] as unknown[] };
+      },
+    };
+    const out = findIdentityCollisions(reader);
+    expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: ["ui_artifacts.owner"] } as never).code).toBe(4);
+  });
+
+  it("[neg] INCOMPLETE outranks a new merge: a failed source with newMerges > 0 is 4, not 3", () => {
+    const out = findIdentityCollisions(readerFailing("job_offers", CORRUPT));
+    expect(collisionAuditExit({ newMerges: 2, ...out, allowedAbsent: [] } as never).code).toBe(4);
+  });
+
+  it("an EMPTY table counts as read", () => {
+    const out = findIdentityCollisions({ prepare: () => ({ all: () => [] as unknown[] }) });
+    expect(out.read.length).toBe(7);
+    expect(collisionAuditExit({ newMerges: 0, ...out, allowedAbsent: [] } as never).code).toBe(0);
+  });
+});
+
