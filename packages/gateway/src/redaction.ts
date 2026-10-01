@@ -175,8 +175,14 @@ const SECRET_NAME_SUFFIXES = [
   "apikey", "rawkey", "privkey", "signingkey", "hmackey", "encryptionkey", "masterkey", "accesskey",
   "token", "cookie", "authorization", "auth", "hmac", "pccsession",
 ];
-/** Whole names outside the spec list that are secret fields on their own. */
-const SECRET_NAMES = new Set(["credential", "credentials", "cookies", "jwt", "bearer"]);
+/**
+ * Whole names outside the spec list that are secret fields on their own. `pwd` is
+ * the connection-string alias of `password` (ODBC `PWD=`, ADO.NET `Pwd=`); as a
+ * whole name only, so `cwd`-style names are untouched. In free text the label scan
+ * accepts it only where it is a password (see scanLabelValue): `PWD=/home/me` is
+ * the shell's working directory.
+ */
+const SECRET_NAMES = new Set(["credential", "credentials", "cookies", "jwt", "bearer", "pwd"]);
 /** Names that hold a session TOKEN when their value is a string (PCC SIWE sessions are UUIDs; WP-D round 4, L5). */
 const SESSION_TOKEN_NAMES = new Set(["session", "sessionid", "sid"]);
 
@@ -243,8 +249,10 @@ function isSecretField(key: string, value: unknown, parentKey: string | null): b
 //      with an anchored (sticky) regex, and a match resumes the scan after its end;
 //   2. schemes: a run that follows `Bearer` (12+ characters) or `Basic` (base64 of
 //      a printable `user:password`) and whitespace;
-//   3. an `Authorization:` / `authorization=` label: the credential after it,
-//      whatever its shape, keeping a scheme word such as `Basic`;
+//   3. labels: `name: value`, `name=value` and `"name": "value"` where `name` is a
+//      secret name, whatever the value's shape, consumed whole by the delimiters of
+//      the enclosing format (see addSecretLabelSpans); an `Authorization` label keeps
+//      its scheme word, such as `Basic`;
 //   4. URL userinfo: the `user:password` in `scheme://user:password@host`;
 //   5. PEM private-key blocks, BEGIN to END (or to the end of the text).
 
@@ -354,6 +362,8 @@ function basicCredentialEnd(s: string, a: number): number {
   return end;
 }
 
+const isLetter = (c: number) => isUpper(c) || isLower(c);
+
 /** `Bearer <run>` / `Basic <run>`: the run [a, b) after a scheme word and whitespace. */
 function addSchemeSpan(s: string, a: number, b: number, spans: Span[]): void {
   let j = a - 1;
@@ -377,61 +387,408 @@ function addTokenRunSpans(s: string, spans: Span[], keepDigests = false): void {
   }
 }
 
-const AUTHORIZATION_LABEL_RE = /(?<![A-Za-z0-9])(?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?/gi;
-/** An optional scheme word (Basic, Bearer, Token, AWS4-HMAC-SHA256) before the credential. */
-const AUTH_SCHEME_Y = /[A-Za-z][A-Za-z0-9._-]{0,31}[ \t]+(?=[A-Za-z0-9_.~+/=[-])/y;
-const TOKEN_RUN_Y = /[A-Za-z0-9_.~+/=-]+/y;
+/** A word, blanks, and a non-blank: the shape of `<scheme> <credential>` at the start of an Authorization value. */
+const AUTH_SCHEME_Y = /[A-Za-z][A-Za-z0-9._-]{0,31}[ \t]+(?=\S)/y;
+/**
+ * The scheme words an Authorization value may start with (IANA registry, and the common
+ * unregistered ones). Only these are kept: any other first word is the credential itself,
+ * so `authorization=hunter2 and more` loses `hunter2` too (it used to be taken for a scheme).
+ */
+const AUTH_SCHEMES: ReadonlySet<string> = new Set([
+  "basic", "bearer", "token", "digest", "negotiate", "ntlm", "oauth", "hawk", "hmac", "mutual", "dpop", "gnap", "hoba",
+  "privatetoken", "vapid", "apikey", "api-key", "key", "jwt", "aws", "aws4-hmac-sha256", "scram-sha-1", "scram-sha-256",
+]);
 
-function addAuthorizationSpans(s: string, spans: Span[]): void {
-  AUTHORIZATION_LABEL_RE.lastIndex = 0;
-  for (let m = AUTHORIZATION_LABEL_RE.exec(s); m !== null; m = AUTHORIZATION_LABEL_RE.exec(s)) {
-    let k = m.index + m[0].length;
-    const scheme = stickyEnd(AUTH_SCHEME_Y, s, k);
-    if (scheme > k) k = scheme;
-    const end = stickyEnd(TOKEN_RUN_Y, s, k);
-    if (end > k) spans.push({ start: k, end });
+/** Where an Authorization value's credential starts at `k`: after a known scheme word and its blanks, else at `k`. */
+function authCredentialStart(s: string, k: number): number {
+  const end = stickyEnd(AUTH_SCHEME_Y, s, k);
+  if (end < 0) return k;
+  let w = k;
+  while (w < end && !isBlank(s.charCodeAt(w))) w += 1;
+  return AUTH_SCHEMES.has(s.slice(k, w).toLowerCase()) ? end : k;
+}
+
+// ── Labelled credentials, in one forward pass (WP-D round 4, L5; astra pack 97: F1, F2, F5) ──
+//
+// `name: value`, `name=value` and `"name": "value"` where `name` is a secret name:
+// header lines (X-Api-Key: ...), URL query and fragment parameters, key=value
+// pairs, connection-string fields (Pwd=...), YAML keys, and secret-named JSON
+// fragments inside prose. addSecretLabelSpans() reads each label once, consumes its
+// value WHOLE by the delimiters of the format the label sits in, and resumes after
+// that value: nothing is rescanned (`authorization=` x n used to be quadratic), and
+// a value that cannot be delimited safely FAILS CLOSED to the end of its line.
+//
+// The NAME is read as bare characters or as a quoted string, then DECODED before it
+// is compared (F2): a bare name percent-decodes (`access%5ftoken`), a quoted name
+// unescapes JSON and JS escapes (the backslash forms of u, x, n, ...). The VALUE
+// that follows is replaced from its ORIGINAL text, and the surrounding text is
+// never rewritten. Budgets: a name is read at most MAX_LABEL_RAW characters long
+// and decoded to at most MAX_LABEL_NAME; a separator is looked for at most
+// FIELD_SEP_WINDOW characters ahead.
+//
+// The VALUE, by what encloses the label:
+//   a quoted value    runs to the matching quote. A backslash escapes the next
+//                     character; a doubled quote is an escaped quote (SQL, ADO.NET).
+//                     Never past the end of the line; a quote that never closes
+//                     FAILS CLOSED: the rest of the line is the value.
+//   a URL parameter   (after `?`, `&` or `#`) runs to `&`, `#` or whitespace, or to a
+//                     quote that reads as closing one. It may be percent-encoded.
+//   `name: value`     runs to the end of the line, or to the quote that encloses
+//                     the label when it opens one (`-H 'Authorization: Basic ...'`).
+//                     With nothing after the colon, the value is the next non-empty
+//                     line indented deeper than the label's line; a YAML block
+//                     scalar (`|`, `>`) takes every such line.
+//   `"name": value`   in a JSON-like fragment (quoted name, unquoted value) runs to
+//                     `,`, `}`, `]` or whitespace. A value that opens `{` or `[`
+//                     cannot be delimited here: it FAILS CLOSED to the line's end.
+//   `name=value`      after a `;`, or as the first field of a line that has more
+//                     `;name=` fields after it (a connection string), runs to the
+//                     `;` that closes the field and may hold spaces. Anywhere else
+//                     it runs to whitespace, cut earlier at a `&`, `;` or `,` that is
+//                     followed by `name=` or by the end of the line (form bodies,
+//                     logfmt). A scheme word (Bearer, Basic) takes the token after it.
+
+/** A bare or quoted name is read at most this many characters long: the regex below hardcodes it, keep them in step. */
+const MAX_LABEL_RAW = 192;
+/** A decoded name is at most this long: a longer one is no field name (the scanner's limit before decoding was 64 too). */
+const MAX_LABEL_NAME = 64;
+/** How far ahead a `;` that ends a connection-string field is looked for, when the label starts its line. */
+const FIELD_SEP_WINDOW = 512;
+/** The longest field name that can follow a field separator (`User ID`, `Initial Catalog`, `MultipleActiveResultSets`). */
+const MAX_FIELD_NAME = 64;
+
+/**
+ * Groups: 1 a double-quoted name, 2 a single-quoted name, 3 a bare name, 4 the
+ * separator (`:` or `=`), 5 an opening quote of the value. A bare name is a whole run
+ * of [A-Za-z0-9_%.+~[]-] (the lookbehind makes it start where the run starts), so
+ * there is one candidate per run and no suffix is retried. Every repeat is bounded and
+ * its two alternatives start with different characters, so a failing candidate costs
+ * at most MAX_LABEL_RAW steps and never backtracks combinatorially.
+ */
+const LABEL_RE =
+  /(?<![A-Za-z0-9_%.+~[\]-])(?:"((?:[^"\\\r\n]|\\.){1,192})"|'((?:[^'\\\r\n]|\\.){1,192})'|([A-Za-z0-9_%.+~-][A-Za-z0-9_%.+~[\]-]{0,191}))[ \t]*([:=])[ \t]*(["']?)/g;
+/** A value that is already a redaction placeholder: left alone, so a second pass changes nothing. */
+const PLACEHOLDER_VALUE_RE = /^(?:\[REDACTED\]|\[redacted(?:-[a-z]+)?\])$/;
+/** The header line of a YAML block scalar: `|`, `>`, `|-`, `>+`, `|2`. */
+const BLOCK_SCALAR_RE = /^[|>][+-]?[0-9]?[+-]?$/;
+/** The three JSON literals that are not strings or numbers. */
+const JSON_LITERAL_RE = /^(?:null|true|false)$/;
+
+const isBlank = (c: number) => c === 32 || c === 9;
+
+/** Index of the line break that ends the line holding `from`, or the end of the text. */
+function lineEnd(s: string, from: number): number {
+  const n = s.indexOf("\n", from);
+  return n === -1 ? s.length : n;
+}
+
+/** `to`, moved back over trailing whitespace (spaces, a CR) but never before `from`. */
+function trimEnd(s: string, from: number, to: number): number {
+  let e = to;
+  while (e > from && isSpace(s.charCodeAt(e - 1))) e -= 1;
+  return e;
+}
+
+/** Percent-decoding of a URL parameter NAME: `%5f` is `_`, `+` is a space. A malformed `%` stays as it is. */
+function percentDecode(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw.charCodeAt(i);
+    if (c === 43) {
+      out += " ";
+    } else if (c === 37 && i + 2 < raw.length && isHexDigit(raw.charCodeAt(i + 1)) && isHexDigit(raw.charCodeAt(i + 2))) {
+      out += String.fromCharCode(parseInt(raw.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      out += raw[i];
+    }
   }
+  return out;
+}
+
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
+/** Unescaping of a quoted NAME: the JSON escapes, plus the JS/Python x form. An unknown escape keeps its character. */
+function unescapeName(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch !== "\\" || i + 1 >= raw.length) {
+      out += ch;
+      continue;
+    }
+    const e = raw[i + 1];
+    const digits = e === "u" ? 4 : e === "x" ? 2 : 0;
+    if (digits > 0) {
+      const hex = raw.slice(i + 2, i + 2 + digits);
+      if (hex.length === digits && /^[0-9a-fA-F]+$/.test(hex)) {
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 1 + digits;
+        continue;
+      }
+    }
+    out += SIMPLE_ESCAPES[e] ?? e;
+    i += 1;
+  }
+  return out;
+}
+
+/** The name as written, decoded for its format; undefined when it is over a budget. */
+function decodeLabelName(raw: string, quoted: boolean): string | undefined {
+  if (raw.length > MAX_LABEL_RAW) return undefined;
+  let name = raw;
+  if (quoted) {
+    if (raw.indexOf("\\") !== -1) name = unescapeName(raw);
+  } else if (raw.indexOf("%") !== -1 || raw.indexOf("+") !== -1) {
+    name = percentDecode(raw);
+  }
+  return name.length > MAX_LABEL_NAME ? undefined : name;
 }
 
 /**
- * `name: value`, `name=value` and `"name": "value"` where `name` is a secret name
- * (WP-D round 4, L5). This covers header lines (X-Api-Key: ..., Cookie: ...), URL
- * query parameters (?access_token=...), key=value pairs (password=...) and secret-
- * named JSON fragments inside prose. A label is at most 64 characters, so the scan
- * is linear. The value is:
- *   - a quoted value: up to its closing quote (escapes skipped, never past a newline);
- *   - a header-style `:` value of a cookie or api-key header: the rest of the line;
- *   - otherwise: the token run that follows (so `&next=1` in a URL survives).
+ * True when the quote character at `i` reads as a CLOSING quote: it ends the text, or a
+ * blank, `,`, `;`, `)`, `]`, `}` or `>` follows it. A raw quote followed by anything
+ * else is part of the value. (A secret that holds a quote followed by one of those marks
+ * is cut there: the one ambiguity a URL value leaves, and a raw quote is not URL syntax.)
  */
-const SECRET_LABEL_RE = /(?<![A-Za-z0-9_-])(["']?)([A-Za-z][A-Za-z0-9_-]{0,63})\1[ \t]*([:=])[ \t]*(["']?)/g;
-const HEADER_TO_EOL_NAMES = new Set(["cookie", "setcookie", "xapikey", "apikey", "xauthtoken"]);
-/** A value that is already a redaction placeholder: left alone, so a second pass changes nothing. */
-const PLACEHOLDER_VALUE_RE = /^(?:\[REDACTED\]|\[redacted(?:-[a-z]+)?\])$/;
-
-function isSecretLabelName(name: string): boolean {
-  // Authorization labels are addAuthorizationSpans' job: it keeps the scheme word.
-  if (normalizeName(name).endsWith("authorization")) return false;
-  return isSecretFieldName(name) || SESSION_TOKEN_NAMES.has(normalizeName(name));
+function closesQuote(s: string, i: number): boolean {
+  const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 10;
+  return isSpace(next) || next === 44 || next === 59 || next === 41 || next === 93 || next === 125 || next === 62;
 }
 
-function addSecretLabelSpans(s: string, spans: Span[]): void {
-  SECRET_LABEL_RE.lastIndex = 0;
-  for (let m = SECRET_LABEL_RE.exec(s); m !== null; m = SECRET_LABEL_RE.exec(s)) {
-    if (!isSecretLabelName(m[2])) continue;
-    const k = m.index + m[0].length;
-    const quote = m[4];
-    let end = k;
-    if (quote) {
-      while (end < s.length && s[end] !== quote && s[end] !== "\n") end += s[end] === "\\" ? 2 : 1;
-      end = Math.min(end, s.length);
-    } else if (m[3] === ":" && HEADER_TO_EOL_NAMES.has(normalizeName(m[2]))) {
-      const eol = s.indexOf("\n", k);
-      end = eol === -1 ? s.length : eol;
-    } else {
-      end = stickyEnd(TOKEN_RUN_Y, s, k);
+/** Index of the closing quote of a value that starts at `from`, or the end of the line when it never closes. */
+function quotedEnd(s: string, from: number, quote: number): number {
+  const n = s.length;
+  let i = from;
+  while (i < n) {
+    const c = s.charCodeAt(i);
+    if (c === 10) return i;
+    if (c === 92) {
+      i += i + 1 < n && s.charCodeAt(i + 1) !== 10 ? 2 : 1; // a backslash escapes a character, never a line break
+      continue;
     }
-    if (end > k && !PLACEHOLDER_VALUE_RE.test(s.slice(k, end).trim())) spans.push({ start: k, end });
-    if (SECRET_LABEL_RE.lastIndex < end) SECRET_LABEL_RE.lastIndex = end;
+    if (c === quote) {
+      if (s.charCodeAt(i + 1) !== quote) return i;
+      i += 2; // a doubled quote is an escaped quote
+      continue;
+    }
+    i += 1;
+  }
+  return n;
+}
+
+/** True when a field NAME followed by `=` starts at `j`: a letter, then letters, digits, spaces, `_`, `.` or `-`. */
+function fieldNameAt(s: string, j: number): boolean {
+  if (!isLetter(s.charCodeAt(j))) return false;
+  const stop = Math.min(s.length, j + MAX_FIELD_NAME + 1);
+  for (let i = j + 1; i < stop; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c === 61) return true;
+    if (!(isAlnum(c) || c === 32 || c === 95 || c === 46 || c === 45)) return false;
+  }
+  return false;
+}
+
+/**
+ * The first of the separators c1, c2, c3 (a character code, or -1 for none) in
+ * [from, limit) that ENDS a field: what follows it, after blanks, is the end of the
+ * line or the next `name=`. Stops at the end of the line. Bounded by `limit`.
+ */
+function firstFieldSep(s: string, from: number, limit: number, c1: number, c2: number, c3: number): number {
+  for (let i = from; i < limit; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c === 10) return -1;
+    if (c !== c1 && c !== c2 && c !== c3) continue;
+    let j = i + 1;
+    while (j < s.length && isBlank(s.charCodeAt(j))) j += 1;
+    if (j >= s.length || s.charCodeAt(j) === 10 || s.charCodeAt(j) === 13 || fieldNameAt(s, j)) return i;
+  }
+  return -1;
+}
+
+/** After a scheme word (`Bearer`, `Basic`) that is the whole value so far, the token that follows it belongs to the value. */
+function extendPastScheme(s: string, start: number, end: number): number {
+  const len = end - start;
+  if (len !== 5 && len !== 6) return end;
+  const word = s.slice(start, end).toLowerCase();
+  if (word !== "basic" && word !== "bearer") return end;
+  let i = end;
+  while (i < s.length && isBlank(s.charCodeAt(i))) i += 1;
+  if (i === end) return end;
+  let j = i;
+  while (j < s.length && !isSpace(s.charCodeAt(j))) j += 1;
+  return j > i ? j : end;
+}
+
+/**
+ * The value of a label whose own line holds none: the next non-empty line indented
+ * DEEPER than the label's line, as [start, end) of that line's text (its indentation
+ * stays). A block scalar takes every such line, to the first that is not deeper.
+ * `from` is anywhere on the label's line at or after the separator.
+ */
+function indentedValue(s: string, labelAt: number, from: number, block: boolean): { start: number; end: number } | null {
+  const n = s.length;
+  const lineStart = labelAt > 0 ? s.lastIndexOf("\n", labelAt - 1) + 1 : 0;
+  let indent = 0;
+  while (lineStart + indent < n && isBlank(s.charCodeAt(lineStart + indent))) indent += 1;
+  let start = -1;
+  let end = -1;
+  let pos = lineEnd(s, from);
+  while (pos < n) {
+    pos += 1; // over the line break, to the first character of the next line
+    const le = lineEnd(s, pos);
+    let q = pos;
+    while (q < le && isBlank(s.charCodeAt(q))) q += 1;
+    const contentEnd = trimEnd(s, q, le);
+    if (contentEnd === q) {
+      pos = le; // a blank line
+      continue;
+    }
+    if (q - pos <= indent) break; // not deeper: the value, if any, is over
+    if (start < 0) start = q;
+    end = contentEnd;
+    if (!block) break;
+    pos = le;
+  }
+  return start < 0 ? null : { start, end };
+}
+
+interface LabelValue {
+  start: number;
+  end: number;
+  /** Where the label scan resumes: past everything this value consumed. */
+  resume: number;
+  /** True where a `pwd` label is a password (a quoted value, a connection string, a URL, a `:` pair), not the shell's PWD. */
+  password: boolean;
+}
+
+/**
+ * The value of the label found at `labelAt`, whose value starts at `k0` (after the
+ * separator `sep`, the blanks and the optional opening quote `valueQuote`). null when
+ * the label has no value. `auth` marks an Authorization label, which keeps a leading
+ * scheme word. See the table above.
+ */
+function scanLabelValue(
+  s: string,
+  labelAt: number,
+  k0: number,
+  sep: number,
+  quotedName: boolean,
+  valueQuote: number,
+  auth: boolean,
+): LabelValue | null {
+  const n = s.length;
+  let k = k0;
+  if (auth && k < n) k = authCredentialStart(s, k);
+  if (valueQuote !== 0) {
+    const close = quotedEnd(s, k, valueQuote);
+    const closed = close < n && s.charCodeAt(close) === valueQuote;
+    return { start: k, end: closed ? close : trimEnd(s, k, close), resume: closed ? close + 1 : close, password: true };
+  }
+  const c0 = k < n ? s.charCodeAt(k) : 10;
+  if (c0 === 10 || c0 === 13) {
+    const v = indentedValue(s, labelAt, k, false);
+    return v === null ? null : { start: v.start, end: v.end, resume: v.end, password: true };
+  }
+  const prev = labelAt > 0 ? s.charCodeAt(labelAt - 1) : -1;
+  if (prev === 63 || prev === 38 || prev === 35) {
+    // a URL query or fragment parameter: ? & #. A raw quote INSIDE the value is part of it; only a quote that
+    // reads as a closing one ends it, so `"url":"https://h/?token=abc","n":1` keeps its structure.
+    let i = k;
+    while (i < n) {
+      const c = s.charCodeAt(i);
+      if (c === 38 || c === 35 || isSpace(c) || (i > k && (c === 34 || c === 39 || c === 96) && closesQuote(s, i))) break;
+      i += 1;
+    }
+    return { start: k, end: i, resume: i, password: true };
+  }
+  // A quote right before the label opens the string it sits in; that quote closes the value.
+  const enclosing = !quotedName && (prev === 34 || prev === 39 || prev === 96) ? prev : -1;
+  if (sep === 58) {
+    if (quotedName) {
+      if (c0 === 123 || c0 === 91) {
+        const stop = lineEnd(s, k); // a structure cannot be delimited here: fail closed
+        return { start: k, end: trimEnd(s, k, stop), resume: stop, password: true };
+      }
+      let i = k;
+      while (i < n) {
+        const c = s.charCodeAt(i);
+        if (c === 44 || c === 125 || c === 93 || isSpace(c)) break;
+        i += 1;
+      }
+      // JSON's own empty slots (`"token": null`, `"hasApiKey": false`) hold nothing, as in the structured walk;
+      // redacting them would turn valid JSON into invalid JSON.
+      if (i - k <= 5 && JSON_LITERAL_RE.test(s.slice(k, i))) return null;
+      return { start: k, end: i, resume: i, password: true };
+    }
+    let i = k;
+    while (i < n && s.charCodeAt(i) !== 10 && s.charCodeAt(i) !== enclosing) i += 1;
+    const end = trimEnd(s, k, i);
+    if (end - k <= 4 && BLOCK_SCALAR_RE.test(s.slice(k, end))) {
+      const v = indentedValue(s, labelAt, i, true);
+      return v === null ? null : { start: v.start, end: v.end, resume: v.end, password: true };
+    }
+    return { start: k, end, resume: i, password: true };
+  }
+  // name=value
+  let p = labelAt - 1;
+  while (p >= 0 && isBlank(s.charCodeAt(p))) p -= 1;
+  const before = p >= 0 ? s.charCodeAt(p) : 10;
+  if (before === 59) {
+    // a connection-string field: ends at the `;` that closes it, and may hold spaces
+    const sepAt = firstFieldSep(s, k, n, 59, -1, -1);
+    const stop = sepAt >= 0 ? sepAt : lineEnd(s, k);
+    return { start: k, end: trimEnd(s, k, stop), resume: stop, password: true };
+  }
+  if (before === 10 || before === 13) {
+    // the first field of a line may be the first field of a connection string
+    const semi = firstFieldSep(s, k, Math.min(n, k + FIELD_SEP_WINDOW), 59, -1, -1);
+    if (semi >= 0) return { start: k, end: trimEnd(s, k, semi), resume: semi, password: true };
+  }
+  let i = k;
+  while (i < n) {
+    const c = s.charCodeAt(i);
+    if (isSpace(c) || c === enclosing) break;
+    i += 1;
+  }
+  const cut = firstFieldSep(s, k, i, 38, 59, 44);
+  const end = cut >= 0 ? cut : extendPastScheme(s, k, i);
+  return { start: k, end, resume: end, password: false };
+}
+
+/**
+ * Add the span of the value of every secret-named label in `s`. With `jsonStringsOnly`
+ * only `"name": "value"` (a double-quoted name with a double-quoted value) counts, which
+ * is all the feedback sink redacts.
+ */
+function addSecretLabelSpans(s: string, spans: Span[], jsonStringsOnly = false): void {
+  LABEL_RE.lastIndex = 0;
+  for (let m = LABEL_RE.exec(s); m !== null; m = LABEL_RE.exec(s)) {
+    const quotedName = m[3] === undefined;
+    const raw = m[3] !== undefined ? m[3] : m[1] !== undefined ? m[1] : m[2];
+    const valueQuote = m[5];
+    if (jsonStringsOnly && (m[1] === undefined || valueQuote !== '"')) continue;
+    if (raw.length < 3) continue; // no secret name is shorter than `jwt`, `sid` or `pwd`
+    const name = decodeLabelName(raw, quotedName);
+    if (name === undefined) continue;
+    const norm = normalizeName(name);
+    if (!isSecretFieldName(name) && !SESSION_TOKEN_NAMES.has(norm)) continue;
+    const value = scanLabelValue(
+      s,
+      m.index,
+      m.index + m[0].length,
+      m[4].charCodeAt(0),
+      quotedName,
+      valueQuote === "" ? 0 : valueQuote.charCodeAt(0),
+      norm.endsWith("authorization"),
+    );
+    if (value === null) continue;
+    if (norm === "pwd" && !value.password) continue;
+    const size = value.end - value.start;
+    if (size > 0 && !(size <= 32 && PLACEHOLDER_VALUE_RE.test(s.slice(value.start, value.end).trim()))) {
+      spans.push({ start: value.start, end: value.end });
+    }
+    if (LABEL_RE.lastIndex < value.resume) LABEL_RE.lastIndex = value.resume;
   }
 }
 
@@ -508,25 +865,19 @@ function addPemSpans(s: string, spans: Span[]): void {
   }
 }
 
-/** Replace every credential-shaped substring of `s`, reporting each secret removed. */
-function scrubShapes(s: string, report: (secret: string) => void, keepDigests = false): string {
-  if (s.length === 0) return s;
-  const spans: Span[] = [];
-  addPemSpans(s, spans);
-  addUserinfoSpans(s, spans);
-  addAuthorizationSpans(s, spans);
-  addSecretLabelSpans(s, spans);
-  addMnemonicSpans(s, spans);
-  addTokenRunSpans(s, spans, keepDigests);
-  if (spans.length === 0) return s;
+/**
+ * Replace each span of `s` with `marker`; overlapping or touching spans are one
+ * secret. `report` receives the text each marker replaced. `spans` must not be empty.
+ */
+function applySpans(s: string, spans: Span[], marker: string, report?: (secret: string) => void): string {
   spans.sort((x, y) => x.start - y.start);
   let out = "";
   let last = 0;
   let start = spans[0].start;
   let end = spans[0].end;
   const flush = () => {
-    out += s.slice(last, start) + REDACTED_VALUE;
-    report(s.slice(start, end));
+    out += s.slice(last, start) + marker;
+    report?.(s.slice(start, end));
     last = end;
   };
   for (let k = 1; k < spans.length; k += 1) {
@@ -541,6 +892,18 @@ function scrubShapes(s: string, report: (secret: string) => void, keepDigests = 
   }
   flush();
   return out + s.slice(last);
+}
+
+/** Replace every credential-shaped substring of `s`, reporting each secret removed. */
+function scrubShapes(s: string, report: (secret: string) => void, keepDigests = false): string {
+  if (s.length === 0) return s;
+  const spans: Span[] = [];
+  addPemSpans(s, spans);
+  addUserinfoSpans(s, spans);
+  addSecretLabelSpans(s, spans);
+  addMnemonicSpans(s, spans);
+  addTokenRunSpans(s, spans, keepDigests);
+  return spans.length === 0 ? s : applySpans(s, spans, REDACTED_VALUE, report);
 }
 
 // ── The deep walk ─────────────────────────────────────────────────────────
