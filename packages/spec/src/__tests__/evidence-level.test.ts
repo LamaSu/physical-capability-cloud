@@ -3,6 +3,7 @@ import {
   DEVICE_REPORTED_EVENT_TYPES,
   EVIDENCE_LEVELS,
   EXECUTION_EVENT_TYPES,
+  NON_EXECUTOR_EVENT_TYPES,
   EvidenceLevelInputError,
   GATEWAY_STAMPED_DEVICE_ID,
   INSPECTION_EVENT_TYPES,
@@ -1446,5 +1447,43 @@ describe("E5 round 2 (lane): a second verdict-looking key beside a valid pinned 
   it("a passing cv that also claims pass:false derives completion-and-failed-inspection", () => {
     const bundles = [{ events: [completion, cv({ passed: true, pass: false })] }] as never;
     expect(deriveContradictions(bundles)).toEqual(["completion-and-failed-inspection"]);
+  });
+});
+
+describe("E5b (cross-family): a party that took or finished the work is an executor, courier legs included", () => {
+  it("a courier delivery and an inspection signed in the same unassigned domain stay device_reported (the reviewer's reproduction)", () => {
+    expect(level([bundle([ev("courier_delivery_confirmed", "courier-1"), ev("instrument_result", "reader-1", { pass: true })], OP_B)], ASSIGNED_A)).toBe("device_reported");
+  });
+
+  it("a courier pickup in one bundle makes that domain's inspection in another bundle non-independent", () => {
+    const pickup = bundle([ev("courier_pickup_confirmed", "courier-1")], OP_B);
+    expect(level([executorBundle(), pickup, bundle([inspectPass()], OP_B)], ASSIGNED_A)).toBe("device_reported");
+  });
+
+  it("a genuinely independent domain still reaches inspected_output beside a courier leg", () => {
+    const courier = bundle([ev("courier_delivery_confirmed", "courier-1")], OP_B);
+    expect(level([executorBundle(), courier, bundle([inspectPass()], OP_C)], ASSIGNED_A)).toBe("inspected_output");
+  });
+});
+
+describe("executor identification: every vocabulary member is ruled on", () => {
+  it("EXECUTION_EVENT_TYPES and NON_EXECUTOR_EVENT_TYPES partition the vocabulary", () => {
+    const ruled = [...EXECUTION_EVENT_TYPES, ...NON_EXECUTOR_EVENT_TYPES];
+    expect(new Set(ruled).size).toBe(ruled.length);
+    expect([...ruled].sort()).toEqual([...EVIDENCE_EVENT_TYPES].sort());
+  });
+
+  it("every submitted and device-reported type identifies an executor; no inspection does", () => {
+    for (const t of [...SUBMITTED_EVENT_TYPES, ...DEVICE_REPORTED_EVENT_TYPES]) expect(EXECUTION_EVENT_TYPES as readonly string[], t).toContain(t);
+    for (const t of INSPECTION_EVENT_TYPES) expect(NON_EXECUTOR_EVENT_TYPES as readonly string[], t).toContain(t);
+  });
+
+  it("no non-executor record makes its domain an executor", () => {
+    const inspections = new Set<string>(INSPECTION_EVENT_TYPES);
+    for (const type of NON_EXECUTOR_EVENT_TYPES) {
+      if (inspections.has(type)) continue;
+      const observer = bundle([ev(type, "observer-c")], OP_C);
+      expect(level([executorBundle(), observer, bundle([inspectPass()], OP_C)], ASSIGNED_A), type).toBe("inspected_output");
+    }
   });
 });

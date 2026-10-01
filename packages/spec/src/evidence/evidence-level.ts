@@ -215,6 +215,14 @@ export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
  * Event types that show a party is executing the job. A bundle that holds any
  * of them puts its trust domain in the executor set, so an inspection signed in
  * that domain is that party reporting on its own output.
+ *
+ * Every submitted and device-reported type is here: a party that took or
+ * finished the work (a courier leg too) is executing it (cross-family E5b). So
+ * are the executing party's own lifecycle records and logs. Telemetry,
+ * captures, custody, integrity and device-lifecycle records are NOT: an
+ * independent observer (a sensor kit, a receiving lab) may emit them
+ * (`NON_EXECUTOR_EVENT_TYPES`). Every vocabulary member is in exactly one of
+ * the two lists, and a test fails if a new type is not ruled on.
  */
 export const EXECUTION_EVENT_TYPES = [
   "gcode_received",
@@ -230,12 +238,65 @@ export const EXECUTION_EVENT_TYPES = [
   "batch_session_completed",
   "digital_task_started",
   "digital_task_completed",
+  "courier_pickup_confirmed",
+  "courier_delivery_confirmed",
+  "workflow_step_completed",
+  "printer_log_captured",
+  "printer_job_verified",
+  "process_log_summary",
+  "log_hash_chain_entry",
+] as const satisfies readonly EvidenceEventType[];
+
+/**
+ * Event types that do not identify an executing party: inspections, and the
+ * telemetry, captures, custody, integrity and device-lifecycle records an
+ * independent observer may also emit.
+ */
+export const NON_EXECUTOR_EVENT_TYPES = [
+  "cv_inspection_result",
+  "photo_comparison_result",
+  "instrument_result",
+  "batch_sample_result",
+  "power_profile_sample",
+  "power_profile_summary",
+  "vibration_signature",
+  "acoustic_signature",
+  "temperature_log",
+  "camera_snapshot",
+  "tee_attestation",
+  "custody_sealed",
+  "custody_handoff_initiated",
+  "custody_handoff_confirmed",
+  "sensor_data_summary",
+  "sensor_anomaly_detected",
+  "evidence_committed",
+  "evidence_encrypted",
+  "zk_proof_generated",
+  "zk_proof_verified",
+  "device_birth",
+  "device_death",
+  "device_heartbeat",
+  "calibration_record",
+  "photo_captured",
+  "photo_reference_set",
+  "photo_anti_spoof_check",
+  "touchstone_dispatched",
+  "touchstone_verified",
+  "capture_class_declared",
+  "capture_nonce_issued",
+  "capture_submitted",
+  "capture_signature_verified",
+  "capture_liveness_result",
+  "capture_multi_sensor_fusion",
+  "capture_anchor_committed",
 ] as const satisfies readonly EvidenceEventType[];
 
 const SUBMITTED = new Set<string>(SUBMITTED_EVENT_TYPES);
 const DEVICE_REPORTED = new Set<string>(DEVICE_REPORTED_EVENT_TYPES);
 const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
-const EXECUTION = new Set<string>(EXECUTION_EVENT_TYPES);
+// The union makes "took or finished the work identifies an executor" hold even if
+// a list above is edited carelessly; a test also keeps EXECUTION_EVENT_TYPES complete.
+const EXECUTION = new Set<string>([...EXECUTION_EVENT_TYPES, ...SUBMITTED_EVENT_TYPES, ...DEVICE_REPORTED_EVENT_TYPES]);
 
 /** Position in EVIDENCE_LEVELS; higher is stronger. */
 export function evidenceLevelRank(level: EvidenceLevel): number {
