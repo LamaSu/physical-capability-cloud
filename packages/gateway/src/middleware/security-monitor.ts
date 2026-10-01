@@ -8,6 +8,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { getClientIp } from "./client-ip.js";
 
 // ---------------------------------------------------------------------------
 // Attack Signatures
@@ -171,7 +172,7 @@ function scanRequest(req: FastifyRequest): { type: AttackType; source: string; v
   }
 
   // Scan select headers
-  for (const h of ["referer", "user-agent", "x-forwarded-for", "cookie"]) {
+  for (const h of ["referer", "user-agent", "x-forwarded-for", "x-original-forwarded-for", "cookie"]) {
     const val = req.headers[h];
     if (val && typeof val === "string") {
       const attack = detectAttack(val);
@@ -251,7 +252,7 @@ setInterval(() => {
 
 function buildFingerprint(req: FastifyRequest) {
   return {
-    ip: req.ip,
+    ip: getClientIp(req),
     method: req.method,
     path: req.url.split("?")[0],
     userAgent: req.headers["user-agent"] ?? "unknown",
@@ -311,7 +312,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         honeypotPath: path,
         severity: "high",
       });
-      app.log.warn({ msg: "HONEYPOT", ip: req.ip, path, ua: req.headers["user-agent"] });
+      app.log.warn({ msg: "HONEYPOT", ip: fp.ip, path, ua: req.headers["user-agent"] });
       // Add random delay (50-200ms) to match real 404 timing — prevents timing side-channel
       await new Promise((r) => setTimeout(r, 50 + Math.random() * 150));
       return reply.status(404).send({ error: "not_found" });
@@ -336,7 +337,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         attackPayload: req.url.slice(0, 500),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: req.ip, source: "url", url: req.url });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: fp.ip, source: "url", url: req.url });
       // BLOCK known attacks — detection-only is insufficient for tonight
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
@@ -348,20 +349,20 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         const attack = detectAttack(str);
         if (attack) {
           emitSecurityEvent("attack_detected", { ...fp, attackType: attack, attackSource: "query", attackPayload: str.slice(0, 500), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "query", url: req.url });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: fp.ip, source: "query", url: req.url });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
     }
 
     // Scan headers
-    for (const h of ["referer", "user-agent", "x-forwarded-for", "cookie"]) {
+    for (const h of ["referer", "user-agent", "x-forwarded-for", "x-original-forwarded-for", "cookie"]) {
       const val = req.headers[h];
       if (val && typeof val === "string") {
         const attack = detectAttack(val);
         if (attack) {
           emitSecurityEvent("attack_detected", { ...fp, attackType: attack, attackSource: `header:${h}`, attackPayload: val.slice(0, 300), severity: "critical" });
-          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: `header:${h}` });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: fp.ip, source: `header:${h}` });
           return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
         }
       }
@@ -378,12 +379,12 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         severity: bot.confidence >= 0.8 ? "high" : "medium",
       });
       if (bot.confidence >= 0.7) {
-        app.log.warn({ msg: "BOT_DETECTED", type: bot.type, ip: req.ip, reason: bot.reason });
+        app.log.warn({ msg: "BOT_DETECTED", type: bot.type, ip: fp.ip, reason: bot.reason });
       }
     }
 
     // 3. Rate tracking
-    const rate = trackRate(req.ip);
+    const rate = trackRate(fp.ip);
     if (rate.overLimit && rate.count === RATE_LIMIT + 1) {
       emitSecurityEvent("rate_limit_exceeded", {
         ...fp,
@@ -391,7 +392,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         windowMs: RATE_WINDOW_MS,
         severity: "medium",
       });
-      app.log.warn({ msg: "RATE_LIMIT", ip: req.ip, count: rate.count });
+      app.log.warn({ msg: "RATE_LIMIT", ip: fp.ip, count: rate.count });
     }
   });
 
@@ -416,7 +417,7 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         attackPayload: scanTarget.slice(0, 500),
         severity: "critical",
       });
-      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "body", url: req.url });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: fp.ip, source: "body", url: req.url });
       return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
   });
