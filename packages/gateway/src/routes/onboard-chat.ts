@@ -1186,6 +1186,12 @@ function processToolResult(
 
 // ── Held actions (WP-D R2) ──────────────────────────────────────────
 
+/** The identity a held credential-minting call was shown binding to (astra 91b F2). */
+interface HeldBinding {
+  operatorId: string;
+  shown: string;
+}
+
 /**
  * The real arguments of held actions, in this process's memory only, keyed by
  * action id. They may carry a secret (a password argument), so they are never
@@ -1193,12 +1199,6 @@ function processToolResult(
  * if a stale copy of the envelope is written back; after a restart every held
  * action is refused and the user asks again.
  */
-/** The identity a held credential-minting call was shown binding to (astra 91b F2). */
-interface HeldBinding {
-  operatorId: string;
-  shown: string;
-}
-
 interface HeldArgsEntry {
   conversationId: string;
   owner: string;
