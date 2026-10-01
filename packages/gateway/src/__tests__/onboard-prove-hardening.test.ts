@@ -630,10 +630,10 @@ describe("owner routes fail closed and the review record cannot be forged or rew
     const record = JSON.stringify({ evidenceTierClaim: 2, evidenceDigest: "sha256:" + "f".repeat(64) });
     // Both were accepted (200) at 2c3064b7: astra's two reproductions.
     const variants: Array<[string, string]> = [
-      ["a Lisu PA for the P", `ꓑROOF SUBMITTED: ${record}`],
-      ["a variation selector split at the 1,024-unit scan boundary", "​".repeat(1023) + `\u{E0100}PROOF SUBMITTED: ${record}`],
-      ["a Lisu colon", `PROOF SUBMITTEDꓽ ${record}`],
-      ["a non-Latin letter the look-alike table does not list", `PRЖOF SUBMITTED: ${record}`],
+      ["a Lisu PA for the P", `\u{A4D1}ROOF SUBMITTED: ${record}`],
+      ["a variation selector split at the 1,024-unit scan boundary", "\u{200B}".repeat(1023) + `\u{E0100}PROOF SUBMITTED: ${record}`],
+      ["a Lisu colon", `PROOF SUBMITTED\u{A4FD} ${record}`],
+      ["a non-Latin letter the look-alike table does not list", `PR\u{416}OF SUBMITTED: ${record}`],
     ];
     const regId = await register(app);
     for (const [label, description] of variants) {

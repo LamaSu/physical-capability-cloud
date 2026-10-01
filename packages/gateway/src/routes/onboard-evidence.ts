@@ -657,21 +657,28 @@ export function evidenceRecordDigest(record: OnboardEvidenceRecordV1): string {
 export const PROOF_RECORD_PREFIX = "PROOF SUBMITTED: ";
 
 // ---------------------------------------------------------------------------
-// Reserved description prefixes (WP-B round 5, L1)
+// Reserved description prefixes (WP-B round 5, L1; astra pack 88, Q2)
 // ---------------------------------------------------------------------------
 
 /** The reserved prefixes as skeletons: lower-case, with every space removed. */
 const RESERVED_SKELETONS = ["proofsubmitted:", "proved:"] as const;
-/** How much of a description the reserved-prefix check reads. */
-const RESERVED_SCAN_CHARS = 1024;
+/**
+ * How much of a description the reserved-prefix check reads, in code points.
+ * Code points, not UTF-16 units: a cut between the two units of a surrogate
+ * pair strands a lone surrogate, and astra pack 88 (Q2) hid a reserved prefix
+ * behind exactly that (a variation selector split at the boundary).
+ */
+const RESERVED_SCAN_CODE_POINTS = 1024;
 
 /**
  * What a reader does not see as part of a word: format characters (Cf: zero
  * width, bidi controls, ...), every separator (Z*), controls (Cc), combining
- * marks (M*), default-ignorable code points (the combining grapheme joiner,
- * variation selectors, Hangul fillers, ...) and the blank braille pattern.
+ * marks (M*), lone surrogates (Cs: nothing a reader can tell from a gap or a
+ * replacement box), default-ignorable code points (the combining grapheme
+ * joiner, variation selectors including U+E0100..U+E01EF, Hangul fillers, ...)
+ * and the blank braille pattern.
  */
-const INVISIBLE_RE = /[\p{Cf}\p{Z}\p{Cc}\p{M}\p{Default_Ignorable_Code_Point}⠀]/gu;
+const INVISIBLE_RE = /[\p{Cf}\p{Z}\p{Cc}\p{M}\p{Cs}\p{Default_Ignorable_Code_Point}\u{2800}]/gu;
 
 /**
  * Look-alikes that NFKC does not fold, for the letters of the reserved words
@@ -697,8 +704,34 @@ const CONFUSABLE_GROUPS: ReadonlyArray<readonly [string, string]> = [
   ["v", "ѵνᴠꮩ∨"],
   [":", "։׃∶꞉ː፡᛬ःঃઃఃಃഃඃး"],
 ];
+/**
+ * Lisu (U+A4D0..U+A4FF), astra pack 88 Q2. The Fraser alphabet draws many of
+ * its letters as Latin capitals, so each letter of the reserved words has a
+ * Lisu twin (checked against the glyphs, not against the letter names), and
+ * the tone letter U+A4FD is drawn as a colon. Escapes, so a reviewer can see
+ * which code point is meant. The block's other letters are mirrored or
+ * rotated forms (U+A4D2 PHA, U+A4D5 THA, ...) or look like letters the
+ * reserved words do not use; as non-ASCII letters they are caught by the
+ * wildcard rule in isReservedDescription.
+ */
+const LISU_GROUPS: ReadonlyArray<readonly [string, string]> = [
+  ["p", "\u{A4D1}"], // PA
+  ["r", "\u{A4E3}"], // ZHA
+  ["o", "\u{A4F3}"], // O
+  ["f", "\u{A4DD}"], // TSA
+  ["s", "\u{A4E2}"], // SA
+  ["u", "\u{A4F4}"], // U
+  ["b", "\u{A4D0}"], // BA
+  ["m", "\u{A4DF}"], // MA
+  ["i", "\u{A4F2}"], // I
+  ["t", "\u{A4D4}"], // TA
+  ["e", "\u{A4F0}"], // E
+  ["d", "\u{A4D3}"], // DA
+  ["v", "\u{A4E6}"], // HA
+  [":", "\u{A4FD}"], // TONE MYA JEU
+];
 const CONFUSABLES: ReadonlyMap<string, string> = new Map(
-  CONFUSABLE_GROUPS.flatMap(([ascii, lookalikes]) => Array.from(lookalikes, (ch) => [ch, ascii] as const)),
+  [...CONFUSABLE_GROUPS, ...LISU_GROUPS].flatMap(([ascii, lookalikes]) => Array.from(lookalikes, (ch) => [ch, ascii] as const)),
 );
 
 /**
@@ -713,21 +746,81 @@ function readingSkeleton(text: string): string {
 }
 
 /**
+ * The first RESERVED_SCAN_CODE_POINTS code points of `text`. A surrogate pair
+ * is never cut, so the window never ends in a stranded half of a character.
+ */
+function scanWindow(text: string): string {
+  if (text.length <= RESERVED_SCAN_CODE_POINTS) return text; // at most one code point per UTF-16 unit
+  let end = 0;
+  for (let n = 0; n < RESERVED_SCAN_CODE_POINTS && end < text.length; n++) {
+    end += (text.codePointAt(end) ?? 0) > 0xffff ? 2 : 1;
+  }
+  return text.slice(0, end);
+}
+
+const isAsciiLetter = (ch: string): boolean => ch >= "a" && ch <= "z";
+const FOREIGN_LETTER_RE = /^\p{L}$/u;
+/** A letter outside ASCII that is still there after folding, so the look-alike table does not know it. */
+const isForeignLetter = (ch: string): boolean => ch > "\u007f" && FOREIGN_LETTER_RE.test(ch);
+
+/** How many letters each reserved skeleton has (its colon is not one). */
+const RESERVED_LETTERS: ReadonlyMap<string, number> = new Map(
+  RESERVED_SKELETONS.map((reserved) => [reserved, reserved.replace(/[^a-z]/g, "").length] as const),
+);
+
+/**
+ * Does `chars` (a skeleton, one code point per element) read as the start of
+ * `reserved`?
+ *
+ * It is compared position by position. A character matches when it equals the
+ * reserved one, or, where the reserved one is a letter, when it is a letter
+ * outside ASCII that the look-alike table did not fold: a wildcard, because no
+ * table lists every look-alike (astra pack 88, Q2). A full-length skeleton
+ * must also match at least half of the reserved letters literally, so text in
+ * another script never matches. A skeleton shorter than `reserved` (the scan
+ * was cut off) cannot show its literal letters yet, so the positions it has
+ * only have to be consistent.
+ */
+function readsAsReserved(chars: readonly string[], reserved: string): boolean {
+  const whole = chars.length >= reserved.length;
+  const seen = Math.min(chars.length, reserved.length);
+  let literal = 0;
+  for (let i = 0; i < seen; i++) {
+    const ch = chars[i]!;
+    const want = reserved[i]!;
+    if (ch === want) {
+      if (isAsciiLetter(want)) literal++;
+    } else if (!(isAsciiLetter(want) && isForeignLetter(ch))) {
+      return false;
+    }
+  }
+  return !whole || literal * 2 >= RESERVED_LETTERS.get(reserved)!;
+}
+
+/**
  * Descriptions that read like a server-written review record ("PROOF
  * SUBMITTED: ..." or the pre-review "PROVED: ..."), including invisible,
  * spaced-out and look-alike variants. Operators may not write these
  * (/register, PATCH, the onboarding wizard), so an admin never sees an
  * operator's text dressed up as a server record.
+ *
+ * This is a display guard, not the trust boundary: no transition reads the
+ * description, they take the evidence from the audit log. And it is not a
+ * complete impersonation check: Unicode has more look-alikes than any table
+ * lists, so a non-ASCII letter the table did not fold stands for any letter
+ * (readsAsReserved), as long as at least half of the reserved letters are
+ * really there. The colon is matched through the table only.
  */
 export function isReservedDescription(description: unknown): boolean {
   if (typeof description !== "string") return false;
-  const scanned = description.slice(0, RESERVED_SCAN_CHARS);
-  const skeleton = readingSkeleton(scanned);
-  if (RESERVED_SKELETONS.some((reserved) => skeleton.startsWith(reserved))) return true;
+  const scanned = scanWindow(description);
+  const chars = Array.from(readingSkeleton(scanned));
   // The scanned part can end before enough visible characters to rule a
   // reserved prefix out (e.g. after a long run of invisible characters):
-  // anything that could still turn into one is refused.
-  return description.length > scanned.length && RESERVED_SKELETONS.some((reserved) => reserved.startsWith(skeleton));
+  // when more text follows it, anything that could still turn into one is
+  // refused.
+  const cutOff = scanned.length < description.length;
+  return RESERVED_SKELETONS.some((reserved) => (chars.length >= reserved.length || cutOff) && readsAsReserved(chars, reserved));
 }
 
 // ---------------------------------------------------------------------------

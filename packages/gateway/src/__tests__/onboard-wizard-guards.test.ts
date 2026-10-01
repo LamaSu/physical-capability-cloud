@@ -126,8 +126,8 @@ describe("wizard machine-onboarding completion gets /register's guards", () => {
 
   it("astra pack 88 Q2: a Lisu-letter variant and a boundary-split variant of the record through the wizard are refused too", async () => {
     const variants = [
-      `ꓑROOF SUBMITTED: ${JSON.stringify({ evidenceDigest: FORGED_DIGEST })}`,
-      "​".repeat(1023) + FORGED_RECORD.replace("PROOF", "\u{E0100}PROOF"),
+      `\u{A4D1}ROOF SUBMITTED: ${JSON.stringify({ evidenceDigest: FORGED_DIGEST })}`,
+      "\u{200B}".repeat(1023) + FORGED_RECORD.replace("PROOF", "\u{E0100}PROOF"),
     ];
     for (const description of variants) {
       const { res, sessionStatus } = await completeWizard(app, OWNER, { description });
