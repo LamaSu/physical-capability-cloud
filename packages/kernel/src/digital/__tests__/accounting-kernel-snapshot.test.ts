@@ -129,3 +129,144 @@ describe("AccountingReconcileKernel — hashes and executes the same snapshot (N
     await expect(run({ ledgerData: { entries: [{ amount: Number.NaN }] } })).rejects.toMatchObject({ name: "NonCanonicalValueError" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// N15 round 5 (cross-family review A05c, finding F1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The snapshot inherited Object.prototype, and execute() and every step read it with
+ * ordinary property reads, so a polluted prototype fed the workflow members that were
+ * never hashed: an inherited `entries` became the ledger of an empty ledger, an
+ * inherited `invoiceData` became invoices the caller never sent. The snapshot is
+ * prototype-less now, so a key the input does not own reads as undefined.
+ */
+
+/** Object.prototype's own names when this file loaded, before any test could pollute it. */
+const OBJECT_PROTOTYPE_AT_LOAD = Object.getOwnPropertyNames(Object.prototype).sort();
+
+/**
+ * Install `members` on Object.prototype while `fn` settles and always take them off again, even when
+ * `fn` throws, so a failing assertion cannot leak a pollution into another test. The members are
+ * non-enumerable so nothing that iterates keys while the awaits are pending can trip over them.
+ * Assert only after this returns.
+ */
+async function withPollutedPrototype<T>(members: Record<PropertyKey, unknown>, fn: () => Promise<T>): Promise<T> {
+  const target = Object.prototype as unknown as Record<PropertyKey, unknown>;
+  const names = Reflect.ownKeys(members);
+  try {
+    for (const name of names) {
+      Object.defineProperty(Object.prototype, name, { value: members[name], writable: true, enumerable: false, configurable: true });
+    }
+    return await fn();
+  } finally {
+    for (const name of names) delete target[name];
+  }
+}
+
+type Run = Awaited<ReturnType<typeof run>>;
+const hashes = (r: Run) => ({
+  inputs: r.stepTraces.map((t) => t.inputHash),
+  outputs: r.stepTraces.map((t) => t.outputHash),
+  committed: (r.evidenceBundle.events[0].payload as { inputHash: string }).inputHash,
+});
+
+describe("AccountingReconcileKernel -- a polluted Object.prototype feeds no step anything that was not hashed (N15 round 5, A05c F1)", () => {
+  const POISON_ENTRIES = [{ date: "2026-01-01", description: "from the prototype", amount: 999, account: "cash" }];
+
+  it("A05c F1: execute(): the verdict's repro: an inherited `entries` does not feed an empty ledger", async () => {
+    const clean = await run({ ledgerData: {} });
+    const polluted = await withPollutedPrototype({ entries: POISON_ENTRIES }, () => run({ ledgerData: {} }));
+    expect(polluted.report.unmatchedLedgerCount).toBe(0); // faac0003: 1
+    expect(polluted.report).toEqual(clean.report);
+    expect(hashes(polluted)).toEqual(hashes(clean));
+    expect(hashes(polluted).committed).toBe(await sha256(canonicalize({ ledgerData: {} })));
+  });
+
+  it("A05c F1: execute(): an inherited `invoiceData` does not stand in for invoices the caller explicitly left out", async () => {
+    // `invoiceData: undefined` is omitted from the snapshot, like a member that is not there. Reading it back
+    // from an ordinary snapshot would find the inherited one: executed, but never hashed.
+    const clean = await run({ ledgerData: SAFE_LEDGER, invoiceData: undefined });
+    const polluted = await withPollutedPrototype({ invoiceData: DANGER_INVOICES }, () =>
+      run({ ledgerData: SAFE_LEDGER, invoiceData: undefined }),
+    );
+    expect(polluted.report).toEqual(clean.report); // faac0003 reconciled the inherited invoice
+    expect(hashes(polluted)).toEqual(hashes(clean));
+  });
+
+  it("whatever execute() reads from its own params is exactly what the input commitment covers, polluted prototype or not", async () => {
+    // The params object is the caller's: a key it does not own is read through its prototype, and the value
+    // found is part of the snapshot, so it is hashed. That is consistent (what ran is what was hashed).
+    const polluted = await withPollutedPrototype({ invoiceData: DANGER_INVOICES }, () => run({ ledgerData: SAFE_LEDGER }));
+    expect(hashes(polluted).committed).toBe(await sha256(canonicalize({ ledgerData: SAFE_LEDGER, invoiceData: DANGER_INVOICES })));
+    expect(polluted.report.unmatchedInvoiceCount).toBe(1); // inv-9 really was reconciled, and really was committed
+  });
+
+  it("A05c F1: execute(): an inherited `invoices` does not complete an invoiceData that carries none", async () => {
+    const clean = await run({ ledgerData: SAFE_LEDGER, invoiceData: {} });
+    const polluted = await withPollutedPrototype({ invoices: DANGER_INVOICES.invoices }, () =>
+      run({ ledgerData: SAFE_LEDGER, invoiceData: {} }),
+    );
+    expect(polluted.report).toEqual(clean.report);
+    expect(hashes(polluted)).toEqual(hashes(clean));
+  });
+
+  it("A05c F1: execute(): inherited members do not fill in what a ledger entry or the ledger leaves out", async () => {
+    const ledger = { entries: [{ date: "2026-01-01", description: "rent", amount: 5, account: "cash" }] };
+    const clean = await run({ ledgerData: ledger });
+    const polluted = await withPollutedPrototype({ reference: "R-1", credit: 3, periodStart: "1999-01-01" }, () =>
+      run({ ledgerData: ledger }),
+    );
+    expect(polluted.report).toEqual(clean.report);
+    expect(hashes(polluted)).toEqual(hashes(clean));
+  });
+
+  it("A05c F1: execute(): an inherited coercion cannot turn a nested object into text that was never hashed", async () => {
+    // The ledger steps coerce entry fields with String(). On an ordinary snapshot object that consults
+    // Object.prototype, so a polluted @@toPrimitive handed the kernel a description nobody hashed. A snapshot
+    // object has no prototype to consult: coercing one is a TypeError (a deliberate consequence of the
+    // prototype-less snapshot, where an ordinary object used to read "[object Object]").
+    const ledger = { entries: [{ date: "2026-01-01", description: { not: "text" }, amount: 5, account: "cash" }] };
+    const outcome = await withPollutedPrototype({ [Symbol.toPrimitive]: () => "FROM-THE-PROTOTYPE" }, () =>
+      run({ ledgerData: ledger }).then(
+        (result) => ({ ok: true as const, summary: JSON.stringify(result.stepTraces) }),
+        (error: unknown) => ({ ok: false as const, error }),
+      ),
+    );
+    expect(outcome.ok).toBe(false); // faac0003 completed, with the inherited text as the entry's description
+    if (!outcome.ok) expect(outcome.error).toBeInstanceOf(TypeError);
+    await expect(run({ ledgerData: ledger })).rejects.toBeInstanceOf(TypeError); // and without any pollution
+  });
+
+  it("A05c F1: runStep(): the step logic reads no inherited member of the snapshot it was handed", async () => {
+    const kernel = new AccountingReconcileKernel("kernel-snapshot-test");
+    const source: EvidenceSource = { deviceId: "d", deviceType: "digital_agent", kernelId: "k" };
+    const runStep = (kernel as unknown as {
+      runStep(p: {
+        stepId: string;
+        source: EvidenceSource;
+        input: unknown;
+        execute: (input: Record<string, unknown>) => unknown;
+      }): Promise<{ output: unknown; trace: { inputHash: string } }>;
+    }).runStep.bind(kernel);
+    const step = await withPollutedPrototype({ entries: POISON_ENTRIES, command: "danger" }, () =>
+      runStep({
+        stepId: "probe",
+        source,
+        input: {},
+        execute: (input) => ({
+          sawEntries: input.entries ?? "none",
+          sawCommand: input.command ?? "none",
+          keys: Object.keys(input),
+          has: "entries" in input,
+        }),
+      }),
+    );
+    expect(step.output).toEqual({ sawEntries: "none", sawCommand: "none", keys: [], has: false }); // faac0003: the inherited values
+    expect(step.trace.inputHash).toBe(await sha256(canonicalize({})));
+  });
+
+  it("leaves Object.prototype exactly as it found it (no test above leaks a pollution)", () => {
+    expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(OBJECT_PROTOTYPE_AT_LOAD);
+  });
+});
