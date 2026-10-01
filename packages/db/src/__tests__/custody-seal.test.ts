@@ -228,6 +228,16 @@ describe("N1 custody seal: seal and unseal", () => {
     expect(Buffer.from(parts[5], "base64url").toString("utf8")).not.toBe(key);
   });
 
+  it("names the KEK that sealed it: the blob carries that KEK's id, whatever it is", () => {
+    const key = randKeyHex();
+    for (const id of ["k1", "rot_2-A", "x", "k".repeat(32)]) {
+      const other = new CustodyKek(id, randomBytes(32));
+      const blob = sealCustodialKey(key, ctx, other);
+      expect(blob.split(":")[2]).toBe(id);
+      expect(unsealCustodialKey(blob, ctx, other)).toBe(key);
+    }
+  });
+
   it("matches the spec independently: AAD is api_keys:<rowId>:<lowercased address>", () => {
     const key = randKeyHex();
     const mixedAddress = `0x${randomBytes(20).toString("hex").toUpperCase()}`;
