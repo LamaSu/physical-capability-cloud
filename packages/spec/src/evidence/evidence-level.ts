@@ -1,5 +1,5 @@
 /**
- * Evidence levels (technical pack §3, must-close 5): how strongly an event
+ * Evidence levels (technical pack §3, must-close 5): how strongly evidence
  * shows that the work was done. Weakest first:
  *
  *   submitted         the device TOOK the work: a spooler queued the job, an
@@ -7,10 +7,12 @@
  *                     picked up the parcel. Proves a request was made, never
  *                     that the work happened.
  *   device_reported   the device that did the work reports it finished: its
- *                     own completion record or its own measurement result.
- *                     Proves the device said so.
- *   inspected_output  the output itself was observed or measured by something
- *                     other than the device that produced it.
+ *                     own completion record, or a result record that cannot be
+ *                     shown to come from an independent party. Proves the
+ *                     device said so.
+ *   inspected_output  the output itself was observed or measured, with a valid
+ *                     verdict, by a party in a different AUTHENTICATED trust
+ *                     domain from every executor of the job.
  *
  * The three are never interchangeable. pcc-node reports a device's acceptance
  * as `execution_progress` at level `submitted`, never as `execution_completed`
@@ -25,14 +27,64 @@
  * public rule for contradictions: the oracle signs a reject only for a
  * contradiction it derives this way, never for a producer's say-so (J4).
  *
- * Classify only authenticated events: a bundle whose signature verified and
- * whose digest opens to its events for this job and kernel
- * (`verifyEvidenceSubjectBinding`). Fabricated events (`isFabricated`) prove no
- * level, and an event without a device attribution proves no level. The
- * gateway's own stamp (`GATEWAY_STAMPED_DEVICE_ID`) is not a device
- * attribution: those events are the gateway's record of a completion call, and
- * the caller chose their types. A read model that shows levels for recorded,
- * unauthenticated events gets the same answer.
+ * THE CONTRACT. Nothing inside an event can vouch for itself, so this module
+ * trusts only what the caller authenticated and refuses to guess the rest.
+ *
+ * 1. Authenticated bundles, ONE settlement unit. Callers pass
+ *    `AuthenticatedBundle`s: bundles whose signature verified and whose digest
+ *    opens to their events for this job and kernel
+ *    (`verifyEvidenceSubjectBinding`), with `events` exactly as verified.
+ *    Bundle boundaries are part of the input because fabrication (5) is a
+ *    property of a bundle. SCOPE: one call covers the bundles of ONE
+ *    settlement unit (one job step), the unit EvidenceBlockV2 commits ONE
+ *    bundle for. Evidence-lane ruling (E5/F5): no PCC flow retries a job under
+ *    the same job id (pcc-node has no retry, the gateway has none, a failed
+ *    unit is refunded and a new attempt is a new job). So within a unit a
+ *    completion plus a failure IS a contradiction, and refusing it is
+ *    fail-closed. This module does not correlate attempts, steps or devices:
+ *    never pass the bundles of different attempts, steps or jobs together, or a
+ *    failed first attempt will contradict a successful later one.
+ *
+ * 2. Trust domains, never declared device ids. Independence is judged between
+ *    AUTHENTICATED trust domains: the operator principal
+ *    (`eip155:<chainId>:0x<40 lowercase hex>`, the pcc.evidence.principal-id.v1
+ *    operator form) that owns the bundle's VERIFIED signer in the pinned
+ *    registry (`AuthenticatedBundle.trustDomain`). `source.deviceId` is a
+ *    string the signer chose: one device can be spelled two ways, a signer can
+ *    invent a second id or name a decoy. It is never compared for independence;
+ *    it only attributes an event to some device (6). A `trustDomain` or an
+ *    `executorTrustDomains` entry that is present but not in the exact operator
+ *    form throws `EvidenceLevelInputError`, and so does `bundles` not being an
+ *    array or a bundle whose `events` is not an array.
+ *
+ * 3. Authoritative executors. The executor set E is `context.executorTrustDomains`
+ *    (the operators the job was ASSIGNED to, from the accepted job or deal,
+ *    never from events) plus the trust domain of every bundle, fabricated or
+ *    not, that holds ANY `EXECUTION_EVENT_TYPES` event. If such a bundle has no
+ *    trust domain, E is UNKNOWN. An inspection is `inspected_output` only if
+ *    ALL of these hold: `executorTrustDomains` is non-empty; E is not unknown;
+ *    the inspection's bundle has a trust domain; that domain is not in E.
+ *    Otherwise an inspection with a valid verdict is `device_reported`.
+ *
+ * 4. Verdict pinning. An inspection proves a level only if its payload carries
+ *    a valid verdict. `inspectionVerdict` reads ONE pinned field per inspection
+ *    type, in a closed value domain, and answers pass, fail, none or
+ *    malformed. Only pass and fail prove a level (none and malformed prove NO
+ *    level, not even device_reported). In contradictions a fail or a malformed
+ *    verdict counts as a failed inspection (fail closed) and none does not.
+ *
+ * 5. Fabrication is bundle-wide. One fabricated event (`isFabricated`) makes the
+ *    whole bundle non-authentic (`bundleHasFabricatedEvents`): it proves no
+ *    level and `deriveContradictions` ignores it. Its trust domain (or UNKNOWN)
+ *    still joins E when it carries an execution event, so independence fails
+ *    closed.
+ *
+ * 6. Attribution. An event with no non-empty string `source.deviceId` proves no
+ *    level. The gateway's own stamp (`GATEWAY_STAMPED_DEVICE_ID`, compared after
+ *    an ASCII trim and ASCII lowercase) is not a device attribution: those
+ *    events are the gateway's record of a completion call, and the caller chose
+ *    their types. A read model that shows levels for recorded, unauthenticated
+ *    events gets the same answer.
  *
  * Every member of EVIDENCE_EVENT_TYPES is ruled on below, including the ones
  * that prove no outcome level, so a new event type cannot join the vocabulary
@@ -40,7 +92,7 @@
  */
 
 import type { EvidenceEvent, EvidenceEventType } from "../types/evidence.js";
-import { isFabricated } from "./is-fabricated.js";
+import { bundleHasFabricatedEvents } from "./is-fabricated.js";
 
 export const EVIDENCE_LEVELS = ["submitted", "device_reported", "inspected_output"] as const;
 
@@ -64,11 +116,12 @@ export const DEVICE_REPORTED_EVENT_TYPES = [
 ] as const satisfies readonly EvidenceEventType[];
 
 /**
- * An observation or measurement of the output. It is inspected_output only
- * when the events name the devices that executed the job and the observing
- * device is not one of them. A device measuring its own output is reporting,
- * and so is an observation whose independence cannot be shown (no executing
- * device in the events): both are device_reported.
+ * An observation or measurement of the output. It proves a level only when its
+ * payload carries a valid verdict (`inspectionVerdict` is pass or fail). It is
+ * then inspected_output only when the inspector's authenticated trust domain is
+ * shown to be outside every executor's; a party measuring its own output is
+ * reporting, and so is an observation whose independence cannot be shown (no
+ * assigned executor, an unknown executor, no trust domain): all device_reported.
  */
 export const INSPECTION_EVENT_TYPES = [
   "cv_inspection_result",
@@ -135,8 +188,9 @@ export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
 ] as const satisfies readonly EvidenceEventType[];
 
 /**
- * Event types whose source device is doing the job. An inspection from one of
- * these devices is that device reporting on its own output.
+ * Event types that show a party is executing the job. A bundle that holds any
+ * of them puts its trust domain in the executor set, so an inspection signed in
+ * that domain is that party reporting on its own output.
  */
 export const EXECUTION_EVENT_TYPES = [
   "gcode_received",
@@ -169,101 +223,389 @@ export function meetsEvidenceLevel(reached: EvidenceLevel | null, required: Evid
   return reached !== null && evidenceLevelRank(reached) >= evidenceLevelRank(required);
 }
 
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+
+/** One bundle of an authenticated settlement unit, as the caller verified it. */
+export interface AuthenticatedBundle {
+  /** The bundle's events exactly as verified (signature + subject binding). */
+  readonly events: readonly EvidenceEvent[];
+  /**
+   * Operator principal (`eip155:<chainId>:0x<40 lowercase hex>`, chainId 1+ with
+   * no leading zero and a safe integer; the pcc.evidence.principal-id.v1
+   * operator form) that owns the bundle's VERIFIED signer in the pinned
+   * registry. Omit when unknown.
+   */
+  readonly trustDomain?: string;
+}
+
+export interface EvidenceLevelContext {
+  /**
+   * Operator principals the job was ASSIGNED to, from the accepted job or deal,
+   * never from events. Independence cannot be shown without it.
+   */
+  readonly executorTrustDomains?: readonly string[];
+}
+
+/**
+ * Thrown for input this module cannot classify: `bundles` not an array, a
+ * bundle or an event that is not an object, a bundle whose `events` is not an
+ * array, or a `trustDomain` / `executorTrustDomains` entry that is present but
+ * not in the exact operator form. Never swallowed into a level or a verdict.
+ */
+export class EvidenceLevelInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EvidenceLevelInputError";
+  }
+}
+
+// Mirrors #399's OPERATOR_PRINCIPAL_ID_PATTERN (the pcc.evidence.principal-id.v1
+// operator form). Kept local so this branch does not depend on #399. The chain
+// id has no leading zero and is at least 1; the safe-integer bound is checked
+// separately. Lowercase hex only, so equal principals are equal strings.
+const OPERATOR_PRINCIPAL_ID_PATTERN = /^eip155:([1-9][0-9]*):0x[0-9a-f]{40}$/;
+
+function isOperatorPrincipalId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = OPERATOR_PRINCIPAL_ID_PATTERN.exec(value);
+  return match !== null && Number.isSafeInteger(Number(match[1]));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface PreparedBundle {
+  readonly events: readonly EvidenceEvent[];
+  readonly trustDomain: string | null;
+  readonly fabricated: boolean;
+  readonly holdsExecutionEvent: boolean;
+}
+
+/** Validate the whole input up front (no early exit), reading each field once. */
+function prepareBundles(bundles: unknown): PreparedBundle[] {
+  if (!Array.isArray(bundles)) {
+    throw new EvidenceLevelInputError("bundles must be an array of AuthenticatedBundle");
+  }
+  const prepared: PreparedBundle[] = [];
+  for (let i = 0; i < bundles.length; i += 1) {
+    const bundle: unknown = bundles[i];
+    if (!isRecord(bundle)) {
+      throw new EvidenceLevelInputError(`bundles[${i}] must be an object`);
+    }
+    const events: unknown = bundle.events;
+    if (!Array.isArray(events)) {
+      throw new EvidenceLevelInputError(`bundles[${i}].events must be an array`);
+    }
+    for (let j = 0; j < events.length; j += 1) {
+      if (!isRecord(events[j])) {
+        throw new EvidenceLevelInputError(`bundles[${i}].events[${j}] must be an object`);
+      }
+    }
+    const declared: unknown = bundle.trustDomain;
+    let trustDomain: string | null = null;
+    if (declared !== undefined) {
+      if (!isOperatorPrincipalId(declared)) {
+        throw new EvidenceLevelInputError(
+          `bundles[${i}].trustDomain is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
+        );
+      }
+      trustDomain = declared;
+    }
+    const verified = events as readonly EvidenceEvent[];
+    prepared.push({
+      events: verified,
+      trustDomain,
+      fabricated: bundleHasFabricatedEvents({ events: verified }),
+      holdsExecutionEvent: verified.some((event) => EXECUTION.has(event.type)),
+    });
+  }
+  return prepared;
+}
+
+function assignedExecutorDomains(context: unknown): readonly string[] {
+  if (context === undefined) return [];
+  if (!isRecord(context)) {
+    throw new EvidenceLevelInputError("context must be an object");
+  }
+  const assigned: unknown = context.executorTrustDomains;
+  if (assigned === undefined) return [];
+  if (!Array.isArray(assigned)) {
+    throw new EvidenceLevelInputError("context.executorTrustDomains must be an array of operator principal ids");
+  }
+  const domains: string[] = [];
+  for (let i = 0; i < assigned.length; i += 1) {
+    const domain: unknown = assigned[i];
+    if (!isOperatorPrincipalId(domain)) {
+      throw new EvidenceLevelInputError(
+        `context.executorTrustDomains[${i}] is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
+      );
+    }
+    domains.push(domain);
+  }
+  return domains;
+}
+
+// ---------------------------------------------------------------------------
+// Attribution and the gateway stamp
+// ---------------------------------------------------------------------------
+
 /**
  * The `source.deviceId` the gateway stamps on events it writes itself. Its
  * `PUT /api/jobs/:jobId/complete` writes its own `execution_completed` and the
  * caller's `evidenceEvents`, of any type, under this id. No device reported
- * them, so they prove no level and do not name an executing device.
+ * them, so they prove no level. The comparison ignores ASCII whitespace around
+ * the id and ASCII case ("Gateway", " gateway " are the stamp too).
  */
 export const GATEWAY_STAMPED_DEVICE_ID = "gateway";
 
-function deviceIdOf(event: EvidenceEvent): string | null {
-  const source: unknown = event.source;
-  if (typeof source !== "object" || source === null) return null;
-  const id = (source as { deviceId?: unknown }).deviceId;
-  return typeof id === "string" && id.length > 0 && id !== GATEWAY_STAMPED_DEVICE_ID ? id : null;
+/** Space, TAB, LF, VT, FF, CR. */
+function isAsciiSpace(code: number): boolean {
+  return code === 0x20 || (code >= 0x09 && code <= 0x0d);
 }
 
-/** The devices that executed the job, read from a bundle's own events. */
-export function executingDeviceIds(events: readonly EvidenceEvent[]): ReadonlySet<string> {
-  const ids = new Set<string>();
-  for (const event of events) {
-    if (!EXECUTION.has(event.type) || isFabricated(event)) continue;
-    const id = deviceIdOf(event);
-    if (id !== null) ids.add(id);
+/** ASCII trim + ASCII lowercase compare, with no locale or Unicode case APIs. */
+function isGatewayStamp(deviceId: string): boolean {
+  let start = 0;
+  let end = deviceId.length;
+  while (start < end && isAsciiSpace(deviceId.charCodeAt(start))) start += 1;
+  while (end > start && isAsciiSpace(deviceId.charCodeAt(end - 1))) end -= 1;
+  if (end - start !== GATEWAY_STAMPED_DEVICE_ID.length) return false;
+  for (let i = 0; i < GATEWAY_STAMPED_DEVICE_ID.length; i += 1) {
+    let code = deviceId.charCodeAt(start + i);
+    if (code >= 0x41 && code <= 0x5a) code += 0x20;
+    if (code !== GATEWAY_STAMPED_DEVICE_ID.charCodeAt(i)) return false;
   }
-  return ids;
+  return true;
+}
+
+/** True when the event names a device other than the gateway's own stamp. */
+function isDeviceAttributed(event: EvidenceEvent): boolean {
+  const source: unknown = event.source;
+  if (typeof source !== "object" || source === null) return false;
+  const deviceId = (source as { deviceId?: unknown }).deviceId;
+  return typeof deviceId === "string" && deviceId.length > 0 && !isGatewayStamp(deviceId);
+}
+
+// ---------------------------------------------------------------------------
+// Inspection verdicts
+// ---------------------------------------------------------------------------
+
+/**
+ * What an inspection event claims about the output:
+ *   pass       a valid pinned verdict field says it passed;
+ *   fail       a valid pinned verdict field says it failed;
+ *   none       the payload claims no verdict (no pinned field, no verdict-looking key);
+ *   malformed  the payload is not an object, the pinned field holds a value
+ *              outside its domain, or a verdict-looking key is present without
+ *              a valid pinned field.
+ * Events that are not inspections claim none.
+ */
+export type InspectionVerdict = "pass" | "fail" | "none" | "malformed";
+
+interface PinnedVerdict {
+  /** The payload key that carries the verdict. */
+  readonly field: string;
+  /** The closed value domain of that key: pass or fail for a valid value, malformed otherwise. */
+  readonly read: (value: unknown) => "pass" | "fail" | "malformed";
+}
+
+function readBooleanVerdict(value: unknown): "pass" | "fail" | "malformed" {
+  return value === true ? "pass" : value === false ? "fail" : "malformed";
+}
+
+function readPassFailVerdict(value: unknown): "pass" | "fail" | "malformed" {
+  return value === "PASS" ? "pass" : value === "FAIL" ? "fail" : "malformed";
 }
 
 /**
- * The level one event proves, or null. `executing` is the set of devices that
- * executed the job (`executingDeviceIds` of the same bundle).
+ * The pinned verdict field per inspection type, matching types/dpp.ts and
+ * evidence-lane ruling E5/F2+F3:
+ *   instrument_result    `pass`, a boolean
+ *   batch_sample_result  `status`, exactly "PASS" or "FAIL"
+ *
+ * photo_comparison_result has NO pinned field: nothing in the repository
+ * produces or reads it, so there is no verdict field to pin. Its verdict is
+ * `none` (or `malformed` when the payload carries a verdict-looking key).
+ *
+ * cv_inspection_result is deliberately NOT pinned here. OPEN (E5 triage, F2/F3):
+ * the ruling pins `pass`, "matching existing producers and types/dpp.ts", but
+ * the producers do not emit `pass`. The real camera (kernel PhotoCameraAdapter
+ * .runInspection in adapters/photo-camera-adapter.ts), the kernel mock camera,
+ * the onboard-kit GenericCameraAdapter and the onboard-kit scaffolder's camera
+ * template all emit `passed`. Only the types/dpp.ts reader (`p["pass"]`) and
+ * some demo scripts use `pass`. Pinning either spelling is the contract owner's
+ * call, so this module does not choose. Until that is ruled, a cv payload that
+ * carries `pass` or `passed` is `malformed` (it proves no level and counts as
+ * failed in contradictions: fail closed, so a legitimate real-camera job is
+ * refused rather than a bad one accepted), and a cv payload with no verdict key
+ * is `none`. Pinning it is one entry in this map.
  */
-export function evidenceLevelOf(
-  event: EvidenceEvent,
-  executing: ReadonlySet<string>,
-): EvidenceLevel | null {
-  if (isFabricated(event)) return null;
-  const deviceId = deviceIdOf(event);
-  if (deviceId === null) return null;
-  if (SUBMITTED.has(event.type)) return "submitted";
-  if (DEVICE_REPORTED.has(event.type)) return "device_reported";
-  if (INSPECTION.has(event.type)) {
-    return executing.size > 0 && !executing.has(deviceId) ? "inspected_output" : "device_reported";
+const PINNED_VERDICTS: ReadonlyMap<string, PinnedVerdict> = new Map<string, PinnedVerdict>([
+  ["instrument_result", { field: "pass", read: readBooleanVerdict }],
+  ["batch_sample_result", { field: "status", read: readPassFailVerdict }],
+]);
+
+/**
+ * Keys that look like a verdict. When an inspection's pinned field is absent
+ * (or the type has none) and the payload still carries one of these, it is
+ * claiming something this module cannot read, so the verdict is `malformed`.
+ */
+const VERDICT_LOOKING_KEYS = ["pass", "passed", "status", "result", "verdict", "ok", "success"] as const;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOwn(target: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(target, key);
+}
+
+/**
+ * The verdict an inspection event carries. One closed answer per inspection
+ * type, from one shared extractor:
+ *   - not an inspection type: `none`;
+ *   - the payload is not a plain, non-null, non-array object: `malformed`;
+ *   - the pinned field is an own property: a valid value gives `pass` or `fail`,
+ *     any other value (or an accessor, which is never invoked) gives `malformed`;
+ *   - the pinned field is absent: any own key of {pass, passed, status, result,
+ *     verdict, ok, success} gives `malformed`, otherwise `none`.
+ * The pinned field is read once, into a local.
+ */
+export function inspectionVerdict(event: EvidenceEvent): InspectionVerdict {
+  const type: unknown = event.type;
+  if (typeof type !== "string" || !INSPECTION.has(type)) return "none";
+  const payload: unknown = event.payload;
+  if (!isPlainObject(payload)) return "malformed";
+  const pinned = PINNED_VERDICTS.get(type);
+  if (pinned !== undefined) {
+    const descriptor = Object.getOwnPropertyDescriptor(payload, pinned.field);
+    if (descriptor !== undefined) {
+      return "value" in descriptor ? pinned.read(descriptor.value) : "malformed";
+    }
+  }
+  for (const key of VERDICT_LOOKING_KEYS) {
+    if (hasOwn(payload, key)) return "malformed";
+  }
+  return "none";
+}
+
+/**
+ * An inspection that reports its own negative verdict, or one whose verdict
+ * cannot be read (fail closed): `inspectionVerdict` is `fail` or `malformed`.
+ * An inspection that claims no verdict (`none`) did not fail.
+ */
+export function inspectionFailed(event: EvidenceEvent): boolean {
+  const verdict = inspectionVerdict(event);
+  return verdict === "fail" || verdict === "malformed";
+}
+
+// ---------------------------------------------------------------------------
+// Levels
+// ---------------------------------------------------------------------------
+
+/** The level one event proves inside a non-fabricated bundle, or null. */
+function eventLevel(event: EvidenceEvent, inspectorIndependent: boolean): EvidenceLevel | null {
+  if (!isDeviceAttributed(event)) return null;
+  const type = event.type;
+  if (SUBMITTED.has(type)) return "submitted";
+  if (DEVICE_REPORTED.has(type)) return "device_reported";
+  if (INSPECTION.has(type)) {
+    const verdict = inspectionVerdict(event);
+    if (verdict !== "pass" && verdict !== "fail") return null;
+    return inspectorIndependent ? "inspected_output" : "device_reported";
   }
   return null;
 }
 
 /**
- * The strongest level any event proves, or null. Pass every authenticated
- * event for the job (all of its bound bundles), so an inspection is judged
- * against every device that executed the job.
+ * The strongest level the bundles of one settlement unit prove, or null. Pass
+ * every authenticated bundle of the unit (see the contract in the header).
+ * Throws `EvidenceLevelInputError` for input it cannot classify.
+ *
+ * Bundles with any fabricated event prove nothing. An inspection is
+ * inspected_output only when `context.executorTrustDomains` is non-empty, no
+ * bundle holding an execution event lacks a trust domain, the inspection's
+ * bundle has a trust domain, and that domain is not an executor (assigned, or
+ * the domain of any bundle holding an execution event, fabricated or not).
  */
-export function evidenceLevelOfBundle(events: readonly EvidenceEvent[]): EvidenceLevel | null {
-  const executing = executingDeviceIds(events);
+export function evidenceLevelOfBundles(
+  bundles: readonly AuthenticatedBundle[],
+  context?: EvidenceLevelContext,
+): EvidenceLevel | null {
+  const assigned = assignedExecutorDomains(context);
+  const prepared = prepareBundles(bundles);
+
+  const executors = new Set<string>(assigned);
+  let executorsUnknown = false;
+  for (const bundle of prepared) {
+    if (!bundle.holdsExecutionEvent) continue;
+    if (bundle.trustDomain === null) executorsUnknown = true;
+    else executors.add(bundle.trustDomain);
+  }
+  const independenceProvable = assigned.length > 0 && !executorsUnknown;
+
   let best: EvidenceLevel | null = null;
-  for (const event of events) {
-    const level = evidenceLevelOf(event, executing);
-    if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
-      best = level;
+  for (const bundle of prepared) {
+    if (bundle.fabricated) continue;
+    const inspectorIndependent =
+      independenceProvable && bundle.trustDomain !== null && !executors.has(bundle.trustDomain);
+    for (const event of bundle.events) {
+      const level = eventLevel(event, inspectorIndependent);
+      if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
+        best = level;
+      }
     }
   }
   return best;
 }
 
+// ---------------------------------------------------------------------------
+// Contradictions
+// ---------------------------------------------------------------------------
+
 /** A contradiction derivable from authenticated events (J4). */
 export type ContradictionKind = "completion-and-failure" | "completion-and-failed-inspection";
 
 /**
- * An inspection that reports its own negative verdict: an INSPECTION_EVENT_TYPES
- * event whose payload.passed is present and not true. With no passed field it
- * claims no verdict (and a pass/fail on values belongs to a profile tolerance).
- */
-export function inspectionFailed(event: EvidenceEvent): boolean {
-  if (!INSPECTION.has(event.type)) return false;
-  const passed = (event.payload as Record<string, unknown> | undefined)?.passed;
-  return passed !== undefined && passed !== true;
-}
-
-/**
- * The contradictions a set of AUTHENTICATED events shows, in this fixed order:
+ * The contradictions the bundles of ONE settlement unit show, in this fixed
+ * order:
  *   - "completion-and-failure": a device-reported completion and an
- *     execution_failed in the same set;
+ *     execution_failed in the same unit;
  *   - "completion-and-failed-inspection": a device-reported completion and an
- *     inspection that reports its own negative verdict.
+ *     inspection that failed (`inspectionFailed`: a `fail` verdict, or a
+ *     `malformed` one, which fails closed; `none` does not).
  * A failure with no completion is a device failure, not a contradiction.
- * Fabricated events prove nothing here either, so they are ignored. Event
+ *
+ * SCOPE (E5/F5): the caller passes the authenticated bundles of ONE settlement
+ * unit (one job step). Evidence-lane ruling: no PCC flow retries a job under
+ * the same job id, a failed unit is refunded and a new attempt is a new job, and
+ * EvidenceBlockV2 commits ONE bundle per unit. Inside a unit a completion plus a
+ * failure IS a contradiction, and refusing it is fail-closed. This function does
+ * not correlate attempts, steps or devices: passing the bundles of different
+ * units together makes a failed first attempt contradict a successful later one.
+ *
+ * Bundles with any fabricated event are ignored (they prove nothing). Event
  * types decide here, not who stamped them, so a gateway-stamped completion
- * still counts: a contradiction can only refuse. This is
- * the public, deterministic rule: the oracle signs a reject only for what it
- * derives here (J4), and profile admission reads the same predicate.
+ * still counts: a contradiction can only refuse. This is the public,
+ * deterministic rule: the oracle signs a reject only for what it derives here
+ * (J4), and profile admission reads the same predicate. Throws
+ * `EvidenceLevelInputError` for input it cannot classify.
  */
-export function deriveContradictions(events: readonly EvidenceEvent[]): ContradictionKind[] {
-  const genuine = events.filter((e) => !isFabricated(e));
-  const completed = genuine.some((e) => DEVICE_REPORTED.has(e.type));
+export function deriveContradictions(bundles: readonly AuthenticatedBundle[]): ContradictionKind[] {
+  const genuine: EvidenceEvent[] = [];
+  for (const bundle of prepareBundles(bundles)) {
+    if (bundle.fabricated) continue;
+    for (const event of bundle.events) genuine.push(event);
+  }
+  const completed = genuine.some((event) => DEVICE_REPORTED.has(event.type));
   if (!completed) return [];
   const kinds: ContradictionKind[] = [];
-  if (genuine.some((e) => e.type === "execution_failed")) kinds.push("completion-and-failure");
+  if (genuine.some((event) => event.type === "execution_failed")) kinds.push("completion-and-failure");
   if (genuine.some(inspectionFailed)) kinds.push("completion-and-failed-inspection");
   return kinds;
 }
