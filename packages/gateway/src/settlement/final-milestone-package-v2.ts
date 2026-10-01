@@ -35,7 +35,6 @@ import {
   operatorPrincipalMatchesSigner,
   principalFromRegistry,
 } from "@pcc/spec";
-import { canonicalSignatures, type PackageSignature } from "./package-digest-v2.js";
 
 export type Hex = `0x${string}`;
 
@@ -306,6 +305,79 @@ export function packageBodyJcs(body: FinalMilestonePackageV2Body): string {
 export const INTERIM_NONCE: Hex = `0x${"00".repeat(32)}` as Hex;
 export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {
   return body.challengeBinding.nonce.toLowerCase() === INTERIM_NONCE;
+}
+
+// ── Signature entries ───────────────────────────────────────────────────────
+// Moved here unchanged from package-digest-v2.ts, which re-exports them, so that
+// packageDigestV2 can call validatePackageBody without an import cycle.
+
+/**
+ * One signature over a FinalMilestonePackage body.
+ *
+ * Shape is the ORACLE's (#1395, they own ingestion): `{signer, scheme, sig}`.
+ * The signer SET is {operator, kernel} per evidence's frozen profile —
+ * D1 = operator secp256k1-EIP712, D2 = kernel ed25519-raw32.
+ *
+ * `signer` is the dedup key AND the sort key AND is LOWERCASED in the canonical
+ * form. Oracle #1395, verbatim: "Do NOT depend on case; changing a signer id's
+ * case MUST be a no-op." Signer ids are EIP-55-checksummed addresses in some
+ * paths and lowercase in others, so the same address in two spellings is ONE
+ * signer; binding the spelling would make identical evidence produce two package
+ * identities and fail the packageHash bind at first mint.
+ */
+export interface PackageSignature {
+  signer: string;
+  scheme: string;
+  sig: string;
+  [k: string]: unknown;
+}
+
+/** Raised when a signature entry cannot participate in the canonical order. */
+export class InvalidSignatureEntryError extends Error {
+  constructor(reason: string) {
+    super(`Invalid FinalMilestonePackageV2 signature entry: ${reason}`);
+    this.name = "InvalidSignatureEntryError";
+  }
+}
+
+/**
+ * The malleability closure: dedup by signer (FIRST occurrence wins), then sort
+ * by lowercased signerId.
+ *
+ * Pure — never mutates the caller's array. Returns a new array.
+ */
+export function canonicalSignatures(
+  sigs: readonly PackageSignature[],
+): PackageSignature[] {
+  if (!Array.isArray(sigs)) {
+    throw new InvalidSignatureEntryError("signatures must be an array");
+  }
+
+  const seen = new Set<string>();
+  const kept: PackageSignature[] = [];
+
+  for (const s of sigs) {
+    if (s === null || typeof s !== "object") {
+      throw new InvalidSignatureEntryError("entry is not an object");
+    }
+    if (typeof s.signer !== "string" || s.signer.length === 0) {
+      throw new InvalidSignatureEntryError("signer must be a non-empty string");
+    }
+    const key = s.signer.toLowerCase();
+    if (seen.has(key)) continue; // FIRST wins — later duplicates are dropped
+    seen.add(key);
+    // NORMALIZE the emitted signer to the same lowercased form used for dedup
+    // and sorting. Without this the digest would depend on the SPELLING of an
+    // address, so the identical package assembled by two services could hash
+    // differently — the case-insensitivity the oracle requires (#1395).
+    kept.push({ ...s, signer: key });
+  }
+
+  // Sort by the SAME lowercased key used for dedup and emission, so no two of
+  // the three operations can disagree about signer identity.
+  return kept.sort((a, b) =>
+    a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0,
+  );
 }
 
 // ── The mint-time guard ─────────────────────────────────────────────────────
