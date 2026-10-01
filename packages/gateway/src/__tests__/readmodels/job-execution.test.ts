@@ -589,7 +589,10 @@ describe("GET /api/jobs/:jobId/execution", () => {
     expect(dto.settlement.linkMatches).toEqual(["job_cwm"]);
     expect(dto.settlement.record?.escrowId).toBe("esc-001");
     expect(dto.settlement.record?.milestoneMatch).toBe("step_not_in_escrow");
-    expect(dto.settlement.payout).toBe("unknown");
+    // The seed's esc-001 sits at 0xESCROW_CONTRACT_001, no real contract address: it is mock data,
+    // so the record is simulated and its payout is simulated, never a real unknown (#409 r1 MEDIUM 1).
+    expect(dto.settlement.record?.simulated).toBe(true);
+    expect(dto.settlement.payout).toBe("simulated");
   });
 
   it("links a paid-job-flow job through its session; completed + funded is not_paid", async () => {

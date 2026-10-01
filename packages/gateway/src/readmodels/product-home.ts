@@ -24,7 +24,7 @@ import {
   type ProductHomeKernels,
 } from "@pcc/spec";
 import { ACTIVE_LISTING_GRACE_MS, STALE_HEARTBEAT_MS, isKernelStale } from "../facades/populators/staleness.js";
-import { MOCK_ESCROW_ADDRESS_PREFIX, type SourceRead } from "./job-execution.js";
+import { isSimulatedEscrowAddress, type SourceRead } from "./job-execution.js";
 
 export interface HomeKernelRow {
   id: string;
@@ -135,7 +135,7 @@ export function buildJobs(rows: HomeJobRow[]): ProductHomeJobs {
 export function buildEscrowHeld(src: { escrows: HomeEscrowRow[]; milestones: HomeMilestoneRow[] }): ProductHomeEscrowHeld {
   const escrowById = new Map(src.escrows.map((e) => [e.id, e]));
   const simulated = new Set(
-    src.escrows.filter((e) => String(e.contractAddress ?? "").startsWith(MOCK_ESCROW_ADDRESS_PREFIX)).map((e) => e.id),
+    src.escrows.filter((e) => isSimulatedEscrowAddress(e.contractAddress)).map((e) => e.id),
   );
   type Sums = Map<string, { decimals: number; sum: bigint; milestones: number }>;
   const held: Sums = new Map();
