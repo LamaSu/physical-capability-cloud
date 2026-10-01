@@ -610,6 +610,32 @@ class TestKeyLocationIsBoundToTheDirectoryOpened:
         assert _open_descriptors() == before
         assert not target.exists()
 
+    def test_a_directory_another_process_created_with_a_git_entry_is_refused(self, monkeypatch, tmp_path):
+        real_mkdir = os.mkdir
+
+        def lose_the_race(name, mode=0o777, *, dir_fd=None):
+            real_mkdir(name, mode, dir_fd=dir_fd)
+            real_mkdir(os.path.join(name, ".git"), mode, dir_fd=dir_fd)  # what the other process made
+            raise FileExistsError(errno.EEXIST, "File exists", name)
+
+        monkeypatch.setattr(crypto_module.os, "mkdir", lose_the_race)
+        with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+            load_or_create_keys(str(tmp_path / "other" / "keys.json"))
+        assert os.listdir(tmp_path / "other") == [".git"], "a key went into the work tree"
+
+    def test_a_symbolic_link_planted_where_a_directory_is_created_is_not_followed(self, monkeypatch, tmp_path):
+        safe = _private_dir(tmp_path / "safe")
+
+        def lose_the_race(name, mode=0o777, *, dir_fd=None):
+            os.symlink(str(safe), name, dir_fd=dir_fd)  # what the other process made: a link to a directory
+            raise FileExistsError(errno.EEXIST, "File exists", name)
+
+        monkeypatch.setattr(crypto_module.os, "mkdir", lose_the_race)
+        with pytest.raises(OSError) as refused:
+            load_or_create_keys(str(tmp_path / "other" / "keys.json"))
+        assert refused.value.errno in (errno.ELOOP, errno.ENOTDIR)  # which one depends on the kernel
+        assert os.listdir(safe) == [], "the planted link was followed and a key went through it"
+
     def test_no_descriptor_is_left_open_on_any_path(self, tmp_path):
         repo_dir = _private_dir(tmp_path / "repo" / "a" / "b")
         (tmp_path / "repo" / ".git").mkdir()
@@ -702,3 +728,21 @@ class TestHardLinkedKeyFiles:
             load_or_create_keys(str(target))
         assert not target.exists(), "the refused key file was left behind"
         assert planted.read_bytes() == b"", "a secret was written through the extra link"
+
+
+@needs_nacl
+class TestTheLocationIsCheckedWhenTheKeyIsLoaded:
+    """A02b F3, the documented limit: nothing watches the location once the key
+    is loaded. A repository created around it later is caught by the next load,
+    which for the daemon is the next start."""
+
+    def test_a_repository_created_after_loading_is_noticed_by_the_next_load_only(self, tmp_path):
+        home = _private_dir(tmp_path / "home")
+        path = str(home / "keys.json")
+        public, secret = load_or_create_keys(path)
+        (home / ".git").mkdir()
+        signature = sign_announcement({"a": 1}, secret)
+        still_verifies = verify_signature({"a": 1}, signature, public)
+        assert still_verifies
+        with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
+            load_or_create_keys(path)
