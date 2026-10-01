@@ -129,4 +129,81 @@ describe("POST /api/identity/session", () => {
     expect(verified.json().failures).toEqual([]);
     expect(verified.json().valid).toBe(true);
   });
+
+  describe("a malformed scope is a 400 and issues nothing", () => {
+    // Each row is a request body the route's own types claim cannot happen.
+    const malformed: Array<[label: string, scope: unknown, message: string]> = [
+      [
+        "a number in allowedActions",
+        { allowedActions: ["evidence_submit", 5] },
+        "scope.allowedActions[1] must be a string",
+      ],
+      [
+        "null in contractIds",
+        { contractIds: ["c1", null] },
+        "scope.contractIds[1] must be a string",
+      ],
+      [
+        "an object in contractIds",
+        { contractIds: [{ id: "c1" }] },
+        "scope.contractIds[0] must be a string",
+      ],
+      [
+        "a bare string where allowedActions belongs",
+        { allowedActions: "evidence_submit" },
+        "scope.allowedActions must be an array of strings",
+      ],
+      [
+        "a plain object where contractIds belongs",
+        { contractIds: { 0: "c1" } },
+        "scope.contractIds must be an array of strings",
+      ],
+    ];
+
+    it.each(malformed)("rejects %s", async (_label, scope, message) => {
+      const res = await issue({ principalAgentId: "agent-skey-route-5", scope });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid_scope", message });
+      // Nothing was issued: no key material in the body.
+      expect(res.body).not.toContain("sessionPrivateKey");
+    });
+  });
+
+  describe("absent and empty lists keep their meaning", () => {
+    const DEFAULT_ACTIONS = ["evidence_submit", "workflow_step_complete"];
+
+    it("issues the defaults when there is no scope at all", async () => {
+      const res = await issue({ principalAgentId: "agent-skey-route-6" });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().sessionKey.scope.allowedActions).toEqual(DEFAULT_ACTIONS);
+      expect(res.json().sessionKey.scope.contractIds).toEqual([]);
+    });
+
+    it.each([
+      ["an empty scope object", {}],
+      ["null lists", { allowedActions: null, contractIds: null }],
+    ])("falls back to the defaults for %s", async (_label, scope) => {
+      const res = await issue({ principalAgentId: "agent-skey-route-7", scope });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().sessionKey.scope).toEqual({
+        allowedActions: DEFAULT_ACTIONS,
+        contractIds: [],
+        maxSignatures: 1000,
+      });
+    });
+
+    it("returns explicitly empty lists as empty, not as defaults", async () => {
+      const res = await issue({
+        principalAgentId: "agent-skey-route-8",
+        scope: { allowedActions: [], contractIds: [] },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().sessionKey.scope.allowedActions).toEqual([]);
+      expect(res.json().sessionKey.scope.contractIds).toEqual([]);
+    });
+  });
 });
