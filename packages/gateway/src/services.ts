@@ -78,14 +78,18 @@ for (const ch of defaultChannels) {
   sensorPipeline.registerChannel(ch);
 }
 
-// Forward sensor readings to StreamHub
+// Forward sensor readings to StreamHub. A reading is per-sample data (exact
+// time, job/step/sample ids, value, free-form tags), so it is never put on the
+// shared batch topic: /sse/stream/batch/:batchId fans every event out to every
+// authenticated subscriber with no ownership check (N49 round 5). The batch
+// stream carries batch-level aggregates only, and is projected at its own
+// boundary (sse/topic-sse.ts) as well; this is the second line of defense.
 sensorPipeline.onReading((reading) => {
   const topics: import("@pcc/spec").StreamTopic[] = [
     { type: "kernel", id: reading.kernelId },
     { type: "device", id: reading.deviceId },
   ];
   if (reading.jobId) topics.push({ type: "job", id: reading.jobId });
-  if (reading.batchId) topics.push({ type: "batch", id: reading.batchId });
 
   streamHub.publish(topics, {
     id: reading.id,
@@ -116,7 +120,10 @@ export const batchTracker = new BatchTracker();
 // Forward batch events to StreamHub. N49 F1: only aggregate batch-LEVEL
 // events go on the SHARED stream (projectBatchStreamEvent); per-sample data
 // never reaches all subscribers. Per-sample events stay on the authenticated,
-// owner-projected HTTP surface (routes/batches.ts viewEvents).
+// owner-projected HTTP surface (routes/batches.ts viewEvents). The batch stream
+// applies the same projection again at its boundary (sse/topic-sse.ts), so this
+// one is redundant for privacy; it keeps per-sample events off the topic (and
+// out of its replay buffer) in the first place.
 batchTracker.onBatchEvent((event) => {
   const message = projectBatchStreamEvent(event as never);
   if (!message) return;

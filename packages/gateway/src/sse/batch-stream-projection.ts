@@ -7,6 +7,10 @@
  * projection the HTTP batch views use. Per-sample events are available solely
  * through the authenticated, owner-projected HTTP surface (viewEvents).
  *
+ * N49 round 5: this runs at the stream boundary (topic-sse.ts), on every event
+ * the batch stream delivers, whoever published it. It therefore has to judge any
+ * input without throwing: it is total, and it fails closed.
+ *
  * Pure and side-effect free, so it is unit-tested directly.
  */
 
@@ -32,16 +36,27 @@ export interface BatchStreamMessage {
   payload: Record<string, unknown>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * The shared-stream message for a batch event, or null when the event must not
  * be broadcast (any per-sample event, or an unlisted type).
  */
 export function projectBatchStreamEvent(event: BatchStreamEventLike): BatchStreamMessage | null {
+  // Own keys only: an event type of "constructor" or "__proto__" is not a listed type.
+  if (!Object.hasOwn(PUBLIC_BATCH_STREAM_FIELDS, event.type)) return null;
   const fields = PUBLIC_BATCH_STREAM_FIELDS[event.type];
-  if (!fields) return null;
-  const src = (event.payload ?? {}) as Record<string, unknown>;
+  // A payload that is not an object (a string, an array, nothing) holds no aggregate fields.
+  const src = isRecord(event.payload) ? event.payload : {};
   const payload: Record<string, unknown> = { batchId: event.batchId };
-  for (const f of fields) if (f in src) payload[f] = src[f];
+  for (const f of fields) {
+    const value = Object.hasOwn(src, f) ? src[f] : undefined;
+    // An aggregate is a count. A string, an object or a fraction under a listed
+    // name is not one, so it is left out rather than broadcast.
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) payload[f] = value;
+  }
   return {
     id: event.id,
     type: event.type,

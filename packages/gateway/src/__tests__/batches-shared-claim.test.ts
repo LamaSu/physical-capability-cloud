@@ -492,6 +492,27 @@ describe("N49 F1: the shared batch stream carries no per-sample data", () => {
   it("drops an unlisted event type", () => {
     expect(projectBatchStreamEvent({ type: "batch_new_thing", batchId: "b1", payload: { x: 1 } })).toBeNull();
   });
+  // Round 5: the projection now runs at the stream boundary on whatever any
+  // publisher put on the batch topic, so it must judge every input without throwing.
+  it("round 5: counts a payload that is not an object as no payload, instead of throwing", () => {
+    for (const payload of ["raw-secret", ["raw-secret"], 7, true, null, undefined]) {
+      expect(projectBatchStreamEvent({ type: "batch_sealed", batchId: "b1", payload })?.payload, String(payload)).toEqual({ batchId: "b1" });
+    }
+  });
+  it("round 5: an event type that is a prototype key is not a listed type (null, not a throw)", () => {
+    for (const type of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(projectBatchStreamEvent({ type, batchId: "b1", payload: { completed: 1 } }), type).toBeNull();
+    }
+  });
+  it("round 5: an aggregate field passes only as a whole-number count", () => {
+    const done = (completed: unknown, failed: unknown) =>
+      projectBatchStreamEvent({ type: "batch_completed", batchId: "b1", payload: { completed, failed } })?.payload;
+    expect(done("patient-7731", { secret: 1 })).toEqual({ batchId: "b1" });
+    for (const bad of [-1, 1.5, Number.NaN, Infinity, null, [3], "3"]) {
+      expect(done(bad, bad), String(bad)).toEqual({ batchId: "b1" });
+    }
+    expect(done(0, 12)).toEqual({ batchId: "b1", completed: 0, failed: 12 });
+  });
 });
 
 describe("N49 F2: the legacy manifest view never exposes runConfig", () => {

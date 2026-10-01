@@ -4,9 +4,10 @@
 
 import type { FastifyInstance } from "fastify";
 import type { StreamTopic } from "@pcc/spec";
-import { streamHub } from "./stream-hub.js";
+import { streamHub, type StreamEvent } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 import { resolveSSEAuth } from "./sse-auth.js";
+import { projectBatchStreamEvent } from "./batch-stream-projection.js";
 import { getJobFacade } from "../facades/index.js";
 
 // ---------------------------------------------------------------------------
@@ -97,6 +98,14 @@ const ALLOWED_SSE_ORIGINS = new Set([
   "http://127.0.0.1:3200",
 ]);
 
+/**
+ * A per-stream boundary projector (N49 round 5). It maps a hub event to what
+ * this stream may write, or to null to drop the event. setupSSE runs it on
+ * EVERY event the stream delivers, live or replayed, so what a stream shows
+ * does not depend on which producer published to its topic.
+ */
+type StreamProjector = (event: StreamEvent) => { type: string; payload: unknown } | null;
+
 export async function topicSSE(app: FastifyInstance) {
   // Connection limit gate for all SSE topic streams (auth is checked per-route)
   app.addHook("onRequest", async (req, reply) => {
@@ -107,13 +116,18 @@ export async function topicSSE(app: FastifyInstance) {
     trackSSEOpen(req.ip);
   });
 
-  /** Helper to set up an SSE connection for given topics */
+  /**
+   * Helper to set up an SSE connection for given topics. A stream passes
+   * `project` when its topic is shared by subscribers who may not see every
+   * event as published; without one, events are written as published.
+   */
   function setupSSE(
     req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
     reply: { raw: { writeHead: (status: number, headers: Record<string, string>) => void; write: (data: string) => void } },
     topics: StreamTopic[],
     lastEventId?: string,
     origin?: string,
+    project?: StreamProjector,
   ) {
     // Strict origin validation — reject unknown origins with default
     const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
@@ -132,7 +146,20 @@ export async function topicSSE(app: FastifyInstance) {
     const unsubscribe = streamHub.subscribe(
       topics,
       (event) => {
-        const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
+        let type = event.type;
+        let data = event.payload;
+        if (project) {
+          let projected: ReturnType<StreamProjector>;
+          try {
+            projected = project(event);
+          } catch {
+            return; // fail closed: an event the projector cannot judge is not written
+          }
+          if (!projected) return;
+          type = projected.type;
+          data = projected.payload;
+        }
+        const payload = `id: ${event.id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
         try {
           reply.raw.write(payload);
         } catch {
@@ -208,7 +235,14 @@ export async function topicSSE(app: FastifyInstance) {
     await new Promise(() => {});
   });
 
-  // Per-batch streaming
+  // Per-batch streaming. The batch topic is SHARED: every authenticated
+  // subscriber of a batchId receives the same events, and there is no ownership
+  // check. So per-sample data must never be on it. The projection is therefore
+  // applied here, at the stream boundary, to every event on the topic whoever
+  // published it (the sensor pipeline, the BatchTracker, a mock producer, a
+  // future producer), not inside any one producer. Only the aggregate
+  // batch-level events pass; per-sample events stay on the authenticated,
+  // owner-projected HTTP surface (routes/batches.ts viewEvents).
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
     const auth = await resolveSSEAuth(req);
     if (!auth.authenticated) {
@@ -217,7 +251,17 @@ export async function topicSSE(app: FastifyInstance) {
     const { batchId } = req.params as { batchId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
     const origin = req.headers.origin as string | undefined;
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
+    const project: StreamProjector = (event) => {
+      const message = projectBatchStreamEvent({
+        id: event.id,
+        type: event.type,
+        timestamp: event.timestamp,
+        batchId,
+        payload: event.payload,
+      });
+      return message ? { type: message.type, payload: message.payload } : null;
+    };
+    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin, project);
     await new Promise(() => {});
   });
 }
