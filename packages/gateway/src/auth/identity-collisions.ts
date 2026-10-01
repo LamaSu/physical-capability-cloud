@@ -41,16 +41,37 @@ const SOURCES: ReadonlyArray<{ source: string; sql: string }> = [
   { source: "ui_artifacts.owner", sql: "SELECT DISTINCT owner AS v FROM ui_artifacts" },
 ];
 
-export function findIdentityCollisions(db: Reader): { collisions: IdentityCollision[]; read: string[]; skipped: string[] } {
+/**
+ * A read failure that POSITIVELY identifies a missing table or column (SQLite's
+ * "no such table: ..." / "no such column: ..."). Only this kind of failure may be
+ * excused by PCC_COLLISION_AUDIT_ALLOW_ABSENT. Any other error (corruption, I/O,
+ * locking, a failure part-way through .all()) means the data EXISTS but was not
+ * read, and must never be allowlisted away (AZ-9 round 2, astra pack 95b).
+ */
+function isConfirmedAbsence(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  return /^no such (table|column)\b/i.test(message.trim());
+}
+
+export function findIdentityCollisions(db: Reader): {
+  collisions: IdentityCollision[];
+  read: string[];
+  /** Sources whose table or column is CONFIRMED absent: allowlistable. */
+  skipped: string[];
+  /** Sources that exist but could not be read: NEVER allowlistable. */
+  failed: string[];
+} {
   const groups = new Map<string, { spellings: Set<string>; sources: Set<string> }>();
   const read: string[] = [];
   const skipped: string[] = [];
+  const failed: string[] = [];
   for (const { source, sql } of SOURCES) {
     let rows: unknown[];
     try {
       rows = db.prepare(sql).all();
-    } catch {
-      skipped.push(source); // table or column absent in this deployment
+    } catch (err) {
+      if (isConfirmedAbsence(err)) skipped.push(source); // table or column absent in this deployment
+      else failed.push(source); // present but unreadable: never excusable
       continue;
     }
     read.push(source);
@@ -72,7 +93,7 @@ export function findIdentityCollisions(db: Reader): { collisions: IdentityCollis
     collisions.push({ normalized, spellings, sources: [...g.sources].sort(), newMerge: masterForms.size > 1 });
   }
   collisions.sort((a, b) => a.normalized.localeCompare(b.normalized));
-  return { collisions, read, skipped };
+  return { collisions, read, skipped, failed };
 }
 
 /** The identity sources that EXIST in every PCC deployment. If the audit could
@@ -105,8 +126,20 @@ export function collisionAuditExit(params: {
   newMerges: number;
   read: readonly string[];
   skipped: readonly string[];
+  /** Sources that exist but failed to read. Any entry makes the audit INCOMPLETE,
+   *  whatever the allowlist says. Optional for older callers; absent means none. */
+  failed?: readonly string[];
   allowedAbsent: readonly string[];
 }): CollisionAuditExit {
+  const failed = params.failed ?? [];
+  if (failed.length > 0) {
+    return {
+      code: 4,
+      reason:
+        `audit INCOMPLETE — could not read (the source exists but the read failed): ${failed.join(", ")}. ` +
+        "Only a confirmed missing table or column can be allowlisted; this cannot. Fix the read and re-run.",
+    };
+  }
   const allowed = new Set(params.allowedAbsent.map((s) => s.trim()).filter(Boolean));
   const blockingSkips = params.skipped.filter(
     (s) => REQUIRED_COLLISION_SOURCES.includes(s) || !allowed.has(s),

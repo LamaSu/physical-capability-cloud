@@ -20,7 +20,7 @@ initStore({ seed: false });
 const { findIdentityCollisions, collisionAuditExit } = await import("../dist/auth/identity-collisions.js");
 const allowedAbsent = (process.env.PCC_COLLISION_AUDIT_ALLOW_ABSENT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const client = getStore().db.$client;
-const { collisions, read, skipped } = findIdentityCollisions(client);
+const { collisions, read, skipped, failed } = findIdentityCollisions(client);
 const fingerprint = (s) => "sha256:" + createHash("sha256").update(s, "utf8").digest("hex").slice(0, 12);
 const out = collisions.map((c) => ({
   normalized: show ? c.normalized : fingerprint(c.normalized),
@@ -28,6 +28,6 @@ const out = collisions.map((c) => ({
   sources: c.sources,
   newMerge: c.newMerge,
 }));
-const verdict = collisionAuditExit({ newMerges: out.filter((c) => c.newMerge).length, read, skipped, allowedAbsent });
-console.log(JSON.stringify({ read, skipped, groups: out.length, newMerges: out.filter((c) => c.newMerge).length, exit: verdict.code, reason: verdict.reason, collisions: out }, null, 2));
+const verdict = collisionAuditExit({ newMerges: out.filter((c) => c.newMerge).length, read, skipped, failed, allowedAbsent });
+console.log(JSON.stringify({ read, skipped, failed, groups: out.length, newMerges: out.filter((c) => c.newMerge).length, exit: verdict.code, reason: verdict.reason, collisions: out }, null, 2));
 process.exit(verdict.code);
