@@ -80,6 +80,7 @@ const PKG = {
     tool("marketplace_list_listings", "GET", "/api/marketplace/listings"), // public read anyone can write to
     tool("list_api_keys", "GET", "/api/auth/keys"), // the real route
     tool("revoke_api_key", "DELETE", "/api/auth/keys/{keyId}"), // the real route
+    tool("reset_session", "DELETE", "/api/test/sessions/{sessionToken}"), // a secret-NAMED path parameter (astra 91b F1)
     tool("bump_counter", "POST", "/api/test/counter"),
     tool("boom", "POST", "/api/test/boom"),
     tool("public_post", "POST", "/api/marketplace/roi"),
@@ -143,6 +144,7 @@ describe("onboard-chat held actions (WP-D R2)", () => {
       reply.code(500).send({ error: "upstream_failed", message: `upstream rejected key ${LIVE_KEY}` }),
     );
     app.post("/api/marketplace/roi", async () => ({ ok: true }));
+    app.delete("/api/test/sessions/:sessionToken", async () => ({ ok: true }));
     await app.register(onboardChatRoutes);
     await app.ready();
   });
@@ -458,5 +460,139 @@ describe("onboard-chat held actions (WP-D R2)", () => {
     // What is persisted keeps the full redaction.
     expect(persisted(body.conversationId)).not.toContain(HASH);
     expect(persisted(body.conversationId)).not.toContain(PRIV.slice(2));
+  });
+
+  // ── astra pack 91b, F1: a held target is built from redacted parameters ─────────
+  // The held target is path + query, URL-encoded. The redactor's unquoted-value scan
+  // stops at `%`, so `password=%40Tricky%21Pwd` (a reversible form of the whole
+  // password) used to be stored in the envelope, shown by GET and fed to the model on
+  // confirmation. These tests assert no reversible form of the secret survives anywhere
+  // a person, the database or the model can read it.
+
+  /** Every reversible form of `secret` that a stored or displayed string could carry. */
+  const forms = (secret: string): string[] => {
+    const b64 = Buffer.from(secret).toString("base64");
+    return [
+      secret,
+      encodeURIComponent(secret), // %40Tricky!Pwd
+      new URLSearchParams({ p: secret }).toString().slice(2), // %40Tricky%21Pwd ("+" for a space)
+      encodeURIComponent(encodeURIComponent(secret)),
+      b64,
+      b64.replace(/=+$/, ""),
+      Buffer.from(secret).toString("base64url"),
+      Buffer.from(secret).toString("hex"),
+    ];
+  };
+  const leaksOf = (haystack: string, secret: string) => forms(secret).filter((f) => haystack.includes(f));
+
+  const TRICKY = "@Tricky!Pwd";
+  const TRICKY_SPACED = "@Tricky !Pwd"; // a space makes the URLSearchParams form use "+"
+
+  it.each([TRICKY, TRICKY_SPACED])(
+    "[neg] a secret-named argument of a held DELETE is not recoverable (%s): not from the reply, GET, the envelope or the model, held or confirmed (astra 91b F1)",
+    async (secret) => {
+      // The caller revokes ANOTHER key of the same operator, so the caller's own key (which
+      // authenticates every request below) survives the confirmation.
+      const caller = signedIn("victim@example.com");
+      const victim = signedIn("victim@example.com");
+      llm.responses.push(calls(["revoke_api_key", { keyId: victim.keyId, password: secret }]), endTurn);
+      const post = await chat({ message: "revoke that key" }, caller.headers);
+      expect(post.statusCode).toBe(200);
+      const body = post.json();
+      expect(body.pendingActions).toHaveLength(1);
+      const { conversationId } = body;
+      const actionId = body.pendingActions[0].actionId as string;
+      // The person can still tell which key is aimed at.
+      expect(body.pendingActions[0].target).toContain(`/api/auth/keys/${victim.keyId}`);
+
+      const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: caller.headers });
+      expect(get.statusCode).toBe(200);
+      expect(get.json().pendingActions).toHaveLength(1);
+      const held = {
+        "POST reply": post.body,
+        "GET reply": get.body,
+        "stored envelope": persisted(conversationId),
+        "model requests": JSON.stringify(llm.requests),
+      };
+      for (const [where, text] of Object.entries(held)) expect(leaksOf(text, secret), `held: ${where}`).toEqual([]);
+
+      // Confirmed: the call runs with the REAL argument, and still nothing readable keeps it.
+      const confirm = await chat({ conversationId, confirmActionId: actionId }, caller.headers);
+      expect(confirm.statusCode).toBe(200);
+      expect(confirm.json().confirmedAction).toMatchObject({ tool: "revoke_api_key", status: 200 });
+      expect(resolveApiKeyFromToken(victim.rawKey)).toBeNull(); // the revocation really ran
+      const deletes = dispatched.filter((d) => d.method === "DELETE");
+      expect(deletes).toHaveLength(1);
+      expect(deletes[0].url).toBe(`/api/auth/keys/${victim.keyId}?password=${new URLSearchParams({ p: secret }).toString().slice(2)}`);
+      const confirmed = {
+        "confirm reply": confirm.body,
+        "GET after confirm": (await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: caller.headers })).body,
+        "stored envelope": persisted(conversationId),
+        "model requests": JSON.stringify(llm.requests),
+      };
+      for (const [where, text] of Object.entries(confirmed)) expect(leaksOf(text, secret), `confirmed: ${where}`).toEqual([]);
+      // The model is told which call ran (the target is in its history), not what the secret was.
+      expect(JSON.stringify(llm.requests.at(-1))).toContain("The user confirmed the held call revoke_api_key");
+    },
+  );
+
+  it("[neg] a secret-named PATH parameter of a held call is not recoverable either (astra 91b F1)", async () => {
+    const alice = signedIn("alice@example.com");
+    llm.responses.push(calls(["reset_session", { sessionToken: TRICKY }]), endTurn);
+    const post = await chat({ message: "reset it" }, alice.headers);
+    expect(post.statusCode).toBe(200);
+    const body = post.json();
+    expect(body.pendingActions).toHaveLength(1);
+    const { conversationId } = body;
+    const actionId = body.pendingActions[0].actionId as string;
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: alice.headers });
+    for (const [where, text] of Object.entries({
+      "POST reply": post.body,
+      "GET reply": get.body,
+      "stored envelope": persisted(conversationId),
+      "model requests": JSON.stringify(llm.requests),
+    })) {
+      expect(leaksOf(text, TRICKY), `held: ${where}`).toEqual([]);
+    }
+
+    const confirm = await chat({ conversationId, confirmActionId: actionId }, alice.headers);
+    expect(confirm.statusCode).toBe(200);
+    // The real call went to the real path, with the encoded real value.
+    expect(dispatched.filter((d) => d.method === "DELETE").map((d) => d.url)).toEqual([`/api/test/sessions/${encodeURIComponent(TRICKY)}`]);
+    for (const [where, text] of Object.entries({
+      "confirm reply": confirm.body,
+      "stored envelope": persisted(conversationId),
+      "model requests": JSON.stringify(llm.requests),
+    })) {
+      expect(leaksOf(text, TRICKY), `confirmed: ${where}`).toEqual([]);
+    }
+  });
+
+  it("[neg] a secret-SHAPED value under an innocent name is cut before it is URL-encoded, so the encoding cannot hide it (astra 91b F1)", async () => {
+    const victim = signedIn("victim-shape@example.com");
+    const BODY = "abc+def/ghi==jkl012345"; // base64 punctuation: every one of +, / and = is percent-encoded in a query
+    llm.responses.push(calls(["revoke_api_key", { keyId: victim.keyId, note: `Bearer ${BODY}` }]), endTurn);
+    const post = await chat({ message: "revoke that key" }, victim.headers);
+    expect(post.statusCode).toBe(200);
+    const { conversationId } = post.json();
+    const get = await app.inject({ method: "GET", url: `/api/onboard/chat/${conversationId}`, headers: victim.headers });
+    for (const [where, text] of Object.entries({
+      "POST reply": post.body,
+      "GET reply": get.body,
+      "stored envelope": persisted(conversationId),
+      "model requests": JSON.stringify(llm.requests),
+    })) {
+      expect(leaksOf(text, BODY), `held: ${where}`).toEqual([]);
+    }
+  });
+
+  it("control: parameters that are not secrets stay readable in the held target, so the person can check what they confirm (astra 91b F1)", async () => {
+    const victim = signedIn("victim-control@example.com");
+    llm.responses.push(calls(["revoke_api_key", { keyId: victim.keyId, reason: "rotating keys" }]), endTurn);
+    const post = await chat({ message: "revoke that key" }, victim.headers);
+    expect(post.statusCode).toBe(200);
+    const view = post.json().pendingActions[0];
+    expect(view.target).toBe(`/api/auth/keys/${victim.keyId}?reason=rotating+keys`);
+    expect(view.summary).toContain(`DELETE /api/auth/keys/${victim.keyId}?reason=rotating+keys`);
   });
 });

@@ -99,6 +99,9 @@ const PKG = {
     tool("marketplace_list_listings", "GET", "/api/marketplace/test-listings"),
     tool("huge_listing", "GET", "/api/marketplace/test-huge"),
     tool("big_page", "GET", "/api/marketplace/test-big"),
+    // astra 91b F5: pages whose characters a second JSON serialization doubles.
+    tool("quote_page", "GET", "/api/marketplace/test-quotes"),
+    tool("backslash_page", "GET", "/api/marketplace/test-backslashes"),
     tool("many_items", "GET", "/api/marketplace/test-many"),
   ],
 };
@@ -138,6 +141,8 @@ async function buildApp(): Promise<FastifyInstance> {
   }));
   app.get("/api/marketplace/test-huge", async () => ({ id: "lst-huge", description: "-eyJ".repeat(50_000) }));
   app.get("/api/marketplace/test-big", async () => ({ page: "word ".repeat(12_000) }));
+  app.get("/api/marketplace/test-quotes", async () => ({ page: '"'.repeat(60_000) }));
+  app.get("/api/marketplace/test-backslashes", async () => ({ page: "\\".repeat(60_000) }));
   // Round-3 probe P1: ~600 KB of tiny items, each one a node for the redaction walk.
   app.get("/api/marketplace/test-many", async () => ({ items: Array.from({ length: 200_000 }, () => []) }));
   await app.register(onboardChatRoutes);
@@ -493,4 +498,28 @@ describe("onboard-chat secret exposure (WP-D D1-D4)", () => {
     expect(next.json().error).toBe("conversation_too_long");
     expect(llm.requests).toHaveLength(1);
   });
+
+  // astra pack 91b, F5: the budget counted `content.length`, but a tool result is a JSON
+  // string stored inside the message array's own JSON, so every quote and backslash in
+  // it is escaped again (a quote in the page is `\"` in the content and `\\\"` in the
+  // row). The ordinary-word page above does not expand, which is why the cap test missed it.
+  it.each([["quote_page"], ["backslash_page"]])(
+    "[neg] the stored history cap counts JSON escaping: several %s results in one turn stay under 256 KiB + 8 KiB (astra 91b F5)",
+    async (name) => {
+      const calls = Array.from({ length: 10 }, (_, i) => ({ type: "tool_use", id: `tu_esc_${i}`, name, input: {} }));
+      llm.responses.push({ content: calls, stop_reason: "tool_use" }, endTurn);
+      const post = await chat({ message: "read everything" });
+      expect(post.statusCode).toBe(200);
+      const body = post.json();
+      expect(body.toolCalls).toHaveLength(10);
+      expect(body.doneReason).toBe("history_full");
+      expect(llm.requests).toHaveLength(1); // no second model call over a full history
+      const stored = persistedMessages(body.conversationId).length;
+      expect(stored).toBeLessThan(256 * 1024 + 8 * 1024);
+
+      const next = await chat({ conversationId: body.conversationId, message: "and now?" });
+      expect(next.statusCode).toBe(400);
+      expect(next.json().error).toBe("conversation_too_long");
+    },
+  );
 });
