@@ -9,10 +9,14 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import nacl from "tweetnacl";
-import { operatorRelayRoutes } from "../routes/operator-relay.js";
+import { operatorRelayRoutes, NO_DEVICE_SIGNATURE } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
+import { settlementRoutes } from "../routes/settlement.js";
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
+import { isDeviceSignedSignature } from "../services/device-evidence-settlement.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import crypto from "node:crypto";
 
 /** A real device-signed (#236) evidence bundle over `bundleHash`, in the wire
  *  form the node produces (hex Ed25519 sig, truncated EVM-looking signer). */
@@ -45,6 +49,9 @@ async function buildApp(): Promise<FastifyInstance> {
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);
+  // LO-GW-4b: the retrieval side of the round-trip — GET /api/evidence/:hash
+  // serves the canonical envelope the relay committed to.
+  await app.register(settlementRoutes);
   await app.ready();
   return app;
 }
@@ -241,7 +248,8 @@ describe("Operator Relay Routes", () => {
       expect(stored!.assuranceTier).toBe(0);
     });
 
-    it("falls back to the placeholder for non-bundle evidence (backward compatible)", async () => {
+    // ── LO-GW-4a: the unsigned path records ABSENCE, never a placeholder ──
+    it("records a null signature (not `operator-relay-auto`) for non-bundle evidence", async () => {
       const kernelId = await getSeededKernelId(app);
       if (!kernelId) return;
       const jobId = await getQueuedJobId(app, kernelId);
@@ -256,10 +264,415 @@ describe("Operator Relay Routes", () => {
       const body = res.json();
       expect(body.stored).toBe(true);
       expect(body.deviceSigned).toBe(false);
+      // The RESPONSE reports null — never a signature the gateway does not hold.
+      expect(body.kernelSignature).toBeNull();
 
       const stored = getRepos().evidence.findById(body.bundleId);
-      expect(stored!.kernelSignature.value).toBe("operator-relay-auto");
+      // The invented placeholder is gone. The stored record asserts nothing:
+      // no signer named, algorithm "none", empty value (the column is NOT NULL,
+      // so absence is recorded inside that constraint — see NO_DEVICE_SIGNATURE).
+      expect(stored!.kernelSignature.value).not.toBe("operator-relay-auto");
+      expect(stored!.kernelSignature).toEqual({ ...NO_DEVICE_SIGNATURE });
+      expect(stored!.kernelSignature.signer).toBe("");
       expect(stored!.assuranceTier).toBe(0);
+    });
+
+    // ── LO-GW-4b: the pushed events array is PERSISTED, on both branches ──
+    it("persists the pushed events array (unsigned path) — rows > 0", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const jobId = await getQueuedJobId(app, kernelId);
+      if (!jobId) return;
+
+      const ts = new Date().toISOString();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/evidence",
+        payload: {
+          jobId,
+          kernelId,
+          evidence: {
+            printed: true,
+            events: [
+              { type: "job_started", timestamp: ts },
+              { type: "execution_completed", timestamp: ts, payload: { pagesCount: 1 } },
+            ],
+          },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.eventsStored).toBe(2);
+
+      const rows = getRepos().evidence.findEventsByBundle(body.bundleId);
+      expect(rows.length).toBe(2);
+      expect(rows.map((r) => r.type).sort()).toEqual(["execution_completed", "job_started"]);
+      // The payload the node pushed survived the round-trip verbatim.
+      const completed = rows.find((r) => r.type === "execution_completed")!;
+      expect(completed.payload).toEqual({ pagesCount: 1 });
+    });
+
+    it("persists the pushed events array on the SIGNED path too", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const jobId = await getQueuedJobId(app, kernelId);
+      if (!jobId) return;
+
+      const bundle = realDeviceBundle(jobId);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/evidence",
+        payload: { jobId, kernelId, evidence: bundle },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.deviceSigned).toBe(true);
+      expect(body.eventsStored).toBe(1);
+      const rows = getRepos().evidence.findEventsByBundle(body.bundleId);
+      expect(rows.length).toBe(1);
+      expect(rows[0]!.type).toBe("execution_completed");
+      // The device's own hash still anchors the signed path (SEAM-2 unchanged).
+      expect(body.bundleHash).toBe(bundle.bundleHash);
+    });
+
+    it("retrieval returns the SAME BYTES the relay committed to (oracle re-hash verifies)", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const jobId = await getQueuedJobId(app, kernelId);
+      if (!jobId) return;
+
+      const ts = new Date().toISOString();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/evidence",
+        payload: {
+          jobId,
+          kernelId,
+          evidence: { events: [{ type: "execution_completed", timestamp: ts }] },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const { bundleId, bundleHash } = res.json();
+
+      // The committed hash is content-addressed, not the old `sha256-<uuid>`
+      // synthetic string, so it is in a form the oracle's fetch recognises.
+      expect(bundleHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+      // Fetch the bundle back the way the oracle does and re-hash the RAW bytes.
+      const got = await app.inject({ method: "GET", url: `/api/evidence/${bundleHash}` });
+      expect(got.statusCode).toBe(200);
+      const rehashed = `sha256:${crypto.createHash("sha256").update(got.body).digest("hex")}`;
+      expect(rehashed).toBe(bundleHash);
+
+      // ...and the served document CONTAINS the events (a doc without them
+      // verifies but detects nothing — pcc-oracle PR #15).
+      const doc = JSON.parse(got.body);
+      expect(doc.id).toBe(bundleId);
+      expect(Array.isArray(doc.events)).toBe(true);
+      expect(doc.events.length).toBe(1);
+      expect(doc.events[0].type).toBe("execution_completed");
+    });
+
+    // ── Negative controls: none of these may reach a settle-eligible state ──
+    describe("negative controls — unverified relay evidence is never settle-eligible", () => {
+      it("an unsigned bundle is not device-signed and cannot anchor settlement", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: { jobId, kernelId, evidence: { printed: true, assuranceTier: 3 } },
+        });
+        const stored = getRepos().evidence.findById(res.json().bundleId)!;
+        // The settlement seam's own predicate — the gate every anchor passes.
+        expect(isDeviceSignedSignature(stored.kernelSignature)).toBe(false);
+        // The node's self-declared tier 3 is NOT trusted; tier stays at the
+        // permissionless floor.
+        expect(stored.assuranceTier).toBe(0);
+      });
+
+      it("a bundle whose events were dropped cannot serve bytes that re-hash", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: {
+            jobId,
+            kernelId,
+            evidence: { events: [{ type: "execution_completed", timestamp: new Date().toISOString() }] },
+          },
+        });
+        const { bundleId, bundleHash } = res.json();
+        const stored = getRepos().evidence.findById(bundleId)!;
+
+        // Reconstruct the envelope the OLD behaviour would have served — same
+        // bundle row, events discarded. It must NOT re-hash to the committed
+        // hash: dropping the events breaks the oracle's byte check, which is
+        // exactly why they have to be persisted.
+        const withoutEvents = buildCanonicalEvidenceEnvelope(
+          {
+            id: stored.id,
+            jobId: stored.jobId,
+            stepId: stored.stepId,
+            kernelId: stored.kernelId,
+            assuranceTier: stored.assuranceTier,
+            createdAt: stored.createdAt,
+            kernelSignature: stored.kernelSignature,
+          },
+          [],
+        );
+        const rehashed = `sha256:${crypto.createHash("sha256").update(withoutEvents).digest("hex")}`;
+        expect(rehashed).not.toBe(bundleHash);
+      });
+
+      it("a bundle carrying the legacy placeholder signature is rejected by the seam", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        // A node that sends the old placeholder verbatim must not be promoted
+        // to device-signed: extractNodeSignedBundle returns null for it.
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: {
+            jobId,
+            kernelId,
+            evidence: {
+              bundleHash: `sha256:${"cd".repeat(32)}`,
+              kernelSignature: { signer: kernelId, algorithm: "ed25519", value: "operator-relay-auto" },
+              events: [{ type: "execution_completed", timestamp: new Date().toISOString() }],
+            },
+          },
+        });
+        const body = res.json();
+        expect(body.deviceSigned).toBe(false);
+        expect(body.kernelSignature).toBeNull();
+        const stored = getRepos().evidence.findById(body.bundleId)!;
+        expect(stored.kernelSignature.value).not.toBe("operator-relay-auto");
+        expect(isDeviceSignedSignature(stored.kernelSignature)).toBe(false);
+        // The node-supplied bundleHash is NOT adopted for an unsigned bundle —
+        // the committed hash is the gateway's own content hash.
+        expect(stored.bundleHash).not.toBe(`sha256:${"cd".repeat(32)}`);
+      });
+    });
+
+    // ── Round 2: the relay never leaves an events-less bundle behind ────────
+    //
+    // Round 1 stored the events but as a SECOND autocommitted statement after
+    // the bundle row. better-sqlite3 committed the bundle immediately, so any
+    // throw from insertEvents left a durable bundle whose content-addressed
+    // hash covers events that were never stored — served back as `events: []`,
+    // so the bytes no longer re-hash (oracle fails closed) and the
+    // authenticity-of-origin floor reads nothing. The response said
+    // `stored:false` while the row persisted, and settlement reports a job's
+    // LAST bundle, so the orphan became the job's advertised evidence.
+    describe("round 2 — events and bundle commit together, ids cannot collide", () => {
+      it("a node RETRY of the same spec-conformant bundle stores both, no orphan", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const ts = new Date().toISOString();
+        // `EvidenceEvent.id` is REQUIRED by @pcc/spec and the kernel-sdk always
+        // sets it (`id: ids.evidence()`), so stable node-supplied ids are the
+        // CANONICAL shape — and a retry after a timeout resends them verbatim
+        // under a fresh bundleId.
+        const payload = {
+          jobId,
+          kernelId,
+          evidence: {
+            events: [
+              { id: "evt-sdk-0001", type: "execution_started", timestamp: ts, payload: { a: 1 } },
+              { id: "evt-sdk-0002", type: "execution_completed", timestamp: ts, payload: { b: 2 } },
+            ],
+          },
+        };
+
+        const first = await app.inject({ method: "POST", url: "/api/operator/evidence", payload });
+        expect(first.statusCode).toBe(200);
+        expect(first.json().stored).toBe(true);
+        expect(first.json().eventsStored).toBe(2);
+
+        const retry = await app.inject({ method: "POST", url: "/api/operator/evidence", payload });
+        expect(retry.statusCode).toBe(200);
+        const r = retry.json();
+        // Before the fix this was `{stored:false, error:"storage_failed"}` with
+        // the bundle row committed anyway.
+        expect(r.stored).toBe(true);
+        expect(r.eventsStored).toBe(2);
+        expect(r.bundleId).not.toBe(first.json().bundleId);
+
+        // Both bundles hold their OWN events — the retry neither collided with
+        // the first bundle's rows nor stole them.
+        expect(getRepos().evidence.findEventsByBundle(first.json().bundleId).length).toBe(2);
+        expect(getRepos().evidence.findEventsByBundle(r.bundleId).length).toBe(2);
+
+        // And the retry's advertised hash still serves bytes that re-hash — the
+        // amplification path (settlement reports the LAST bundle for a job).
+        const got = await app.inject({ method: "GET", url: `/api/evidence/${r.bundleHash}` });
+        expect(got.statusCode).toBe(200);
+        expect(`sha256:${crypto.createHash("sha256").update(got.body).digest("hex")}`).toBe(
+          r.bundleHash,
+        );
+        expect(JSON.parse(got.body).events.length).toBe(2);
+      });
+
+      it("stored event ids are bundle-scoped, so two bundles can carry the same node id", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: {
+            jobId,
+            kernelId,
+            evidence: {
+              events: [
+                {
+                  id: "evt-stable",
+                  type: "execution_completed",
+                  timestamp: new Date().toISOString(),
+                },
+              ],
+            },
+          },
+        });
+        const { bundleId } = res.json();
+        const rows = getRepos().evidence.findEventsByBundle(bundleId);
+        expect(rows.length).toBe(1);
+        // `evidence_events.id` is a GLOBAL primary key; the node's id is only
+        // unique inside its own bundle, so the relay scopes it on the way in.
+        expect(rows[0]!.id).toBe(`${bundleId}:evt-stable`);
+      });
+
+      it("refuses a bundle whose events share an id, and commits nothing", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const before = getRepos().evidence.findByJob(jobId).length;
+        const ts = new Date().toISOString();
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: {
+            jobId,
+            kernelId,
+            evidence: {
+              events: [
+                { id: "evt-dup", type: "execution_started", timestamp: ts },
+                { id: "evt-dup", type: "execution_completed", timestamp: ts },
+              ],
+            },
+          },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe("duplicate_event_id");
+        expect(res.json().duplicateIds).toEqual(["evt-dup"]);
+        // Nothing was written — the old behaviour committed the bundle row and
+        // then failed the whole multi-row event INSERT on the PK collision.
+        expect(getRepos().evidence.findByJob(jobId).length).toBe(before);
+      });
+
+      it("rolls the bundle row back when the event write fails", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const before = getRepos().evidence.findByJob(jobId).length;
+        const repo = getRepos().evidence as unknown as Record<string, unknown>;
+        // Simulate ANY failure of the event write — the PK collision is only one
+        // cause; atomicity has to hold for all of them.
+        repo.insertEvents = () => {
+          throw new Error("simulated event-write failure");
+        };
+        let body: Record<string, unknown>;
+        try {
+          const res = await app.inject({
+            method: "POST",
+            url: "/api/operator/evidence",
+            payload: {
+              jobId,
+              kernelId,
+              evidence: {
+                events: [{ type: "execution_completed", timestamp: new Date().toISOString() }],
+              },
+            },
+          });
+          body = res.json();
+        } finally {
+          delete repo.insertEvents; // restore the prototype method
+        }
+
+        expect(body.stored).toBe(false);
+        expect(body.error).toBe("storage_failed");
+        // `stored:false` now MEANS nothing was stored.
+        expect(getRepos().evidence.findById(body.bundleId as string)).toBeUndefined();
+        expect(getRepos().evidence.findByJob(jobId).length).toBe(before);
+      });
+
+      it("refuses a signed bundle whose bundleHash could never be served back", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const before = getRepos().evidence.findByJob(jobId).length;
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          // Device-signed SHAPE, but a bundleHash `isEvidenceHashForm` does not
+          // recognise: GET /api/evidence/:hash could never return it, so the
+          // committed hash would point at nothing.
+          payload: { jobId, kernelId, evidence: realDeviceBundle(jobId, "definitely-not-a-hash") },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe("invalid_bundle_hash");
+        expect(getRepos().evidence.findByJob(jobId).length).toBe(before);
+      });
+
+      it("reports signature PRESENCE, never verification, on the signed path", async () => {
+        const kernelId = await getSeededKernelId(app);
+        if (!kernelId) return;
+        const jobId = await getQueuedJobId(app, kernelId);
+        if (!jobId) return;
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/operator/evidence",
+          payload: { jobId, kernelId, evidence: realDeviceBundle(jobId) },
+        });
+        const body = res.json();
+        // A relay caller can supply ANY ed25519-shaped signature over ANY hash
+        // and land deviceSigned:true — this route does not verify it. The
+        // response says so explicitly, so presence is never read as proof.
+        expect(body.deviceSigned).toBe(true);
+        expect(body.signatureVerified).toBe(false);
+      });
+
+      it("the no-signature sentinel is not device-signed", () => {
+        // NO_DEVICE_SIGNATURE is deliberately NOT a member of
+        // PLACEHOLDER_SIGNATURE_VALUES — it is caught by the empty-value,
+        // empty-signer and non-ed25519 clauses instead. `isDeviceSignedSignature`
+        // is the only sanctioned test; a check written against the SET alone
+        // would miss this value. Pinned here so that stays true.
+        expect(isDeviceSignedSignature(NO_DEVICE_SIGNATURE)).toBe(false);
+      });
     });
   });
 

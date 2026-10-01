@@ -333,6 +333,25 @@ export class CourierJobsStore {
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: CourierJobStatus; claimedBy: string | null }
   > {
+    // SCOPE THE SHIM TO ITS OWN CATEGORY (round 2). Every READ on this shim is
+    // already courier-scoped — `listOpen` filters on COURIER_CAPABILITY_TYPE and
+    // `countByStatus` skips other types — but `claim` forwarded any id straight
+    // through to the shared store. `JobOffersStore.claim` looks an offer up in
+    // ONE map with no capability filter, so the courier surface could claim a
+    // `lab.hplc` offer (or any money-path offer produced by
+    // services/job-offer-producer.ts, which stamps each offer with its request
+    // node's own capabilityType). From this surface such an offer does not
+    // exist, which is exactly what its read side already reports, so `claim`
+    // now says the same thing.
+    //
+    // Read outside the claim mutex on purpose: `capabilityType` is set at
+    // creation and never mutated, so it needs no serialisation. The mutex
+    // guards the open -> claimed transition, which still happens entirely
+    // inside `JobOffersStore.claim` below.
+    const offer = getJobOffersStore().get(id);
+    if (!offer || offer.capabilityType !== COURIER_CAPABILITY_TYPE) {
+      return { ok: false, reason: "not_found" };
+    }
     const result = await getJobOffersStore().claim(id, {
       kernelId: claim.driverAgent,    // v0.2 names this driverAgent
       etaMin: claim.etaMin,

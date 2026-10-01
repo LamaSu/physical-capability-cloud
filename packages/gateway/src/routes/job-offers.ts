@@ -16,7 +16,7 @@
  *                                                           ?verified=true
  *                                                           ?limit=N&offset=N
  *   GET    /api/job-offers/:id                   — single offer + events (PUBLIC)
- *   POST   /api/job-offers/:id/claim             — race-safe claim
+ *   POST   /api/job-offers/:id/claim             — race-safe claim (operator-authenticated)
  *   POST   /api/job-offers/:id/events            — operator progress event
  *   POST   /api/job-offers/:id/heartbeat         — poster liveness
  *   PATCH  /api/job-offers/:id                   — poster updates
@@ -24,8 +24,10 @@
  *   GET    /api/job-offers/healthz               — liveness (PUBLIC)
  *
  * Auth:
- *   - POST/PATCH/DELETE/heartbeat require an authenticated poster identity
+ *   - POST/PATCH/DELETE/heartbeat/claim require an authenticated identity
  *     (API key operatorId, SIWE userId, or X-Posted-By header fallback).
+ *   - claim additionally checks principal -> kernel ownership: the body's
+ *     kernelId is never trusted on its own (LO-GW-3a).
  *   - PATCH/DELETE/heartbeat check the original poster matches the current
  *     identity (or are permitted if posterDid was null at creation).
  *   - GET /open + GET /:id + healthz are PUBLIC so operator agents can poll
@@ -39,6 +41,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { requireKernelOperator } from "../auth/kernel-operator.js";
 import {
   getJobOffersStore,
   type ClaimInput,
@@ -265,10 +268,18 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { kernelId?: string; claimSignature?: string; etaMin?: number; contact?: string };
   }>("/api/job-offers/:id/claim", async (req, reply) => {
+    // LO-GW-3a — authenticate the claimant, then check principal -> kernel
+    // ownership, before any offer state is touched. Same shape as the sibling
+    // PATCH/DELETE/heartbeat routes below.
+    const poster = requirePoster(req, reply);
+    if (poster === null) return;
     const b = req.body || {};
     if (!b.kernelId) {
       return reply.code(400).send({ error: "missing_field", required: ["kernelId"] });
     }
+    // The body's kernelId is an assertion, not an identity: it only stands if
+    // the authenticated principal actually operates that kernel.
+    if (!(await requireKernelOperator(reply, poster, b.kernelId))) return;
     const store = getJobOffersStore();
     const claim: ClaimInput = {
       kernelId: b.kernelId,

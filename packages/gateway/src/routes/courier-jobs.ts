@@ -20,12 +20,18 @@
  *                                                          ?verified=true
  *                                                          ?minFeeUSD=N  ?maxFeeUSD=N
  *   GET    /api/courier-jobs/:id                — single job + events (PUBLIC)
- *   POST   /api/courier-jobs/:id/claim          — race-safe claim
+ *   POST   /api/courier-jobs/:id/claim          — race-safe claim (authenticated)
  *   POST   /api/courier-jobs/:id/events         — driver progress event
  *   POST   /api/courier-jobs/:id/heartbeat      — poster liveness ping
  *   PATCH  /api/courier-jobs/:id                — poster updates
  *   DELETE /api/courier-jobs/:id                — poster cancels
  *   GET    /api/courier-jobs/healthz            — liveness (PUBLIC)
+ *
+ * Auth (LO-GW-3a, round 2): POST /:id/claim requires an authenticated identity
+ * and binds `driverAgent` to it — either a kernel the principal operates (the
+ * same check /api/job-offers/:id/claim makes, since both write the same store)
+ * or the principal's own name. It also only reaches courier.dispatch offers,
+ * matching this shim's read scope. See authorizeDriverClaim below.
  *
  *   POST   /api/courier-jobs/jobs               — v0.2 alias (pcc-courier broadcasts here)
  *   GET    /api/courier-jobs/jobs/open          — v0.2 alias
@@ -34,6 +40,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { ZERO_ADDRESS, isSamePrincipal, lookupKernelOwner } from "../auth/kernel-operator.js";
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -60,6 +67,76 @@ function requirePoster(req: FastifyRequest, reply: FastifyReply): string | null 
     return null;
   }
   return p;
+}
+
+/**
+ * LO-GW-3a (round 2) — authorize a claim on the courier shim.
+ *
+ * This route writes the SAME field of the SAME store as
+ * `POST /api/job-offers/:id/claim` (`JobOffersStore.claim` sets
+ * `claimedByKernelId`); the shim just renames the body field to `driverAgent`.
+ * Until now its entire validation was `if (!b.driverAgent) return 400`, so the
+ * ownership guard on the generic route was bypassable by posting the same claim
+ * one path over — with no identity header at all, naming a kernel that does not
+ * exist, on an offer that has nothing to do with couriers.
+ *
+ * The claim is load-bearing beyond the offer row: routes/print-and-mail.ts
+ * documents its authentication model as "presenting the driverAgent that
+ * matches the claim" and gates handoff EVIDENCE submission on
+ * `claimedBy === driverAgent`. An unauthenticated claim therefore let a caller
+ * choose the value that later authorizes evidence for that job.
+ *
+ * `driverAgent` is not required to be a kernel here — the v0.2 surface this
+ * shim preserves uses free-form driver-agent names (`drone-a3` in
+ * docs/COURIER_MATCHING.md, and print-and-mail's gig worker), and the generic
+ * route's flat "must be a registered kernel" rule would break that documented
+ * flow. What was missing is not kernel-ness, it is any BINDING to the caller.
+ * So the name must resolve to the authenticated principal one of two ways:
+ *
+ *   1. it names a REGISTERED kernel -> the principal must operate that kernel,
+ *      exactly as `/api/job-offers/:id/claim` requires. The shim is then never
+ *      the softer door for a kernel-shaped claim.
+ *   2. otherwise -> it must BE the principal. A caller may claim under its own
+ *      name, never under someone else's.
+ *
+ * A failed kernel lookup falls through to rule 2, which is strictly no more
+ * permissive than rule 2 alone: an outage cannot turn into an authorization.
+ *
+ * Returns true when authorized; otherwise it has already sent the reply.
+ */
+async function authorizeDriverClaim(
+  reply: FastifyReply,
+  principal: string,
+  driverAgent: string,
+): Promise<boolean> {
+  const lookup = await lookupKernelOwner(driverAgent);
+  if (lookup.found) {
+    if (!lookup.owner || lookup.owner === ZERO_ADDRESS) {
+      void reply.code(403).send({
+        error: "kernel_unowned",
+        message: `Kernel '${driverAgent}' has no recorded operator; it cannot claim jobs`,
+      });
+      return false;
+    }
+    if (!isSamePrincipal(lookup.owner, principal)) {
+      void reply.code(403).send({
+        error: "not_kernel_operator",
+        message: "You can only claim jobs for a kernel you operate",
+      });
+      return false;
+    }
+    return true;
+  }
+  if (!isSamePrincipal(driverAgent, principal)) {
+    void reply.code(403).send({
+      error: "not_driver_identity",
+      message:
+        "driverAgent must be your own authenticated identity, or a kernel you operate. "
+        + "A claim cannot be posted on another driver's behalf.",
+    });
+    return false;
+  }
+  return true;
 }
 
 const VALID_EVENT_TYPES = new Set(["pickup", "delivered", "cancelled", "note"]);
@@ -202,10 +279,17 @@ export async function courierJobsRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { driverAgent?: string; etaMin?: number; contact?: string };
   }>("/api/courier-jobs/:id/claim", async (req, reply) => {
+    // LO-GW-3a (round 2) — authenticate first, like every other mutating route
+    // in this file already does. The claim is what later authorizes handoff
+    // evidence for the job, so an anonymous caller must not be able to set it.
+    const poster = requirePoster(req, reply);
+    if (poster === null) return;
     const b = req.body || {};
     if (!b.driverAgent) {
       return reply.code(400).send({ error: "missing_field", required: ["driverAgent"] });
     }
+    // The body's driverAgent is an assertion about identity, not an identity.
+    if (!(await authorizeDriverClaim(reply, poster, b.driverAgent))) return;
     const store = getCourierJobsStore();
     const result = await store.claim(req.params.id, {
       driverAgent: b.driverAgent,

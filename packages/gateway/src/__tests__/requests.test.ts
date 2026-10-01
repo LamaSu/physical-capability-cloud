@@ -449,16 +449,48 @@ describe("PUT /api/requests/:id", () => {
     await app.close();
   });
 
-  it("updates title and budget", async () => {
+  it("updates the title with no authentication — a non-authority field", async () => {
     const res = await app.inject({
       method: "PUT",
       url: `/api/requests/${requestId}`,
-      payload: { title: "Updated Robot", budget: 3000 },
+      payload: { title: "Updated Robot" },
     });
     expect(res.statusCode).toBe(200);
-    const { request } = res.json();
-    expect(request.title).toBe("Updated Robot");
-    expect(request.budget).toBe(3000);
+    expect(res.json().request.title).toBe("Updated Robot");
+  });
+
+  it("updates the budget for the authenticated requester", async () => {
+    // R-06 (round 2): `budget` is the authorized ceiling, so raising it is
+    // renewed acceptance and belongs to the requester. ROBOT_REQUEST records
+    // requesterEmail team@moltpod.com, so that principal — and no other — may
+    // change it. The refusals are pinned in requests-budget-authorization.test.ts.
+    const authed = await buildAuthedApp("team@moltpod.com");
+    try {
+      const res = await authed.inject({
+        method: "PUT",
+        url: `/api/requests/${requestId}`,
+        payload: { title: "Updated Robot", budget: 3000 },
+      });
+      expect(res.statusCode).toBe(200);
+      const { request } = res.json();
+      expect(request.title).toBe("Updated Robot");
+      expect(request.budget).toBe(3000);
+    } finally {
+      await authed.close();
+    }
+  });
+
+  it("refuses an unauthenticated budget change", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/requests/${requestId}`,
+      payload: { budget: 3000 },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("authentication_required");
+
+    const after = await app.inject({ method: "GET", url: `/api/requests/${requestId}` });
+    expect(after.json().request.budget).toBe(2500);
   });
 
   it("returns 404 for unknown request", async () => {
