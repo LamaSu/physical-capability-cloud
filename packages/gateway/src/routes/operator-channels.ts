@@ -349,18 +349,20 @@ function vaultKeyFor(ref: string): string {
 export function isChannelCredentialAllowed(operatorSlug: unknown, credentialRef: unknown): boolean {
   if (typeof operatorSlug !== "string" || typeof credentialRef !== "string") return false;
   const slug = operatorSlug.trim().toLowerCase();
-  const ref = credentialRef.trim();
-  if (slug === "" || ref === "") return false;
+  const wanted = vaultKeyFor(credentialRef);
+  // An empty slug or ref never matches: it would otherwise equal an empty
+  // entry part ("lab-7:" or " :ref") and authorise a blank ref or slug.
+  if (slug === "" || wanted === "") return false;
   const raw = process.env[CHANNEL_CREDENTIALS_ENV];
-  if (!raw || raw.trim() === "") return false;
-  const wanted = vaultKeyFor(ref);
+  if (!raw) return false;
   for (const entry of raw.split(",")) {
+    // No colon (or nothing before it) means a malformed entry that matches
+    // nothing; without this guard "ab" would read as slug "a", ref "ab".
     const colon = entry.indexOf(":");
     if (colon <= 0) continue;
-    const entrySlug = entry.slice(0, colon).trim().toLowerCase();
-    const entryRef = entry.slice(colon + 1).trim();
-    if (entrySlug === "" || entryRef === "") continue;
-    if (entrySlug === slug && vaultKeyFor(entryRef) === wanted) return true;
+    if (entry.slice(0, colon).trim().toLowerCase() === slug && vaultKeyFor(entry.slice(colon + 1)) === wanted) {
+      return true;
+    }
   }
   return false;
 }
@@ -605,15 +607,11 @@ async function sendWebhook(
       warning: "no endpoint.url",
     };
   }
-  // A record stored before attach-time validation existed (or edited around
-  // it) must not be sent: check the URL again, before anything is signed.
-  const urlCheck = checkOutboundUrl(url);
-  if (!urlCheck.ok) {
-    return webhookFailure(ch, new OutboundError("invalid_url", "url is not an allowed destination", { reason: urlCheck.reason }));
-  }
   // credentialRef gate: a stored channel whose ref is not allowlisted (or whose
   // secret is not configured) is neither signed nor sent, and the refusal is
-  // the same either way. Checked before the body is even built.
+  // the same either way. Checked before the body is even built. (The URL is
+  // checked again inside guardedFetch, so a record stored before the attach-time
+  // rule existed is refused there.)
   let secret: string | undefined;
   if (ch.credentialRef) {
     secret = resolveChannelSecret(ch.operatorSlug, ch.credentialRef);

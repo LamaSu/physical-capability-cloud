@@ -40,7 +40,11 @@ import net from "node:net";
 
 // ── address predicate ────────────────────────────────────────────────────────
 
-/** IPv4 ranges the gateway must never send to. One entry per range so each can be tested alone. */
+/**
+ * IPv4 ranges the gateway must never send to. One entry per range so each can be
+ * tested alone; ranges that touch (224/4 and 240/4) are one entry, so no entry can
+ * be widened into its neighbour without changing what is blocked.
+ */
 const V4_BLOCKED: ReadonlyArray<readonly [cidr: string, why: string]> = [
   ["0.0.0.0/8", "this-network / unspecified"],
   ["10.0.0.0/8", "RFC1918 private"],
@@ -56,26 +60,24 @@ const V4_BLOCKED: ReadonlyArray<readonly [cidr: string, why: string]> = [
   ["198.18.0.0/15", "benchmarking"],
   ["198.51.100.0/24", "TEST-NET-2"],
   ["203.0.113.0/24", "TEST-NET-3"],
-  ["224.0.0.0/4", "multicast"],
-  ["240.0.0.0/4", "reserved (class E), includes limited broadcast 255.255.255.255"],
+  ["224.0.0.0/3", "multicast 224.0.0.0/4 and reserved 240.0.0.0/4, which includes limited broadcast 255.255.255.255"],
 ];
 
 /**
  * IPv6 ranges blocked outright. IPv4-mapped (::ffff:0:0/96), IPv4-translated
- * (::ffff:0:0:0/96) and NAT64 (64:ff9b::/96) are NOT listed here: they embed an
- * IPv4 address and are decided by that address, see v6Blocked().
+ * (::ffff:0:0:0/96) and NAT64 (64:ff9b::/96) sit inside ::/8 but embed an IPv4
+ * address, so v6Blocked() decides them by that address BEFORE this table is
+ * consulted; everything else in ::/8 is reserved and blocked here.
  */
 const V6_BLOCKED: ReadonlyArray<readonly [cidr: string, why: string]> = [
-  ["::/96", "unspecified, loopback and IPv4-compatible (deprecated, never routable)"],
-  ["64:ff9b:1::/48", "local-use NAT64 (RFC 8215)"],
+  ["::/8", "reserved by IETF: unspecified, loopback, IPv4-compatible, local-use NAT64 64:ff9b:1::/48 and the rest of ::/8"],
   ["100::/64", "discard-only (RFC 6666)"],
   ["2001::/23", "IETF protocol assignments (Teredo, ORCHID, benchmarking)"],
   ["2001:db8::/32", "documentation"],
   ["2002::/16", "6to4 (embeds an IPv4 address)"],
   ["3fff::/20", "documentation (RFC 9637)"],
   ["fc00::/7", "unique local addresses (includes AWS IMDS fd00:ec2::254)"],
-  ["fe80::/10", "link-local"],
-  ["fec0::/10", "site-local (deprecated)"],
+  ["fe80::/9", "link-local fe80::/10 and site-local fec0::/10 (deprecated)"],
   ["ff00::/8", "multicast"],
 ];
 
@@ -96,8 +98,6 @@ function parseIPv4(s: string): number | null {
 
 /** Strict IPv6 parse to eight 16-bit groups. No brackets, no zone id, no whitespace. */
 function parseIPv6(input: string): number[] | null {
-  if (input.length < 2 || input.length > 45) return null;
-  if (!/^[0-9A-Fa-f:.]+$/.test(input)) return null;
   let s = input;
   let tail: [number, number] | null = null;
   if (s.includes(".")) {
@@ -231,15 +231,11 @@ export type OutboundUrlCheck = { ok: true; url: URL } | { ok: false; reason: Out
 
 const MAX_URL_LENGTH = 2048;
 
-/** Names that are internal by convention or by ICANN reservation. */
-const INTERNAL_NAMES: ReadonlySet<string> = new Set([
-  "localhost",
-  "localhost.localdomain",
-  "ip6-localhost",
-  "ip6-loopback",
-  "metadata",
-  "instance-data",
-]);
+/**
+ * Suffixes that are internal by convention or by ICANN reservation. Together with
+ * the single-label rule below they cover localhost, localhost.localdomain,
+ * *.localhost, metadata.google.internal and *.internal.
+ */
 const INTERNAL_SUFFIXES: ReadonlyArray<string> = [
   ".localhost",
   ".local",
@@ -255,9 +251,8 @@ const INTERNAL_SUFFIXES: ReadonlyArray<string> = [
 
 function isInternalHostname(name: string): boolean {
   // A single-label name resolves through the resolver's search domains, which
-  // makes it internal by construction ("redis", "metadata", "kubernetes").
+  // makes it internal by construction ("localhost", "redis", "metadata").
   if (!name.includes(".")) return true;
-  if (INTERNAL_NAMES.has(name)) return true;
   return INTERNAL_SUFFIXES.some((suffix) => name.endsWith(suffix));
 }
 
@@ -300,15 +295,13 @@ export function checkOutboundUrl(raw: unknown): OutboundUrlCheck {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && httpAllowed())) return refuse("scheme_not_allowed");
   if (url.username !== "" || url.password !== "") return refuse("userinfo_not_allowed");
 
+  // WHATWG parsing already turned any IPv4 spelling into dotted decimal (or
+  // failed), so a host made of digits and dots here is a real IPv4 literal.
   const host = bareHost(url);
-  if (host === "") return refuse("invalid_url");
   if (net.isIP(host) !== 0) {
     return isBlockedAddress(host) ? refuse("blocked_address") : { ok: true, url };
   }
-  // Digits-and-dots that are not a valid IP can only come from a parser quirk: refuse.
-  if (/^[\d.]+$/.test(host)) return refuse("invalid_url");
   const name = host.replace(/\.+$/, "");
-  if (name === "") return refuse("invalid_url");
   if (isInternalHostname(name)) return refuse("internal_hostname");
   return { ok: true, url };
 }
