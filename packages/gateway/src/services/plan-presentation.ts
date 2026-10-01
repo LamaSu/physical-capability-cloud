@@ -16,6 +16,8 @@
  *    operator, tier, program) and its unit (amount, currency, decimals);
  *  - R10's verdicts are exactly one per submitted node, and a refusal's nested verdicts are exactly the
  *    top-level ones that are not current;
+ *  - the acceptance-time live terms shown beside a deal are the deal's own (price in exact base units,
+ *    currency, operator, tier, capability identity);
  *  - the seal record names this reservation and exactly this deal digest.
  *
  * Every input is read ONCE into owned, validated data (the review pattern of #351/#355/#356). A
@@ -291,7 +293,8 @@ function readLive(x: unknown): LiveView {
 }
 
 type VerdictView =
-  | { nodeId: string; status: "current"; live: LiveView }
+  /** `tier` and `gross` are R10's exact resolved terms (not displayed): what an accepted deal is checked against. */
+  | { nodeId: string; status: "current"; live: LiveView; tier: number; gross: bigint }
   | { nodeId: string; status: "stale"; live: LiveView; diffs: DiffView[] }
   | { nodeId: string; status: Exclude<PlanNodeState, "proposed" | "current" | "stale" | "compiled" | "sealed">; reason: string };
 
@@ -300,7 +303,15 @@ function readVerdict(x: unknown): VerdictView {
   const nodeId = str(o.nodeId);
   const status = str(o.status);
   need(VERDICT_STATUSES.has(status)); // a forged status such as "sealed" is refused
-  if (status === "current") return { nodeId, status, live: readLive(o.resolved) };
+  if (status === "current") {
+    const resolved = o.resolved;
+    const live = readLive(resolved);
+    const exact = obj(resolved);
+    const tier = exact.tier;
+    const gross = exact.grossBaseUnits;
+    need(isInt(tier, 0, 3) && isBig(gross) && gross >= 0n);
+    return { nodeId, status, live, tier: tier as number, gross: gross as bigint };
+  }
   if (status === "stale") {
     return {
       nodeId,
@@ -558,6 +569,47 @@ function sameVerdicts(a: readonly VerdictView[], b: readonly VerdictView[]): boo
   return x.length === y.length && x.every((k, i) => k === y[i]);
 }
 
+/** A decimal price as exact base units at `decimals`, or null if it is not an exact amount at that precision. No float is involved. */
+function baseUnitsOf(price: string, decimals: number): bigint | null {
+  const m = /^(0|[1-9][0-9]{0,77})(?:\.([0-9]{1,78}))?$/.exec(price);
+  if (m === null) return null;
+  const fraction = m[2] ?? "";
+  if (fraction.length > decimals) return null;
+  return BigInt(m[1]!) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
+}
+
+/**
+ * The acceptance-time terms R10 resolved for each accepted node are the terms the deal sealed, so the
+ * live view shown beside a deal cannot contradict it (astra, #434). The shown price is exactly the
+ * resolved amount in base units, and that amount is the unit's gross, or, when an economics agreement
+ * grossed the unit up (royalties on top), no more than it: the seam refuses a gross below the quote,
+ * and the plan does not record the quote. Currency, operator, tier (resolved, and among the tiers
+ * shown as offered) and the capability's type, csd and matched digest equal the deal's contract.
+ * Addresses and hashes compare lowercased: the compiler lowercases the contract, and hex case carries
+ * no meaning. Every accepted node needs a current verdict; `verdictOf` is already an exact cover.
+ */
+function liveTermsMatchDeal(plan: CompiledAcceptedPlan, verdictOf: ReadonlyMap<string, VerdictView>): boolean {
+  return plan.nodeToUnit.every((b) => {
+    const v = verdictOf.get(b.nodeId);
+    if (v === undefined || v.status !== "current") return false;
+    const unit = plan.jobs[b.jobIndex]!.units[b.milestoneIndex]!; // `planIsBound` has checked that both exist
+    const cp = b.canonicalPlan;
+    const shown = baseUnitsOf(v.live.priceDecimal, plan.currencyDecimals);
+    return (
+      shown !== null &&
+      shown === v.gross &&
+      (plan.agreementHash === null ? v.gross === unit.g : v.gross <= unit.g) &&
+      v.live.currency === plan.currency &&
+      cp.operator === v.live.operator.toLowerCase() &&
+      v.tier === b.tier &&
+      v.live.assuranceTiers.includes(b.tier) &&
+      cp.capability.type === v.live.capabilityType &&
+      cp.capability.csd === v.live.csd &&
+      cp.capability.matchedCapabilityDigest === v.live.matchedCapabilityDigest.toLowerCase()
+    );
+  });
+}
+
 function money(amount: bigint, plan: CompiledAcceptedPlan): Money {
   return { baseUnits: amount.toString(), currency: plan.currency, decimals: plan.currencyDecimals };
 }
@@ -609,6 +661,9 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
     if (plan && !(verdictList.length === nodeIds.length && verdictList.every((v) => v.status === "current"))) {
       return invalid("malformed-outcome", asOf, snap);
     }
+    const verdictOf = new Map(verdictList.map((v) => [v.nodeId, v]));
+    // The live terms shown beside the deal are the deal's own (a mismatch is two server inputs that disagree).
+    if (plan && !liveTermsMatchDeal(plan, verdictOf)) return invalid("plan-binding", asOf, snap);
     // All units of one compiled deal share one reclaim time; a plan where they differ is not intact.
     const reclaims = plan ? [...new Set(plan.jobs.flatMap((j) => j.units.map((u) => u.reclaimAt.toString())))] : [];
     if (plan && reclaims.length !== 1) return invalid("plan-integrity", asOf, snap);
@@ -628,7 +683,6 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
       state = "needs-requote";
     } else state = "refused";
 
-    const verdictOf = new Map(verdictList.map((v) => [v.nodeId, v]));
     const bindingOf = new Map((plan?.nodeToUnit ?? []).map((b) => [b.nodeId, b]));
     const presented: PlanNodePresentation[] = nodes
       .map((n) => {

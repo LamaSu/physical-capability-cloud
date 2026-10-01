@@ -17,7 +17,7 @@
  */
 import { describe, it, expect } from "vitest";
 import type { EvidenceRequirement } from "@pcc/spec";
-import { acceptExternalPlan, type ExternalPlanSubmission, type SeamDeps, type SeamResult } from "../services/external-plan-seam.js";
+import { acceptExternalPlan, type EconomicsBinding, type ExternalPlanSubmission, type SeamDeps, type SeamResult } from "../services/external-plan-seam.js";
 import type { LiveCapability, LiveKernel } from "../services/plan-snapshot-revalidation.js";
 import { presentPlan, type SealRecord } from "../services/plan-presentation.js";
 
@@ -278,20 +278,138 @@ describe("PlanPresentation.unknowns (item 6): an honest 'we don't know' list, ne
 
 // ── astra review of #434 (round 1): no contradictory live terms beside a deal ────────────────────
 
-describe("PlanPresentation verdicts: a verdict list that repeats one verdict is refused", () => {
+describe("PlanPresentation live terms: the acceptance-time terms shown beside a deal are the deal's own", () => {
   type Accepted = Extract<SeamResult, { ok: true }>;
+  /** The accepted outcome with `edit` applied to one node's resolved terms: same plan, same digest, same seal. */
+  const withResolved = (outcome: Accepted, nodeId: string, edit: (resolved: Record<string, unknown>) => Record<string, unknown>): Accepted => ({
+    ...outcome,
+    verdicts: outcome.verdicts.map((v) => (v.nodeId === nodeId && v.status === "current" ? { ...v, resolved: edit({ ...v.resolved }) as unknown as typeof v.resolved } : v)),
+  });
   const sealedOf = (outcome: Accepted) => presentPlan({ submission: agentDag(), outcome, sealed: sealedRecordFor(outcome), asOf: ASOF });
+  const compiledOf = (outcome: Accepted) => presentPlan({ submission: agentDag(), outcome, asOf: ASOF });
+  /** The four facts that matter, compact: layer, state, the invalid reason and how many nodes are shown. */
   const shape = (p: ReturnType<typeof presentPlan>) => [p.layer, p.state, p.invalid?.reason ?? null, p.nodes.length];
+  /** A contradiction between the shown live terms and the deal is a binding failure between two server inputs. */
+  const mismatch = (outcome: Accepted, why?: string) => {
+    expect(shape(sealedOf(outcome)), `sealed: ${why ?? ""}`).toEqual(["C", "invalid", "plan-binding", 0]);
+    expect(shape(compiledOf(outcome)), `compiled: ${why ?? ""}`).toEqual(["C", "invalid", "plan-binding", 0]);
+  };
+  const editPrint = (edit: (resolved: Record<string, unknown>) => Record<string, unknown>) => withResolved(accept(), "print", edit);
 
-  it("control: the unedited deal is sealed (Layer B)", () => {
+  it("control: the unedited deal is sealed (Layer B), so each case below can fail only on its own term", () => {
     expect(shape(sealedOf(accept()))).toEqual(["B", "sealed", null, 2]);
+    expect(shape(compiledOf(accept()))).toEqual(["C", "compiled", null, 2]);
+    const print = sealedOf(accept()).nodes.find((n) => n.nodeId === "print")!;
+    expect([print.live?.priceDecimal, print.money?.gross.baseUnits]).toEqual(["6.5", "6500000"]);
   });
 
   it("duplicates: the same current verdict for both nodes is invalid, never sealed (the reviewer's second case)", () => {
     const outcome = accept();
     const [first, second] = outcome.verdicts;
     for (const verdicts of [[first!, first!], [second!, second!]]) {
-      expect(shape(sealedOf({ ...outcome, verdicts }))).toEqual(["C", "invalid", "malformed-outcome", 0]);
+      const p = sealedOf({ ...outcome, verdicts });
+      expect(shape(p)).toEqual(["C", "invalid", "malformed-outcome", 0]);
     }
+  });
+
+  it("price: print's resolved.priceDecimal \"0.01\" beside a deal that seals 6.50 is invalid, never Layer B (the reviewer's case)", () => {
+    mismatch(editPrint((r) => ({ ...r, priceDecimal: "0.01" })), "priceDecimal only");
+    // The same lie told consistently in the exact amount: the deal's gross still disagrees.
+    mismatch(editPrint((r) => ({ ...r, priceDecimal: "0.01", grossBaseUnits: 10_000n })), "priceDecimal and grossBaseUnits");
+  });
+
+  it("price: the shown decimal is exactly the resolved base units, and the resolved base units are exactly the unit's gross", () => {
+    for (const priceDecimal of ["6.4", "65", "6.5000001", "0.6500000", "06.5", "6.5e0", "-6.5", " 6.5", "6.5\n", "", "abc", "0x6.5"]) {
+      mismatch(editPrint((r) => ({ ...r, priceDecimal })), `priceDecimal ${JSON.stringify(priceDecimal)}`);
+    }
+    mismatch(editPrint((r) => ({ ...r, grossBaseUnits: 6_500_001n })), "grossBaseUnits one base unit off");
+    mismatch(editPrint((r) => ({ ...r, grossBaseUnits: 6_499_999n })), "grossBaseUnits one base unit under");
+  });
+
+  it("exact terms: a verdict whose resolved amount or tier is missing or the wrong type is a malformed outcome, never a throw", () => {
+    const malformed = (p: ReturnType<typeof presentPlan>, why: string) => expect(shape(p), why).toEqual(["C", "invalid", "malformed-outcome", 0]);
+    for (const grossBaseUnits of [undefined, 6_500_000, "6500000", null, -1n]) {
+      malformed(sealedOf(editPrint((r) => ({ ...r, grossBaseUnits }))), `grossBaseUnits ${String(grossBaseUnits)}`);
+    }
+    for (const tier of [undefined, "2", 9, -1, 1.5, null]) {
+      malformed(sealedOf(editPrint((r) => ({ ...r, tier }))), `tier ${String(tier)}`);
+    }
+  });
+
+  it("currency: the live currency is the deal's currency", () => {
+    mismatch(editPrint((r) => ({ ...r, currency: "USDT" })));
+  });
+
+  it("operator: the live operator is the deal's operator, in whatever hex case", () => {
+    mismatch(editPrint((r) => ({ ...r, operator: OP_MAIL })));
+    const upper = editPrint((r) => ({ ...r, operator: `0x${OP_PRINT.slice(2).toUpperCase()}` }));
+    expect(shape(sealedOf(upper))).toEqual(["B", "sealed", null, 2]); // hex case carries no meaning
+  });
+
+  it("tier: the resolved tier is the deal's tier, and the tiers shown as offered include it", () => {
+    mismatch(editPrint((r) => ({ ...r, tier: 1 })), "resolved tier");
+    mismatch(editPrint((r) => ({ ...r, assuranceTiers: [0, 1] })), "offered tiers without the deal's");
+    mismatch(withResolved(accept(), "mail", (r) => ({ ...r, tier: 2 })), "mail resolved at the print tier");
+  });
+
+  it("capability identity: the live type, csd and matched digest are the deal's, the digest in whatever hex case", () => {
+    mismatch(editPrint((r) => ({ ...r, capabilityType: "mail.drop" })), "capabilityType");
+    mismatch(editPrint((r) => ({ ...r, csd: "courier-route" })), "csd");
+    mismatch(editPrint((r) => ({ ...r, matchedCapabilityDigest: `0x${"ab".repeat(32)}` })), "matchedCapabilityDigest");
+    const upper = editPrint((r) => ({ ...r, matchedCapabilityDigest: `0x${String(r.matchedCapabilityDigest).slice(2).toUpperCase()}` }));
+    expect(shape(sealedOf(upper))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("every accepted node is checked, not just the first or the last", () => {
+    mismatch(withResolved(accept(), "mail", (r) => ({ ...r, priceDecimal: "0.01" })), "mail");
+    mismatch(withResolved(withResolved(accept(), "mail", (r) => ({ ...r, currency: "USDT" })), "print", (r) => ({ ...r, tier: 1 })), "both");
+  });
+
+  describe("with an economics agreement (royalties on top), the unit's gross legitimately exceeds the live quote", () => {
+    const LICENSOR = A("c1");
+    const HASH = (b: string) => `0x${b.repeat(32)}`;
+    const standInSplit: EconomicsBinding["splitNet"] = (units) => ({
+      ok: true,
+      agreementHash: HASH("a1"),
+      economicTermsHash: HASH("e1"),
+      rightsTermsHash: HASH("f1"),
+      units: units.map((u) => {
+        const royalty = (u.g - u.quote) / 2n;
+        return {
+          unitRef: u.nodeId,
+          gross: u.g.toString(),
+          fee: u.f.toString(),
+          net: u.n.toString(),
+          payouts: royalty > 0n ? [{ recipient: u.payoutAddress, amount: (u.n - royalty).toString() }, { recipient: LICENSOR, amount: royalty.toString() }] : [{ recipient: u.payoutAddress, amount: u.n.toString() }],
+        };
+      }),
+    });
+    const agreed = (): Accepted => {
+      const economics: EconomicsBinding = { unitGross: () => ({ ok: true, gross: { print: 7_000_000n, mail: 3_250_000n } }), splitNet: standInSplit };
+      const outcome = acceptExternalPlan(agentDag(), CTX, { ...world(), economics });
+      if (!outcome.ok) throw new Error(`setup: ${JSON.stringify(outcome.refusal)}`);
+      return outcome;
+    };
+
+    it("an honest agreement deal is still presented: live 6.5 beside a gross of 7.0, compiled and sealed", () => {
+      const outcome = agreed();
+      expect(outcome.plan.agreementHash).toBe(HASH("a1"));
+      for (const p of [sealedOf(outcome), compiledOf(outcome)]) {
+        const print = p.nodes.find((n) => n.nodeId === "print")!;
+        expect([p.state === "sealed" ? "B" : "C", p.invalid ?? null]).toEqual([p.layer, null]);
+        expect([print.live?.priceDecimal, print.money?.gross.baseUnits]).toEqual(["6.5", "7000000"]);
+      }
+      expect(shape(sealedOf(outcome))).toEqual(["B", "sealed", null, 2]);
+    });
+
+    it("the quote may not exceed the gross, and the shown decimal still has to be the resolved amount", () => {
+      mismatch(withResolved(agreed(), "print", (r) => ({ ...r, priceDecimal: "7.000001", grossBaseUnits: 7_000_001n })), "quote above the gross");
+      mismatch(withResolved(agreed(), "print", (r) => ({ ...r, priceDecimal: "0.01" })), "shown decimal edited alone");
+      mismatch(withResolved(agreed(), "print", (r) => ({ ...r, grossBaseUnits: 6_000_000n })), "resolved amount edited alone");
+    });
+
+    it("without an agreement the same gap is a mismatch: a quote below the gross is not the deal", () => {
+      mismatch(editPrint((r) => ({ ...r, priceDecimal: "6.4", grossBaseUnits: 6_400_000n })), "no agreement, quote below the gross");
+    });
   });
 });
