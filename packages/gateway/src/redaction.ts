@@ -99,12 +99,34 @@ function b64urlRunEnd(s: string, k: number): number {
   return B64URL_RUN_Y.lastIndex;
 }
 
+/** `e30` is `{}`, the smallest JSON object a JWT payload can be (RFC 7519: the claims set is an object). */
+const JWT_MIN_PAYLOAD = 3;
+/** A payload shorter than this must prove it is JSON (see jwtAt); a longer one is taken as it was before. */
+const JWT_PLAIN_PAYLOAD = 6;
+
+/** True when the base64url segment s[from, to) decodes to a JSON object. Bounded: only 3 to 5 characters reach it. */
+function isJsonObjectSegment(s: string, from: number, to: number): boolean {
+  try {
+    const v: unknown = JSON.parse(Buffer.from(s.slice(from, to), "base64url").toString("utf8"));
+    return v !== null && typeof v === "object" && !Array.isArray(v);
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Match `eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}` at `i`, the
- * way the greedy regex would: each segment is a maximal [A-Za-z0-9_-] run, since
- * `.` is not in that class. On failure, `skipTo` is the end of the first
- * segment's run: every later `eyJ` start inside that run ends its first segment at
- * the same place (so it fails the same way), and need not be tried.
+ * Match `eyJ[A-Za-z0-9_-]{6,}.<payload>.[A-Za-z0-9_-]{6,}` at `i`, the way the greedy
+ * regex would: each segment is a maximal [A-Za-z0-9_-] run, since `.` is not in
+ * that class. The payload is 6+ characters, or 3 to 5 that decode to a JSON object
+ * (`e30` is the claims set `{}`: astra pack 97, F4); the header's `eyJ` is base64
+ * of `{"` and the signature segment must be present.
+ *
+ * On failure, `skipTo` is the end of the first segment's run: every later `eyJ`
+ * start inside that run ends its first segment at the same place, so it finds the
+ * same payload and signature and fails the same way, and need not be tried. A later
+ * start only ever has a SHORTER header, and no other test (the short payload's JSON
+ * decode included) looks at the header's text, so no later start can succeed where
+ * this one failed. That is what keeps the scan linear.
  */
 function jwtAt(s: string, i: number): { end: number; skipTo: number } {
   if (s.charCodeAt(i) !== 101 || s.charCodeAt(i + 1) !== 121 || s.charCodeAt(i + 2) !== 74) {
@@ -113,9 +135,11 @@ function jwtAt(s: string, i: number): { end: number; skipTo: number } {
   const e1 = b64urlRunEnd(s, i + 3);
   if (e1 - (i + 3) < 6 || s.charCodeAt(e1) !== 46) return { end: -1, skipTo: e1 };
   const e2 = b64urlRunEnd(s, e1 + 1);
-  if (e2 - (e1 + 1) < 6 || s.charCodeAt(e2) !== 46) return { end: -1, skipTo: e1 };
+  const payload = e2 - (e1 + 1);
+  if (payload < JWT_MIN_PAYLOAD || s.charCodeAt(e2) !== 46) return { end: -1, skipTo: e1 };
   const e3 = b64urlRunEnd(s, e2 + 1);
   if (e3 - (e2 + 1) < 6) return { end: -1, skipTo: e1 };
+  if (payload < JWT_PLAIN_PAYLOAD && !isJsonObjectSegment(s, e1 + 1, e2)) return { end: -1, skipTo: e1 };
   return { end: e3, skipTo: e3 };
 }
 
@@ -248,8 +272,9 @@ function isSecretField(key: string, value: unknown, parentKey: string | null): b
 //      inside one run. Inside a run each shape is tried only where it may start
 //      (after a non-alphanumeric neighbour, per the shape's own boundary rule),
 //      with an anchored (sticky) regex, and a match resumes the scan after its end;
-//   2. schemes: a run that follows `Bearer` (12+ characters) or `Basic` (base64 of
-//      a printable `user:password`) and whitespace;
+//   2. schemes: a run that follows `Bearer` and whitespace (12+ characters; fewer when
+//      it reads like a token or the word sits where a header value sits, see
+//      addSchemeSpan) or `Basic` (base64 of a printable `user:password`);
 //   3. labels: `name: value`, `name=value` and `"name": "value"` where `name` is a
 //      secret name, whatever the value's shape, consumed whole by the delimiters of
 //      the enclosing format (see addSecretLabelSpans); an `Authorization` label keeps
@@ -258,7 +283,8 @@ function isSecretField(key: string, value: unknown, parentKey: string | null): b
 //   5. PEM private-key blocks, BEGIN to END (or to the end of the text);
 //   6. BIP-39 mnemonics: a window of 12/15/18/21/24 wordlist words whose checksum
 //      holds, however few distinct words it has, and a run of 12+ words with 10+
-//      distinct ones that fails it (a mistyped phrase is still a phrase).
+//      distinct ones that fails it (a mistyped phrase is still a phrase);
+//   7. a 64-digit hex key wrapped over lines (the contiguous 64-hex shape is 1).
 
 /** Self-identifying shapes. Each is anchored where it is tried and ends in one greedy class (or a fixed width). */
 const PCC_KEY_Y = /pcc_(?:live|test|oracle)_[A-Za-z0-9_-]{6,}/iy;
@@ -368,14 +394,41 @@ function basicCredentialEnd(s: string, a: number): number {
 
 const isLetter = (c: number) => isUpper(c) || isLower(c);
 
-/** `Bearer <run>` / `Basic <run>`: the run [a, b) after a scheme word and whitespace. */
+/** A run of 4+ token characters that is not all letters (a digit, `_`, `-`, `.`...): it reads like a credential, not a word. */
+function looksLikeTokenRun(s: string, a: number, b: number): boolean {
+  if (b - a < 4) return false;
+  for (let i = a; i < b; i += 1) if (!isLetter(s.charCodeAt(i))) return true;
+  return false;
+}
+
+/** True when the word at `start` sits where a header VALUE sits: right after a quote, a backtick or `=`. */
+function atValuePosition(s: string, start: number): boolean {
+  let p = start - 1;
+  while (p >= 0 && (s.charCodeAt(p) === 32 || s.charCodeAt(p) === 9)) p -= 1;
+  const c = p >= 0 ? s.charCodeAt(p) : -1;
+  return c === 34 || c === 39 || c === 96 || c === 61;
+}
+
+/**
+ * `Bearer <run>` / `Basic <run>`: the run [a, b) after a scheme word and whitespace.
+ *
+ * A Bearer run is a credential when it has MIN_SHAPE_RUN (12) or more characters,
+ * which no English word has; or when it reads like a token (4+ characters with a
+ * digit or a token mark: `short123`); or when the word `Bearer` sits where a header
+ * value sits (after a quote, a backtick or `=`). An `Authorization:` label needs
+ * none of this: addSecretLabelSpans takes any value after it. What stays UNREDACTED
+ * is a short all-letters word after `Bearer` in running text ("Bearer tokens go in
+ * the header", "Bearer bonds"): it cannot be told from prose, and redacting it
+ * would erase ordinary sentences about the scheme. That is the one narrowing of the
+ * claim that a Bearer token is always removed (astra pack 97, coverage limits).
+ */
 function addSchemeSpan(s: string, a: number, b: number, spans: Span[]): void {
   let j = a - 1;
   if (j < 0 || !isSpace(s.charCodeAt(j))) return;
   while (j >= 0 && isSpace(s.charCodeAt(j))) j -= 1;
   if (wordEndsAt(s, j, "bearer")) {
-    if (b - a >= MIN_SHAPE_RUN) spans.push({ start: a, end: b });
-  } else if (wordEndsAt(s, j, "basic")) {
+    if (b - a >= MIN_SHAPE_RUN || looksLikeTokenRun(s, a, b) || atValuePosition(s, j - 5)) spans.push({ start: a, end: b });
+  } else if (b - a >= MIN_SCHEME_RUN && wordEndsAt(s, j, "basic")) {
     const end = basicCredentialEnd(s, a);
     if (end > a) spans.push({ start: a, end });
   }
@@ -386,7 +439,7 @@ function addTokenRunSpans(s: string, spans: Span[], keepDigests = false): void {
   for (let m = TOKEN_RUN_RE.exec(s); m !== null; m = TOKEN_RUN_RE.exec(s)) {
     const a = m.index;
     const b = a + m[0].length;
-    if (b - a >= MIN_SCHEME_RUN) addSchemeSpan(s, a, b, spans);
+    addSchemeSpan(s, a, b, spans);
     if (b - a >= MIN_SHAPE_RUN) addShapeSpans(s, a, b, spans, keepDigests);
   }
 }
@@ -917,6 +970,62 @@ function addMnemonicSpans(s: string, spans: Span[]): void {
   close();
 }
 
+// ── A 64-digit hex key wrapped over lines (astra pack 97, coverage limits) ─────────
+//
+// The contiguous 64-hex shape (HEX_SECRET_Y) misses a key pasted as two 32-digit
+// lines, or as `xxd -p`'s 60 + 4. Hex runs that each end a line and ADD UP TO EXACTLY
+// 64 digits are joined, across single line breaks (and the indentation after them),
+// into one secret. Bounded: at most WRAPPED_HEX_MAX_LINES runs, so a column of hex
+// words is not a key. Two bare 32-hex lines (two MD5 sums) are indistinguishable from
+// a wrapped key and are redacted too; a digest is not worth a leaked key.
+
+const WRAPPED_HEX_DIGITS = 64;
+const WRAPPED_HEX_MAX_LINES = 4;
+/** A line of the key holds at least this many digits. */
+const WRAPPED_HEX_MIN_RUN = 4;
+
+/** The end of the run of hex digits that starts at `from`, looked at for at most `max + 1` digits: a result over `max` long means `too long`. */
+function hexRunEnd(s: string, from: number, max: number): number {
+  let i = from;
+  while (i < s.length && i - from <= max && isHexDigit(s.charCodeAt(i))) i += 1;
+  return i;
+}
+
+function addWrappedHexSpans(s: string, spans: Span[]): void {
+  for (let nl = s.indexOf("\n"); nl !== -1; nl = s.indexOf("\n", nl + 1)) {
+    // the hex run that ends this line: back over a CR and blanks, then over hex digits
+    let e = nl;
+    if (e > 0 && s.charCodeAt(e - 1) === 13) e -= 1;
+    while (e > 0 && isBlank(s.charCodeAt(e - 1))) e -= 1;
+    let b = e;
+    while (b > 0 && e - b < WRAPPED_HEX_DIGITS && isHexDigit(s.charCodeAt(b - 1))) b -= 1;
+    let total = e - b;
+    // (the walk stopped at a non-hex character or the start, so the run is whole on its left; a run of 64+ is the contiguous shape's)
+    if (total < WRAPPED_HEX_MIN_RUN || total >= WRAPPED_HEX_DIGITS) continue;
+    let end = e;
+    let pos = nl + 1;
+    for (let lines = 1; lines < WRAPPED_HEX_MAX_LINES; lines += 1) {
+      let q = pos;
+      while (q < s.length && isBlank(s.charCodeAt(q))) q += 1;
+      const r = hexRunEnd(s, q, WRAPPED_HEX_DIGITS - total);
+      const len = r - q;
+      if (len < WRAPPED_HEX_MIN_RUN || total + len > WRAPPED_HEX_DIGITS) break;
+      total += len;
+      end = r;
+      if (total === WRAPPED_HEX_DIGITS) {
+        const prefixed = b >= 2 && (s.charCodeAt(b - 1) === 120 || s.charCodeAt(b - 1) === 88) && s.charCodeAt(b - 2) === 48;
+        spans.push({ start: prefixed ? b - 2 : b, end });
+        break;
+      }
+      // a run that is not the last must end its line too, or the key is not wrapped here
+      let t = r;
+      while (t < s.length && (isBlank(s.charCodeAt(t)) || s.charCodeAt(t) === 13)) t += 1;
+      if (s.charCodeAt(t) !== 10) break;
+      pos = t + 1;
+    }
+  }
+}
+
 /** `://user:password@`: the lookahead-then-backreference cannot backtrack into the userinfo. */
 const URL_USERINFO_RE = /:\/\/(?=([^\s/?#@[\]"'<>`\\]+))\1@/g;
 
@@ -983,6 +1092,8 @@ function scrubShapes(s: string, report: (secret: string) => void, keepDigests = 
   addSecretLabelSpans(s, spans);
   addMnemonicSpans(s, spans);
   addTokenRunSpans(s, spans, keepDigests);
+  // A wrapped hex key is a digest-shaped value too: an owner-only view that keeps digests keeps it.
+  if (!keepDigests) addWrappedHexSpans(s, spans);
   return spans.length === 0 ? s : applySpans(s, spans, REDACTED_VALUE, report);
 }
 
