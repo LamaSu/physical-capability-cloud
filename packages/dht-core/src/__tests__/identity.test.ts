@@ -76,6 +76,25 @@ describe("identity", () => {
     });
   });
 
+  describe("canonical endpoint order (review E1b, finding 3)", () => {
+    const base = { did: "did:pcc:peer:abc", publicKey: "pk" };
+    it("endpoints that tie on priority and URL sort by transport, so input order cannot change the preimage", () => {
+      const direct: PeerEndpoint = { transport: "websocket-direct", url: "wss://same", priority: 1 };
+      const relay: PeerEndpoint = { transport: "websocket-relay", url: "wss://same", priority: 1 };
+      const a = canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [direct, relay] }));
+      const b = canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [relay, direct] }));
+      expect(b).toBe(a);
+    });
+
+    it("lane-found: an endpoint's key order cannot change the preimage", () => {
+      const e1 = { transport: "websocket-direct", url: "wss://a", priority: 1 } as PeerEndpoint;
+      const e2 = { priority: 1, url: "wss://a", transport: "websocket-direct" } as PeerEndpoint;
+      const a = canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [e1] }));
+      const b = canonicalIdentityJson(createPeerIdentity({ ...base, endpoints: [e2] }));
+      expect(b).toBe(a);
+    });
+  });
+
   describe("sortedEndpoints", () => {
     it("orders by priority asc then url", () => {
       const input: PeerEndpoint[] = [

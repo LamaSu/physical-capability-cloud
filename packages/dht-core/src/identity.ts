@@ -72,14 +72,16 @@ export function endpointsEqual(
 }
 
 /**
- * Sort endpoints by priority (asc), with a secondary sort on URL in UTF-16
- * code-unit order (never locale collation) so the result is deterministic
- * regardless of input ordering or host ICU. Lower priority value = preferred.
+ * Sort endpoints by priority (asc), then URL, then transport, both in UTF-16
+ * code-unit order (never locale collation), so the result is deterministic
+ * regardless of input ordering or host ICU. Endpoints equal on all three
+ * serialize identically (see `canonicalIdentityJson`). Lower priority value =
+ * preferred.
  */
 export function sortedEndpoints(endpoints: PeerEndpoint[]): PeerEndpoint[] {
   return [...endpoints].sort((a, b) => {
     if (a.priority !== b.priority) return a.priority - b.priority;
-    return compareCodeUnits(a.url, b.url);
+    return compareCodeUnits(a.url, b.url) || compareCodeUnits(a.transport, b.transport);
   });
 }
 
@@ -99,7 +101,8 @@ export function preferredEndpoint(
 /**
  * Canonical JSON of a PeerIdentity for hashing / signing purposes.
  *
- * Fields ordered alphabetically; endpoints sorted with `sortedEndpoints`.
+ * Fields ordered alphabetically; endpoints sorted with `sortedEndpoints`, each as
+ * `{transport, url, priority}` in that order.
  * Mirrors @pcc/a2a's signAnnouncement canonicalisation pattern so the
  * shape stays stable when the federation runtime hashes peer identities
  * for the Kademlia routing-table key.
@@ -108,7 +111,9 @@ export function canonicalIdentityJson(identity: PeerIdentity): string {
   const canonical = {
     agentId: identity.agentId ?? null,
     did: identity.did,
-    endpoints: sortedEndpoints(identity.endpoints),
+    // Each endpoint is rebuilt with its declared fields in a fixed order, so neither an
+    // object's key order nor an undeclared field can change the preimage (review E1b).
+    endpoints: sortedEndpoints(identity.endpoints).map((e) => ({ transport: e.transport, url: e.url, priority: e.priority })),
     kernelId: identity.kernelId ?? null,
     publicKey: identity.publicKey,
   };
