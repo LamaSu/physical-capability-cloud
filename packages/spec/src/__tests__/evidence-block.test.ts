@@ -777,16 +777,27 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
             return "x";
           },
         });
-      const top = withGetter(freshAuth(), "sessionId");
-      expect(refuseAuth(top).field).toBe(`${P}.sessionId`);
+      const accessor = /accessor properties are not accepted/;
+      const topErr = refuseAuth(withGetter(freshAuth(), "sessionId"));
+      expect(topErr.field).toBe(`${P}.sessionId`);
+      expect(topErr.message).toMatch(accessor);
+
+      // An optional field must not be dropped as "absent" just because it is an accessor.
+      const optionalErr = refuseAuth(withGetter(freshAuth(), "derivationPath"));
+      expect(optionalErr.field).toBe(`${P}.derivationPath`);
+      expect(optionalErr.message).toMatch(accessor);
 
       const nested = freshAuth();
       withGetter(nested.scope, "maxSignatures");
-      expect(refuseAuth(nested).field).toBe(`${P}.scope.maxSignatures`);
+      const nestedErr = refuseAuth(nested);
+      expect(nestedErr.field).toBe(`${P}.scope.maxSignatures`);
+      expect(nestedErr.message).toMatch(accessor);
 
       const element = freshAuth();
       withGetter(element.scope.contractIds, "0");
-      expect(refuseAuth(element).field).toBe(`${P}.scope.contractIds[0]`);
+      const elementErr = refuseAuth(element);
+      expect(elementErr.field).toBe(`${P}.scope.contractIds[0]`);
+      expect(elementErr.message).toMatch(/enumerable data element/);
 
       const scopeGetter = freshAuth();
       const realScope = scopeGetter.scope;
@@ -797,7 +808,9 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
           return realScope;
         },
       });
-      expect(refuseAuth(scopeGetter).field).toBe(`${P}.scope`);
+      const scopeErr = refuseAuth(scopeGetter);
+      expect(scopeErr.field).toBe(`${P}.scope`);
+      expect(scopeErr.message).toMatch(accessor);
       expect(reads).toBe(0);
     });
 
@@ -872,12 +885,16 @@ describe("E7 F3 — roles are read once and the session authorization is a froze
       for (const key of ["sessionId", "parentAgentId", "publicKey", "issuedAt", "expiresAt", "scope", "parentSignature"]) {
         const auth = freshAuth() as unknown as Record<string, unknown>;
         delete auth[key];
-        expect(refuseAuth(auth).field, key).toBe(`${P}.${key}`);
+        const err = refuseAuth(auth);
+        expect(err.field, key).toBe(`${P}.${key}`);
+        expect(err.message, key).toMatch(/is required/);
       }
       for (const key of ["allowedActions", "contractIds", "maxSignatures"]) {
         const auth = freshAuth();
         delete (auth.scope as unknown as Record<string, unknown>)[key];
-        expect(refuseAuth(auth).field, key).toBe(`${P}.scope.${key}`);
+        const err = refuseAuth(auth);
+        expect(err.field, key).toBe(`${P}.scope.${key}`);
+        expect(err.message, key).toMatch(/is required/);
       }
     });
 
@@ -1064,6 +1081,43 @@ describe("E7 F3 extension — the unit context is read once", () => {
     );
     for (const bad of [null, undefined, 7, "ctx"]) {
       expect(refusalOf(() => computeUnitContextDigest(bad as never)).field, String(bad)).toBe("unitContext");
+    }
+  });
+});
+
+// ── Found by the mutation run: an array whose `length` is not a safe integer ──
+// A Proxy over an array passes Array.isArray, and `NaN < 1` is false, so a `count < 1`
+// check alone would treat such an array as non-empty, loop zero times and accept an
+// EMPTY bundle, role set or hash list. The explicit safe-integer check closes that.
+describe("E7 — an array with a non-integer length is refused, never treated as empty", () => {
+  const lying = <T>(items: T[], length: unknown) =>
+    new Proxy(items, { get: (target, key, receiver) => (key === "length" ? length : Reflect.get(target, key, receiver)) });
+  const ODD_LENGTHS = [NaN, -1, 1.5, "2", undefined, Infinity];
+  const H = sha("odd-length-attestation");
+
+  it("bundle events", async () => {
+    const emptyHash = await hashBundle([]);
+    for (const length of ODD_LENGTHS) {
+      const err = await refusalOfAsync(() =>
+        computeKernelSignedEventsRoot({ events: lying([], length) as never, bundleHash: emptyHash }),
+      );
+      expect(err.field, String(length)).toBe("events");
+    }
+  });
+
+  it("attestation roles", () => {
+    const role = { roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: [H] };
+    for (const length of ODD_LENGTHS) {
+      const err = refusalOf(() => computeAttestationSetRoot(attJob, lying([role], length) as never));
+      expect(err.field, String(length)).toBe("roles");
+    }
+  });
+
+  it("attestation hashes", () => {
+    for (const length of ODD_LENGTHS) {
+      const role = { roleId: "inspector", minPositive: 1, total: 2, minScore: 50, attestationHashes: lying([H], length) };
+      const err = refusalOf(() => computeAttestationSetRoot(attJob, [role as never]));
+      expect(err.field, String(length)).toBe("roles[0].attestationHashes");
     }
   });
 });
