@@ -21,10 +21,13 @@
  *
  * Budgets are explicit (astra pack 97): a label name is read at most MAX_LABEL_RAW
  * characters long and decoded to at most MAX_LABEL_NAME; a connection-string or
- * form separator is looked for FIELD_SEP_WINDOW characters ahead; a mnemonic is
+ * form separator is looked for FIELD_SEP_WINDOW characters ahead; a value is extended
+ * over at most MAX_EMBEDDED_LABELS labels that start inside it; a mnemonic is
  * checksummed at most MNEMONIC_CHECKSUM_BUDGET times per string; a wrapped hex key
- * is joined over at most WRAPPED_HEX_MAX_LINES lines. Past a budget the scan fails
- * CLOSED (redacts) and never open.
+ * is joined over at most WRAPPED_HEX_MAX_LINES lines. What a budget does is stated
+ * where it is set: past the mnemonic budget a run is redacted whole (fail closed);
+ * a label name over its budget is not read as a label in free text, though a whole
+ * JSON value is still walked, and its names are decoded without a limit.
  */
 
 import { createHash } from "node:crypto";
@@ -528,7 +531,10 @@ function authCredentialStart(s: string, k: number): number {
 // fragments inside prose. addSecretLabelSpans() reads each label once, consumes its
 // value WHOLE by the delimiters of the format the label sits in, and resumes after
 // that value: nothing is rescanned (`authorization=` x n used to be quadratic), and
-// a value that cannot be delimited safely FAILS CLOSED to the end of its line.
+// a value that cannot be delimited safely FAILS CLOSED to the end of its line. A
+// value never hides a secret label's NAME and leaves its credential: a secret label
+// that STARTS inside a value (`password=a|Authorization: Bearer b`) and whose own
+// value goes on past it extends the value over that value (see embeddedValue).
 //
 // The NAME is read as bare characters or as a quoted string, then DECODED before it
 // is compared (F2): a bare name percent-decodes (`access%5ftoken`), a quoted name
@@ -543,8 +549,8 @@ function authCredentialStart(s: string, k: number): number {
 //                     character; a doubled quote is an escaped quote (SQL, ADO.NET).
 //                     Never past the end of the line; a quote that never closes
 //                     FAILS CLOSED: the rest of the line is the value.
-//   a URL parameter   (after `?`, `&` or `#`) runs to `&`, `#` or whitespace, or to a
-//                     quote that reads as closing one. It may be percent-encoded.
+//   a URL parameter   (`name=value` after `?`, `&` or `#`) runs to `&`, `#` or whitespace,
+//                     or to a quote that reads as closing one. It may be percent-encoded.
 //   `name: value`     runs to the end of the line, or to the quote that encloses
 //                     the label when it opens one (`-H 'Authorization: Basic ...'`).
 //                     With nothing after the colon, the value is the next non-empty
@@ -557,8 +563,15 @@ function authCredentialStart(s: string, k: number): number {
 //                     `;name=` fields after it (a connection string), runs to the
 //                     `;` that closes the field and may hold spaces. Anywhere else
 //                     it runs to whitespace, cut earlier at a `&`, `;` or `,` that is
-//                     followed by `name=` or by the end of the line (form bodies,
-//                     logfmt). A scheme word (Bearer, Basic) takes the token after it.
+//                     followed by `name=`, `name:` and a blank, or the end of the line
+//                     (form bodies, logfmt). A scheme word (Bearer, Basic) takes the
+//                     token after it.
+//
+// A value that already starts with a redaction placeholder, and is not continued by a
+// token character, is left as it is, so a second pass takes nothing the first left
+// (see alreadyRedactedAt). Redaction itself joins lines, which changes what a
+// neighbouring label sees, so in contrived text a second pass can still redact a
+// little MORE; it never redacts less.
 
 /** A bare or quoted name is read at most this many characters long (raw, before decoding). */
 const MAX_LABEL_RAW = 192;
