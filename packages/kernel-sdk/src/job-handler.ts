@@ -24,7 +24,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { canonicalize, ids, sha256 } from "@pcc/spec";
+import { canonicalize, canonicalSnapshot, ids, sha256 } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Hex helpers (serialising bytes over JSON)
@@ -80,7 +80,11 @@ export interface KernelJobRequest {
 export interface KernelJobResponse {
   /** Signed + hashed evidence bundle */
   evidenceBundle: EvidenceBundle;
-  /** Output payload returned by the builder's execute() */
+  /**
+   * The output payload the builder's execute() returned, as the canonical-JSON snapshot the
+   * evidence commits to (not the builder's own object): -0 reads 0, an undefined member is
+   * omitted, and every object in it has no prototype (see `CanonicalSnapshot`).
+   */
   output: Record<string, unknown>;
   /** Session key used by the kernel to sign evidence (hex pubkey) */
   kernelSessionPublicKey: string;
@@ -102,7 +106,17 @@ export interface CreateKernelHandlerOptions {
    * Used to sign the session key struct and the evidence bundle hash.
    */
   principalPrivateKey: Uint8Array;
-  /** Builder-supplied execution function. Must return a JSON-serialisable value. */
+  /**
+   * Builder-supplied execution function. Must return a JSON-serialisable value.
+   *
+   * `input` is a snapshot of exactly the JSON the input commitment hashes. Every object in it, at
+   * every depth, has NO prototype: a key the caller did not send reads as undefined (a polluted
+   * Object.prototype supplies nothing), but Object.prototype methods are not there either, so
+   * do not call input.hasOwnProperty(k) or input.toString(): use Object.keys, `in`,
+   * Object.hasOwn or JSON.stringify. A value with no JSON form (NaN, a function, a Date,
+   * an accessor ...) is refused with a NonCanonicalValueError, for the returned output as for
+   * the input.
+   */
   execute: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
@@ -174,6 +188,16 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       }
     }
 
+    // ── Snapshot the input ──────────────────────────────────────────────
+    // Canonicalize FIRST and parse the canonical text ONCE; from here on only
+    // that snapshot is used. The builder executes on it and the input commitment
+    // hashes the very same text, so the evidence covers exactly what ran. The
+    // request object is caller-controlled and mutable (a Proxy can answer the
+    // builder differently from what canonicalize read), so it is never handed
+    // to the builder. An input with no JSON form is refused here, before any
+    // builder code runs.
+    const inputSnapshot = canonicalSnapshot<Record<string, unknown>>(request.input);
+
     // ── Mint a session key for this job ─────────────────────────────────
     // The kernel signs the bundle with a fresh Ed25519 keypair; the session
     // key struct is authorised by the kernel's principal private key. This
@@ -221,8 +245,16 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     // ── Execute the builder's code ──────────────────────────────────────
     const executionStart = new Date().toISOString();
-    const output = await execute(request.input);
+    const returned = await execute(inputSnapshot.value);
     const executionEnd = new Date().toISOString();
+
+    // -- Snapshot the output --------------------------------------------
+    // The same discipline as the input: canonicalize FIRST and parse the canonical text ONCE,
+    // commit to that text, and hand the caller that parsed value. The builder's own object (a
+    // Proxy, or one the builder keeps and changes after returning) is never read again, so the
+    // output commitment covers exactly the output the caller receives. An output with no JSON
+    // form is refused here, with the same NonCanonicalValueError an input with none gets.
+    const outputSnapshot = canonicalSnapshot<Record<string, unknown>>(returned);
 
     // ── Assemble evidence events ────────────────────────────────────────
     const source: EvidenceSource = {
@@ -233,8 +265,8 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     const events: EvidenceEvent[] = [];
 
-    // Input commitment
-    const inputHash = await sha256(canonicalize(request.input));
+    // Input commitment: the hash of the snapshot the builder received
+    const inputHash = await sha256(inputSnapshot.text);
     const inputEvent: EvidenceEvent = {
       id: ids.evidence(),
       type: "gcode_hash_verified",
@@ -306,8 +338,8 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       events.push(stepEvent);
     }
 
-    // Output commitment
-    const outputHash = await sha256(canonicalize(output));
+    // Output commitment: the hash of the snapshot the caller receives
+    const outputHash = await sha256(outputSnapshot.text);
 
     // Execution completed
     const completedEvent: EvidenceEvent = {
@@ -365,7 +397,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
 
     return {
       evidenceBundle,
-      output,
+      output: outputSnapshot.value,
       kernelSessionPublicKey: toHex(sessionKey.publicKey),
     };
   };

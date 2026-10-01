@@ -20,7 +20,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { ids, canonicalize, sha256 } from "@pcc/spec";
+import { ids, canonicalize, canonicalSnapshot, sha256 } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -122,11 +122,22 @@ export class AccountingReconcileKernel {
 
     const executionStartTime = new Date().toISOString();
 
-    // ── Lifecycle: input verification (equivalent to gcode_hash_verified) ──
-    const inputHash = await sha256(canonicalize({
+    // ── Snapshot the inputs ──
+    // Canonicalize FIRST and parse the canonical text ONCE; from here on only
+    // that snapshot is read. The input commitment hashes its text and every step
+    // runs on its data, so the evidence covers exactly what was executed. The
+    // caller's objects may be Proxies or mutable; they are never read again.
+    const inputs = canonicalSnapshot<{
+      ledgerData: Record<string, unknown>;
+      invoiceData?: Record<string, unknown>;
+    }>({
       ledgerData: params.ledgerData,
       invoiceData: params.invoiceData,
-    }));
+    });
+    const { ledgerData, invoiceData } = inputs.value;
+
+    // ── Lifecycle: input verification (equivalent to gcode_hash_verified) ──
+    const inputHash = await sha256(inputs.text);
     const inputVerifiedEvent: EvidenceEvent = {
       id: ids.evidence(),
       type: "gcode_hash_verified",
@@ -173,7 +184,7 @@ export class AccountingReconcileKernel {
     const step1 = await this.runStep({
       stepId: "fetch_ledger",
       source,
-      input: params.ledgerData,
+      input: ledgerData,
       execute: (input) => this.fetchLedger(input),
     });
     events.push(step1.event);
@@ -192,7 +203,7 @@ export class AccountingReconcileKernel {
     // ── Step 3: match_invoices ────────────────────────────────────────
     const matchInput = {
       ledgerEntries: step2.output.entries,
-      invoices: (params.invoiceData as any)?.invoices ?? [],
+      invoices: (invoiceData as any)?.invoices ?? [],
     };
     const step3 = await this.runStep({
       stepId: "match_invoices",
@@ -299,10 +310,13 @@ export class AccountingReconcileKernel {
     trace: StepTrace;
     output: O;
   }> {
-    const inputHash = await sha256(canonicalize(params.input));
+    // Hash and execute ONE snapshot: canonicalize first, parse once, hand the
+    // step the parsed copy of exactly the text that was hashed.
+    const input = canonicalSnapshot<I>(params.input);
+    const inputHash = await sha256(input.text);
     const t0 = Date.now();
 
-    const output = params.execute(params.input);
+    const output = params.execute(input.value);
 
     const durationMs = Date.now() - t0;
     const outputHash = await sha256(canonicalize(output));
