@@ -156,7 +156,8 @@ describe("computePackageBodyHash — the SIGNED pre-image", () => {
         ...BODY,
         unitBinding: {
           ...BODY.unitBinding,
-          [k]: k === "chainId" || k === "milestoneIndex" ? "999" : H("9"),
+          // a value of the field's own form: a decimal, a 40-digit address or a 64-digit hash
+          [k]: k === "chainId" || k === "milestoneIndex" ? "999" : k === "escrow" ? `0x${"9".repeat(40)}` : H("9"),
         },
       } as FinalMilestonePackageV2Body;
       expect(computePackageBodyHash(mutated)).not.toBe(base);
@@ -169,17 +170,99 @@ describe("computePackageBodyHash — the SIGNED pre-image", () => {
   });
 
   it("length-prefixes by UTF-8 BYTE length, not JS string length", () => {
-    // A non-ASCII principalId makes byte-length != string-length. A producer
-    // using .length would agree with the oracle on ASCII and diverge silently
-    // the first time an accent appeared. This asserts the two bodies — same
-    // string length, different byte length — do not collide.
-    const ascii = { ...BODY, producer: { ...BODY.producer, kernelId: "aaaa" } };
-    const wide = { ...BODY, producer: { ...BODY.producer, kernelId: "ääää" } };
-    expect(wide.producer.kernelId.length).toBe(ascii.producer.kernelId.length);
-    expect(Buffer.byteLength(wide.producer.kernelId, "utf8")).not.toBe(
-      Buffer.byteLength(ascii.producer.kernelId, "utf8"),
+    // A non-ASCII value makes byte-length != string-length. A producer using
+    // .length would agree with the oracle on ASCII and diverge silently the first
+    // time an accent appeared. This asserts the two bodies — same string length,
+    // different byte length — do not collide. (tChallengeRef is the one free-form
+    // field: every other string in the body is hex, a decimal or an ASCII id.)
+    const ascii = { ...BODY, challengeBinding: { ...BODY.challengeBinding, tChallengeRef: "aaaa" } };
+    const wide = { ...BODY, challengeBinding: { ...BODY.challengeBinding, tChallengeRef: "ääää" } };
+    expect(wide.challengeBinding.tChallengeRef.length).toBe(ascii.challengeBinding.tChallengeRef.length);
+    expect(Buffer.byteLength(wide.challengeBinding.tChallengeRef, "utf8")).not.toBe(
+      Buffer.byteLength(ascii.challengeBinding.tChallengeRef, "utf8"),
     );
     expect(computePackageBodyHash(wide)).not.toBe(computePackageBodyHash(ascii));
+  });
+});
+
+/**
+ * F3: hex case carries no meaning but it changes the canonical bytes, so a body
+ * hashed in two spellings would have two hashes. One accepted spelling per field,
+ * 0x + lowercase hex of its exact width, by REJECTION: every function that hashes
+ * a body validates it first and refuses any other spelling with a typed error.
+ */
+describe("hex spelling is pinned by rejection on every hashing path (F3)", () => {
+  const SIGS = [
+    { signer: SIGNER_OP, scheme: "secp256k1-eip712", sig: "0xop" },
+    { signer: SIGNER_KERNEL, scheme: "ed25519-raw32", sig: "0xkernel" },
+  ];
+  const FIELDS: Array<{ path: string; digits: number; set: (b: any, v: string) => void }> = [
+    { path: "$.unitBinding.escrow", digits: 40, set: (b, v) => { b.unitBinding.escrow = v; } },
+    { path: "$.unitBinding.settlementUnitId", digits: 64, set: (b, v) => { b.unitBinding.settlementUnitId = v; } },
+    { path: "$.unitBinding.jobIdHash", digits: 64, set: (b, v) => { b.unitBinding.jobIdHash = v; } },
+    { path: "$.unitBinding.stepId", digits: 64, set: (b, v) => { b.unitBinding.stepId = v; } },
+    { path: "$.unitBinding.compositionRoot", digits: 64, set: (b, v) => { b.unitBinding.compositionRoot = v; } },
+    { path: "$.unitBinding.acceptedEnvelopeHash", digits: 64, set: (b, v) => { b.unitBinding.acceptedEnvelopeHash = v; } },
+    { path: "$.challengeBinding.nonce", digits: 64, set: (b, v) => { b.challengeBinding.nonce = v; } },
+    { path: "$.evidence.evidenceBlockHash", digits: 64, set: (b, v) => { b.evidence.evidenceBlockHash = v; } },
+  ];
+  const hashers: Array<[string, (b: unknown) => unknown]> = [
+    ["computePackageBodyHash", (b) => computePackageBodyHash(b)],
+    ["packageBodyJcs", (b) => packageBodyJcs(b)],
+    ["packageDigestV2", (b) => packageDigestV2(b, SIGS)],
+  ];
+
+  it("every hashing function refuses every hex field in every spelling but 0x + lowercase, naming the field", () => {
+    for (const f of FIELDS) {
+      const hex = "ab12cd34ef56".repeat(6).slice(0, f.digits); // has letters, so case is observable
+      const bad: Array<[string, string]> = [
+        ["uppercase", `0x${hex.toUpperCase()}`],
+        ["mixed case (EIP-55 style)", `0x${hex.slice(0, 5)}${hex.slice(5).toUpperCase()}`],
+        ["a 0X prefix", `0X${hex}`],
+        ["no prefix", hex],
+      ];
+      const good = clone(BODY);
+      f.set(good, `0x${hex}`);
+      for (const [fn, hash] of hashers) expect(() => hash(good), `${fn} ${f.path} lowercase`).not.toThrow();
+      for (const [spelling, value] of bad) {
+        const b = clone(BODY);
+        f.set(b, value);
+        for (const [fn, hash] of hashers) {
+          expect(() => hash(b), `${fn} ${f.path} ${spelling}`).toThrow(PackageBodyValidationError);
+          expect(() => hash(b), `${fn} ${f.path} ${spelling}`).toThrow(f.path);
+        }
+      }
+    }
+  });
+
+  it("an EIP-55 checksummed escrow address is refused by BOTH hashes instead of moving them", () => {
+    const eip55 = clone(BODY);
+    eip55.unitBinding.escrow = "0x00000000000000000000000000000000000E5c0F" as `0x${string}`;
+    expect(() => computePackageBodyHash(eip55)).toThrow(PackageBodyValidationError);
+    expect(() => packageDigestV2(eip55, SIGS)).toThrow(PackageBodyValidationError);
+    // The lowercase spelling of the same address is the one accepted spelling, and it hashes.
+    expect(computePackageBodyHash(BODY)).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it("every hashing function refuses a body that does not conform, instead of hashing what it can", () => {
+    const unknownKey: any = clone(BODY);
+    unknownKey.extra = "x";
+    const number: any = clone(BODY);
+    number.unitBinding.chainId = 8453;
+    const missing: any = clone(BODY);
+    delete missing.producer;
+    for (const [fn, hash] of hashers) {
+      for (const bad of [unknownKey, number, missing, null, "body", [BODY]]) {
+        expect(() => hash(bad), `${fn} ${JSON.stringify(bad)?.slice(0, 40)}`).toThrow(PackageBodyValidationError);
+      }
+    }
+  });
+
+  it("hashes the canonical lowercase body to the same value as before the validation step", () => {
+    // Validation changes what is accepted, never what a canonical body hashes to.
+    const golden = JSON.parse(GOLDEN.jcsBody);
+    expect(computePackageBodyHash(golden)).toBe(GOLDEN.packageBodyHash);
+    expect(packageBodyJcs(golden)).toBe(GOLDEN.jcsBody);
   });
 });
 

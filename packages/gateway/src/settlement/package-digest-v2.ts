@@ -58,7 +58,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalize } from "@pcc/spec";
-import { canonicalSignatures, type PackageSignature } from "./final-milestone-package-v2.js";
+import { canonicalSignatures, validatePackageBody } from "./final-milestone-package-v2.js";
 
 // The signature entry type, its error and its canonicalization live in
 // final-milestone-package-v2.ts, so that this module can call validatePackageBody
@@ -83,13 +83,18 @@ export class NonCanonicalizableBodyError extends Error {
 }
 
 /**
- * Walk the body and reject anything the shared canonicalizer would serialize in
+ * Walk a value and reject anything the shared canonicalizer would serialize in
  * a way the oracle's canonicalizer might not reproduce byte-for-byte.
  *
  * Fails CLOSED. A money-path digest that two implementations disagree about is
  * worse than no digest at all.
+ *
+ * A validated package body is all strings, so this cannot fire on one today. It
+ * stays as a tripwire on the object that is about to be hashed: if the body schema
+ * ever gains a numeric field, the canonicalizer divergence is caught here instead
+ * of at the oracle.
  */
-function assertCanonicalizable(value: unknown, path = "$"): void {
+export function assertCanonicalizable(value: unknown, path = "$"): void {
   if (value === null || value === undefined) return;
   if (typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
@@ -128,14 +133,17 @@ export const SIGNATURES_KEY = "signatures" as const;
 
 /** The exact object that gets canonicalized. Exported so tests and the oracle
  *  can diff the PRE-IMAGE, not just the digest — a digest mismatch with no
- *  visible pre-image is nearly impossible to debug across two codebases. */
-export function packageDigestV2PreImage(
-  body: unknown,
-  sigs: readonly PackageSignature[],
-): string {
-  assertCanonicalizable(body, "$.body");
+ *  visible pre-image is nearly impossible to debug across two codebases.
+ *
+ *  The body is validated FIRST (`validatePackageBody`) and only the validated copy
+ *  is hashed: an unknown key, a JS number, a missing field, an empty id, or a hex
+ *  field in any spelling but 0x + lowercase hex (an EIP-55 escrow address, say) is
+ *  refused with a PackageBodyValidationError instead of becoming a digest. */
+export function packageDigestV2PreImage(body: unknown, sigs: unknown): string {
+  const valid = validatePackageBody(body);
+  assertCanonicalizable(valid, "$.body");
   return canonicalize({
-    body,
+    body: valid,
     [SIGNATURES_KEY]: canonicalSignatures(sigs),
   });
 }
@@ -149,10 +157,7 @@ export function packageDigestV2PreImage(
  * `0x<hex>`. Mixing those two framings would produce a value that looks right
  * in logs and fails every on-chain bind.
  */
-export function packageDigestV2(
-  body: unknown,
-  sigs: readonly PackageSignature[],
-): Hex {
+export function packageDigestV2(body: unknown, sigs: unknown): Hex {
   const preImage = packageDigestV2PreImage(body, sigs);
   const hex = createHash("sha256").update(preImage, "utf8").digest("hex");
   return `0x${hex}` as Hex;

@@ -102,9 +102,14 @@ export class PackageBodyValidationError extends Error {
   }
 }
 
-// Lowercase only. Hex case carries no meaning, but it changes the canonical
-// bytes, so an EIP-55 checksummed escrow would otherwise produce a different
-// packageBodyHash and packageDigestV2 for the same unit. The caller lowercases.
+// Lowercase only, by REJECTION. Hex case carries no meaning, but it changes the
+// canonical bytes, so an EIP-55 checksummed escrow would otherwise produce a
+// different packageBodyHash and packageDigestV2 for the same unit. One accepted
+// spelling means one digest: a body in any other spelling is refused here with a
+// PackageBodyValidationError, never lowercased for the caller, and every hashing
+// function (computePackageBodyHash, packageBodyJcs, packageDigestV2) validates
+// first. A caller that holds an EIP-55 address lowercases it before it builds
+// the body.
 const HEX32 = /^0x[0-9a-f]{64}$/;
 const ADDR = /^0x[0-9a-f]{40}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
@@ -273,9 +278,16 @@ function u64be(n: number): Buffer {
  * these differ for any non-ASCII character, and a producer that used `.length`
  * would agree with the oracle on ASCII-only bodies and diverge silently the
  * first time a principalId carried an accent.
+ *
+ * The body is validated FIRST (`validatePackageBody`) and only the validated copy
+ * is hashed. Every hex field must be `0x` + lowercase hex of its exact width: a
+ * mixed-case or uppercase spelling (an EIP-55 escrow address, say) is refused with
+ * a PackageBodyValidationError, never lowercased and never hashed. Hex case carries
+ * no meaning but it changes the canonical bytes, so a body that was hashed in two
+ * spellings would have two hashes; with one accepted spelling it has one.
  */
-export function computePackageBodyHash(body: FinalMilestonePackageV2Body): Hex {
-  const jcs = canonicalize(body);
+export function computePackageBodyHash(body: unknown): Hex {
+  const jcs = canonicalize(validatePackageBody(body));
   const jcsBytes = Buffer.from(jcs, "utf8");
   const preImage = Buffer.concat([
     Buffer.from(toBytes(SIG_DOMAIN_V2)), // raw 32 bytes, NOT the hex string
@@ -285,9 +297,12 @@ export function computePackageBodyHash(body: FinalMilestonePackageV2Body): Hex {
   return `0x${createHash("sha256").update(preImage).digest("hex")}` as Hex;
 }
 
-/** The JCS pre-image, exposed so a cross-codebase mismatch is diffable. */
-export function packageBodyJcs(body: FinalMilestonePackageV2Body): string {
-  return canonicalize(body);
+/**
+ * The JCS pre-image, exposed so a cross-codebase mismatch is diffable. Validated
+ * exactly like `computePackageBodyHash`, so what it shows is what gets signed.
+ */
+export function packageBodyJcs(body: unknown): string {
+  return canonicalize(validatePackageBody(body));
 }
 
 /**

@@ -17,13 +17,14 @@
  * operator secp256k1-EIP712, D2 kernel ed25519-raw32). A signer is `0x` +
  * lowercase hex (an address, 40 digits, or an ed25519 key, 64 digits).
  *
- * GOLDEN STATUS — read before trusting any cross-codebase claim: the byte-exact
- * golden against the oracle's crossconfirm test is still a `todo`. Q1/Q2 are now
- * answered, but the oracle's exact input VECTOR (the body + rawSigs that produced
- * their published digest) has not landed, and the authoritative BODY SCHEMA is
- * evidence's to give. The BODY below is a placeholder that exercises invariants —
- * it is NOT a claim about the real schema. A fabricated golden that agrees only
- * with itself would be worse than none.
+ * The digest validates its body FIRST (`validatePackageBody`) and hashes only the
+ * validated copy, so every fixture here is a conforming FinalMilestonePackageV2
+ * body: a body that is not one is refused, never hashed.
+ *
+ * GOLDEN: evidence's integrated settlement vector (#1202, 974b3ff1) is pinned at
+ * the end of this file, byte for byte. It is a SAMPLE vector (free-text principal
+ * ids, signatures labelled "secp256k1" / "ed25519"), which is why a few rules are
+ * only enforced by the mint guard; see the it.todo block.
  */
 
 import { describe, it, expect } from "vitest";
@@ -33,19 +34,40 @@ import {
   packageDigestV2,
   packageDigestV2PreImage,
   canonicalSignatures,
+  assertCanonicalizable,
   NonCanonicalizableBodyError,
   InvalidSignatureEntryError,
   SIGNATURES_KEY,
   type PackageSignature,
 } from "../settlement/package-digest-v2.js";
+import {
+  PACKAGE_FORMAT,
+  PACKAGE_SCHEMA_VERSION,
+  PackageBodyValidationError,
+} from "../settlement/final-milestone-package-v2.js";
 
-/** PLACEHOLDER body — invariant fixture only. Real schema is evidence's. */
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+const H = (n: string) => `0x${n.repeat(64).slice(0, 64)}`;
+
+/** A conforming package body. Every hex field carries letters, so case matters. */
 const BODY = {
-  settlementUnitId:
-    "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
-  milestoneIndex: 3,
-  outcome: "released",
-  evidenceCid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+  packageSchemaVersion: PACKAGE_SCHEMA_VERSION,
+  packageFormat: PACKAGE_FORMAT,
+  compositionSchemaVersion: "1",
+  unitBinding: {
+    chainId: "8453",
+    escrow: "0x00000000000000000000000000000000000e5c0f",
+    settlementUnitId: H("a1"),
+    jobIdHash: H("b2"),
+    milestoneIndex: "3",
+    stepId: H("c3"),
+    compositionRoot: H("d4"),
+    acceptedEnvelopeHash: H("e5"),
+  },
+  producer: { operatorPrincipalId: "op-1", kernelId: "kernel-1", devicePrincipalId: "dev-1" },
+  challengeBinding: { nonce: H("f6"), tChallengeRef: "chal-1" },
+  evidence: { evidenceBlockHash: H("1a") },
+  evidenceTimeBounds: { start: "1700000000", end: "1700000100" },
 };
 
 // Signers are the two pinned forms: 0x + lowercase hex, an address (40 digits)
@@ -280,13 +302,15 @@ describe("packageDigestV2 — signature malleability closes by REFUSAL, reorderi
     }
   });
 
-  it("is stable under BODY key insertion order", () => {
-    const reordered = {
-      evidenceCid: BODY.evidenceCid,
-      outcome: BODY.outcome,
-      milestoneIndex: BODY.milestoneIndex,
-      settlementUnitId: BODY.settlementUnitId,
-    };
+  it("is stable under BODY key insertion order, at every depth", () => {
+    const reverseKeys = (v: unknown): unknown =>
+      Array.isArray(v)
+        ? v.map(reverseKeys)
+        : v !== null && typeof v === "object"
+          ? Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reverseKeys(x)]))
+          : v;
+    const reordered = reverseKeys(BODY);
+    expect(Object.keys(reordered as object)).not.toEqual(Object.keys(BODY));
     expect(packageDigestV2(reordered, [SIG_A, SIG_B])).toBe(base);
   });
 });
@@ -295,11 +319,20 @@ describe("packageDigestV2 — negative parity, every fact must be bound", () => 
   const base = packageDigestV2(BODY, [SIG_A, SIG_B]);
 
   it("moves when ANY body field changes", () => {
+    const mutate = (f: (b: typeof BODY) => void) => {
+      const b = clone(BODY);
+      f(b);
+      return b;
+    };
     for (const mutated of [
-      { ...BODY, milestoneIndex: 4 },
-      { ...BODY, outcome: "refunded" },
-      { ...BODY, evidenceCid: "bafyREPLACED" },
-      { ...BODY, settlementUnitId: `0x${"1".repeat(64)}` },
+      mutate((b) => { b.unitBinding.milestoneIndex = "4"; }),
+      mutate((b) => { b.unitBinding.chainId = "1"; }),
+      mutate((b) => { b.unitBinding.escrow = `0x${"9".repeat(40)}`; }),
+      mutate((b) => { b.unitBinding.settlementUnitId = H("91"); }),
+      mutate((b) => { b.producer.kernelId = "kernel-2"; }),
+      mutate((b) => { b.challengeBinding.nonce = H("92"); }),
+      mutate((b) => { b.evidence.evidenceBlockHash = H("93"); }),
+      mutate((b) => { b.evidenceTimeBounds.end = "1700000200"; }),
     ]) {
       expect(packageDigestV2(mutated, [SIG_A, SIG_B])).not.toBe(base);
     }
@@ -336,34 +369,84 @@ describe("packageDigestV2 — framing", () => {
     // Canonical JSON: keys sorted at all depths, no whitespace.
     expect(pre).not.toMatch(/\s/);
     // Signers appear exactly as given (they are already lowercase) and in canonical order.
+    // (located by key: a body hash may legitimately equal a signer's digits)
     expect(pre).toContain(`"signer":"${SIGNER_A}"`);
-    expect(pre.indexOf(SIGNER_A)).toBeLessThan(pre.indexOf(SIGNER_B));
+    expect(pre.indexOf(`"signer":"${SIGNER_A}"`)).toBeLessThan(pre.indexOf(`"signer":"${SIGNER_B}"`));
   });
 });
 
-describe("packageDigestV2 — fails closed on values the canonicalizer is unsafe for", () => {
-  it("refuses a non-integer number rather than emitting an unreproducible digest", () => {
-    // The shared canonicalizer serializes numbers with String(), which is not
-    // RFC 8785. Rather than silently produce a digest the oracle may not
-    // reproduce, refuse it loudly.
-    expect(() => packageDigestV2({ amount: 1.5 }, [SIG_A, SIG_B])).toThrow(
-      NonCanonicalizableBodyError,
-    );
+describe("assertCanonicalizable — the tripwire on the object about to be hashed", () => {
+  // The shared canonicalizer serializes numbers with String(), which is not
+  // RFC 8785. A validated body is all strings, so packageDigestV2 never reaches
+  // these; they pin the tripwire itself for the day the schema gains a number.
+  it("refuses a non-integer number rather than letting an unreproducible digest through", () => {
+    expect(() => assertCanonicalizable({ amount: 1.5 })).toThrow(NonCanonicalizableBodyError);
   });
 
   it("refuses a bigint", () => {
-    expect(() => packageDigestV2({ amount: 10n }, [SIG_A, SIG_B])).toThrow(
-      NonCanonicalizableBodyError,
-    );
+    expect(() => assertCanonicalizable({ amount: 10n })).toThrow(NonCanonicalizableBodyError);
   });
 
   it("accepts safe integers, strings, booleans, null and nesting", () => {
-    expect(() =>
-      packageDigestV2(
-        { a: 1, b: "x", c: true, d: null, e: { f: [1, "y", false] } },
-        [SIG_A, SIG_B],
-      ),
-    ).not.toThrow();
+    expect(() => assertCanonicalizable({ a: 1, b: "x", c: true, d: null, e: { f: [1, "y", false] } })).not.toThrow();
+  });
+});
+
+describe("packageDigestV2 — the body is validated first, and a body that is not conforming is never hashed", () => {
+  const SIGS = [SIG_A, SIG_B];
+
+  it("refuses a JS number where the schema says decimal string (F7)", () => {
+    const num: any = clone(BODY);
+    num.unitBinding.chainId = 8453;
+    expect(() => packageDigestV2(num, SIGS)).toThrow(PackageBodyValidationError);
+    expect(() => packageDigestV2(num, SIGS)).toThrow(/\$\.unitBinding\.chainId/);
+  });
+
+  it("refuses an unknown key at any level, and a missing field (F7)", () => {
+    for (const mutate of [
+      (b: any) => { b.extra = "x"; },
+      (b: any) => { b.unitBinding.chainName = "base"; },
+      (b: any) => { b.producer.role = "operator"; },
+      (b: any) => { delete b.evidence; },
+      (b: any) => { delete b.unitBinding.escrow; },
+    ]) {
+      const b = clone(BODY);
+      mutate(b);
+      expect(() => packageDigestV2(b, SIGS)).toThrow(PackageBodyValidationError);
+      expect(() => packageDigestV2PreImage(b, SIGS)).toThrow(PackageBodyValidationError);
+    }
+  });
+
+  it("refuses an EIP-55 checksummed escrow address instead of letting it move the digest (F3)", () => {
+    const eip55: any = clone(BODY);
+    eip55.unitBinding.escrow = "0x00000000000000000000000000000000000E5c0F";
+    expect(() => packageDigestV2(eip55, SIGS)).toThrow(PackageBodyValidationError);
+    expect(() => packageDigestV2(eip55, SIGS)).toThrow(/\$\.unitBinding\.escrow/);
+    // The lowercase spelling of the same address is the one accepted spelling.
+    expect(() => packageDigestV2(BODY, SIGS)).not.toThrow();
+  });
+
+  it("refuses an uppercase hash and a 0X prefix (F3)", () => {
+    const upper: any = clone(BODY);
+    upper.evidence.evidenceBlockHash = `0x${"1A".repeat(32)}`;
+    const prefix: any = clone(BODY);
+    prefix.challengeBinding.nonce = `0X${"f6".repeat(32)}`;
+    expect(() => packageDigestV2(upper, SIGS)).toThrow(/\$\.evidence\.evidenceBlockHash/);
+    expect(() => packageDigestV2(prefix, SIGS)).toThrow(/\$\.challengeBinding\.nonce/);
+  });
+
+  it("refuses empty principal ids (F7)", () => {
+    for (const key of ["operatorPrincipalId", "kernelId", "devicePrincipalId"]) {
+      const b: any = clone(BODY);
+      b.producer[key] = "";
+      expect(() => packageDigestV2(b, SIGS), key).toThrow(/must not be empty/);
+    }
+  });
+
+  it("refuses a body that is not an object", () => {
+    for (const bad of [null, undefined, "body", 7, [BODY]]) {
+      expect(() => packageDigestV2(bad, SIGS), String(bad)).toThrow(PackageBodyValidationError);
+    }
   });
 });
 
