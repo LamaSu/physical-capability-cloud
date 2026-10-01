@@ -133,7 +133,10 @@ export class NonCanonicalValueError extends Error {
  * NaN, Infinity, a bigint, a function, a symbol, a Date, a Map or any other
  * non-plain object — throws NonCanonicalValueError too, instead of producing
  * text only this function could reproduce. Reading each value once, from its
- * own data descriptor, also means no getter ever runs here.
+ * own data descriptor, also means no getter ever runs here. The only input code
+ * that can run is a Proxy's reflection traps (getPrototypeOf, ownKeys,
+ * getOwnPropertyDescriptor): never a getter, a `get` trap (an array's length is
+ * read from its descriptor too), a toJSON / toString / valueOf or a constructor.
  *
  * Numbers follow the evidence number policy D5 (evidence commitment profile v1
  * §1), which the oracle and VCR enforce too: an integer outside the safe range
