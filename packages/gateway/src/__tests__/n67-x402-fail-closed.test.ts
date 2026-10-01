@@ -28,12 +28,21 @@
  * misconfigured gate.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import Fastify, { type FastifyInstance } from "fastify";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type MockInstance,
+} from "vitest";
+import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import {
   aggregatorRoutes,
   getAggregatorRegistry,
   getX402GateConfig,
+  isX402GateMisconfigured,
   _resetAggregatorRegistryForTests,
 } from "../routes/aggregator/index.js";
 import { initStore, closeStore } from "../db.js";
@@ -49,6 +58,30 @@ import {
   priceTagHmac,
   type PriceTagFields,
 } from "@pcc/aggregator";
+
+// ---------------------------------------------------------------------------
+// Sentry mock: the gateway's alerting facility is Sentry (src/sentry.ts). Only
+// captureMessage / isSentryEnabled are replaced; everything else stays real.
+// ---------------------------------------------------------------------------
+
+const sentryMock = vi.hoisted(() => ({
+  captureMessage: vi.fn(),
+  enabled: vi.fn(() => true),
+}));
+
+vi.mock("../sentry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../sentry.js")>();
+  return {
+    ...actual,
+    Sentry: new Proxy(actual.Sentry, {
+      get(target, prop, receiver) {
+        if (prop === "captureMessage") return sentryMock.captureMessage;
+        return Reflect.get(target, prop, receiver);
+      },
+    }),
+    isSentryEnabled: () => sentryMock.enabled(),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Constants (all synthetic)
@@ -283,14 +316,45 @@ function buildPaymentSignature(
 
 const openApps: FastifyInstance[] = [];
 
-async function boot(tools: IndexedTool[] = [makePaidTool()]) {
+async function boot(
+  tools: IndexedTool[] = [makePaidTool()],
+  opts: { logger?: FastifyBaseLogger } = {},
+) {
   const reg = getAggregatorRegistry();
   for (const t of tools) reg.upsert(t);
   const fetchSpy = installFetchMock();
-  const app = Fastify();
+  const app = opts.logger ? Fastify({ logger: opts.logger }) : Fastify();
   openApps.push(app);
   await app.register(aggregatorRoutes);
   return { app, fetchSpy };
+}
+
+/**
+ * A pino-shaped logger that records every `.error()` call, so a test can assert
+ * on the structured log line without parsing stdout.
+ */
+function makeCapturingLogger() {
+  const errors: Array<{ obj: Record<string, unknown>; msg: string }> = [];
+  const logger = {
+    level: "info",
+    info: () => undefined,
+    warn: () => undefined,
+    debug: () => undefined,
+    trace: () => undefined,
+    fatal: () => undefined,
+    error: (obj: unknown, msg?: string) => {
+      errors.push({ obj: obj as Record<string, unknown>, msg: msg ?? "" });
+    },
+    child: () => logger,
+  };
+  return { logger: logger as unknown as FastifyBaseLogger, errors };
+}
+
+/** console.error calls that are the one-per-process misconfiguration alert. */
+function consoleAlerts(spy: MockInstance): unknown[][] {
+  return spy.mock.calls.filter((c) =>
+    String(c[0]).startsWith("[x402] MISCONFIGURED:"),
+  );
 }
 
 function invoke(
@@ -319,9 +383,16 @@ async function receiptsFor(app: FastifyInstance, toolId: string) {
 // ---------------------------------------------------------------------------
 
 describe("N67: aggregator x402 gate fails closed on misconfiguration", () => {
+  /** Silences + records console.error (the alert's stderr line) for every test. */
+  let errorSpy: MockInstance;
+
   beforeEach(() => {
     snapshotAndClearEnv();
     process.env.PCC_DB_PATH = ":memory:";
+    sentryMock.captureMessage.mockReset();
+    sentryMock.enabled.mockReset();
+    sentryMock.enabled.mockReturnValue(true);
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     _resetAggregatorRegistryForTests();
     initStore({ seed: false });
   });
@@ -436,6 +507,8 @@ describe("N67: aggregator x402 gate fails closed on misconfiguration", () => {
       { label: "ethereum", value: "ethereum" },
       { label: "empty string (set, but empty)", value: "" },
       { label: 'the literal string "undefined"', value: "undefined" },
+      // Guard: a prototype key must not resolve through an object lookup.
+      { label: "constructor (prototype key)", value: "constructor" },
     ];
 
     it.each(UNKNOWN_CHAINS)(
@@ -647,6 +720,234 @@ describe("N67: aggregator x402 gate fails closed on misconfiguration", () => {
         "a later fix must not be hidden by a cached misconfigured result",
       ).toBe(402);
       expect(fixed.json().accepts[0].payTo).toBe(TREASURY);
+    });
+
+    it("isX402GateMisconfigured() is true ONLY for the fail-closed state", () => {
+      // disabled -> undefined -> not misconfigured
+      gateEnv({ enabled: UNSET });
+      expect(isX402GateMisconfigured(getX402GateConfig())).toBe(false);
+
+      // usable -> not misconfigured
+      _resetAggregatorRegistryForTests();
+      gateEnv();
+      expect(isX402GateMisconfigured(getX402GateConfig())).toBe(false);
+
+      // enabled + unusable treasury -> misconfigured
+      _resetAggregatorRegistryForTests();
+      gateEnv({ treasury: "0x123" });
+      const bad = getX402GateConfig();
+      expect(isX402GateMisconfigured(bad)).toBe(true);
+      expect(bad).toMatchObject({ misconfigured: true });
+    });
+
+    it("reports EVERY problem at once, naming the env var and the problem class", () => {
+      gateEnv({ treasury: UNSET, chain: "base-mainet" });
+      const state = getX402GateConfig();
+      if (!isX402GateMisconfigured(state)) throw new Error("expected misconfigured");
+      expect(state.reasons).toHaveLength(2);
+      const text = state.reasons.join("\n");
+      expect(text).toContain("PCC_AGGREGATOR_TREASURY is not set");
+      expect(text).toContain('PCC_X402_CHAIN="base-mainet" is not a known chain');
+      expect(text).toContain("base-mainnet");
+    });
+
+    it.each([
+      { value: UNSET as EnvVal, problem: "is not set" },
+      { value: "" as EnvVal, problem: "is empty or blank" },
+      { value: "   " as EnvVal, problem: "is empty or blank" },
+      { value: "0x123" as EnvVal, problem: "is not a valid address" },
+      { value: ZERO_ADDRESS as EnvVal, problem: "is the zero address" },
+    ])(
+      "treasury reason text distinguishes the problem class ($problem)",
+      ({ value, problem }) => {
+        gateEnv({ treasury: value });
+        const state = getX402GateConfig();
+        if (!isX402GateMisconfigured(state)) throw new Error("expected misconfigured");
+        expect(state.reasons.join("\n")).toContain(
+          `PCC_AGGREGATOR_TREASURY ${problem}`,
+        );
+      },
+    );
+
+    it("only quotes a short, benign chain value; a long or odd one is omitted from the reason", () => {
+      const long = "x".repeat(100);
+      gateEnv({ chain: long });
+      const state = getX402GateConfig();
+      if (!isX402GateMisconfigured(state)) throw new Error("expected misconfigured");
+      const text = state.reasons.join("\n");
+      expect(text).toContain("value omitted");
+      expect(text).not.toContain(long);
+    });
+
+    it("a valid treasury is returned verbatim as payTo, in either case", () => {
+      const mixed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+      gateEnv({ treasury: mixed });
+      expect(getX402GateConfig()).toMatchObject({ enabled: true, payTo: mixed });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("alert: ONE per process, never silent, never breaks the request", () => {
+    it("raises exactly one alert however many calls are refused, and none for free calls", async () => {
+      gateEnv({ treasury: UNSET });
+      const { app } = await boot([makePaidTool(), makeFreeTool()]);
+
+      await invoke(app);
+      await invoke(app);
+      await invoke(app);
+      await invoke(app, "free-tool-1");
+
+      expect(consoleAlerts(errorSpy)).toHaveLength(1);
+      expect(sentryMock.captureMessage).toHaveBeenCalledTimes(1);
+      const [message, context] = sentryMock.captureMessage.mock.calls[0] as [
+        string,
+        { level: string; tags: Record<string, string>; extra: { reasons: string[] } },
+      ];
+      expect(message).toContain("[x402] MISCONFIGURED:");
+      expect(message).toContain("PCC_AGGREGATOR_TREASURY is not set");
+      expect(message).toContain("503 payment_gate_misconfigured");
+      expect(context.level).toBe("fatal");
+      expect(context.tags).toMatchObject({
+        service: "pcc-gateway",
+        component: "x402-gate",
+      });
+      expect(context.extra.reasons).toEqual([
+        expect.stringContaining("PCC_AGGREGATOR_TREASURY is not set"),
+      ]);
+    });
+
+    it("is raised at BOOT (route registration), before any request, and not repeated by requests", async () => {
+      gateEnv({ chain: "base-mainet" });
+      const { app } = await boot();
+
+      // No request has been made yet.
+      expect(consoleAlerts(errorSpy)).toHaveLength(1);
+      expect(sentryMock.captureMessage).toHaveBeenCalledTimes(1);
+
+      await invoke(app);
+      await invoke(app);
+
+      expect(consoleAlerts(errorSpy)).toHaveLength(1);
+      expect(sentryMock.captureMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("still alerts on stderr when Sentry is not active (no DSN): a money gate must not fail closed silently", async () => {
+      sentryMock.enabled.mockReturnValue(false);
+      gateEnv({ treasury: UNSET });
+      const { app } = await boot();
+
+      const res = await invoke(app);
+
+      expect(res.statusCode).toBe(503);
+      expect(sentryMock.captureMessage).not.toHaveBeenCalled();
+      expect(consoleAlerts(errorSpy)).toHaveLength(1);
+    });
+
+    it("a failing alert channel never breaks request handling: the refusal is still a clean 503", async () => {
+      sentryMock.captureMessage.mockImplementation(() => {
+        throw new Error("sentry transport down");
+      });
+      gateEnv({ treasury: UNSET });
+      const { app, fetchSpy } = await boot();
+
+      const res = await invoke(app);
+
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual(REFUSAL_BODY);
+      expect(outboundUrls(fetchSpy)).toEqual([]);
+    });
+
+    it("a gate that is OFF by configuration raises no alert, even with a bad treasury and chain", async () => {
+      gateEnv({ enabled: UNSET, treasury: "0x123", chain: "base-mainet" });
+      const { app } = await boot();
+
+      await invoke(app);
+
+      expect(consoleAlerts(errorSpy)).toHaveLength(0);
+      expect(sentryMock.captureMessage).not.toHaveBeenCalled();
+    });
+
+    it("a valid gate raises no alert", async () => {
+      gateEnv();
+      const { app } = await boot();
+
+      const res = await invoke(app);
+
+      expect(res.statusCode).toBe(402);
+      expect(consoleAlerts(errorSpy)).toHaveLength(0);
+      expect(sentryMock.captureMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("structured log: one error line per refused request", () => {
+    it("logs code, toolId and reasons on EVERY refused paid call, prefixed [x402] MISCONFIGURED:", async () => {
+      gateEnv({ treasury: ZERO_ADDRESS });
+      const { logger, errors } = makeCapturingLogger();
+      const { app } = await boot([makePaidTool()], { logger });
+
+      await invoke(app);
+      await invoke(app);
+      await invoke(app);
+
+      const refusals = errors.filter((e) => "toolId" in e.obj);
+      expect(refusals).toHaveLength(3);
+      for (const r of refusals) {
+        expect(r.msg.startsWith("[x402] MISCONFIGURED:")).toBe(true);
+        expect(r.obj).toMatchObject({
+          code: "payment_gate_misconfigured",
+          toolId: "paid-tool-1",
+        });
+        expect(JSON.stringify(r.obj.reasons)).toContain("zero address");
+      }
+    });
+
+    it("also logs one structured line at boot, with no toolId", async () => {
+      gateEnv({ treasury: UNSET });
+      const { logger, errors } = makeCapturingLogger();
+      await boot([makePaidTool()], { logger });
+
+      const boots = errors.filter((e) => !("toolId" in e.obj));
+      expect(boots).toHaveLength(1);
+      expect(boots[0].obj).toMatchObject({ code: "payment_gate_misconfigured" });
+      expect(boots[0].msg.startsWith("[x402] MISCONFIGURED:")).toBe(true);
+    });
+
+    it("does NOT log a refusal for a free tool served under a misconfigured gate", async () => {
+      gateEnv({ treasury: UNSET });
+      const { logger, errors } = makeCapturingLogger();
+      const { app } = await boot([makeFreeTool()], { logger });
+
+      const res = await invoke(app, "free-tool-1");
+
+      expect(res.statusCode).toBe(200);
+      expect(errors.filter((e) => "toolId" in e.obj)).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("no raw value leaks: a key-shaped treasury is never echoed", () => {
+    it("is absent from the response, the alert, the Sentry event and the log lines", async () => {
+      // A pasted 32-byte private key is a realistic treasury typo. It is
+      // synthetic here (repeating pattern), and must never be echoed anywhere.
+      const keyShaped = "0x" + "ab".repeat(32);
+      gateEnv({ treasury: keyShaped });
+      const { logger, errors } = makeCapturingLogger();
+      const { app } = await boot([makePaidTool()], { logger });
+
+      const res = await invoke(app);
+
+      expect(res.statusCode).toBe(503);
+      const everything = JSON.stringify({
+        body: res.body,
+        headers: res.headers,
+        console: errorSpy.mock.calls,
+        sentry: sentryMock.captureMessage.mock.calls,
+        logs: errors,
+      });
+      expect(everything).not.toContain("abababab");
+      // ... but it must still be diagnosable.
+      expect(everything).toContain("PCC_AGGREGATOR_TREASURY is not a valid address");
     });
   });
 });
