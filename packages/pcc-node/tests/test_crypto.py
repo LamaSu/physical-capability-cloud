@@ -665,3 +665,40 @@ class TestKeyLocationIsBoundToTheDirectoryOpened:
             load_or_create_keys(str(existing / "keys.json"))
         assert not (tmp_path / "new").exists()
 
+
+@needs_nacl
+class TestHardLinkedKeyFiles:
+    """A02b F2: a key file with a second name may also be a file inside a checkout."""
+
+    def test_a_key_file_hard_linked_into_a_checkout_is_refused(self, tmp_path):
+        made = tmp_path / "made" / "keys.json"
+        load_or_create_keys(str(made))
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        inside = repo / "keys.json"
+        inside.write_bytes(made.read_bytes())
+        os.chmod(inside, 0o600)
+        outside = _private_dir(tmp_path / "outside") / "keys.json"
+        os.link(inside, outside)
+        assert os.stat(outside).st_nlink == 2
+        with pytest.raises(crypto_module.KeyFileError, match="hard link"):
+            load_or_create_keys(str(outside))
+
+    def test_a_new_key_file_that_gained_a_second_link_is_refused_and_removed(self, monkeypatch, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        planted = repo / "planted.json"
+        target = tmp_path / "keys-dir" / "keys.json"
+        real_open = os.open
+
+        def open_then_link(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if flags & os.O_CREAT and not planted.exists():
+                os.link(path, planted, src_dir_fd=dir_fd)
+            return fd
+
+        monkeypatch.setattr(crypto_module.os, "open", open_then_link)
+        with pytest.raises(crypto_module.KeyFileError, match="hard link"):
+            load_or_create_keys(str(target))
+        assert not target.exists(), "the refused key file was left behind"
+        assert planted.read_bytes() == b"", "a secret was written through the extra link"

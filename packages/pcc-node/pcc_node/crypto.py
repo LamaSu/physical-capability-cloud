@@ -53,9 +53,9 @@ def _require_nacl(action):
 
 class KeyFileError(RuntimeError):
     """A key file that cannot be used as it is: malformed, holding a public key
-    that does not belong to its secret, readable by other users, or about to be
-    created inside a source checkout. Also raised where the platform cannot
-    check that location."""
+    that does not belong to its secret, readable by other users, with more than
+    one name, or about to be created inside a source checkout. Also raised where
+    the platform cannot check that location."""
 
 
 def _strict_hex(value, byte_length):
@@ -353,13 +353,20 @@ def _open_key_directory(parent, key_path):
 
 def _judge_key_file(fd, key_path):
     """Judge the open file itself, never a name that may lead elsewhere: a
-    regular file owned by this user, readable by the owner only (a wider mode
-    is corrected on this descriptor, or refused)."""
+    regular file owned by this user, with exactly one name (a second hard link
+    may sit inside a source checkout, where this file is published with it),
+    readable by the owner only (a wider mode is corrected on this descriptor,
+    or refused)."""
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         raise KeyFileError(key_path + " is not a regular file")
     if st.st_uid != os.getuid():
         raise KeyFileError(key_path + " is not owned by this user")
+    if st.st_nlink != 1:
+        raise KeyFileError(
+            "%s has %d hard links; a key file must have exactly one name, because another may sit "
+            "inside a source checkout" % (key_path, st.st_nlink)
+        )
     mode = st.st_mode & 0o777
     if mode & 0o077:
         try:
@@ -427,10 +434,11 @@ def load_or_create_keys(path=None):
     checkout; and it must be owned by this user and writable by no one else.
     The key file is then opened or created relative to that same directory,
     never through a symbolic link. An existing file must be a regular file
-    owned by this user; a new file is created 0600 from the first byte, never
-    over an existing name. Directories that do not exist yet are created 0700.
-    Where the platform cannot do this (no ``dir_fd`` calls, no ``O_DIRECTORY``
-    or ``O_NOFOLLOW``: native Windows), the key is refused.
+    owned by this user with exactly one name (a second hard link could sit in a
+    checkout); a new file is created 0600 from the first byte, never over an
+    existing name. Directories that do not exist yet are created 0700. Where
+    the platform cannot do this (no ``dir_fd`` calls, no ``O_DIRECTORY`` or
+    ``O_NOFOLLOW``: native Windows), the key is refused.
 
     Loading checks the pair, not just its label: both keys are exactly 64 hex
     characters, the public key derived from the secret must match the stored
@@ -446,8 +454,9 @@ def load_or_create_keys(path=None):
     KeyFileError
         The location is inside a checkout (or cannot be proven to be outside
         one) or the platform cannot check it, the directory or file is not this
-        user's own, the file is a symbolic link, or it is malformed or holds a
-        public key that does not belong to its secret.
+        user's own, the file is a symbolic link or has more than one name, or
+        it is malformed or holds a public key that does not belong to its
+        secret.
 
     Returns
     -------
