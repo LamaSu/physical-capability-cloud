@@ -1171,6 +1171,18 @@ describe("scanIntakeStrings — walking and paths", () => {
     expect(hits).toEqual([{ path: "a~1b~0c/priv\\u{430}te", kind: "hex-secret" }]);
   });
 
+  it("walks the own properties of a class instance too, not only plain objects", () => {
+    class Approver {
+      name = FAKE.hex64;
+    }
+    expect(scanIntakeStrings({ answers: { "evidence.approver": { value: new Approver() } } })).toEqual([
+      { path: "answers/evidence.approver/value/name", kind: "hex-secret" },
+    ]);
+    const redacted = redactIntakeSecrets({ approver: new Approver() });
+    expect(redacted.approver).toEqual({ name: "[redacted:hex-secret]" });
+    expect(Object.getPrototypeOf(redacted.approver)).toBe(Object.prototype);
+  });
+
   it("terminates on a cyclic structure and on very deep nesting", () => {
     const cyclic: Record<string, unknown> = { text: FAKE.hex64 };
     cyclic.self = cyclic;
@@ -2510,6 +2522,116 @@ describe("zodToJsonSchemaFragment — refuses to guess", () => {
   });
 });
 
+// ── 15. Object keys: non-ASCII keys and NFKC (astra 120b, finding 7) ────────
+
+describe("validateIntake — object keys come from a closed ASCII vocabulary (astra 120b, finding 7)", () => {
+  const cyrillicA = String.fromCodePoint(0x430);
+  const cameraWith = (extra: Record<string, unknown>) =>
+    human({ seesWorkArea: true, seesOutput: true, mount: "fixed", captureDeviceId: "cam-1", ...extra });
+
+  it("a Cyrillic-a look-alike of privateKey nested in a value makes the report not ok, by path only", () => {
+    const key = `priv${cyrillicA}teKey`;
+    const report = ready(withAnswer("evidence.camera", cameraWith({ [key]: "x" })), "register");
+    expect(report.ok).toBe(false);
+    expect(report.nonAsciiKeys).toEqual(["answers/evidence.camera/value/priv\\u{430}teKey"]);
+    expect(report.invalidFields).toEqual(["evidence.camera"]); // the strict field schema refuses it too
+    expect(JSON.stringify(report)).not.toContain(key);
+  });
+
+  it("a non-ASCII key anywhere in a value or a source is reported with its full path", () => {
+    const deep = human({ available: true, expectedResultRef: "x", nested: { list: [{ [`k${cyrillicA}`]: 1 }] } });
+    const report = ready(withAnswer("evidence.referenceSample", deep), "register");
+    expect(report.nonAsciiKeys).toEqual(["answers/evidence.referenceSample/value/nested/list/0/k\\u{430}"]);
+
+    const sourced = withAnswer("calibration.procedureRef", {
+      value: "Prusa bed-leveling procedure v2",
+      provenance: "confirmed",
+      source: { doc: "manual", [`s${String.fromCodePoint(0xe9)}ction`]: "x" },
+    });
+    const sourcedReport = ready(sourced, "register");
+    expect(sourcedReport.ok).toBe(false);
+    expect(sourcedReport.nonAsciiKeys).toEqual(["answers/calibration.procedureRef/source/s\\u{e9}ction"]);
+    // the strict source schema fails the parse, and the key is still reported from the raw input
+    expect(sourcedReport.structuralErrors).toEqual(["answers/calibration.procedureRef/source: unrecognized_keys"]);
+  });
+
+  it("a non-ASCII field id is reported too (as unknown and as a non-ASCII key)", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    (record.answers as Record<string, IntakeAnswer>)[`caf${String.fromCodePoint(0xe9)}.menu`] = human("x");
+    const report = ready(record, "register");
+    expect(report.ok).toBe(false);
+    expect(report.nonAsciiKeys).toEqual(["answers/caf\\u{e9}.menu"]);
+    expect(report.unknownFields).toEqual(["caf\\u{e9}.menu"]);
+  });
+
+  it("an all-ASCII record, and non-ASCII text in VALUES, are not affected", () => {
+    expect(ready(buildFullValidRecord(), "accept-jobs").nonAsciiKeys).toEqual([]);
+    const accented = withAnswer("device.description", human("Imprimante de bureau, modèle résistant"));
+    const report = ready(accented, "identify");
+    expect(report.nonAsciiKeys).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
+  it("ASCII is up to and including DEL (0x7f); the first non-ASCII character is 0x80", () => {
+    const camera = (key: string) => cameraWith({ [key]: "x" });
+    expect(ready(withAnswer("evidence.camera", camera(`a${String.fromCharCode(0x7f)}`)), "register").nonAsciiKeys).toEqual([]);
+    expect(ready(withAnswer("evidence.camera", camera(`a${String.fromCharCode(0x80)}`)), "register").nonAsciiKeys).toEqual([
+      "answers/evidence.camera/value/a\\u{80}",
+    ]);
+  });
+
+  it("never echoes a secret-looking non-ASCII key", () => {
+    const key = `${FAKE.pem}${cyrillicA}`;
+    const report = ready(withAnswer("evidence.camera", cameraWith({ [key]: "x" })), "register");
+    expect(report.nonAsciiKeys).toEqual(["answers/evidence.camera/value/[redacted:pem]"]);
+    expect(JSON.stringify(report)).not.toContain("PRIVATE KEY");
+  });
+
+  it("finds a non-ASCII key at any depth without overflowing the stack", () => {
+    let nested: unknown = { [`z${cyrillicA}`]: 1 };
+    for (let i = 0; i < 50000; i++) nested = { a: nested };
+    const report = ready(withAnswer("evidence.camera", cameraWith({ extra: nested })), "register");
+    expect(report.ok).toBe(false);
+    expect(report.nonAsciiKeys).toHaveLength(1);
+    expect(report.nonAsciiKeys[0]!.endsWith("/z\\u{430}")).toBe(true);
+  });
+
+  describe("forbidden keys are compared after NFKC normalization", () => {
+    const fullWidth = (text: string): string =>
+      [...text].map((ch) => String.fromCodePoint(ch.codePointAt(0)! + 0xfee0)).join("");
+    const sampleWith = (key: string) => withAnswer("evidence.referenceSample", human({ available: true, [key]: "smuggled" }));
+
+    it("a full-width spelling of privateKey is a forbidden key (and, being non-ASCII, a non-ASCII key)", () => {
+      const key = fullWidth("privateKey");
+      const report = ready(sampleWith(key), "register");
+      expect(report.ok).toBe(false);
+      expect(report.forbiddenKeys).toHaveLength(1);
+      expect(report.forbiddenKeys[0]!.startsWith("evidence.referenceSample.")).toBe(true);
+      expect(report.forbiddenKeys[0]).not.toContain(key); // written as \u{hex}, not echoed raw
+      expect(report.nonAsciiKeys).toHaveLength(1);
+    });
+
+    it("a ligature spelling (the fi in verified) is a forbidden key too", () => {
+      const key = `veri${String.fromCodePoint(0xfb01)}ed`;
+      const report = ready(sampleWith(key), "register");
+      expect(report.forbiddenKeys).toEqual([`evidence.referenceSample.veri\\u{fb01}ed`]);
+    });
+
+    it("a look-alike from another script is not folded by NFKC — it is refused as a non-ASCII key instead", () => {
+      const key = `priv${cyrillicA}teKey`;
+      const report = ready(sampleWith(key), "register");
+      expect(report.forbiddenKeys).toEqual([]);
+      expect(report.nonAsciiKeys).toHaveLength(1);
+      expect(report.ok).toBe(false);
+    });
+
+    it("the ASCII variants keep matching", () => {
+      const report = ready(sampleWith("Private_Key"), "register");
+      expect(report.forbiddenKeys).toEqual(["evidence.referenceSample.Private_Key"]);
+    });
+  });
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
     expect(ready(buildFullValidRecord(), "identify").ok).toBe(true);
@@ -2615,6 +2737,14 @@ describe("astra pack 120b", () => {
   it("MEDIUM 6b: the generated safety.limits items schema is not the accept-anything {}", () => {
     const text = JSON.stringify(buildIntakeJsonSchema());
     expect(text.includes('"items":{}')).toBe(false);
+  });
+
+  it("MEDIUM 7: a Cyrillic-a 'privateKey' key nested in a value is caught", () => {
+    const key = "priv" + String.fromCodePoint(0x430) + "teKey";
+    const answer = human({ seesWorkArea: true, seesOutput: true, mount: "fixed", captureDeviceId: "cam-1", [key]: "x" });
+    const report = ready(withAnswer("evidence.camera", answer), "register");
+    expect(report.ok).toBe(false);
+    expect(report.nonAsciiKeys).toHaveLength(1);
   });
 
   it("HIGH 5a: tier2 is not ready while its required primitives are stub", () => {

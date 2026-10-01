@@ -31,6 +31,7 @@ import {
   type SafetyLimit,
 } from "./safety-policy.js";
 import { insubstantialTierFields, stubPrimitivesFor } from "./tier-readiness.js";
+import { walkValue } from "./walk.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
@@ -188,7 +189,9 @@ export interface IntakeValidationReport {
    *  guess"). */
   neverDefaultViolations: string[];
   /** `fieldId` (or `fieldId.key`) pairs where an INTAKE_FORBIDDEN_KEYS key was
-   *  found anywhere in an answer's value/source, or used as a field id itself. */
+   *  found anywhere in an answer's value/source, or used as a field id itself.
+   *  The comparison is NFKC-normalized, case-insensitive and ignores `_` and
+   *  `-`. */
   forbiddenKeys: string[];
   /** Field ids marked `sensitive` whose stored value is not exactly {set: true}
    *  (R2 rule 5). */
@@ -232,6 +235,13 @@ export interface IntakeValidationReport {
    *  publish): `safety.estop` `{mechanism: "none"}` on a capability that is not
    *  in ESTOP_NONE_APPROVED_CAPABILITIES. */
   safetyBlocks: string[];
+  /** Paths (`answers/<fieldId>/value/.../<key>`, characters outside printable
+   *  ASCII written as `\u{hex}`) of every object key that contains a non-ASCII
+   *  character, in an answer's value or source or as a field id. Keys come from
+   *  a closed protocol vocabulary that is ASCII, so a non-ASCII key (a Cyrillic
+   *  look-alike of "privateKey", say) is rejected outright, whatever it
+   *  spells. Paths only, never values. */
+  nonAsciiKeys: string[];
   /** For a milestone that is (or implies) tier1/tier2: the evidence primitives
    *  its required fields map to that are not `active` + `live` in
    *  EVIDENCE_PRIMITIVES (stub, planned, reserved, deprecated or unknown), sorted.
@@ -267,6 +277,7 @@ const REPORT_LISTS = Object.keys({
   safetyBlocks: true,
   stubPrimitives: true,
   insubstantial: true,
+  nonAsciiKeys: true,
 } satisfies Record<IntakeReportList, true>) as IntakeReportList[];
 
 function emptyReport(): IntakeValidationReport {
@@ -286,6 +297,7 @@ function emptyReport(): IntakeValidationReport {
     safetyBlocks: [],
     stubPrimitives: [],
     insubstantial: [],
+    nonAsciiKeys: [],
   };
 }
 
@@ -293,11 +305,14 @@ const FIELD_INDEX: ReadonlyMap<string, IntakeFieldDef> = new Map(
   INTAKE_FIELDS.map((f) => [f.id, f]),
 );
 
-/** Case/underscore/hyphen-insensitive normalization so `assurance_tier`,
- *  `AssuranceTier`, `private-key`, `PrivateKey`, and `HASH` all match their
- *  canonical INTAKE_FORBIDDEN_KEYS spelling (review fix — was exact-match). */
+/** NFKC, case and underscore/hyphen-insensitive normalization so
+ *  `assurance_tier`, `AssuranceTier`, `private-key`, `PrivateKey`, `HASH` and a
+ *  full-width spelling all match their canonical INTAKE_FORBIDDEN_KEYS
+ *  spelling. NFKC folds compatibility forms only (full-width letters,
+ *  ligatures); it does not fold look-alikes from other scripts — those are
+ *  rejected by the non-ASCII key check instead. */
 function normalizeForbiddenKey(key: string): string {
-  return key.toLowerCase().replace(/[_-]/g, "");
+  return key.normalize("NFKC").toLowerCase().replace(/[_-]/g, "");
 }
 
 const FORBIDDEN_KEY_NORMALIZED_SET: ReadonlySet<string> = new Set(
@@ -312,27 +327,9 @@ function isRecordObject(node: unknown): node is Record<string, unknown> {
   return node !== null && typeof node === "object" && !Array.isArray(node);
 }
 
-/** Collect any INTAKE_FORBIDDEN_KEYS key (loosely matched — see isForbiddenKey)
- *  found as an object key inside `root` (arrays are walked, primitives are
- *  ignored). The literal key encountered is recorded (not its canonical
- *  spelling), so the report shows exactly what was found. Iterative, so depth
- *  cannot overflow the stack; an object reachable twice is visited once. */
-function collectForbiddenKeys(root: unknown, out: Set<string>): void {
-  const seen = new Set<object>();
-  const stack: unknown[] = [root];
-  while (stack.length > 0) {
-    const node = stack.pop();
-    if (node === null || typeof node !== "object" || seen.has(node)) continue;
-    seen.add(node);
-    if (Array.isArray(node)) {
-      stack.push(...node);
-      continue;
-    }
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-      if (isForbiddenKey(key)) out.add(key);
-      stack.push(value);
-    }
-  }
+/** Does `key` contain a character outside ASCII? */
+function hasNonAscii(key: string): boolean {
+  return /[^\x00-\x7f]/.test(key);
 }
 
 /** A zod issue as `path: description`. Only the issue code, static text and
@@ -360,19 +357,28 @@ function scanRawInput(input: unknown, report: IntakeValidationReport): void {
   const answers = isRecordObject(input) && isRecordObject(input.answers) ? input.answers : {};
   const forbiddenKeyHits = new Set<string>();
   const unknownFields = new Set<string>();
+  const nonAsciiKeys = new Set<string>();
   for (const [fieldId, answer] of Object.entries(answers)) {
     const shownId = pathSegment(fieldId);
     if (isForbiddenKey(fieldId)) forbiddenKeyHits.add(shownId);
     if (!FIELD_INDEX.has(fieldId)) unknownFields.add(shownId);
+    if (hasNonAscii(fieldId)) nonAsciiKeys.add(joinPath(["answers", fieldId]));
     if (!isRecordObject(answer)) continue;
 
-    const keyHits = new Set<string>();
-    collectForbiddenKeys(answer.value, keyHits);
-    collectForbiddenKeys(answer.source, keyHits);
-    for (const key of keyHits) forbiddenKeyHits.add(`${shownId}.${pathSegment(key)}`);
+    // Keys inside the answer's value and source: a forbidden concept (reported
+    // as `fieldId.key`) and a non-ASCII key (reported by path).
+    for (const part of ["value", "source"] as const) {
+      walkValue(answer[part], {
+        key: (key, path) => {
+          if (isForbiddenKey(key)) forbiddenKeyHits.add(`${shownId}.${pathSegment(key)}`);
+          if (hasNonAscii(key)) nonAsciiKeys.add(joinPath(["answers", fieldId, part, ...path()]));
+        },
+      });
+    }
   }
   report.forbiddenKeys.push(...forbiddenKeyHits);
   report.unknownFields.push(...unknownFields);
+  report.nonAsciiKeys.push(...nonAsciiKeys);
 }
 
 /** Is `answer` (for `fieldId`) backed by a confirmation event that `authority`
@@ -528,8 +534,12 @@ function checkParsedRecord(
  *      exactly {set: true}, R2 rule 5 — also listed in `sensitiveViolations`.)
  *   3. Every string anywhere in the input is scanned for secrets and
  *      sensitive values (`scanIntakeStrings`; see secret-scan.ts), reported in
- *      `secretsInText`. Forbidden keys and unknown field ids are read from the
- *      raw input as well, so they are reported even when the parse fails.
+ *      `secretsInText`. Forbidden keys, unknown field ids and non-ASCII keys are
+ *      read from the raw input as well, so they are reported even when the
+ *      parse fails. Every object key in an answer's value or source (and every
+ *      field id) must be ASCII: keys come from a closed protocol vocabulary, so
+ *      a non-ASCII key makes the report not ok (`nonAsciiKeys`, paths only),
+ *      and forbidden keys are matched after NFKC normalization.
  *   4. Milestone readiness. A field in CONFIRMATION_REQUIRED_FIELDS (every
  *      `neverDefault` field, plus every field a `humanConfirmRequired`
  *      research entry fills, e.g. capability.parameters) satisfies a milestone

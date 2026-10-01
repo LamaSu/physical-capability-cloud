@@ -48,6 +48,7 @@
  */
 
 import { BIP39_ENGLISH_WORDLIST } from "./bip39-english.js";
+import { walkValue } from "./walk.js";
 
 export const INTAKE_SECRET_KINDS = [
   "pem",
@@ -258,70 +259,23 @@ export function joinPath(segments: readonly string[]): string {
   return segments.map(pathSegment).join("/");
 }
 
-// ── Walking ──────────────────────────────────────────────────────────────
-
-function isPlainObject(node: unknown): node is Record<string, unknown> {
-  if (node === null || typeof node !== "object" || Array.isArray(node)) return false;
-  const proto = Object.getPrototypeOf(node);
-  return proto === Object.prototype || proto === null;
-}
-
-interface WalkFrame {
-  node: unknown;
-  parent: WalkFrame | null;
-  key: string;
-}
-
-function pathOf(frame: WalkFrame): string[] {
-  const segments: string[] = [];
-  for (let f: WalkFrame | null = frame; f !== null && f.parent !== null; f = f.parent) segments.push(f.key);
-  return segments.reverse();
-}
-
-/** Visit every string in arrays and plain objects (iteratively, so depth cannot
- *  overflow the stack, and each frame links to its parent so a path is only
- *  built when the visitor asks for it; an object reachable twice, or through a
- *  cycle, is visited once). Object keys are not visited. */
-function walkStrings(root: unknown, visit: (text: string, path: () => string[]) => void): void {
-  const seen = new WeakSet<object>();
-  const stack: WalkFrame[] = [{ node: root, parent: null, key: "" }];
-  while (stack.length > 0) {
-    const frame = stack.pop()!;
-    const node = frame.node;
-    if (typeof node === "string") {
-      visit(node, () => pathOf(frame));
-      continue;
-    }
-    if (node === null || typeof node !== "object") continue;
-    if (Array.isArray(node)) {
-      if (seen.has(node)) continue;
-      seen.add(node);
-      for (let i = node.length - 1; i >= 0; i--) stack.push({ node: node[i], parent: frame, key: String(i) });
-    } else if (isPlainObject(node)) {
-      if (seen.has(node)) continue;
-      seen.add(node);
-      const entries = Object.entries(node);
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const entry = entries[i]!;
-        stack.push({ node: entry[1], parent: frame, key: entry[0] });
-      }
-    }
-  }
-}
+// ── Scanning ─────────────────────────────────────────────────────────────
 
 /**
- * Scan every string in `value` (arrays and plain objects, recursively) with
- * every detector. Returns one `{path, kind}` per (string, kind) in document
- * order; empty when nothing matches. It never returns or logs the matched text,
- * and object keys are not scanned.
+ * Scan every string in `value` (arrays and objects, recursively) with every
+ * detector. Returns one `{path, kind}` per (string, kind) in document order;
+ * empty when nothing matches. It never returns or logs the matched text, and
+ * object keys are not scanned.
  */
 export function scanIntakeStrings(value: unknown): IntakeSecretHit[] {
   const hits: IntakeSecretHit[] = [];
-  walkStrings(value, (text, path) => {
-    const kinds = secretKindsOf(text);
-    if (kinds.length === 0) return;
-    const where = joinPath(path());
-    for (const kind of kinds) hits.push({ path: where, kind });
+  walkValue(value, {
+    string: (text, path) => {
+      const kinds = secretKindsOf(text);
+      if (kinds.length === 0) return;
+      const where = joinPath(path());
+      for (const kind of kinds) hits.push({ path: where, kind });
+    },
   });
   return hits;
 }
@@ -350,8 +304,9 @@ function setOwn(target: object, key: string, value: unknown): void {
  * each match replaced by `[redacted:<kind>]` (a PEM block is replaced through
  * its footer). An object key that itself matches a detector is renamed to
  * `[redacted:<kind>]`, suffixed `-2`, `-3`, ... if that would collide. Arrays
- * and plain objects are copied; any other value is returned as it is. The input
- * is not modified.
+ * and objects are copied (an object that is not a plain object becomes a plain
+ * object of its own enumerable properties); numbers, booleans, null and
+ * undefined are returned as they are. The input is not modified.
  *
  * For safe LOGGING only. A record that has a hit must be rejected (see the
  * file header), not stored in redacted form.
@@ -363,7 +318,6 @@ export function redactIntakeSecrets<T>(record: T): T {
   const copyOf = (node: unknown): unknown => {
     if (typeof node === "string") return redactText(node);
     if (node === null || typeof node !== "object") return node;
-    if (!Array.isArray(node) && !isPlainObject(node)) return node;
     const known = copies.get(node);
     if (known !== undefined) return known;
     const target: object = Array.isArray(node) ? [] : {};
