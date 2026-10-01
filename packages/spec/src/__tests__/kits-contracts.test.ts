@@ -1316,7 +1316,7 @@ describe("astra pack 112b", () => {
     expect(readTimeIsNotInFuture(tenAhead)).toBe(false);
   });
 
-  it("every OpportunityDTO kind accepts an asOf up to the skew ahead (60 s, and the skew itself) and refuses one beyond it (10 min)", () => {
+  it("every OpportunityDTO kind accepts an asOf within the skew ahead (60 s, and just inside it) and refuses one beyond it (10 min)", () => {
     const kinds: Array<[string, (asOf: string) => unknown]> = [
       ["funded_offer", (asOf) => fundedOffer({ asOf })],
       ["kit_build_request", (asOf) => kitRequest({ asOf })],
@@ -1324,7 +1324,7 @@ describe("astra pack 112b", () => {
     ];
     for (const [kind, make] of kinds) {
       expect(parses(make(fromNow(60_000))), `${kind} +60 s`).toBe(true);
-      expect(parses(make(fromNow(MAX_AS_OF_SKEW_MS))), `${kind} +skew`).toBe(true);
+      expect(parses(make(fromNow(MAX_AS_OF_SKEW_MS - 1000))), `${kind} +skew-1s`).toBe(true);
       expect(parses(make(fromNow(MAX_AS_OF_SKEW_MS + 60_000))), `${kind} +skew+1 min`).toBe(false);
       expect(messagesOf(make(fromNow(10 * 60_000))), `${kind} +10 min`).toEqual([futureAsOf]);
       expect(parses(make(fromNow(-60_000))), `${kind} -60 s`).toBe(true);
@@ -1345,7 +1345,7 @@ describe("astra pack 112b", () => {
     };
     // asOf
     expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: fromNow(60_000) })).success).toBe(true);
-    expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: fromNow(MAX_AS_OF_SKEW_MS) })).success).toBe(true);
+    expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: fromNow(MAX_AS_OF_SKEW_MS - 1000) })).success).toBe(true);
     expect(bindingMessages(binding({ asOf: fromNow(10 * 60_000) }))).toEqual([futureBinding]);
     expect(OperatorBindingDTOSchema.safeParse(binding({ asOf: "2100-01-01T00:00:00Z" })).success).toBe(false);
     // lastSeenAt: null is "never seen", and a recent time is fine
