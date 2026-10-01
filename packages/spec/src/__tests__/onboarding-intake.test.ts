@@ -24,6 +24,7 @@ import {
   redactIntakeSecrets,
   INTAKE_SECRET_KINDS,
   CONFIRMATION_REQUIRED_FIELDS,
+  ESTOP_NONE_APPROVED_CAPABILITIES,
   intakeValueHash,
   type IntakeAnswer,
   type IntakeAuthority,
@@ -34,6 +35,9 @@ import {
 import { BIP39_ENGLISH_WORDLIST } from "../onboarding/intake/bip39-english.js";
 import { getPrimitive } from "../evidence/primitives.js";
 import { canonicalize } from "../util/canonical.js";
+import { CsdRegistry, loadBuiltinCsds } from "../csd/registry.js";
+import { CsdSchema, type CSD } from "../csd/schema.js";
+import printAndMailCsd from "../csds/document-print-and-mail.csd.json" with { type: "json" };
 import { RESEARCH_LIBRARY } from "../onboarding/research/index.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -328,7 +332,8 @@ function buildFullValidRecord(): IntakeRecord {
     "safety.estop": human({ mechanism: "hardware" }),
     "safety.hazards": human(["heat"]),
     "safety.commandRate": human(60),
-    "safety.limits": confirmed([{ quantity: "bed temperature", unit: "C", min: 0, max: 120 }]),
+    // Bound to capability.type's CSD (fdm/v2): infill is its number parameter with a unit (%, 5-100).
+    "safety.limits": confirmed([{ quantity: "infill", unit: "%", min: 10, max: 90 }]),
     "consumables.items": human(["PLA filament"]),
     "consumables.restockedBy": human("operator, monthly"),
     "consumables.loadedMaterial": human("PLA"),
@@ -1779,6 +1784,379 @@ describe("intakeValueHash", () => {
   });
 });
 
+// ── 12. Safety limits bind to the selected CSD; estop "none" (astra 120b, finding 4) ─
+
+/** A confirmed safety.limits answer whose confirmation reference the stub authority will resolve. */
+function limitsAnswer(limits: unknown): IntakeAnswer {
+  return { ...confirmed(limits), confirmation: { eventId: "evt-safety.limits" } };
+}
+
+/** A lab-rig CSD with one number parameter per unit dimension in the table, plus awkward ones. */
+function labCsd(): CSD {
+  const numberParam = (key: string, unit: string | undefined, min: number, max: number) => ({
+    type: "number" as const,
+    key,
+    label: key,
+    required: false,
+    min,
+    max,
+    step: 1,
+    ...(unit === undefined ? {} : { unit }),
+  });
+  return CsdSchema.parse({
+    url: "pcc://capabilities/test-lab/v1",
+    version: "1.0.0",
+    status: "active",
+    name: "Test lab rig",
+    description: "fixture CSD for limit binding",
+    kind: "base",
+    baseDefinition: null,
+    parameters: [
+      numberParam("bedTemp", "C", 20, 120),
+      numberParam("travel", "mm", 0, 500),
+      numberParam("volume", "mL", 0.5, 5),
+      numberParam("duration", "s", 1, 3600),
+      numberParam("fill", "%", 5, 100),
+      numberParam("spindle", "rpm", 0, 100), // a unit outside the closed table
+      numberParam("plain", undefined, 1, 10), // declares no unit
+      { type: "enum", key: "material", label: "Material", required: true, options: [{ value: "pla", label: "PLA" }] },
+    ],
+    constraints: [],
+    pricing: { basePrice: "1", currency: "USD" },
+  });
+}
+
+function labRegistry(): CsdRegistry {
+  const registry = new CsdRegistry();
+  registry.register(labCsd());
+  return registry;
+}
+
+interface LabOptions {
+  milestone?: (typeof INTAKE_MILESTONES)[number];
+  /** capability.type; null leaves the answer out. */
+  type?: string | null;
+  /** The CSD registry the authority offers; null offers none (the built-ins apply). */
+  registry?: CsdRegistry | null;
+}
+
+/** The full fixture, retargeted at the lab CSD with the given limits, validated with that registry. */
+function labReport(limits: unknown, options: LabOptions = {}) {
+  const { milestone = "accept-jobs", type = "pcc://capabilities/test-lab/v1", registry = labRegistry() } = options;
+  const record = cloneRecord(buildFullValidRecord());
+  record.answers["safety.limits"] = limitsAnswer(limits);
+  if (type === null) delete record.answers["capability.type"];
+  else record.answers["capability.type"] = probed(type);
+  const authority = { ...makeAuthority(record), ...(registry ? { csdRegistry: registry } : {}) };
+  return validateIntake(record, milestone, authority);
+}
+
+const limit = (quantity: string, unit: string, min: number, max: number) => ({ quantity, unit, min, max });
+
+describe("validateIntake — safety limits bind to the selected CSD (astra 120b, finding 4)", () => {
+  it("the fixture's limit uses fdm/v2's infill (%, 5-100), a number parameter that declares a unit", () => {
+    const infill = loadBuiltinCsds().resolve("pcc://capabilities/fdm/v2").parameters.find((p) => p.key === "infill");
+    expect(infill).toMatchObject({ type: "number", unit: "%", min: 5, max: 100 });
+    expect(ready(buildFullValidRecord(), "accept-jobs").limitErrors).toEqual([]);
+  });
+
+  it("accepts a limit that narrows the CSD range, or equals it, or is a single point", () => {
+    expect(labReport([limit("bedTemp", "C", 30, 100)]).limitErrors).toEqual([]);
+    expect(labReport([limit("bedTemp", "C", 20, 120)]).limitErrors).toEqual([]);
+    expect(labReport([limit("bedTemp", "C", 60, 60)]).limitErrors).toEqual([]);
+    expect(labReport([limit("bedTemp", "C", 30, 100)]).ok).toBe(true);
+  });
+
+  it("refuses a limit that widens the CSD range on either side", () => {
+    for (const bad of [limit("bedTemp", "C", 20, 121), limit("bedTemp", "C", 19, 100), limit("bedTemp", "C", 0, 500)]) {
+      const report = labReport([bad]);
+      expect(report.ok).toBe(false);
+      expect(report.limitErrors).toEqual(["safety.limits[0]: limit lies outside the CSD parameter's range"]);
+    }
+  });
+
+  it("requires the quantity to be a NUMBER parameter key of the CSD, exactly", () => {
+    for (const quantity of ["bed temperature", "Bedtemp", "BedTemp", "bedTemp ", "material", "infill", "volume2"]) {
+      const report = labReport([limit(quantity, "C", 30, 100)]);
+      expect(report.ok, quantity).toBe(false);
+      expect(report.limitErrors, quantity).toEqual(["safety.limits[0]: quantity is not a number parameter of the selected CSD"]);
+    }
+  });
+
+  it("converts units within a dimension before comparing to the parameter's range", () => {
+    // volume: parameter is mL 0.5-5
+    expect(labReport([limit("volume", "uL", 1000, 2000)]).limitErrors).toEqual([]);
+    expect(labReport([limit("volume", "L", 0.001, 0.004)]).limitErrors).toEqual([]);
+    expect(labReport([limit("volume", "uL", 400, 2000)]).limitErrors).toEqual([
+      "safety.limits[0]: limit lies outside the CSD parameter's range",
+    ]);
+    // temperature: parameter is C 20-120 (K is offset, not just scaled)
+    expect(labReport([limit("bedTemp", "K", 303.15, 373.15)]).limitErrors).toEqual([]);
+    expect(labReport([limit("bedTemp", "K", 20, 120)]).limitErrors).toEqual([
+      "safety.limits[0]: limit lies outside the CSD parameter's range",
+    ]);
+    // length: parameter is mm 0-500
+    expect(labReport([limit("travel", "cm", 1, 50)]).limitErrors).toEqual([]);
+    expect(labReport([limit("travel", "m", 0, 0.5)]).limitErrors).toEqual([]);
+    expect(labReport([limit("travel", "m", 0, 0.6)]).limitErrors).toHaveLength(1);
+    // time: parameter is s 1-3600
+    expect(labReport([limit("duration", "min", 1, 60)]).limitErrors).toEqual([]);
+    expect(labReport([limit("duration", "h", 0.5, 1)]).limitErrors).toEqual([]);
+    expect(labReport([limit("duration", "h", 0.5, 1.5)]).limitErrors).toHaveLength(1);
+    // percent: the same unit, compared exactly
+    expect(labReport([limit("fill", "%", 5, 100)]).limitErrors).toEqual([]);
+    expect(labReport([limit("fill", "%", 4.9999999999, 100)]).limitErrors).toHaveLength(1);
+  });
+
+  it("accepts the unit spellings that fold to a table unit", () => {
+    const micro = String.fromCharCode(0xb5);
+    const greekMu = String.fromCharCode(0x3bc);
+    const degree = String.fromCharCode(0xb0);
+    for (const unit of [`${micro}L`, `${greekMu}L`, "ul", " uL "]) {
+      expect(labReport([limit("volume", unit, 1000, 2000)]).limitErrors, unit).toEqual([]);
+    }
+    expect(labReport([limit("volume", "ml", 1, 2)]).limitErrors).toEqual([]);
+    for (const unit of [`${degree}C`, "degC"]) {
+      expect(labReport([limit("bedTemp", unit, 30, 100)]).limitErrors, unit).toEqual([]);
+    }
+    expect(labReport([limit("duration", "sec", 1, 60)]).limitErrors).toEqual([]);
+  });
+
+  it("refuses a unit outside the closed table, a unit of another dimension, and a CSD unit it cannot convert", () => {
+    expect(labReport([limit("bedTemp", "F", 90, 200)]).limitErrors).toEqual([
+      "safety.limits[0]: unit is not in the closed unit table",
+    ]);
+    expect(labReport([limit("volume", "ML", 1, 2)]).limitErrors).toEqual([
+      "safety.limits[0]: unit is not in the closed unit table",
+    ]);
+    expect(labReport([limit("bedTemp", "mm", 30, 100)]).limitErrors).toEqual([
+      "safety.limits[0]: unit does not match the CSD parameter's unit",
+    ]);
+    expect(labReport([limit("volume", "mm", 1, 2)]).limitErrors).toHaveLength(1);
+    // the parameter's own unit ("rpm") is outside the table, so it cannot carry a limit even in its own unit
+    expect(labReport([limit("spindle", "rpm", 1, 50)]).limitErrors).toEqual([
+      "safety.limits[0]: unit is not in the closed unit table",
+    ]);
+  });
+
+  it("refuses a limit on a parameter that declares no unit", () => {
+    const report = labReport([limit("plain", "count", 1, 5)]);
+    expect(report.ok).toBe(false);
+    expect(report.limitErrors).toEqual(["safety.limits[0]: unit is not in the closed unit table"]);
+    // even with a table unit there is nothing for it to equal
+    expect(labReport([limit("plain", "%", 1, 5)]).limitErrors).toEqual([
+      "safety.limits[0]: the CSD parameter declares no unit",
+    ]);
+  });
+
+  it("every number parameter with a unit in a built-in CSD accepts its own full range, and the table covers those units", () => {
+    const registry = loadBuiltinCsds();
+    registry.register(CsdSchema.parse(printAndMailCsd));
+    let checked = 0;
+    for (const csd of registry.list()) {
+      for (const p of csd.parameters) {
+        if (p.type !== "number") continue;
+        const full = limit(p.key, p.unit ?? "?", p.min, p.max);
+        const record = cloneRecord(buildFullValidRecord());
+        record.answers["safety.limits"] = limitsAnswer([full]);
+        record.answers["capability.type"] = probed(csd.url);
+        const report = validateIntake(record, "accept-jobs", { ...makeAuthority(record), csdRegistry: registry });
+        if (p.unit === undefined) {
+          expect(report.limitErrors, `${csd.url}#${p.key}`).toEqual(["safety.limits[0]: unit is not in the closed unit table"]);
+        } else {
+          expect(report.limitErrors, `${csd.url}#${p.key} (${p.unit})`).toEqual([]);
+          checked += 1;
+        }
+      }
+    }
+    // %, degrees, km, min, kg, pages: infill, 4 lat/lng, distanceKm, deadlineMinutes, weightKg, pageCount, prepTimeMinutes
+    expect(checked).toBe(10);
+  });
+
+  it("refuses duplicate quantities and never intersects them", () => {
+    const wide = limit("volume", "mL", 1, 4);
+    for (const duplicates of [
+      [wide, wide],
+      [wide, limit("volume", "uL", 1000, 4000)],
+      [wide, limit(" Volume", "mL", 2, 3)],
+    ]) {
+      const report = labReport(duplicates);
+      expect(report.ok).toBe(false);
+      expect(report.limitErrors).toContain("safety.limits[1]: duplicate quantity (first at safety.limits[0])");
+    }
+  });
+
+  it("reports every bad entry by index, in order, and never echoes a quantity or bound", () => {
+    const report = labReport([
+      limit("SENTINEL-quantity", "C", 1, 2),
+      limit("bedTemp", "C", 30, 100),
+      limit("travel", "kg", 1, 2),
+      limit("bedTemp", "C", 40, 90),
+    ]);
+    expect(report.limitErrors).toEqual([
+      "safety.limits[0]: quantity is not a number parameter of the selected CSD",
+      "safety.limits[2]: unit does not match the CSD parameter's unit",
+      "safety.limits[3]: duplicate quantity (first at safety.limits[1])",
+    ]);
+    expect(JSON.stringify(report)).not.toContain("SENTINEL-quantity");
+  });
+
+  it("limit bounds that are NaN or infinite, or min > max, are invalid values (not limit errors)", () => {
+    for (const bad of [
+      limit("bedTemp", "C", Number.NaN, 100),
+      limit("bedTemp", "C", 30, Number.POSITIVE_INFINITY),
+      limit("bedTemp", "C", Number.NEGATIVE_INFINITY, 100),
+      limit("bedTemp", "C", 100, 30),
+    ]) {
+      const report = labReport([bad]);
+      expect(report.ok).toBe(false);
+      expect(report.invalidFields).toEqual(["safety.limits"]);
+      expect(report.limitErrors).toEqual([]);
+    }
+  });
+
+  it("resolves inherited parameters: a profile CSD can carry a limit on its base's number parameter", () => {
+    const registry = labRegistry();
+    registry.register(
+      CsdSchema.parse({
+        url: "pcc://capabilities/test-lab-profile/v1",
+        version: "1.0.0",
+        status: "active",
+        name: "Lab rig profile",
+        description: "inherits the lab rig's parameters",
+        kind: "profile",
+        baseDefinition: "pcc://capabilities/test-lab/v1",
+        parameters: [],
+        constraints: [],
+        pricing: { basePrice: "1", currency: "USD" },
+      }),
+    );
+    const report = labReport([limit("bedTemp", "C", 30, 100)], { type: "pcc://capabilities/test-lab-profile/v1", registry });
+    expect(report.limitErrors).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
+  describe("an unbound CSD cannot validate limits", () => {
+    it("capability.type absent: a milestone requiring safety.limits is not ready", () => {
+      const report = labReport([limit("bedTemp", "C", 30, 100)], { type: null });
+      expect(report.ok).toBe(false);
+      expect(report.limitErrors).toEqual(["unbound: no CSD"]);
+      expect(report.missing).toContain("capability.type");
+    });
+
+    it("capability.type that names no registered CSD: not ready either", () => {
+      const report = labReport([limit("bedTemp", "C", 30, 100)], { type: "pcc://capabilities/nonexistent/v9" });
+      expect(report.ok).toBe(false);
+      expect(report.limitErrors).toEqual(["unbound: no CSD"]);
+    });
+
+    it("a milestone that does not require safety.limits is not blocked by it, but duplicates are still refused", () => {
+      const unbound = labReport([limit("bedTemp", "C", 30, 100)], { milestone: "register", type: null });
+      expect(unbound.limitErrors).toEqual([]);
+      expect(unbound.ok).toBe(true);
+      const duplicated = labReport([limit("x", "C", 1, 2), limit("x", "C", 1, 2)], { milestone: "register", type: null });
+      expect(duplicated.ok).toBe(false);
+      expect(duplicated.limitErrors).toEqual(["safety.limits[1]: duplicate quantity (first at safety.limits[0])"]);
+    });
+
+    it("no safety.limits answer at all adds no limit error (the missing answer is reported as missing)", () => {
+      const record = cloneRecord(buildFullValidRecord());
+      delete record.answers["safety.limits"];
+      delete record.answers["capability.type"];
+      const report = ready(record, "accept-jobs");
+      expect(report.limitErrors).toEqual([]);
+      expect(report.missing).toEqual(expect.arrayContaining(["safety.limits", "capability.type"]));
+    });
+
+    it("authority.csdRegistry replaces the built-in lookup: a built-in url is unbound in a registry that lacks it", () => {
+      const report = labReport([limit("infill", "%", 10, 90)], { type: "pcc://capabilities/fdm/v2" });
+      expect(report.limitErrors).toEqual(["unbound: no CSD"]);
+      // and without a custom registry the built-ins resolve
+      const builtin = labReport([limit("infill", "%", 10, 90)], { type: "pcc://capabilities/fdm/v2", registry: null });
+      expect(builtin.limitErrors).toEqual([]);
+    });
+
+    it("an unusable csdRegistry fails closed instead of throwing", () => {
+      const record = buildFullValidRecord();
+      const authority = { ...makeAuthority(record), csdRegistry: {} as unknown as CsdRegistry };
+      const report = validateIntake(record, "accept-jobs", authority);
+      expect(report.ok).toBe(false);
+      expect(report.limitErrors).toEqual(["unbound: no CSD"]);
+    });
+  });
+});
+
+describe("validateIntake — estop none is not runnable by default (astra 120b, finding 4)", () => {
+  const withEstop = (value: unknown, type: string | null = "pcc://capabilities/fdm/v2"): IntakeRecord => {
+    const record = cloneRecord(buildFullValidRecord());
+    record.answers["safety.estop"] = {
+      ...human(value),
+      confirmation: { eventId: "evt-safety.estop" },
+    };
+    if (type === null) delete record.answers["capability.type"];
+    else record.answers["capability.type"] = probed(type);
+    // The fixture's limit is fdm/v2's infill; limits are checked against whatever CSD is selected,
+    // so a record retargeted at another capability drops them (publish does not require them).
+    if (type !== "pcc://capabilities/fdm/v2") delete record.answers["safety.limits"];
+    return record;
+  };
+  const none = { mechanism: "none" };
+
+  it("the approved list is exactly the two office-printing capabilities, and frozen", () => {
+    expect([...ESTOP_NONE_APPROVED_CAPABILITIES]).toEqual([
+      "pcc://capabilities/2d-print/v1",
+      "pcc://capabilities/document-print-and-mail/v1",
+    ]);
+    expect(Object.isFrozen(ESTOP_NONE_APPROVED_CAPABILITIES)).toBe(true);
+  });
+
+  it("blocks publish, accept-jobs and get-paid (which imply publish) on an unapproved capability", () => {
+    for (const milestone of ["publish", "accept-jobs", "get-paid"] as const) {
+      const report = ready(withEstop(none), milestone);
+      expect(report.ok, milestone).toBe(false);
+      expect(report.safetyBlocks, milestone).toEqual(['safety.estop: mechanism "none" is not approved for this capability']);
+      expect(report.missing, milestone).toEqual([]);
+    }
+  });
+
+  it("does not block milestones that do not imply publish: it stays an honest observation", () => {
+    for (const milestone of ["register", "identify", "register-device", "tier1", "tier2", "optional"] as const) {
+      expect(ready(withEstop(none), milestone).safetyBlocks, milestone).toEqual([]);
+    }
+  });
+
+  it("never blocks hardware or adapter-stop, on any capability", () => {
+    for (const value of [{ mechanism: "hardware" }, { mechanism: "adapter-stop", stopCommand: "M112" }]) {
+      expect(ready(withEstop(value), "accept-jobs").safetyBlocks).toEqual([]);
+    }
+  });
+
+  it("allows none on an approved capability (publish; the other checks still apply)", () => {
+    for (const type of ESTOP_NONE_APPROVED_CAPABILITIES) {
+      const report = ready(withEstop(none, type), "publish");
+      expect(report.safetyBlocks, type).toEqual([]);
+      expect(report.ok, type).toBe(true);
+    }
+  });
+
+  it("blocks none when capability.type is absent, and for a lookalike of an approved url", () => {
+    expect(ready(withEstop(none, null), "publish").safetyBlocks).toHaveLength(1);
+    expect(ready(withEstop(none, "pcc://capabilities/2d-print/v1/"), "publish").safetyBlocks).toHaveLength(1);
+    expect(ready(withEstop(none, "PCC://capabilities/2d-print/v1"), "publish").safetyBlocks).toHaveLength(1);
+  });
+
+  it("an approved capability can reach accept-jobs when its CSD is in the registry and limits bind (document-print-and-mail)", () => {
+    const registry = new CsdRegistry();
+    registry.register(CsdSchema.parse(printAndMailCsd));
+    const record = withEstop(none, "pcc://capabilities/document-print-and-mail/v1");
+    record.answers["safety.limits"] = limitsAnswer([limit("pageCount", "pages", 1, 100)]);
+    const report = validateIntake(record, "accept-jobs", { ...makeAuthority(record), csdRegistry: registry });
+    expect(report.limitErrors).toEqual([]);
+    expect(report.safetyBlocks).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+});
+
 describe("astra pack 120b", () => {
   it("baseline: the full fixture is ok for identify (else the cases below prove nothing)", () => {
     expect(ready(buildFullValidRecord(), "identify").ok).toBe(true);
@@ -1860,6 +2238,22 @@ describe("astra pack 120b", () => {
     const report = ready(buildFullValidRecord(), "get-paid", { payout: false });
     expect(report.ok).toBe(false);
     expect(report.unverified).toEqual(["payout.destination"]);
+  });
+
+  it("HIGH 4a: conflicting duplicate limits for one quantity are refused", () => {
+    const answer = limitsAnswer([
+      { quantity: "volume", unit: "uL", min: 1, max: 1000 },
+      { quantity: "volume", unit: "mL", min: 10, max: 20 },
+    ]);
+    const report = ready(withAnswer("safety.limits", answer), "register");
+    expect(report.ok).toBe(false);
+    expect(report.limitErrors).toContain("safety.limits[1]: duplicate quantity (first at safety.limits[0])");
+  });
+  it("HIGH 4b: estop mechanism none does not make accept-jobs ready", () => {
+    const answer = { ...human({ mechanism: "none" }), confirmation: { eventId: "evt-safety.estop" } };
+    const report = ready(withAnswer("safety.estop", answer), "accept-jobs");
+    expect(report.ok).toBe(false);
+    expect(report.safetyBlocks).toEqual(['safety.estop: mechanism "none" is not approved for this capability']);
   });
 
   it("HIGH 5c: a malformed execution mode caps at 0, not the no-cap 3", () => {

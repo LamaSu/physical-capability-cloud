@@ -24,11 +24,18 @@ import {
 import type { CsdRegistry } from "../../csd/registry.js";
 import { intakeValueHash, isConfirmationRequired } from "./confirmation.js";
 import { joinPath, pathSegment, scanIntakeStrings, type IntakeSecretHit } from "./secret-scan.js";
+import {
+  ESTOP_NONE_APPROVED_CAPABILITIES,
+  checkSafetyLimits,
+  numberParametersOf,
+  type SafetyLimit,
+} from "./safety-policy.js";
 
 export * from "./fields.js";
 export * from "./json-schema.js";
 export * from "./form-html.js";
 export { CONFIRMATION_REQUIRED_FIELDS, intakeValueHash } from "./confirmation.js";
+export { ESTOP_NONE_APPROVED_CAPABILITIES } from "./safety-policy.js";
 export {
   INTAKE_SECRET_KINDS,
   redactIntakeSecrets,
@@ -212,6 +219,18 @@ export interface IntakeValidationReport {
    *  `authority.payoutDestinationExists()` is not exactly true (or no authority
    *  was supplied): the record's `{set: true}` is never trusted for that. */
   unverified: string[];
+  /** Problems with `safety.limits` against the CSD that `capability.type`
+   *  names (looked up in `authority.csdRegistry`, else the built-in CSDs): one
+   *  entry per bad limit (index and reason, never a value) — quantity not a
+   *  number parameter of the CSD, unit outside the closed table or not the
+   *  parameter's, bounds outside the parameter's range, duplicate quantity.
+   *  `"unbound: no CSD"` when `capability.type` is absent or does not resolve
+   *  and `milestone` requires safety.limits. */
+  limitErrors: string[];
+  /** Safety policy that blocks publish / accept-jobs (any milestone implying
+   *  publish): `safety.estop` `{mechanism: "none"}` on a capability that is not
+   *  in ESTOP_NONE_APPROVED_CAPABILITIES. */
+  safetyBlocks: string[];
 }
 
 /** Every list-valued member of the report: `ok` is true iff all are empty. The
@@ -232,6 +251,8 @@ const REPORT_LISTS = Object.keys({
   invalidFields: true,
   unconfirmed: true,
   unverified: true,
+  limitErrors: true,
+  safetyBlocks: true,
 } satisfies Record<IntakeReportList, true>) as IntakeReportList[];
 
 function emptyReport(): IntakeValidationReport {
@@ -247,6 +268,8 @@ function emptyReport(): IntakeValidationReport {
     invalidFields: [],
     unconfirmed: [],
     unverified: [],
+    limitErrors: [],
+    safetyBlocks: [],
   };
 }
 
@@ -371,6 +394,36 @@ function payoutDestinationExists(authority: IntakeAuthority | undefined): boolea
   }
 }
 
+/** The safety rules that depend on the selected capability (safety-policy.ts):
+ *  `safety.limits` bound to the CSD, and `estop: none`. `parsedValues` holds the
+ *  value of every present known field that satisfied its own schema. */
+function checkSafetyPolicy(
+  record: IntakeRecord,
+  impliedMilestones: ReadonlySet<IntakeMilestone>,
+  parsedValues: ReadonlyMap<string, unknown>,
+  authority: IntakeAuthority | undefined,
+  report: IntakeValidationReport,
+): void {
+  const capabilityType = parsedValues.get("capability.type");
+
+  const limits = parsedValues.get("safety.limits") as readonly SafetyLimit[] | undefined;
+  if (limits) {
+    const parameters = numberParametersOf(capabilityType, authority?.csdRegistry);
+    const limitsRequired = FIELD_INDEX.get("safety.limits")!.requiredFor.some((rf) => impliedMilestones.has(rf));
+    if (!parameters && limitsRequired) report.limitErrors.push("unbound: no CSD");
+    report.limitErrors.push(...checkSafetyLimits(limits, parameters));
+  }
+
+  const estop = parsedValues.get("safety.estop") as { mechanism: string } | undefined;
+  if (
+    estop?.mechanism === "none" &&
+    impliedMilestones.has("publish") &&
+    !(typeof capabilityType === "string" && ESTOP_NONE_APPROVED_CAPABILITIES.includes(capabilityType))
+  ) {
+    report.safetyBlocks.push('safety.estop: mechanism "none" is not approved for this capability');
+  }
+}
+
 /** The milestone checks, over a record that already parsed. */
 function checkParsedRecord(
   record: IntakeRecord,
@@ -383,6 +436,7 @@ function checkParsedRecord(
   const sensitiveViolations = new Set<string>();
   const invalidFields = new Set<string>();
   const valueValid = new Map<string, boolean>();
+  const parsedValues = new Map<string, unknown>();
 
   // Every present known field, whatever the milestone: its value must satisfy
   // its own schema, and the global provenance/sensitive invariants hold.
@@ -390,8 +444,10 @@ function checkParsedRecord(
     const field = FIELD_INDEX.get(fieldId);
     if (!field) continue;
 
-    const valid = field.valueSchema.safeParse(answer.value).success;
+    const result = field.valueSchema.safeParse(answer.value);
+    const valid = result.success;
     valueValid.set(fieldId, valid);
+    if (result.success) parsedValues.set(fieldId, result.data);
     if (!valid) invalidFields.add(fieldId);
     if (isConfirmationRequired(fieldId) && (answer.provenance === "probe" || answer.provenance === "research")) {
       neverDefaultViolations.add(fieldId);
@@ -426,6 +482,8 @@ function checkParsedRecord(
   if (impliedMilestones.has("get-paid") && !payoutDestinationExists(authority)) {
     report.unverified.push("payout.destination");
   }
+
+  checkSafetyPolicy(record, impliedMilestones, parsedValues, authority, report);
 
   report.missing.push(...missing);
   report.unconfirmed.push(...unconfirmed);
@@ -472,6 +530,19 @@ function checkParsedRecord(
  *      "get-paid" (and nothing that does not imply it) also needs
  *      `authority.payoutDestinationExists() === true`; otherwise
  *      "payout.destination" is listed in `unverified`.
+ *   5. Safety limits bind to the selected CSD (safety-policy.ts): when
+ *      `safety.limits` is present and well-formed, each entry's quantity must
+ *      be a NUMBER parameter of the CSD that `capability.type` names (looked
+ *      up in `authority.csdRegistry`, else the built-in CSDs), its unit must
+ *      convert to that parameter's declared unit through a small closed table,
+ *      it must lie within the parameter's own [min, max], and a quantity may
+ *      appear once; problems go to `limitErrors` and make the report not ok
+ *      for any milestone. When `capability.type` is absent or does not
+ *      resolve, the limits cannot be validated and a milestone requiring
+ *      safety.limits is not ready ("unbound: no CSD"). `safety.estop`
+ *      `{mechanism: "none"}` blocks publish and every milestone implying it
+ *      (accept-jobs, get-paid) unless `capability.type` is in
+ *      ESTOP_NONE_APPROVED_CAPABILITIES (`safetyBlocks`).
  * Milestone matching is CUMULATIVE (review fix): a field is required for
  * `milestone` if its own `requiredFor` contains `milestone` OR any milestone
  * that `milestone` implies (MILESTONE_IMPLIES in fields.ts — e.g. accept-jobs
