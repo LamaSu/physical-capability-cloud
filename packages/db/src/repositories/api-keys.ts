@@ -2,6 +2,7 @@ import { eq, and, isNull, or } from "drizzle-orm";
 import { apiKeys } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IApiKeyRepository } from "../interfaces/IApiKeyRepository.js";
+import { sealCustodialKey } from "../custody-seal.js";
 
 export class ApiKeyRepository implements IApiKeyRepository {
   constructor(private db: StoreDB) {}
@@ -134,6 +135,13 @@ export class ApiKeyRepository implements IApiKeyRepository {
    * Record the per-operator operational wallet (option A ownership stopgap).
    * Persists the wallet address + custodied private key + on-chain assignment
    * status from the best-effort setAgentWallet call. See coord bulletin 235.
+   *
+   * N1: the key is stored SEALED, never as plaintext. It is sealed here, before
+   * it touches the database (AES-256-GCM under PCC_CUSTODY_KEK, bound to this
+   * row id and address; see custody-seal.ts), so no caller can store it any
+   * other way. With no valid KEK this throws CustodyKekUnavailableError BEFORE
+   * any write: the row is left exactly as it was, in every environment (fail
+   * closed). The legacy plaintext column is set NULL, never written.
    */
   recordOperatorWallet(
     id: string,
@@ -145,11 +153,13 @@ export class ApiKeyRepository implements IApiKeyRepository {
       onchainError: string | null;
     },
   ) {
+    const sealed = sealCustodialKey(wallet.privateKey, { rowId: id, address: wallet.address });
     return this.db
       .update(apiKeys)
       .set({
         operatorWalletAddress: wallet.address,
-        operatorWalletPrivateKey: wallet.privateKey,
+        operatorWalletPrivateKey: null,
+        operatorWalletKeySealed: sealed,
         operatorWalletCustody: "gateway",
         agentWalletOnchainStatus: wallet.onchainStatus,
         agentWalletOnchainTxHash: wallet.onchainTxHash,

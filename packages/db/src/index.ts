@@ -49,6 +49,23 @@ export function createStore(options: StoreOptions = {}): Store {
 }
 export type { StoreDB, Repositories };
 export { schema, buildRepositories, createDatabase, migrateDatabase, seedAll };
+// Custodial key sealing (N1): AES-256-GCM at rest under PCC_CUSTODY_KEK.
+export {
+  CUSTODY_KEK_ENV,
+  CUSTODY_KEK_ID_ENV,
+  CustodyKek,
+  CustodySealError,
+  CustodyKekUnavailableError,
+  CustodyKekIdMismatchError,
+  CustodyBlobMalformedError,
+  CustodyUnsealError,
+  CustodyInputError,
+  resolveCustodyKek,
+  requireCustodyKek,
+  sealCustodialKey,
+  unsealCustodialKey,
+} from "./custody-seal.js";
+export type { CustodySealErrorCode, CustodyKekResolution, SealContext } from "./custody-seal.js";
 // Re-export drizzle-orm operators for gateway routes that need direct table queries
 export { eq, and, or, sql, count, desc, asc } from "drizzle-orm";
 // Repository interfaces — the public contract for the data access layer

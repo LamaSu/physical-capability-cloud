@@ -1999,6 +1999,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // Option A ownership stopgap: per-operator operational wallet.
   safeAddColumn("api_keys", "operator_wallet_address", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_private_key", "TEXT");
+  // N1: the custodial key sealed at rest (pcc-seal:v1 blob, see custody-seal.ts).
+  // Nullable and additive; the plaintext column above is left in place.
+  safeAddColumn("api_keys", "operator_wallet_key_sealed", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_custody", "TEXT DEFAULT 'gateway'");
   safeAddColumn("api_keys", "agent_wallet_onchain_status", "TEXT DEFAULT 'pending'");
   safeAddColumn("api_keys", "agent_wallet_onchain_tx_hash", "TEXT");
