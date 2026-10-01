@@ -305,9 +305,9 @@ describe("eligibility — requireImplementedVerifier caps below report-only", ()
 // ── 5. Backward-compat regression (existing CSDs still validate) ────
 
 describe("backward-compat — existing CSDs still validate", () => {
-  it("all 8 built-in CSDs still load (additive primitives[] is optional)", () => {
+  it("all 9 built-in CSDs still load (additive primitives[] is optional)", () => {
     const registry = loadBuiltinCsds();
-    expect(registry.size).toBe(8);
+    expect(registry.size).toBe(9);
   });
 
   it("built-in CSD JSON with no primitives[] still parses under CsdSchema", () => {

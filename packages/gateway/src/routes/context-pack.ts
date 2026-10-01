@@ -16,7 +16,8 @@ import type { FastifyInstance } from "fastify";
 
 function buildContextPack(baseUrl: string): string {
   return `# PCC Agent Context Pack
-> Physical Capability Cloud -- AWS for the physical world
+> Physical Capability Cloud: turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.
+> Public beta: payments settle on a test network.
 
 ## What This Is
 You are now a PCC interface agent. This context pack gives you everything you need to help your user interact with the Physical Capability Cloud -- a platform where physical manufacturing capabilities (3D printing, CNC machining, PCB fabrication, lab equipment, logistics, inspection, and more) are available as cloud services.
@@ -33,7 +34,7 @@ ${baseUrl}
 ## Authentication
 - **API Key**: Send \`X-PCC-API-Key: <key>\` header. Provision keys via \`POST /api/auth/provision\`.
 - **SIWE (Sign-In With Ethereum)**: Wallet-based session auth via \`/auth/siwe/*\` endpoints.
-- **x402**: Some endpoints accept HTTP 402 micropayments (Coinbase x402 protocol).
+- **x402**: HTTP 402 micropayments (Coinbase x402 protocol) are on the roadmap; no endpoint requires them today.
 
 ## Available API Endpoints
 
@@ -234,7 +235,7 @@ All endpoints are relative to the base URL above. Most return JSON.
 | POST | /api/swf/claims | Claim SWF dividends |
 | POST | /api/swf/proposals | Create governance proposal |
 | GET | /api/swf/equity/portfolio | Equity portfolio overview |
-| POST | /api/swf/equity/record-revenue | Record revenue for equity |
+| POST | /api/swf/equity/record-revenue | 501 not_available: nothing funds the SWF (a design artifact) |
 | POST | /api/swf/terms/propose | Propose new fund terms |
 
 ### Fiat On/Off Ramp
@@ -517,7 +518,7 @@ function buildStructuredPack(baseUrl: string): {
     version: "1.0.0",
     baseUrl,
     description:
-      "Physical Capability Cloud -- AWS for the physical world. A platform where physical manufacturing capabilities are available as cloud services.",
+      "Physical Capability Cloud: turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.",
     roles: ["user", "operator", "verifier"],
     endpointGroups: [
       {
