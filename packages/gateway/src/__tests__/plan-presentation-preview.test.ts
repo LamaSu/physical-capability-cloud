@@ -275,3 +275,23 @@ describe("PlanPresentation.unknowns (item 6): an honest 'we don't know' list, ne
     expect(invalid.unknowns).toEqual(["time-estimate"]);
   });
 });
+
+// ── astra review of #434 (round 1): no contradictory live terms beside a deal ────────────────────
+
+describe("PlanPresentation verdicts: a verdict list that repeats one verdict is refused", () => {
+  type Accepted = Extract<SeamResult, { ok: true }>;
+  const sealedOf = (outcome: Accepted) => presentPlan({ submission: agentDag(), outcome, sealed: sealedRecordFor(outcome), asOf: ASOF });
+  const shape = (p: ReturnType<typeof presentPlan>) => [p.layer, p.state, p.invalid?.reason ?? null, p.nodes.length];
+
+  it("control: the unedited deal is sealed (Layer B)", () => {
+    expect(shape(sealedOf(accept()))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("duplicates: the same current verdict for both nodes is invalid, never sealed (the reviewer's second case)", () => {
+    const outcome = accept();
+    const [first, second] = outcome.verdicts;
+    for (const verdicts of [[first!, first!], [second!, second!]]) {
+      expect(shape(sealedOf({ ...outcome, verdicts }))).toEqual(["C", "invalid", "malformed-outcome", 0]);
+    }
+  });
+});
