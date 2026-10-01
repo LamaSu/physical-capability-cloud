@@ -16,6 +16,7 @@ import {
   executionPhaseOf,
   isTerminalExecutionPhase,
   normalizeJobRowStatus,
+  normalizeMoneyStatus,
   operatorPhaseOf,
   toBaseUnits,
   type OperatorIncomeDTO,
@@ -225,6 +226,38 @@ function kernelSite(kernel: KernelLite | undefined, kernelId: string): OperatorW
   return { kind: "operator_site", approximate: false, lat, lng, kernelId };
 }
 
+/**
+ * Escrow-record words (escrows.status, or a V-next unit name) under which the escrow holds its
+ * funds, uncontested, with nothing yet returned to the payer or paid out.
+ */
+const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "PRIMARY_ASSERTED", "RELEASE_ALLOCATED"]);
+/** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
+const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
+/** Words, in either record, that say the money is not or no longer held: never funded, refunded, or released. */
+const NOT_HELD = new Set(["CREATED", "UNFUNDED", "PENDING", "REFUNDED", "SETTLED_REFUNDED", "REFUND_ALLOCATED", "RELEASED", "SETTLED_RELEASED"]);
+
+/** Every word the funding decision reads, for the test that each one is in the canonical money map. */
+export const FUNDING_WORDS: readonly string[] = Object.freeze([...new Set([...ESCROW_HOLDS, ...MILESTONE_HOLDS, ...NOT_HELD])]);
+
+/**
+ * Whether a REAL escrow record holds this job's milestone (astra r1 on #389, HIGH: a linked
+ * record was called escrowed without reading its status). Read from the exact words of both
+ * records, after the payout reconciliation:
+ *   the payout is unknown (conflicting, unrecognized or ambiguous records)  -> unknown
+ *   either word says never funded, refunded or released                     -> not_held
+ *   the escrow holds its funds and the milestone is funded and open         -> escrowed
+ *   anything else (disputed, challenged, slashed, expired)                  -> unknown
+ */
+function recordFunding(s: SettlementAxis): OperatorWorkPay["funding"] {
+  const record = s.record!;
+  const ms = record.milestone!;
+  if (s.payout === "unknown" || !record.escrow.known || !ms.status.known) return "unknown";
+  const e = normalizeMoneyStatus(record.escrow.sourceStatus);
+  const m = normalizeMoneyStatus(ms.status.sourceStatus);
+  if (NOT_HELD.has(e) || NOT_HELD.has(m)) return "not_held";
+  return ESCROW_HOLDS.has(e) && MILESTONE_HOLDS.has(m) ? "escrowed" : "unknown";
+}
+
 /** Pay for a kernel job: only from this job's own milestone in its linked escrow record. */
 export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
   if (s.link !== "linked" || !s.record) return { ...NO_PAY };
@@ -239,7 +272,7 @@ export function kernelJobPay(s: SettlementAxis): OperatorWorkPay {
     decimals,
     model: "escrow_milestone",
     unit: null,
-    funding: s.record.simulated ? "simulated" : "escrowed",
+    funding: s.record.simulated ? "simulated" : recordFunding(s),
     fundingRef: s.record.escrowId,
     basis: "escrow_milestone_record",
   };

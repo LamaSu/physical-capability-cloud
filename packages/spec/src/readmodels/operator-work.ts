@@ -148,13 +148,19 @@ export interface OperatorWorkPay {
   unit: string | null;
   /**
    * What backs the amount:
-   *   escrowed           this job's milestone in a real escrow record holds it (record only)
+   *   escrowed           a real escrow record holds this job's milestone, uncontested: the
+   *                      escrow is funded, active or completing (or a V-next funded state),
+   *                      and the milestone is funded, locked or releasing (record only)
+   *   not_held           a real escrow record that says it does not hold this job's money:
+   *                      never funded (created, unfunded, pending), refunded to the payer, or
+   *                      released (record only; a recorded release is never proof of payment)
    *   declared_unfunded  a price the poster declared; nothing funds it
    *   simulated          a mock-settlement escrow: no money exists
    *   unknown            no amount, or a settlement link that is ambiguous, conflicting,
-   *                      unreadable or missing this job's milestone
+   *                      unreadable or missing this job's milestone, or a record that is
+   *                      contested (disputed, challenged, slashed), expired or unrecognized
    */
-  funding: "escrowed" | "declared_unfunded" | "simulated" | "unknown";
+  funding: "escrowed" | "not_held" | "declared_unfunded" | "simulated" | "unknown";
   fundingRef: string | null;
   basis: "job_offer_pricing" | "escrow_milestone_record" | null;
 }

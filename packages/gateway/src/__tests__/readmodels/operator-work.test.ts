@@ -10,8 +10,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { SettlementAxis } from "@pcc/spec";
+import { classifyMoneyStatus, type SettlementAxis } from "@pcc/spec";
 import {
+  FUNDING_WORDS,
   buildOperatorIncomeDTO,
   buildOperatorWorkDTO,
   INCOME_HISTORY_REASON,
@@ -117,6 +118,42 @@ describe("kernel jobs", () => {
     const [rel] = work({ kernelJobs: { ok: true, value: [kj(job({ status: "completed" }), linked(escrow({ status: "active" }), [milestone({ status: "released" })]))] } }).items;
     expect(rel!.payout).toBe("reported_released");
     expect(rel!.payout).not.toBe("paid");
+  });
+
+  it("NEGATIVE (r1 HIGH): escrowed only while the record holds this job's milestone; never funded, refunded or released is not_held", () => {
+    const fundingOf = (escrowStatus: string, milestoneStatus: string) =>
+      work({ kernelJobs: { ok: true, value: [kj(job(), linked(escrow({ status: escrowStatus }), [milestone({ status: milestoneStatus })]))] } })
+        .items[0]!.pay.funding;
+    // The record holds the money: a funded, active or completing escrow; a funded, locked or releasing milestone.
+    for (const e of ["funded", "active", "completing"]) {
+      for (const m of ["funded", "locked", "releasing"]) expect(fundingOf(e, m), `${e}/${m}`).toBe("escrowed");
+    }
+    // Never funded, refunded to the payer, or released: the record does not hold it.
+    for (const [e, m] of [
+      ["created", "funded"],
+      ["refunded", "funded"],
+      ["funded", "unfunded"],
+      ["funded", "refunded"],
+      ["active", "released"],
+    ]) {
+      expect(fundingOf(e!, m!), `${e}/${m}`).toBe("not_held");
+    }
+    // Contested, conflicting or unrecognized: unknown, never escrowed.
+    for (const [e, m] of [
+      ["disputed", "funded"],
+      ["funded", "disputed"],
+      ["funded", "slashed"],
+      ["completed", "funded"],
+      ["funded", "on_hold"],
+      ["funded", "completed"],
+    ]) {
+      expect(fundingOf(e!, m!), `${e}/${m}`).toBe("unknown");
+    }
+  });
+
+  it("every word the funding decision reads is a known word of the canonical money map", () => {
+    expect(FUNDING_WORDS.length).toBeGreaterThan(10);
+    for (const w of FUNDING_WORDS) expect(classifyMoneyStatus(w).known, w).toBe(true);
   });
 
   it("NEGATIVE: no link, an ambiguous link, an unreadable link or no milestone for the job is unknown funding with no amount", () => {
