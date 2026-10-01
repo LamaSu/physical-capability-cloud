@@ -74,3 +74,57 @@ export function findIdentityCollisions(db: Reader): { collisions: IdentityCollis
   collisions.sort((a, b) => a.normalized.localeCompare(b.normalized));
   return { collisions, read, skipped };
 }
+
+/** The identity sources that EXIST in every PCC deployment. If the audit could
+ *  not read one of these, it read no real identity data and must fail closed —
+ *  reporting "safe to deploy" after reading nothing is the fail-open AZ-9. The
+ *  optional tables (machine_registrations, job_offers, ui_artifacts) may be
+ *  absent in a minimal deployment; name them in PCC_COLLISION_AUDIT_ALLOW_ABSENT
+ *  to permit that, per deployment. */
+export const REQUIRED_COLLISION_SOURCES: readonly string[] = [
+  "api_keys.operator_id",
+  "shop_kernels.operator_address",
+];
+
+export type CollisionAuditExit =
+  | { code: 0; reason: string }
+  | { code: 3; reason: string }
+  | { code: 4; reason: string };
+
+/**
+ * The pre-deploy audit's exit decision (AZ-9 fix). FAIL CLOSED:
+ *   4 — at least one identity source could not be read and was not explicitly
+ *       allowlisted as absent (the audit is INCOMPLETE; it may have read no
+ *       identities at all). This outranks a clean result.
+ *   3 — the audit ran and found at least one NEW merge to resolve.
+ *   0 — every non-allowlisted source was read and no new merge exists.
+ * A required source (REQUIRED_COLLISION_SOURCES) can never be allowlisted away:
+ * if it is unreadable, the audit is always incomplete.
+ */
+export function collisionAuditExit(params: {
+  newMerges: number;
+  read: readonly string[];
+  skipped: readonly string[];
+  allowedAbsent: readonly string[];
+}): CollisionAuditExit {
+  const allowed = new Set(params.allowedAbsent.map((s) => s.trim()).filter(Boolean));
+  const blockingSkips = params.skipped.filter(
+    (s) => REQUIRED_COLLISION_SOURCES.includes(s) || !allowed.has(s),
+  );
+  if (blockingSkips.length > 0) {
+    return {
+      code: 4,
+      reason:
+        `audit INCOMPLETE — could not read: ${blockingSkips.join(", ")}. ` +
+        "A required source is never allowlistable; for a legitimately absent optional table, " +
+        "set PCC_COLLISION_AUDIT_ALLOW_ABSENT=<comma-separated sources>. Refusing to report safe after reading it.",
+    };
+  }
+  if (params.read.length === 0) {
+    return { code: 4, reason: "audit INCOMPLETE — no identity source was read at all." };
+  }
+  if (params.newMerges > 0) {
+    return { code: 3, reason: `${params.newMerges} NEW merge group(s) to resolve before deploy.` };
+  }
+  return { code: 0, reason: `no new merges; read ${params.read.length} source(s).` };
+}

@@ -26,6 +26,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { safeLogJson } from "../packages/gateway/src/util/redact-log.js";
 
 const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
 if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
@@ -329,7 +330,7 @@ async function main() {
   });
   const oracleResult = await oracleReq.json() as any;
   log(`    Status:  ${oracleReq.status}`);
-  log(`    Result:  ${JSON.stringify(oracleResult)}`);
+  log(`    Result:  ${safeLogJson(oracleResult)}`);
 
   // Build the on-chain Attestation struct. The escrow stores
   // keccak256(abi.encode(attestation)) so the SAME struct must be passed
