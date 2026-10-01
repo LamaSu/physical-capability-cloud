@@ -222,6 +222,25 @@ describe("createKernelHandler -- commits to, and returns, the one snapshot of th
     expect(keysRead.filter((key) => key !== "then")).toEqual([]);
   });
 
+  it("A05c F2: the commitment is the snapshot's own text, not a second read of the builder's object", async () => {
+    // A builder object that answers each descriptor read differently: if the handler canonicalized it twice (once
+    // to commit, once to build the response) the commitment and the response would disagree.
+    let descriptorReads = 0;
+    const output = new Proxy({ command: "target" } as Record<string, unknown>, {
+      getOwnPropertyDescriptor(target, key) {
+        const real = Reflect.getOwnPropertyDescriptor(target, key);
+        if (key !== "command" || real === undefined) return real;
+        descriptorReads++;
+        return { ...real, value: "read " + descriptorReads };
+      },
+    });
+    const handler = handlerWith(async () => output);
+    const response = await handler({ jobId: "job-6b", input: {} });
+    expect(response.output).toEqual({ command: "read 1" }); // faac0003 returned the Proxy itself: "target"
+    expect(committedOutputHash(response)).toBe(await sha256(canonicalize({ command: "read 1" })));
+    expect(descriptorReads).toBe(1); // the builder's object was read exactly once
+  });
+
   it("A05c F2: the response is a detached copy: a builder that keeps its object cannot change the output after the commitment", async () => {
     const returned = { command: "safe", list: [1, 2] };
     const handler = handlerWith(async () => returned);
