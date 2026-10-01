@@ -154,10 +154,17 @@ export class NonCanonicalValueError extends Error {
  * NaN, Infinity, a bigint, a function, a symbol, a Date, a Map or any other
  * non-plain object — throws NonCanonicalValueError too, instead of producing
  * text only this function could reproduce. Reading each value once, from its
- * own data descriptor, also means no getter ever runs here. The only input code
- * that can run is a Proxy's reflection traps (getPrototypeOf, ownKeys,
- * getOwnPropertyDescriptor): never a getter, a `get` trap (an array's length is
- * read from its descriptor too), a toJSON / toString / valueOf or a constructor.
+ * own data descriptor, also means no getter of the input ever runs here.
+ * canonicalize interacts with the input only through reflection operations
+ * (getPrototypeOf, ownKeys, getOwnPropertyDescriptor): it never performs a
+ * [[Get]] on the input (an array's length is read from its descriptor too),
+ * never calls a toJSON / toString / valueOf and never runs a constructor. That is
+ * not a promise that no input code runs. A hostile Proxy's reflection traps are
+ * code, and so are the objects they return (a descriptor that is itself a Proxy,
+ * or that carries accessors, runs its has / get traps and getters while the
+ * engine converts it), so they may themselves run arbitrary code. Whatever they
+ * report is what is hashed, which is why a consumer that must evaluate what was
+ * hashed takes a canonicalSnapshot and does not re-read the input.
  *
  * Numbers follow the evidence number policy D5 (evidence commitment profile v1
  * §1), which the oracle and VCR enforce too: an integer outside the safe range
@@ -331,7 +338,7 @@ function canonicalArray(arr: unknown[], path: string, ancestors: WeakSet<object>
 /**
  * An array's length, read from its OWN `length` data descriptor through the
  * captured reflection. `arr.length` is a [[Get]]: on a Proxy it runs the `get`
- * trap, which is input code outside the reflection traps. A Proxy's
+ * trap, which is not a reflection operation. A Proxy's
  * getOwnPropertyDescriptor trap is a reflection trap, but the engine only
  * insists that `length` stays a compatible non-configurable data property, so the
  * reported value can be anything: it must be a non-negative safe integer, or the
