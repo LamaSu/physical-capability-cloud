@@ -114,3 +114,75 @@ describe("createKernelHandler — executes exactly the snapshot it hashed (N15 r
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// N15 round 5 (cross-family review A05c, finding F1)
+// ---------------------------------------------------------------------------
+
+/** Object.prototype's own names when this file loaded, before any test could pollute it. */
+const OBJECT_PROTOTYPE_AT_LOAD = Object.getOwnPropertyNames(Object.prototype).sort();
+
+/**
+ * Install `members` on Object.prototype while `fn` settles and always take them off again, even when
+ * `fn` throws, so a failing assertion cannot leak a pollution into another test. The members are
+ * non-enumerable so nothing that iterates keys while the awaits are pending can trip over them.
+ * Assert only after this returns.
+ */
+async function withPollutedPrototype<T>(members: Record<string, unknown>, fn: () => Promise<T>): Promise<T> {
+  const target = Object.prototype as unknown as Record<string, unknown>;
+  const names = Object.keys(members);
+  try {
+    for (const name of names) {
+      Object.defineProperty(Object.prototype, name, { value: members[name], writable: true, enumerable: false, configurable: true });
+    }
+    return await fn();
+  } finally {
+    for (const name of names) delete target[name];
+  }
+}
+
+/**
+ * The input snapshot inherited Object.prototype and the builder reads it with ordinary
+ * property reads, so a polluted prototype supplied the builder members that the input
+ * commitment never covered. The snapshot is prototype-less now.
+ */
+describe("createKernelHandler -- a polluted Object.prototype supplies the builder nothing that was not hashed (N15 round 5, A05c F1)", () => {
+  it("A05c F1: the verdict's repro: an inherited `command` does not reach a builder that was given {}", async () => {
+    const seen: unknown[] = [];
+    const handler = handlerWith(async (input) => {
+      seen.push(input.command, "command" in input);
+      return { ran: true };
+    });
+    const response = await withPollutedPrototype({ command: "danger" }, () => handler({ jobId: "job-5", input: {} }));
+    expect(seen).toEqual([undefined, false]); // faac0003: ["danger", true]
+    expect(committedInputHash(response)).toBe(await sha256(canonicalize({})));
+  });
+
+  it("A05c F1: at every depth of the input", async () => {
+    const seen: unknown[] = [];
+    const handler = handlerWith(async (input) => {
+      const nested = input.nested as Record<string, unknown>;
+      const first = (input.list as Array<Record<string, unknown>>)[0];
+      seen.push(nested.command, first.command, "command" in nested, "command" in first);
+      return {};
+    });
+    await withPollutedPrototype({ command: "danger" }, () => handler({ jobId: "job-5b", input: { nested: {}, list: [{}] } }));
+    expect(seen).toEqual([undefined, undefined, false, false]);
+  });
+
+  it("A05c F1: hands the builder a prototype-less snapshot that Object.keys, `in`, spread and JSON.stringify all handle", async () => {
+    let seen: Record<string, unknown> | undefined;
+    const handler = handlerWith(async (input) => {
+      seen = input;
+      return { keys: Object.keys(input), copy: { ...input }, json: JSON.stringify(input) };
+    });
+    const response = await handler({ jobId: "job-5c", input: { b: 2, a: { c: [1, 2] } } });
+    expect(Object.getPrototypeOf(seen)).toBeNull();
+    expect(Object.getPrototypeOf((seen as { a: object }).a)).toBeNull();
+    expect(response.output).toEqual({ keys: ["a", "b"], copy: { a: { c: [1, 2] }, b: 2 }, json: '{"a":{"c":[1,2]},"b":2}' });
+  });
+
+  it("A05c F1: leaves Object.prototype exactly as it found it (no test above leaks a pollution)", () => {
+    expect(Object.getOwnPropertyNames(Object.prototype).sort()).toEqual(OBJECT_PROTOTYPE_AT_LOAD);
+  });
+});

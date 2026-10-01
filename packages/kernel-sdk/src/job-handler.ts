@@ -102,7 +102,17 @@ export interface CreateKernelHandlerOptions {
    * Used to sign the session key struct and the evidence bundle hash.
    */
   principalPrivateKey: Uint8Array;
-  /** Builder-supplied execution function. Must return a JSON-serialisable value. */
+  /**
+   * Builder-supplied execution function. Must return a JSON-serialisable value.
+   *
+   * `input` is a snapshot of exactly the JSON the input commitment hashes. Every object in it, at
+   * every depth, has NO prototype: a key the caller did not send reads as undefined (a polluted
+   * Object.prototype supplies nothing), but Object.prototype methods are not there either, so
+   * do not call input.hasOwnProperty(k) or input.toString(): use Object.keys, `in`,
+   * Object.hasOwn or JSON.stringify. A value with no JSON form (NaN, a function, a Date,
+   * an accessor ...) is refused with a NonCanonicalValueError, for the returned output as for
+   * the input.
+   */
   execute: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
