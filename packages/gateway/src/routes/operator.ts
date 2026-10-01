@@ -20,6 +20,15 @@ function notAvailable(what: string, why: string, see: string[]) {
   return { error: "not_available", message: `${what} ${why} Nothing is returned rather than an estimate.`, see };
 }
 
+/**
+ * The 409 body for an approve/reject that changed nothing because the approval had already
+ * left "pending". It carries the record's current status and never says this request
+ * decided it (no `approved: true` / `rejected: true`).
+ */
+function alreadyDecided(status: string) {
+  return { error: "already_decided", status, message: `This approval is already ${status}; this request changed nothing.` };
+}
+
 export async function operatorRoutes(app: FastifyInstance) {
   // Machines: the operator's real kernels, devices and in-flight jobs are at
   // /api/agent/me. There is no per-operator machine registry with utilization or
@@ -318,7 +327,10 @@ export async function operatorRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const now = new Date().toISOString();
 
-        db.update(pendingApprovals)
+        // The update only matches a "pending" row, so its changed-row count is what says
+        // whether THIS request made the decision. Accepting any row that reads back as
+        // "approved" reported an earlier decision as this request's.
+        const { changes } = db.update(pendingApprovals)
           .set({ status: "approved", decidedAt: now })
           .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "pending")))
           .run();
@@ -327,8 +339,11 @@ export async function operatorRoutes(app: FastifyInstance) {
           .where(eq(pendingApprovals.id, req.params.id))
           .get();
 
-        if (!row || row.status !== "approved") {
+        if (!row) {
           return reply.status(404).send({ error: "Approval not found or already decided" });
+        }
+        if (changes === 0) {
+          return reply.status(409).send(alreadyDecided(row.status));
         }
 
         return { approval: row, approved: true };
@@ -348,7 +363,8 @@ export async function operatorRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const now = new Date().toISOString();
 
-        db.update(pendingApprovals)
+        // Same rule as approve: only a changed row means THIS request rejected it.
+        const { changes } = db.update(pendingApprovals)
           .set({ status: "rejected", decidedAt: now, rejectionReason: reason ?? null })
           .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "pending")))
           .run();
@@ -357,8 +373,11 @@ export async function operatorRoutes(app: FastifyInstance) {
           .where(eq(pendingApprovals.id, req.params.id))
           .get();
 
-        if (!row || row.status !== "rejected") {
+        if (!row) {
           return reply.status(404).send({ error: "Approval not found or already decided" });
+        }
+        if (changes === 0) {
+          return reply.status(409).send(alreadyDecided(row.status));
         }
 
         return { approval: row, rejected: true };

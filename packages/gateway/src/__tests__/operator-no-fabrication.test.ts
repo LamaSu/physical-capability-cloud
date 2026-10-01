@@ -92,6 +92,7 @@ describe("operator read routes: no fabricated data", () => {
  * PR #362 (verdict rm-n32-362-r1-d30de649):
  *   M1  a failed read answers 503, never an empty list that hides recorded approvals
  *   M2  an omitted capabilityType is stored as unknown, never as an invented type
+ *   M3  approve/reject that change nothing answer 409 already_decided, never a success
  */
 describe("operator approvals: no silent substitution", () => {
   let app: FastifyInstance;
@@ -118,6 +119,11 @@ describe("operator approvals: no silent substitution", () => {
     });
     expect(res.statusCode).toBe(200);
     return res.json().approval as { id: string; status: string };
+  }
+
+  /** The row as stored, bypassing the routes. */
+  function storedRow(id: string) {
+    return getStore().db.select().from(schema.pendingApprovals).where(eq(schema.pendingApprovals.id, id)).get();
   }
 
   describe("M1 GET /api/operator/approvals", () => {
@@ -168,10 +174,6 @@ describe("operator approvals: no silent substitution", () => {
   });
 
   describe("M2 POST /api/operator/approvals: capabilityType", () => {
-    function storedRow(id: string) {
-      return getStore().db.select().from(schema.pendingApprovals).where(eq(schema.pendingApprovals.id, id)).get();
-    }
-
     it("NEGATIVE: M2 an omitted capabilityType is stored as unknown, never as an invented liquid-handler", async () => {
       // Only kernelId and agentId: the caller asserted no capability type.
       const res = await app.inject({
@@ -202,6 +204,94 @@ describe("operator approvals: no silent substitution", () => {
       for (const capabilityType of ["fdm", "liquid-handler"]) {
         const a = await submit({ capabilityType });
         expect(storedRow(a.id)?.jobSummary).toMatchObject({ capabilityType });
+      }
+    });
+  });
+
+  describe("M3 approve and reject: a decision that changed nothing is not a success", () => {
+    const decide = (id: string, action: "approve" | "reject", payload?: Record<string, unknown>) =>
+      app.inject({
+        method: "POST",
+        url: `/api/operator/approvals/${id}/${action}`,
+        ...(payload ? { payload } : {}),
+      });
+
+    it("NEGATIVE: M3 approving twice: the first approves, the second is 409 already_decided and decides nothing", async () => {
+      const a = await submit();
+      const first = await decide(a.id, "approve");
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toMatchObject({ approved: true, approval: { id: a.id, status: "approved" } });
+      const decidedAt = storedRow(a.id)?.decidedAt;
+      expect(decidedAt).toBeTruthy();
+
+      const second = await decide(a.id, "approve");
+      expect(second.statusCode).toBe(409);
+      expect(second.json()).toMatchObject({ error: "already_decided", status: "approved" });
+      // It must not claim that THIS request decided it.
+      expect(second.json()).not.toHaveProperty("approved");
+      expect(second.json()).not.toHaveProperty("rejected");
+      // And it changed nothing.
+      expect(storedRow(a.id)).toMatchObject({ status: "approved", decidedAt });
+    });
+
+    it("NEGATIVE: M3 rejecting twice: the first rejects, the second is 409 already_decided and keeps the first reason", async () => {
+      const a = await submit();
+      const first = await decide(a.id, "reject", { reason: "first reason" });
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toMatchObject({
+        rejected: true,
+        approval: { id: a.id, status: "rejected", rejectionReason: "first reason" },
+      });
+
+      const second = await decide(a.id, "reject", { reason: "second reason" });
+      expect(second.statusCode).toBe(409);
+      expect(second.json()).toMatchObject({ error: "already_decided", status: "rejected" });
+      expect(second.json()).not.toHaveProperty("rejected");
+      expect(second.json()).not.toHaveProperty("approved");
+      expect(storedRow(a.id)).toMatchObject({ status: "rejected", rejectionReason: "first reason" });
+    });
+
+    it("NEGATIVE: M3 rejecting after approving is 409 already_decided with status approved", async () => {
+      const a = await submit();
+      expect((await decide(a.id, "approve")).statusCode).toBe(200);
+
+      const res = await decide(a.id, "reject", { reason: "changed my mind" });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "already_decided", status: "approved" });
+      expect(res.json()).not.toHaveProperty("rejected");
+      expect(storedRow(a.id)).toMatchObject({ status: "approved", rejectionReason: null });
+    });
+
+    it("NEGATIVE: M3 approving after rejecting is 409 already_decided with status rejected", async () => {
+      const a = await submit();
+      expect((await decide(a.id, "reject", { reason: "no" })).statusCode).toBe(200);
+
+      const res = await decide(a.id, "approve");
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "already_decided", status: "rejected" });
+      expect(res.json()).not.toHaveProperty("approved");
+      expect(storedRow(a.id)).toMatchObject({ status: "rejected", rejectionReason: "no" });
+    });
+
+    it("NEGATIVE: M3 an approval created with autoApprove was decided at creation: a later approve or reject is 409", async () => {
+      const a = await submit({ autoApprove: true });
+      expect(a.status).toBe("approved");
+
+      const approve = await decide(a.id, "approve");
+      expect(approve.statusCode).toBe(409);
+      expect(approve.json()).toMatchObject({ error: "already_decided", status: "approved" });
+      expect(approve.json()).not.toHaveProperty("approved");
+
+      const reject = await decide(a.id, "reject");
+      expect(reject.statusCode).toBe(409);
+      expect(reject.json()).toMatchObject({ error: "already_decided", status: "approved" });
+    });
+
+    it("an approval that does not exist keeps the existing 404 answer for both routes", async () => {
+      for (const action of ["approve", "reject"] as const) {
+        const res = await decide("approval-does-not-exist", action);
+        expect(res.statusCode, action).toBe(404);
+        expect(res.json(), action).toEqual({ error: "Approval not found or already decided" });
       }
     });
   });
